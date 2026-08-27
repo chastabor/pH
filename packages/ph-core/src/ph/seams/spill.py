@@ -41,31 +41,72 @@ class SpillStore:
     ctx: Context
     root: Path
 
+    def locator_for(self, *, owner: str, suggested_name: str, content: bytes) -> Path:
+        """Where `content` will be written — derived, not written.
+
+        The one home of the naming rule (digest + sanitized name), so a caller
+        that must record a blob's locator *before* writing it (write-ahead
+        ordering, §4.9) derives the same path the write will use rather than
+        mirroring the rule and hoping a test keeps the two in step.
+        """
+        digest = hashlib.sha256(content).hexdigest()[:16]
+        safe = "".join(char if char.isalnum() or char in "-._" else "_" for char in suggested_name)
+        return self.root / owner / f"{digest}-{safe}"
+
+    async def save_bytes(
+        self, *, owner: str, source: str, suggested_name: str, content: bytes
+    ) -> SpillRef:
+        """Write binary `content` and return its reference.
+
+        Named by content digest, so re-spilling identical output costs one file
+        rather than one file per occurrence. Text spills through here too, as
+        UTF-8, so the naming rule has one implementation.
+        """
+        path = self.locator_for(owner=owner, suggested_name=suggested_name, content=content)
+        await anyio.to_thread.run_sync(_write, path.parent, path, content)
+        return SpillRef(
+            locator=str(path),
+            bytes=len(content),
+            retrieval_hint=f'read the file at "{path}" for the full {source}',
+        )
+
     async def save_text(
         self, *, owner: str, source: str, suggested_name: str, content: str
     ) -> SpillRef:
-        """Write `content` and return its reference.
-
-        Named by content digest, so re-spilling identical output costs one file
-        rather than one file per occurrence.
-        """
-        payload = content.encode("utf-8")
-        digest = hashlib.sha256(payload).hexdigest()[:16]
-        safe = "".join(char if char.isalnum() or char in "-._" else "_" for char in suggested_name)
-        directory = self.root / owner
-        path = directory / f"{digest}-{safe}"
-        await anyio.to_thread.run_sync(_write, directory, path, payload)
-        return SpillRef(
-            locator=str(path),
-            bytes=len(payload),
-            retrieval_hint=f'read the file at "{path}" for the full {source}',
+        """Write `content` as UTF-8 and return its reference."""
+        return await self.save_bytes(
+            owner=owner,
+            source=source,
+            suggested_name=suggested_name,
+            content=content.encode("utf-8"),
         )
 
     async def load_text(self, locator: str) -> str:
         return await anyio.to_thread.run_sync(lambda: Path(locator).read_text(encoding="utf-8"))
 
-    def referenced_locators(self) -> set[str]:  # pragma: no cover - Phase 3 blob GC
-        return set()
+    async def load_bytes(self, locator: str) -> bytes:
+        return await anyio.to_thread.run_sync(lambda: Path(locator).read_bytes())
+
+    async def sweep(self, *, owner: str, referenced: set[str]) -> list[str]:
+        """Delete this owner's blobs that no event references (F7).
+
+        Called at session open, because a blob whose event never landed — a crash
+        between the append and the write — is otherwise never reconciled by
+        anything. Returns what it removed, so the caller can say so.
+        """
+
+        def remove() -> list[str]:
+            directory = self.root / owner
+            if not directory.is_dir():
+                return []
+            gone: list[str] = []
+            for path in sorted(directory.iterdir()):
+                if path.is_file() and str(path) not in referenced:
+                    path.unlink(missing_ok=True)
+                    gone.append(str(path))
+            return gone
+
+        return await anyio.to_thread.run_sync(remove)
 
 
 def _write(directory: Path, path: Path, payload: bytes) -> None:

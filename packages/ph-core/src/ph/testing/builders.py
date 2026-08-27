@@ -25,6 +25,7 @@ __all__ = [
     "StubAgent",
     "assistant_payload",
     "raising",
+    "run_tool",
     "simple_tool",
     "tool_result_payload",
     "tool_runtime",
@@ -59,6 +60,36 @@ def simple_tool(
         execute=execute or (lambda _args, _run: name),
         is_concurrency_safe=safe,
         **kwargs,
+    )
+
+
+async def run_tool(
+    ctx: Any,
+    name: str,
+    arguments: Any = None,
+    *,
+    agent: Any,
+    session: Any = None,
+    call_id: str = "call-1",
+) -> Any:
+    """Execute one tool the way the loop does, for a test that is not the loop.
+
+    The `ToolExecutionInput(...)` incantation — `scope=agent.ctx`, `session=`,
+    `agent=` — was written out at nine call sites across six files, which is
+    nine places for a test to accidentally pass a different scope than the one
+    whose policy it meant to exercise.
+    """
+    from ..tools.definition import ToolExecutionInput
+
+    return await ctx.tools.execute(
+        ToolExecutionInput(
+            call_id=call_id,
+            name=name,
+            arguments={} if arguments is None else arguments,
+            scope=getattr(agent, "ctx", None),
+            session=session,
+            agent=agent,
+        )
     )
 
 

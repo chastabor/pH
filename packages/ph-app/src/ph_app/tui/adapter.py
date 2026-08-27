@@ -336,6 +336,24 @@ class TuiEventAdapter:
         text = f"Retrying after {event.data.get('code')} (attempt {event.data.get('attempt')})."
         self._row("retry", "notice", text, event)
 
+    def _on_kernel_restored(self, event: SessionEvent, live: bool) -> None:
+        """A resumed namespace, but only when something did not come back.
+
+        A clean restore is not news — the cell that follows simply works. A
+        variable that is *gone* is news, because the model is about to reference
+        a name that no longer exists and will read the failure as its own bug.
+        """
+        failed = [str(name) for name in seq(event.data.get("failed"))]
+        if not failed:
+            return
+        restored = len(seq(event.data.get("restored")))
+        self._row(
+            "kernel",
+            "notice",
+            f"Restored {restored} kernel variable(s); {', '.join(failed)} could not be restored.",
+            event,
+        )
+
     def _on_todo_write(self, event: SessionEvent, live: bool) -> None:
         # Phase 4 emits these; the sidebar is ready for them now.
         self.state.todos = [thaw_json(todo) for todo in seq(event.data.get("todos"))]
@@ -368,6 +386,7 @@ HANDLERS: Mapping[str, Handler] = {
     "llm/retry": TuiEventAdapter._on_llm_retry,
     "agent/inbox/spliced": TuiEventAdapter._on_agent_inbox_spliced,
     "todo/write": TuiEventAdapter._on_todo_write,
+    "kernel/restored": TuiEventAdapter._on_kernel_restored,
 }
 """Event type → handler. Explicit, so the set of what renders is a value a test
 can hold against the log's vocabulary rather than a naming convention."""
@@ -380,11 +399,17 @@ RECORDLESS: frozenset[str] = frozenset(
         "approval/policy",
         "fs/observed",
         "session/end-seed",
+        "kernel/snapshot",
     }
 )
 """Known types that produce no transcript row on purpose. They are the auditor's
 records — the prompt snapshot, step timings, policy changes — and belong to the
-trajectory view (P3-24), not the conversation."""
+trajectory view (P3-24), not the conversation.
+
+`kernel/snapshot` is here for a second reason as well as that one: there is one
+per changed variable per cell, so rendering them would bury the conversation in
+its own bookkeeping. Its companion `kernel/restored` *is* rendered, but only when
+a variable failed to come back — see `_on_kernel_restored`."""
 
 FORWARD_REFERENCES: frozenset[str] = frozenset({"todo/write"})
 """Handled here before the log can carry it: Phase 4 adds the type and the

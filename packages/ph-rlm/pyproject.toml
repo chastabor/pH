@@ -9,10 +9,15 @@ description = "pH RLM bundle: the CPython fd-3 code runtime, bindings, subagents
 readme = "README.md"
 requires-python = ">=3.12"
 license = "MIT"
-dependencies = ["ph-core"]
+dependencies = ["ph-core", "ph-runtime-guest", "dill>=0.3.8"]
+
+[project.entry-points."ph.plugins"]
+code-runtime-python = "ph_rlm.kernel.manager:apply"
+rlm-kernel-snapshot = "ph_rlm.snapshot:apply"
 
 [tool.uv.sources]
 ph-core = { workspace = true }
+ph-runtime-guest = { workspace = true }
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/ph_rlm"]

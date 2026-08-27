@@ -1,0 +1,47 @@
+# ph-rlm: Prime Agent's design as plugins, over ph-base.
+#
+# The `rlm` profile is base + tui + this. Every row here is a listener on a seam
+# that already exists; the only core change the bundle needs is the one the
+# `code_runtime` seam already carries — `namespace` and `persistence` (C1).
+
+# --- Code Mode --------------------------------------------------------------
+# Opt-in in `ph-base`, on here: the RLM model writes Python, so the transport
+# and its bindings are the whole surface it sees. `tools.mode: code` is what
+# makes a native tool call refuse with the SDK route back (C6).
+- id: tools
+  config:
+    mode: code
+
+- id: tools-code-mode
+  name: tools-code-mode
+  config:
+    maxDispatchesPerRun: 256
+    maxSubagentSpawnsPerRun: 32
+    maxParallelSubCalls: 10
+
+# --- the runtime ------------------------------------------------------------
+# pH's own CPython subprocess, fd 3 as the framed channel, one child per agent.
+# `persistence: namespace` is admissible only because the provider promises to
+# emit `kernel/snapshot` events, and the seam checks that promise when it
+# registers (D6) — cross-call state invisible to the log is exactly why dsh
+# withheld a persistent kernel.
+- id: code-runtime-python
+  name: code-runtime-python
+  config:
+    # `managed` builds $PH_CACHE/runtime-venv: ph-runtime-guest, dill, and the
+    # Python skills. Nothing else, because everything in it is reachable by
+    # model code.
+    python: managed
+    cpuSeconds: 30
+    addressSpaceBytes: 2147483648
+    maxLogBytes: 65536
+    maxValueBytes: 65536
+    maxSnapshotBytes: 16777216
+
+# The row that makes `persistence: namespace` true rather than declared (D17).
+# Mounted with the runtime, not optionally: the seam takes the provider's promise
+# at registration, and these events are the promise being kept.
+- id: rlm-kernel-snapshot
+  name: rlm-kernel-snapshot
+  config:
+    inlineBlobMax: 65536

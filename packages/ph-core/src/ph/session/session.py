@@ -32,7 +32,7 @@ from ..wire import WireModel
 from .derive import derive_event_message, derive_transcript
 from .events import SESSION_FORMAT_VERSION, SessionEvent, SurfaceIntent, now_ms
 from .json import freeze_json_value
-from .known_event_types import KNOWN_SESSION_EVENT_TYPES
+from .known_event_types import IGNORABLE_SESSION_EVENT_TYPES, KNOWN_SESSION_EVENT_TYPES
 from .request_header import (
     EpochHeader,
     RequestContext,
@@ -241,6 +241,11 @@ class Session:
         The hot path never blocks on I/O — persistence buffers asynchronously
         and drains on `session/flush`.
 
+        Whether the event is `ignorable` — skippable by a *different* build that
+        does not know its type — is a property of the type, read from
+        `IGNORABLE_SESSION_EVENT_TYPES` rather than passed here, so no two call
+        sites can disagree about one type.
+
         :raises InvalidJsonValueError: when `data` is not losslessly JSON.
         :raises SurfaceError: when the surface metadata is wrong for this type.
         :raises RuntimeError: when re-entered during publication.
@@ -258,6 +263,7 @@ class Session:
             data=freeze_json_value(data),
             source_event_seqs=None if surface is None else surface.source_event_seqs,
             surface_op=None if surface is None else surface.surface_op,
+            ignorable=event_type in IGNORABLE_SESSION_EVENT_TYPES,
         )
         # Validated BEFORE the push: a rejected candidate must leave both the
         # log and the surface exactly as they were.

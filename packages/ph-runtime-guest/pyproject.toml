@@ -1,0 +1,20 @@
+[build-system]
+requires = ["hatchling>=1.26"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ph-runtime-guest"
+version = "0.0.1"
+description = "The guest half of pH's code runtime: the fd-3 protocol, the run loop, and the binding proxies a cell awaits."
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+# Deliberately almost dependency-free. This package is installed into
+# `$PH_CACHE/runtime-venv`, a venv that executes model-written code; every
+# dependency there is another import that code can reach and another thing that
+# can break a session the host cannot repair. `dill` is the one exception and it
+# is imported lazily, so a venv without it runs cells and forgoes snapshots.
+dependencies = ["dill>=0.3.8"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ph_runtime"]

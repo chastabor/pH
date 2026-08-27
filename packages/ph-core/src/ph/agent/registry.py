@@ -105,6 +105,19 @@ class AgentRegistry:
         scope.emit("agent/session-start", agent, session)
         return agent
 
+    def get(self, agent_id: str) -> Any | None:
+        """The live agent by id, or `None`. The symmetric read to `ctx.sessions.get`.
+
+        A plugin that has an agent id — a runtime keyed by it, a policy folding
+        its session — reaches the agent's scope and session through here, instead
+        of shadowing the registry with its own `agent/created` side table.
+        """
+        return self._agents.get(agent_id)
+
+    def list(self) -> list[Any]:
+        """Every live agent, for a sweep that must visit all of them."""
+        return list(self._agents.values())
+
     async def dispose(self, agent_id: str) -> None:
         agent = self._agents.pop(agent_id, None)
         if agent is None:

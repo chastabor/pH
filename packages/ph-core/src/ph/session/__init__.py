@@ -22,7 +22,7 @@ from .json import (
     snapshot_json_value,
     thaw_json,
 )
-from .known_event_types import KNOWN_SESSION_EVENT_TYPES
+from .known_event_types import IGNORABLE_SESSION_EVENT_TYPES, KNOWN_SESSION_EVENT_TYPES
 from .request_header import (
     EpochHeader,
     RequestContext,
@@ -46,6 +46,7 @@ from .surface import (
 )
 
 __all__ = [
+    "IGNORABLE_SESSION_EVENT_TYPES",
     "KNOWN_SESSION_EVENT_TYPES",
     "SESSION_FORMAT_VERSION",
     "SURFACE_EVENT_TYPES",

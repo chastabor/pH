@@ -7,6 +7,7 @@ dependencies = [
     "ph-core",
     "ph-app",
     "ph-rlm",
+    "ph-runtime-guest",
     "ph-stabilize",
 ]
 
@@ -20,6 +21,7 @@ members = ["packages/*"]
 ph-core = { workspace = true }
 ph-app = { workspace = true }
 ph-rlm = { workspace = true }
+ph-runtime-guest = { workspace = true }
 ph-stabilize = { workspace = true }
 
 [dependency-groups]
@@ -42,7 +44,13 @@ target-version = "py312"
 # ruff formats fenced Python inside Markdown, and reformatting a quoted excerpt
 # would silently edit the record it is quoting.
 extend-exclude = ["plans", "sources", ".venv"]
-src = ["packages/ph-core/src", "packages/ph-app/src", "packages/ph-rlm/src", "packages/ph-stabilize/src"]
+src = [
+    "packages/ph-core/src",
+    "packages/ph-app/src",
+    "packages/ph-rlm/src",
+    "packages/ph-runtime-guest/src",
+    "packages/ph-stabilize/src",
+]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
@@ -58,13 +66,22 @@ indent-style = "space"
 [tool.mypy]
 python_version = "3.12"
 strict = true
-mypy_path = "packages/ph-core/src"
-packages = ["ph"]
+# Every shipped package, not just `ph`: `ph_rlm` and `ph_runtime` are where the
+# subprocess protocol lives, and a config that checked only `ph` would have let
+# the guest drift untyped. `packages` rather than `.` because the test trees hold
+# several modules named `conftest`, which mypy refuses as duplicates.
+mypy_path = "packages/ph-core/src:packages/ph-app/src:packages/ph-rlm/src:packages/ph-runtime-guest/src:packages/ph-stabilize/src"
+packages = ["ph", "ph_app", "ph_rlm", "ph_runtime", "ph_stabilize"]
 namespace_packages = true
 explicit_package_bases = true
 
 [tool.pytest.ini_options]
-testpaths = ["packages/ph-core/tests", "packages/ph-app/tests", "tests"]
+testpaths = [
+    "packages/ph-core/tests",
+    "packages/ph-app/tests",
+    "packages/ph-rlm/tests",
+    "tests",
+]
 addopts = "-ra"
 markers = [
     "e2e: end-to-end scenario tests",
