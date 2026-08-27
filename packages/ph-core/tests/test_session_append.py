@@ -14,10 +14,11 @@ from __future__ import annotations
 import math
 import re
 from pathlib import Path
+from typing import Any
 
 import pytest
 
-from ph.session import KNOWN_SESSION_EVENT_TYPES, Session, SurfaceIntent
+from ph.session import KNOWN_SESSION_EVENT_TYPES, Session, SessionFoldCache, SurfaceIntent
 from ph.session.json import InvalidJsonValueError
 from ph.testing import user_payload
 
@@ -154,3 +155,67 @@ def test_every_appended_type_is_a_known_event_type() -> None:
     }
     assert appended, "the scan found no append call sites — the regex is stale"
     assert appended <= KNOWN_SESSION_EVENT_TYPES, appended - KNOWN_SESSION_EVENT_TYPES
+
+
+# ------------------------------------------------------------- fold caches --
+
+
+def test_a_fold_cache_recomputes_only_when_the_log_grew() -> None:
+    """`seq` is an exact invalidation key because the log is append-only (A1)."""
+    session = Session("s")
+    calls: list[int] = []
+
+    def count_turns(log: Session) -> int:
+        calls.append(log.seq)
+        return sum(1 for event in log.events if event.type == "turn/start")
+
+    cache: SessionFoldCache[int] = SessionFoldCache(count_turns)
+    session.append("turn/start", {"turn": 1})
+
+    assert cache.read(session) == 1
+    assert cache.read(session) == 1
+    assert calls == [1], "the fold ran twice for one log"
+
+    session.append("turn/end", {"turn": 1, "reason": {"kind": "completed"}})
+    assert cache.read(session) == 1
+    assert calls == [1, 2], "an appended event did not invalidate the fold"
+
+
+def test_a_fold_cache_holds_one_value_per_session() -> None:
+    """Bounded by live sessions, not by history: entries are replaced."""
+    cache: SessionFoldCache[int] = SessionFoldCache(lambda log: log.seq)
+    first, second = Session("a"), Session("b")
+    for index in range(50):
+        first.append("turn/start", {"turn": index})
+        assert cache.read(first) == index + 1
+    assert cache.read(second) == 0
+    assert len(cache._entries) == 2
+
+    cache.forget("a")
+    assert len(cache._entries) == 1
+
+
+def test_a_fold_cache_leaves_the_fold_callable_on_a_slice() -> None:
+    """The property that ruled out attaching folds to `Session`.
+
+    A fork reconstructs state *as of its boundary* (D17), and the trajectory view
+    projects a stored log with nothing mounted — so the fold has to answer for a
+    prefix that is not the live log. A cache is a separate thing a consumer owns;
+    the fold itself stays a pure function.
+    """
+    session = Session("s")
+    session.append("turn/start", {"turn": 1})
+    boundary = session.seq
+    session.append("turn/start", {"turn": 2})
+
+    def count_turns(log: Any) -> int:
+        return sum(1 for event in log.events if event.type == "turn/start")
+
+    assert count_turns(session) == 2
+
+    class _AsOf:
+        id = session.id
+        seq = boundary
+        events = session.events[:boundary]
+
+    assert count_turns(_AsOf()) == 1

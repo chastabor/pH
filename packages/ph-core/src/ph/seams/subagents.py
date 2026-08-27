@@ -33,7 +33,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol, TypeAlias, runtime_checkable
 
 from ..cordis import Context, Disposer, plugin
-from ..session import Session
+from ..session import Session, SessionFoldCache
 from ._registry import claim_key
 
 __all__ = [
@@ -257,13 +257,15 @@ class SubagentService:
     ctx: Context
     _providers: dict[str, SubagentProvider] = field(default_factory=dict)
     _runs: dict[str, SubagentRun] = field(default_factory=dict)
-    _rosters: dict[str, tuple[int, dict[str, dict[str, Any]]]] = field(default_factory=dict)
-    """One cached roster fold per session, keyed by the log length it was folded
-    at. The prompt, the model's roster tool and every name lookup ask for the
-    same fold several times per model step; `session.seq` is an exact
-    invalidation key because the log is append-only (A1). One entry per session,
-    replaced rather than accumulated, so this is bounded by live sessions and not
-    by history."""
+    _rosters: SessionFoldCache[dict[str, dict[str, Any]]] = field(
+        default_factory=lambda: SessionFoldCache(subagent_roster)
+    )
+    """The roster fold, cached per session. The prompt, the model's roster tool
+    and every name lookup ask for the same fold several times per model step.
+
+    The *fold* stays a pure function of a log — `subagent_roster` has to keep
+    working on a fork slice and on a stored log, which is what a cache attached
+    to `Session` could not have done."""
 
     def register_provider(
         self, name: str, provider: SubagentProvider, *, scope: Context | None = None
@@ -298,15 +300,13 @@ class SubagentService:
     def roster(self, session: Session) -> dict[str, dict[str, Any]]:
         """`subagent_roster(session)`, folded at most once per appended event.
 
-        The read every consumer should use when it has a `ctx`: the fold is
-        O(log) and the prompt alone asks for it several times per model step.
+        The read every consumer should use when it has a `ctx`.
         """
-        cached = self._rosters.get(session.id)
-        if cached is not None and cached[0] == session.seq:
-            return cached[1]
-        roster = subagent_roster(session)
-        self._rosters[session.id] = (session.seq, roster)
-        return roster
+        return self._rosters.read(session)
+
+    def forget_session(self, session_id: str) -> None:
+        """Drop what this service cached about one session."""
+        self._rosters.forget(session_id)
 
     def name_of(self, sessions: Iterable[Session], agent_id: str) -> str:
         """`roster_name`, through the cached fold."""
@@ -360,10 +360,14 @@ class SubagentService:
         return self._runs.pop(run_id, None)
 
 
-@plugin("subagents")
+@plugin("subagents", inject=["sessions"])
 async def apply(ctx: Context, config: Any) -> None:
     """Mount the subagent seam definition. No provider ships in ph-base."""
-    ctx.provide("subagents", SubagentService(ctx=ctx))
+    service = SubagentService(ctx=ctx)
+    ctx.provide("subagents", service)
+    # A disposed session's last projection is a value nobody can reach; the cache
+    # is bounded either way, but holding it is holding it for nothing.
+    ctx.on("session/disposed", lambda session: service.forget_session(session.id))
 
 
 def subagent_roster(session: Session) -> dict[str, dict[str, Any]]:

@@ -392,6 +392,57 @@ async def test_start_does_not_wait_for_the_body() -> None:
     assert entered.is_set()
 
 
+async def test_a_job_is_an_effect_of_the_scope_that_owns_it() -> None:
+    """I2: disposing the owner abandons the work rather than leaving it running.
+
+    Without an owner the table only ever grew, and the bound would have had to be
+    a number somebody picked.
+    """
+    root = Context()
+    service = JobService(ctx=root)
+    owner = root.scope("owner")
+    release = anyio.Event()
+
+    async def body(job: Any) -> str:
+        await release.wait()
+        return "unreached" if not job.token.cancelled else "noticed"
+
+    job = await service.start(kind="test", label="owned", run=body, scope=owner)
+    assert service.get(job.id) is job
+
+    await owner.dispose()
+    assert job.token.cancelled, "the owner went away and the work was not cancelled"
+    assert service.get(job.id) is None, "the entry outlived its owner"
+    release.set()
+    await root.drain()
+
+
+async def test_releasing_a_finished_job_does_not_report_it_cancelled() -> None:
+    """The distinction the two halves exist for.
+
+    A subagent's drive job disposes the child as its own last act, so a job that
+    abandoned itself on that teardown would report `cancelled` for work that
+    completed. `forget` drops the entry and cancels nothing.
+    """
+    root = Context()
+    service = JobService(ctx=root)
+    owner = root.scope("owner")
+
+    job = await service.start(kind="test", label="brief", run=lambda _job: 7, scope=owner)
+    await root.drain()
+    assert job.state == "done"
+
+    assert service.forget(job.id) is True
+    assert service.get(job.id) is None
+    assert service.forget(job.id) is False, "forgetting twice is not an error"
+
+    # And the owner no longer holds a teardown for work that is over: disposing
+    # it must not revive or re-report the job.
+    await owner.dispose()
+    assert job.state == "done"
+    assert not job.token.cancelled
+
+
 async def test_a_cancelled_job_reports_cancelled() -> None:
     root = Context()
     service = JobService(ctx=root)

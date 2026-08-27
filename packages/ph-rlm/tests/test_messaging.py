@@ -203,6 +203,43 @@ async def test_addressing_a_settled_child_wakes_it(family_ctx: Mounted) -> None:
     assert causes == [None, None, "rehydrated", None]
 
 
+async def test_repeated_wakes_do_not_accrete_jobs(family_ctx: Mounted) -> None:
+    """A drive job is an effect of the delegation, released when the child settles.
+
+    Every message to a settled child wakes it, and each wake starts a job. Without
+    an owner that is one permanent table entry per message; with one it is none.
+    """
+    ctx, session, parent = await family_ctx(rateCapacity=99)
+    await _spawn(ctx, parent, "scout")
+    await ctx.drain()
+
+    for index in range(4):
+        sent = await _send(
+            ctx,
+            parent,
+            session,
+            message=f"ping {index}",
+            receiver_role="child",
+            receiver_name="scout",
+        )
+        assert sent.is_error is False
+        await ctx.drain()
+
+    assert [job for job in ctx.jobs.list() if job.kind == "subagent"] == []
+
+
+async def test_disposing_the_parent_abandons_a_running_drive(family_ctx: Mounted) -> None:
+    """The other half: work still in flight when its owner goes is cancelled."""
+    ctx, _session, parent = await family_ctx()
+    await _spawn(ctx, parent, "scout")
+    running = [job for job in ctx.jobs.list() if job.kind == "subagent"]
+    assert running, "the drive job was never registered"
+
+    await ctx.agents.dispose(parent.id)
+    assert [job for job in ctx.jobs.list() if job.kind == "subagent"] == []
+    assert running[0].token.cancelled
+
+
 async def test_a_revoked_child_is_not_quietly_revived(family_ctx: Mounted) -> None:
     """The tombstone is the parent's record that it revoked the child; waking one
     behind that record would make the record false."""

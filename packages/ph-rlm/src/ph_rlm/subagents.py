@@ -133,6 +133,10 @@ class _Child:
     agent: Any = None
     session: Session | None = None
     unobserve: Disposer | None = None
+    job_id: str | None = None
+    """The drive job, owned by the *parent's* scope. Not the child's: the child's
+    scope is disposed *by* the drive job's own last act, and a job that abandoned
+    itself would report `cancelled` for work that finished."""
     result: SubagentResult | None = None
     replied: bool = False
     """Whether the child sent its parent a message (`rlm-messaging` sets it).
@@ -249,7 +253,7 @@ class RlmChildProvider:
                 source=PluginSource(plugin="ph_rlm.subagents", form="relay"),
             )
         )
-        await self._attach(child)
+        await self._attach(child, parent)
         return run
 
     def _resolve_name(
@@ -296,7 +300,9 @@ class RlmChildProvider:
 
     # ------------------------------------------------------------- lifecycle --
 
-    async def _attach(self, child: _Child, *, cause: StatusCause | None = None) -> None:
+    async def _attach(
+        self, child: _Child, parent: Any, *, cause: StatusCause | None = None
+    ) -> None:
         """Wire a live child to its parent and start driving it.
 
         One path for a fresh admission and for a rehydration, so the two cannot
@@ -308,11 +314,16 @@ class RlmChildProvider:
         # `ctx.jobs`, which detaches rather than running inline: the job gives the
         # run an id, a cancel and `job/*` events for free, and a subagent is the
         # seam's own example of work that outlives the step that started it.
-        await self.ctx.jobs.start(
+        job = await self.ctx.jobs.start(
             kind="subagent",
             label=f"{child.run.name} ({child.run.id})",
             run=lambda _job: self._drive(child, cause=cause),
+            # The delegation's lifetime, which is the parent's: a disposed parent
+            # abandons the drive, and a settled child releases its own entry so a
+            # chatty exchange does not leave one job per message behind.
+            scope=parent.ctx,
         )
+        child.job_id = job.id
 
     async def rehydrate(self, run_id: str) -> bool:
         """Give a settled child a runtime again so it can be addressed (P3-13).
@@ -343,7 +354,11 @@ class RlmChildProvider:
         # A fresh gate, which the awaiter already on the run reads at await time —
         # its closure holds the `_Child`, not the old Event.
         child.finished = anyio.Event()
-        await self._attach(child, cause="rehydrated")
+        parent = self.ctx.agents.get(child.run.parent_id)
+        if parent is None:
+            log.debug("ph_rlm.subagents: %s has no live parent to own its drive", run_id)
+            return False
+        await self._attach(child, parent, cause="rehydrated")
         return True
 
     def _awaiter(self, child: _Child) -> Any:
@@ -439,6 +454,11 @@ class RlmChildProvider:
         if child.unobserve is not None:
             child.unobserve()
             child.unobserve = None
+        if child.job_id is not None:
+            # Released, not abandoned: the work finished, so the entry goes
+            # without the job being reported as cancelled.
+            self.ctx.jobs.forget(child.job_id)
+            child.job_id = None
         agent, child.agent, child.session = child.agent, None, None
         if agent is None:
             return

@@ -1082,6 +1082,100 @@ making one string mean two facts read badly in both places.)
   beyond this diff. The cache gets the measured win.
 * **`by_session` as public API** — folded into `ensure_addressable` instead, so
   the three-hop wake path is stated once.
-* **The per-wake `Job` accretion** noted by the efficiency reviewer: `ctx.jobs`
-  never prunes, so a chatty parent↔settled-child exchange leaves one `Job` per
-  wake. Inherent to P3-13's design; worth knowing, not worth a special case.
+* **An incremental roster fold attached to `Session`** — investigated and
+  *rejected*, for a better reason than the one I first gave. See below.
+
+### And one skip that was retired instead
+
+I first recorded the per-wake `Job` accretion as "inherent to P3-13's design".
+Half right: the *rate* is inherent (a wake per message, where every other planned
+job is one per long-lived thing), but the unbounded table was a Phase 1 default
+nobody had picked a bound for. Asked directly whether jobs should be tied to
+sessions, the answer turned out to be neither a session nor a number:
+
+**A job is now an effect of the scope that owns it (I2)** — `start` takes a
+`scope=` like every other registration in the codebase, and disposing that scope
+cancels the job and drops its entry. A subagent's drive job belongs to the
+*delegation* (the parent's scope), a `/refine` pass will belong to its session, a
+daemon sweeper to the process. The bound is structural instead of a retention
+number, which is the same reason `ctx.effect` exists at all.
+
+Two things this had to distinguish, and the reason is specific:
+
+* **abandoned** — the owner went away with work still running: cancel, then
+  forget.
+* **released** (`jobs.forget`) — the owner knows the work is done: forget,
+  cancel nothing.
+
+Without the second, a subagent drive job would report `cancelled` for work that
+completed, because `_drive`'s own last act disposes the child. The presence of the
+entry in `_jobs` *is* the flag that tells the two apart — `forget` pops it before
+deregistering, so the abandon path sees it gone and no-ops. That also settled
+where the job's owner is: the **parent's** scope, not the child's, since a job
+whose body disposes its own owner would abandon itself.
+
+Two questions I answered "no" to along the way, recorded because they are
+reasonable and the reasons are not obvious:
+
+* **Clear jobs when a new session starts.** `sessions.create()` is not a rare
+  top-level event here — it fires once per subagent, 32 per cell at the shipped
+  budget — so clearing then would kill the drive jobs of every sibling still
+  working.
+* **Log jobs to the session.** A job is mechanism, not a fact about the
+  conversation, and it is not model-visible. Every job's *meaningful* outcome is
+  already logged by its owner in domain terms (`subagent/status`,
+  `harness/refined`); a generic `job/*` record would put scheduler bookkeeping in
+  the conversation log beside it.
+
+---
+
+## Why folds are not attached to `Session`
+
+I skipped "an incremental `session.fold(...)` in ph-core" with the weak reason
+"beyond this diff". Looking at it properly, it is the wrong shape, and the reason
+is a property worth writing down.
+
+`Session.latest` *is* an incremental fold attached to the log, and it works
+because "the current policy" is only ever asked of the live log. The plugin folds
+are not like that:
+
+* `fold_namespace` is what makes `ctx.sessions.fork(source, boundary)`
+  reconstruct a namespace **as of the boundary** — that is the entire argument
+  for D17 over a side file, and `test_snapshot.py` pins it by folding a
+  hand-made slice of the log.
+* P3-24's trajectory view projects a **stored** log with nothing mounted.
+
+A fold attached to a live `Session` is monotonic in that log: there is no way to
+ask it about an earlier prefix. Attaching these folds would have traded the
+property for the speed — and the property is why the design is a fold in the
+first place.
+
+So the fold stays a pure function of *a* log, and the cache is a separate thing
+the consumer owns. That is what `SessionFoldCache` is: one value per session,
+keyed on `session.seq` — an exact invalidation key, because an append-only log
+that has not grown cannot have changed any fold over it (A1). Entries are
+replaced rather than accumulated, so it is bounded by live sessions, and
+`session/disposed` drops the last projection of a session nobody can reach.
+
+Two things this settled beyond tidying:
+
+* **`SubagentService`'s bespoke `_rosters` dict became an instance of the
+  pattern**, so the previous pass's measured win (2.27 ms → 0.033 ms per model
+  step) is now expressed once rather than as a one-off in a seam.
+* **P3-16 already prescribes this exact shape** — "fold over `harness/*` with
+  incremental cache per `(scope, last_seq)`" — so the second consumer was
+  certain, and it now has the helper and, more importantly, the stated
+  requirement rather than a copy of the mechanism.
+
+The requirement is the part worth having documented: **the cached function must
+be a pure fold of the prefix.** One that also reads the clock, the filesystem or
+a mutable table can change its answer without the log growing, and the cache
+cannot notice. Nothing enforces it, so it is said where a second implementer will
+read it.
+
+### The other two folds were left alone, deliberately
+
+`pending_approvals` has **no production caller** (tests only), and
+`fold_namespace` runs once per kernel start rather than per step. Neither is hot,
+and wrapping a cold fold in a cache adds a stale-value question to code that had
+none.

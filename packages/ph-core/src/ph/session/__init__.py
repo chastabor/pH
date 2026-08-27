@@ -13,6 +13,7 @@ from .events import (
     is_surface_eligible_type,
     now_ms,
 )
+from .folds import SessionFoldCache
 from .json import (
     InvalidJsonValueError,
     JsonValue,
@@ -56,6 +57,7 @@ __all__ = [
     "RequestContext",
     "Session",
     "SessionEvent",
+    "SessionFoldCache",
     "SessionForkError",
     "SessionHeader",
     "SessionObserver",
