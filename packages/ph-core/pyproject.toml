@@ -18,14 +18,46 @@ dependencies = [
 # The plugin discovery group. Reserved in Phase 0 (P0-01) so a third-party
 # wheel can mount a row by name from its first release onward.
 [project.entry-points."ph.plugins"]
+# core
 llm = "ph.llm.adapter:apply"
 session = "ph.session.store:apply"
 agent = "ph.agent.registry:apply"
 agent-loop = "ph.agent_loop:apply"
 system-prompt = "ph.system_prompt.assembly:apply"
+tools = "ph.tools.registry:apply"
+tools-prompt = "ph.tools.prompt:apply"
+tools-timeout = "ph.tools.timeout:apply"
+# capability seams
+approval = "ph.seams.approval:apply"
+code-runtime = "ph.seams.code_runtime:apply"
+commands = "ph.seams.commands:apply"
+credentials-env = "ph.seams.credentials:apply"
+fs-local = "ph.seams.fs:apply"
+fs-read-before-edit = "ph.seams.fs:read_before_edit"
+jobs-local = "ph.seams.jobs:apply"
+permission-presets = "ph.seams.permission_presets:apply"
+sandbox-policy = "ph.seams.sandbox:apply"
+settings-local = "ph.seams.settings:apply"
+shell-local = "ph.seams.shell:apply"
+skills = "ph.seams.skills:apply"
+spill-local = "ph.seams.spill:apply"
+subprocess-local = "ph.seams.subprocess:apply"
+token-meter = "ph.seams.token_meter:apply"
+user-questions = "ph.seams.user_questions:apply"
+session-telemetry = "ph.seams.telemetry:apply"
+# model-facing tools
+tool-fs = "ph.tools.builtin.fs_tools:apply"
+tool-bash = "ph.tools.builtin.bash_tool:apply"
+agent-instructions = "ph.tools.builtin.instructions:apply"
+# durability and resilience
 session-persistence-jsonl = "ph.persistence.jsonl:apply"
 session-checkpoint-policy = "ph.persistence.checkpoint_policy:apply"
+llm-retry = "ph.llm.retry:apply"
+# testing and invariants
 llm-fake = "ph.testing.fake_adapter:apply"
+code-runtime-stub = "ph.testing.stub_runtime:apply"
+llm-replay = "ph.testing.replay_adapter:apply"
+tools-code-mode = "ph.tools.code_mode:apply"
 agent-loop-invariant = "ph.agent_loop.invariant:apply"
 
 [tool.hatch.build.targets.wheel]

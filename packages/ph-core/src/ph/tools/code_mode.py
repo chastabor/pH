@@ -1,0 +1,371 @@
+"""Code Mode: one transport, and every binding call governed (C1-C3).
+
+This is the file the whole containment argument rests on. A `run_code` cell is
+*one* tool call, but a cell that writes forty files must not be *one* governance
+evaluation — that is exactly the collapse the feature map records in
+prime-agent, where `ToolName = "ipython"` reduces permission, approval, call
+limits, offload and `fs/write-intent` to a single decision per cell.
+
+So the bridge re-enters the **complete** pipeline per binding call:
+
+* each `await tools.<name>(...)` is a sub-call with the outer execution's opaque
+  token as `parent`, dispatched through `tools/pre-execute` → approval → guards
+  → `tools/execute` → body → `tools/post-execute` (C1);
+* each one logs `tool/code-dispatch-start` at entry and `tool/code-dispatch` at
+  settle, so forty writes are forty durable records rather than one stdout blob
+  (C2). Both are log-only: `derive_messages()` ignores them, so sub-calls never
+  re-enter model context;
+* a **denial fails the whole run** (C3, Q9). This is pH's one deliberate
+  divergence from dsh, and the reason is that a program which can `except` a
+  refusal can route around it — retry with a different path, fall back to
+  `subprocess`. Failing the run puts the refusal in the model's context and
+  bounds partial state to one cell. A *failed* call (timeout, bad arguments)
+  keeps dsh's `ToolCallError` semantics, because that is the model's to handle.
+
+Budgets (C4) are enforced here rather than by the runtime: one approved cell
+must not be able to issue unbounded governed calls, and the bridge is the only
+place that sees them all.
+
+@module ph.tools.code_mode
+"""
+
+from __future__ import annotations
+
+import logging
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
+from functools import partial
+from typing import Any, Literal
+
+import anyio
+
+from ..cancel import CancelToken
+from ..cordis import Context, events, plugin
+from ..seams.code_runtime import CodeBinding, CodeBindingNamespace, CodeRunRequest
+from ..session import Session
+from ..session.json import freeze_json_value, thaw_json
+from ..system_prompt.assembly import ORDER_TOOL_GUIDANCE, PromptSection
+from ..wire import WireModel
+from .definition import (
+    ToolExecutionInput,
+    ToolExecutionResult,
+    ToolOutput,
+    ToolRunContext,
+    define_tool,
+    text_content,
+)
+from .errors import HarnessError
+from .registry import RUN_CODE, ToolRuntime
+from .sdk import code_only_rule, render_python_sdk, render_typescript_sdk
+
+__all__ = [
+    "MAX_DISPATCHES_PER_RUN",
+    "MAX_SUBAGENT_SPAWNS_PER_RUN",
+    "CodeRunFailure",
+    "DispatchBridge",
+    "ToolCallError",
+    "apply",
+]
+
+log = logging.getLogger("ph.tools.code_mode")
+
+MAX_DISPATCHES_PER_RUN = 256
+"""How many governed calls one cell may issue (C4).
+
+A cell the human approved is still one decision; without a cap it could issue
+unbounded governed calls on the strength of it."""
+
+MAX_SUBAGENT_SPAWNS_PER_RUN = 32
+"""How many children one cell may spawn (C4). Counted by bindings that declare
+`counts_as_spawn`."""
+
+events.declare(
+    "tools/code-dispatch-log",
+    "waterfall",
+    owner="ph.tools.code_mode",
+    doc="One settled sub-dispatch about to be logged; the spill policy reshapes it here.",
+)
+
+
+class ToolCallError(HarnessError):
+    """A sub-call *failed*. Raised inside the program, for the model to handle."""
+
+    def __init__(self, name: str, message: str) -> None:
+        super().__init__(f"tools.{name} failed: {message}", "TOOL_CALL_FAILED")
+        self.tool_name = name
+
+
+class CodeRunFailure(HarnessError):
+    """The whole run is over.
+
+    `kind: "denied"` is the C3 case: a refusal the program is not allowed to
+    catch, because catching it is how a program routes around policy.
+    """
+
+    def __init__(self, kind: Literal["denied", "budget", "aborted"], message: str) -> None:
+        super().__init__(message, f"CODE_RUN_{kind.upper()}")
+        self.kind = kind
+
+
+class CodeDispatchLog(WireModel):
+    """One settled sub-dispatch, as the log waterfall sees it."""
+
+    root_call_id: str
+    parent_call_id: str
+    sub_call_id: str
+    name: str
+    is_error: bool
+
+
+@dataclass(slots=True)
+class DispatchBridge:
+    """Turns binding calls inside one program into governed sub-calls."""
+
+    tools: ToolRuntime
+    ctx: Context
+    execution: Any
+    session: Session | None
+    token: CancelToken
+    max_parallel: int = 10
+    max_dispatches: int = MAX_DISPATCHES_PER_RUN
+    max_spawns: int = MAX_SUBAGENT_SPAWNS_PER_RUN
+    _dispatched: int = 0
+    _spawned: int = 0
+    _failure: CodeRunFailure | None = None
+    _limiter: anyio.CapacityLimiter = field(init=False)
+
+    def __post_init__(self) -> None:
+        self._limiter = anyio.CapacityLimiter(max(1, self.max_parallel))
+
+    @property
+    def dispatch_count(self) -> int:
+        return self._dispatched
+
+    def _settle(self, kind: Literal["denied", "budget", "aborted"], message: str) -> CodeRunFailure:
+        # Once the run is settled, later awaits stop immediately rather than
+        # racing to do more work the outcome has already discarded.
+        self._failure = CodeRunFailure(kind, message)
+        return self._failure
+
+    async def call(self, binding: CodeBinding, arguments: Any) -> Any:
+        """Dispatch one binding call through the full pipeline.
+
+        :raises ToolCallError: the call failed; the program may handle it.
+        :raises CodeRunFailure: the call was denied or a budget was reached;
+            the program may not.
+        """
+        if self._failure is not None:
+            raise self._failure
+        if self._dispatched >= self.max_dispatches:
+            raise self._settle(
+                "budget",
+                f"this program reached max_dispatches_per_run={self.max_dispatches}; "
+                "split the work across cells",
+            )
+        if binding.counts_as_spawn:
+            self._spawned += 1
+            if self._spawned > self.max_spawns:
+                raise self._settle(
+                    "budget", f"this program reached max_subagent_spawns_per_run={self.max_spawns}"
+                )
+
+        # Deterministic and ordered, so a reader can pair a start with its settle
+        # and see submission order without a timestamp.
+        sub_call_id = f"{self.execution.call_id}:code:{self._dispatched}"
+        self._dispatched += 1
+        # One lossless snapshot proves the arguments are JSON; `create_execution`
+        # accepts the frozen form directly, so it is not thawed again for the call.
+        snapshot = freeze_json_value(arguments, frozen_input=True)
+
+        async with self._limiter:
+            if self.session is not None:
+                self.session.append(
+                    "tool/code-dispatch-start",
+                    {
+                        "rootCallId": self.execution.root_call_id,
+                        "parentCallId": self.execution.call_id,
+                        "subCallId": sub_call_id,
+                        "name": binding.name,
+                        "arguments": thaw_json(snapshot),
+                    },
+                )
+            result = await self.tools.execute(
+                ToolExecutionInput(
+                    call_id=sub_call_id,
+                    root_call_id=self.execution.root_call_id,
+                    name=binding.name,
+                    arguments=snapshot,
+                    scope=self.execution.scope,
+                    session=self.session,
+                    agent=self.execution.agent,
+                    parent=self.execution.token,
+                    cancel=self.token,
+                )
+            )
+            await self._log_settle(sub_call_id, binding.name, result)
+
+        if result.is_error:
+            failure = result.error
+            reason = failure.message if failure is not None else "denied"
+            if failure is not None and failure.kind == "denied":
+                raise self._settle(
+                    "denied",
+                    f"tools.{binding.name} was refused: {reason}. The program was stopped; "
+                    "re-plan with this refusal in mind.",
+                )
+            raise ToolCallError(binding.name, reason)
+        return result.value
+
+    async def _log_settle(self, sub_call_id: str, name: str, result: ToolExecutionResult) -> None:
+        async def inner(record: CodeDispatchLog, blocks: Sequence[Any]) -> Sequence[Any]:
+            return blocks
+
+        record = CodeDispatchLog(
+            root_call_id=self.execution.root_call_id,
+            parent_call_id=self.execution.call_id,
+            sub_call_id=sub_call_id,
+            name=name,
+            is_error=result.is_error,
+        )
+        # The spill policy replaces an oversized dispatch content *individually*
+        # here (C5), so one large read does not melt its siblings into a blob.
+        shaped = await self.ctx.waterfall(
+            "tools/code-dispatch-log", record, result.content, inner=inner
+        )
+        if self.session is not None:
+            self.session.append(
+                "tool/code-dispatch",
+                {**record.to_wire(), "content": [block.to_wire() for block in shaped]},
+            )
+
+
+class Config(WireModel):
+    """Row config for the Code Mode transport."""
+
+    max_dispatches_per_run: int = MAX_DISPATCHES_PER_RUN
+    max_subagent_spawns_per_run: int = MAX_SUBAGENT_SPAWNS_PER_RUN
+    max_parallel_sub_calls: int = 10
+
+
+@plugin("tools-code-mode", config=Config, inject=["tools", "code_runtime", "system_prompt"])
+async def apply(ctx: Context, config: Config) -> None:
+    """Register the reserved transport, the shipped SDK renderers, and the prompt section."""
+    tools: ToolRuntime = ctx.tools
+    ctx.code_runtime.register_sdk_renderer("python", render_python_sdk)
+    ctx.code_runtime.register_sdk_renderer("typescript", render_typescript_sdk)
+
+    async def run_code(args: Any, run: ToolRunContext) -> Any:
+        # `Mapping`, not `dict`: accepted arguments are frozen into a
+        # `MappingProxyType`, which is a Mapping but not a dict instance.
+        program = args.get("program") if isinstance(args, Mapping) else None
+        if not isinstance(program, str) or not program.strip():
+            raise ToolCallError(RUN_CODE, "program must be a non-empty string")
+        runtime = ctx.code_runtime.require()
+        bridge = DispatchBridge(
+            tools=tools,
+            ctx=ctx,
+            execution=run.execution,
+            session=run.session,
+            token=(run.signal or CancelToken()).child(),
+            max_parallel=config.max_parallel_sub_calls,
+            max_dispatches=config.max_dispatches_per_run,
+            max_spawns=config.max_subagent_spawns_per_run,
+        )
+        outcome = await runtime.run(
+            CodeRunRequest(
+                program=program,
+                bindings=(_tools_namespace(tools, run.scope, bridge),),
+                namespace=getattr(run.agent, "id", None),
+                cancel_scope=bridge.token,
+            )
+        )
+        return {
+            "logs": outcome.logs,
+            "value": outcome.value,
+            "error": outcome.error,
+            "dispatches": bridge.dispatch_count,
+        }
+
+    tools.register_transport(
+        define_tool(
+            RUN_CODE,
+            "Run a program. Every capability is reached from inside it; see the SDK below.",
+            parameters={
+                "type": "object",
+                "properties": {"program": {"type": "string"}},
+                "required": ["program"],
+            },
+            output=ToolOutput(
+                schema={"type": "object"},
+                render=lambda _args, value: text_content(_render_run(value)),
+            ),
+            execute=run_code,
+        )
+    )
+
+    def sdk_section(scope: Context) -> str:
+        runtime = ctx.code_runtime.provider
+        if runtime is None:
+            return ""
+        language = getattr(runtime, "language", "python")
+        renderer = ctx.code_runtime.sdk_renderer(language)
+        if renderer is None:
+            raise RuntimeError(
+                f'no tools:sdk renderer for language "{language}"; Code Mode cannot describe '
+                "its own surface, and a listing in the wrong syntax would make the model "
+                "write code that cannot run"
+            )
+        return f"{code_only_rule(RUN_CODE)}\n\n{renderer([_tools_namespace(tools, scope, None)])}"
+
+    ctx.system_prompt.section(
+        PromptSection(name="tools:sdk", order=ORDER_TOOL_GUIDANCE, text=sdk_section)
+    )
+
+
+def _tools_namespace(
+    tools: ToolRuntime, scope: Context, bridge: DispatchBridge | None
+) -> CodeBindingNamespace:
+    """The `tools` namespace: every visible tool, as a governed binding.
+
+    With no bridge the namespace is descriptive — for rendering the SDK — and
+    carries no dispatch closures.
+    """
+    view = tools.view(scope)
+    bindings: list[CodeBinding] = []
+    for name in sorted(view.visible):
+        if name == RUN_CODE:
+            continue
+        definition = view.visible[name]
+        binding = CodeBinding(
+            name=name, description=definition.description, parameters=definition.parameters
+        )
+        if bridge is not None:
+            binding = CodeBinding(
+                name=name,
+                description=definition.description,
+                parameters=definition.parameters,
+                dispatch=partial(_dispatch, bridge, binding),
+            )
+        bindings.append(binding)
+    return CodeBindingNamespace(
+        name="tools",
+        description="governed capabilities; every call is recorded and may be refused",
+        bindings=tuple(bindings),
+    )
+
+
+async def _dispatch(bridge: DispatchBridge, binding: CodeBinding, **arguments: Any) -> Any:
+    return await bridge.call(binding, arguments)
+
+
+def _render_run(value: Any) -> str:
+    parts: list[str] = []
+    logs = value.get("logs") or ""
+    if logs:
+        parts.append(logs.rstrip())
+    if value.get("error"):
+        parts.append(f"[error]\n{value['error']}")
+    result = value.get("value")
+    if result is not None:
+        parts.append(f"[result] {result!r}")
+    return "\n".join(parts) if parts else "(no output)"

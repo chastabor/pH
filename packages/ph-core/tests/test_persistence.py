@@ -16,14 +16,12 @@ from typing import Any
 
 import pytest
 
-from ph.agent.types import AgentOptions
 from ph.persistence.jsonl import read_session
 from ph.session import Session, SessionEvent, SurfaceIntent
+from ph.testing import FAKE_OPTIONS as FAKE
 from ph.testing import user_payload
 
 pytestmark = pytest.mark.anyio
-
-FAKE = AgentOptions(provider="fake", model="fake-1")
 
 
 def _root(tmp_path: Path) -> dict[str, Any]:
@@ -122,21 +120,65 @@ def test_a_wrong_format_version_is_refused(tmp_path: Path) -> None:
         read_session(path)
 
 
-async def test_the_checkpoint_policy_flushes_before_each_request(
+async def test_the_checkpoint_policy_flushes_once_before_each_request(
     mount: Any, tmp_path: Path
 ) -> None:
+    """Barrier 1 (A4). One fsync per step, not two: the "step end" barrier on
+    the request path *is* this one, since the next request's flush covers
+    everything the previous step committed."""
     ctx = await mount(_root(tmp_path))
     session = ctx.sessions.create("s")
     written: list[int] = []
     # `session/flush` is a parallel dispatch, so an extra listener observes the
-    # barrier without displacing the backend that actually writes.
+    # barriers without displacing the backend that actually writes.
     ctx.on("session/flush", lambda target: written.append(len(target.events)))
 
     await ctx.agents.create(session, FAKE).prompt("hello")
-    # The user message and the request header are durable before the request is
-    # in flight — the whole point of the barrier.
-    assert written, "no flush happened before the model request"
-    assert "user/message" in [event.type for event in session.events[: written[0]]]
+    assert len(written) == 1, f"expected exactly one barrier on a tool-less step, saw {written}"
+    # By the time the model request goes out, the message that motivated it and
+    # the header it was built under are both durable.
+    durable = [event.type for event in session.events[: written[0]]]
+    assert "user/message" in durable
+    assert "request/header" in durable
+
+
+async def test_a_rejected_step_still_reaches_disk(mount: Any, tmp_path: Path) -> None:
+    """The one step end barrier 1 never reaches: no request follows a reject."""
+    from ph.agent.types import PreStepDecision
+
+    ctx = await mount(_root(tmp_path))
+    session = ctx.sessions.create("s")
+    written: list[int] = []
+    ctx.on("session/flush", lambda target: written.append(len(target.events)))
+    ctx.on("agent/pre-step", lambda request, next_: PreStepDecision(kind="reject"))
+
+    await ctx.agents.create(session, FAKE).prompt("hello")
+    assert written, "a rejected step was never flushed"
+
+
+async def test_a_top_level_tool_body_is_preceded_by_a_barrier(mount: Any, tmp_path: Path) -> None:
+    """Barrier 2: the `tool/call` is durable before the side effect happens."""
+    from ph.testing import simple_tool
+
+    ctx = await mount(_root(tmp_path))
+    flushed_before_body: list[bool] = []
+
+    def body(_args: Any, run: Any) -> str:
+        durable = ctx.session_persistence._buffers[run.session.id].pending
+        flushed_before_body.append(not durable)
+        return "ok"
+
+    ctx.tools.register(simple_tool("touch", body))
+    session = ctx.sessions.create("s")
+    run = ctx.tools.create_execution(
+        __import__("ph.tools", fromlist=["ToolExecutionInput"]).ToolExecutionInput(
+            call_id="c", name="touch", arguments={}, scope=ctx, session=session
+        )
+    )
+    session.append("turn/start", {"turn": 1})
+    await ctx.tools.dispatch(run)
+    # Nothing pending when the body ran: the barrier drained the buffer first.
+    assert flushed_before_body == [True]
 
 
 def test_events_survive_a_wire_round_trip() -> None:

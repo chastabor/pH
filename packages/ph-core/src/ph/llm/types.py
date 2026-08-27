@@ -15,6 +15,7 @@ messages, and only `source` distinguishes them.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Annotated, Any, Literal, TypeAlias
 
@@ -63,6 +64,7 @@ __all__ = [
     "create_user_message",
     "is_token_delta",
     "new_message_id",
+    "text_of",
 ]
 
 
@@ -132,6 +134,22 @@ _CONTENT_BLOCKS: TypeAdapter[list[Any]] = TypeAdapter(list[ContentBlock])
 def content_from_wire(blocks: Any) -> list[Any]:
     """Validate a list of content blocks read back from the log."""
     return _CONTENT_BLOCKS.validate_python(blocks)
+
+
+def text_of(blocks: Sequence[Any], *, placeholder: Callable[[str], str] | None = None) -> str:
+    """The text of a block list, joined by newlines.
+
+    Non-text blocks are skipped, or rendered through `placeholder(type)` when a
+    caller wants a marker — the one join every mode and adapter needs.
+    """
+    parts: list[str] = []
+    for block in blocks:
+        kind = getattr(block, "type", None)
+        if kind == "text":
+            parts.append(block.text)
+        elif placeholder is not None and isinstance(kind, str):
+            parts.append(placeholder(kind))
+    return "\n".join(parts)
 
 
 # ------------------------------------------------------------------ sources --

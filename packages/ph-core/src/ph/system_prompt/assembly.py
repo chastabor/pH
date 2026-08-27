@@ -140,8 +140,14 @@ class SystemPromptService:
         return self._register(self._contexts, scope or self.ctx, context)
 
     def tools(
-        self, provider: Callable[[], list[ToolSchema]], *, scope: Context | None = None
+        self, provider: Callable[[Context], list[ToolSchema]], *, scope: Context | None = None
     ) -> Disposer:
+        """Contribute tool schemas.
+
+        The provider receives the *target* scope, because what a tool set
+        contains is a per-agent question: a restriction or a scoped
+        registration changes the answer (B7).
+        """
         return self._register(self._tools, scope or self.ctx, provider)
 
     def variable(
@@ -184,7 +190,7 @@ class SystemPromptService:
 
         schemas: list[ToolSchema] = []
         for provider in self._visible(self._tools, target):
-            schemas.extend(provider())
+            schemas.extend(provider(target))
 
         assembly = PromptAssembly(
             sections=rendered,

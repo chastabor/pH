@@ -1,0 +1,9 @@
+# A profile for Anthropic's messages API.
+- insert:
+    - id: llm-anthropic
+      name: llm-anthropic
+      config:
+        provider: anthropic
+        apiKeyEnv: ANTHROPIC_API_KEY
+        contextWindow: 200000
+        defaultMaxTokens: 8192

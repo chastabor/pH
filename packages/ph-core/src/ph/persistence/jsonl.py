@@ -139,6 +139,23 @@ def read_session(path: Path) -> tuple[SessionHeader, list[SessionEvent]]:
     return header, events
 
 
+async def resume_session(ctx: Any, session_id: str) -> Any:
+    """Read a stored session, repair a crashed tail, and publish it.
+
+    The repair runs on the seed rather than after publication, so a resumed
+    session is provider-valid the first time anything reads it — an open turn
+    that reached `derive_messages()` would be rejected by the provider before
+    anyone noticed it was unclosed (A5).
+    """
+    from ..session import Session
+    from .repair import repaired
+
+    store = ctx.session_persistence
+    path = session_path(store.root, session_id)
+    header, events = read_session(path)
+    return ctx.sessions.adopt(Session(session_id, seed=repaired(events), header=header))
+
+
 @plugin("session-persistence-jsonl", inject=["sessions"])
 async def apply(ctx: Context, config: Any) -> None:
     """Mount the JSONL backend and wire it to the session firehose."""

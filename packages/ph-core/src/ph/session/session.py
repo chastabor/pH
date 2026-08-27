@@ -128,6 +128,7 @@ class Session:
         "_derived_nodes",
         "_events_snapshot",
         "_header_fold",
+        "_latest",
         "_log",
         "_observers",
         "_publishing",
@@ -152,6 +153,7 @@ class Session:
         self._derived_generation = 0
         self._header_fold = _LatestFold("request/header", parse_request_header)
         self._context_fold = _LatestFold("request/context", parse_request_context)
+        self._latest: dict[str, _LatestFold[SessionEvent]] = {}
 
         if seed is not None:
             # Validate the seed to the SAME invariants `append` enforces. A
@@ -319,7 +321,20 @@ class Session:
 
     # -------------------------------------------------------------- helpers --
 
+    def latest(self, event_type: str) -> SessionEvent | None:
+        """The most recent event of one type, folded incrementally.
+
+        The shape every "current policy" question takes — approval policy,
+        sandbox mode, permission preset — and one a per-call check must not
+        answer by scanning a log that is mostly `assistant/chunk`s.
+        """
+        fold = self._latest.get(event_type)
+        if fold is None:
+            fold = self._latest[event_type] = _LatestFold(event_type, lambda event: event)
+        return fold.read(self._log)
+
     def last_event_of(self, *types: str) -> SessionEvent | None:
+        """The most recent event of any of `types`. One type: prefer `latest()`."""
         for event in reversed(self._log):
             if event.type in types:
                 return event

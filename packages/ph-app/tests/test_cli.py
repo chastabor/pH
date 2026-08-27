@@ -104,6 +104,31 @@ def test_print_mode_answers_and_writes_a_readable_log(tmp_path: Path, monkeypatc
     assert [m.role for m in session.derive_messages()] == ["user", "assistant"]
 
 
+def test_each_mode_is_reachable_from_the_command_line(tmp_path: Path, monkeypatch: Any) -> None:
+    monkeypatch.setenv("PH_HOME", str(tmp_path))
+
+    text = runner.invoke(app, ["-p", "hello"])
+    assert text.exit_code == 0, text.output
+    assert "ok" in text.stdout
+
+    transcript = runner.invoke(app, ["-p", "hello", "--mode", "transcript"])
+    assert transcript.exit_code == 0, transcript.output
+    assert "you: hello" in transcript.stdout
+    assert "pH: ok" in transcript.stdout
+
+    stream = runner.invoke(app, ["-p", "hello", "--mode", "json"])
+    assert stream.exit_code == 0, stream.output
+    lines = [json.loads(line) for line in stream.stdout.splitlines() if line.startswith("{")]
+    assert lines[0]["type"] == "session/header"
+    # The log's own envelopes, not a rendering (I-7).
+    assert any(event.get("type") == "turn/end" for event in lines)
+
+
+def test_an_unknown_mode_is_refused() -> None:
+    result = runner.invoke(app, ["-p", "hi", "--mode", "nonsense"])
+    assert result.exit_code != 0
+
+
 def test_bare_invocation_prints_help() -> None:
     result = runner.invoke(app, [])
     assert result.exit_code == 0

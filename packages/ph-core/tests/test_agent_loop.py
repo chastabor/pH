@@ -39,10 +39,9 @@ from ph.llm.types import (
     create_user_message,
 )
 from ph.system_prompt.assembly import PromptContext, PromptSection
+from ph.testing import FAKE_OPTIONS as FAKE
 
 pytestmark = pytest.mark.anyio
-
-FAKE = AgentOptions(provider="fake", model="fake-1")
 
 
 def _plugin_snapshots(session: Any) -> list[Any]:

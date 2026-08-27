@@ -1,0 +1,16 @@
+# A profile for DeepSeek over the OpenAI-compatible wire.
+#
+# `${env:...}` is the only interpolation the loader performs, and the API key is
+# never interpolated here: the adapter takes the *name* of an environment
+# variable and resolves it at the request edge, so the value never enters a row,
+# an event, or a child process (I-3).
+- insert:
+    - id: llm-deepseek
+      name: llm-openai-compatible
+      config:
+        profiles:
+          - provider: deepseek
+            baseUrl: ${env:DEEPSEEK_BASE_URL:-https://api.deepseek.com/v1}
+            apiKeyEnv: DEEPSEEK_API_KEY
+            contextWindow: 128000
+            defaultMaxTokens: 8192

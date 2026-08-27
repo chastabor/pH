@@ -1,10 +1,16 @@
 """`ph` — the command line.
 
-Phase 0 ships four things: a one-shot print mode, `--dump-config` (so a
-composed profile is inspectable before it runs), `ph doctor` (which prints the
-three resolved path roots and how `$PH_RUNTIME` was reached), and `ph events`
-(the producer/consumer matrix, generated from the declaration registry rather
-than hand-maintained).
+Four output modes and three diagnostics.
+
+`--mode` decides what reaches stdout, and the choice matters more than a flag
+usually does: `json` and `rpc` emit the session log's **own** envelopes rather
+than a per-mode rendering (I-7), so a wrapper streaming from a pipe and a tool
+reading the stored JSONL parse one format — and dsh's tooling reads both (Q2).
+`text` and `transcript` are for people.
+
+`--dump-config` prints the composed rows before anything runs, `ph doctor` the
+three resolved path roots, and `ph events` the producer/consumer matrix
+generated from the declaration registry rather than hand-maintained.
 
 @module ph_app.cli
 """
@@ -14,7 +20,7 @@ from __future__ import annotations
 import json
 import sys
 from functools import partial
-from typing import Annotated
+from typing import Annotated, Literal
 
 import anyio
 import typer
@@ -26,7 +32,7 @@ from ph.cordis import Loader, import_plugin_modules
 from ph.cordis.events import events as event_registry
 from ph.paths import RuntimeDirError, resolve_roots
 
-from .modes.print_mode import run_print
+from .modes import run_json, run_print, run_rpc, run_transcript
 from .profiles import BUILTIN_PROFILES, resolve_profile
 
 __all__ = ["app", "main"]
@@ -43,6 +49,10 @@ err = Console(stderr=True)
 
 DEFAULT_PROFILE = "headless"
 
+OutputMode = Literal["text", "json", "transcript", "rpc"]
+
+_MODES = {"text": run_print, "json": run_json, "transcript": run_transcript}
+
 
 @app.callback()
 def default(
@@ -58,6 +68,10 @@ def default(
     session_id: Annotated[
         str | None, typer.Option("--session", help="Session id to create.")
     ] = None,
+    mode: Annotated[
+        OutputMode,
+        typer.Option("--mode", help="text (default), json, transcript, or rpc."),
+    ] = "text",
     dump_config: Annotated[
         bool, typer.Option("--dump-config", help="Print the composed rows and exit.")
     ] = False,
@@ -78,16 +92,29 @@ def default(
         )
         return
 
+    if mode == "rpc":
+        # No prompt: the peer drives the session over stdio.
+        anyio.run(partial(run_rpc, documents, provider=provider, model=model))
+        return
+
     if prompt is None:
         console.print(ctx.get_help())
         return
 
-    result = anyio.run(
-        partial(run_print, documents, prompt, provider=provider, model=model, session_id=session_id)
+    route = partial(
+        _MODES[mode], documents, prompt, provider=provider, model=model, session_id=session_id
     )
-    console.print(result.text)
+    outcome = anyio.run(route)
+
+    if mode == "json":
+        # Already written, event by event, as each committed.
+        return
+    if mode == "transcript":
+        console.print(outcome.text)
+        return
+    console.print(outcome.text)
     err.print(
-        f"[dim]session {result.session_id} · {result.events} events · {result.log_path}[/dim]"
+        f"[dim]session {outcome.session_id} · {outcome.events} events · {outcome.log_path}[/dim]"
     )
 
 

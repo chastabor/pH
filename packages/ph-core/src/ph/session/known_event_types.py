@@ -33,5 +33,20 @@ KNOWN_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         "turn/end",
         "turn/start",
         "user/message",
+        # policy and human-in-the-loop
+        "approval/asked",
+        "approval/decided",
+        "approval/policy",
+        "command/done",
+        "command/run",
+        "permission/preset",
+        "sandbox/mode",
+        # capability observations
+        "fs/observed",
+        # retry
+        "llm/retry",
+        # Code Mode dispatch records (log-only; see ph.tools.code_mode)
+        "tool/code-dispatch",
+        "tool/code-dispatch-start",
     }
 )

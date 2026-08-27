@@ -14,11 +14,17 @@ from pathlib import Path
 from ph.bundles import BASE, HEADLESS
 from ph.paths import resolve_roots
 
-__all__ = ["BUILTIN_PROFILES", "resolve_profile"]
+__all__ = ["BUILTIN_PROFILES", "PROFILE_DIR", "resolve_profile"]
+
+PROFILE_DIR = Path(__file__).parent / "profiles"
 
 BUILTIN_PROFILES: dict[str, tuple[Path, ...]] = {
     "base": (BASE,),
     "headless": (BASE, HEADLESS),
+    # Real providers layer onto base; the fake adapter is deliberately absent so
+    # a misconfigured key fails loudly instead of silently answering "ok".
+    "deepseek": (BASE, PROFILE_DIR / "deepseek.yaml"),
+    "anthropic": (BASE, PROFILE_DIR / "anthropic.yaml"),
 }
 
 

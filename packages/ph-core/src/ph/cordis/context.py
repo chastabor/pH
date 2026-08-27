@@ -291,6 +291,30 @@ class Context:
         """Whether `other` is this context or a descendant of it."""
         return any(node is self for node in other._chain())
 
+    @property
+    def isolation(self) -> Context | None:
+        """The scope a registration made here belongs to; `None` for global.
+
+        The key every scoped registry (tools, prompt sections) files a
+        registration under, so "who can see this" is one question with one
+        answer. A plugin's activation scope is transparent and answers `None`.
+        """
+        return self._isolation
+
+    def isolation_chain(self) -> list[Context | None]:
+        """This context's isolation scopes, most specific first, ending in `None`.
+
+        A scoped registry walks this to resolve a name: the innermost scope that
+        registered one wins, and the global layer is consulted last.
+        """
+        chain: list[Context | None] = []
+        for node in self._chain():
+            key = node._isolation
+            if key is not None and key not in chain:
+                chain.append(key)
+        chain.append(None)
+        return chain
+
     def reaches(self, target: Context) -> bool:
         """Whether a registration made here applies to work happening in `target`.
 

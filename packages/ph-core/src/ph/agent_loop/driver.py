@@ -41,7 +41,7 @@ seam unless something shadowed it for this agent alone.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import anyio
@@ -58,6 +58,7 @@ from ..agent.types import (
     RequestProposal,
     TurnEndReason,
 )
+from ..cancel import Cancelled, CancelToken
 from ..cordis import Context
 from ..llm.adapter import LlmError
 from ..llm.assembler import BlockAssembler
@@ -69,6 +70,7 @@ from ..llm.types import (
     Message,
     PluginSource,
     TokenUsage,
+    ToolCallBlock,
     create_assistant_message,
     create_user_message,
 )
@@ -81,6 +83,7 @@ from ..system_prompt.assembly import (
     render_context_sections,
     render_prompt,
 )
+from ..tools.batch import execute_tool_calls
 
 __all__ = ["AgentCancelled", "ReactLoopAgent"]
 
@@ -101,6 +104,20 @@ class _Phase:
     turn: int = 0
     step: int = 0
     cancelled: AgentCancelCause | None = None
+    token: CancelToken = field(default_factory=CancelToken)
+    """The live cancellation view handed to tool calls.
+
+    A flag the loop checks between awaits is not enough once a tool body can run
+    for minutes: the body needs to observe cancellation itself, and the pipeline
+    needs to tell "aborted before dispatch" from "aborted" to know whether the
+    call had an effect."""
+
+    def begin_turn(self) -> None:
+        """Fresh per-turn state: a new token, so an old cancellation cannot leak
+        into the next turn's tool calls."""
+        self.step = 0
+        self.cancelled = None
+        self.token = CancelToken()
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,11 +130,19 @@ class _PreparedStep:
 class ReactLoopAgent:
     """The default agent driver."""
 
-    def __init__(self, ctx: Context, session: Session, options: AgentOptions) -> None:
+    def __init__(
+        self,
+        ctx: Context,
+        session: Session,
+        options: AgentOptions,
+        *,
+        max_parallel_tool_calls: int = 10,
+    ) -> None:
         self.ctx = ctx
         self.session = session
         self.options = options
         self.id = session.id
+        self.max_parallel_tool_calls = max_parallel_tool_calls
         self._phase = _Phase(turn=_last_turn_of(session))
         self._request_header_logged = False
         self._context_snapshot: str | None = None
@@ -174,6 +199,7 @@ class ReactLoopAgent:
         if not keep_inbox:
             self.inbox.clear()
         self._phase.cancelled = cause
+        self._phase.token.cancel(cause.kind)
 
     def _throw_if_cancelled(self) -> None:
         if self._phase.cancelled is not None:
@@ -196,12 +222,11 @@ class ReactLoopAgent:
             raise RuntimeError(f'agent "{self.id}" already has active work')
         self._idle = anyio.Event()
         self._set_phase("running")
-        self._phase.step = 0
-        self._phase.cancelled = None
+        self._phase.begin_turn()
         try:
             while await self._turn():
                 pass
-        except AgentCancelled:
+        except (AgentCancelled, Cancelled):
             pass
         except Exception:
             log.debug("ph.agent_loop: driver contained a failure", exc_info=True)
@@ -314,8 +339,13 @@ class ReactLoopAgent:
                 if turn_ends is not None and not self.inbox.next_step:
                     break
                 target = "next-step"
-        except AgentCancelled as cancelled:
-            turn_ends = TurnEndReason(kind="aborted", reason=cancelled.cause)
+        except (AgentCancelled, Cancelled) as cancelled:
+            cause = (
+                cancelled.cause
+                if isinstance(cancelled, AgentCancelled)
+                else self._phase.cancelled or AgentCancelCause(kind="user")
+            )
+            turn_ends = TurnEndReason(kind="aborted", reason=cause)
             raise
         except Exception as error:
             failure = (
@@ -333,8 +363,7 @@ class ReactLoopAgent:
             )
         if not self.inbox.has_pending:
             return False
-        phase.cancelled = None
-        phase.step = 0
+        phase.begin_turn()
         return True
 
     async def _step(self, assembly: PromptAssembly) -> TurnEndReason | None:
@@ -363,7 +392,7 @@ class ReactLoopAgent:
                     )
                     assembler.push(chunk)
                 self._throw_if_cancelled()
-            except AgentCancelled:
+            except (AgentCancelled, Cancelled):
                 content = assembler.interrupted_blocks()
                 if content:
                     # An interrupted turn still finalizes what the user saw:
@@ -384,14 +413,40 @@ class ReactLoopAgent:
                     raise LlmError(failure.message, failure.code, failure)
                 continue
 
-            self._append_assistant_message(
-                turn, step, request, assembler.blocks(), chunk_seqs, assembler.usage
-            )
+            blocks = assembler.blocks()
+            self._append_assistant_message(turn, step, request, blocks, chunk_seqs, assembler.usage)
             if finish.kind == "max-tokens":
+                # Sticky, and checked before dispatch: max-tokens already
+                # dropped any truncated tool call, so there is nothing to run.
                 return TurnEndReason(kind="max-tokens")
-            # Phase 1 dispatches tool calls here; until then every step with a
-            # message completes the turn.
-            return TurnEndReason(kind="completed")
+            tool_calls = [block for block in blocks if isinstance(block, ToolCallBlock)]
+            if not tool_calls:
+                return TurnEndReason(kind="completed")
+            return await self._dispatch_tools(turn, step, tool_calls)
+
+    async def _dispatch_tools(
+        self, turn: int, step: int, tool_calls: list[ToolCallBlock]
+    ) -> TurnEndReason | None:
+        """Run the step's tool batch; `None` continues the turn with another step.
+
+        Result context is spliced into the next-step inbox rather than appended
+        here, so it lands *after* every `tool/result` and call/result adjacency
+        survives.
+        """
+        outcome = await execute_tool_calls(
+            self.ctx,
+            self,
+            turn,
+            step,
+            tool_calls,
+            self._phase.token,
+            lambda context: self.inbox.append("next-step", context),
+            max_parallel=self.max_parallel_tool_calls,
+        )
+        if outcome.aborted:
+            self._throw_if_cancelled()
+            raise Cancelled("tool batch aborted")
+        return TurnEndReason(kind="completed") if outcome.concluded else None
 
     async def _request_error(
         self, turn: int, step: int, request: GenerateOptions, finish: FinishReason

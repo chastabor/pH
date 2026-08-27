@@ -43,7 +43,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-__all__ = ["PathRoots", "RuntimeDirError", "resolve_roots"]
+__all__ = ["PathRoots", "RuntimeDirError", "default_home_path", "resolve_roots", "write_text_under"]
 
 RuntimeTier = Literal["override", "windows", "xdg-runtime", "tmpdir", "tmp-uid"]
 
@@ -187,3 +187,18 @@ def resolve_roots(*, create: bool = False) -> PathRoots:
         runtime_tier=tier,
     )
     return roots.ensure() if create else roots
+
+
+def default_home_path(configured: str | None, name: str) -> Path:
+    """A row's `path` setting, else `$PH_HOME/<name>` — the idiom every seam shares."""
+    return Path(configured).expanduser() if configured else resolve_roots().home / name
+
+
+def write_text_under(path: Path, text: str, *, append: bool = False) -> None:
+    """Write (or append) text, creating the parent directory first.
+
+    Blocking; call it through `anyio.to_thread.run_sync` from async code.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a" if append else "w", encoding="utf-8") as handle:
+        handle.write(text)

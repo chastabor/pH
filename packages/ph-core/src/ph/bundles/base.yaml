@@ -23,6 +23,85 @@
 
 - id: agent-loop
   name: agent-loop
+  config:
+    maxParallelToolCalls: 10
+
+# --- tools -----------------------------------------------------------------
+- id: tools
+  name: tools
+  config:
+    mode: native
+
+- id: tools-prompt
+  name: tools-prompt
+
+# The row that makes `ToolDefinition.timeout_ms` true. Its own row, as in dsh,
+# so a deployment wanting a different timeout policy swaps it.
+- id: tools-timeout
+  name: tools-timeout
+
+# --- capability seams ------------------------------------------------------
+# Definition + one local provider each. A deployment swaps a provider by
+# addressing the row; consumers never learn which one answered (I5).
+- id: subprocess
+  name: subprocess-local
+
+- id: sandbox
+  name: sandbox-policy
+  config:
+    defaultMode: read-only
+
+- id: shell
+  name: shell-local
+
+- id: fs
+  name: fs-local
+
+- id: fs-read-before-edit
+  name: fs-read-before-edit
+
+- id: approval
+  name: approval
+
+- id: permission-presets
+  name: permission-presets
+
+- id: user-questions
+  name: user-questions
+
+- id: commands
+  name: commands
+
+- id: jobs
+  name: jobs-local
+
+- id: settings
+  name: settings-local
+
+- id: credentials
+  name: credentials-env
+
+- id: skills
+  name: skills
+
+- id: spill
+  name: spill-local
+
+- id: token-meter
+  name: token-meter
+
+- id: code-runtime
+  name: code-runtime
+
+# --- model-facing tools ----------------------------------------------------
+- id: tool-fs
+  name: tool-fs
+
+- id: tool-bash
+  name: tool-bash
+
+- id: agent-instructions
+  name: agent-instructions
 
 # --- durability ------------------------------------------------------------
 - id: session-persistence
@@ -30,6 +109,15 @@
 
 - id: checkpoint-policy
   name: session-checkpoint-policy
+
+- id: telemetry
+  name: session-telemetry
+  config:
+    enabled: false
+
+# --- resilience ------------------------------------------------------------
+- id: llm-retry
+  name: llm-retry
 
 # --- invariants ------------------------------------------------------------
 # "Model-visible means logged" is checked at runtime, not only in tests: a

@@ -24,7 +24,14 @@ from ph.wire import WireModel, wire_alias
 
 
 def _all_ph_models() -> list[type[BaseModel]]:
+    """Every pH pydantic model that crosses a pH-owned JSON boundary.
+
+    `ToolModel` subclasses are excluded because they are the one declared
+    exemption (Q2): a tool's parameter names are the model's vocabulary, not
+    pH's wire, so they stay snake_case.
+    """
     import ph
+    from ph.tools.definition import ToolModel
 
     found: dict[str, type[BaseModel]] = {}
     for info in pkgutil.walk_packages(ph.__path__, prefix="ph."):
@@ -32,14 +39,31 @@ def _all_ph_models() -> list[type[BaseModel]]:
         for _, obj in inspect.getmembers(module, inspect.isclass):
             if (
                 issubclass(obj, BaseModel)
-                and obj not in (BaseModel, WireModel)
+                and obj not in (BaseModel, WireModel, ToolModel)
+                and not issubclass(obj, ToolModel)
                 and obj.__module__.startswith("ph.")
             ):
                 found[f"{obj.__module__}.{obj.__qualname__}"] = obj
     return list(found.values())
 
 
+def test_tool_schemas_stay_snake_case() -> None:
+    """The exemption is real, and it is only for tool schemas.
+
+    A tool parameter renamed by an alias generator would change what the model
+    has to type — `old_text` becoming `oldText` is an API break dressed as a
+    convention.
+    """
+    from ph.tools.builtin.fs_tools import EditArgs
+    from ph.tools.definition import ToolModel
+
+    assert issubclass(EditArgs, ToolModel)
+    assert "old_text" in EditArgs.model_json_schema()["properties"]
+    assert all(field.alias is None for field in EditArgs.model_fields.values())
+
+
 def test_every_ph_model_uses_the_shared_wire_base() -> None:
+    """Including plugin row configs: a YAML row is a JSON boundary too."""
     offenders = [
         f"{model.__module__}.{model.__qualname__}"
         for model in _all_ph_models()
@@ -104,6 +128,30 @@ def _sample(model: type[BaseModel]) -> BaseModel | None:
         },
         "RequestContext": {"provider": "fake", "model": "fake-1", "contextWindow": 8},
         "SurfaceReplace": {"start": 1, "end": 2},
+        "UserQuestion": {"question": "which?"},
+        "ToolCallView": {"title": "read"},
+        "ToolResultView": {"title": "read"},
+        "ApprovalRequest": {"toolName": "edit"},
+        "CredentialRef": {"name": "OPENAI_API_KEY"},
+        "FileSlice": {"path": "/x", "text": "hi"},
+        "GrepMatch": {"path": "/x", "line": 1, "text": "hit"},
+        "Skill": {"name": "review", "description": "Review a diff."},
+        "SpillRef": {"locator": "/x", "bytes": 3, "retrievalHint": "read /x"},
+        "SessionTelemetryRecord": {
+            "channel": "ops",
+            "time": 1,
+            "severity": "info",
+            "attributes": {},
+            "body": "started",
+        },
+        "SandboxPolicy": {"mode": "read-only"},
+        "CodeDispatchLog": {
+            "rootCallId": "r",
+            "parentCallId": "p",
+            "subCallId": "p:code:0",
+            "name": "read",
+            "isError": False,
+        },
         "_EventWire": {"type": "turn/start", "seq": 0, "time": 1, "data": {"turn": 1}},
     }
     fields = prepared.get(model.__name__)

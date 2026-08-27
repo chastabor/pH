@@ -23,9 +23,10 @@ through the same alias function, so there is one casing convention and not two.
 from __future__ import annotations
 
 import dataclasses
+from types import MappingProxyType
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, model_validator
 from pydantic.alias_generators import to_camel
 
 __all__ = ["WireDataclass", "WireModel", "wire_alias"]
@@ -41,6 +42,14 @@ class WireModel(BaseModel):
 
     Dumps by alias (camelCase), validates either form, and is frozen: a model
     that reached the wire is a value, not a mutable buffer.
+
+    It also accepts **frozen log data** directly. The session log freezes
+    payloads into `MappingProxyType`/`tuple`, and pydantic coerces those into
+    declared `dict`/`list` fields — but a field typed `Any` keeps what it was
+    given, so a JSON array read back from the log would stay a tuple and compare
+    unequal to an identical list. That broke `header_equals` once, silently, and
+    with it prefix caching. Thawing here, at the one layer every model shares,
+    means no call site has to remember to.
     """
 
     model_config = ConfigDict(
@@ -49,6 +58,18 @@ class WireModel(BaseModel):
         frozen=True,
         extra="forbid",
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _thaw_frozen_input(cls, data: Any) -> Any:
+        if isinstance(data, MappingProxyType):
+            # Lazy import: `ph.session.json` is import-safe on its own, but
+            # importing it at module load would run `ph.session.__init__`, which
+            # imports `ph.llm.types`, which imports this module.
+            from .session.json import thaw_json
+
+            return thaw_json(data)
+        return data
 
     def to_wire(self) -> dict[str, Any]:
         """The camelCase JSON form, with absent optional fields omitted."""

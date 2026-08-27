@@ -1,18 +1,94 @@
-"""Event-payload builders for tests and fixtures.
+"""Builders for tests and fixtures.
 
-The three surface types have a shape every test needs and none should retype:
-a user message, an assistant message inside its `assistant/message` payload,
-and a tool result inside its `tool/result` payload. Ids are explicit so a test
-can cite them.
+Two families. **Payloads**: the three surface types have a shape every test
+needs and none should retype — a user message, an assistant message inside its
+`assistant/message` payload, a tool result inside its `tool/result` payload.
+**Tool scaffolding**: a string-output tool, a bare registry, an agent stub, and
+the fake-provider options. Each was being re-declared per test module.
 
 @module ph.testing.builders
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
-__all__ = ["assistant_payload", "tool_result_payload", "user_payload"]
+from ..agent.types import AgentOptions
+from ..cordis import Context
+from ..session import Session
+from ..tools.definition import ToolDefinition, ToolOutput, define_tool, text_content
+from ..tools.registry import ToolRuntime
+
+__all__ = [
+    "FAKE_OPTIONS",
+    "StubAgent",
+    "assistant_payload",
+    "raising",
+    "simple_tool",
+    "tool_result_payload",
+    "tool_runtime",
+    "user_payload",
+]
+
+FAKE_OPTIONS = AgentOptions(provider="fake", model="fake-1")
+"""The options every test that drives the fake adapter uses."""
+
+
+def simple_tool(
+    name: str,
+    execute: Callable[..., Any] | None = None,
+    *,
+    description: str | None = None,
+    safe: bool | Callable[[Any], bool] = False,
+    **kwargs: Any,
+) -> ToolDefinition:
+    """A tool taking a free-form object and returning a string.
+
+    The shape every pipeline and batch test wants: no schema to satisfy, a
+    string the assertions can read back. `execute` defaults to returning `name`;
+    `safe` is the concurrency classification, a bool or a classifier.
+    """
+    return define_tool(
+        name,
+        description or f"the {name} tool",
+        parameters={"type": "object", "properties": {}},
+        output=ToolOutput(
+            schema={"type": "string"}, render=lambda _args, value: text_content(value)
+        ),
+        execute=execute or (lambda _args, _run: name),
+        is_concurrency_safe=safe,
+        **kwargs,
+    )
+
+
+def raising(error: BaseException) -> Callable[..., Any]:
+    """A body that raises `error` — readable where a generator trick was not."""
+
+    def body(*_args: Any, **_kwargs: Any) -> Any:
+        raise error
+
+    return body
+
+
+def tool_runtime() -> tuple[Context, ToolRuntime]:
+    """A root context with a bare registry provided as `tools`."""
+    root = Context()
+    runtime = ToolRuntime(ctx=root)
+    root.provide("tools", runtime)
+    return root, runtime
+
+
+class StubAgent:
+    """The minimum an approval prompt or a tool call needs of an agent."""
+
+    def __init__(
+        self, ctx: Context | None = None, session: Session | None = None, agent_id: str = "agent-a"
+    ) -> None:
+        self.ctx = ctx if ctx is not None else Context()
+        self.session = session
+        self.id = agent_id
+        self.options = FAKE_OPTIONS
 
 
 def user_payload(text: str, message_id: str = "m1") -> dict[str, Any]:

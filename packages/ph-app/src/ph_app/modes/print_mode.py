@@ -13,11 +13,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from ph.agent.types import AgentOptions
-from ph.llm.types import TextBlock
+from ph.llm.types import text_of
 from ph.persistence import session_path
 
-from ..runtime import mounted
+from ..runtime import prompted
 
 __all__ = ["PrintResult", "run_print"]
 
@@ -39,20 +38,15 @@ async def run_print(
     session_id: str | None = None,
 ) -> PrintResult:
     """Run one prompt to completion and return what the model said."""
-    async with mounted(documents) as run:
-        ctx = run.ctx
-        session = ctx.sessions.create(session_id)
-        agent = ctx.agents.create(session, AgentOptions(provider=provider, model=model))
-        await agent.prompt(prompt)
-        await ctx.sessions.flush(session)
+    async with prompted(
+        documents, prompt, provider=provider, model=model, session_id=session_id
+    ) as (ctx, session):
         # The human transcript, not the model surface: what the user was shown,
         # compaction or not.
         text = "\n".join(
-            block.text
+            text_of(message.content)
             for message in session.transcript()
-            if message.role == "assistant"
-            for block in message.content
-            if isinstance(block, TextBlock) and block.text
+            if message.role == "assistant" and text_of(message.content)
         )
         persistence = ctx.get("session_persistence")
         return PrintResult(
