@@ -1,0 +1,486 @@
+"""The provider-neutral message and streaming vocabulary.
+
+Ported from dsh `packages/llm/llm/src/{types,message}.ts`. Adapters alone
+translate provider wire formats; everything above this line — the loop, the
+session log, every plugin, the TUI — speaks only these types.
+
+The one field worth calling out is `Message.source`. It is what lets a consumer
+tell *typed human input* from *injected context* without a second channel: a
+file-change notice, a skill body and a subagent's reply are all user-role
+messages, and only `source` distinguishes them.
+
+@module ph.llm.types
+"""
+
+from __future__ import annotations
+
+import uuid
+from dataclasses import dataclass
+from typing import Annotated, Any, Literal, TypeAlias
+
+from pydantic import Field, TypeAdapter, model_validator
+
+from ..wire import WireDataclass, WireModel
+
+__all__ = [
+    "AssistantMessage",
+    "BlockEnd",
+    "BlockStart",
+    "ContentBlock",
+    "ContextForm",
+    "ContextSnapshotSection",
+    "Finish",
+    "FinishReason",
+    "GenerateOptions",
+    "ImageBlock",
+    "LlmCallConfig",
+    "LlmCallConfigAdapterDefaults",
+    "LlmFailure",
+    "Message",
+    "MessageSource",
+    "ModelSource",
+    "PluginSource",
+    "ReasoningBlock",
+    "ReasoningDelta",
+    "StreamChunk",
+    "TextBlock",
+    "TextDelta",
+    "TokenUsage",
+    "ToolCallBlock",
+    "ToolCallDelta",
+    "ToolResultBlock",
+    "ToolResultMessage",
+    "ToolSchema",
+    "ToolSource",
+    "UsageChunk",
+    "UserMessage",
+    "UserSource",
+    "chunk_from_wire",
+    "content_from_wire",
+    "create_assistant_message",
+    "create_message",
+    "create_tool_result_message",
+    "create_user_message",
+    "is_token_delta",
+    "new_message_id",
+]
+
+
+def new_message_id() -> str:
+    """A stable message identity preserved across every representation boundary."""
+    return str(uuid.uuid4())
+
+
+# ------------------------------------------------------------ content blocks --
+
+
+class TextBlock(WireModel):
+    """Plain text visible to the end user."""
+
+    type: Literal["text"] = "text"
+    text: str
+
+
+class ReasoningBlock(WireModel):
+    """Reasoning content, distinct from visible text."""
+
+    type: Literal["reasoning"] = "reasoning"
+    text: str
+
+
+class ImageBlock(WireModel):
+    """A durable raster image reference.
+
+    Role-neutral by design; today's adapters declare text-only output, so only
+    user content carries one.
+    """
+
+    type: Literal["image"] = "image"
+    attachment: dict[str, Any]
+
+
+class ToolCallBlock(WireModel):
+    """A tool invocation requested by the model."""
+
+    type: Literal["tool-call"] = "tool-call"
+    id: str
+    """Provider-issued call id; correlates with the matching tool result."""
+    name: str
+    arguments: str
+    """Raw JSON string exactly as the model produced it — never re-serialized."""
+
+
+class ToolResultBlock(WireModel):
+    """The result of a tool invocation, sent back to the model."""
+
+    type: Literal["tool-result"] = "tool-result"
+    tool_call_id: str
+    content: list[ContentBlock]
+    is_error: bool | None = None
+
+
+ContentBlock: TypeAlias = Annotated[
+    "TextBlock | ReasoningBlock | ImageBlock | ToolCallBlock | ToolResultBlock",
+    Field(discriminator="type"),
+]
+
+ToolResultBlock.model_rebuild()
+
+_CONTENT_BLOCKS: TypeAdapter[list[Any]] = TypeAdapter(list[ContentBlock])
+
+
+def content_from_wire(blocks: Any) -> list[Any]:
+    """Validate a list of content blocks read back from the log."""
+    return _CONTENT_BLOCKS.validate_python(blocks)
+
+
+# ------------------------------------------------------------------ sources --
+
+ContextForm: TypeAlias = Literal["instructions", "catalog", "snapshot", "notice", "relay", "recall"]
+"""What kind of thing a piece of injected context is.
+
+Deliberately semantic, never visual: a value says the content is a file's
+instructions or a catalog, and the consumer decides what that looks like.
+Colours, icons and collapse defaults are the consumer's business and must not
+enter this union.
+"""
+
+CONTEXT_SUMMARY_MAX_CHARS = 120
+
+
+class ContextSnapshotSection(WireModel):
+    """One named contribution to a `snapshot`-form context, in assembly order."""
+
+    name: str
+    text: str
+
+
+class UserSource(WireModel):
+    """Text a human typed."""
+
+    kind: Literal["user"] = "user"
+
+
+class PluginSource(WireModel):
+    """Content a plugin injected, and what kind of content it is."""
+
+    kind: Literal["plugin"] = "plugin"
+    plugin: str
+    form: ContextForm | None = None
+    summary: Annotated[str, Field(max_length=CONTEXT_SUMMARY_MAX_CHARS)] | None = None
+    """Required for `notice`: the one-line account shown without expanding."""
+    sections: list[ContextSnapshotSection] | None = None
+    """Required for `snapshot`: the named contributions, in order."""
+
+    @model_validator(mode="after")
+    def _form_carries_its_fields(self) -> PluginSource:
+        # Discriminated by `form` so a producer cannot select a form without the
+        # fields needed to present it.
+        if self.form == "notice" and self.summary is None:
+            raise ValueError('a "notice" context source must carry a summary')
+        if self.form == "snapshot" and self.sections is None:
+            raise ValueError('a "snapshot" context source must carry sections')
+        return self
+
+
+class ModelSource(WireModel):
+    """Provider identity and adapter-private replay data."""
+
+    kind: Literal["model"] = "model"
+    provider: str
+    model: str
+    replay_state: dict[str, Any] | None = None
+
+
+class ToolSource(WireModel):
+    """The call this result answers."""
+
+    kind: Literal["tool"] = "tool"
+    call_id: str
+
+
+MessageSource: TypeAlias = Annotated[
+    "UserSource | PluginSource | ModelSource | ToolSource", Field(discriminator="kind")
+]
+
+
+# ----------------------------------------------------------------- messages --
+
+
+class Message(WireModel):
+    """One immutable message shared by delivery, durable history and requests."""
+
+    id: str
+    role: Literal["system", "user", "assistant"]
+    content: list[ContentBlock]
+    source: MessageSource
+
+
+UserMessage: TypeAlias = Message
+AssistantMessage: TypeAlias = Message
+ToolResultMessage: TypeAlias = Message
+
+
+def create_message(
+    *, role: Literal["system", "user", "assistant"], content: list[Any], source: Any
+) -> Message:
+    """Create one identified message."""
+    return Message.model_validate(
+        {"id": new_message_id(), "role": role, "content": content, "source": source}
+    )
+
+
+def create_user_message(*, content: list[Any], source: Any) -> Message:
+    return create_message(role="user", content=content, source=source)
+
+
+def create_assistant_message(
+    *, content: list[Any], provider: str, model: str, replay_state: Any = None
+) -> Message:
+    source: dict[str, Any] = {"kind": "model", "provider": provider, "model": model}
+    if replay_state is not None:
+        source["replayState"] = replay_state
+    return create_message(role="assistant", content=content, source=source)
+
+
+def create_tool_result_message(*, call_id: str, content: list[Any], is_error: bool) -> Message:
+    return create_user_message(
+        content=[
+            {"type": "tool-result", "toolCallId": call_id, "content": content, "isError": is_error}
+        ],
+        source={"kind": "tool", "callId": call_id},
+    )
+
+
+# ---------------------------------------------------------------- accounting --
+
+
+class TokenUsage(WireModel):
+    """Token accounting for one model call.
+
+    Counts are DISJOINT: `input_tokens` is uncached input only, and cached input
+    is reported separately. An adapter whose provider folds cache hits into one
+    prompt total subtracts them out — otherwise every cache hit is billed twice
+    in pH's own accounting.
+    """
+
+    input_tokens: int
+    output_tokens: int
+    cache_read_tokens: int | None = None
+    cache_write_tokens: int | None = None
+    reasoning_tokens: int | None = None
+
+
+class LlmFailure(WireModel):
+    """Serializable provider or transport failure facts.
+
+    Facts only: policy decides whether they are retryable (Phase 1's retry
+    plugin), and compaction keys off `CONTEXT_WINDOW_EXCEEDED`.
+    """
+
+    message: str
+    code: str
+    status: int | None = None
+    provider_retry_after_ms: int | None = None
+    request_id: str | None = None
+
+
+CONTEXT_WINDOW_EXCEEDED = "CONTEXT_WINDOW_EXCEEDED"
+EMPTY_RESPONSE = "EMPTY_RESPONSE"
+
+
+class LlmCallConfig(WireModel):
+    """The conversation's call configuration: route plus sampling scalars.
+
+    Separated from `GenerateOptions` because this is the part that is *durable* —
+    it is what `request/header` snapshots and what header equality compares, so
+    a request that differs only in its message list appends no new header.
+    """
+
+    provider: str
+    model: str
+    reasoning_effort: str | None = None
+    temperature: float | None = None
+    max_tokens: int | None = None
+    stop: list[str] | None = None
+
+
+class LlmCallConfigAdapterDefaults(WireModel):
+    """Which config fields the adapter materialized rather than the caller.
+
+    Recorded so a later step re-resolves them against the exact model instead of
+    freezing one adapter's default into the conversation forever.
+    """
+
+    reasoning_effort: bool | None = None
+    max_tokens: bool | None = None
+
+
+class ToolSchema(WireModel):
+    """A tool as the model sees it."""
+
+    name: str
+    description: str
+    parameters: dict[str, Any]
+
+
+# ------------------------------------------------------------ stream chunks --
+#
+# Chunks are per-token hot-path values (D4), so they are frozen dataclasses on
+# `WireDataclass` rather than pydantic models. Their wire form still follows the
+# one alias rule.
+
+
+@dataclass(frozen=True, slots=True)
+class FinishReason(WireDataclass):
+    """Why a model response stopped."""
+
+    kind: Literal["stop", "tool-calls", "max-tokens", "aborted", "error"]
+    failure: LlmFailure | None = None
+
+    @classmethod
+    def from_wire(cls, wire: Any) -> FinishReason:
+        failure = wire.get("failure")
+        return cls(
+            kind=wire["kind"],
+            failure=None if failure is None else LlmFailure.model_validate(failure),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class BlockStart(WireDataclass):
+    index: int
+    block_type: str
+    type: Literal["block-start"] = "block-start"
+
+
+@dataclass(frozen=True, slots=True)
+class TextDelta(WireDataclass):
+    index: int
+    text: str
+    type: Literal["text-delta"] = "text-delta"
+
+
+@dataclass(frozen=True, slots=True)
+class ReasoningDelta(WireDataclass):
+    index: int
+    text: str
+    type: Literal["reasoning-delta"] = "reasoning-delta"
+
+
+@dataclass(frozen=True, slots=True)
+class ToolCallDelta(WireDataclass):
+    index: int
+    id: str
+    arguments_delta: str
+    name: str | None = None
+    type: Literal["tool-call-delta"] = "tool-call-delta"
+
+
+@dataclass(frozen=True, slots=True)
+class BlockEnd(WireDataclass):
+    index: int
+    block: Any
+    type: Literal["block-end"] = "block-end"
+
+
+@dataclass(frozen=True, slots=True)
+class UsageChunk(WireDataclass):
+    usage: TokenUsage
+    type: Literal["usage"] = "usage"
+
+
+@dataclass(frozen=True, slots=True)
+class Finish(WireDataclass):
+    reason: FinishReason
+    replay_state: dict[str, Any] | None = None
+    type: Literal["finish"] = "finish"
+
+
+StreamChunk: TypeAlias = (
+    "BlockStart | TextDelta | ReasoningDelta | ToolCallDelta | BlockEnd | UsageChunk | Finish"
+)
+"""The raw streaming protocol adapters emit.
+
+Contract: block indexes correlate interleaved deltas; `block-end` carries the
+assembled block; `usage` precedes the terminal `finish` and nothing follows it;
+tool arguments stay raw JSON strings until `block-end`. An adapter may raise,
+and the runtime normalizes that into a terminal `finish{error}` before any
+consumer sees it — so a consumer never has to handle both shapes.
+"""
+
+
+def chunk_from_wire(wire: Any) -> Any:
+    """Rebuild one stream chunk from its logged JSON form (replay fidelity).
+
+    A malformed chunk is reported as `ValueError` naming its kind, so a replay
+    reader can say which line was wrong rather than surfacing a `KeyError` from
+    three frames down.
+    """
+    kind = wire.get("type")
+    try:
+        if kind == "block-start":
+            return BlockStart(index=wire["index"], block_type=wire["blockType"])
+        if kind == "text-delta":
+            return TextDelta(index=wire["index"], text=wire["text"])
+        if kind == "reasoning-delta":
+            return ReasoningDelta(index=wire["index"], text=wire["text"])
+        if kind == "tool-call-delta":
+            return ToolCallDelta(
+                index=wire["index"],
+                id=wire["id"],
+                arguments_delta=wire["argumentsDelta"],
+                name=wire.get("name"),
+            )
+        if kind == "block-end":
+            return BlockEnd(index=wire["index"], block=content_from_wire([wire["block"]])[0])
+        if kind == "usage":
+            return UsageChunk(usage=TokenUsage.model_validate(wire["usage"]))
+        if kind == "finish":
+            return Finish(
+                reason=FinishReason.from_wire(wire["reason"]), replay_state=wire.get("replayState")
+            )
+    except (KeyError, TypeError) as error:
+        raise ValueError(f"malformed {kind!r} stream chunk: {error!r}") from error
+    raise ValueError(f"unknown stream chunk type {kind!r}")
+
+
+def is_token_delta(chunk: Any) -> bool:
+    """Whether a chunk carries visible output — the first-token boundary.
+
+    Empty deltas (heartbeats, empty tool-call frames) do not count.
+    """
+    if isinstance(chunk, (TextDelta, ReasoningDelta)):
+        return chunk.text != ""
+    if isinstance(chunk, ToolCallDelta):
+        return chunk.arguments_delta != "" or chunk.name is not None
+    return False
+
+
+# ------------------------------------------------------------- request shape --
+
+
+@dataclass(frozen=True, slots=True)
+class GenerateOptions:
+    """A single model request, fully assembled."""
+
+    provider: str
+    model: str
+    messages: tuple[Message, ...]
+    system: str | None = None
+    tools: tuple[ToolSchema, ...] = ()
+    reasoning_effort: str | None = None
+    temperature: float | None = None
+    max_tokens: int | None = None
+    stop: tuple[str, ...] = ()
+    session_id: str | None = None
+    purpose: Literal["compaction", "session-title"] | None = None
+    """Why an auxiliary call is being made. Ordinary conversation requests leave
+    it unset — so a session-bound request with no `purpose` *is* a loop request,
+    and the "model-visible means logged" invariant holds it to the log. Nothing
+    outside the loop can opt a conversation request out by leaving a flag at its
+    default; it would have to name a purpose it does not have."""
+
+    @property
+    def is_loop_request(self) -> bool:
+        return self.session_id is not None and self.purpose is None

@@ -1,0 +1,32 @@
+[build-system]
+requires = ["hatchling>=1.26"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ph-core"
+version = "0.0.1"
+description = "pH core: the cordis plugin subset, the session log, the LLM vocabulary, and the agent loop."
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+dependencies = [
+    "anyio>=4.4",
+    "pydantic>=2.9",
+    "pyyaml>=6.0",
+]
+
+# The plugin discovery group. Reserved in Phase 0 (P0-01) so a third-party
+# wheel can mount a row by name from its first release onward.
+[project.entry-points."ph.plugins"]
+llm = "ph.llm.adapter:apply"
+session = "ph.session.store:apply"
+agent = "ph.agent.registry:apply"
+agent-loop = "ph.agent_loop:apply"
+system-prompt = "ph.system_prompt.assembly:apply"
+session-persistence-jsonl = "ph.persistence.jsonl:apply"
+session-checkpoint-policy = "ph.persistence.checkpoint_policy:apply"
+llm-fake = "ph.testing.fake_adapter:apply"
+agent-loop-invariant = "ph.agent_loop.invariant:apply"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ph"]

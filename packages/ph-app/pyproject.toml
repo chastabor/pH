@@ -1,0 +1,25 @@
+[build-system]
+requires = ["hatchling>=1.26"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ph-app"
+version = "0.0.1"
+description = "pH CLI and TUI: print/json/transcript/rpc modes and the Textual front-end."
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+dependencies = [
+    "ph-core",
+    "typer>=0.12",
+    "rich>=13.0",
+]
+
+[project.scripts]
+ph = "ph_app.cli:main"
+
+[tool.uv.sources]
+ph-core = { workspace = true }
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ph_app"]

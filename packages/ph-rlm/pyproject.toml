@@ -1,0 +1,18 @@
+[build-system]
+requires = ["hatchling>=1.26"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ph-rlm"
+version = "0.0.1"
+description = "pH RLM bundle: the CPython fd-3 code runtime, bindings, subagents and the Continual Harness."
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+dependencies = ["ph-core"]
+
+[tool.uv.sources]
+ph-core = { workspace = true }
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ph_rlm"]

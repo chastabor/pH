@@ -1,0 +1,38 @@
+# ph-base: the shared core of every pH profile.
+#
+# Row order carries no load semantics — activation is service-availability
+# driven, so a row waits for whatever it injects regardless of where it sits.
+# The grouping below is for readers.
+#
+# A later bundle or the user's profile addresses these rows by id. A patch
+# replaces the targeted row's WHOLE config rather than merging into it, so a
+# row's effective value is always one layer's and readable in one place.
+
+# --- the log, the vocabulary, the loop -------------------------------------
+- id: llm
+  name: llm
+
+- id: session
+  name: session
+
+- id: system-prompt
+  name: system-prompt
+
+- id: agent
+  name: agent
+
+- id: agent-loop
+  name: agent-loop
+
+# --- durability ------------------------------------------------------------
+- id: session-persistence
+  name: session-persistence-jsonl
+
+- id: checkpoint-policy
+  name: session-checkpoint-policy
+
+# --- invariants ------------------------------------------------------------
+# "Model-visible means logged" is checked at runtime, not only in tests: a
+# harness that can only prove this in CI cannot prove it about your session.
+- id: agent-loop-invariant
+  name: agent-loop-invariant

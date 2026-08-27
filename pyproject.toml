@@ -1,0 +1,74 @@
+[project]
+name = "ph-workspace"
+version = "0.0.0"
+description = "pH — a Python agent harness ported from DeepSeek Harness (workspace root)."
+requires-python = ">=3.12"
+dependencies = [
+    "ph-core",
+    "ph-app",
+    "ph-rlm",
+    "ph-stabilize",
+]
+
+[tool.uv]
+package = false
+
+[tool.uv.workspace]
+members = ["packages/*"]
+
+[tool.uv.sources]
+ph-core = { workspace = true }
+ph-app = { workspace = true }
+ph-rlm = { workspace = true }
+ph-stabilize = { workspace = true }
+
+[dependency-groups]
+dev = [
+    "mypy>=1.11",
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "ruff>=0.6",
+    "anyio>=4.4",
+    "types-PyYAML>=6.0",
+]
+
+# ---------------------------------------------------------------- tooling ----
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+# `plans/` and `sources/` are reference material, not this project's code:
+# ruff formats fenced Python inside Markdown, and reformatting a quoted excerpt
+# would silently edit the record it is quoting.
+extend-exclude = ["plans", "sources", ".venv"]
+src = ["packages/ph-core/src", "packages/ph-app/src", "packages/ph-rlm/src", "packages/ph-stabilize/src"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+# B008: Typer expresses CLI options as call-valued defaults.
+# UP040: PEP 695 `type` aliases are lazily evaluated, and pydantic resolves the
+#   discriminated-union aliases in this codebase at class-definition time.
+ignore = ["B008", "UP040"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+mypy_path = "packages/ph-core/src"
+packages = ["ph"]
+namespace_packages = true
+explicit_package_bases = true
+
+[tool.pytest.ini_options]
+testpaths = ["packages/ph-core/tests", "packages/ph-app/tests", "tests"]
+addopts = "-ra"
+markers = [
+    "e2e: end-to-end scenario tests",
+]
+
+[tool.coverage.run]
+source = ["ph"]
+branch = true

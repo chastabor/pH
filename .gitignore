@@ -1,0 +1,22 @@
+# Build and environment
+.venv/
+dist/
+build/
+*.egg-info/
+__pycache__/
+*.py[cod]
+
+# Tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Reference checkouts of the upstream projects this port reads from. Vendored
+# locally so the plans' citations are verifiable; never part of this repo.
+sources/
+
+# Local scratch
+.ph/
+*.local.yaml
