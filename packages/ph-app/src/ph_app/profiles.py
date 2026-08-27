@@ -23,6 +23,9 @@ BUILTIN_PROFILES: dict[str, tuple[Path, ...]] = {
     "headless": (BASE, HEADLESS),
     # Real providers layer onto base; the fake adapter is deliberately absent so
     # a misconfigured key fails loudly instead of silently answering "ok".
+    # The interactive profile. Same rows as `headless` bar one: a person is
+    # present to answer the seams, so the workspace is writable (see tui.yaml).
+    "tui": (BASE, HEADLESS, PROFILE_DIR / "tui.yaml"),
     "deepseek": (BASE, PROFILE_DIR / "deepseek.yaml"),
     "anthropic": (BASE, PROFILE_DIR / "anthropic.yaml"),
 }

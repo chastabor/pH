@@ -518,6 +518,89 @@ Net effect: `ph-app` depends on `tau-ai` (the PyPI distribution) for `tau_ai`, `
 
 - **Textual rules adopted verbatim from `deepagents/libs/code/AGENTS.md`**: use `textual.content.Content` (`from_markup("$var", var=...)`, `styled`, `assemble`) never f-string Rich markup; `App.notify(..., markup=False)` for dynamic text; escape markdown for `Markdown` widgets; `push_screen(screen, callback)` from slash-command handlers (never await a modal on the message pump — hand continuations to an off-pump scheduler); glyphs and spinners from one source of truth; test modals through real keypresses with `textual.pilot`.
 
+### 5.5 The trajectory view — dsh's *second* front-end projection
+
+dsh ships two UI packages, not one: `packages/client/ui-conversation` (the chat)
+and `packages/client/ui-trajectory` (33 modules — table, timeline, toolbar,
+search index, details panel, and one record *definition* per record kind).
+§5.1–§5.4 describe the first. This section describes the second, which was
+missing from this plan and is the reason it is written down here.
+
+Its record vocabulary is a closed set — `system | user | context | compacted |
+message | tool | subtool` — and each record carries a 1-based `#N` index, a
+`sourceSeq` back to the owning session event for cross-navigation, and a
+`messageSource` (producer role and name). Subagent scheduling is *not* a
+separate kind: it surfaces as `message`/`context` records attributed to their
+producer, which is what "inspect these records by source" means. `subtool` is a
+Code Mode sub-dispatch (`block.subCalls`). A details panel holds the full
+input/output/reasoning, the tool schema as it was at call time, and — for a
+`system` record — the whole prompt-and-tool-catalog snapshot **plus the one it
+replaced**, so a prompt change is readable as a diff.
+
+**Why pH can add this late at zero cost.** The log already records every one of
+those facts. `request/header` carries the prompt snapshot, `PluginSource(plugin=,
+form=, sections=)` carries the producer, `step/start`/`step/end` carry the
+timings TTFT and decode throughput are derived from, and `tool/code-dispatch*`
+carries the sub-calls. The trajectory view is a **second projection of the same
+fold** (I6), not a new data path — so deferring it costs no migration and loses
+no history. That is I4 earning its keep: the conversation view is the reader's
+projection and the trajectory view is the auditor's, over identical input.
+
+#### The two shapes this can take
+
+**(a) A screen inside the running TUI.** A `TrajectoryScreen` pushed over the
+chat, or a second entry in `App.MODES`, reading the events of the session
+*currently mounted*. It follows the live stream on the existing frame tick, and
+the chat keeps its scroll and focus behind it. Cheap: one screen, one projection
+module, a details pane; theme, keybindings and redraw loop all reused. Its limit
+is structural — it can only show the session you are already in, so the crashed
+run, the subagent's log and the P3-23 fixture are all out of reach, and those
+are the cases an auditor's view exists for.
+
+**(b) A full second view: a first-class reader of any log.** The view takes a
+*stored session*, which means it must work with **nothing mounted** — no agent,
+no provider, no approval answerers, no prompt. `read_session()` gives it the
+events; `App.MODES` lets chat and trajectory coexist as co-equal top-level
+views, each with its own screen stack; and a harness-free entry point
+(`ph --mode trajectory --session <id|path>`) falls out for free. Only in this
+shape do search, cross-navigation and fork-at-record mean anything, because you
+are operating on a **record** rather than watching a conversation.
+
+**(a) is a strict subset of (b).** The projection, the record kinds, the details
+pane and the handlers for the currently-unrendered event types are identical
+work; (b) adds only *where the events come from* and a second entry point. So
+shipping (a) first wastes nothing — it just delivers the smaller half.
+
+#### Decision: (b), in Phase 3 — P3-24 and P3-25
+
+Four reasons, in order of weight.
+
+1. **The record vocabulary is incomplete before Phase 3.** `subtool` is a Code
+   Mode sub-dispatch, which the TUI only renders at P3-19, and subagent
+   attribution needs `rlm/child-*` — events that do not yet exist and are not in
+   `KNOWN_SESSION_EVENT_TYPES`. Built in Phase 2, the view would have to grow two
+   record kinds afterwards and re-do its grouping and timeline around them.
+2. **Fork-at-record is the view's highest-value action and it is coupled to
+   P3-15**, whose gate is already "fork at boundary restores that namespace". A
+   trajectory view whose fork key is dead is worse than no trajectory view,
+   because it advertises a capability the harness does not yet have. Note the
+   constraint A6 puts on the UX: forking is legal only at a **closed-turn
+   boundary**, so the action is offered on boundary records and refused
+   elsewhere — the table has to show which records those are rather than letting
+   a user aim at any row and be rejected.
+3. **P3-23 wants it.** "Report checked in; unexpected diffs triaged" is a human
+   triage step over two logs, and the trajectory view is the instrument for it.
+   The dependency runs Phase 3 → Phase 3, not Phase 2 → Phase 3.
+4. **Nothing in Phase 2 needs changing to keep the option open**, per the
+   zero-cost argument above. The six event types the conversation view does not
+   render — `request/header`, `step/start`, `step/end`, `approval/policy`,
+   `fs/observed`, `session/end-seed` — are not transcript defects. They are
+   records only an auditor's view wants, and they stay in the log either way.
+
+What this does **not** defer: if Phase 3 slips, (a) remains available as a
+one-week subset against the record kinds that exist, and upgrading it to (b)
+later is additive.
+
 ---
 
 ## 6. The RLM plugin bundle (`ph-rlm`) — Prime Agent's design as plugins

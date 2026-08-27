@@ -6,7 +6,8 @@ Four output modes and three diagnostics.
 usually does: `json` and `rpc` emit the session log's **own** envelopes rather
 than a per-mode rendering (I-7), so a wrapper streaming from a pipe and a tool
 reading the stored JSONL parse one format — and dsh's tooling reads both (Q2).
-`text` and `transcript` are for people.
+`text` and `transcript` are for people, and `tui` is the interactive one — the
+only mode that takes no `--print`, because the prompt is the interface.
 
 `--dump-config` prints the composed rows before anything runs, `ph doctor` the
 three resolved path roots, and `ph events` the producer/consumer matrix
@@ -19,8 +20,9 @@ from __future__ import annotations
 
 import json
 import sys
+from collections.abc import Awaitable, Callable
 from functools import partial
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal, TypeAlias
 
 import anyio
 import typer
@@ -49,9 +51,18 @@ err = Console(stderr=True)
 
 DEFAULT_PROFILE = "headless"
 
-OutputMode = Literal["text", "json", "transcript", "rpc"]
+OutputMode = Literal["text", "json", "transcript", "rpc", "tui"]
 
-_MODES = {"text": run_print, "json": run_json, "transcript": run_transcript}
+ModeRunner: TypeAlias = Callable[..., Awaitable[Any]]
+"""Each mode returns its own result type — `json` reports a count, `text` and
+`transcript` report text — so the table is typed by what they have in common:
+they are awaited, and the caller branches on the mode it asked for."""
+
+_MODES: dict[str, ModeRunner] = {
+    "text": run_print,
+    "json": run_json,
+    "transcript": run_transcript,
+}
 
 
 @app.callback()
@@ -70,8 +81,11 @@ def default(
     ] = None,
     mode: Annotated[
         OutputMode,
-        typer.Option("--mode", help="text (default), json, transcript, or rpc."),
+        typer.Option("--mode", help="text (default), json, transcript, rpc, or tui."),
     ] = "text",
+    resume: Annotated[
+        str | None, typer.Option("--resume", help="Session id to reopen (tui only).")
+    ] = None,
     dump_config: Annotated[
         bool, typer.Option("--dump-config", help="Print the composed rows and exit.")
     ] = False,
@@ -95,6 +109,23 @@ def default(
     if mode == "rpc":
         # No prompt: the peer drives the session over stdio.
         anyio.run(partial(run_rpc, documents, provider=provider, model=model))
+        return
+
+    if mode == "tui":
+        # Imported here because the TUI pulls in Textual, and `ph -p` in a
+        # script should not pay for a terminal UI it will never draw.
+        from .tui.app import run_tui
+
+        anyio.run(
+            partial(
+                run_tui,
+                documents,
+                provider=provider,
+                model=model,
+                session_id=session_id,
+                resume=resume,
+            )
+        )
         return
 
     if prompt is None:

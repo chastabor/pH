@@ -259,6 +259,14 @@ IDs are `P<phase>-<nn>`. **Delivers** names §2 rows; **Gate** is the test that 
 | P2-06 | Textual discipline: `Content.from_markup("$var")`, never f-string markup, `notify(markup=False)`, off-pump continuations | P2-01 | — | bracketed user text renders literally |
 | P2-07 | `tui` profile; `dev-notes/phase-2.md` | P2-05 | — | snapshot tests for streaming / tool card / error / compaction marker |
 
+Phase 2 delivers dsh's **conversation** view (`ui-conversation`). dsh's
+**trajectory** view (`ui-trajectory`) is the second projection of the same fold
+and is scheduled at P3-24/P3-25, not here: its record set needs Code Mode
+sub-dispatches (P3-19) and subagent attribution (P3-11), and its fork action is
+coupled to P3-15. Deferring costs nothing, because the log already records every
+field the view needs (I4, I6) — see port plan §5.5 for the two shapes considered
+and why the harness-free reader won.
+
 ### Phase 3 — RLM bundle *(4–5 weeks; parallel with Phase 4)*
 
 | ID | Work item | Depends | Delivers | Gate |
@@ -286,6 +294,8 @@ IDs are `P<phase>-<nn>`. **Delivers** names §2 rows; **Gate** is the test that 
 | P3-21 | **Governance gate (a)–(e)** as a named test module | P3-10, P3-12 | C1–C4, C7 | all five pass — if not, the fold did not land |
 | P3-22 | **Runtime conformance suite**: one test per frame type, one per binding namespace; fuzzed frames; persistence across runs; `restore` after kill; `recipe` rehydration; `cancel` recovery; `%%bash` `SyntaxError`; lifecycle (no zombie; `SIGKILL` → no child on 3 OSes; journal cleans strays; mid-snapshot kill → no orphan blob) | P3-05, P3-06, P3-15 | D1–D5, F3–F5, F7 | full suite green on Linux, macOS, Windows |
 | P3-23 | Trajectory-fixture replay: prime-agent fixtures under the new surface; diff turn counts and tool-call shapes; expected diffs = `access` default + SDK block | P3-20 | — | report checked in; unexpected diffs triaged |
+| P3-24 | **Trajectory projection** (`tui/trajectory.py`): dsh's closed record set `system \| user \| context \| compacted \| message \| tool \| subtool`; 1-based `#N` + `sourceSeq` identity; **source attribution** from `PluginSource(plugin=, form=, sections=)`; records for the six types the conversation view does not render (`request/header`, `step/start`, `step/end`, `approval/policy`, `fs/observed`, `session/end-seed`); prompt-and-tool-catalog snapshot **plus the snapshot it replaced**; call-time tool schema; TTFT and decode throughput derived from `step/*` + `usage` | P2-01, P3-11, P3-19 | A11 | every type in `KNOWN_SESSION_EVENT_TYPES` either produces a record or is explicitly classified record-less — no silent omissions; the projection equals its fold (live and replayed agree, as P2-01) |
+| P3-25 | **`TrajectoryView` as a second app view** (§5.4/§5.5 shape (b)): `App.MODES` chat/trajectory, each with its own screen stack; virtualised table + timeline + toolbar; details panel; **incremental search index** over record text *and* sources; cross-navigation by `sourceSeq`; **fork at a record** via `ctx.sessions.fork`; harness-free entry point `ph --mode trajectory --session <id\|path>` (reads `read_session()`, mounts nothing, no agent, no provider, no answerers) | P3-24, P3-15 | A6 | opens a stored log with nothing mounted; search finds a tool call by name and by argument; fork offered only at a closed-turn boundary record (A6) and refused elsewhere; the fork's prefix is byte-identical to the source; pilot tests drive the table, the details panel and the fork |
 
 ### Phase 4 — Stabilization bundle *(4–5 weeks; parallel with Phase 3)*
 
@@ -363,7 +373,7 @@ IDs are `P<phase>-<nn>`. **Delivers** names §2 rows; **Gate** is the test that 
 | 0 | P0-14's invariant fires on a bypass; the wire round-trip property passes; `ph doctor` prints three resolved roots on all three OSes; a print-mode run writes a JSONL that dsh tooling reads |
 | 1 | dsh's pipeline ordering invariants pass; crash-repair fixtures resume; the prefix-stability test passes on a recorded session; registering a namespace provider without a snapshot hook fails at `provide()`; `SIGTERM` unwinds within grace |
 | 2 | pilot tests drive every modal; resume rebuilds the transcript from events alone |
-| 3 | **P3-21 (governance gate) and P3-22 (runtime conformance) both green on three OSes**; fork restores the boundary namespace; harness re-derives byte-identical; the fixture-replay report is checked in with its diffs triaged |
+| 3 | **P3-21 (governance gate) and P3-22 (runtime conformance) both green on three OSes**; fork restores the boundary namespace; harness re-derives byte-identical; the fixture-replay report is checked in with its diffs triaged; the trajectory view opens a stored log with nothing mounted and accounts for every known event type |
 | 4 | P4-16 green; a denied run reverts exactly; an inside-worktree cell prompts zero times; `containment.strict` refuses on a backend-less host; doctor's tier output matches the table |
 | 5 | reattach preserves position; concurrent open is refused; lingering state reported; non-guarantees documented and asserted |
 | 6 | 100 % coverage on `ph-core`; the docs test passes; `sandbox` refuses an absolute-path write; every seam has a page; Windows in the matrix |

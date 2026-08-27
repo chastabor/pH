@@ -140,3 +140,43 @@ def test_profiles_resolve_to_bundle_documents() -> None:
     assert [path.name for path in documents] == ["base.yaml", "headless.yaml"]
     with pytest.raises(ValueError):
         resolve_profile("nope")
+
+
+def test_the_tui_profile_layers_onto_headless() -> None:
+    documents = resolve_profile("tui")
+    assert [path.name for path in documents] == ["base.yaml", "headless.yaml", "tui.yaml"]
+
+
+def test_the_tui_profile_makes_the_workspace_writable() -> None:
+    """The only row that differs, and the reason a `tui` profile exists.
+
+    `read-only` is right unattended — nothing can answer an approval prompt. In
+    the TUI a person is present, so the workspace is writable and everything
+    outside it still asks.
+    """
+    result = runner.invoke(app, ["--dump-config", "--profile", "tui"])
+    assert result.exit_code == 0, result.output
+    rows = yaml.safe_load(result.stdout)
+    sandbox = next(row for row in rows if row["id"] == "sandbox")
+    assert sandbox["config"]["defaultMode"] == "workspace-write"
+    assert sandbox["layer"].endswith("tui.yaml")
+
+    headless = runner.invoke(app, ["--dump-config", "--profile", "headless"])
+    rows = yaml.safe_load(headless.stdout)
+    unattended = next(row for row in rows if row["id"] == "sandbox")
+    assert unattended["config"]["defaultMode"] == "read-only"
+
+
+def test_tui_is_an_accepted_mode() -> None:
+    """`--mode tui` is offered and takes no `--print`.
+
+    Only the wiring is asserted here — the TUI itself is covered by the pilot
+    and snapshot tests, which drive it without a terminal.
+    """
+    from ph_app.cli import _MODES
+
+    help_text = runner.invoke(app, ["--help"]).output
+    assert "tui" in help_text
+    # The one-shot table is for modes that answer a prompt and exit; the TUI
+    # has its own entry point because the prompt *is* the interface.
+    assert "tui" not in _MODES

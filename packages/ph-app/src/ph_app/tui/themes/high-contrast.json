@@ -1,0 +1,20 @@
+{
+  "dark": true,
+  "background": "#000000",
+  "foreground": "#ffffff",
+  "surface": "#0a0a0a",
+  "panel": "#141414",
+  "muted": "#bdbdbd",
+  "border": "#ffffff",
+  "accent": "#00d0ff",
+  "success": "#00ff87",
+  "error": "#ff5f5f",
+  "warning": "#ffd75f",
+  "user_text": "#00d0ff",
+  "assistant_text": "#ffffff",
+  "thinking_text": "#bdbdbd",
+  "tool_success": "#00ff87",
+  "tool_error": "#ff5f5f",
+  "highlight_background": "#005f87",
+  "highlight_text": "#ffffff"
+}

@@ -1,0 +1,482 @@
+"""`PHTuiApp` — widgets, keys, and the worker that drives a turn.
+
+Everything harness-shaped lives in `frontend.py`; this file is the terminal. It
+satisfies `ModalHost`, so the one rule that cannot be forgotten is enforced by
+where the code sits: turns run in a Textual worker, and only a worker may await
+a modal.
+
+Keys are Textual bindings built from `TUI_VERBS` and remapped from `tui.json`
+with one `set_keymap` — screens and modals included, since their bindings carry
+the same ids. `priority=True` puts them ahead of the prompt's `TextArea`, which
+binds `ctrl+k`, `ctrl+y` and others for editing and would otherwise fire as well
+as, or instead of, the app. `check_action` keeps them quiet while a modal is up.
+
+Redrawing is on a timer rather than per event. A streaming turn commits an
+`assistant/chunk` every few tokens, and syncing the view on each one spends more
+time laying out than rendering; the adapter marks the state dirty and the frame
+tick — 30 a second — draws whatever arrived. Only the spinner is per-frame.
+
+@module ph_app.tui.app
+"""
+
+from __future__ import annotations
+
+import logging
+from collections.abc import Callable, Sequence
+from dataclasses import replace
+from pathlib import Path
+from typing import Any, ClassVar
+
+from textual import work
+from textual.app import App, ComposeResult
+from textual.binding import BindingType
+from textual.containers import Horizontal, Vertical
+
+from ph.paths import resolve_roots
+from ph.seams.approval import ApprovalOutcome, ApprovalRequest
+from ph.seams.permission_presets import PRESETS
+from ph.seams.user_questions import UserQuestion
+
+from .autocomplete import PathCompleter
+from .commands import app_bindings, register_tui_commands
+from .config import TuiKeybindings, TuiSettings, load_tui_settings, save_tui_settings
+from .frontend import HarnessSession, open_harness
+from .modals.approval import ApprovalModal
+from .modals.ask_user import AskUserModal
+from .modals.base import Choice, ChoicePicker
+from .modals.login import LoginModal, credential_choices
+from .modals.pickers import (
+    command_choices,
+    model_choices,
+    preset_choices,
+    session_choices,
+    theme_choices,
+)
+from .modals.trust import TrustStore, project_trust_modal
+from .terminal import TerminalTitle
+from .themes import ThemeCatalog, fallback_variables, load_catalog
+from .widgets.prompt import PromptInput
+from .widgets.status import Sidebar, StatusBar
+from .widgets.transcript import TranscriptView
+
+__all__ = ["PHTuiApp", "run_tui"]
+
+log = logging.getLogger("ph_app.tui.app")
+
+FRAME_INTERVAL = 1 / 30
+"""Redraws a second. Fast enough that streaming looks continuous, slow enough
+that a burst of chunks costs one layout instead of forty."""
+
+
+class PHTuiApp(App[str | None]):
+    """pH in a terminal.
+
+    The exit value is a session id to reopen, or `None`. Resuming is a restart,
+    not a mutation: the transcript, the agent scope and every registration
+    belong to the session being left, so `run_tui` unwinds this app completely
+    and mounts a new one on the chosen session.
+    """
+
+    ENABLE_COMMAND_PALETTE = False
+    """pH's palette is `ctx.commands`, opened by its own verb."""
+
+    BINDINGS: ClassVar[list[BindingType]] = app_bindings(TuiKeybindings())
+    """Defaults; `on_mount` remaps them from the user's settings."""
+
+    CSS = """
+    Screen { background: $ph-background; color: $ph-foreground; layers: base; }
+    #body { height: 1fr; }
+    #main { width: 1fr; height: 1fr; }
+    #chrome { height: auto; }
+    """
+
+    def __init__(
+        self,
+        documents: Sequence[Path],
+        *,
+        provider: str = "fake",
+        model: str = "fake-1",
+        session_id: str | None = None,
+        resume: str | None = None,
+        home: Path | None = None,
+    ) -> None:
+        super().__init__()
+        self.documents = list(documents)
+        self.provider = provider
+        self.model = model
+        self.session_id = session_id
+        self.resume = resume
+        self.home = home or resolve_roots().home
+        self.settings: TuiSettings = load_tui_settings(self.home)
+        self.catalog: ThemeCatalog = load_catalog(self.home)
+        self.project = Path.cwd()
+        self.trust = TrustStore(path=self.home / "trust.json")
+        self.front: HarnessSession | None = None
+        self.title_writer = TerminalTitle()
+        self._paths = PathCompleter(root=str(self.project))
+        self._dirty = True
+        self._command_disposers: list[Callable[[], Any]] = []
+        # Held rather than queried. `App.query_one` searches the *top* screen,
+        # so every lookup would fail while a modal is up — and the frame timer
+        # runs thirty times a second whether or not one is.
+        self._view: TranscriptView | None = None
+        self._status: StatusBar | None = None
+        self._sidebar: Sidebar | None = None
+        self._prompt: PromptInput | None = None
+
+    @property
+    def keys(self) -> TuiKeybindings:
+        return self.settings.keybindings
+
+    def get_theme_variable_defaults(self) -> dict[str, str]:
+        return fallback_variables()
+
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        """Keep global keys quiet while a modal owns the screen — except quit."""
+        if action == "quit":
+            return True
+        if len(self.screen_stack) > 1:
+            return False
+        return not (action.startswith("open_") and self.front is None)
+
+    # --------------------------------------------------------------- layout --
+
+    def compose(self) -> ComposeResult:
+        with Horizontal(id="body"):
+            if self.settings.sidebar == "left":
+                yield Sidebar(classes="-left")
+            with Vertical(id="main"):
+                yield TranscriptView(id="transcript")
+                with Vertical(id="chrome"):
+                    yield PromptInput(self.keys, completion_source=self._completion_source)
+                    yield StatusBar()
+            if self.settings.sidebar != "left":
+                yield Sidebar()
+
+    async def on_mount(self) -> None:
+        self.set_keymap(self.keys.as_map())
+        self.catalog.install(self)
+        self.theme = self.catalog.resolve(self.settings.theme).name
+        self._view = self.query_one("#transcript", TranscriptView)
+        self._status = self.query_one(StatusBar)
+        self._sidebar = self.query_one(Sidebar)
+        self._prompt = self.query_one(PromptInput)
+        self._sidebar.display = self.settings.sidebar != "off"
+        self.set_interval(FRAME_INTERVAL, self._tick)
+        self._prompt.area.focus()
+        if self.trust.trusted(self.project):
+            self.run_worker(self._open(), group="open")
+            return
+        # Asked before mounting, because mounting is what reads the project's
+        # AGENTS.md, its hooks and its configured plugins. `push_screen` with a
+        # callback, never awaited: this runs on the message pump.
+        self.push_screen(project_trust_modal(self.project), self._answer_trust)
+
+    def _answer_trust(self, answer: str | None) -> None:
+        if answer == "trust":
+            self.trust.trust(self.project)
+        if answer in ("trust", "once"):
+            self.run_worker(self._open(), group="open")
+            return
+        self.exit()
+
+    async def _open(self) -> None:
+        """Mount the harness. In a worker, so the shell paints first."""
+        try:
+            self.front = await open_harness(
+                self.documents,
+                host=self,
+                provider=self.provider,
+                model=self.model,
+                session_id=self.session_id,
+                resume=self.resume,
+            )
+        except Exception as error:
+            log.exception("ph_app.tui: the harness would not mount")
+            self.notify(str(error), title="pH could not start", severity="error", markup=False)
+            return
+        self._command_disposers = register_tui_commands(self.front.ctx, self)
+        self._dirty = True
+
+    async def on_unmount(self) -> None:
+        for dispose in reversed(self._command_disposers):
+            dispose()
+        self._command_disposers.clear()
+        if self.front is not None:
+            await self.front.close()
+        self.title_writer.clear()
+
+    # ---------------------------------------------------------------- frames --
+
+    def state_changed(self) -> None:
+        self._dirty = True
+
+    async def _tick(self) -> None:
+        front, status, view = self.front, self._status, self._view
+        if front is None or status is None or view is None:
+            return
+        running = front.state.status == "running"
+        if running:
+            status.tick()
+            self.title_writer.set(f"{status.glyph} working")
+        if not (running or self._dirty):
+            return
+        status.show(front.state)
+        if not self._dirty:
+            return
+        self._dirty = False
+        await view.sync(self._rows(front))
+        if self._sidebar is not None and self._sidebar.display:
+            self._sidebar.show(front.state, session_id=front.session.id, cwd=str(self.project))
+
+    def _rows(self, front: HarnessSession) -> list[Any]:
+        return front.state.visible_items(
+            thinking=self.settings.show_thinking, tool_results=self.settings.show_tool_results
+        )
+
+    # ----------------------------------------------------------------- turns --
+
+    async def on_prompt_input_submitted(self, message: PromptInput.Submitted) -> None:
+        front = self.front
+        if front is None:
+            return
+        if message.text.startswith("/"):
+            # A command is the human's verb. Sending it as a prompt would spend
+            # a turn and make the log say the model chose it.
+            await self._dispatch_command(front, message.text)
+            return
+        if message.queue or front.state.status == "running":
+            # The driver refuses a second concurrent `run()`, and a person
+            # typing mid-turn means "also this", not "instead of that".
+            front.queue(message.text)
+            return
+        self._run_turn(message.text)
+
+    async def on_prompt_input_cancelled(self, _message: PromptInput.Cancelled) -> None:
+        if self.front is not None and self.front.state.status == "running":
+            self.front.cancel()
+
+    async def _dispatch_command(self, front: HarnessSession, line: str) -> None:
+        name = line.split()[0]
+        try:
+            shown = await front.run_command(line)
+        except KeyError as error:
+            self.notify(str(error), title="unknown command", severity="warning", markup=False)
+            return
+        except Exception as error:
+            log.exception("ph_app.tui: a command failed")
+            self.notify(str(error), title=name, severity="error", markup=False)
+            return
+        if shown:
+            self.notify(shown, title=name, markup=False)
+        self._dirty = True
+
+    @work(exclusive=True, group="turn")
+    async def _run_turn(self, text: str) -> None:
+        """One turn, in a worker — which is what makes the modals legal."""
+        front = self.front
+        if front is None:
+            return
+        try:
+            await front.submit(text)
+        except Exception:
+            log.exception("ph_app.tui: a turn failed")
+        finally:
+            self._dirty = True
+            self.title_writer.set("")
+            if self.settings.turn_notification == "bell":
+                self.bell()
+
+    # ------------------------------------------------------------ modal host --
+
+    async def ask_approval(self, request: ApprovalRequest) -> tuple[ApprovalOutcome, str]:
+        decision = await self.push_screen_wait(ApprovalModal(request))
+        return decision.outcome, decision.reason
+
+    async def ask_question(self, question: UserQuestion) -> str | None:
+        answer = await self.push_screen_wait(AskUserModal(question))
+        return answer if isinstance(answer, str) else None
+
+    # -------------------------------------------------------------- actions --
+    # One per `TuiVerb`. Reached by key, by `/command`, and by `run_action`.
+    # Every picker opens with `push_screen(screen, callback)` and returns: an
+    # action runs on the message pump, where awaiting a dismissal deadlocks.
+
+    def _pick(
+        self,
+        title: str,
+        choices: list[Choice],
+        then: Callable[[str | None], None],
+        **options: Any,
+    ) -> None:
+        self.push_screen(ChoicePicker(title=title, choices=choices, **options), then)
+
+    def action_open_commands(self) -> None:
+        if self.front is not None:
+            self._pick("commands", command_choices(self.front.ctx.commands), self._insert_command)
+
+    def _insert_command(self, chosen: str | None) -> None:
+        if chosen is not None and self._prompt is not None:
+            self._prompt.area.insert(f"{chosen} ")
+            self._prompt.area.focus()
+
+    def action_open_models(self) -> None:
+        front = self.front
+        if front is None:
+            return
+        llm = front.ctx.get("llm")
+        providers = llm.list_providers() if llm is not None else []
+        self._pick(
+            "model",
+            model_choices(providers, front.state.provider, front.state.model),
+            self._set_model,
+            free_text="provider/model",
+        )
+
+    def _set_model(self, chosen: str | None) -> None:
+        front = self.front
+        if chosen is None or front is None:
+            return
+        provider, _, model = chosen.partition("/")
+        front.state.provider = provider
+        front.state.model = model or front.state.model
+        self.notify(f"{front.state.provider}/{front.state.model}", title="model", markup=False)
+        self._dirty = True
+
+    def action_open_sessions(self) -> None:
+        front = self.front
+        if front is None:
+            return
+        # The store's own root: a profile may point persistence elsewhere, and
+        # a picker listing a directory the store never writes to lists nothing.
+        store = front.ctx.get("session_persistence")
+        directory = store.root if store is not None else self.home / "sessions"
+        self._pick(
+            "sessions",
+            session_choices(directory, current=front.session.id),
+            self._resume_session,
+            free_text="session id",
+        )
+
+    def _resume_session(self, chosen: str | None) -> None:
+        if chosen is not None and (self.front is None or chosen != self.front.session.id):
+            self.exit(chosen)
+
+    def action_open_themes(self) -> None:
+        self._pick(
+            "theme",
+            theme_choices(self.theme, self.catalog),
+            self._set_theme,
+            on_highlight=self._preview_theme,
+        )
+
+    def _preview_theme(self, name: str) -> None:
+        """Apply a theme as the cursor passes it — seeing it is how you pick."""
+        if name in self.catalog.themes:
+            self.theme = name
+
+    def _set_theme(self, chosen: str | None) -> None:
+        if chosen is not None and chosen in self.catalog.themes:
+            self._save(replace(self.settings, theme=chosen))
+        # Chosen or cancelled, the theme in force is the one the settings name.
+        self.theme = self.catalog.resolve(self.settings.theme).name
+
+    def action_open_presets(self) -> None:
+        if self.front is not None:
+            self._pick("permissions", preset_choices(self.front.state.preset), self._set_preset)
+
+    def _set_preset(self, chosen: str | None) -> None:
+        front = self.front
+        if chosen is None or front is None or chosen not in PRESETS:
+            return
+        presets = front.ctx.get("permission_presets")
+        if presets is None:
+            return
+        # The service appends `permission/preset`; the adapter picks it up from
+        # the log like any other event, so the display follows the record.
+        presets.apply_preset(chosen, front.session)
+        self._dirty = True
+
+    def action_open_login(self) -> None:
+        front = self.front
+        if front is None:
+            return
+        credentials = front.ctx.get("credentials")
+        self._pick(
+            "credential",
+            credential_choices(front.config_rows, credentials),
+            self._ask_for_secret,
+            free_text="environment variable",
+        )
+
+    def _ask_for_secret(self, name: str | None) -> None:
+        if name is not None:
+            self.push_screen(LoginModal(name), lambda value: self._store(name, value))
+
+    def _store(self, name: str, value: str | None) -> None:
+        front = self.front
+        credentials = front.ctx.get("credentials") if front is not None else None
+        if value is None or credentials is None:
+            return
+        # In-process only, and never written down: `notify` names the credential
+        # and never the secret.
+        credentials.provide_value(name, value)
+        self.notify(f"{name} set for this session", title="login", markup=False)
+
+    async def action_toggle_thinking(self) -> None:
+        self._save(replace(self.settings, show_thinking=not self.settings.show_thinking))
+        await self._rebuild()
+
+    async def action_toggle_tool_results(self) -> None:
+        self._save(replace(self.settings, show_tool_results=not self.settings.show_tool_results))
+        await self._rebuild()
+
+    async def _rebuild(self) -> None:
+        """Redraw from scratch — what a display toggle needs."""
+        if self._view is not None and self.front is not None:
+            await self._view.rebuild(self._rows(self.front))
+
+    def action_toggle_sidebar(self) -> None:
+        if self._sidebar is not None:
+            self._sidebar.display = not self._sidebar.display
+            self._dirty = True
+
+    def _save(self, settings: TuiSettings) -> None:
+        """Adopt new settings and persist them. A write failure costs the memory, not the change."""
+        self.settings = settings
+        try:
+            save_tui_settings(self.home, settings)
+        except OSError:
+            log.warning("ph_app.tui: could not write tui.json", exc_info=True)
+
+    # ---------------------------------------------------------- completions --
+
+    def _completion_source(self) -> dict[str, Any]:
+        front = self.front
+        commands: list[tuple[str, str]] = []
+        if front is not None:
+            commands = [(d.name, d.summary) for d in front.ctx.commands.list()]
+        return {"commands": commands, "paths": self._paths}
+
+
+async def run_tui(
+    documents: Sequence[Path],
+    *,
+    provider: str,
+    model: str,
+    session_id: str | None = None,
+    resume: str | None = None,
+) -> None:
+    """Entry point for `--mode tui`.
+
+    Loops so that choosing a session from the picker reopens it: the app exits
+    with the id, everything it mounted has unwound, and a fresh app resumes.
+    """
+    while True:
+        app = PHTuiApp(
+            documents, provider=provider, model=model, session_id=session_id, resume=resume
+        )
+        resume = await app.run_async()
+        if resume is None:
+            return
+        session_id = None

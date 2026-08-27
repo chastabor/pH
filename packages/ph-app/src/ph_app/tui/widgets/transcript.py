@@ -1,0 +1,340 @@
+"""The transcript: rows that render from `TuiState` and nothing else.
+
+Two disciplines are enforced here rather than remembered (P2-06).
+
+**Never build markup with an f-string.** User text, tool output and provider
+errors all contain `[` — a path like `foo[0]`, a Python list, a Rich tag someone
+typed on purpose. `Content(text)` renders it literally; an f-string into a
+markup parser makes the model's output a formatting language, and at worst
+swallows it. Where styling *is* wanted, `Content.from_markup` takes `$variables`
+so the substituted value can never be parsed as markup.
+
+**Stream by appending, not by reparsing.** `MarkdownStream.write(fragment)`
+appends to a live Markdown widget; re-`update()`ing the accumulated text on every
+delta re-parses the whole message per token, which is quadratic and visibly
+janky by the second paragraph. The view tracks how much of each row it has
+already written and sends only the tail.
+
+The same discipline, one layer up: a settled row **remembers what it last drew**
+and skips `update()` when nothing changed. `sync` visits every visible row on
+every dirty frame, and `Static.update` always re-lays-out — so without the memo
+a 200-row transcript re-rendered 200 widgets per frame while streaming.
+
+@module ph_app.tui.widgets.transcript
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from textual.app import ComposeResult
+from textual.containers import Vertical, VerticalScroll
+from textual.content import Content
+from textual.widgets import Collapsible, Markdown, Static
+from textual.widgets.markdown import MarkdownStream
+
+from ..state import ChatItem, ToolCard
+
+__all__ = ["StreamingMessage", "ToolCardWidget", "TranscriptRow", "TranscriptView"]
+
+_ROLE_LABEL = {
+    "user": "you",
+    "assistant": "pH",
+    "thinking": "thinking",
+    "context": "context",
+    "notice": "·",
+    "error": "!",
+    "compaction": "compacted",
+}
+
+MARKDOWN_ROLES: frozenset[str] = frozenset({"assistant", "thinking"})
+"""Roles rendered as Markdown.
+
+Not a display preference — a consistency requirement. The model writes Markdown,
+so its rows render it; a *streamed* row that rendered Markdown while a
+*replayed* one showed raw asterisks would make a resumed session look different
+from the session the person left, which is the same failure the P2-01 gate
+guards against, one layer up.
+
+The user's own text is deliberately absent: what someone typed is shown as they
+typed it.
+"""
+
+_ROLE_STYLE = {
+    "user": "$ph-user-text",
+    "assistant": "$ph-assistant-text",
+    "thinking": "$ph-thinking-text",
+    "context": "$ph-muted",
+    "notice": "$ph-muted",
+    "error": "$ph-error",
+    "compaction": "$ph-warning",
+}
+
+
+def _status_markup(card: ToolCard) -> tuple[str, str]:
+    """The glyph and its style for a call's state — one rule for cards and dispatches."""
+    glyph = "…" if not card.settled else ("✗" if card.is_error else "✓")
+    return glyph, ("$ph-tool-error" if card.is_error else "$ph-tool-success")
+
+
+class TranscriptRow(Vertical):
+    """A settled row: a styled label over its body."""
+
+    DEFAULT_CSS = """
+    TranscriptRow { height: auto; margin: 0 1 1 1; }
+    TranscriptRow > .row-label { color: $ph-muted; }
+    TranscriptRow > .row-body { height: auto; }
+    TranscriptRow.-error > .row-body { color: $ph-error; }
+    TranscriptRow.-thinking > .row-body { color: $ph-thinking-text; }
+    TranscriptRow.-context > .row-body { color: $ph-muted; }
+    TranscriptRow.-compaction { border-left: outer $ph-warning; padding-left: 1; }
+    TranscriptRow.-shadowed > .row-body { color: $ph-muted; }
+    """
+
+    def __init__(self, item: ChatItem) -> None:
+        super().__init__(id=f"row-{_slug(item.key)}")
+        self.item = item
+        self._shown: tuple[str, bool] | None = None
+        self.add_class(f"-{item.role}")
+
+    def compose(self) -> ComposeResult:
+        label = _ROLE_LABEL.get(self.item.role, self.item.role)
+        style = _ROLE_STYLE.get(self.item.role, "$ph-foreground")
+        # `$label` is substituted, never parsed: a role name could not introduce
+        # markup here, but the same rule everywhere is what makes it reliable.
+        yield Static(Content.from_markup(f"[{style}]$label[/]", label=label), classes="row-label")
+        yield Static(Content(self.item.text), classes="row-body")
+
+    def on_mount(self) -> None:
+        self._shown = (self.item.text, self.item.shadowed)
+        # Dimmed, not removed: the person read it, the model no longer has it.
+        self.set_class(self.item.shadowed, "-shadowed")
+
+    def refresh_text(self) -> None:
+        current = (self.item.text, self.item.shadowed)
+        if current == self._shown:
+            return
+        self._shown = current
+        self.set_class(self.item.shadowed, "-shadowed")
+        self.query_one(".row-body", Static).update(Content(self.item.text))
+
+
+class StreamingMessage(Markdown):
+    """An assistant or thinking row that grows a fragment at a time."""
+
+    DEFAULT_CSS = """
+    StreamingMessage { height: auto; margin: 0 1 1 1; }
+    /* The model's answer carries no label — it is the default voice of the
+       transcript. Reasoning does need marking, since it can be toggled off and
+       a reader must be able to tell which they are looking at. */
+    StreamingMessage.-thinking {
+        color: $ph-thinking-text; border-left: outer $ph-thinking-text; padding-left: 1;
+    }
+    StreamingMessage.-streaming MarkdownFence { overflow-x: hidden; scrollbar-size-horizontal: 0; }
+    StreamingMessage.-finalized MarkdownFence { overflow-x: auto; scrollbar-size-horizontal: 1; }
+    """
+
+    def __init__(self, item: ChatItem) -> None:
+        super().__init__("", id=f"row-{_slug(item.key)}")
+        self.item = item
+        self._stream: MarkdownStream | None = None
+        self._written = 0
+        self.add_class(f"-{item.role}")
+        self.add_class("-streaming")
+
+    async def write_tail(self, text: str) -> None:
+        """Append whatever part of `text` has not been written yet."""
+        if len(text) <= self._written:
+            return
+        fragment = text[self._written :]
+        self._written = len(text)
+        if self._stream is None:
+            self._stream = self.get_stream(self)
+        await self._stream.write(fragment)
+
+    async def finalize(self, text: str) -> None:
+        """Flush, then restore finalized Markdown chrome (scrollbars come back)."""
+        await self.write_tail(text)
+        await self._stop_stream()
+        self.remove_class("-streaming")
+        self.add_class("-finalized")
+
+    async def on_unmount(self) -> None:
+        await self._stop_stream()
+
+    async def _stop_stream(self) -> None:
+        if self._stream is not None:
+            stream, self._stream = self._stream, None
+            await stream.stop()
+
+
+class ToolCardWidget(Vertical):
+    """One tool call: a header line, its body, and any Code Mode sub-dispatches.
+
+    Dispatch rows are mounted as they arrive, keyed by call id, rather than
+    composed once. Live, the card mounts on the tick after `tool/call` — before
+    any `tool/code-dispatch-start` exists — so compose-time content would show
+    the "governed calls" section on replay and never live. Same fold, same
+    picture, is the P2-01 promise at the widget level.
+    """
+
+    DEFAULT_CSS = """
+    ToolCardWidget {
+        height: auto; margin: 0 1 1 1; border-left: outer $ph-border; padding-left: 1;
+    }
+    ToolCardWidget.-error { border-left: outer $ph-tool-error; }
+    ToolCardWidget.-settled { border-left: outer $ph-tool-success; }
+    ToolCardWidget > .tool-body { color: $ph-muted; height: auto; }
+    ToolCardWidget .dispatch { color: $ph-muted; }
+    """
+
+    def __init__(self, item: ChatItem) -> None:
+        super().__init__(id=f"row-{_slug(item.key)}")
+        self.item = item
+        self._shown: tuple[Any, ...] | None = None
+        self._dispatch_rows: dict[str, tuple[Static, tuple[bool, bool]]] = {}
+        self._dispatch_box = Vertical(classes="dispatches")
+
+    def compose(self) -> ComposeResult:
+        yield Static(self._header(), classes="tool-header")
+        yield Static(Content(self._body()), classes="tool-body")
+        with Collapsible(title="governed calls", collapsed=True, id="dispatches"):
+            yield self._dispatch_box
+
+    async def on_mount(self) -> None:
+        self.query_one(Collapsible).display = False
+        await self.refresh_card()
+
+    def _snapshot(self) -> tuple[Any, ...]:
+        card = self.item.tool
+        if card is None:
+            return (self.item.text,)
+        return (
+            card.settled,
+            card.is_error,
+            card.failure_kind,
+            card.title,
+            card.subtitle,
+            card.body,
+        )
+
+    def _header(self) -> Content:
+        card = self.item.tool
+        if card is None:
+            return Content("tool")
+        glyph, style = _status_markup(card)
+        # Every dynamic part is a substituted variable, so a path containing
+        # brackets cannot become markup.
+        return Content.from_markup(
+            f"[{style}]$glyph[/] [b]$title[/b] [$ph-muted]$subtitle[/] [{style}]$failure[/]",
+            glyph=glyph,
+            title=card.title or card.name,
+            subtitle=card.subtitle,
+            failure=card.failure_kind,
+        )
+
+    def _body(self) -> str:
+        card = self.item.tool
+        return self.item.text if card is None else card.body
+
+    async def refresh_card(self) -> None:
+        current = self._snapshot()
+        if current != self._shown:
+            self._shown = current
+            card = self.item.tool
+            self.set_class(bool(card and card.settled), "-settled")
+            self.set_class(bool(card and card.is_error), "-error")
+            self.query_one(".tool-header", Static).update(self._header())
+            self.query_one(".tool-body", Static).update(Content(self._body()))
+        await self._sync_dispatches()
+
+    async def _sync_dispatches(self) -> None:
+        card = self.item.tool
+        if card is None or not card.dispatches:
+            return
+        collapsible = self.query_one(Collapsible)
+        collapsible.display = True
+        collapsible.title = f"{len(card.dispatches)} governed calls"
+        for dispatch in card.dispatches:
+            state = (dispatch.settled, dispatch.is_error)
+            known = self._dispatch_rows.get(dispatch.call_id)
+            if known is None:
+                row = Static(self._dispatch_line(dispatch), classes="dispatch")
+                self._dispatch_rows[dispatch.call_id] = (row, state)
+                await self._dispatch_box.mount(row)
+            elif known[1] != state:
+                known[0].update(self._dispatch_line(dispatch))
+                self._dispatch_rows[dispatch.call_id] = (known[0], state)
+
+    @staticmethod
+    def _dispatch_line(dispatch: ToolCard) -> Content:
+        glyph, style = _status_markup(dispatch)
+        return Content.from_markup(
+            f"[{style}]$glyph[/] $name [$ph-muted]$args[/]",
+            glyph=glyph,
+            name=dispatch.name,
+            args=dispatch.arguments,
+        )
+
+
+class TranscriptView(VerticalScroll):
+    """Renders a list of rows, mounting new ones and updating changed ones.
+
+    Receives rows already filtered — `TuiState.visible_items` owns which toggles
+    hide what — so the view has no opinion about the transcript's meaning.
+    """
+
+    DEFAULT_CSS = """
+    TranscriptView { height: 1fr; background: $ph-background; padding: 1 0 0 0; }
+    """
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self._rows: dict[str, Any] = {}
+
+    async def sync(self, items: list[ChatItem]) -> None:
+        """Bring the view in line with `items`. Idempotent and cheap when nothing changed."""
+        for item in items:
+            widget = self._rows.get(item.key)
+            if widget is None:
+                widget = self._build(item)
+                self._rows[item.key] = widget
+                await self.mount(widget)
+            await self._update(widget, item)
+        if not self.is_anchored and self.max_scroll_y > 0:
+            # Stick to the bottom while rows arrive; release when the reader
+            # scrolls up. Textual's `anchor()` does that from one call — but
+            # engaged only once there is something to scroll: anchoring an
+            # underfull pane scrolls it to a *negative* offset and every row
+            # renders pushed to the bottom.
+            self.anchor()
+
+    def _build(self, item: ChatItem) -> Any:
+        if item.role == "tool":
+            return ToolCardWidget(item)
+        if item.role in MARKDOWN_ROLES:
+            return StreamingMessage(item)
+        return TranscriptRow(item)
+
+    async def _update(self, widget: Any, item: ChatItem) -> None:
+        if isinstance(widget, ToolCardWidget):
+            await widget.refresh_card()
+        elif isinstance(widget, StreamingMessage):
+            # A settled row is finalized on its first sync, which is what makes
+            # a replayed message look identical to one that streamed in.
+            if item.streaming:
+                await widget.write_tail(item.text)
+            else:
+                await widget.finalize(item.text)
+        elif isinstance(widget, TranscriptRow):
+            widget.refresh_text()
+
+    async def rebuild(self, items: list[ChatItem]) -> None:
+        """Drop every row and render from scratch — what a toggle needs."""
+        await self.remove_children()
+        self._rows.clear()
+        await self.sync(items)
+
+
+def _slug(key: str) -> str:
+    return "".join(char if char.isalnum() or char == "-" else "-" for char in key)

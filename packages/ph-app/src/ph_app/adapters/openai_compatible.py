@@ -69,7 +69,7 @@ class ProviderProfile(WireModel):
 class Config(WireModel):
     """Row config: the routes to register."""
 
-    profiles: list[ProviderProfile] = field(default_factory=list)  # type: ignore[assignment]
+    profiles: list[ProviderProfile] = field(default_factory=list)
 
 
 def _is_overflow(body: str) -> bool:

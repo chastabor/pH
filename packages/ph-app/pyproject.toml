@@ -14,6 +14,7 @@ dependencies = [
     "typer>=0.12",
     "rich>=13.0",
     "httpx>=0.27",
+    "textual>=1.0",
 ]
 
 [project.entry-points."ph.plugins"]
@@ -29,5 +30,6 @@ ph-core = { workspace = true }
 [tool.hatch.build.targets.wheel]
 packages = ["src/ph_app"]
 
-[tool.hatch.build.targets.wheel.force-include]
-"src/ph_app/profiles" = "ph_app/profiles"
+# No force-include: `packages` already ships every file under `src/ph_app`,
+# data files included, and naming the profiles again made the wheel build fail
+# outright ("a second file is being added at the same path").

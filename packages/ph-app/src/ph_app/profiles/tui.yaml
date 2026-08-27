@@ -1,0 +1,13 @@
+# ph-tui: the interactive posture.
+#
+# One row differs from `headless`, and the reason is attendance. `read-only` is
+# right for an unattended run: no one is there to answer an approval prompt, so
+# nothing should be writable without one. In the TUI a person is present — the
+# status bar names the posture, one key changes it, and every write outside the
+# workspace still asks. So the workspace is writable and the boundary stands.
+#
+# Addressed by id, so this replaces the sandbox row's whole config. A deployment
+# that disagrees overrides the same id in `$PH_HOME/profiles/tui.yaml`.
+- id: sandbox
+  config:
+    defaultMode: workspace-write

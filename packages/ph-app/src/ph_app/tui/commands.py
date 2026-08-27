@@ -1,0 +1,97 @@
+"""The TUI's verbs: one table, three routes.
+
+Every front-end action a person can name is a `TuiVerb`, and one verb is
+reachable three ways — as a slash command registered into `ctx.commands` (so the
+palette lists it, the prompt completes it, and `command/run` records it), as a
+Textual action on the app, and, when it has a `key`, as a binding remapped from
+`tui.json`. Adding a verb is adding a row here plus an `action_<name>` method;
+nothing re-dispatches on the name string.
+
+The commands are registered on the *root* context, so they unwind with it (I2).
+
+@module ph_app.tui.commands
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Any
+
+from textual.binding import Binding, BindingType
+
+from ph.cordis import Context
+from ph.seams.commands import CommandDefinition
+
+from .config import TuiKeybindings
+
+__all__ = ["TUI_VERBS", "TuiVerb", "app_bindings", "register_tui_commands"]
+
+
+@dataclass(frozen=True, slots=True)
+class TuiVerb:
+    """One front-end action."""
+
+    name: str
+    """The slash command: `/<name>`."""
+    summary: str
+    action: str
+    """The Textual action: `PHTuiApp.action_<action>`."""
+    key: str | None = None
+    """The `TuiKeybindings` field that binds it, if any. Doubles as the binding
+    id, which is what `App.set_keymap` remaps."""
+
+
+TUI_VERBS: tuple[TuiVerb, ...] = (
+    TuiVerb("commands", "Browse every command.", "open_commands", "command_palette"),
+    TuiVerb("model", "Choose the provider and model.", "open_models", "model_picker"),
+    TuiVerb("theme", "Choose a colour theme.", "open_themes", "theme_picker"),
+    TuiVerb("sessions", "Reopen a stored session.", "open_sessions", "session_picker"),
+    TuiVerb(
+        "permissions", "Change what pH may do without asking.", "open_presets", "permission_picker"
+    ),
+    TuiVerb("login", "Provide a provider credential for this process.", "open_login"),
+    TuiVerb(
+        "thinking", "Show or hide the model's reasoning.", "toggle_thinking", "toggle_thinking"
+    ),
+    TuiVerb("tools", "Show or hide tool results.", "toggle_tool_results", "toggle_tool_results"),
+    TuiVerb("sidebar", "Show or hide the sidebar.", "toggle_sidebar", "toggle_sidebar"),
+    TuiVerb("quit", "Leave pH.", "quit", "quit"),
+)
+
+
+def app_bindings(keys: TuiKeybindings) -> list[BindingType]:
+    """The app-level bindings, one per keyed verb.
+
+    `priority=True` so they are checked before the focused widget: the prompt is
+    a `TextArea`, which binds `ctrl+k`, `ctrl+y` and others for editing, and a
+    non-priority binding would lose to it — or, worse, fire *as well as* it.
+    """
+    bindings: list[BindingType] = [
+        Binding(getattr(keys, verb.key), verb.action, verb.summary, id=verb.key, priority=True)
+        for verb in TUI_VERBS
+        if verb.key is not None
+    ]
+    return bindings
+
+
+def register_tui_commands(ctx: Context, app: Any) -> list[Callable[[], Any]]:
+    """Register one slash command per verb. Returns their disposers.
+
+    Each body runs the app action. A command body is dispatched on the message
+    pump, so an action that opens a screen does so with a callback and returns
+    — the same constraint every key handler already lives under.
+    """
+    return [
+        ctx.commands.register(
+            CommandDefinition(name=verb.name, summary=verb.summary, run=_body(app, verb))
+        )
+        for verb in TUI_VERBS
+    ]
+
+
+def _body(app: Any, verb: TuiVerb) -> Callable[..., Any]:
+    async def run(_argument: str, _context: Any) -> None:
+        await app.run_action(verb.action)
+
+    return run

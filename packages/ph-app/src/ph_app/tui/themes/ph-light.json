@@ -1,0 +1,20 @@
+{
+  "dark": false,
+  "background": "#fbfbfd",
+  "foreground": "#20242c",
+  "surface": "#f2f3f7",
+  "panel": "#e8eaf0",
+  "muted": "#5f6675",
+  "border": "#d3d7e0",
+  "accent": "#2563c9",
+  "success": "#2f8a4e",
+  "error": "#c0392f",
+  "warning": "#9a6b10",
+  "user_text": "#1d4ea8",
+  "assistant_text": "#20242c",
+  "thinking_text": "#5f6675",
+  "tool_success": "#2f8a4e",
+  "tool_error": "#c0392f",
+  "highlight_background": "#cfe0ff",
+  "highlight_text": "#12141a"
+}
