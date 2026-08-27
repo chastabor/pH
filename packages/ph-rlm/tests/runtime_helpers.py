@@ -13,9 +13,19 @@ from ph.tools.registry import RUN_CODE
 
 
 async def run_cell(
-    ctx: Any, program: str, *, agent: Any, session: Any = None, call_id: str = "call-1"
+    ctx: Any,
+    program: str,
+    *,
+    agent: Any,
+    session: Any = None,
+    call_id: str = "call-1",
+    name: str = RUN_CODE,
 ) -> Any:
-    """Execute one cell through the real transport and pipeline."""
+    """Execute one cell through the real transport and pipeline.
+
+    `name` is for the profile that presents the transport as `ipython` —
+    the reserved name stops resolving once the rename is mounted.
+    """
     return await run_tool(
-        ctx, RUN_CODE, {"program": program}, agent=agent, session=session, call_id=call_id
+        ctx, name, {"program": program}, agent=agent, session=session, call_id=call_id
     )

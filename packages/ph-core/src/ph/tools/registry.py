@@ -23,7 +23,7 @@ that must not be reorderable stays a guard rather than a listener.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Awaitable, Callable, Iterator, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from typing import Any, Literal
@@ -31,6 +31,7 @@ from typing import Any, Literal
 from ..cancel import Cancelled, is_cancelled
 from ..cordis import Context, Disposer, events, plugin
 from ..llm.types import ToolSchema, text_of
+from ..seams.code_runtime import CodeBindingNamespace, validate_binding_name
 from ..session.json import freeze_json_value
 from ..wire import WireModel
 from .definition import (
@@ -49,6 +50,7 @@ from .definition import (
     ToolFailure,
     ToolOutput,
     ToolRunContext,
+    TransportPresentation,
     aborted_result,
     denied_result,
     error_result,
@@ -57,6 +59,7 @@ from .errors import HarnessError, ToolNotFoundError, error_info, error_message
 
 __all__ = [
     "RUN_CODE",
+    "CodeNamespaceFactory",
     "PreparedCall",
     "ToolGuard",
     "ToolRestriction",
@@ -76,6 +79,11 @@ reach something else (P1-04). Only `register_transport` may claim it."""
 PresentationMode = Literal["native", "code", "both"]
 
 ToolGuard = Callable[[ToolExecution], str | None]
+CodeNamespaceFactory = Callable[[Any], "CodeBindingNamespace | Awaitable[CodeBindingNamespace]"]
+"""Builds one binding namespace for one question — a live run, or the SDK block.
+
+The argument is a `CodeBindingsRequest` (`ph.tools.code_mode`), typed `Any` here
+because the registry must not import the module that consumes it."""
 """A monotonic guard: a reason denies, `None` abstains.
 
 There is no allow result *by construction*, which is what makes listener order
@@ -144,9 +152,18 @@ class _Layer:
 
     One cell, not a list: two answers to "which form does the model see" is a
     contradiction rather than something to merge."""
+    transport: TransportPresentation | None = None
+    """How this scope names and describes the transport. One cell for the same
+    reason `mode` is: the model is offered exactly one callable."""
+    code_namespaces: dict[str, CodeNamespaceFactory] = field(default_factory=dict)
+    """Binding namespaces this scope contributes to Code Mode runs (P3-10)."""
 
     def empty(self) -> bool:
-        return not (self.tools or self.restrictions or self.guards) and self.mode is None
+        return (
+            not (self.tools or self.restrictions or self.guards or self.code_namespaces)
+            and self.mode is None
+            and self.transport is None
+        )
 
     def admits(self, name: str) -> bool:
         return all(restriction.admits(name) for restriction in self.restrictions)
@@ -161,6 +178,17 @@ class _View:
     schemas: tuple[ToolSchema, ...]
     """The model-facing schemas, or empty under Code Mode — where the model is
     offered one callable and reaches the rest through the SDK (P1-04)."""
+    transport_name: str
+    """What this scope's model calls the transport.
+
+    Every check that used to compare against `RUN_CODE` compares against this
+    instead — the C6 refusal, the route-back text, the `tools` namespace that
+    must not bind the transport to itself, the code-only rule in the prompt.
+    Reading it from the view keeps those four in agreement by construction."""
+    code_namespaces: dict[str, CodeNamespaceFactory]
+    """The contributed binding namespaces this scope's programs may reach,
+    shadowed by name like tools. Resolved with the view so the run and the SDK
+    block read one answer."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -242,6 +270,14 @@ class ToolRuntime:
             raise ValueError(
                 f'"{RUN_CODE}" is the reserved Code Mode transport and cannot be registered'
             )
+        # A chain walk over the layer cells, not `view()`: registration
+        # invalidates the view cache one line later, so building one here made
+        # every mount O(N^2) in throwaway schema construction.
+        if definition.name == self._presented_name(scope or self.ctx):
+            raise ValueError(
+                f'"{definition.name}" is how this profile presents the Code Mode transport '
+                "and cannot be registered"
+            )
         return self._register(definition, scope)
 
     def register_transport(
@@ -307,7 +343,81 @@ class ToolRuntime:
             scope or self.ctx, lambda layer: setattr(layer, "mode", mode), clear, "tools.present_as"
         )
 
+    def present_transport(
+        self, presentation: TransportPresentation, *, scope: Context | None = None
+    ) -> Disposer:
+        """Name and describe the transport for one scope (P3-09).
+
+        Refused when the name is already a visible tool: the whole point of the
+        reservation is that a model told to call this name reaches the transport,
+        and a silent shadow either way would defeat it. The mirror check lives in
+        `register`, so the two orders fail the same way.
+        """
+        target = scope or self.ctx
+        occupant = self.view(target).visible.get(presentation.name)
+        if occupant is not None:
+            raise ValueError(
+                f'cannot present the Code Mode transport as "{presentation.name}": a tool of '
+                "that name is already visible here, and the transport name must be "
+                "unshadowable (C6)"
+            )
+
+        def add(layer: _Layer) -> None:
+            if layer.transport is not None:
+                # A real claim, unlike a silent overwrite: with two presentations
+                # on one cell, the first disposal would clear what the second
+                # still wants, and the survivor would depend on disposal order.
+                raise ValueError(
+                    "this scope already presents the Code Mode transport as "
+                    f'"{layer.transport.name}"'
+                )
+            layer.transport = presentation
+
+        def clear(layer: _Layer) -> None:
+            if layer.transport is presentation:
+                layer.transport = None
+
+        return self._claim(target, add, clear, "tools.present_transport")
+
+    def register_code_namespace(
+        self, name: str, factory: CodeNamespaceFactory, *, scope: Context | None = None
+    ) -> Disposer:
+        """Claim one Code Mode binding namespace for this scope (P3-10).
+
+        The factory answers one question, asked twice with the same request: by
+        the run (with a live bridge) and by the SDK prompt section (with none) —
+        so the block cannot describe a namespace a program could not reach. A
+        keyed claim rather than a listener, so two rows wanting one name fail
+        *here*, at mount, instead of on every cell of a booted deployment; a
+        scoped claim shadows a global one by name, like a tool's.
+        """
+        validate_binding_name(name)
+        if name == "tools":
+            raise ValueError('"tools" is contributed by Code Mode itself and cannot be registered')
+
+        def add(layer: _Layer) -> None:
+            if name in layer.code_namespaces:
+                raise ValueError(
+                    f'code binding namespace "{name}" is already registered in this scope'
+                )
+            layer.code_namespaces[name] = factory
+
+        return self._claim(
+            scope or self.ctx,
+            add,
+            lambda layer: layer.code_namespaces.pop(name, None),
+            f"tools.code_namespace({name})",
+        )
+
     # ------------------------------------------------------------ visibility --
+
+    def _presented_name(self, target: Context) -> str:
+        """The transport's presented name, from the layer cells alone."""
+        presentation = next(
+            (layer.transport for _key, layer in self._chain(target) if layer.transport is not None),
+            None,
+        )
+        return presentation.name if presentation is not None else RUN_CODE
 
     def _chain(self, target: Context) -> Iterator[tuple[Context | None, _Layer]]:
         for key in target.isolation_chain():
@@ -347,12 +457,45 @@ class ToolRuntime:
                     continue
                 visible[name] = definition
         resolved_mode = mode if mode is not None else self.default_mode
+        presentation = next(
+            (layer.transport for _key, layer in layers if layer.transport is not None), None
+        )
+        transport_name = RUN_CODE
+        transport = visible.get(RUN_CODE)
+        if presentation is not None and transport is not None:
+            if presentation.name != RUN_CODE and presentation.name in visible:
+                # The claim-time checks in `register` and `present_transport` are
+                # scope-local snapshots; a scoped presentation plus a later
+                # parent-scope registration slips past both. This is the one
+                # place that resolves every view, so the contradiction fails
+                # loudly here instead of silently clobbering either side.
+                raise ValueError(
+                    f'the Code Mode transport is presented as "{presentation.name}", but a '
+                    "tool of that name is also visible in this scope; the transport name "
+                    "must be unshadowable (C6)"
+                )
+            # Renamed in place, so `visible` never holds the transport twice and
+            # nothing downstream has to know which name it was registered under.
+            del visible[RUN_CODE]
+            visible[presentation.name] = presentation.rename(transport)
+            transport_name = presentation.name
+        code_namespaces: dict[str, CodeNamespaceFactory] = {}
+        for _key, layer in layers:
+            for name, factory in layer.code_namespaces.items():
+                if name not in code_namespaces:
+                    code_namespaces[name] = factory
         schemas = (
             ()
             if resolved_mode == "code"
             else tuple(visible[name].schema() for name in sorted(visible))
         )
-        return _View(visible=visible, mode=resolved_mode, schemas=schemas)
+        return _View(
+            visible=visible,
+            mode=resolved_mode,
+            schemas=schemas,
+            transport_name=transport_name,
+            code_namespaces=code_namespaces,
+        )
 
     def mode_for(self, scope: Context | None = None) -> PresentationMode:
         return self.view(scope).mode
@@ -423,12 +566,20 @@ class ToolRuntime:
         view = self.view(call.scope)
         definition = view.visible.get(call.name)
         if definition is None:
-            if call.name == RUN_CODE:
+            if call.name == RUN_CODE and view.transport_name != RUN_CODE:
+                # "Not enabled" would be false — it is enabled, under the name
+                # this profile presents; say which, so the model can correct.
+                raise ToolNotFoundError(
+                    call.name,
+                    f'the Code Mode transport is presented as "{view.transport_name}" here',
+                )
+            if call.name in {RUN_CODE, view.transport_name}:
                 raise ToolNotFoundError(call.name, "Code Mode is not enabled for this agent")
             raise ToolNotFoundError(call.name)
-        if view.mode == "code" and call.parent is None and call.name != RUN_CODE:
+        if view.mode == "code" and call.parent is None and call.name != view.transport_name:
             raise ToolNotFoundError(
-                call.name, f"call it from inside {RUN_CODE} as `await tools.{call.name}(...)`"
+                call.name,
+                f"call it from inside {view.transport_name} as `await tools.{call.name}(...)`",
             )
         execution = self._execution(call, freeze_json_value(call.arguments, frozen_input=True))
         return ToolRunContext(execution=execution, definition=definition)

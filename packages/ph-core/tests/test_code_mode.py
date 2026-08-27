@@ -18,9 +18,12 @@ from typing import Any
 import pytest
 
 from ph.cordis import Context
-from ph.testing import FAKE_OPTIONS, raising, simple_tool
+from ph.seams.code_runtime import CodeBinding, CodeBindingNamespace
+from ph.system_prompt.assembly import AssembleContext, render_prompt
+from ph.testing import FAKE_OPTIONS, raising, run_tool, simple_tool
 from ph.tools import Deny, ToolExecutionInput, text_content
 from ph.tools.code_mode import ToolCallError
+from ph.tools.definition import ToolOutput, TransportPresentation
 from ph.tools.registry import RUN_CODE
 
 pytestmark = pytest.mark.anyio
@@ -299,3 +302,223 @@ async def test_a_pre_execute_denial_of_a_sub_call_also_fails_the_run(mount: Any)
     result, _session = await _run(ctx, "pre-denied", program)
     assert result.is_error
     assert "not now" in result.error.message
+
+
+# ------------------------------------------------- transport presentation --
+#
+# P3-09. The transport name is reserved so nothing can occupy it and misdirect a
+# model told to call it (C6) — but a profile still has to be able to present it
+# under its own name. These are the tests that renaming it moves *every* place
+# the name is load-bearing, not just the schema.
+
+
+def _as_ipython() -> TransportPresentation:
+    return TransportPresentation(
+        name="ipython",
+        description="Python cells.",
+        output=ToolOutput(schema={"type": "object"}, render=lambda _a, v: text_content(repr(v))),
+    )
+
+
+async def test_a_profile_can_present_the_transport_under_its_own_name(mount: Any) -> None:
+    ctx = await _code_ctx(mount)
+    ctx.tools.present_transport(_as_ipython())
+
+    view = ctx.tools.view()
+    assert view.transport_name == "ipython"
+    # Renamed, not duplicated: two callables would be exactly the ambiguity the
+    # reservation exists to prevent.
+    assert ctx.tools.get("ipython") is not None
+    assert ctx.tools.get(RUN_CODE) is None
+    assert ctx.tools.get("ipython").description == "Python cells."
+
+
+async def test_the_presented_name_is_what_the_model_may_call(mount: Any) -> None:
+    """The C6 refusal follows the rename, or the model is told to call a name
+    that no longer resolves."""
+    ctx = await _code_ctx(mount)
+    ctx.tools.present_transport(_as_ipython())
+    ctx.tools.register(_recorder("touch", []))
+    ctx.code_runtime_stub.register_program("p", lambda _b: "ok")
+    session = ctx.sessions.create("s-alias")
+    agent = ctx.agents.create(session, FAKE_OPTIONS)
+
+    settled = await run_tool(ctx, "ipython", {"program": "p"}, agent=agent, session=session)
+    assert settled.is_error is False
+
+    # And the old name is gone from the model's surface — with the denial naming
+    # the presented transport, so the model can correct itself (C6).
+    refused = await run_tool(
+        ctx, RUN_CODE, {"program": "p"}, agent=agent, session=session, call_id="c2"
+    )
+    assert refused.is_error is True
+    assert 'presented as "ipython"' in repr(refused.content)
+
+
+async def test_the_route_back_names_the_presented_transport(mount: Any) -> None:
+    """A native call is refused with the SDK path; under a rename that path has
+    to be the name the model was actually offered."""
+    ctx = await _code_ctx(mount)
+    ctx.tools.present_transport(_as_ipython())
+    ctx.tools.register(_recorder("touch", []))
+    session = ctx.sessions.create("s-route")
+    agent = ctx.agents.create(session, FAKE_OPTIONS)
+    ctx.tools.present_as("code", scope=agent.ctx)
+
+    result = await run_tool(ctx, "touch", {}, agent=agent, session=session)
+    assert result.is_error is True
+    assert "from inside ipython" in repr(result.content)
+
+
+async def test_the_presented_name_is_not_bound_into_its_own_namespace(mount: Any) -> None:
+    """`tools.ipython` inside a cell would hand the program a way to re-enter
+    the transport, which the `RUN_CODE` skip existed to prevent."""
+    ctx = await _code_ctx(mount)
+    ctx.tools.present_transport(_as_ipython())
+    ctx.tools.register(_recorder("touch", []))
+    session = ctx.sessions.create("s-bindings")
+    agent = ctx.agents.create(session, FAKE_OPTIONS)
+
+    assembly = await ctx.system_prompt.assemble(AssembleContext(scope=agent.ctx, agent=agent))
+    text = render_prompt(assembly)
+    assert "tools.touch" in text
+    assert "tools.ipython" not in text
+    # The code-only rule names the presented transport, and the reserved name —
+    # which this profile's model has never seen — appears nowhere at all.
+    assert "ipython" in text
+    assert RUN_CODE not in text
+
+
+async def test_the_presented_name_cannot_be_occupied_either(mount: Any) -> None:
+    """Both orders fail: the name is unshadowable however the race runs."""
+    ctx = await _code_ctx(mount)
+    ctx.tools.present_transport(_as_ipython())
+    with pytest.raises(ValueError, match="presents the Code Mode transport"):
+        ctx.tools.register(_recorder("ipython", []))
+
+    other = await _code_ctx(mount)
+    other.tools.register(_recorder("ipython", []))
+    with pytest.raises(ValueError, match="unshadowable"):
+        other.tools.present_transport(_as_ipython())
+
+
+async def test_a_scoped_presentation_cannot_be_occupied_from_a_parent_scope(mount: Any) -> None:
+    """The claim-time checks are scope-local snapshots; the view build is the
+    backstop that turns the ordering hole into a loud failure instead of a
+    silent clobber of whichever side resolved second."""
+    ctx = await _code_ctx(mount)
+    session = ctx.sessions.create("s-backstop")
+    agent = ctx.agents.create(session, FAKE_OPTIONS)
+    ctx.tools.present_transport(_as_ipython(), scope=agent.ctx)
+    # Registered globally, where no presentation is in sight — the claim-time
+    # check passes, and only the agent's view knows there is a contradiction.
+    ctx.tools.register(_recorder("ipython", []))
+    with pytest.raises(ValueError, match="unshadowable"):
+        ctx.tools.view(agent.ctx)
+
+
+async def test_disposing_the_presentation_restores_the_reserved_name(mount: Any) -> None:
+    ctx = await _code_ctx(mount)
+    dispose = ctx.tools.present_transport(_as_ipython())
+    assert ctx.tools.view().transport_name == "ipython"
+    dispose()
+    assert ctx.tools.view().transport_name == RUN_CODE
+    assert ctx.tools.get(RUN_CODE) is not None
+
+
+# ------------------------------------------------------- binding namespaces --
+#
+# P3-10's extension point. `tools` is built by the row itself and is not
+# optional; every other namespace is a `register_code_namespace` claim, and the
+# SDK prompt asks the same factories the run does.
+
+
+def _extra_namespace(request: Any) -> CodeBindingNamespace:
+    """A contributed namespace in the shape P3-10 actually needs.
+
+    The binding the program writes (`rlm.run`) is not the tool it dispatches to
+    (`spawn_child`), because a namespace cannot claim a global tool name — and it
+    goes through the *bridge*, so the budgets and the dispatch records are the
+    bridge's, exactly as for the `tools` namespace.
+    """
+    governed = CodeBinding(
+        name="spawn_child",
+        description="Start a child.",
+        parameters={"type": "object", "properties": {"what": {"type": "string"}}},
+        counts_as_spawn=True,
+    )
+
+    async def dispatch(**arguments: Any) -> Any:
+        return await request.bridge.call(governed, arguments)
+
+    binding = CodeBinding(
+        name="run",
+        description=governed.description,
+        parameters=governed.parameters,
+        dispatch=None if request.describing else dispatch,
+        counts_as_spawn=True,
+    )
+    return CodeBindingNamespace(name="rlm", description="children", bindings=(binding,))
+
+
+async def test_a_row_can_contribute_a_binding_namespace(mount: Any) -> None:
+    ctx = await _code_ctx(mount)
+    calls: list[str] = []
+    ctx.tools.register(_recorder("spawn_child", calls))
+    ctx.tools.register_code_namespace("rlm", _extra_namespace)
+
+    async def program(bindings: Any, _emit: Any) -> Any:
+        return await bindings["rlm"].run(n="research")
+
+    result, session = await _run(ctx, "spawn", program)
+    assert result.is_error is False
+    assert result.value["value"] == "spawn_child ok"
+    assert calls == ["spawn_child:research"]
+    # C2 holds for a contributed namespace too: the durable record names the
+    # governed tool, not the binding the program wrote.
+    starts = [e for e in session.events if e.type == "tool/code-dispatch-start"]
+    assert [e.data["name"] for e in starts] == ["spawn_child"]
+
+
+async def test_the_sdk_block_describes_the_contributed_namespace(mount: Any) -> None:
+    """The prompt asks the same waterfall the run does, so the block cannot list
+    a namespace the program could not reach — or omit one it can."""
+    ctx = await _code_ctx(mount)
+    ctx.tools.register_code_namespace("rlm", _extra_namespace)
+    ctx.tools.register(_recorder("touch", []))
+    session = ctx.sessions.create("s-sdk")
+    agent = ctx.agents.create(session, FAKE_OPTIONS)
+
+    assembly = await ctx.system_prompt.assemble(AssembleContext(scope=agent.ctx, agent=agent))
+    text = render_prompt(assembly)
+    assert "tools.touch" in text
+    assert "rlm.run" in text
+
+
+async def test_two_rows_cannot_claim_one_namespace_name(mount: Any) -> None:
+    """A name conflict is a mount-time configuration fact, and it fails there —
+    not per cell in a deployment that booted green."""
+    ctx = await _code_ctx(mount)
+    ctx.tools.register_code_namespace("rlm", _extra_namespace)
+    with pytest.raises(ValueError, match="already registered"):
+        ctx.tools.register_code_namespace("rlm", _extra_namespace)
+    # And the one namespace the row itself contributes is not claimable.
+    with pytest.raises(ValueError, match="contributed by Code Mode itself"):
+        ctx.tools.register_code_namespace("tools", _extra_namespace)
+
+
+async def test_a_contributed_binding_counts_against_the_spawn_budget(mount: Any) -> None:
+    """C4 is enforced by the bridge, so a contributed namespace is held to the
+    same budget as the one the row built itself."""
+    ctx = await _code_ctx(mount, maxSubagentSpawnsPerRun=1)
+    ctx.tools.register(_recorder("spawn_child", []))
+    ctx.tools.register_code_namespace("rlm", _extra_namespace)
+
+    async def program(bindings: Any, _emit: Any) -> Any:
+        await bindings["rlm"].run(n="one")
+        await bindings["rlm"].run(n="two")
+        return "unreached"
+
+    result, _session = await _run(ctx, "greedy", program)
+    assert result.is_error is True
+    assert "max_subagent_spawns_per_run=1" in repr(result.content)

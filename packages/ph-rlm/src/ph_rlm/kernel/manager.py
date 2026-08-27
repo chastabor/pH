@@ -364,7 +364,12 @@ class Kernel:
             if restarted:
                 logs = f"{RESET_NOTICE} the runtime restarted; the namespace is empty.\n{logs}"
             return CodeRunResult(
-                logs=logs, value=active.value, error=active.error, truncated=active.truncated
+                logs=logs,
+                value=active.value,
+                error=active.error,
+                truncated=active.truncated,
+                reset=restarted,
+                displays=tuple(active.displays),
             )
 
     async def _pump(

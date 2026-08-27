@@ -29,13 +29,15 @@ construction: the only guest→host channel is a `call` frame.
 | P3-06 | Orphan journal, `fsync`ed, swept at every start, start-token guarded | `ph_rlm/kernel/journal.py` |
 | P3-07 | Runtime venv resolution and staleness | `ph_rlm/kernel/venv.py` |
 | P3-08 | The guest package: binding proxies, skill wrapping, bootstrap | `ph_runtime/{proxies,skill,errors}.py` |
+| P3-09 | `rlm-presentation`: the transport presented as `ipython`, prime-agent's description verbatim, its result layout, `IpythonToolDetails` | `ph_rlm/presentation.py`, `ph/tools/definition.py`, `ph/tools/registry.py` |
 | P3-15 | `kernel/snapshot` and `kernel/restored`: per-variable, tagged, spilled, folded | `ph_rlm/snapshot.py` |
+| P3-10 (part) | The extension point only: `tools/code-bindings` as a waterfall, asked by both the run and the SDK section | `ph/tools/code_mode.py` |
 
-**Still to come:** P3-09…P3-14 and P3-16…P3-25 — the presentation alias, the
-binding namespaces, the subagent provider, messaging and the registry, the RLM
-prompt, the Continual Harness, the context loader, Python skills, the TUI code
-cell, the profile bundle, the two conformance gates, the fixture replay, and the
-trajectory view.
+**Still to come:** the rest of P3-10, then P3-11…P3-14 and P3-16…P3-25 — the
+`rlm`/`agent_message`/`agent_observe` namespaces, the subagent provider,
+messaging and the registry, the RLM prompt, the Continual Harness, the context
+loader, Python skills, the TUI code cell, the profile bundle, the two conformance
+gates, the fixture replay, and the trajectory view.
 
 ---
 
@@ -276,12 +278,141 @@ names present and others missing with no way to tell which.
   yet. The guest reports which die-with-parent mechanism it armed in `boot-ack`,
   and `_await_boot_ack` writes it at `INFO` alongside the applied limits, so a
   log says what was actually in force rather than what was requested.
-* **No `display` consumer.** The frame is defined, decoded and collected into
-  `_ActiveRun.displays`, and nothing renders it until P3-19's code cell.
+* **The `display` frame has no producer *or* consumer.** The frame is defined on
+  both sides, decoded, collected into `_ActiveRun.displays`, and now carried out
+  through `CodeRunResult` and onto the transport's tool value — but the guest has
+  no `display()` in the cell namespace, so nothing can send one, and nothing
+  renders one until P3-19's code cell. The plumbing was finished at P3-09 because
+  writing `IpythonToolDetails.attachments` is what surfaced that it went nowhere;
+  the producer belongs with the widget that would show it.
+
+  A related defect found the same way: `run_code` was dropping **`truncated`** as
+  well, so a capped cell's card claimed the output was complete. That one had a
+  real producer already, and now has a test driven through an actual capped
+  stream — the hand-built-dict test beside it is what missed it.
 * **The runtime is effectively asyncio-only.** `anyio.wait_readable` is
   backend-agnostic, but the guest uses `asyncio` directly (it must: it cannot
   depend on anyio), and D3 already fixes asyncio for the whole app because
   Textual requires it.
+
+---
+
+## P3-09, and the two core changes it needed
+
+### An alias would not have worked
+
+The plan called `ipython` "a presentation-level alias for `run_code`". Writing it
+revealed that an alias is the wrong shape, because five separate places compare
+against *a* transport name:
+
+* `register` refuses the name, so nothing can occupy it;
+* `create_execution` refuses a native call under `mode: code` unless the name is
+  the transport (C6);
+* the denial's route-back text tells the model which name to call instead;
+* the `tools` namespace skips the transport, so a program cannot re-enter it;
+* the code-only rule in the prompt names it.
+
+Two names means five places deciding which one is authoritative, and any
+disagreement is a model told to call something that does not resolve. So the
+transport is **renamed in place** instead: `ctx.tools.present_transport` claims a
+`TransportPresentation` on a layer exactly like `present_as` claims a mode,
+`_build_view` swaps the definition's name and description as it resolves, and
+`_View.transport_name` is the one answer all five now read. `run_code` stops
+being visible; it does not become a second door.
+
+`TransportPresentation` carries name, description, `output` and the two
+presentation hooks — and deliberately *not* `parameters` or `execute`. A profile
+that could replace the argument schema or the governed body would have replaced
+Code Mode rather than renamed it, and the type says so by omission.
+
+The name is unshadowable in both directions, which took two checks rather than
+one: presenting over an existing tool is refused, and registering a tool under
+the presented name is refused. Either check alone leaves the other order open.
+
+### The result text keeps prime-agent's order, not its stream split
+
+Prime Agent concatenates `stdout + "\n" + stderr + "\n" + result + "\n" +
+traceback`. pH frames each write as it happens, so the two streams arrive
+interleaved — and relocating stderr to the end would *misread* a cell that
+prints, warns, then prints again. What is ported is the section order, which is
+what the model parses; what is dropped is the split, which was an artifact of
+buffering two pipes. Absent sections are dropped rather than left blank, because
+three empty lines above a traceback is a puzzle rather than information.
+
+One thing worth being explicit about: **a cell that raises is not `is_error`.**
+A traceback is the model's to read and act on — that is the whole point of a
+scratchpad — so `is_error` stays reserved for a refused or aborted tool *call*.
+The details payload carries `status: "error"` so the card can still colour it.
+
+### `CodeRunResult` was dropping the display frames
+
+`_ActiveRun.displays` collected them and `CodeRunResult` had nowhere to put them,
+so every `display` the runtime decoded was discarded at the seam. They are on the
+result now, and deliberately not folded into `logs`: `logs` is for the model and
+a base64 PNG in the model's text costs a fortune and says nothing. The card shows
+a count.
+
+### What is deferred, and why
+
+**Streaming.** The plan lists `on_update` → `ToolExecutionUpdate`. There is no
+such seam yet and its only consumer is P3-19's `CodeCellWidget`. Adding the hook
+now would mean a contract with nothing to hold it honest, so it lands with the
+widget.
+
+**`present_as("code")` in the row.** The plan lists it under `rlm-presentation`.
+It is not there: the mode is the bundle's `tools.mode`, and `present_as` is a
+single-cell claim — two rows claiming it means the first disposal clears what the
+second still wants. The row's docstring says so, so the next reader does not add
+it back.
+
+---
+
+## P3-10's extension point, landed early
+
+`tools-code-mode` hard-coded `bindings=(tools_namespace,)`. There was no way for
+a row to contribute the `rlm`, `agent_message` or `agent_observe` namespaces, so
+this had to land before P3-10 could start.
+
+A row claims `ctx.tools.register_code_namespace(name, factory)` — keyed and
+scoped like a tool registration, resolved into the same memoized view. The
+property worth keeping from the first draft: **the run and the SDK prompt
+section ask the factories the same question**, one `CodeBindingsRequest {scope,
+bridge}`, the prompt with `bridge=None` — the same "describing, not bound"
+convention `CodeBinding.dispatch` already used — so the block cannot list a
+namespace the program could not reach, or omit one it can.
+
+This landed first as a `tools/code-bindings` *waterfall*, and the same-day
+cleanup pass replaced it: contribution-by-anonymous-listener meant a name
+conflict could only be detected per run, so a deployment with two rows claiming
+`rlm` booted green and then failed every cell with a `RuntimeError` the model
+had to read. As a keyed claim the conflict fails at mount, like every other
+name conflict in the codebase, and `tools` itself is unclaimable.
+
+Two consequences that P3-11 and P3-12 will rely on, found by writing the tests
+rather than by reading the plan:
+
+1. **A binding's program-facing name is not the tool it dispatches to.**
+   `rlm.run(...)` dispatches the tool `spawn_child`. A namespace cannot claim a
+   bare global name like `run`, and does not need to: the SDK renders the
+   namespaced form, `tool/code-dispatch-start` names the governed tool, and both
+   are right. The first version of the test got this wrong by giving the
+   contributed binding a plain closure — which passed, and proved nothing,
+   because it never touched the bridge and therefore never met a budget.
+2. **A contributed namespace goes through the same `DispatchBridge`**, so C2's
+   records and C4's budgets (`counts_as_spawn` included) apply with no extra
+   code. A namespace dispatching around the bridge would be bypassing the
+   containment argument, not taking a shortcut — which is why the budget test
+   exists at this level and not only for `tools`.
+
+### `PromptSection` text may now be async
+
+A prompt section that has to ask a seam a question could not, because `resolve()`
+was synchronous — while `assemble()` around it was already a coroutine. The
+alternative was for the SDK section to answer from a stale copy of the namespace
+list, which is precisely the disagreement the waterfall exists to prevent.
+`PromptText = str | Callable[[Context], str | Awaitable[str]]`, one `maybe_await`
+in `resolve`. P3-14's workspace section and its `context()` snapshot need the
+same widening.
 
 ---
 
@@ -404,3 +535,51 @@ a byte cap instead of encoding the whole value to find out it was too big.
   control, and fd 3 is the whole mechanism.
 * **Giving `CancelToken` an awaitable.** That is a `ph-core` change for one
   consumer; the polling is confined to one method and says so.
+
+---
+
+## The second cleanup pass (over P3-09 itself)
+
+Four review agents over the P3-09/P3-10 diff. What changed, beyond the
+waterfall-to-claim reshape above:
+
+* **`reset` became a field instead of a sniff.** `cell_details` recovered "the
+  kernel restarted" by `logs.startswith(RESET_NOTICE)` — parsing back a fact the
+  kernel had held as a boolean and thrown into prose. Same failure class as the
+  `truncated`/`displays` drop this diff had already fixed, plus one worse
+  property: a cell whose first output was the literal marker text forged the
+  flag. `CodeRunResult.reset` now carries it; the notice stays in `logs` for the
+  model; a test proves both the real flag and the forgery's failure.
+* **The transport's value is typed.** `run_code` returned a six-key dict read
+  back through `.get()` with defaults — which is exactly why the dropped keys
+  never failed a test. `CodeCellValue(WireModel)` is now constructed from the
+  `CodeRunResult` and is the transport's `ToolOutput.schema`, so `render()`
+  validates what it renders and a new result field is a visible type decision.
+* **`register` stopped building a view per registration.** Its presented-name
+  check called `view()`, whose cache the same registration invalidates one line
+  later — O(N²) throwaway schema construction across a mount. It walks the layer
+  cells instead.
+* **The occupancy rule got a backstop where it can actually be enforced.** The
+  claim-time checks in `register`/`present_transport` are scope-local snapshots:
+  an agent-scoped presentation plus a later parent-scope registration slipped
+  past both, and `_build_view` silently clobbered the tool. The view build —
+  the one place every view resolves — now fails loudly on the contradiction,
+  and the transport cell is a real claim (double-present raises; disposal is
+  identity-checked).
+* **The model is never told a name it has not seen.** The transport's own
+  argument error said `run_code` under a profile whose model knows only
+  `ipython` (`ToolCallError(run.name, ...)` now), and calling `run_code` under a
+  rename says *presented as "ipython"* instead of the false "not enabled".
+* **Dead weight dropped:** `CodeBindingsRequest` lost three fields nothing read
+  (two duplicated the bridge); `TransportPresentation.timeout_ms` (a knob
+  nothing turned); `_View.transport_name`'s misleading default; a stray
+  re-export. Tests: three rlm tests re-proving core-level mechanics deleted, the
+  hand-rolled `ToolExecutionInput` incantations replaced with `run_tool`
+  (which exists precisely to end them), manual section-joining replaced with
+  `render_prompt`, and the card views stopped materializing every line of a
+  program to show one.
+* **Skipped deliberately:** parallelizing prompt-section resolution (one async
+  provider exists; the loop's lost atomicity is instead documented on
+  `PromptText`), caching the described namespace tuple per registry generation
+  (µs-scale), and a meta-threading `simple_views` variant (worth extracting on
+  the next customer, not the first).

@@ -19,6 +19,13 @@
     maxSubagentSpawnsPerRun: 32
     maxParallelSubCalls: 10
 
+# The model-facing half of Code Mode: the transport is presented as `ipython`,
+# with prime-agent's description verbatim and its result layout. `run_code` stays
+# the reserved internal name — a profile renames the transport, it does not
+# replace it (P3-09).
+- id: rlm-presentation
+  name: rlm-presentation
+
 # --- the runtime ------------------------------------------------------------
 # pH's own CPython subprocess, fd 3 as the framed channel, one child per agent.
 # `persistence: namespace` is admissible only because the provider promises to

@@ -38,9 +38,10 @@ from functools import partial
 from typing import Any, Literal
 
 import anyio
+from pydantic import Field
 
 from ..cancel import CancelToken
-from ..cordis import Context, events, plugin
+from ..cordis import Context, events, maybe_await, plugin
 from ..seams.code_runtime import CodeBinding, CodeBindingNamespace, CodeRunRequest
 from ..session import Session
 from ..session.json import freeze_json_value, thaw_json
@@ -61,6 +62,7 @@ from .sdk import code_only_rule, render_python_sdk, render_typescript_sdk
 __all__ = [
     "MAX_DISPATCHES_PER_RUN",
     "MAX_SUBAGENT_SPAWNS_PER_RUN",
+    "CodeBindingsRequest",
     "CodeRunFailure",
     "DispatchBridge",
     "ToolCallError",
@@ -115,6 +117,26 @@ class CodeDispatchLog(WireModel):
     sub_call_id: str
     name: str
     is_error: bool
+
+
+@dataclass(frozen=True, slots=True)
+class CodeBindingsRequest:
+    """What a namespace factory is told about the run it is binding for.
+
+    `bridge is None` means the namespace is being *described* rather than
+    bound — the SDK prompt section asks the factories the same question the run
+    does, so the block cannot list a namespace the program could not reach, or
+    omit one it can. Two fields only: the bridge already carries the execution
+    and the session, and a second copy of either would be one more thing the two
+    construction sites could disagree about.
+    """
+
+    scope: Context
+    bridge: DispatchBridge | None = None
+
+    @property
+    def describing(self) -> bool:
+        return self.bridge is None
 
 
 @dataclass(slots=True)
@@ -259,7 +281,7 @@ async def apply(ctx: Context, config: Config) -> None:
         # `MappingProxyType`, which is a Mapping but not a dict instance.
         program = args.get("program") if isinstance(args, Mapping) else None
         if not isinstance(program, str) or not program.strip():
-            raise ToolCallError(RUN_CODE, "program must be a non-empty string")
+            raise ToolCallError(run.name, "program must be a non-empty string")
         runtime = ctx.code_runtime.require()
         bridge = DispatchBridge(
             tools=tools,
@@ -271,20 +293,24 @@ async def apply(ctx: Context, config: Config) -> None:
             max_dispatches=config.max_dispatches_per_run,
             max_spawns=config.max_subagent_spawns_per_run,
         )
+        namespaces = await _namespaces(tools, CodeBindingsRequest(scope=run.scope, bridge=bridge))
         outcome = await runtime.run(
             CodeRunRequest(
                 program=program,
-                bindings=(_tools_namespace(tools, run.scope, bridge),),
+                bindings=namespaces,
                 namespace=getattr(run.agent, "id", None),
                 cancel_scope=bridge.token,
             )
         )
-        return {
-            "logs": outcome.logs,
-            "value": outcome.value,
-            "error": outcome.error,
-            "dispatches": bridge.dispatch_count,
-        }
+        return CodeCellValue(
+            logs=outcome.logs,
+            value=outcome.value,
+            error=outcome.error,
+            dispatches=bridge.dispatch_count,
+            truncated=outcome.truncated,
+            reset=outcome.reset,
+            displays=list(outcome.displays),
+        ).to_wire()
 
     tools.register_transport(
         define_tool(
@@ -296,14 +322,14 @@ async def apply(ctx: Context, config: Config) -> None:
                 "required": ["program"],
             },
             output=ToolOutput(
-                schema={"type": "object"},
+                schema=CodeCellValue,
                 render=lambda _args, value: text_content(_render_run(value)),
             ),
             execute=run_code,
         )
     )
 
-    def sdk_section(scope: Context) -> str:
+    async def sdk_section(scope: Context) -> str:
         runtime = ctx.code_runtime.provider
         if runtime is None:
             return ""
@@ -315,11 +341,56 @@ async def apply(ctx: Context, config: Config) -> None:
                 "its own surface, and a listing in the wrong syntax would make the model "
                 "write code that cannot run"
             )
-        return f"{code_only_rule(RUN_CODE)}\n\n{renderer([_tools_namespace(tools, scope, None)])}"
+        transport = tools.view(scope).transport_name
+        described = await _namespaces(tools, CodeBindingsRequest(scope=scope))
+        return f"{code_only_rule(transport)}\n\n{renderer(described)}"
 
     ctx.system_prompt.section(
         PromptSection(name="tools:sdk", order=ORDER_TOOL_GUIDANCE, text=sdk_section)
     )
+
+
+class CodeCellValue(WireModel):
+    """The transport's return value, typed so a field cannot be silently dropped.
+
+    Six untyped dict keys read back through `.get()` with defaults is how
+    `truncated` and `displays` went missing without a failing test: an omitted
+    key is indistinguishable from its default. Constructed *from* the
+    `CodeRunResult`, so a field added to the result but not carried here is a
+    visible type-level decision — and the transport's `ToolOutput.schema` is
+    this model, so `render()` actually validates the value it renders.
+    """
+
+    logs: str = ""
+    value: Any = None
+    error: str | None = None
+    dispatches: int = 0
+    truncated: bool = False
+    reset: bool = False
+    displays: list[dict[str, Any]] = Field(default_factory=list)
+
+
+async def _namespaces(
+    tools: ToolRuntime, request: CodeBindingsRequest
+) -> tuple[CodeBindingNamespace, ...]:
+    """Every namespace this program may reach, `tools` first.
+
+    `tools` is built here rather than registered because it is not optional:
+    Code Mode without the registry as a namespace is a transport to nowhere. The
+    rest come from `register_code_namespace` claims, read off the same view the
+    tool surface is — name conflicts already failed at registration.
+    """
+    view = tools.view(request.scope)
+    namespaces = [_tools_namespace(tools, request.scope, request.bridge)]
+    for name in sorted(view.code_namespaces):
+        namespace = await maybe_await(view.code_namespaces[name](request))
+        if namespace.name != name:
+            raise RuntimeError(
+                f'the factory registered for code binding namespace "{name}" returned one '
+                f'named "{namespace.name}"; the SDK block and the dispatch table would disagree'
+            )
+        namespaces.append(namespace)
+    return tuple(namespaces)
 
 
 def _tools_namespace(
@@ -333,7 +404,10 @@ def _tools_namespace(
     view = tools.view(scope)
     bindings: list[CodeBinding] = []
     for name in sorted(view.visible):
-        if name == RUN_CODE:
+        # `transport_name`, not `RUN_CODE`: under a profile that renames it the
+        # transport is visible under the new name, and binding it into `tools`
+        # would hand the program a way to re-enter itself.
+        if name == view.transport_name:
             continue
         definition = view.visible[name]
         binding = CodeBinding(

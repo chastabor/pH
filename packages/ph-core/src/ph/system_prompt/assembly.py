@@ -18,11 +18,11 @@ find that out from an invoice.
 from __future__ import annotations
 
 import re
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, TypeAlias
 
-from ..cordis import Context, Disposer, events, plugin
+from ..cordis import Context, Disposer, events, maybe_await, plugin
 from ..llm.types import ContextSnapshotSection, ToolSchema
 
 __all__ = [
@@ -30,6 +30,7 @@ __all__ = [
     "PromptAssembly",
     "PromptContext",
     "PromptSection",
+    "PromptText",
     "SystemPromptService",
     "apply",
     "join_context_sections",
@@ -39,6 +40,21 @@ __all__ = [
 
 
 _VARIABLE = re.compile(r"\{\{\s*([A-Za-z_][A-Za-z0-9_.-]*)\s*\}\}")
+
+PromptText: TypeAlias = "str | Callable[[Context], str | Awaitable[str]]"
+"""A section's body: literal text, or a provider given the target scope.
+
+The provider may be async. `assemble` is already a coroutine, and a section that
+has to ask a seam a question — Code Mode listing the namespaces a program can
+actually reach, a workspace section naming the tier it actually got — would
+otherwise have to answer it somewhere that cannot await, which in practice means
+answering it from a stale copy.
+
+One consequence to know: `assemble` now yields to the event loop between
+sections, so the render is no longer atomic — a registration landing mid-await
+can produce a prompt mixing two registry generations. Providers are pure
+projections of current state, so this is benign today; a provider that is not
+pure is wrong for a deeper reason than atomicity."""
 
 ORDER_HARNESS_IDENTITY = -100
 ORDER_DEPLOYMENT_PERSONA = 0
@@ -52,7 +68,7 @@ class PromptSection:
     """A static contribution to the cached system-prompt prefix."""
 
     name: str
-    text: str | Callable[[Context], str]
+    text: PromptText
     order: int = ORDER_DEPLOYMENT_PERSONA
     complete: bool = False
     """When true this section is the *sole* prompt — everything else is dropped."""
@@ -63,7 +79,7 @@ class PromptContext:
     """A dynamic contribution materialized after retained history."""
 
     name: str
-    text: str | Callable[[Context], str]
+    text: PromptText
     order: int = 0
 
 
@@ -171,21 +187,21 @@ class SystemPromptService:
         for name, provider in self._visible(self._variables, target):
             variables[name] = provider()
 
-        def resolve(text: str | Callable[[Context], str]) -> str:
-            raw = text(target) if callable(text) else text
+        async def resolve(text: PromptText) -> str:
+            raw = await maybe_await(text(target)) if callable(text) else text
             return _VARIABLE.sub(lambda m: variables.get(m.group(1), m.group(0)), raw)
 
         sections = sorted(self._visible(self._sections, target), key=lambda s: (s.order, s.name))
         complete = next((s for s in sections if s.complete), None)
         rendered: tuple[tuple[str, str], ...]
         if complete is not None:
-            rendered = ((complete.name, resolve(complete.text)),)
+            rendered = ((complete.name, await resolve(complete.text)),)
         else:
-            rendered = tuple((s.name, resolve(s.text)) for s in sections)
+            rendered = tuple([(s.name, await resolve(s.text)) for s in sections])
 
         contexts = sorted(self._visible(self._contexts, target), key=lambda c: (c.order, c.name))
         materialized = tuple(
-            ContextSnapshotSection(name=c.name, text=resolve(c.text)) for c in contexts
+            [ContextSnapshotSection(name=c.name, text=await resolve(c.text)) for c in contexts]
         )
 
         schemas: list[ToolSchema] = []

@@ -47,6 +47,10 @@ CODE_MODE_ROWS: list[dict[str, Any]] = [
 
 SNAPSHOT_ROW: dict[str, Any] = {"id": "rlm-kernel-snapshot", "name": "rlm-kernel-snapshot"}
 
+PRESENTATION_ROW: dict[str, Any] = {"id": "rlm-presentation", "name": "rlm-presentation"}
+"""The model-facing rename. Off unless a test asks for it, because most tests
+here address the transport by its reserved name."""
+
 
 @pytest.fixture
 async def make_kernel(tmp_path: Path) -> AsyncIterator[MakeKernel]:
@@ -86,13 +90,15 @@ def mounted_runtime(mount: Any) -> Callable[..., Any]:
     """`await mounted_runtime(...)` → `(ctx, session, agent)` on the real profile.
 
     `snapshots=False` mounts the runtime *without* the snapshot policy, which is
-    how `test_runtime_integration.py` checks the runtime on its own.
+    how `test_runtime_integration.py` checks the runtime on its own;
+    `presentation=True` adds the row that renames the transport to `ipython`.
     """
 
     async def build(
         *,
         session_id: str = "runtime-test",
         snapshots: bool = True,
+        presentation: bool = False,
         snapshot_config: dict[str, Any] | None = None,
     ) -> tuple[Any, Any, Any]:
         rows = [*CODE_MODE_ROWS, HOST_RUNTIME_ROW]
@@ -100,6 +106,8 @@ def mounted_runtime(mount: Any) -> Callable[..., Any]:
             rows.append(
                 {**SNAPSHOT_ROW, "config": snapshot_config} if snapshot_config else SNAPSHOT_ROW
             )
+        if presentation:
+            rows.append(PRESENTATION_ROW)
         ctx = await mount(*rows)
         session = ctx.sessions.create(session_id)
         return ctx, session, ctx.agents.create(session, FAKE_OPTIONS)

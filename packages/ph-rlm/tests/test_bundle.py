@@ -18,6 +18,7 @@ from ph.testing import FAKE_OPTIONS
 from ph.tools.definition import ToolExecutionInput
 from ph.tools.registry import RUN_CODE
 from ph_rlm import BUNDLE
+from ph_rlm.presentation import IPYTHON
 
 pytestmark = pytest.mark.anyio
 
@@ -67,7 +68,12 @@ async def test_the_bundle_mounts_over_base() -> None:
 
 
 async def test_a_cell_runs_and_its_state_reaches_the_log() -> None:
-    """The end-to-end claim of everything landed so far, in one test."""
+    """The end-to-end claim of everything landed so far, in one test.
+
+    Called as `ipython`, because that is the only name this profile's model is
+    ever offered — `rlm-presentation` renames the transport, and a bundle test
+    that reached past the rename would be testing a surface nobody ships.
+    """
     ctx = Context()
     try:
         await Loader.from_documents(_documents()).mount(ctx)
@@ -76,7 +82,7 @@ async def test_a_cell_runs_and_its_state_reaches_the_log() -> None:
         result = await ctx.tools.execute(
             ToolExecutionInput(
                 call_id="c1",
-                name=RUN_CODE,
+                name=IPYTHON,
                 arguments={"program": "remembered = 'yes'\nlen(remembered)"},
                 scope=agent.ctx,
                 session=session,
@@ -86,6 +92,29 @@ async def test_a_cell_runs_and_its_state_reaches_the_log() -> None:
         assert result.is_error is False
         assert result.value["value"] == 3
         assert any(event.type == "kernel/snapshot" for event in session.events)
+    finally:
+        await ctx.drain()
+        await ctx.dispose()
+
+
+async def test_the_shipped_profile_offers_exactly_one_callable() -> None:
+    """Prime Agent's surface, kept: one entry, and the reserved name is not it."""
+    ctx = Context()
+    try:
+        await Loader.from_documents(_documents()).mount(ctx)
+        session = ctx.sessions.create("bundle-surface")
+        agent = ctx.agents.create(session, FAKE_OPTIONS)
+        view = ctx.tools.view(agent.ctx)
+
+        assert view.mode == "code"
+        assert view.transport_name == IPYTHON
+        # Under Code Mode the model is handed no schema list at all; everything
+        # other than the transport is reached as a binding (P1-04, C6).
+        assert ctx.tools.schemas(scope=agent.ctx) == []
+        assert ctx.tools.get(RUN_CODE, scope=agent.ctx) is None
+        # And the base tool rows are still mounted — not directly callable, but
+        # present, which is what makes them bindings rather than absences.
+        assert len(view.visible) > 1
     finally:
         await ctx.drain()
         await ctx.dispose()

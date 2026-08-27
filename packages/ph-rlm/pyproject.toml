@@ -14,6 +14,7 @@ dependencies = ["ph-core", "ph-runtime-guest", "dill>=0.3.8"]
 [project.entry-points."ph.plugins"]
 code-runtime-python = "ph_rlm.kernel.manager:apply"
 rlm-kernel-snapshot = "ph_rlm.snapshot:apply"
+rlm-presentation = "ph_rlm.presentation:apply"
 
 [tool.uv.sources]
 ph-core = { workspace = true }

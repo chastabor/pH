@@ -177,6 +177,17 @@ class CodeRunResult:
     value: Any = None
     error: str | None = None
     truncated: bool = False
+    reset: bool = False
+    """The runtime died since the last run, so this one got a fresh, empty
+    namespace. The reset notice in `logs` tells the *model*; this flag tells the
+    card — a fact recovered from the notice's prose would be forged by any
+    program whose first output is the marker text."""
+    displays: tuple[dict[str, Any], ...] = ()
+    """Rich payloads the program emitted — a plot, a table, a diff.
+
+    Carried on the result rather than folded into `logs` because they are for a
+    front-end and `logs` is for the model: a base64 PNG in the model's text costs
+    a fortune and says nothing."""
 
 
 @runtime_checkable

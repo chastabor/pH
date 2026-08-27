@@ -23,6 +23,7 @@ import inspect
 import json
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
+from dataclasses import replace as dataclasses_replace
 from typing import Any, Literal, TypeAlias
 
 from pydantic import BaseModel, ConfigDict
@@ -54,6 +55,7 @@ __all__ = [
     "ToolOutput",
     "ToolResult",
     "ToolRunContext",
+    "TransportPresentation",
     "aborted_result",
     "define_tool",
     "denied_result",
@@ -404,6 +406,40 @@ class ToolDefinition:
             return ExecutionMode(kind="parallel" if classifier(args) is True else "exclusive")
         except Exception:
             return ExecutionMode(kind="exclusive")
+
+
+@dataclass(frozen=True, slots=True)
+class TransportPresentation:
+    """The parts of the Code Mode transport a *profile* is allowed to restate.
+
+    The transport's name is reserved so nothing can occupy it and misdirect a
+    model told to call it (P1-04, C6) — but a profile still needs to present it
+    under its own name and description. The RLM profile calls it `ipython` and
+    ports prime-agent's wording verbatim, so a model that knows that surface
+    finds the surface it knows.
+
+    Only the presentation is restated. `parameters` and `execute` are absent by
+    design: the argument schema and the governed body are what make the transport
+    the transport, and a profile that could replace them would have replaced
+    Code Mode rather than renamed it.
+    """
+
+    name: str
+    description: str
+    output: ToolOutput | None = None
+    present_call: Callable[[Any], ToolCallView | None] | None = None
+    present_result: Callable[[Any, ToolResult], ToolResultView | None] | None = None
+
+    def rename(self, transport: ToolDefinition) -> ToolDefinition:
+        """The transport as this profile presents it."""
+        return dataclasses_replace(
+            transport,
+            name=self.name,
+            description=self.description,
+            output=self.output if self.output is not None else transport.output,
+            present_call=self.present_call or transport.present_call,
+            present_result=self.present_result or transport.present_result,
+        )
 
 
 def define_tool(
