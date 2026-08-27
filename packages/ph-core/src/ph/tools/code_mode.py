@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import partial
 from typing import Any, Literal
 
@@ -67,6 +67,7 @@ __all__ = [
     "DispatchBridge",
     "ToolCallError",
     "apply",
+    "governed_binding",
 ]
 
 log = logging.getLogger("ph.tools.code_mode")
@@ -381,7 +382,11 @@ async def _namespaces(
     tool surface is — name conflicts already failed at registration.
     """
     view = tools.view(request.scope)
-    namespaces = [_tools_namespace(tools, request.scope, request.bridge)]
+    # Contributed namespaces first, so `tools` can be built knowing which tools
+    # already have a namespaced face. The order the *program* sees is still
+    # `tools` first — it is the one namespace that is never optional.
+    contributed: list[CodeBindingNamespace] = []
+    presented: set[str] = set()
     for name in sorted(view.code_namespaces):
         namespace = await maybe_await(view.code_namespaces[name](request))
         if namespace.name != name:
@@ -389,12 +394,18 @@ async def _namespaces(
                 f'the factory registered for code binding namespace "{name}" returned one '
                 f'named "{namespace.name}"; the SDK block and the dispatch table would disagree'
             )
-        namespaces.append(namespace)
-    return tuple(namespaces)
+        contributed.append(namespace)
+        presented.update(
+            binding.presents for binding in namespace.bindings if binding.presents is not None
+        )
+    return (_tools_namespace(tools, request.scope, request.bridge, presented), *contributed)
 
 
 def _tools_namespace(
-    tools: ToolRuntime, scope: Context, bridge: DispatchBridge | None
+    tools: ToolRuntime,
+    scope: Context,
+    bridge: DispatchBridge | None,
+    presented: set[str] = frozenset(),  # type: ignore[assignment]
 ) -> CodeBindingNamespace:
     """The `tools` namespace: every visible tool, as a governed binding.
 
@@ -408,6 +419,12 @@ def _tools_namespace(
         # transport is visible under the new name, and binding it into `tools`
         # would hand the program a way to re-enter itself.
         if name == view.transport_name:
+            continue
+        # A tool another namespace already presents (`rlm.run` for `rlm_run`),
+        # as declared by that namespace's own bindings. Still dispatchable and
+        # still addressable by policy — just not offered twice, under two names,
+        # in one SDK block.
+        if name in presented:
             continue
         definition = view.visible[name]
         binding = CodeBinding(
@@ -430,6 +447,33 @@ def _tools_namespace(
 
 async def _dispatch(bridge: DispatchBridge, binding: CodeBinding, **arguments: Any) -> Any:
     return await bridge.call(binding, arguments)
+
+
+def governed_binding(
+    request: CodeBindingsRequest,
+    public_name: str,
+    definition: Any,
+    *,
+    counts_as_spawn: bool = False,
+) -> CodeBinding:
+    """One registered tool, as a namespaced binding a program may await.
+
+    The one place that knows the protocol every namespace has to follow: the
+    binding the *program* writes may be named differently from the tool it
+    dispatches (`rlm.run` for `rlm_run`), the dispatch closure is omitted when
+    the namespace is being described rather than bound, and the binding handed to
+    the bridge carries the *tool's* name so `tool/code-dispatch-start` records
+    the governed capability rather than the alias.
+    """
+    governed = CodeBinding(
+        name=definition.name,
+        description=definition.description,
+        parameters=definition.parameters,
+        counts_as_spawn=counts_as_spawn,
+    )
+    bridge = request.bridge
+    dispatch = None if bridge is None else partial(_dispatch, bridge, governed)
+    return replace(governed, name=public_name, dispatch=dispatch, presents=definition.name)
 
 
 def _render_run(value: Any) -> str:

@@ -31,13 +31,15 @@ construction: the only guest→host channel is a `call` frame.
 | P3-08 | The guest package: binding proxies, skill wrapping, bootstrap | `ph_runtime/{proxies,skill,errors}.py` |
 | P3-09 | `rlm-presentation`: the transport presented as `ipython`, prime-agent's description verbatim, its result layout, `IpythonToolDetails` | `ph_rlm/presentation.py`, `ph/tools/definition.py`, `ph/tools/registry.py` |
 | P3-15 | `kernel/snapshot` and `kernel/restored`: per-variable, tagged, spilled, folded | `ph_rlm/snapshot.py` |
-| P3-10 (part) | The extension point only: `tools/code-bindings` as a waterfall, asked by both the run and the SDK section | `ph/tools/code_mode.py` |
+| P3-10 | The extension point, then the `rlm` namespace over it | `ph/tools/{code_mode,registry}.py`, `ph_rlm/bindings.py` |
+| P3-11 | The `ctx.subagents` seam **and** the `rlm-child` provider: non-blocking admission, depth gate, status mirroring, usage attribution, terminal notices, tombstones | `ph/seams/subagents.py`, `ph_rlm/subagents.py` |
 
-**Still to come:** the rest of P3-10, then P3-11…P3-14 and P3-16…P3-25 — the
-`rlm`/`agent_message`/`agent_observe` namespaces, the subagent provider,
-messaging and the registry, the RLM prompt, the Continual Harness, the context
-loader, Python skills, the TUI code cell, the profile bundle, the two conformance
-gates, the fixture replay, and the trajectory view.
+**Still to come:** P3-12…P3-14 and P3-16…P3-25 — the `agent_message` /
+`agent_observe` namespaces and the family guard, the RLM prompt, the Continual
+Harness, the context loader, Python skills, the TUI code cell and subagent panel,
+the profile bundle, the two conformance gates, the fixture replay, and the
+trajectory view. P3-13's roster already exists as `subagent_roster()`; what it still
+needs is passivation.
 
 ---
 
@@ -583,3 +585,213 @@ waterfall-to-claim reshape above:
   `PromptText`), caching the described namespace tuple per registry generation
   (µs-scale), and a meta-threading `simple_views` variant (worth extracting on
   the next customer, not the first).
+
+---
+
+## P3-11: delegation, and three things the plan could not have known
+
+### `ctx.subagents` was never scheduled
+
+The port plan lists it among the capability seams; no Phase 0/1 row delivers it
+and no code provided it. So the seam definition landed here with its first
+provider — which is the right pairing anyway, because a seam with no consumer is
+a guess about what a consumer will need.
+
+Two contract points are stated in the seam rather than left to the provider:
+**`start()` returns at admission, never with the answer** (the non-blocking
+fan-out an RLM parent is built on), and **`result()` exists separately** for the
+caller that genuinely blocks — a generic `task` tool returning the child's last
+text. One provider serves both, which is only possible because the answer is
+*reachable* without being what admission hands back.
+
+`family_reach()` also lives in the seam, unused so far. It is C7's rule, and
+P3-12's guard must not be able to disagree with the roster that displays it — one
+rule, one implementation, even though only one of the two callers exists yet.
+
+### `ctx.jobs` would have made admission blocking
+
+`JobService.start` documents that a host which never binds a task group runs the
+job **inline** — deliberately, so a headless one-shot stays honest instead of
+silently dropping work. For a subagent that is exactly wrong: `start()` would not
+return until the child had finished, destroying the one property the provider
+exists to have. Every test would have passed while measuring nothing.
+
+The fix was already in the codebase, unreachable: `Context._spawn` puts a
+coroutine in the pool `drain()` awaits, with failures logged at their own
+boundary. It was private and named for `emit` listeners. It is now
+`ctx.detach(coro, label=...)`, and `_spawn` is three lines that call it. Nothing
+about the mechanism changed — only that a second legitimate caller can reach it.
+
+### The "no fallback" model rule has nothing to check yet
+
+The plan specifies a model preflight with no fallback: an explicit selector must
+resolve or the spawn fails. But `ctx.llm` has no model *catalogue* — only
+`resolve_model(provider, model)`, which returns an empty `ResolvedModel` rather
+than raising for an unknown name. So what P3-11 can enforce is the *route*: the
+provider must have a registered adapter, checked at admission. An unknown model
+name still fails, at the child's first request rather than at spawn.
+
+The part that matters is intact and tested: **nothing substitutes a different
+model.** An explicit selector is passed through untouched. `rlm.find_models` will
+have to bring the catalogue with it, and it gets the earlier check for free when
+it does.
+
+### A `mappingproxy` is not a `dict`
+
+The usage-attribution observer read `event.data.get("usage")` and guarded it with
+`isinstance(usage, dict)`. A committed event's data is frozen into
+`MappingProxyType`, which is a `Mapping` and is **not** a dict instance — so the
+guard was always false and nothing was ever attributed. `code_mode.py` carries a
+comment about exactly this trap for tool arguments; the same trap, one file over.
+Caught by a test that asserted the attribution existed rather than that the code
+ran.
+
+### A namespace now owns the tools it presents
+
+`rlm_run` was reachable two ways from a cell: `rlm.run(...)` and
+`tools.rlm_run(...)`. Both governed, so not a safety hole — but two SDK routes to
+one capability, and the second one has no prompt text explaining it.
+`register_code_namespace(..., owns=(...))` drops the owned names from the `tools`
+listing while leaving them dispatchable and policy-addressable. Found by an
+assertion that was written expecting the property and did not get it.
+
+### Also fixed: the CPU re-arm was flooring the wrong way
+
+`arm_cpu_budget` computed `used = int(cpu_seconds_used())`. Flooring the CPU
+*already spent* hands the next cell less than its budget: a bomb that burned
+1.9 s floors to 1, so `cpu_seconds=1` leaves 0.1 s and the *next* trivial cell
+dies on the previous one's spend. `math.ceil`. This is why
+`test_a_cpu_bomb_hits_its_budget_and_the_kernel_survives` was intermittent under
+load — a flake with a real bug behind it.
+
+### The TUI vocabulary test earned its keep again
+
+Four new event types, and the Phase 2 test that walks `KNOWN_SESSION_EVENT_TYPES`
+against the adapter's tables refused them all until each was classified.
+`subagent/status` and `subagent/usage-attributed` are `RECORDLESS` — they
+belong to the subagent panel (P3-19), and eight children ticking through
+`queued → running → done` would push the conversation off screen.
+`rlm/child-admitted` and `rlm/child-deleted` *render*: a spawn is the moment work
+left the conversation, and reading the transcript later without it makes the
+child's reply arrive from nowhere. The same split decides ignorability — status
+and usage are skippable by an older build; an admission is not, because skipping
+it shows the parent the wrong family.
+
+---
+
+## The cleanup pass over P3-11
+
+Four review agents. Three findings were structural, and one of them was a
+resource leak.
+
+### A settled child leaked a CPython subprocess
+
+`code-runtime:<namespace>` is an effect of the *agent's scope* — that is the
+Phase 3 design working correctly, and it is exactly why this went wrong. The
+provider created child agents and disposed them nowhere: `delete()` cancelled the
+agent but never called `ctx.agents.dispose`, which is the only thing that unwinds
+an agent's scope. So every delegation left a live child process holding its whole
+namespace, for the host's lifetime, whether the child finished or was revoked.
+
+The fix is the invariant the rest of the package already follows: a child is
+acquired through **`parent.ctx.effect()`**, so a disposed parent unwinds its
+children (I2) and `delete()` becomes "release it early" rather than a second
+cleanup path that has to remember everything. Settlement also calls `_quiesce`,
+which drops the observer, disposes the agent and releases the session while
+keeping the terminal `SubagentResult` — so a caller awaiting `result()` after the
+child is gone still gets its answer. Two new tests pin both halves.
+
+The session observer had the same shape of bug: `observe()` returns a disposer
+and the return value was discarded, so a cancelled child kept attributing usage
+to its parent forever.
+
+### `rlm/child-*` was the wrong name for a generic seam's contract
+
+ph-core declares the vocabulary and **ph-app** consumes it — and ph-app depends on
+ph-core only, never on ph-rlm. So a second `ctx.subagents` provider would have had
+to emit `rlm/…` (lying about its identity in an append-only log) or be invisible
+to the TUI. The repo had already settled this the other way for `kernel/snapshot`,
+which only ph-rlm emits and which is named neutrally.
+
+Renamed to `subagent/admitted | status | deleted | usage-attributed`, with the
+producer named in the payload. Worth doing now and effectively impossible later:
+these are on-disk logs, and an unknown *non-ignorable* type makes a log
+unreadable rather than degraded.
+
+The roster fold moved with the names, from ph-rlm into the seam. P3-19's subagent
+panel lives in ph-app and could not have imported `ph_rlm.child_roster` — it would
+have grown a second copy of the fold, which is the "two projections that
+disagree" A11 exists to forbid.
+
+### `owns=` was a second list that could drift from the first
+
+`register_code_namespace(..., owns=(...))` had the namespace declare which tools
+it presents, as free text validated against nothing. In `bindings.py` the same
+fact was stated twice — once as the `specs` tuple that builds the bindings, once
+as `owns` — and a typo in `owns` silently suppressed nothing while a missing entry
+silently double-listed. Generically it was worse: `owns=("bash",)` would have
+deleted `bash` from every SDK block in scope, from a plugin that does not own it.
+
+Inverted: `CodeBinding.presents` names the governed tool a binding is the face of,
+so **the suppression list *is* the binding list**. `owns`, `_CodeNamespace` and
+`_View.namespaced_tools` all disappeared. `_namespaces` builds the contributed
+namespaces first, collects their `presents`, then builds `tools` — the ordering
+change that makes the derivation possible.
+
+The three hand-rolled copies of "wrap a governed tool as a namespaced binding"
+became one `governed_binding()` in `code_mode.py`, which is also where the
+load-bearing subtlety now lives: the binding handed to the bridge carries the
+*tool's* name, so the dispatch record names the capability rather than the alias.
+
+### `ctx.jobs` gained the path that made `detach` unnecessary for callers
+
+`JobService.bind()` has zero callers, so the inline `await body()` branch was the
+only one that had ever executed — a placeholder, not a shipped behaviour. It now
+falls back to `ctx.detach`, which means `start()` returns immediately either way
+and a job gets an id, a cancel and `job/started`/`job/settled` for free. The
+provider uses `ctx.jobs.start` and `detach` goes back to being the primitive
+underneath rather than a second public mechanism for the same concern.
+
+### Reuse the codebase already had
+
+* `delegation_depth` read `header.to_wire()["delegationDepth"]`. `SessionHeader`
+  has a typed `delegation_depth` field — and reconstructing the wire alias by
+  hand meant a rename would return 0, which *opens* the depth gate.
+* `_last_assistant_text` hand-rolled the message projection and the text join.
+  `derive_event_message` + `text_of` own those rules.
+* The child's `AgentOptions` was rebuilt field by field, silently dropping
+  `temperature`. `dataclasses.replace` keeps every field the parent had.
+* `summary[:120]` → `CONTEXT_SUMMARY_MAX_CHARS`, which is what already caps the
+  field.
+* `access: str` plus a hand-check plus a `type: ignore` → `access: Access`, so
+  pydantic validates it and the model sees `read|write` in the schema.
+
+### Dead surface removed
+
+`SubagentRequest.metadata`; `SubagentResult.replied` and its `WireModel` base (it
+crosses no JSON boundary, and being a `WireModel` forced a hand-maintained sample
+into `test_wire.py`); `SubagentRun.status` (the roster folds status — a copy on
+the handle is a second source of truth frozen at the last in-process update);
+`SubagentProvider.capabilities` (no consumer, and the vocabulary a second provider
+needs is not guessable from the first); `SubagentService.provider()`;
+`Config.default_access` and its shipped `bundle.yaml` key (inert: the request
+default lives on the seam); `mark_replied` and the `replied` branch (P3-12 brings
+both, and today the notice is unconditional because there is nothing to condition
+it on). One prose `accessNote` in a durable event became a
+`downgrade_reason` code with `downgrade_text()` rendering the sentence once, for
+the model and the card both.
+
+Also: `subagent_roster` now tests the event type *first* — 1.58 ms → 0.34 ms per
+scan on a 20k-event log, measured, because the old loop read `data["runId"]` off
+every `assistant/chunk` before discovering it was not a roster event.
+
+### Skipped
+
+* **An incremental cached fold for the roster.** The real fix (8 spawns in one
+  cell is still 8 scans), but it needs a general `session.fold(key, types, step)`
+  in ph-core — `_LatestFold` only does latest-of-one-type — and that is a seam
+  addition beyond this diff. The filter-first win is 4.7× of it for two lines.
+* **`family_reach` shipped unused.** The argument to land it with P3-12 is fair;
+  the counter-argument that the guard and the roster must not be able to disagree
+  is why it is in the seam. Left as-is.
+* **`TokenUsage` validation** on the attributed payload, and inlining `_spawn`.

@@ -142,6 +142,15 @@ class CodeBinding:
     """Declared by the namespace author when a call starts a child agent, so the
     bridge can hold it to the spawn budget (C4) by property rather than by
     guessing from the name."""
+    presents: str | None = None
+    """The governed tool this binding is the namespaced face of.
+
+    Set when a namespace re-presents a registered tool under its own name
+    (`rlm.run` for `rlm_run`). The tool stays dispatchable and stays addressable
+    by a policy row; it is simply dropped from the `tools` listing, so the SDK
+    offers one route to a capability rather than two — the second of which has no
+    prompt text explaining it. Read off the bindings themselves so the
+    suppression list *is* the binding list and the two cannot drift."""
 
 
 @dataclass(frozen=True, slots=True)

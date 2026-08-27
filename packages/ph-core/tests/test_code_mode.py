@@ -13,16 +13,17 @@ evaluation. So:
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from ph.cordis import Context
-from ph.seams.code_runtime import CodeBinding, CodeBindingNamespace
+from ph.seams.code_runtime import CodeBindingNamespace
 from ph.system_prompt.assembly import AssembleContext, render_prompt
 from ph.testing import FAKE_OPTIONS, raising, run_tool, simple_tool
 from ph.tools import Deny, ToolExecutionInput, text_content
-from ph.tools.code_mode import ToolCallError
+from ph.tools.code_mode import ToolCallError, governed_binding
 from ph.tools.definition import ToolOutput, TransportPresentation
 from ph.tools.registry import RUN_CODE
 
@@ -441,23 +442,12 @@ def _extra_namespace(request: Any) -> CodeBindingNamespace:
     goes through the *bridge*, so the budgets and the dispatch records are the
     bridge's, exactly as for the `tools` namespace.
     """
-    governed = CodeBinding(
+    definition = SimpleNamespace(
         name="spawn_child",
         description="Start a child.",
-        parameters={"type": "object", "properties": {"what": {"type": "string"}}},
-        counts_as_spawn=True,
+        parameters={"type": "object", "properties": {"n": {"type": "string"}}},
     )
-
-    async def dispatch(**arguments: Any) -> Any:
-        return await request.bridge.call(governed, arguments)
-
-    binding = CodeBinding(
-        name="run",
-        description=governed.description,
-        parameters=governed.parameters,
-        dispatch=None if request.describing else dispatch,
-        counts_as_spawn=True,
-    )
+    binding = governed_binding(request, "run", definition, counts_as_spawn=True)
     return CodeBindingNamespace(name="rlm", description="children", bindings=(binding,))
 
 
@@ -522,3 +512,36 @@ async def test_a_contributed_binding_counts_against_the_spawn_budget(mount: Any)
     result, _session = await _run(ctx, "greedy", program)
     assert result.is_error is True
     assert "max_subagent_spawns_per_run=1" in repr(result.content)
+
+
+async def test_a_namespace_owns_the_tools_it_presents(mount: Any) -> None:
+    """One SDK route per capability.
+
+    A tool a namespace presents stays dispatchable and stays addressable by a
+    policy row — it just stops appearing in `tools` as well, because two routes
+    to one capability invites the model to take the one the prompt did not
+    explain. Declared on the *binding* (`CodeBinding.presents`), so the
+    suppression list is the binding list and the two cannot drift.
+    """
+    ctx = await _code_ctx(mount)
+    calls: list[str] = []
+    ctx.tools.register(_recorder("spawn_child", calls))
+    ctx.tools.register(_recorder("touch", []))
+    ctx.tools.register_code_namespace("rlm", _extra_namespace)
+    session = ctx.sessions.create("s-owns")
+    agent = ctx.agents.create(session, FAKE_OPTIONS)
+
+    assembly = await ctx.system_prompt.assemble(AssembleContext(scope=agent.ctx, agent=agent))
+    text = render_prompt(assembly)
+    assert "rlm.run" in text
+    assert "tools.spawn_child" not in text
+    # An unowned tool is unaffected, and the owned one is still *callable*.
+    assert "tools.touch" in text
+    assert ctx.tools.get("spawn_child", scope=agent.ctx) is not None
+
+    async def program(bindings: Any, _emit: Any) -> Any:
+        return await bindings["rlm"].run(n="still works")
+
+    result, _session = await _run(ctx, "owned", program)
+    assert result.is_error is False
+    assert calls == ["spawn_child:still works"]

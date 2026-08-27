@@ -34,6 +34,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
+from ph.seams.subagents import downgrade_text
 from ph.session import Session, SessionEvent, is_replacement_surface_event, thaw_json
 from ph.session.request_header import parse_request_context
 from ph.tools import ToolResult, ToolResultView, parse_arguments
@@ -354,6 +355,31 @@ class TuiEventAdapter:
             event,
         )
 
+    def _on_subagent_admitted(self, event: SessionEvent, live: bool) -> None:
+        """A delegation the human should see starting.
+
+        Rendered rather than left to the panel because a spawn is a *decision*:
+        it is the point at which work left this conversation, and reading the
+        transcript later without it makes the child's eventual reply arrive from
+        nowhere.
+        """
+        name = str(event.data.get("name") or event.data.get("runId") or "child")
+        model = str(event.data.get("model") or "?")
+        access = str(event.data.get("grantedAccess") or "read")
+        text = f"Delegated to {name} on {model} ({access} workspace)."
+        reason = event.data.get("downgradeReason")
+        if reason:
+            # The sentence is generated from the code, here and in the model's
+            # own result, so the two never disagree and neither goes stale.
+            text = f"{text} {downgrade_text(str(reason))}"
+        self._row("subagent", "notice", text, event)
+
+    def _on_subagent_deleted(self, event: SessionEvent, live: bool) -> None:
+        """A revoked child. The transcript stays on disk; the row says it went."""
+        run_id = str(event.data.get("runId") or "child")
+        reason = str(event.data.get("reason") or "user")
+        self._row("subagent", "notice", f"Revoked child {run_id} ({reason}).", event)
+
     def _on_todo_write(self, event: SessionEvent, live: bool) -> None:
         # Phase 4 emits these; the sidebar is ready for them now.
         self.state.todos = [thaw_json(todo) for todo in seq(event.data.get("todos"))]
@@ -387,6 +413,8 @@ HANDLERS: Mapping[str, Handler] = {
     "agent/inbox/spliced": TuiEventAdapter._on_agent_inbox_spliced,
     "todo/write": TuiEventAdapter._on_todo_write,
     "kernel/restored": TuiEventAdapter._on_kernel_restored,
+    "subagent/admitted": TuiEventAdapter._on_subagent_admitted,
+    "subagent/deleted": TuiEventAdapter._on_subagent_deleted,
 }
 """Event type → handler. Explicit, so the set of what renders is a value a test
 can hold against the log's vocabulary rather than a naming convention."""
@@ -400,6 +428,8 @@ RECORDLESS: frozenset[str] = frozenset(
         "fs/observed",
         "session/end-seed",
         "kernel/snapshot",
+        "subagent/status",
+        "subagent/usage-attributed",
     }
 )
 """Known types that produce no transcript row on purpose. They are the auditor's
@@ -409,7 +439,14 @@ trajectory view (P3-24), not the conversation.
 `kernel/snapshot` is here for a second reason as well as that one: there is one
 per changed variable per cell, so rendering them would bury the conversation in
 its own bookkeeping. Its companion `kernel/restored` *is* rendered, but only when
-a variable failed to come back — see `_on_kernel_restored`."""
+a variable failed to come back — see `_on_kernel_restored`.
+
+The two delegation records are here for the same reason plus one: a child's
+status and its token attribution belong to the **subagent panel** (P3-19), a live
+projection beside the transcript rather than rows inside it — eight children
+ticking through `queued → running → done` would push the conversation off screen.
+`subagent/admitted` and `subagent/deleted` *are* rendered; the same split decides
+ignorability, in `ph.session.known_event_types`."""
 
 FORWARD_REFERENCES: frozenset[str] = frozenset({"todo/write"})
 """Handled here before the log can carry it: Phase 4 adds the type and the

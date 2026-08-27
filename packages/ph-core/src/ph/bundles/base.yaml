@@ -90,6 +90,12 @@
 - id: token-meter
   name: token-meter
 
+# Delegation. The seam only: "run a child agent" has genuinely different
+# answers in one deployment, so providers are named and a profile registers the
+# one it wants (`rlm-child` in the rlm bundle).
+- id: subagents
+  name: subagents
+
 - id: code-runtime
   name: code-runtime
 

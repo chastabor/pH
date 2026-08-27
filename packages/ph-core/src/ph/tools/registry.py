@@ -79,11 +79,15 @@ reach something else (P1-04). Only `register_transport` may claim it."""
 PresentationMode = Literal["native", "code", "both"]
 
 ToolGuard = Callable[[ToolExecution], str | None]
+"""A monotonic guard: a reason denies, `None` abstains."""
+
 CodeNamespaceFactory = Callable[[Any], "CodeBindingNamespace | Awaitable[CodeBindingNamespace]"]
 """Builds one binding namespace for one question — a live run, or the SDK block.
 
 The argument is a `CodeBindingsRequest` (`ph.tools.code_mode`), typed `Any` here
 because the registry must not import the module that consumes it."""
+
+
 """A monotonic guard: a reason denies, `None` abstains.
 
 There is no allow result *by construction*, which is what makes listener order
@@ -390,6 +394,11 @@ class ToolRuntime:
         keyed claim rather than a listener, so two rows wanting one name fail
         *here*, at mount, instead of on every cell of a booted deployment; a
         scoped claim shadows a global one by name, like a tool's.
+
+        A namespace that re-presents a registered tool says so on the *binding*
+        (`CodeBinding.presents`), not here: the binding list is then the only
+        statement of the fact, so it cannot drift from a second list, and a
+        namespace cannot suppress a tool it does not actually offer.
         """
         validate_binding_name(name)
         if name == "tools":

@@ -45,6 +45,27 @@
     maxValueBytes: 65536
     maxSnapshotBytes: 16777216
 
+# --- delegation ------------------------------------------------------------
+# `rlm()` as a `ctx.subagents` provider: admission is logged and the handle
+# returns before the child answers, so a parent can fan out and keep working
+# (P3-11). The roster the parent reads back is the fold over these events, not a
+# side table, so it survives restart and compaction by construction.
+# E4 note: a child gets `read` unless it asks for `write`, and that default is
+# the seam's (`SubagentRequest.access`) rather than a row knob — until
+# `ctx.workspace` lands (Phase 4, D21) a `write` request is recorded and
+# downgraded with a reason code, because a guarantee nothing enforces must not
+# be granted, and a row knob that could not change that would be a lie.
+- id: rlm-subagent-provider
+  name: rlm-subagent-provider
+  config:
+    maxDepth: 2
+
+# The model-facing half: `rlm.run(...)` inside a cell is a governed dispatch,
+# not a comm-channel RPC — so a policy row can deny or ask on spawning, and C4's
+# spawn budget counts it (P3-10).
+- id: rlm-bindings
+  name: rlm-bindings
+
 # The row that makes `persistence: namespace` true rather than declared (D17).
 # Mounted with the runtime, not optionally: the seam takes the provider's promise
 # at registration, and these events are the promise being kept.

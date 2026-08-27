@@ -646,27 +646,41 @@ class Context:
 
         return await next_()
 
-    def _spawn(self, coro: Any, event: str) -> None:
-        """Track a fire-and-forget coroutine returned by an `emit` listener."""
+    def detach(self, coro: Any, *, label: str) -> None:
+        """Run `coro` outside the caller's lifetime, tracked and drained.
+
+        For work that must outlive the call that started it and must not be
+        awaited by it: an async `emit` listener, a subagent running while its
+        parent keeps working. `drain()` is what makes this honest — the task is
+        in a pool the host awaits at shutdown, so "fire and forget" does not mean
+        "lost on exit". A failure is logged at its own boundary, because there is
+        no caller left to raise into.
+
+        With no running loop the coroutine is closed rather than leaked, and the
+        drop is logged: a sync host that cannot run it should not silently hold a
+        never-awaited coroutine either.
+        """
         try:
             task = asyncio.ensure_future(coro)
         except RuntimeError:  # pragma: no cover - no running loop
             coro.close()
-            log.warning("ph.cordis: dropped async listener for %s (no event loop)", event)
+            log.warning("ph.cordis: dropped detached %s (no event loop)", label)
             return
         self._runtime.background.add(task)
 
         def done(finished: asyncio.Future[Any]) -> None:
             self._runtime.background.discard(finished)
             if not finished.cancelled() and finished.exception() is not None:
-                log.error(
-                    "ph.cordis: async listener for %s failed", event, exc_info=finished.exception()
-                )
+                log.error("ph.cordis: detached %s failed", label, exc_info=finished.exception())
 
         task.add_done_callback(done)
 
+    def _spawn(self, coro: Any, event: str) -> None:
+        """Track a fire-and-forget coroutine returned by an `emit` listener."""
+        self.detach(coro, label=f"listener for {event}")
+
     async def drain(self) -> None:
-        """Await every coroutine an `emit` listener left running."""
+        """Await every detached coroutine: async `emit` listeners, and `detach()`."""
         while self._runtime.background:
             for task in list(self._runtime.background):
                 # Already logged by the done callback; awaiting here is only

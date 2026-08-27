@@ -20,6 +20,7 @@ could `except Exception` its way past the limit would make the limit advisory.
 from __future__ import annotations
 
 import contextlib
+import math
 import signal
 from typing import Any
 
@@ -81,7 +82,10 @@ def arm_cpu_budget(cpu_seconds: int) -> None:
     if resource is None or cpu_seconds <= 0:  # pragma: no cover
         return
     signal.signal(signal.SIGXCPU, _on_sigxcpu)
-    used = int(cpu_seconds_used())
+    # `ceil`, not `int`: flooring the CPU already spent hands the next cell less
+    # than `cpu_seconds` — a bomb that burned 1.9s floors to 1, so a budget of 1
+    # leaves 0.1s and the *next* trivial cell dies on the previous one's spend.
+    used = math.ceil(cpu_seconds_used())
     soft = used + cpu_seconds
     _, hard = resource.getrlimit(resource.RLIMIT_CPU)
     if hard != resource.RLIM_INFINITY:

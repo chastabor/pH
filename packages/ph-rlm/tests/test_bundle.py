@@ -118,3 +118,43 @@ async def test_the_shipped_profile_offers_exactly_one_callable() -> None:
     finally:
         await ctx.drain()
         await ctx.dispose()
+
+
+async def test_a_cell_can_delegate_through_the_shipped_profile() -> None:
+    """The rows that must arrive together: transport, bindings, provider.
+
+    Every one of these has unit tests; this is the claim that the *shipped*
+    composition wires them to each other — a spawn written the way the model
+    writes it, reaching the provider the bundle registers.
+    """
+    ctx = Context()
+    try:
+        await Loader.from_documents(_documents()).mount(ctx)
+        session = ctx.sessions.create("bundle-delegation")
+        agent = ctx.agents.create(session, FAKE_OPTIONS)
+        result = await ctx.tools.execute(
+            ToolExecutionInput(
+                call_id="c1",
+                name=IPYTHON,
+                arguments={
+                    "program": "h = await rlm.run(prompt='look into it', name='scout')\nh['name']"
+                },
+                scope=agent.ctx,
+                session=session,
+                agent=agent,
+            )
+        )
+        assert result.is_error is False
+        assert result.value["value"] == "scout"
+        # One governed dispatch, and the admission it caused, in one log.
+        assert [
+            event.data["name"]
+            for event in session.events
+            if event.type == "tool/code-dispatch-start"
+        ] == ["rlm_run"]
+        admitted = [event for event in session.events if event.type == "subagent/admitted"]
+        assert len(admitted) == 1
+        assert admitted[0].data["grantedAccess"] == "read"
+    finally:
+        await ctx.drain()
+        await ctx.dispose()

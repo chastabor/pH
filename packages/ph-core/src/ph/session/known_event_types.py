@@ -56,6 +56,18 @@ KNOWN_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         # refused on the seed path, so the vocabulary has one home.
         "kernel/snapshot",
         "kernel/restored",
+        # Delegation (P3-11; emitted by a `ctx.subagents` provider). Named for
+        # the *seam*, not for the bundle that ships the first provider: the
+        # reader is ph-core and ph-app, neither of which depends on ph-rlm, and a
+        # second provider emitting `rlm/…` would be lying about its identity in
+        # an append-only log. The provider names itself in the payload instead.
+        # The roster a parent reads back *is* this fold — there is no side
+        # table — so the admission and the tombstone are required reading, while
+        # status and usage attribution are informational.
+        "subagent/admitted",
+        "subagent/deleted",
+        "subagent/status",
+        "subagent/usage-attributed",
     }
 )
 
@@ -63,6 +75,12 @@ IGNORABLE_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
     {
         "kernel/snapshot",
         "kernel/restored",
+        # Status mirroring and usage bookkeeping. `subagent/admitted` and
+        # `subagent/deleted` are deliberately NOT here: they are the roster's
+        # only record of a child existing and of it being revoked, and a reader
+        # that skipped either would show a parent the wrong family.
+        "subagent/status",
+        "subagent/usage-attributed",
     }
 )
 """Types a *different* build may skip without misreading the rest of the log.
@@ -75,6 +93,6 @@ forgotten flag is an older build refusing a log it could have read.
 
 The set is deliberately small: an unrecognized *required* event must still
 refuse the seed, because skipping one can change how everything after it reads.
-Only purely informational records — kernel state, and (later) subagent status —
-belong here.
+Only purely informational records — kernel state, subagent status, usage
+attribution — belong here.
 """

@@ -56,8 +56,12 @@ class JobService:
     def bind(self, task_group: Any) -> None:
         """Adopt the task group jobs run in.
 
-        A host that never binds one runs jobs inline on `start`, which keeps a
-        headless one-shot honest rather than silently dropping the work.
+        Optional. Without one, a job runs on `ctx.detach` — the pool
+        `ctx.drain()` awaits — which is still honest for a headless one-shot
+        (nothing is dropped; shutdown waits) and, unlike running the body
+        inline, does not make `start()` block until the job finishes. A job that
+        outlives the step that started it is the entire point of the seam, so
+        `start` returning early is the contract rather than an optimization.
         """
         self._scope = task_group
 
@@ -86,7 +90,7 @@ class JobService:
         if self._scope is not None:
             self._scope.start_soon(body)
         else:
-            await body()
+            self.ctx.detach(body(), label=f"job {job.id}")
         return job
 
     def get(self, job_id: str) -> Job | None:

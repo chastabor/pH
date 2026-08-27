@@ -91,7 +91,10 @@ def mounted_runtime(mount: Any) -> Callable[..., Any]:
 
     `snapshots=False` mounts the runtime *without* the snapshot policy, which is
     how `test_runtime_integration.py` checks the runtime on its own;
-    `presentation=True` adds the row that renames the transport to `ipython`.
+    `presentation=True` adds the row that renames the transport to `ipython`;
+    `extra_rows` appends whatever else a test needs — profile rows, or a config
+    *patch* (an `id` with no `name`), which is how a test reaches the budgets on
+    `tools-code-mode` without this fixture growing a parameter per knob.
     """
 
     async def build(
@@ -100,6 +103,7 @@ def mounted_runtime(mount: Any) -> Callable[..., Any]:
         snapshots: bool = True,
         presentation: bool = False,
         snapshot_config: dict[str, Any] | None = None,
+        extra_rows: list[dict[str, Any]] | None = None,
     ) -> tuple[Any, Any, Any]:
         rows = [*CODE_MODE_ROWS, HOST_RUNTIME_ROW]
         if snapshots:
@@ -108,6 +112,7 @@ def mounted_runtime(mount: Any) -> Callable[..., Any]:
             )
         if presentation:
             rows.append(PRESENTATION_ROW)
+        rows.extend(extra_rows or [])
         ctx = await mount(*rows)
         session = ctx.sessions.create(session_id)
         return ctx, session, ctx.agents.create(session, FAKE_OPTIONS)

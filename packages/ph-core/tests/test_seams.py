@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 from typing import Any
 
+import anyio
 import pytest
 
 from ph.cordis import Context
@@ -356,9 +357,39 @@ async def test_a_job_runs_and_reports() -> None:
     root = Context()
     service = JobService(ctx=root)
     job = await service.start(kind="test", label="a job", run=lambda _job: 42)
+    assert service.get(job.id) is job
+
+    # `start` hands back a handle, not an outcome — a job outliving the step that
+    # started it is the whole point of the seam. `drain()` is what settles it.
+    await root.drain()
     assert job.state == "done"
     assert job.result == 42
-    assert service.get(job.id) is job
+
+
+async def test_start_does_not_wait_for_the_body() -> None:
+    """With no task group bound, a job detaches rather than running inline.
+
+    The inline fallback was a placeholder — `bind()` never had a caller, so it was
+    the only branch that ever ran — and it made `start()` block for exactly as
+    long as the work, which is what a caller uses a job to avoid.
+    """
+    root = Context()
+    service = JobService(ctx=root)
+    entered = anyio.Event()
+    release = anyio.Event()
+
+    async def body(_job: Any) -> str:
+        entered.set()
+        await release.wait()
+        return "eventually"
+
+    job = await service.start(kind="test", label="slow", run=body)
+    assert job.state == "running", "start waited for the body"
+    release.set()
+    await root.drain()
+    assert job.state == "done"
+    assert job.result == "eventually"
+    assert entered.is_set()
 
 
 async def test_a_cancelled_job_reports_cancelled() -> None:
@@ -370,6 +401,7 @@ async def test_a_cancelled_job_reports_cancelled() -> None:
         return "partial"
 
     job = await service.start(kind="test", label="a job", run=body)
+    await root.drain()
     assert job.state == "cancelled"
 
 
