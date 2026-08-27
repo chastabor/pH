@@ -21,11 +21,11 @@ log, and neither is guessed.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, ClassVar, Literal, TypeAlias, cast, get_args
+from typing import Any, Literal, TypeAlias, cast, get_args
 
 from ..cordis import Context, Disposer, plugin
 from ..session import Session
-from ..tools.errors import HarnessError
+from ..tools.errors import FailureKind, HarnessError
 from ..wire import WireModel
 from ._registry import claim_slot
 
@@ -49,7 +49,7 @@ class SandboxError(HarnessError):
     refuses rather than running unconfined.
     """
 
-    denies: ClassVar[bool] = True
+    failure_kind: FailureKind = "denied"
 
     def __init__(self, message: str) -> None:
         super().__init__(message, "SANDBOX_UNAVAILABLE")

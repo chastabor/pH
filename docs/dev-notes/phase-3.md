@@ -36,8 +36,9 @@ construction: the only guest→host channel is a `call` frame.
 | P3-12 | `rlm-messaging`: the family guard, steer delivery, the `agent_message` and `agent_observe` namespaces | `ph_rlm/messaging.py`, `ph/seams/subagents.py` |
 | P3-13 | Rehydration on address: a settled child is woken by a send | `ph/seams/subagents.py`, `ph_rlm/subagents.py` |
 | P3-14 | `rlm-prompt`: doctrine, child doctrine, conditional delegation section, volatile facts as a `context()` | `ph_rlm/prompt.py` |
+| P3-21 | The governance gate: C1-C4 and C7 against the shipped profile | `ph-rlm/tests/test_governance_gate.py` |
 
-**Still to come:** P3-16…P3-25 — the Continual Harness, the context loader, Python skills, the TUI code
+**Still to come:** P3-16…P3-20 and P3-22…P3-25 — the Continual Harness, the context loader, Python skills, the TUI code
 cell and subagent panel, the profile bundle, the two conformance gates, the
 fixture replay, and the trajectory view. P3-13's remaining half — passivation
 across a *restart*, where the child's session is gone and has to come off disk —
@@ -1179,3 +1180,211 @@ read it.
 `fold_namespace` runs once per kernel start rather than per step. Neither is hot,
 and wrapping a cold fold in a cache adds a stale-value question to code that had
 none.
+
+---
+
+## P3-21: the gate found three things, which is what a gate is for
+
+Every one of the five claims already had unit tests. The gate exists because
+those mount hand-picked rows, and the claim the containment argument rests on is
+about the profile a *user* gets — so it mounts `ph-base` + `rlm/bundle.yaml`
+through the loader and runs real cells in a real kernel. Doing that surfaced
+three things no unit test had.
+
+### `CodeRunFailure` never declared itself a denial
+
+`HarnessError.denies` is what `registry.py` reads to set `ToolFailure.kind`, and
+`ToolFailure.kind`'s own docstring calls it "the fact every consumer branches on
+and none may infer". `CodeRunFailure` did not set it — so a cell refused by policy
+reached the model, the log and any future UI as **`failed`**, indistinguishable
+from a cell that timed out. The plan's gate (a) names `CodeRunFailure {kind:
+"denied"}` explicitly; the code produced `failed`.
+
+Fixing it needed one change of shape: `denies` was a `ClassVar`, and
+`CodeRunFailure` is one type with three kinds — a denial *is* policy refusing, a
+budget is a cap, an abort is cancellation. So `denies` became a class attribute an
+instance may set, and `CodeRunFailure.__init__` sets it from its kind.
+
+### `cancel_grace` was the one grace a deployment could not tune
+
+`boot_timeout_seconds` and `shutdown_grace_seconds` are row config;
+`cancel_grace` was a `Kernel` field with a hardcoded 2.0 that the provider never
+passed. It is the window in which a cell that swallowed a refusal can still finish
+straight-line synchronous work — the most consequential of the three — and it was
+the only one unreachable. Found because the gate could not make its own assertion
+deterministic without it: the shipped 2.0 raced the test cell's own `sleep(2)`.
+
+### The abort ladder's reach is narrower than my earlier note implied
+
+I wrote, after the first cleanup pass, that C3's enforcement means "the file is no
+longer written". True of that test — whose docstring is explicit that "the `sleep`
+is the window" — but not a general claim. The ladder (`cancel` frame → `SIGINT` →
+`SIGKILL` after the grace) stops a cell **at its next yield point, or kills it if
+it never reaches one**. It cannot preempt straight-line synchronous Python: two
+`pathlib` statements immediately after a caught refusal run before the guest's
+loop regains control.
+
+That residue is a stated non-goal (§11, Q10) — raw `pathlib`/`subprocess` cannot
+be gated per call, and the sandbox tier is the boundary for it, not the dispatch
+bridge. The gate now says so in the one place someone will look for it, rather
+than asserting a stronger claim that happens to hold for one grace value.
+
+### Two of the five test a mechanism, not a consumer
+
+(b)'s `ToolCallLimit` and (c)'s shipped spill policy are both Phase 4 rows. What
+Phase 3 owes is that a per-dispatch boundary *exists* for them to attach to, so
+the gate mounts listeners that stand in for them — a counter for (b), an offload
+for (c) — and asserts the boundary: three governed evaluations rather than one,
+and one oversized dispatch reshaped while its sibling stays inline. Marked as
+such rather than left to look like the policy ships.
+
+### One finding left as a follow-up
+
+`FsDenied` is a `PermissionError`, not a `HarnessError`, so an `fs/write-intent`
+veto also reports as `failed` — the same class of gap as `CodeRunFailure`'s, one
+seam over. The gate records the current behaviour instead of asserting a
+distinction the code does not draw. The row that makes it matter is
+`permissions-fs` (Phase 4), which is where the fix belongs: changing the base
+class now would touch every `except PermissionError` for a distinction nothing
+yet consumes.
+
+---
+
+## The cleanup pass over P3-21
+
+Four review agents over a diff that was mostly one test module. They found two
+defects in the gate itself, one in the code it was testing, and a 3× runtime win.
+
+### The gate was silently not testing what it claimed
+
+`_documents()` appended `[HOST_INTERPRETER, *overlay]` as raw loader patches, and
+**a patch replaces a row's whole config**. Both fragments targeted
+`code-runtime-python`, so the `cancelGraceSeconds: 0.5` overlay dropped
+`python: host` and `sweepOrphans: False` outright — meaning the C3 test, the most
+important one in the module, was building a `uv` venv and re-enabling the orphan
+sweep, in a module whose comment said it "needs no `uv` and no network". It
+passed, so nothing reported it.
+
+The fix is the fixture owning the merge: `shipped_profile({row_id: {key: value}})`
+merges fragments per row and emits one patch each, so a test cannot un-pin the
+interpreter by tuning an unrelated knob. Verified by composing the real documents
+before and after.
+
+### 72% of the gate's runtime was `os.walk` over the repo
+
+`tools.glob(pattern='*.nothing')` with no `path` resolves against `FsService.root`,
+which falls back to `Path.cwd()` — the checkout, 11,279 files, **~400 ms per
+dispatch**. Two tests issued seven of them: 2.9 s of the module's 4.0 s, and
+runtime that scaled with whatever was sitting in the developer's working tree. One
+`path=str(tmp_path)` argument: **4.0 s → 1.08 s**, and the whole-suite tax from
++11% to about +3%.
+
+The reviewer also checked the `time.sleep(5)` I had assumed was the cost: cell
+wall time is `cancel_grace + ~60 ms` flat in the sleep length, because the cell is
+`SIGKILL`ed at expiry. 5 s is free margin. The `cancelGraceSeconds: 0.5` override
+is itself a 1.5 s *saving* against the shipped default — the row config paid for
+itself in the test that motivated it.
+
+### `denies` was a boolean carrying a three-valued fact
+
+`FailureKind` is `denied|failed|aborted`; `CodeRunFailure.kind` is
+`denied|budget|aborted`; and the bridge between them was
+`"denied" if error.denies else "failed"`. So `budget → failed` (right) and
+**`aborted → failed` (wrong)** — unreachable today, but the Literal advertised a
+kind whose consumer contract was already broken.
+
+Replaced with `HarnessError.failure_kind: FailureKind`, declared by the error and
+read directly. The three-way mapping is now one dict in `CodeRunFailure`, and
+`registry._failure` has no mapping at all. `denies` is gone rather than kept
+alongside.
+
+### `FsDenied` — the deferral was too conservative
+
+I had recorded "an `fs/write-intent` veto reports as `failed`" as a Phase 4
+follow-up. The reviewer pointed out the precedent is one file over —
+`SandboxError` already sets this — and verified the blast radius: `FsDenied` is
+caught nowhere in `src/`, and the only production `except PermissionError` is an
+unrelated `os.kill` probe. `class FsDenied(HarnessError, PermissionError)` with
+`failure_kind = "denied"` linearizes cleanly and keeps every catcher working.
+
+So the hole C3 closes for `tools/pre-execute` is now closed for the fs seam too —
+in the seam whose module docstring calls itself a gate rather than a report.
+
+### Two gate claims were testing the wrong thing
+
+* **(c) was on a log-only seam.** `tools/code-dispatch-log` reshapes the durable
+  record and nothing else, so a listener there leaves the *program* holding the
+  full bytes — and C5 is about what reaches the model's context. It also has no
+  consumer in `src/` at all, so the gate was filling the seam's missing third
+  role and authoring both halves of its own contract. Moved to
+  `tools/post-execute`, where the Phase 4 row attaches and where an
+  `Accept(has_value=True)` changes what the cell receives. The test now asserts
+  the program saw `["[spilled]", "small"]` — the actual C5 fact — plus that the
+  seam fired per dispatch.
+
+  Writing it surfaced a real P4-02 design question worth recording: a value
+  replacement re-renders content through the tool's own output schema, so a
+  *generic* spill policy cannot invent a replacement value without knowing the
+  tool. Noted in the test rather than solved.
+
+* **(d) was refusing for the wrong reason.** It sent to a name that did not
+  exist, so `resolve` took the empty-roster branch — a guard denial, but not the
+  out-of-family one C7 is about. It now spawns a child and a grandchild and
+  addresses the grandchild: genuinely one generation too far.
+
+* **(b) no longer needs a stand-in.** The dispatch budget is a *shipped* counter
+  of exactly the boundary `ToolCallLimit` will count, so setting it to 3 and
+  issuing a fourth proves the per-dispatch boundary without the test authoring
+  the policy it checks.
+
+### The bundle-inventory test could not see the most load-bearing row
+
+`test_the_gate_runs_against_the_shipped_bundle` parsed `bundle.yaml` and checked
+six `name` literals. It could not see `disabled:`, could not see a row that fails
+to activate, silently omitted two of the eight named rows — and could not check
+`- id: tools / config: {mode: code}` at all, because a patch has no `name`.
+Flipping that to `mode: native` deletes C6 from the shipped profile and **all five
+behavioural tests still pass**, because they all reach tools through the
+transport.
+
+Replaced with one observable property of the *mounted* profile: a top-level native
+`write` must be refused with the transport named in the route back. That single
+call fails if the mode changed, if the transport was renamed, or if
+`rlm-presentation` left the bundle — and needs no inventory to go stale on a
+rename. `Loader.inactive() == []` moved to `test_bundle.py`, where it catches the
+never-activated case the name list could not.
+
+### Consolidation
+
+`shipped_profile` in `conftest.py` replaced the gate's hand-rolled mount *and*
+five `Context()` + try/finally blocks in `test_bundle.py`, so "the gate mounts
+what the bundle test mounts" is now true by construction. `run_ipython_cell`,
+`dispatch_names` and `settled_dispatches` moved to `runtime_helpers`, removing a
+fifth hand-written `ToolExecutionInput` and four copies of the dispatch-name
+comprehension. The root `mount` fixture grew one `profile=` keyword rather than
+the suite growing a second lifecycle.
+
+And a gap the reviewer found while arguing about the grace threading: **nothing
+tested the `Config → PythonCodeRuntime → Kernel` handoff**, which is how
+`cancel_grace` came to be a config field that did nothing. `test_bundle.py` now
+asserts two configured graces arrive and an untouched one keeps its default.
+
+### The abort residue moved to the code that owns it
+
+It was documented in a test docstring while `code_mode.py` still claimed a denial
+"bounds partial state to one cell". The limit now lives on
+`Kernel.cancel_grace` — the ladder's only tuning point — `code_mode.py`'s C3
+bullet says "about one cell" and points there, and the gate references it instead
+of restating it. Three prose copies became one.
+
+### Skipped
+
+* **Grouping the three graces into a `KernelTimings` value object.** Real
+  duplication (five coordinated edits per knob, and `KernelLimits`' own docstring
+  argues against exactly this shape), but it churns three construction sites to
+  save six lines, and the new handoff test now catches the failure mode that made
+  it urgent. Revisit when a fourth timing knob arrives.
+* **Module-scoped mounts in the gate.** Ceiling was ~0.3 s and only five of seven
+  tests could share; three register process-wide mutating listeners, in the one
+  module whose job is asserting what policy does. Fixing the glob root was 6× the
+  saving with none of the coupling.

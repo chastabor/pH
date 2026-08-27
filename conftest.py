@@ -39,8 +39,15 @@ async def mount(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AsyncIterato
     monkeypatch.setenv("PH_HOME", str(tmp_path))
     roots: list[Context] = []
 
-    async def _mount(*overlay_rows: dict[str, Any]) -> Context:
-        documents = Loader.from_paths([BASE, HEADLESS]).documents
+    async def _mount(*overlay_rows: dict[str, Any], profile: Any = None) -> Context:
+        """`profile` layers a bundle between the base and the overlay.
+
+        One keyword rather than a second fixture, because "mount the shipped
+        profile" and "mount base plus these rows" differ by one document and
+        should not differ by a lifecycle.
+        """
+        paths = [BASE, HEADLESS] if profile is None else [BASE, HEADLESS, profile]
+        documents = Loader.from_paths(paths).documents
         if overlay_rows:
             documents.append(("test-overlay", list(overlay_rows)))
         ctx = Context()

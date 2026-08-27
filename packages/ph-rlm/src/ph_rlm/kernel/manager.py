@@ -192,7 +192,16 @@ class Kernel:
     boot_timeout: float = 30.0
     shutdown_grace: float = 5.0
     cancel_grace: float = 2.0
-    """How long a cancelled cell has to unwind before the child is killed."""
+    """How long a cancelled cell has to unwind before the child is killed.
+
+    **What the abort ladder can and cannot do**, stated here because this field is
+    the ladder's only tuning point. `cancel` frame → `SIGINT` → `SIGKILL` at
+    expiry stops a cell at its next yield point, or kills it if it never reaches
+    one. It cannot preempt straight-line synchronous Python: statements after a
+    caught refusal run before the guest's loop regains control, so C3's bound is
+    "about one cell" rather than exactly one. The residue is narrower than the
+    raw-`pathlib` non-goal (§11, Q10) and distinct from it: this one is about
+    *time*, and a deployment widens it by raising this number."""
 
     _process: anyio.abc.Process | None = None
     _sock: socket.socket | None = None
@@ -693,6 +702,7 @@ class PythonCodeRuntime:
     cwd: Path | None = None
     boot_timeout: float = 30.0
     shutdown_grace: float = 5.0
+    cancel_grace: float = 2.0
     snapshots: SnapshotPolicy | None = None
     """Set by the `rlm-kernel-snapshot` row. Absent, the runtime still runs — but
     `persistence: "namespace"` would then be a promise nothing keeps, which is
@@ -753,6 +763,7 @@ class PythonCodeRuntime:
             snapshots=self.snapshots,
             boot_timeout=self.boot_timeout,
             shutdown_grace=self.shutdown_grace,
+            cancel_grace=self.cancel_grace,
         )
         self._kernels[namespace] = kernel
         scope = self._scopes.get(namespace)
@@ -813,6 +824,13 @@ class Config(KernelLimits):
     interpreter: str | None = None
     boot_timeout_seconds: float = 30.0
     shutdown_grace_seconds: float = 5.0
+    cancel_grace_seconds: float = 2.0
+    """How long a cell asked to stop has before it is killed.
+
+    Both directions cost something: longer widens the window in which a cell that
+    swallowed a refusal can finish synchronous work (see `Kernel.cancel_grace`);
+    shorter kills a cell that is legitimately slow to unwind, and killing costs
+    the namespace."""
     skills: tuple[str, ...] = ()
     sweep_orphans: bool = True
 
@@ -843,6 +861,7 @@ async def apply(ctx: Context, config: Config) -> None:
         skills=config.skills,
         boot_timeout=config.boot_timeout_seconds,
         shutdown_grace=config.shutdown_grace_seconds,
+        cancel_grace=config.cancel_grace_seconds,
     )
 
     async def enter() -> Disposer:

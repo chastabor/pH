@@ -19,8 +19,11 @@ So the bridge re-enters the **complete** pipeline per binding call:
   divergence from dsh, and the reason is that a program which can `except` a
   refusal can route around it — retry with a different path, fall back to
   `subprocess`. Failing the run puts the refusal in the model's context and
-  bounds partial state to one cell. A *failed* call (timeout, bad arguments)
-  keeps dsh's `ToolCallError` semantics, because that is the model's to handle.
+  bounds partial state to *about* one cell: the bound is best-effort in time,
+  because the abort is a signal ladder that stops the program at its next yield
+  point (see `Kernel.cancel_grace` in `ph_rlm.kernel.manager`). A *failed* call
+  (timeout, bad arguments) keeps dsh's `ToolCallError` semantics, because that is
+  the model's to handle.
 
 Budgets (C4) are enforced here rather than by the runtime: one approved cell
 must not be able to issue unbounded governed calls, and the bridge is the only
@@ -35,7 +38,7 @@ import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from functools import partial
-from typing import Any, Literal
+from typing import Any, ClassVar, Literal
 
 import anyio
 from pydantic import Field
@@ -55,7 +58,7 @@ from .definition import (
     define_tool,
     text_content,
 )
-from .errors import HarnessError
+from .errors import FailureKind, HarnessError
 from .registry import RUN_CODE, ToolRuntime
 from .sdk import code_only_rule, render_python_sdk, render_typescript_sdk
 
@@ -103,11 +106,22 @@ class CodeRunFailure(HarnessError):
 
     `kind: "denied"` is the C3 case: a refusal the program is not allowed to
     catch, because catching it is how a program routes around policy.
+
+    All three kinds end the run; they do not mean the same thing to a consumer,
+    so each declares its own `failure_kind`. A budget is the tool failing (the
+    program asked for too much), a denial is policy, an abort is cancellation.
     """
+
+    _FAILURE_KINDS: ClassVar[dict[str, FailureKind]] = {
+        "denied": "denied",
+        "budget": "failed",
+        "aborted": "aborted",
+    }
 
     def __init__(self, kind: Literal["denied", "budget", "aborted"], message: str) -> None:
         super().__init__(message, f"CODE_RUN_{kind.upper()}")
         self.kind = kind
+        self.failure_kind = self._FAILURE_KINDS[kind]
 
 
 class CodeDispatchLog(WireModel):

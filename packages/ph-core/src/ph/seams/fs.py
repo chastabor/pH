@@ -33,6 +33,7 @@ import anyio
 
 from ..cordis import Context, events, plugin
 from ..session import Session
+from ..tools.errors import FailureKind, HarnessError
 from ..wire import WireModel
 
 __all__ = [
@@ -106,8 +107,24 @@ class EditIntent:
     agent: Any = None
 
 
-class FsDenied(PermissionError):
-    """A write or edit was refused by policy."""
+class FsDenied(HarnessError, PermissionError):
+    """A write or edit was refused by policy.
+
+    A `HarnessError` as well as a `PermissionError`, so the refusal survives the
+    trip to a consumer as a *denial*. Without that it reached `ToolFailure.kind`
+    as an ordinary `failed`, which is the same hole C3 closes for
+    `tools/pre-execute`: a Code Mode program could `except` a policy veto from
+    this seam and route around it, and the durable record said the tool merely
+    failed. `SandboxError` next door already had this; this seam, whose whole
+    argument is being a gate rather than a report, did not.
+
+    Still a `PermissionError`, so every existing catcher keeps working.
+    """
+
+    failure_kind: FailureKind = "denied"
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message, "FS_DENIED")
 
 
 @dataclass(slots=True)

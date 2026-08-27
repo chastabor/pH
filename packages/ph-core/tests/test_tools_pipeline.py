@@ -387,5 +387,5 @@ async def test_a_timeout_budget_is_enforced_by_its_row(mount: Any) -> None:
 async def test_unknown_tool_error_is_routable() -> None:
     error = ToolNotFoundError("edit", "call it through run_code")
     assert error.code == "UNKNOWN_TOOL"
-    assert error.denies
+    assert error.failure_kind == "denied"
     assert "call it through run_code" in str(error)

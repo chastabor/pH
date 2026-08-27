@@ -777,7 +777,9 @@ def _failure(error: object, *, started: bool = False) -> ToolExecutionResult:
     """
     if isinstance(error, Cancelled):
         return aborted_result(started=started)
-    kind: FailureKind = "denied" if isinstance(error, HarnessError) and error.denies else "failed"
+    # The error's own answer, not a mapping this function keeps: a boolean here
+    # collapsed three kinds into two and silently reported an abort as a failure.
+    kind: FailureKind = error.failure_kind if isinstance(error, HarnessError) else "failed"
     return error_result(error_message(error), error_info(error), kind=kind)
 
 

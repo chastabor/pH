@@ -9,7 +9,7 @@ a string match would break the moment the wording improved.
 
 from __future__ import annotations
 
-from typing import ClassVar
+from typing import Literal, TypeAlias
 
 __all__ = [
     "TOOL_ABORTED",
@@ -36,16 +36,30 @@ Code Mode fails the whole run on a refusal and lets the program handle a failure
 """
 
 
+FailureKind: TypeAlias = Literal["denied", "failed", "aborted"]
+"""What kind of non-success one tool call was.
+
+The fact every consumer branches on and none may infer: policy **denied** the
+call, the tool **failed**, or cancellation **aborted** it. Code Mode ends the run
+on the first, lets the program handle the second, and a UI colours each
+differently.
+
+Declared here, in the lowest module of the tools package, because it is what an
+*error* says about itself — `definition.py` re-exports it for the callers that
+know it as part of the tool contract."""
+
+
 class HarnessError(Exception):
     """An error carrying a machine-routable code.
 
-    `denies` says whether raising this is *policy refusing* rather than the tool
-    failing. The two take opposite paths in Code Mode (a refusal ends the run, a
-    failure is the program's to handle), so the fact is declared by the error
-    class that knows it, not inferred downstream from a list of codes.
+    `failure_kind` is what raising this means to a consumer, declared by the
+    error that knows rather than inferred downstream from a list of codes. A
+    class attribute rather than a `ClassVar`, because one error type can carry
+    more than one kind — `CodeRunFailure` maps its three — and an instance that
+    knows sets it in `__init__`.
     """
 
-    denies: ClassVar[bool] = False
+    failure_kind: FailureKind = "failed"
 
     def __init__(self, message: str, code: str) -> None:
         super().__init__(message)
@@ -62,7 +76,7 @@ class ToolNotFoundError(HarnessError):
     instead of guessing (C6).
     """
 
-    denies: ClassVar[bool] = True
+    failure_kind: FailureKind = "denied"
 
     def __init__(self, tool_name: str, reachable_from: str | None = None) -> None:
         detail = f'unknown tool "{tool_name}"'

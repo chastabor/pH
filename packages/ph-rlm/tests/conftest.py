@@ -22,6 +22,7 @@ from typing import Any
 import pytest
 
 from ph.testing import FAKE_OPTIONS
+from ph_rlm import BUNDLE
 from ph_rlm.kernel.journal import OrphanJournal
 from ph_rlm.kernel.manager import Kernel, KernelLimits, _declare
 from ph_rlm.kernel.venv import resolve_interpreter
@@ -55,6 +56,14 @@ MESSAGING_ROW: dict[str, Any] = {"id": "rlm-messaging", "name": "rlm-messaging"}
 DOCTRINE_ROW: dict[str, Any] = {"id": "rlm-prompt", "name": "rlm-prompt"}
 """The delegation rows, here rather than re-spelled in four test modules — a row
 set that drifts between them tests different things while appearing to test one."""
+
+HOST_INTERPRETER: dict[str, Any] = {"python": "host", "sweepOrphans": False}
+"""The offline pin for `code-runtime-python`, as a *config fragment*.
+
+Not a row: a loader patch replaces a row's whole config, so a test that also
+tuned `cancelGraceSeconds` by appending a second patch would silently drop the
+pin and start building a `uv` venv. `shipped_profile` merges fragments per row so
+that cannot happen — which is exactly what it did before this was merged."""
 """The model-facing rename. Off unless a test asks for it, because most tests
 here address the transport by its reserved name."""
 
@@ -90,6 +99,38 @@ async def make_kernel(tmp_path: Path) -> AsyncIterator[MakeKernel]:
     yield make
     for kernel in started:
         await kernel.aclose()
+
+
+@pytest.fixture
+def shipped_profile(mount: Any) -> Callable[..., Any]:
+    """`await shipped_profile()` → `(ctx, session, agent)` on the real `rlm` bundle.
+
+    `ph-base` + `headless` + `rlm/bundle.yaml` through the loader, so a row
+    deleted from the shipped profile breaks a test rather than a hand-assembled
+    row set quietly standing in for it.
+
+    `config` is `{row_id: {key: value}}` and is **merged** per row before it
+    becomes one patch. Appending raw patches instead is how the interpreter pin
+    got dropped: two patches for one row means the second replaces the first
+    whole, and nothing says so.
+    """
+
+    async def build(
+        config: dict[str, dict[str, Any]] | None = None,
+        *,
+        session_id: str = "profile",
+    ) -> tuple[Any, Any, Any]:
+        merged: dict[str, dict[str, Any]] = {"code-runtime-python": dict(HOST_INTERPRETER)}
+        for row_id, overrides in (config or {}).items():
+            merged.setdefault(row_id, {}).update(overrides)
+        ctx = await mount(
+            *({"id": row_id, "config": values} for row_id, values in merged.items()),
+            profile=BUNDLE,
+        )
+        session = ctx.sessions.create(session_id)
+        return ctx, session, ctx.agents.create(session, FAKE_OPTIONS)
+
+    return build
 
 
 @pytest.fixture

@@ -32,7 +32,13 @@ from ..cancel import CancelToken
 from ..cordis import Context
 from ..llm.types import ContentBlock, Message, TextBlock, ToolSchema
 from ..session import Session
-from .errors import TOOL_ABORTED, TOOL_ABORTED_BEFORE_DISPATCH, TOOL_DENIED, ToolOutputError
+from .errors import (
+    TOOL_ABORTED,
+    TOOL_ABORTED_BEFORE_DISPATCH,
+    TOOL_DENIED,
+    FailureKind,
+    ToolOutputError,
+)
 from .json_schema import schema_of, validate_json_schema_value
 from .presentation import ToolCallView, ToolResultView
 
@@ -81,7 +87,6 @@ class ToolModel(BaseModel):
 
 
 SchemaDeclaration: TypeAlias = "type[BaseModel] | dict[str, Any]"
-FailureKind: TypeAlias = Literal["denied", "failed", "aborted"]
 
 
 def text_content(text: str) -> list[Any]:
@@ -107,11 +112,9 @@ class ToolOutput:
 class ToolFailure:
     """Canonical failure detail.
 
-    `kind` is the fact every consumer branches on and none may infer: policy
-    **denied** the call, the tool **failed**, or cancellation **aborted** it.
-    Code Mode ends the run on the first, lets the program handle the second, and
-    a UI card colours each differently. `info` is the routable identity for the
-    subset of failures that have one.
+    `kind` is `FailureKind` — see `ph.tools.errors`, which declares it, because
+    it is what an error says about itself. `info` is the routable identity for
+    the subset of failures that have one.
     """
 
     message: str
