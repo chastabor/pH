@@ -237,6 +237,27 @@ async def test_the_notice_reaches_the_parents_context_on_its_next_step(
     assert run.name in claimed[0]
 
 
+async def test_a_child_that_replied_is_not_announced_as_silent(delegating: Mounted) -> None:
+    """The reply is the notice, so the parent is not told the same thing twice.
+
+    `mark_replied` is called here directly, which is the only way to fix the
+    ordering: `rlm-messaging` calls it from a send, and a fake-adapter child
+    settles inside that send's own await.
+    """
+    ctx, session, parent = await delegating()
+    run = await _spawn(ctx, parent, "say something")
+    ctx.rlm_children.mark_replied(run.session_id)
+    await ctx.drain()
+
+    assert _notices(session) == [], "a child that replied was announced as silent"
+    # The status record still lands: only the redundant notice is suppressed.
+    assert [
+        event.data["status"]
+        for event in session.events
+        if event.type == "subagent/status" and event.data["runId"] == run.id
+    ][-1] == "done"
+
+
 async def test_the_child_status_reaches_the_parents_log(delegating: Mounted) -> None:
     ctx, session, parent = await delegating()
     run = await _spawn(ctx, parent)

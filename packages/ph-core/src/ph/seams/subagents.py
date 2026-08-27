@@ -28,7 +28,7 @@ failures as bugs.
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol, TypeAlias, runtime_checkable
 
@@ -42,6 +42,7 @@ __all__ = [
     "STATUS",
     "USAGE",
     "Access",
+    "FamilyRole",
     "SubagentProvider",
     "SubagentRequest",
     "SubagentResult",
@@ -53,6 +54,7 @@ __all__ = [
     "default_child_name",
     "downgrade_text",
     "family_reach",
+    "reachable_family",
     "subagent_roster",
 ]
 
@@ -300,6 +302,43 @@ def subagent_roster(session: Session) -> dict[str, dict[str, Any]]:
             row["deleted"] = True
             row["deletedReason"] = event.data.get("reason")
     return roster
+
+
+FamilyRole: TypeAlias = Literal["self", "parent", "sibling", "child"]
+"""How one agent stands relative to another, within reach."""
+
+
+def reachable_family(sessions: Iterable[Session], agent_id: str) -> dict[str, FamilyRole]:
+    """Every agent `agent_id` may address, mapped to how it is related (C7).
+
+    The enumeration half of `family_reach`, and derived *from* it rather than
+    restating the rule — the guard that refuses a send and the roster that tells
+    the model who it may address must not be able to disagree.
+
+    An agent's id is its session's id, so the parent link is
+    `SessionHeader.parent_session` and nothing needs a side index. Sessions are
+    passed in rather than read from a store, so this answers on a resumed log
+    with no live agents as readily as in a running process.
+    """
+    parents = {session.id: session.header.parent_session for session in sessions}
+    if agent_id not in parents:
+        return {}
+    mine = parents[agent_id]
+    reach: dict[str, FamilyRole] = {}
+    for other, other_parent in parents.items():
+        if not family_reach(
+            sender_parent=mine, sender_id=agent_id, target_parent=other_parent, target_id=other
+        ):
+            continue
+        if other == agent_id:
+            reach[other] = "self"
+        elif other == mine:
+            reach[other] = "parent"
+        elif other_parent == agent_id:
+            reach[other] = "child"
+        else:
+            reach[other] = "sibling"
+    return reach
 
 
 def family_reach(

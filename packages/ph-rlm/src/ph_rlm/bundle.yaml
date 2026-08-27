@@ -66,6 +66,18 @@
 - id: rlm-bindings
   name: rlm-bindings
 
+# Agent-to-agent messages (P3-12). The nuclear-family boundary is a *guard* —
+# deny-only, last, and not re-permittable by any later listener (C7) — while the
+# rate limit is backpressure the tool body raises, because ending a whole cell
+# over four messages in a second is not what a rate limit means.
+- id: rlm-messaging
+  name: rlm-messaging
+  config:
+    maxMessageChars: 16384
+    maxPending: 20
+    rateCapacity: 3
+    rateRefillSeconds: 1.0
+
 # The row that makes `persistence: namespace` true rather than declared (D17).
 # Mounted with the runtime, not optionally: the seam takes the provider's promise
 # at registration, and these events are the promise being kept.

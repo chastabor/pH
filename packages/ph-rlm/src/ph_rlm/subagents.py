@@ -127,6 +127,12 @@ class _Child:
     session: Session | None = None
     unobserve: Disposer | None = None
     result: SubagentResult | None = None
+    replied: bool = False
+    """Whether the child sent its parent a message (`rlm-messaging` sets it).
+
+    Held here rather than folded, because it decides whether the terminal notice
+    fires — a decision made at completion, in this process, about a child this
+    process ran."""
 
 
 @dataclass(slots=True)
@@ -331,15 +337,16 @@ class RlmChildProvider:
                 "done",
                 answerPreview=answer[: self.config.answer_preview_chars] or None,
             )
-            # Unconditional: `agent_message` does not exist yet (P3-12), so every
-            # child today finishes without replying. The notice becomes
-            # conditional when there is a reply for it to be conditional on.
-            tail = f" Last assistant text: {answer}" if answer else ""
-            self._inject(
-                parent_session,
-                f"[rlm child {run.name} ({run.id}) completed without sending a reply.{tail}]",
-                f"{run.name} finished without replying",
-            )
+            # Silence is indistinguishable from a hang from the parent's side,
+            # so a child that never sent a message is announced. A child that
+            # *did* reply needs no notice — the reply is the notice.
+            if not child.replied:
+                tail = f" Last assistant text: {answer}" if answer else ""
+                self._inject(
+                    parent_session,
+                    f"[rlm child {run.name} ({run.id}) completed without sending a reply.{tail}]",
+                    f"{run.name} finished without replying",
+                )
         except Exception as error:
             message = f"{type(error).__name__}: {error}"
             child.result = SubagentResult(status="error", error=message)
@@ -398,6 +405,18 @@ class RlmChildProvider:
             )
         )
 
+    def mark_replied(self, agent_id: str) -> None:
+        """Record that a child sent its parent a message (`rlm-messaging`).
+
+        Keyed by the child's *agent* id, which is what a sender knows about
+        itself — `_children` is keyed by run id, and deriving one from the other
+        would depend on how a session id happens to be composed.
+        """
+        for child in self._children.values():
+            if child.run.session_id == agent_id:
+                child.replied = True
+                return
+
     # ---------------------------------------------------------------- delete --
 
     async def delete(self, parent_session: Session, run_id: str, *, reason: str = "user") -> bool:
@@ -421,7 +440,12 @@ class RlmChildProvider:
         self._status(parent_session, child, "cancelled", reason=reason)
         child.finished.set()
         await self._quiesce(child)
-        self.ctx.subagents.forget(run_id)
+        # `get`, not attribute access: on the parent-teardown path this runs while
+        # scopes are unwinding, and the seam's own provision may already be gone —
+        # a teardown that raised would abort the rest of the unwind.
+        registry = self.ctx.get("subagents")
+        if registry is not None:
+            registry.forget(run_id)
         parent_session.append(DELETED, {"runId": run_id, "reason": reason})
         return True
 

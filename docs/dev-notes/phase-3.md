@@ -33,13 +33,21 @@ construction: the only guest→host channel is a `call` frame.
 | P3-15 | `kernel/snapshot` and `kernel/restored`: per-variable, tagged, spilled, folded | `ph_rlm/snapshot.py` |
 | P3-10 | The extension point, then the `rlm` namespace over it | `ph/tools/{code_mode,registry}.py`, `ph_rlm/bindings.py` |
 | P3-11 | The `ctx.subagents` seam **and** the `rlm-child` provider: non-blocking admission, depth gate, status mirroring, usage attribution, terminal notices, tombstones | `ph/seams/subagents.py`, `ph_rlm/subagents.py` |
+| P3-12 | `rlm-messaging`: the family guard, steer delivery, the `agent_message` and `agent_observe` namespaces | `ph_rlm/messaging.py`, `ph/seams/subagents.py` |
 
-**Still to come:** P3-12…P3-14 and P3-16…P3-25 — the `agent_message` /
-`agent_observe` namespaces and the family guard, the RLM prompt, the Continual
-Harness, the context loader, Python skills, the TUI code cell and subagent panel,
-the profile bundle, the two conformance gates, the fixture replay, and the
-trajectory view. P3-13's roster already exists as `subagent_roster()`; what it still
-needs is passivation.
+**Still to come:** P3-13, P3-14 and P3-16…P3-25 — passivation and rehydration, the RLM
+prompt, the Continual Harness, the context loader, Python skills, the TUI code
+cell and subagent panel, the profile bundle, the two conformance gates, the
+fixture replay, and the trajectory view. P3-13's roster already exists as
+`subagent_roster()`; what it still owes is passivation — today, addressing a
+settled child *fails* with the `agent_observe` route named, and P3-12's test says
+so explicitly rather than leaving it to be discovered.
+
+**P3-09's gate is met as of P3-12.** "SDK block lists the four namespaces" needed
+all four to exist: `tools` from Code Mode itself, then `rlm`, `agent_message` and
+`agent_observe` as claims by three separate rows. `test_bundle.py` asserts it
+against the shipped profile, and also that none of the governed tool names is
+offered a second time.
 
 ---
 
@@ -795,3 +803,85 @@ every `assistant/chunk` before discovering it was not a roster event.
   the counter-argument that the guard and the roster must not be able to disagree
   is why it is in the seam. Left as-is.
 * **`TokenUsage` validation** on the attributed payload, and inlining `_spawn`.
+
+---
+
+## P3-12: one boundary, two mechanisms
+
+The interesting decision was not the family rule — that was already written down
+as C7 — but **which pipeline mechanism each half of "messaging policy" gets**,
+and the answer turned out to be two different ones.
+
+### The family boundary is a guard; the rate limit deliberately is not
+
+The plan specifies both as policy: the boundary as a `ctx.tools.guard`, the rate
+limit as a `tools/pre-execute` listener "because a rate limit is a policy a
+deployment may tune while the family boundary is not". Implementing it exposed
+what that sentence costs under C3: **a `pre-execute` `Deny` ends the whole cell.**
+So a token bucket refusing the fourth message in a second would destroy the
+model's program — for backpressure, whose correct response is "wait and send
+again".
+
+So the two halves get opposite mechanisms:
+
+* **the boundary** is a guard — deny-only, runs last, and unre-permittable by any
+  later listener, so there is no ordering in which a permissive row lets a send
+  out of the family. A test mounts exactly such a row and confirms it cannot.
+* **the rate limit** raises `ToolCallError` from the tool body — the program's to
+  handle. The distinction is visible in `error.kind` (`denied` vs `failed`), which
+  is precisely what Code Mode's bridge branches on, so this is not a convention:
+  it is the same field that decides whether the cell survives.
+
+That asymmetry is the whole design, and it only became visible because C3 gives a
+denial teeth that prime-agent's comm-channel check never had.
+
+### `reachable_family` derives from `family_reach`
+
+`family_reach` shipped unused at P3-11 with the argument that the guard and the
+roster must not disagree. P3-12 is the consumer, and it needed *enumeration* (who
+may I address?) not just the predicate (may I address X?). Rather than write a
+second traversal, `reachable_family` calls the predicate for every candidate — and
+a test asserts the two agree for every pair in a five-agent family, which is the
+property the argument was actually about.
+
+An agent's id is its session's id, so the parent link is
+`SessionHeader.parent_session` and no side index is needed. Sessions are passed in
+rather than read from a store, so the rule answers on a resumed log with no live
+agents.
+
+### Two roots are siblings, which cost two tests to learn
+
+The rule makes root agents siblings of each other — deliberately, so two
+top-level agents in one deployment can talk. Two of my tests were written as if
+an unrelated root were out of reach; both had to move a generation down to a
+*grandchild* to test the boundary at all. Worth recording because the same
+mistake is available to anyone reading `family_reach` quickly.
+
+### Three tests were racing a child's completion
+
+A fake-adapter child settles inside the very `await` that a send to it needs, so
+"send to a sibling child" and "a replied child gets no notice" were both
+timing-dependent. The limit tests now use two root agents, which are deterministic
+because nothing disposes them; the reply-suppression claim split into the two
+facts it actually is — that a send *records* the reply (asserted in
+`test_messaging.py`, deterministic because the record survives settlement) and
+that the provider suppresses the notice (asserted in `test_subagents.py`, where
+`mark_replied` can be called before the child settles).
+
+The third failure was not a test bug: **a settled child cannot be steered**,
+because `_quiesce` disposed its agent. That is the correct behaviour today and the
+plan's answer is passivation/rehydration (P3-13), so the refusal names the
+`agent_observe` route that does work, and a test pins it as the current contract
+rather than a silent gap.
+
+### Fixed along the way
+
+* **`mark_replied` was keyed wrong.** `_children` is keyed by run id; a sender
+  knows its own *agent* id. It now looks up by `run.session_id` rather than
+  relying on how a child session id happens to be composed.
+* **`_release` raised during parent teardown.** `self.ctx.subagents.forget(...)`
+  reaches the service by attribute, and on the unwind path the provision is
+  already gone — `ServiceNotFoundError` inside a disposer, which aborts the rest
+  of the unwind. `ctx.get("subagents")` instead. Introduced by the previous
+  cleanup pass and caught by the first test that disposed a parent with a live
+  child.

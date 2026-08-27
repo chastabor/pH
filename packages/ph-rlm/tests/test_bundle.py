@@ -14,6 +14,7 @@ import yaml
 
 from ph.bundles import BASE, HEADLESS
 from ph.cordis import Context, Loader
+from ph.system_prompt.assembly import AssembleContext, render_prompt
 from ph.testing import FAKE_OPTIONS
 from ph.tools.definition import ToolExecutionInput
 from ph.tools.registry import RUN_CODE
@@ -155,6 +156,34 @@ async def test_a_cell_can_delegate_through_the_shipped_profile() -> None:
         admitted = [event for event in session.events if event.type == "subagent/admitted"]
         assert len(admitted) == 1
         assert admitted[0].data["grantedAccess"] == "read"
+    finally:
+        await ctx.drain()
+        await ctx.dispose()
+
+
+async def test_the_shipped_sdk_block_lists_the_four_namespaces() -> None:
+    """P3-09's gate, satisfiable only now that P3-10's four namespaces exist.
+
+    `tools` is Code Mode's own; `rlm`, `agent_message` and `agent_observe` are
+    claims by three separate rows. The block is generated from the same factories
+    the run asks, so this is also the assertion that a cell can reach every one of
+    them.
+    """
+    ctx = Context()
+    try:
+        await Loader.from_documents(_documents()).mount(ctx)
+        session = ctx.sessions.create("bundle-sdk")
+        agent = ctx.agents.create(session, FAKE_OPTIONS)
+        assembly = await ctx.system_prompt.assemble(AssembleContext(scope=agent.ctx, agent=agent))
+        text = render_prompt(assembly)
+
+        assert "tools.read" in text or "tools.write" in text
+        assert "rlm.run" in text
+        assert "agent_message.send" in text
+        assert "agent_observe.get" in text
+        # And the governed tool names are not offered a second time.
+        for tool in ("tools.rlm_run", "tools.agent_message_send", "tools.agent_observe_get"):
+            assert tool not in text, f"{tool} is offered twice"
     finally:
         await ctx.drain()
         await ctx.dispose()
