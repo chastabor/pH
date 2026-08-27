@@ -13,6 +13,7 @@ from collections.abc import Callable
 from typing import Any
 
 import pytest
+from conftest import MESSAGING_ROW, PROVIDER_ROW
 
 from ph.seams.subagents import SubagentRequest, family_reach, reachable_family
 from ph.testing import FAKE_OPTIONS, run_tool
@@ -29,10 +30,7 @@ pytestmark = pytest.mark.anyio
 
 Mounted = Callable[..., Any]
 
-ROWS: list[dict[str, Any]] = [
-    {"id": "rlm-subagent-provider", "name": "rlm-subagent-provider"},
-    {"id": "rlm-messaging", "name": "rlm-messaging"},
-]
+ROWS: list[dict[str, Any]] = [PROVIDER_ROW, MESSAGING_ROW]
 
 
 @pytest.fixture
@@ -165,13 +163,12 @@ async def test_siblings_reach_each_other(family_ctx: Mounted) -> None:
     assert ok.value["receiverRole"] == "sibling"
 
 
-async def test_a_settled_child_cannot_be_steered_yet(family_ctx: Mounted) -> None:
-    """Today's honest answer, and the shape of what P3-13 owes.
+async def test_addressing_a_settled_child_wakes_it(family_ctx: Mounted) -> None:
+    """P3-13: a completed child stays addressable, and a send is the trigger.
 
-    Prime Agent retains completed children as addressable and rehydrates a
-    passive one on `send`. Passivation is P3-13; until then a settled child has
-    no live inbox, so the refusal names the route that *does* work rather than
-    pretending the message was delivered.
+    Settlement releases the agent — which is what holds an inbox — but the
+    session, the log and the roster row all survive it. So addressing the child
+    rehydrates it rather than telling the sender to go read a transcript.
     """
     ctx, session, parent = await family_ctx()
     run = await _spawn(ctx, parent, "scout")
@@ -181,10 +178,52 @@ async def test_a_settled_child_cannot_be_steered_yet(family_ctx: Mounted) -> Non
     result = await _send(
         ctx, parent, session, message="are you there", receiver_role="child", receiver_name="scout"
     )
+    assert result.is_error is False
+    assert result.value["receiverId"] == run.session_id
+    # Checked before draining: the woken child settles again once its job runs.
+    assert ctx.agents.get(run.session_id) is not None, "the child was not woken"
+
+    await ctx.drain()
+    # The roster says it was *woken*, distinctly from a child still on its first
+    # task, so a parent reading the roster can tell the two apart.
+    statuses = [
+        event.data["status"]
+        for event in session.events
+        if event.type == "subagent/status" and event.data["runId"] == run.id
+    ]
+    assert statuses == ["running", "done", "running", "done"]
+    # `running` with a *cause*, not a `rehydrated` status: the roster folds
+    # status last-write-wins, so a woken child that is working must still read as
+    # running to anything that branches on it.
+    causes = [
+        event.data.get("cause")
+        for event in session.events
+        if event.type == "subagent/status" and event.data["runId"] == run.id
+    ]
+    assert causes == [None, None, "rehydrated", None]
+
+
+async def test_a_revoked_child_is_not_quietly_revived(family_ctx: Mounted) -> None:
+    """The tombstone is the parent's record that it revoked the child; waking one
+    behind that record would make the record false."""
+    ctx, session, parent = await family_ctx()
+    run = await _spawn(ctx, parent, "scout")
+    await ctx.drain()
+    assert await ctx.rlm_children.delete(session, run.id, reason="user") is True
+
+    # Both doors: the service refuses because `forget()` dropped the run, and the
+    # provider refuses because `_release` dropped the child.
+    assert await ctx.subagents.rehydrate(run.id) is False
+    assert await ctx.rlm_children.rehydrate(run.id) is False
+
+    result = await _send(
+        ctx, parent, session, message="come back", receiver_role="child", receiver_name="scout"
+    )
     assert result.is_error is True
-    assert result.error.kind == "failed", "not running is not a policy refusal"
-    assert "is not running" in result.error.message
+    assert result.error.kind == "failed", "not addressable is not a policy refusal"
+    assert "could not be woken" in result.error.message
     assert "agent_observe" in result.error.message
+    assert ctx.agents.get(run.session_id) is None
 
 
 async def test_a_send_outside_the_family_is_refused_by_a_guard(family_ctx: Mounted) -> None:

@@ -48,6 +48,13 @@ CODE_MODE_ROWS: list[dict[str, Any]] = [
 SNAPSHOT_ROW: dict[str, Any] = {"id": "rlm-kernel-snapshot", "name": "rlm-kernel-snapshot"}
 
 PRESENTATION_ROW: dict[str, Any] = {"id": "rlm-presentation", "name": "rlm-presentation"}
+
+PROVIDER_ROW: dict[str, Any] = {"id": "rlm-subagent-provider", "name": "rlm-subagent-provider"}
+BINDINGS_ROW: dict[str, Any] = {"id": "rlm-bindings", "name": "rlm-bindings"}
+MESSAGING_ROW: dict[str, Any] = {"id": "rlm-messaging", "name": "rlm-messaging"}
+DOCTRINE_ROW: dict[str, Any] = {"id": "rlm-prompt", "name": "rlm-prompt"}
+"""The delegation rows, here rather than re-spelled in four test modules — a row
+set that drifts between them tests different things while appearing to test one."""
 """The model-facing rename. Off unless a test asks for it, because most tests
 here address the transport by its reserved name."""
 

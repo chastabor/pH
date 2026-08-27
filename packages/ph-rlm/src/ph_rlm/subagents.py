@@ -44,7 +44,7 @@ from typing import Any
 
 import anyio
 
-from ph.agent.types import AgentCancelCause
+from ph.agent.types import AgentCancelCause, AgentOptions
 from ph.cordis import Context, Disposer, plugin
 from ph.llm.adapter import LlmError
 from ph.llm.types import CONTEXT_SUMMARY_MAX_CHARS, PluginSource, create_user_message, text_of
@@ -55,13 +55,13 @@ from ph.seams.subagents import (
     USAGE,
     Access,
     DowngradeReason,
+    StatusCause,
     SubagentRequest,
     SubagentResult,
     SubagentRun,
     SubagentSpawnError,
     SubagentStatus,
     default_child_name,
-    subagent_roster,
 )
 from ph.session import Session, derive_event_message
 from ph.session.json import thaw_json
@@ -116,13 +116,20 @@ def delegation_depth(session: Session) -> int:
 class _Child:
     """The live half of one delegation: what a fold cannot reconstruct.
 
-    Everything heavy is released at settlement — the agent scope (and with it the
-    child's kernel subprocess), the session observer, the session handle. What
-    survives is `run` and `result`, which is all a late `result()` needs.
+    Settlement releases what a *finished* child does not need — its agent scope
+    (and with it the kernel subprocess), the session observer, the session
+    handle. What it keeps is what a late `result()` or a rehydration needs: the
+    run, the outcome, the parent's log and the options to rebuild the agent with.
     """
 
     run: SubagentRun
     finished: anyio.Event
+    parent_session: Session
+    """The log the child reports to — the single source for every append about
+    this child, so a rehydration and a tombstone cannot land in different logs."""
+    options: AgentOptions
+    """The child's resolved options, because at rehydration time the parent agent
+    may be gone and `reasoning_effort` survives nowhere else."""
     agent: Any = None
     session: Session | None = None
     unobserve: Disposer | None = None
@@ -143,6 +150,15 @@ class RlmChildProvider:
     config: Config
     _children: dict[str, _Child] = field(default_factory=dict)
 
+    @property
+    def depth_limit(self) -> int:
+        """How deep delegation may go. Read by `rlm-prompt`, enforced here.
+
+        Exposed rather than letting the prompt reach into `self.config`, so the
+        limit the model is told and the limit `start()` applies are one value.
+        """
+        return self.config.max_depth
+
     # ------------------------------------------------------------ admission --
 
     async def start(self, request: SubagentRequest) -> SubagentRun:
@@ -150,19 +166,19 @@ class RlmChildProvider:
         parent = request.parent
         parent_session: Session = parent.session
         depth = delegation_depth(parent_session)
-        if depth >= self.config.max_depth:
+        if depth >= self.depth_limit:
             # Prime Agent's wording; a model that has seen this text before
             # should not have to re-learn what it means.
             raise SubagentSpawnError(
                 f"RLM recursion depth limit reached (RLM_DEPTH={depth}, "
-                f"RLM_MAX_DEPTH={self.config.max_depth})"
+                f"RLM_MAX_DEPTH={self.depth_limit})"
             )
         prompt = request.prompt.strip()
         if not prompt:
             raise SubagentSpawnError("a subagent needs a prompt describing its task")
 
         run_id = f"child-{secrets.token_hex(6)}"
-        taken = [str(row.get("name")) for row in subagent_roster(parent_session).values()]
+        taken = [str(row.get("name")) for row in self.ctx.subagents.roster(parent_session).values()]
         name = self._resolve_name(request.name, prompt, run_id, taken)
         provider_name, model, effort = self._resolve_model(request, parent)
 
@@ -186,13 +202,11 @@ class RlmChildProvider:
         # can fail — no driver, no route, options the driver rejects — cannot
         # leave a phantom child in an append-only roster. It does not *run* yet,
         # so the ordering the log cares about still holds.
+        options = replace(
+            parent.options, provider=provider_name, model=model, reasoning_effort=effort
+        )
         try:
-            child_agent = self.ctx.agents.create(
-                child_session,
-                replace(
-                    parent.options, provider=provider_name, model=model, reasoning_effort=effort
-                ),
-            )
+            child_agent = self.ctx.agents.create(child_session, options)
         except Exception as error:
             self.ctx.sessions.dispose(child_session.id)
             raise SubagentSpawnError(f"the child agent could not be created: {error}") from error
@@ -202,13 +216,20 @@ class RlmChildProvider:
             name=name,
             session_id=child_session.id,
             parent_id=parent.id,
-            provider_name=provider_name,
+            model_provider=provider_name,
             model=model,
             requested_access=request.access,
             granted_access=granted,
             downgrade_reason=downgrade,
         )
-        child = _Child(run=run, finished=anyio.Event(), agent=child_agent, session=child_session)
+        child = _Child(
+            run=run,
+            finished=anyio.Event(),
+            parent_session=parent_session,
+            options=options,
+            agent=child_agent,
+            session=child_session,
+        )
         self._children[run_id] = child
         run.result = self._awaiter(child)
 
@@ -222,22 +243,13 @@ class RlmChildProvider:
             lambda: partial(self._release, parent_session, run_id, "parent-teardown"),
             label=f"subagent:{run_id}",
         )
-
-        child.unobserve = child_session.observe(self._mirror(parent_session, run_id))
         child_agent.followup(
             create_user_message(
                 content=[{"type": "text", "text": f"{TASK_PREFIX}\n\n{prompt}"}],
                 source=PluginSource(plugin="ph_rlm.subagents", form="relay"),
             )
         )
-        # `ctx.jobs`, which detaches rather than running inline: the job gives the
-        # run an id, a cancel and `job/*` events for free, and a subagent is the
-        # seam's own example of work that outlives the step that started it.
-        await self.ctx.jobs.start(
-            kind="subagent",
-            label=f"{name} ({run_id})",
-            run=lambda _job: self._drive(parent_session, child),
-        )
+        await self._attach(child)
         return run
 
     def _resolve_name(
@@ -284,6 +296,56 @@ class RlmChildProvider:
 
     # ------------------------------------------------------------- lifecycle --
 
+    async def _attach(self, child: _Child, *, cause: StatusCause | None = None) -> None:
+        """Wire a live child to its parent and start driving it.
+
+        One path for a fresh admission and for a rehydration, so the two cannot
+        attach different things: the usage mirror, the job, and the `cause` the
+        roster shows beside `running`.
+        """
+        assert child.session is not None
+        child.unobserve = child.session.observe(self._mirror(child))
+        # `ctx.jobs`, which detaches rather than running inline: the job gives the
+        # run an id, a cancel and `job/*` events for free, and a subagent is the
+        # seam's own example of work that outlives the step that started it.
+        await self.ctx.jobs.start(
+            kind="subagent",
+            label=f"{child.run.name} ({child.run.id})",
+            run=lambda _job: self._drive(child, cause=cause),
+        )
+
+    async def rehydrate(self, run_id: str) -> bool:
+        """Give a settled child a runtime again so it can be addressed (P3-13).
+
+        The child's session, log and roster row all survived settlement — what
+        `_quiesce` released was the agent, which is what holds an inbox. So
+        rehydration re-creates the agent against the same session and drives it
+        again; the `Inbox` rebuilds itself from `agent/inbox/spliced` in that log,
+        so anything queued before it settled is still there.
+
+        A *deleted* child is not rehydrated: the tombstone is the parent's record
+        that it revoked the child, and quietly reviving it would make that record
+        false. Passivation across a restart — where the session itself is gone
+        and has to come off disk — is the daemon's (Phase 5).
+        """
+        child = self._children.get(run_id)
+        if child is None or child.agent is not None:
+            # Unknown or already running. A *revoked* child never reaches here:
+            # `_release` both pops `_children` and calls `forget()`, so the
+            # service's own lookup refuses it first.
+            return False
+        session = self.ctx.sessions.get(child.run.session_id)
+        if session is None:
+            log.debug("ph_rlm.subagents: %s has no live session to rehydrate", run_id)
+            return False
+        child.session = session
+        child.agent = self.ctx.agents.create(session, child.options)
+        # A fresh gate, which the awaiter already on the run reads at await time —
+        # its closure holds the `_Child`, not the old Event.
+        child.finished = anyio.Event()
+        await self._attach(child, cause="rehydrated")
+        return True
+
     def _awaiter(self, child: _Child) -> Any:
         async def wait() -> SubagentResult:
             await child.finished.wait()
@@ -291,8 +353,9 @@ class RlmChildProvider:
 
         return wait
 
-    def _mirror(self, parent_session: Session, run_id: str) -> Any:
+    def _mirror(self, child: _Child) -> Any:
         """Attribute the child's usage to the parent as it is produced."""
+        parent_session, run_id = child.parent_session, child.run.id
 
         def observer(_source: Session, event: Any) -> None:
             if event.type != "assistant/message":
@@ -316,26 +379,26 @@ class RlmChildProvider:
 
         return observer
 
-    def _status(
-        self, parent_session: Session, child: _Child, status: SubagentStatus, **extra: Any
-    ) -> None:
-        # Only the event. A copy on the handle would be a second source of truth
-        # for a fact the roster folds, frozen at the last in-process update.
-        parent_session.append(STATUS, {"runId": child.run.id, "status": status, **extra})
+    def _status(self, child: _Child, status: SubagentStatus, **extra: Any) -> None:
+        # Only the event, and only from the child's own parent log. A copy on the
+        # handle would be a second source of truth for a fact the roster folds,
+        # frozen at the last in-process update.
+        child.parent_session.append(STATUS, {"runId": child.run.id, "status": status, **extra})
 
-    async def _drive(self, parent_session: Session, child: _Child) -> None:
+    async def _drive(self, child: _Child, *, cause: StatusCause | None) -> None:
         """Run the child to quiescence, tell the parent, then let it go."""
         run = child.run
+        parent_session = child.parent_session
         try:
-            self._status(parent_session, child, "running")
+            # `running` either way; `cause` says *why* it is running, because the
+            # roster folds status last-write-wins and a woken child that is
+            # working must not read as not-running.
+            self._status(child, "running", **({"cause": cause} if cause else {}))
             await child.agent.run()
             answer = _last_assistant_text(child.session)
             child.result = SubagentResult(status="done", answer=answer)
             self._status(
-                parent_session,
-                child,
-                "done",
-                answerPreview=answer[: self.config.answer_preview_chars] or None,
+                child, "done", answerPreview=answer[: self.config.answer_preview_chars] or None
             )
             # Silence is indistinguishable from a hang from the parent's side,
             # so a child that never sent a message is announced. A child that
@@ -350,7 +413,7 @@ class RlmChildProvider:
         except Exception as error:
             message = f"{type(error).__name__}: {error}"
             child.result = SubagentResult(status="error", error=message)
-            self._status(parent_session, child, "error", detail=message)
+            self._status(child, "error", detail=message)
             self._inject(
                 parent_session,
                 f"[rlm child {run.name} ({run.id}) failed: {message}]",
@@ -437,7 +500,7 @@ class RlmChildProvider:
             child.agent.cancel(AgentCancelCause(kind="parent"))
         # A terminal state for the roster: a revoked child is not merely absent,
         # and a panel that knew only `deleted` could not say whether it had run.
-        self._status(parent_session, child, "cancelled", reason=reason)
+        self._status(child, "cancelled", reason=reason)
         child.finished.set()
         await self._quiesce(child)
         # `get`, not attribute access: on the parent-teardown path this runs while

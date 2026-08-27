@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, TypeAlias
 
 from ..cordis import Context, Disposer, events, maybe_await, plugin
@@ -41,8 +41,15 @@ __all__ = [
 
 _VARIABLE = re.compile(r"\{\{\s*([A-Za-z_][A-Za-z0-9_.-]*)\s*\}\}")
 
-PromptText: TypeAlias = "str | Callable[[Context], str | Awaitable[str]]"
-"""A section's body: literal text, or a provider given the target scope.
+PromptText: TypeAlias = "str | Callable[[AssembleContext], str | Awaitable[str]]"
+"""A section's body: literal text, or a provider given the whole request.
+
+The **request**, not just the scope: a section that needs the agent — the RLM
+child doctrine, which applies only below depth 0 — would otherwise have to
+recover it from `scope.get("agent")`, which means a bundle in another package
+knowing how `ph.agent.registry` provisions it, and silently rendering nothing
+whenever an assembly runs outside an agent scope. `AssembleContext` already
+carries both; handing it over costs one parameter.
 
 The provider may be async. `assemble` is already a coroutine, and a section that
 has to ask a seam a question — Code Mode listing the namespaces a program can
@@ -182,26 +189,44 @@ class SystemPromptService:
         """Collect, order, interpolate, then run the assemble waterfall."""
         request = request or AssembleContext()
         target = request.scope or self.ctx
+        # The request a provider is handed always names the scope being
+        # assembled, even when the caller left it implicit — so no provider has
+        # to repeat the `request.scope or ctx` fallback.
+        scoped = request if request.scope is target else replace(request, scope=target)
 
         variables: dict[str, str] = {}
         for name, provider in self._visible(self._variables, target):
             variables[name] = provider()
 
         async def resolve(text: PromptText) -> str:
-            raw = await maybe_await(text(target)) if callable(text) else text
+            raw = await maybe_await(text(scoped)) if callable(text) else text
             return _VARIABLE.sub(lambda m: variables.get(m.group(1), m.group(0)), raw)
 
         sections = sorted(self._visible(self._sections, target), key=lambda s: (s.order, s.name))
         complete = next((s for s in sections if s.complete), None)
+        # Empty means absent, decided here rather than in each renderer: a
+        # section opts out per-assembly by returning "" — the only mechanism that
+        # can answer a per-agent question, since a row registers once — and a
+        # consumer enumerating section names should not see the ones that did.
         rendered: tuple[tuple[str, str], ...]
         if complete is not None:
             rendered = ((complete.name, await resolve(complete.text)),)
         else:
-            rendered = tuple([(s.name, await resolve(s.text)) for s in sections])
+            rendered = tuple(
+                [
+                    (section.name, body)
+                    for section in sections
+                    if (body := await resolve(section.text)).strip()
+                ]
+            )
 
         contexts = sorted(self._visible(self._contexts, target), key=lambda c: (c.order, c.name))
         materialized = tuple(
-            [ContextSnapshotSection(name=c.name, text=await resolve(c.text)) for c in contexts]
+            [
+                ContextSnapshotSection(name=context.name, text=body)
+                for context in contexts
+                if (body := await resolve(context.text)).strip()
+            ]
         )
 
         schemas: list[ToolSchema] = []

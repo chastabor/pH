@@ -17,6 +17,7 @@ rlm-kernel-snapshot = "ph_rlm.snapshot:apply"
 rlm-presentation = "ph_rlm.presentation:apply"
 rlm-bindings = "ph_rlm.bindings:apply"
 rlm-messaging = "ph_rlm.messaging:apply"
+rlm-prompt = "ph_rlm.prompt:apply"
 rlm-subagent-provider = "ph_rlm.subagents:apply"
 
 [tool.uv.sources]

@@ -12,6 +12,7 @@ from collections.abc import Callable
 from typing import Any
 
 import pytest
+from conftest import BINDINGS_ROW, PROVIDER_ROW
 from runtime_helpers import run_cell
 
 from ph.system_prompt.assembly import AssembleContext, render_prompt
@@ -33,11 +34,7 @@ def delegating_runtime(mounted_runtime: Mounted) -> Callable[..., Any]:
         return await mounted_runtime(
             session_id="parent",
             presentation=True,
-            extra_rows=[
-                {"id": "rlm-subagent-provider", "name": "rlm-subagent-provider"},
-                {"id": "rlm-bindings", "name": "rlm-bindings"},
-                *kwargs.pop("extra_rows", []),
-            ],
+            extra_rows=[PROVIDER_ROW, BINDINGS_ROW, *kwargs.pop("extra_rows", [])],
             **kwargs,
         )
 

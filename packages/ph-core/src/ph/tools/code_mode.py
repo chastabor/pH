@@ -330,7 +330,8 @@ async def apply(ctx: Context, config: Config) -> None:
         )
     )
 
-    async def sdk_section(scope: Context) -> str:
+    async def sdk_section(request: Any) -> str:
+        scope: Context = request.scope
         runtime = ctx.code_runtime.provider
         if runtime is None:
             return ""

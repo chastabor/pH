@@ -41,7 +41,7 @@ import anyio
 from ph.cordis import Context, plugin
 from ph.llm.types import PluginSource, create_user_message, new_message_id, text_of
 from ph.seams.code_runtime import CodeBindingNamespace
-from ph.seams.subagents import FamilyRole, reachable_family, subagent_roster
+from ph.seams.subagents import FamilyRole, reachable_family
 from ph.session import Session, derive_event_message
 from ph.tools import ToolModel, ToolOutput, define_tool, text_content
 from ph.tools.code_mode import CodeBindingsRequest, ToolCallError, governed_binding
@@ -274,9 +274,17 @@ async def apply(ctx: Context, config: Config) -> None:
 
         target = ctx.agents.get(target_id)
         if target is None:
+            # A settled child kept its session, its log and its roster row; what
+            # it lost was the agent that holds an inbox. Waking it is the seam's
+            # job (P3-13), and addressing one is exactly the trigger the plan
+            # names — so a send to a finished child works rather than telling the
+            # sender to go read a transcript.
+            await ctx.subagents.ensure_addressable(target_id)
+            target = ctx.agents.get(target_id)
+        if target is None:
             raise ToolCallError(
                 SEND_TOOL,
-                f"{target_id} is not running, so it cannot be steered; its transcript is "
+                f"{target_id} is not running and could not be woken; its transcript is "
                 "still readable with agent_observe.get()",
             )
         pending = len(target.inbox.next_turn) + len(target.inbox.next_step)
@@ -459,20 +467,11 @@ def _named(ctx: Context, agent_id: str, wanted: str) -> bool:
 def _display(ctx: Context, agent_id: str) -> str:
     """The roster name of an agent, or its id when nobody named it.
 
-    Read from the *parent's* roster fold, because the name is a fact the parent
-    recorded at admission — the child's own log never carries it.
+    One line, because the lookup lives in the seam that owns the fold: the prompt
+    needs the same answer, and two copies is how a prompt names one agent while a
+    send delivers to another.
     """
-    session = ctx.sessions.get(agent_id)
-    if session is None:
-        return agent_id
-    parent_id = session.header.parent_session
-    parent = ctx.sessions.get(parent_id) if parent_id else None
-    if parent is None:
-        return agent_id
-    for row in subagent_roster(parent).values():
-        if row.get("sessionId") == agent_id:
-            return str(row.get("name") or agent_id)
-    return agent_id
+    return str(ctx.subagents.name_of(ctx.sessions.list(), agent_id))
 
 
 def _transcript(session: Session, limit: int) -> list[dict[str, Any]]:

@@ -41,7 +41,6 @@ from ph.seams.subagents import (
     SubagentRequest,
     SubagentSpawnError,
     downgrade_text,
-    subagent_roster,
 )
 from ph.tools import ToolModel, ToolOutput, define_tool, text_content
 from ph.tools.code_mode import CodeBindingsRequest, ToolCallError, governed_binding
@@ -152,7 +151,7 @@ async def apply(ctx: Context, config: Config) -> None:
     def list_children(_args: Any, run: Any) -> Any:
         """The roster, folded from the parent's own log — never a side table."""
         session = run.session
-        rows = list(subagent_roster(session).values()) if session is not None else []
+        rows = list(ctx.subagents.roster(session).values()) if session is not None else []
         return {"children": rows}
 
     async def delete_child(args: DeleteArgs, run: Any) -> Any:

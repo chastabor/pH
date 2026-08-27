@@ -78,6 +78,13 @@
     rateCapacity: 3
     rateRefillSeconds: 1.0
 
+# The doctrine (P3-14). Sections after `tools:sdk`, because they refer to the
+# surface it has just described — and the volatile facts (depth, cwd, family,
+# workspace tier) are a `context()` snapshot rather than a cached section, or
+# every turn that changed one would re-bill the whole prefix (A12).
+- id: rlm-prompt
+  name: rlm-prompt
+
 # The row that makes `persistence: namespace` true rather than declared (D17).
 # Mounted with the runtime, not optionally: the seam takes the provider's promise
 # at registration, and these events are the promise being kept.

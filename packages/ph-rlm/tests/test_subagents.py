@@ -27,7 +27,7 @@ pytestmark = pytest.mark.anyio
 
 Mounted = Callable[..., Any]
 
-PROVIDER_ROW: dict[str, Any] = {"id": "rlm-subagent-provider", "name": "rlm-subagent-provider"}
+from conftest import PROVIDER_ROW  # noqa: E402 - a fixture row, not a symbol
 
 
 @pytest.fixture

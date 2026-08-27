@@ -43,6 +43,8 @@ __all__ = [
     "USAGE",
     "Access",
     "FamilyRole",
+    "RehydratableProvider",
+    "StatusCause",
     "SubagentProvider",
     "SubagentRequest",
     "SubagentResult",
@@ -55,6 +57,7 @@ __all__ = [
     "downgrade_text",
     "family_reach",
     "reachable_family",
+    "roster_name",
     "subagent_roster",
 ]
 
@@ -73,7 +76,16 @@ Access: TypeAlias = Literal["read", "write"]
 """What a child asks of the parent's workspace. `read` is the default (E4)."""
 
 SubagentStatus: TypeAlias = Literal["queued", "running", "done", "error", "cancelled"]
-"""A child's lifecycle, as the parent's roster and the TUI panel see it."""
+"""A child's lifecycle, as the parent's roster and the TUI panel see it.
+
+Lifecycle only. *Why* a child is live — woken to answer a question rather than
+still on its first task — is a separate `cause` on the same record, because the
+roster folds status last-write-wins: a `rehydrated` member would have meant a
+woken child that is actively working reads as not-running to every consumer that
+branches on `"running"`."""
+
+StatusCause: TypeAlias = Literal["rehydrated"]
+"""Why a child entered its current status, when it is not simply "it started"."""
 
 DowngradeReason: TypeAlias = Literal["workspace-not-mounted"]
 """Why a granted access is narrower than the one requested."""
@@ -155,10 +167,21 @@ class SubagentRun:
     name: str
     session_id: str
     parent_id: str
-    provider_name: str
+    model_provider: str
+    """Which LLM provider the child runs on. Named for what it is, because the
+    *subagent* provider is a different thing on the same handle and one field
+    called `provider` for both is how `rehydrate` looked up the wrong one."""
     model: str
     requested_access: Access
     granted_access: Access
+    owner: str = ""
+    """Which `ctx.subagents` provider owns this run, stamped by the service.
+
+    Not `provider` — `SubagentRequest.provider` is the *LLM* provider, and one
+    word for both is how `rehydrate` looked up the wrong one. Not on the wire
+    either: the provider appends the admission from inside its own `start()`,
+    before the service could stamp this, so a serialized copy would read `""` in
+    every log. It is a routing stamp, not a fact about the child."""
     downgrade_reason: DowngradeReason | None = None
     """Why `granted` is narrower than `requested`, as a code rather than prose.
 
@@ -185,7 +208,7 @@ class SubagentRun:
             "name": self.name,
             "sessionId": self.session_id,
             "parentId": self.parent_id,
-            "provider": self.provider_name,
+            "modelProvider": self.model_provider,
             "model": self.model,
             "requestedAccess": self.requested_access,
             "grantedAccess": self.granted_access,
@@ -193,6 +216,20 @@ class SubagentRun:
         if self.downgrade_reason is not None:
             wire["downgradeReason"] = self.downgrade_reason
         return wire
+
+
+@runtime_checkable
+class RehydratableProvider(Protocol):
+    """A provider whose settled children can be given a runtime again (P3-13).
+
+    A second Protocol rather than a method on `SubagentProvider`, because not
+    every way of running a child can resume one — and rather than a `getattr`
+    probe, because a provider whose method is misnamed or has the wrong arity
+    would then fail silently as "cannot rehydrate", which is the failure mode
+    that already cost this package a day.
+    """
+
+    async def rehydrate(self, run_id: str) -> bool: ...
 
 
 @runtime_checkable
@@ -220,6 +257,13 @@ class SubagentService:
     ctx: Context
     _providers: dict[str, SubagentProvider] = field(default_factory=dict)
     _runs: dict[str, SubagentRun] = field(default_factory=dict)
+    _rosters: dict[str, tuple[int, dict[str, dict[str, Any]]]] = field(default_factory=dict)
+    """One cached roster fold per session, keyed by the log length it was folded
+    at. The prompt, the model's roster tool and every name lookup ask for the
+    same fold several times per model step; `session.seq` is an exact
+    invalidation key because the log is append-only (A1). One entry per session,
+    replaced rather than accumulated, so this is bounded by live sessions and not
+    by history."""
 
     def register_provider(
         self, name: str, provider: SubagentProvider, *, scope: Context | None = None
@@ -244,8 +288,32 @@ class SubagentService:
     async def start(self, name: str, request: SubagentRequest) -> SubagentRun:
         """Admit a child and return its handle. Does not wait for an answer."""
         run = await self.require(name).start(request)
+        # Stamped here rather than trusted from the provider: the service is what
+        # knows which name the caller asked for, and `rehydrate` has to be able
+        # to find its way back to the same provider.
+        run.owner = name
         self._runs[run.id] = run
         return run
+
+    def roster(self, session: Session) -> dict[str, dict[str, Any]]:
+        """`subagent_roster(session)`, folded at most once per appended event.
+
+        The read every consumer should use when it has a `ctx`: the fold is
+        O(log) and the prompt alone asks for it several times per model step.
+        """
+        cached = self._rosters.get(session.id)
+        if cached is not None and cached[0] == session.seq:
+            return cached[1]
+        roster = subagent_roster(session)
+        self._rosters[session.id] = (session.seq, roster)
+        return roster
+
+    def name_of(self, sessions: Iterable[Session], agent_id: str) -> str:
+        """`roster_name`, through the cached fold."""
+        by_id = {session.id: session for session in sessions}
+        session = by_id.get(agent_id)
+        parent = by_id.get(session.header.parent_session or "") if session else None
+        return _name_in(self.roster(parent), agent_id) if parent is not None else agent_id
 
     def get(self, run_id: str) -> SubagentRun | None:
         return self._runs.get(run_id)
@@ -256,6 +324,36 @@ class SubagentService:
         if parent_id is None:
             return runs
         return [run for run in runs if run.parent_id == parent_id]
+
+    async def ensure_addressable(self, session_id: str) -> bool:
+        """Make the agent behind `session_id` reachable, waking it if it settled.
+
+        The one place the session-id → run → provider → wake path is stated. A
+        caller that wants to address an agent asks this rather than composing the
+        three hops itself, which is how the second caller forgets the
+        revoked-child refusal.
+        """
+        if self.ctx.agents.get(session_id) is not None:
+            return True
+        run = next((one for one in self._runs.values() if one.session_id == session_id), None)
+        return bool(run is not None and await self.rehydrate(run.id))
+
+    async def rehydrate(self, run_id: str) -> bool:
+        """Make a settled child addressable again (P3-13).
+
+        A child that finished had its agent released, so it has no inbox to steer
+        into — but its session, its log and its roster row are all still there.
+        Rehydration is the provider re-attaching a runtime to that state; a
+        provider that cannot do it says so by not implementing the method, and
+        the caller gets `False` rather than an exception it has to interpret.
+        """
+        run = self._runs.get(run_id)
+        if run is None:
+            return False
+        provider = self._providers.get(run.owner)
+        if not isinstance(provider, RehydratableProvider):
+            return False
+        return bool(await provider.rehydrate(run_id))
 
     def forget(self, run_id: str) -> SubagentRun | None:
         """Drop a run from the live table. The log keeps the tombstone."""
@@ -291,7 +389,10 @@ def subagent_roster(session: Session) -> dict[str, dict[str, Any]]:
             continue
         run_id = str(event.data.get("runId"))
         if event.type == ADMITTED:
-            roster[run_id] = dict(event.data)
+            # `queued` by default: `to_wire()` deliberately omits status, and the
+            # first `subagent/status` comes from a detached job — so without this
+            # a reader between the two sees a child with no status at all.
+            roster[run_id] = {"status": "queued", **event.data}
             continue
         row = roster.get(run_id)
         if row is None:
@@ -339,6 +440,32 @@ def reachable_family(sessions: Iterable[Session], agent_id: str) -> dict[str, Fa
         else:
             reach[other] = "sibling"
     return reach
+
+
+def roster_name(sessions: Iterable[Session], agent_id: str) -> str:
+    """What an agent is called, or its id when nobody named it.
+
+    The name is a fact the *parent* recorded at admission, so it is only knowable
+    from the parent's roster fold — which is why it lives beside that fold rather
+    than in whichever module needed it first. Two modules and the P3-19 panel
+    need it, and two copies of one lookup is how a prompt names one agent while a
+    send delivers to another. Prefer `SubagentService.name_of`, which folds
+    through the cache; this is for a reader holding stored sessions and no `ctx`.
+    """
+    by_id = {session.id: session for session in sessions}
+    session = by_id.get(agent_id)
+    parent = by_id.get(session.header.parent_session or "") if session else None
+    if parent is None:
+        return agent_id
+    return _name_in(subagent_roster(parent), agent_id)
+
+
+def _name_in(roster: dict[str, dict[str, Any]], agent_id: str) -> str:
+    """The name a folded roster gives one session, or the id."""
+    for row in roster.values():
+        if row.get("sessionId") == agent_id:
+            return str(row.get("name") or agent_id)
+    return agent_id
 
 
 def family_reach(

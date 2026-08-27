@@ -34,14 +34,14 @@ construction: the only guest→host channel is a `call` frame.
 | P3-10 | The extension point, then the `rlm` namespace over it | `ph/tools/{code_mode,registry}.py`, `ph_rlm/bindings.py` |
 | P3-11 | The `ctx.subagents` seam **and** the `rlm-child` provider: non-blocking admission, depth gate, status mirroring, usage attribution, terminal notices, tombstones | `ph/seams/subagents.py`, `ph_rlm/subagents.py` |
 | P3-12 | `rlm-messaging`: the family guard, steer delivery, the `agent_message` and `agent_observe` namespaces | `ph_rlm/messaging.py`, `ph/seams/subagents.py` |
+| P3-13 | Rehydration on address: a settled child is woken by a send | `ph/seams/subagents.py`, `ph_rlm/subagents.py` |
+| P3-14 | `rlm-prompt`: doctrine, child doctrine, conditional delegation section, volatile facts as a `context()` | `ph_rlm/prompt.py` |
 
-**Still to come:** P3-13, P3-14 and P3-16…P3-25 — passivation and rehydration, the RLM
-prompt, the Continual Harness, the context loader, Python skills, the TUI code
+**Still to come:** P3-16…P3-25 — the Continual Harness, the context loader, Python skills, the TUI code
 cell and subagent panel, the profile bundle, the two conformance gates, the
-fixture replay, and the trajectory view. P3-13's roster already exists as
-`subagent_roster()`; what it still owes is passivation — today, addressing a
-settled child *fails* with the `agent_observe` route named, and P3-12's test says
-so explicitly rather than leaving it to be discovered.
+fixture replay, and the trajectory view. P3-13's remaining half — passivation
+across a *restart*, where the child's session is gone and has to come off disk —
+is the daemon's (Phase 5); the in-process half landed here.
 
 **P3-09's gate is met as of P3-12.** "SDK block lists the four namespaces" needed
 all four to exist: `tools` from Code Mode itself, then `rlm`, `agent_message` and
@@ -885,3 +885,203 @@ rather than a silent gap.
   of the unwind. `ctx.get("subagents")` instead. Introduced by the previous
   cleanup pass and caught by the first test that disposed a parent with a live
   child.
+
+---
+
+## P3-13: rehydration, and the field name that hid the bug
+
+The roster and the fold had already shipped with P3-11/P3-12. What P3-13 owed was
+the thing P3-12's own test had pinned as a gap: **addressing a settled child**.
+
+Settlement releases the child's *agent* — which is what holds an inbox — while
+its session, its log and its roster row all survive. So rehydration is the
+provider re-creating an agent against the same session, and the `Inbox` rebuilds
+itself from that log's `agent/inbox/spliced` records, so anything queued before
+settlement is still there. `ctx.subagents.rehydrate(run_id)` asks the owning
+provider; a provider that cannot do it simply does not implement the method and
+the caller gets `False` rather than an exception to interpret.
+
+Two decisions inside it:
+
+* **`rehydrated` is a distinct status, not a second `running`.** A parent reading
+  the roster should be able to tell a child still on its original task from one
+  woken up to answer a question.
+* **A revoked child is not revived.** The tombstone is the parent's record that it
+  revoked the child; quietly reviving it behind that record would make the record
+  false. `rehydrate` refuses, and a send to it still fails.
+
+### `provider_name` meant two different things
+
+The first version of `SubagentService.rehydrate` looked up the provider with
+`run.provider_name` — which is the **LLM** provider (`"fake"`, `"deepseek"`), not
+the subagent provider (`"rlm-child"`). So the lookup silently missed, `rehydrate`
+returned `False`, and the P3-12 test that asserted "a settled child cannot be
+steered" *kept passing* — reporting the feature as absent when it was merely
+misrouted.
+
+Renamed to `model_provider`, with `provider` added and stamped by the service at
+`start` (the service is what knows which name the caller asked for). Worth
+recording because the failure mode was a green test, not a red one: a field whose
+name fits two meanings will eventually be read as the wrong one, and the test
+that should have caught it was written against the old behaviour.
+
+The shared attach path (`_attach`) came out of this too — a fresh admission and a
+rehydration now wire the usage mirror, the job and the status through one
+function, so the two cannot attach different things.
+
+---
+
+## P3-14: the doctrine, and what it refuses to say
+
+The port is mostly text, and the interesting parts are the omissions.
+
+**Prime Agent's "RLM-native call contract" paragraph is dropped.** It told the
+model that installed skills are pre-imported modules and not to invent wrappers
+like `call_skill(...)` — advice that existed because prime-agent had no generated
+surface listing. `tools:sdk` *is* that listing, generated from the registry, so
+keeping the prose would mean two descriptions of one surface with the
+hand-written one going stale first. A test asserts the paragraph is absent *and*
+that the generated block is present, so the substitution is pinned rather than
+implied.
+
+**The delegation section is conditional on the surface being in the resolved
+view**, not on config alone. A deployment that restricted the `rlm` namespace away
+would otherwise be advertising calls this agent will be denied — which costs a
+turn and teaches the model nothing.
+
+**The volatile facts are a `context()`.** Depth, cwd, the family and the roster
+all move between turns; in a cached `section` each change would re-bill the whole
+prefix (A12). A test asserts `# Session` appears in the snapshot and *not* in the
+prompt, which is the only way to catch that regression — it is otherwise
+invisible until an invoice.
+
+### The depth limit was quoted from the wrong place
+
+The snapshot reported `RLM_MAX_DEPTH`, the module constant, while the provider
+enforced `config.max_depth`. A deployment that set `maxDepth: 1` would have told
+its children they had a level left. Now read from the provider that enforces it,
+which is the only source that cannot disagree with itself. Caught by the one test
+that configured a non-default limit.
+
+### The workspace section ships partial, on purpose
+
+`ctx.workspace` is Phase 4 (D21), so the section cannot say which tier is in
+force. It says *no tier is mounted, and a child's `access="write"` is recorded but
+not granted* — which is the same warning the full section exists to give: a child
+told nothing about its workspace attempts writes and reads the failures as its own
+bug. Omitting the section until the tier exists would have left exactly the gap
+the section is for.
+
+---
+
+## The cleanup pass over P3-13/P3-14
+
+Four review agents. Two findings were defects, one was a 69× regression in the
+per-step hot path, and the rest were the duplication they were looking for.
+
+### The one durable-log defect
+
+`SubagentRun.provider` was stamped by the *service* after `provider.start()`
+returned — but the provider appends `subagent/admitted` with `run.to_wire()` from
+*inside* `start()`. So every admission event, and every roster row folded from
+one, recorded `"provider": ""`. The field put there so Phase 5 could answer "who
+wakes this child?" from a replayed log was empty in every log.
+
+Renamed to `owner`, taken off the wire entirely, and documented as what it is: a
+routing stamp, not a fact about the child. Two reviewers found this
+independently, from opposite directions — one from the ordering, one from
+grepping for readers of the new wire key.
+
+### Prompt assembly was 69× more expensive than it needed to be
+
+`facts()` folded `subagent_roster` once for the children line and once more per
+family member (through `_name`, which walked to the member's parent and folded
+*that* log). Every child of one parent has the same parent, so those were N+1
+identical folds of the same log — per model step, inside `_pre_step`, before the
+request goes out. Measured by the reviewer at **2.27 ms/step** for a parent of 8
+on a 20k-event log, and quadratic across a fan-out: N² + 1 folds per family
+round, 58 ms at 16 children.
+
+Two changes: `SubagentService.roster(session)` caches the fold keyed on
+`session.seq` (an exact invalidation key, because the log is append-only — one
+entry per session, replaced rather than accumulated), and `facts()` asks for the
+fold once. Re-measured after: **0.033 ms/step** on the same shape. The same cache
+also removes ~3.8 ms from every `agent_message.send`, which was folding the
+parent's log 16 times to resolve one `receiver_name`.
+
+### `rehydrated` was the wrong shape for a status
+
+The roster folds status last-write-wins, so a woken child that was *actively
+working* read as `rehydrated` rather than `running` — losing "it is busy" for
+every future consumer that branches on `"running"` (the P3-19 panel, `ph trace`,
+`_render_roster`). It is now `{status: "running", cause: "rehydrated"}`: the
+lifecycle stays a lifecycle and the provenance rides beside it. Free to change
+because nothing branches on `SubagentStatus` yet — which is exactly why it was
+worth changing now.
+
+### Two contracts got declared instead of probed
+
+`SubagentService.rehydrate` discovered the provider's method by
+`getattr(provider, "rehydrate", None)`, so a provider whose method was misnamed
+or mis-arity'd would fail *silently* as "cannot rehydrate" — the same failure
+class that had just cost this package a green-test day. Now a
+`RehydratableProvider` Protocol and an `isinstance` check.
+
+And `PromptText` providers now receive the whole `AssembleContext` rather than
+just the scope. The child doctrine needed the agent and was fishing it out of
+`scope.get("agent")` — a bundle in another package knowing how
+`ph.agent.registry` provisions it, and silently rendering nothing whenever an
+assembly ran outside an agent scope. `AssembleContext` already carried both; it
+was one parameter away.
+
+### The workspace line now asks instead of asserting
+
+It was a hardcoded sentence claiming no tier is mounted — which would keep being
+emitted after D21 landed one, *and the test pinning it would have defended the
+falsehood*. `facts()` now reads `ctx.get("workspace")` and renders the
+not-mounted text only in its absence; a second test provides a stub workspace and
+asserts the line changes. (A reviewer suggested reusing `downgrade_text` for the
+sentence; tried and reverted — that sentence is about a *child's grant*, and
+making one string mean two facts read badly in both places.)
+
+### Also fixed
+
+* **The delegation section keyed on the wrong thing.** It checked whether the
+  `rlm` namespace was registered; the SDK block checks per-tool *visibility*. A
+  deployment denying `rlm_run` alone would have dropped it from the listing while
+  the doctrine kept teaching it. Now the same check the listing makes.
+* **A roster row had no status between admission and the first status event** —
+  a window a detached job makes real, and one the prompt renders in. The fold
+  defaults to `queued`.
+* **`_name`/`_display` were the same lookup in two modules.** One
+  `roster_name` (and `SubagentService.name_of`, which folds through the cache)
+  next to the fold that owns the fact.
+* **The depth limit was quoted from two places.** `RlmChildProvider.depth_limit`
+  is now the one value, asked of the enforcer.
+* **The prompt's own delegation bullets re-described the SDK surface** — the same
+  argument this file already makes about prime-agent's dropped paragraph, applied
+  to a list I had written myself. Trimmed to the two rules the generated
+  signatures cannot state; a test asserts the removed calls stay out.
+* **Empty sections are dropped at the seam**, so "empty means absent" is stated
+  once rather than in two renderers, and a consumer enumerating section names
+  does not see phantoms.
+* **`_status`/`_mirror` stopped taking `parent_session`** now that `_Child` holds
+  it — two sources for one log is how a tombstone lands somewhere else.
+* Test cleanups: `join_context_sections` instead of a hand-rolled join with the
+  *wrong separator* (so every assertion had been against a string the model never
+  sees); additive `extra_rows` instead of an override that re-listed the defaults;
+  the delegation rows moved to `conftest`; substring echoes after a
+  whole-constant assert deleted; `assert "parent " in ...` (which passed only
+  because the session was named `parent`) made specific; the revoked-child test
+  now exercises both refusal doors and the message it asserts.
+
+### Skipped
+
+* **An incremental roster fold** (`session.fold(...)` in ph-core) — strictly
+  better than the cache, and still the right eventual shape, but a seam addition
+  beyond this diff. The cache gets the measured win.
+* **`by_session` as public API** — folded into `ensure_addressable` instead, so
+  the three-hop wake path is stated once.
+* **The per-wake `Job` accretion** noted by the efficiency reviewer: `ctx.jobs`
+  never prunes, so a chatty parent↔settled-child exchange leaves one `Job` per
+  wake. Inherent to P3-13's design; worth knowing, not worth a special case.
