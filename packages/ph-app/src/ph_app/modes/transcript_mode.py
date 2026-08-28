@@ -10,6 +10,7 @@ replaced ranges, and that is the wrong projection for a reader.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -58,8 +59,14 @@ async def run_transcript(
     provider: str,
     model: str,
     session_id: str | None = None,
+    attachments: Sequence[Path] = (),
 ) -> TranscriptResult:
     async with prompted(
-        documents, prompt, provider=provider, model=model, session_id=session_id
+        documents,
+        prompt,
+        provider=provider,
+        model=model,
+        session_id=session_id,
+        attachments=attachments,
     ) as (_ctx, session):
         return TranscriptResult(session_id=session.id, text=render_transcript(session.transcript()))

@@ -376,6 +376,7 @@ HANDLERS: Mapping[str, Handler] = {
     "compaction/summarized": _on_harness_event,
     "compaction/declined": _on_harness_event,
     "compaction/args-truncated": _on_harness_event,
+    "attachment/degraded": _on_harness_event,
     "session/end-seed": _on_harness_event,
 }
 """Event type → the record it produces.

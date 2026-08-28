@@ -10,6 +10,7 @@ stay separate questions.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -36,10 +37,16 @@ async def run_print(
     provider: str,
     model: str,
     session_id: str | None = None,
+    attachments: Sequence[Path] = (),
 ) -> PrintResult:
     """Run one prompt to completion and return what the model said."""
     async with prompted(
-        documents, prompt, provider=provider, model=model, session_id=session_id
+        documents,
+        prompt,
+        provider=provider,
+        model=model,
+        session_id=session_id,
+        attachments=attachments,
     ) as (ctx, session):
         # The human transcript, not the model surface: what the user was shown,
         # compaction or not.

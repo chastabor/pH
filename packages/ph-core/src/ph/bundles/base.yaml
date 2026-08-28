@@ -141,6 +141,12 @@
     enabled: false
 
 # --- resilience ------------------------------------------------------------
+# Media the routed model cannot read, replaced with a pointer it can — above
+# every adapter, because whether a route takes a MIME type is not a question
+# about the wire. Does nothing until something attaches a file (P7-01).
+- id: media-degrade
+  name: media-degrade
+
 - id: llm-retry
   name: llm-retry
 

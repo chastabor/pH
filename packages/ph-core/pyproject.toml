@@ -57,6 +57,7 @@ agent-instructions = "ph.tools.builtin.instructions:apply"
 session-persistence-jsonl = "ph.persistence.jsonl:apply"
 session-checkpoint-policy = "ph.persistence.checkpoint_policy:apply"
 llm-retry = "ph.llm.retry:apply"
+media-degrade = "ph.llm.media:apply"
 # testing and invariants
 llm-fake = "ph.testing.fake_adapter:apply"
 code-runtime-stub = "ph.testing.stub_runtime:apply"

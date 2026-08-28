@@ -425,15 +425,14 @@ async def test_anthropic_sends_a_pdf_as_a_document(tmp_path: Path) -> None:
     assert any(block["type"] == "document" for block in entry["content"])
 
 
-async def test_a_route_that_cannot_read_it_gets_a_pointer_not_a_silence(
-    tmp_path: Path,
-) -> None:
-    """The bug, as a gate.
+async def test_a_renderer_with_no_shape_for_a_block_says_so(tmp_path: Path) -> None:
+    """The renderer is total over its own wire vocabulary.
 
-    An OpenAI-compatible chat route carries PDFs by `file_id` through the Files
-    API (P7-03), not inline — so it declines this one. What must never happen is
-    the block vanishing: the model is told, in words it can act on, that a file
-    was not sent.
+    Whether a route *may* send a PDF is `media-degrade`'s question, one layer up.
+    This is the narrower one an adapter still owes: it has no `image_url` meaning
+    for a PDF — that wire carries them by `file_id` (P7-03) — so it must not
+    dress one as an image. What must never happen either way is the block
+    vanishing.
     """
     root = Context()
     ref = await _with_attachment(root, tmp_path, "application/pdf")
@@ -486,46 +485,6 @@ async def test_openai_keeps_a_plain_user_message_a_string(tmp_path: Path) -> Non
     )
 
     assert body["messages"] == [{"role": "user", "content": "hello"}]
-
-
-async def test_a_route_can_narrow_what_it_takes(tmp_path: Path) -> None:
-    """The reason the capability is row config and not a module constant.
-
-    One `openai-compatible` row serves many routes — a hosted gateway, Groq,
-    Together, a local llama.cpp — and they do not agree about media. A constant
-    made every one of them promise images and a 20 MB ceiling, so a text-only
-    local model was declaring a capability it does not have and its requests
-    would have been rejected at the far end instead of degraded here.
-    """
-    root = Context()
-    ref = await _with_attachment(root, tmp_path, "image/png")
-    text_only = OpenAiCompatibleAdapter(
-        ctx=root, profile=ProviderProfile(provider="local", accepts=())
-    )
-
-    assert text_only.resolve_model("local", "m").accepts == frozenset()
-    body = await text_only._body(
-        GenerateOptions(provider="local", model="m", messages=(_media_message(ref),))
-    )
-
-    assert "was not sent" in json.dumps(body["messages"])
-    assert "image_url" not in json.dumps(body["messages"])
-
-
-async def test_a_route_can_lower_its_size_ceiling(tmp_path: Path) -> None:
-    """The other half of the same declaration, and the one a gateway in front of
-    a small model actually needs."""
-    root = Context()
-    ref = await _with_attachment(root, tmp_path, "image/png")
-    tiny = OpenAiCompatibleAdapter(
-        ctx=root, profile=ProviderProfile(provider="tiny", max_attachment_bytes=8)
-    )
-
-    body = await tiny._body(
-        GenerateOptions(provider="tiny", model="m", messages=(_media_message(ref),))
-    )
-
-    assert "was not sent" in json.dumps(body["messages"])
 
 
 def test_each_adapter_declares_what_it_accepts() -> None:

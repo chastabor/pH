@@ -10,6 +10,7 @@ caller reading the stored log parse one format, and dsh tooling reads both (Q2).
 from __future__ import annotations
 
 import sys
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TextIO
@@ -35,6 +36,7 @@ async def run_json(
     provider: str,
     model: str,
     session_id: str | None = None,
+    attachments: Sequence[Path] = (),
     out: TextIO | None = None,
 ) -> JsonResult:
     """Drive one prompt, emitting each committed event as one JSON line."""
@@ -49,6 +51,12 @@ async def run_json(
         stream.write(f"{dumps({'type': 'session/header', 'header': session.header.to_wire()})}\n")
 
     async with prompted(
-        documents, prompt, provider=provider, model=model, session_id=session_id, before=attach
+        documents,
+        prompt,
+        provider=provider,
+        model=model,
+        session_id=session_id,
+        attachments=attachments,
+        before=attach,
     ) as (_ctx, session):
         return JsonResult(session_id=session.id, events=len(session.events))

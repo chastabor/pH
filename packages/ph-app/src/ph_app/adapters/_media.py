@@ -1,17 +1,10 @@
-"""Attachment loading and the degrade rule, once for every adapter (P7-01).
+"""Loading the bytes for media that is going out (P7-01).
 
-The sibling of `_http.py`, and here for the reason its docstring gives: written
-twice, the copies drift. This half of media handling is not wire-shaped at all —
-deciding whether a route can take an attachment, loading it, and saying so when
-it cannot are the same decisions on every provider. What *is* wire-shaped is the
-block a usable attachment becomes (`image` against `document`, `image_url`
-against `input_audio`), and that stays in the adapter.
-
-**The route's own declaration is the input.** `ResolvedModel.accepts` and
-`max_attachment_bytes` are what an adapter already answers for a route, so
-policy is read from the capability rather than restated beside it — otherwise
-the declaration is decorative and the real rule lives in whichever adapter you
-happen to read.
+The sibling of `_http.py`, and all that is left here once `ph.llm.media` answers
+the *policy* question above every adapter: by the time a request reaches one, any
+`MediaBlock` still on it is one this route said it accepts, so there is nothing
+left to decide — only bytes to fetch and a wire shape to build, and the shape is
+the adapter's own.
 
 @module ph_app.adapters._media
 """
@@ -22,76 +15,49 @@ import logging
 from collections.abc import Sequence
 from typing import Any
 
-from ph.llm.adapter import ResolvedModel
-from ph.llm.types import AttachmentRef, Message, attachment_of
+from ph.llm.media import media_pointer_text
+from ph.llm.types import Message, attachment_of
 
-__all__ = ["load_media", "media_pointer", "unusable_reason"]
+__all__ = ["load_media", "media_pointer"]
 
 log = logging.getLogger("ph_app.adapters.media")
 
 
-def unusable_reason(attachment: AttachmentRef, store: Any, route: ResolvedModel) -> str | None:
-    """Why this attachment cannot be sent inline, or `None` if it can.
+def media_pointer(attachment: Any) -> dict[str, Any]:
+    """The text block that stands in for media that could not be loaded.
 
-    Three unrelated situations answered with one branch on purpose — a MIME the
-    route does not take, a file over its ceiling, and bytes that are no longer on
-    disk all have the same remedy, because the model can act on a pointer and can
-    do nothing with a wire error.
+    Reached only on a race — `media-degrade` already checked the blob was there,
+    so arriving here means it went away between that check and this read. The
+    wording is `ph.llm.media`'s, so the model reads one sentence for one
+    situation however it was arrived at.
     """
-    if store is None:
-        return "no attachment store is mounted"
-    if attachment.mime not in route.accepts:
-        return f"this route does not accept {attachment.mime}"
-    if route.max_attachment_bytes is not None and attachment.bytes > route.max_attachment_bytes:
-        return f"{attachment.bytes} bytes is over the {route.max_attachment_bytes}-byte limit"
-    if not store.exists(attachment):
-        return "the stored bytes are gone"
-    return None
+    return {"type": "text", "text": media_pointer_text(attachment)}
 
 
-def media_pointer(attachment: AttachmentRef) -> dict[str, Any]:
-    """What the model is shown when the bytes cannot go.
+async def load_media(store: Any, messages: Sequence[Message]) -> dict[str, str]:
+    """Base64 for every attachment still on the request, keyed by id.
 
-    A sentence it can act on — the kind of file, its name, and that this route
-    could not read it — rather than a message that quietly lost a block. Shared
-    so the two wires cannot come to describe the same failure differently.
-    """
-    name = attachment.name or attachment.attachment_id
-    return {
-        "type": "text",
-        "text": (
-            f'[{attachment.mime} attachment "{name}" was not sent: this model cannot read it]'
-        ),
-    }
+    Absent from the map means the read failed after `media-degrade` had approved
+    it, which is a race rather than a policy outcome — the caller renders a
+    pointer either way, so one branch covers both.
 
-
-async def load_media(
-    store: Any, messages: Sequence[Message], route: ResolvedModel, *, provider: str
-) -> dict[str, str]:
-    """Base64 for every attachment this route will actually take.
-
-    Absent from the map means "render a pointer instead". Loaded in one pass
-    before rendering so the message renderers stay pure functions of what they
-    are given, and through `AttachmentStore.load_b64`, which encodes once per
-    process — a media block lives in derived history for the session's life, so
-    re-encoding per request is a cost paid on every step.
+    Through `AttachmentStore.load_b64`, which encodes once per process: a media
+    block lives in derived history for the session's life, so re-encoding per
+    request is a cost paid on every step.
     """
     loaded: dict[str, str] = {}
+    if store is None:
+        return loaded
     for message in messages:
         for block in message.content:
             attachment = attachment_of(block)
             if attachment is None or attachment.attachment_id in loaded:
                 continue
-            reason = unusable_reason(attachment, store, route)
-            if reason is not None:
-                # Not silent. A wire dropping media without a word is the bug
-                # this whole path exists to end.
+            try:
+                loaded[attachment.attachment_id] = await store.load_b64(attachment)
+            except OSError:
                 log.warning(
-                    "ph_app.adapters: %s is sending %s as a pointer: %s",
-                    provider,
+                    "ph_app.adapters: could not read %s; sending a pointer",
                     attachment.name or attachment.attachment_id,
-                    reason,
                 )
-                continue
-            loaded[attachment.attachment_id] = await store.load_b64(attachment)
     return loaded

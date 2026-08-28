@@ -18,6 +18,8 @@ from ph.agent.types import AgentOptions
 from ph.cordis import Context, Loader
 from ph.session import Session
 
+from .attach import ingest, prompt_message
+
 __all__ = ["MountedRun", "mounted", "prompted"]
 
 
@@ -52,19 +54,28 @@ async def prompted(
     provider: str,
     model: str,
     session_id: str | None = None,
+    attachments: Sequence[Path] = (),
     before: Callable[[Context, Session], None] | None = None,
 ) -> AsyncIterator[tuple[Context, Session]]:
     """Mount, create a session, drive one prompt to idle, flush — then yield.
 
     The sequence every one-shot mode shares. `before` runs after the session
     exists and before the prompt, for a mode that needs to attach a listener.
+
+    The turn is opened with a message this builds rather than with
+    `agent.prompt`, uniformly: with nothing attached the two are identical, so
+    the alternative would be a branch whose two halves have to stay in step.
     """
     async with mounted(documents) as run:
         ctx = run.ctx
         session = ctx.sessions.create(session_id)
         if before is not None:
             before(ctx, session)
+        # Before the agent exists: a file that cannot be read should fail the
+        # command, not a turn — nothing is logged and there is nothing to unwind.
+        refs = await ingest(ctx, attachments)
         agent = ctx.agents.create(session, AgentOptions(provider=provider, model=model))
-        await agent.prompt(prompt)
+        agent.followup(prompt_message(prompt, refs))
+        await agent.run()
         await ctx.sessions.flush(session)
         yield ctx, session

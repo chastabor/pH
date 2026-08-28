@@ -22,6 +22,7 @@ import json
 import sys
 from collections.abc import Awaitable, Callable
 from functools import partial
+from pathlib import Path
 from typing import Annotated, Any, Literal, TypeAlias
 
 import anyio
@@ -34,6 +35,7 @@ from ph.cordis import Loader, import_plugin_modules
 from ph.cordis.events import events as event_registry
 from ph.paths import RuntimeDirError, resolve_roots
 
+from .attach import AttachmentUnavailable
 from .modes import run_json, run_print, run_rpc, run_transcript
 from .profiles import available_profiles, resolve_profile
 
@@ -84,6 +86,14 @@ def default(
         OutputMode,
         typer.Option("--mode", help="text (default), json, transcript, rpc, tui, or trajectory."),
     ] = "text",
+    attach: Annotated[
+        list[Path] | None,
+        typer.Option(
+            "-a",
+            "--attach",
+            help="A file to attach to the prompt. Repeatable.",
+        ),
+    ] = None,
     resume: Annotated[
         str | None, typer.Option("--resume", help="Session id to reopen (tui only).")
     ] = None,
@@ -150,9 +160,22 @@ def default(
         return
 
     route = partial(
-        _MODES[mode], documents, prompt, provider=provider, model=model, session_id=session_id
+        _MODES[mode],
+        documents,
+        prompt,
+        provider=provider,
+        model=model,
+        session_id=session_id,
+        attachments=attach or [],
     )
-    outcome = anyio.run(route)
+    try:
+        outcome = anyio.run(route)
+    except (AttachmentUnavailable, OSError) as error:
+        # A file that cannot be read fails the *command*: `prompted` ingests
+        # before the agent exists, so nothing was logged and there is no partial
+        # turn to explain.
+        err.print(f"[red]{error}[/red]")
+        raise typer.Exit(code=2) from error
 
     if mode == "json":
         # Already written, event by event, as each committed.

@@ -74,6 +74,16 @@ instead of in the content-block union."""
 MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024
 """The default per-attachment ceiling, declared so a caller can act on it."""
 
+_WIRE_SHAPES: dict[str, str] = {
+    "image/png": "image",
+    "image/jpeg": "image",
+    "image/gif": "image",
+    "image/webp": "image",
+    "application/pdf": "document",
+}
+"""MIME → this wire's block type. A PDF is a `document`, not an `image`, which is
+the branching that belongs in an adapter rather than in the block union."""
+
 
 class Config(WireModel):
     """Row config for the Anthropic route."""
@@ -117,12 +127,7 @@ class AnthropicAdapter:
         }
 
     async def _body(self, options: GenerateOptions) -> dict[str, Any]:
-        media = await load_media(
-            self.ctx.get("attachments"),
-            options.messages,
-            self.resolve_model(options.provider, options.model),
-            provider="anthropic",
-        )
+        media = await load_media(self.ctx.get("attachments"), options.messages)
         body: dict[str, Any] = {
             "model": options.model,
             "max_tokens": options.max_tokens or self.config.default_max_tokens,
@@ -322,14 +327,17 @@ def _to_anthropic(message: Any, media: dict[str, str]) -> dict[str, Any]:
             blocks.append({"type": "text", "text": block.text})
         elif kind == "media":
             data = media.get(block.attachment.attachment_id)
-            if data is None:
+            shape = _WIRE_SHAPES.get(block.attachment.mime)
+            # Total over its own vocabulary, not a second copy of the accept
+            # policy: `media-degrade` decides what may be sent, but this renderer
+            # still has to be honest about what it can *express*. Without the
+            # fallback, a MIME it has no shape for would be dressed as an image.
+            if data is None or shape is None:
                 blocks.append(media_pointer(block.attachment))
             else:
                 blocks.append(
                     {
-                        "type": (
-                            "document" if block.attachment.mime == "application/pdf" else "image"
-                        ),
+                        "type": shape,
                         "source": {
                             "type": "base64",
                             "media_type": block.attachment.mime,

@@ -122,12 +122,7 @@ class OpenAiCompatibleAdapter:
         return {"Authorization": f"Bearer {secret}", "Content-Type": "application/json"}
 
     async def _body(self, options: GenerateOptions) -> dict[str, Any]:
-        media = await load_media(
-            self.ctx.get("attachments"),
-            options.messages,
-            self.resolve_model(options.provider, options.model),
-            provider=self.profile.provider,
-        )
+        media = await load_media(self.ctx.get("attachments"), options.messages)
         messages: list[dict[str, Any]] = []
         if options.system:
             messages.append({"role": "system", "content": options.system})
@@ -308,14 +303,23 @@ def _to_usage(raw: dict[str, Any]) -> TokenUsage:
 
 
 _AUDIO_FORMATS = {"audio/wav": "wav", "audio/mpeg": "mp3"}
+_IMAGE_MIMES = frozenset({"image/png", "image/jpeg", "image/gif", "image/webp"})
 
 
-def _media_part(attachment: AttachmentRef, data: str) -> dict[str, Any]:
-    """One accepted attachment in this wire's shape."""
+def _media_part(attachment: AttachmentRef, data: str) -> dict[str, Any] | None:
+    """One attachment in this wire's shape, or `None` if it has none here.
+
+    Total over its own vocabulary rather than a second copy of the accept policy:
+    `media-degrade` decides what may be sent, but this renderer still has to be
+    honest about what it can *express*. A PDF reaching here — this wire carries
+    those by `file_id` (P7-03) — must not be dressed as an `image_url`.
+    """
     audio = _AUDIO_FORMATS.get(attachment.mime)
     if audio is not None:
         return {"type": "input_audio", "input_audio": {"data": data, "format": audio}}
-    return {"type": "image_url", "image_url": {"url": f"data:{attachment.mime};base64,{data}"}}
+    if attachment.mime in _IMAGE_MIMES:
+        return {"type": "image_url", "image_url": {"url": f"data:{attachment.mime};base64,{data}"}}
+    return None
 
 
 def _to_openai(message: Any, media: dict[str, str]) -> list[dict[str, Any]]:
@@ -361,9 +365,8 @@ def _to_openai(message: Any, media: dict[str, str]) -> list[dict[str, Any]]:
         if attachment is not None:
             carries_media = True
             data = media.get(attachment.attachment_id)
-            parts.append(
-                media_pointer(attachment) if data is None else _media_part(attachment, data)
-            )
+            part = None if data is None else _media_part(attachment, data)
+            parts.append(part if part is not None else media_pointer(attachment))
         elif getattr(block, "type", "") == "text":
             parts.append({"type": "text", "text": block.text})
     if carries_media:

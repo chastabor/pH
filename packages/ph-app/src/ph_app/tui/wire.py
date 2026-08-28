@@ -22,6 +22,7 @@ __all__ = [
     "first",
     "index_at_or_before",
     "matches_terms",
+    "media_labels",
     "message_of",
     "obj",
     "one_line",
@@ -135,3 +136,22 @@ def index_at_or_before(seqs: Iterable[int], target: int) -> int:
         if value >= 0:
             found = index
     return found
+
+
+def media_labels(blocks: Any) -> list[str]:
+    """One human label per media block: `image/png · diagram.png`.
+
+    A separate read rather than a `placeholder` on `text_of_wire`, because that
+    argument is `(kind) -> str` and deliberately the twin of `ph.llm.types`'s —
+    widening it to see the block would change two joins to describe one row.
+    What a person needs here is the *name they attached*, which only the block
+    has.
+    """
+    labels: list[str] = []
+    for block in seq(blocks):
+        if not isinstance(block, Mapping) or block.get("type") != "media":
+            continue
+        attachment = obj(block.get("attachment"))
+        name = attachment.get("name") or attachment.get("attachmentId")
+        labels.append(f"{attachment.get('mime') or 'file'} · {name}")
+    return labels

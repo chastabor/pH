@@ -47,7 +47,7 @@ from ph.text import count_of
 from ph.tools import ToolResult, ToolResultView, parse_arguments
 
 from .state import ChatItem, ItemRole, ToolCard, TuiState
-from .wire import first, obj, one_line, seq, text_of_wire
+from .wire import first, media_labels, obj, one_line, seq, text_of_wire
 
 __all__ = ["HANDLERS", "RECORDLESS", "TuiEventAdapter"]
 
@@ -105,7 +105,14 @@ class TuiEventAdapter:
     def _on_user_message(self, event: SessionEvent, live: bool) -> None:
         source = obj(event.data.get("source"))
         kind = source.get("kind")
-        text = text_of_wire(event.data.get("content"))
+        content = event.data.get("content")
+        text = text_of_wire(content)
+        # Attached files are part of what the person said. Left out, the row
+        # would show a bare "what is this?" beside a model answering about an
+        # image the transcript never mentions.
+        attached = media_labels(content)
+        if attached:
+            text = "\n".join([text, *(f"[{label}]" for label in attached)]).strip()
         if is_replacement_surface_event(event):
             # Whatever its cause, a replacement shadows the rows it cites: they
             # stay above it, dimmed.
@@ -454,6 +461,20 @@ class TuiEventAdapter:
             event,
         )
 
+    def _on_attachment_degraded(self, event: SessionEvent, live: bool) -> None:
+        """Media a route would not take (P7-01).
+
+        The one place a person finds out their diagram never reached the model.
+        The adapter also logs it, but a process log is not where anyone looks to
+        understand a conversation.
+        """
+        items = [obj(one) for one in seq(event.data.get("attachments"))]
+        if not items:
+            return
+        names = ", ".join(str(one.get("name") or one.get("mime") or "?") for one in items)
+        reason = str(items[0].get("reason") or "this model cannot read it")
+        self._row("attachment", "notice", f"Not sent to the model: {names} — {reason}.", event)
+
     def _on_compaction_declined(self, event: SessionEvent, live: bool) -> None:
         """An automatic compaction that changed nothing, and why (P4-03).
 
@@ -575,6 +596,7 @@ HANDLERS: Mapping[str, Handler] = {
     "offload/spilled": TuiEventAdapter._on_offload_spilled,
     "offload/input-spilled": TuiEventAdapter._on_offload_spilled,
     "compaction/declined": TuiEventAdapter._on_compaction_declined,
+    "attachment/degraded": TuiEventAdapter._on_attachment_degraded,
     "compaction/args-truncated": TuiEventAdapter._on_compaction_args_truncated,
     "kernel/restored": TuiEventAdapter._on_kernel_restored,
     "harness/refined": TuiEventAdapter._on_harness_refined,

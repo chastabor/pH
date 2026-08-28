@@ -120,6 +120,15 @@ KNOWN_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         # to nothing: it names the seqs it rewrote rather than relying on
         # position, because a truncation pass rewrites several at once.
         "compaction/args-truncated",
+        # Media that could not be sent (P7-01). Appended when the route a
+        # request went to would not take an attachment — an unaccepted MIME, an
+        # over-limit file, bytes no longer on disk — so that "the model was not
+        # shown this" is a fact in the log rather than a line in a process log
+        # nobody reads. Ignorable: the model saw the pointer the adapter put in
+        # its place, and that rides the `user/message` it was already carried
+        # by, so a reader skipping this loses the account of *why*, not the
+        # conversation.
+        "attachment/degraded",
         # The context loader's recipe (P3-17): which corpus a session was told
         # about, and the digest of the sources it was built from. Ignorable — a
         # reader that skips it loses the note, not the conversation.
@@ -144,6 +153,7 @@ IGNORABLE_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         "compaction/summarized",
         "compaction/declined",
         "compaction/args-truncated",
+        "attachment/degraded",
     }
 )
 """Types a *different* build may skip without misreading the rest of the log.
