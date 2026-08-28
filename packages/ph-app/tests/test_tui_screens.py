@@ -46,6 +46,29 @@ def _binding(app: PHTuiApp, binding_id: str) -> Any:
     return None
 
 
+def _routes(app: PHTuiApp, screen_id: str) -> set[str]:
+    """Every route this front end has actually opened to one screen.
+
+    Built by *looking*, so a test comparing two registrations compares findings
+    rather than two hand-written checklists — a pair of those cannot disagree,
+    which is the shape of gate this project has been bitten by twice.
+    """
+    assert app.front is not None
+    commands = app.front.ctx.commands
+    found: set[str] = set()
+    if commands.get(screen_id) is not None:
+        found.add("command")
+    if f"/{screen_id}" in {choice.value for choice in command_choices(commands)}:
+        found.add("palette")
+    if _binding(app, screen_id) is not None:
+        found.add("key")
+    return found
+
+
+ROUTES = {"command", "palette", "key"}
+"""What one `ScreenDefinition` is supposed to buy — the row's first gate."""
+
+
 def _pretend_screen(screen_id: str = "pretend") -> ScreenDefinition:
     return ScreenDefinition(
         id=screen_id,
@@ -64,12 +87,7 @@ async def test_a_contributed_screen_becomes_a_verb_a_key_and_a_palette_entry(
     """The gate. One `ScreenDefinition`, three routes to it — and the row that
     contributed the trajectory is an ordinary row, not a special case."""
     async with running(make_tui_app(profile="tui")) as (app, _pilot):
-        assert app.front is not None
-        commands = app.front.ctx.commands
-
-        definition = commands.get(SCREEN_ID)
-        assert definition is not None, "a screen with no verb is reachable only by key"
-        assert f"/{SCREEN_ID}" in {choice.value for choice in command_choices(commands)}
+        assert _routes(app, SCREEN_ID) == ROUTES
 
         binding = _binding(app, SCREEN_ID)
         assert binding is not None and binding.key == TRAJECTORY_KEY
@@ -107,29 +125,38 @@ async def test_unloading_the_row_takes_the_verb_and_the_key_with_it(
         ctx.tui_screens.register(_pretend_screen(), scope=row)
         await pilot.pause()
 
-        assert ctx.commands.get("pretend") is not None
-        assert _binding(app, "pretend") is not None
+        assert _routes(app, "pretend") == ROUTES
 
         await row.dispose()
 
         assert ctx.tui_screens.get("pretend") is None
-        assert ctx.commands.get("pretend") is None, "the verb outlived the row"
-        assert _binding(app, "pretend") is None, "the key outlived the row"
+        assert _routes(app, "pretend") == set(), "a route outlived the row that opened it"
 
 
-async def test_a_screen_registered_after_the_app_attached_still_gets_its_verb(
+async def test_attachment_order_does_not_decide_what_is_reachable(
     make_tui_app: MakeApp,
 ) -> None:
-    """Attachment order must not decide what is reachable: the front end mounts
-    after the rows in a cold start and before them in nothing at all."""
+    """Both orders exist in one running app, and must come out identical.
+
+    The trajectory is the *before* case: `open_harness` mounts every row — and
+    `tui-screen-trajectory` registers — before `_open` attaches the presenter.
+    A screen registered on a scope from here is the *after* case. The seam
+    replays what it already holds to a new front end and notifies it of what
+    arrives later, and this is the assertion that those two paths agree; a
+    presenter that only bound keys for one of them would still pass every other
+    test in this file.
+
+    Compared rather than listed, so the two halves cannot be right about
+    different things.
+    """
     async with running(make_tui_app(profile="tui")) as (app, pilot):
         assert app.front is not None
         ctx = app.front.ctx
         ctx.tui_screens.register(_pretend_screen("later"), scope=ctx.scope("late-row"))
         await pilot.pause()
 
-        assert ctx.commands.get("later") is not None
-        assert _binding(app, "later") is not None
+        before, after = _routes(app, SCREEN_ID), _routes(app, "later")
+        assert after == before == ROUTES
 
 
 # --------------------------------------------------- over the chat, and back --

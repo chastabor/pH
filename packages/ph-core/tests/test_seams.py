@@ -16,6 +16,7 @@ import anyio
 import pytest
 
 from ph.cordis import Context
+from ph.seams._names import SLUG_CHARACTERS
 from ph.seams.approval import ApprovalRequest, ApprovalService, pending_approvals
 from ph.seams.code_runtime import (
     CodeBindingNamespace,
@@ -29,10 +30,10 @@ from ph.seams.jobs import JobService
 from ph.seams.permission_presets import PermissionPresetService
 from ph.seams.sandbox import SandboxError, SandboxPolicy, SandboxSeam
 from ph.seams.settings import SettingsService
-from ph.seams.skills import Skill, SkillService
+from ph.seams.skills import NAME_MAX, NAME_PATTERN, Skill, SkillService
 from ph.seams.spill import SpillStore
 from ph.seams.subprocess import SubprocessService, SubprocessSpawnSpec, scrub_env
-from ph.seams.tui_screens import ScreenDefinition, TuiScreenRegistry
+from ph.seams.tui_screens import ID_MAX, ScreenDefinition, TuiScreenRegistry
 from ph.session import Session
 from ph.testing import StubAgent
 
@@ -523,6 +524,68 @@ async def test_a_screen_id_must_be_addressable_as_a_command() -> None:
         registry.register(_screen("audit"))
     with pytest.raises(ValueError, match=r"1\.\.32"):
         registry.register(_screen("two words"))
+
+
+def test_a_skill_name_and_a_screen_id_are_one_rule_at_two_bounds() -> None:
+    """Both are a token a person types, so both are the same format.
+
+    Pinned because the two seams used to hold a copy of the regex each, and two
+    copies of a rule are a rule that will eventually be two. What may differ is
+    the *bound*.
+
+    Asked through the seams' own `register`, never of the shared helper: a test
+    that called `require_slug` twice would be comparing it with itself and would
+    pass for a seam that had quietly gone back to validating inline.
+    """
+    root = Context()
+
+    def refuse_skill(name: str) -> str | None:
+        try:
+            SkillService(ctx=root).register(Skill(name=name, description="d"))
+        except ValueError as error:
+            return str(error)
+        return None
+
+    def refuse_screen(screen_id: str) -> str | None:
+        try:
+            TuiScreenRegistry(ctx=root).register(_screen(screen_id))
+        except ValueError as error:
+            return str(error)
+        return None
+
+    # The format is one thing: whichever characters one seam admits at a length
+    # both allow, so does the other. Enumerated over the printable range rather
+    # than a hand-picked pair, so a widened character class cannot slip past.
+    printable = [chr(code) for code in range(32, 127)]
+    assert {char for char in printable if refuse_skill(char) is None} == {
+        char for char in printable if refuse_screen(char) is None
+    }
+
+    # `skills.NAME_PATTERN` is exported for a reader that *tests* rather than
+    # raises (`rlm-skills-python` warns past a bad frontmatter name instead of
+    # refusing the scan), so it is a second holder of the rule and is pinned to
+    # what `register` enforces. `tui_screens` publishes no such constant — an
+    # exported pattern with no consumer is a copy nothing can be held to.
+    assert {char for char in printable if NAME_PATTERN.match(char)} == {
+        char for char in printable if refuse_skill(char) is None
+    }
+
+    # The bound is not one thing, and it is the only thing that differs.
+    assert ID_MAX < NAME_MAX
+    assert refuse_screen("x" * ID_MAX) is None and refuse_screen("x" * (ID_MAX + 1))
+    assert refuse_skill("x" * NAME_MAX) is None and refuse_skill("x" * (NAME_MAX + 1))
+    assert refuse_screen("x" * NAME_MAX), "a screen id is held to its own bound"
+
+    # And one sentence refuses both, naming the vocabulary rather than restating
+    # the rule. Compared with the two things allowed to differ substituted out,
+    # which is the claim: nothing *else* about the refusal may diverge.
+    skill, screen = refuse_skill("two words"), refuse_screen("two words")
+    assert skill is not None and screen is not None
+    normalize = lambda text, kind, bound: text.replace(kind, "<kind>").replace(  # noqa: E731
+        f"1..{bound}", "<bound>"
+    )
+    assert normalize(skill, "skill name", NAME_MAX) == normalize(screen, "screen id", ID_MAX)
+    assert SLUG_CHARACTERS in screen
 
 
 async def test_a_front_end_presents_screens_registered_before_and_after_it() -> None:

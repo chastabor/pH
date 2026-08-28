@@ -36,16 +36,15 @@ key are one lifetime, not three that have to be kept in step by hand.
 
 from __future__ import annotations
 
-import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any, TypeAlias
 
 from ..cordis import Context, Disposer, plugin
+from ._names import require_slug
 from ._registry import claim_key
 
 __all__ = [
-    "ID_PATTERN",
     "ScreenDefinition",
     "ScreenFactory",
     "ScreenPresenter",
@@ -54,13 +53,15 @@ __all__ = [
 ]
 
 ID_MAX = 32
-ID_PATTERN = re.compile(rf"^[a-z0-9-]{{1,{ID_MAX}}}$")
-"""The one format of a screen id.
+"""How long a screen id may be. The *format* is `_names`', shared with a skill's
+name because an id is the same kind of token: something a person types, here as
+`/<id>`. The bound is not shared — half a skill's, because an id has to fit a
+key hint and a palette row beside its label, where a skill name stands alone in
+a catalog.
 
-Bounded here rather than shared with `ph.seams.skills.NAME_PATTERN`, which
-happens to have the same shape for a different reason: an id becomes a
-`/<id>` command, so what constrains it is the command grammar — a name with a
-space in it would be a command whose argument is part of its name."""
+Only the bound lives here, and deliberately: a compiled pattern beside it would
+be a second statement of the format that nothing consults, so nothing could hold
+it to the first."""
 
 ScreenFactory: TypeAlias = Callable[[Any], Any]
 """`build(session) -> screen`. The return is the front end's own object."""
@@ -134,10 +135,7 @@ class TuiScreenRegistry:
         contributes and the wrong one for a row's: without it the row could
         unload and leave its screen, its command and its key behind.
         """
-        if ID_PATTERN.match(screen.id) is None:
-            raise ValueError(
-                f'"{screen.id}" is not a screen id: 1..{ID_MAX} of lowercase [a-z0-9-]'
-            )
+        require_slug(screen.id, maximum=ID_MAX, kind="screen id")
         owner = scope or self.ctx
         entry = _Entry(screen=screen, owner=owner)
         release = claim_key(owner, self._entries, screen.id, entry, label="screen")
