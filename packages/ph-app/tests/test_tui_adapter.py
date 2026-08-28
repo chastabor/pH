@@ -35,7 +35,7 @@ from ph.llm.types import (
 from ph.session import Session, SessionEvent, SurfaceIntent, SurfaceReplace
 from ph.session.known_event_types import KNOWN_SESSION_EVENT_TYPES
 from ph.testing import simple_tool, user_payload
-from ph_app.tui.adapter import FORWARD_REFERENCES, HANDLERS, RECORDLESS, TuiEventAdapter
+from ph_app.tui.adapter import HANDLERS, RECORDLESS, TuiEventAdapter
 from ph_app.tui.state import TuiState
 
 pytestmark = pytest.mark.anyio
@@ -240,11 +240,12 @@ async def test_a_corpus_is_a_row_only_when_it_changed(mount: Any) -> None:
 def test_every_known_event_type_is_rendered_or_classified() -> None:
     """The adapter's vocabulary equals the log's — no silent omissions.
 
-    A new event type has to land in `HANDLERS` or be named in `RECORDLESS`; the
-    only type the adapter may know that the log does not yet is the Phase 4
-    forward reference.
+    A new event type has to land in `HANDLERS` or be named in `RECORDLESS`.
+    Strict equality: `todo/write` was carried as a declared forward reference
+    from Phase 2 until its producer landed (P4-01), and the subtraction that
+    allowed it went with it — the next type rendered ahead of the vocabulary
+    should fail here loudly and be argued for, not slip through a standing
+    exemption.
     """
     assert set(HANDLERS) & RECORDLESS == set()
-    assert (set(HANDLERS) | RECORDLESS) - FORWARD_REFERENCES == KNOWN_SESSION_EVENT_TYPES
-    assert set(HANDLERS) >= FORWARD_REFERENCES
-    assert not FORWARD_REFERENCES & KNOWN_SESSION_EVENT_TYPES
+    assert set(HANDLERS) | RECORDLESS == KNOWN_SESSION_EVENT_TYPES

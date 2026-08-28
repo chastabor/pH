@@ -133,16 +133,28 @@ def user_payload(text: str, message_id: str = "m1") -> dict[str, Any]:
 
 
 def assistant_payload(
-    text: str, message_id: str, *, turn: int = 1, step: int = 1, provider: str = "fake"
+    text: str,
+    message_id: str,
+    *,
+    turn: int = 1,
+    step: int = 1,
+    provider: str = "fake",
+    content: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """An `assistant/message` payload; empty `text` gives an empty-content message."""
+    """An `assistant/message` payload; empty `text` gives an empty-content message.
+
+    `content` supplies the blocks outright — a message carrying tool calls —
+    so a test does not reach into this dict's shape to overwrite them.
+    """
+    if content is None:
+        content = [{"type": "text", "text": text}] if text else []
     return {
         "turn": turn,
         "step": step,
         "message": {
             "id": message_id,
             "role": "assistant",
-            "content": [{"type": "text", "text": text}] if text else [],
+            "content": content,
             "source": {"kind": "model", "provider": provider, "model": "m"},
         },
     }

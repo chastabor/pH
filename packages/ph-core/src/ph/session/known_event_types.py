@@ -8,7 +8,10 @@ rather than an incomplete one.
 
 Kept beside the code that appends these types, and checked by a test that walks
 every `append(` call site in `ph-core`: a type that ships without an entry here
-would be a log this build could write and then refuse to read.
+would be a log this build could write and then refuse to read. That walker sees
+only ph-core — a producer in another package (the subagent providers,
+ph-stabilize's `tool-todo`) owes the same proof through its own bundle's tests,
+which is the deal the per-type comments below record.
 
 @module ph.session.known_event_types
 """
@@ -79,6 +82,12 @@ KNOWN_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         # ignorable: a reader that skips it gets one extra review pass, not a
         # harness the session does not have.
         "harness/refine-considered",
+        # Planning (P4-01, G1; emitted by `ph-stabilize`'s `tool-todo`). The
+        # list *is* this fold — there is no side table — and it reaches the
+        # model through a prompt context, so a reader that skipped it would
+        # assemble a different prompt than the session had. Required, not
+        # ignorable: the difference is model-visible.
+        "todo/write",
         # The context loader's recipe (P3-17): which corpus a session was told
         # about, and the digest of the sources it was built from. Ignorable — a
         # reader that skips it loses the note, not the conversation.

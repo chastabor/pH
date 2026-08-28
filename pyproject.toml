@@ -80,6 +80,7 @@ testpaths = [
     "packages/ph-core/tests",
     "packages/ph-app/tests",
     "packages/ph-rlm/tests",
+    "packages/ph-stabilize/tests",
     "tests",
 ]
 addopts = "-ra"

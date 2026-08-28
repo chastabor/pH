@@ -1,0 +1,19 @@
+# ph-stabilize: Deep Agents' stabilization features as plugins, over `ph-base`.
+#
+# Every row here attaches to a waterfall that already exists — D12, the whole
+# integration thesis: todo planning is a tool plus a prompt section, offloading
+# is `tools/post-execute`, summarization is `agent/pre-step`. None of them is a
+# parameter on the loop, and none of them needs the loop to know it is there.
+#
+# Layered by a profile rather than by `ph-base`, because a deployment that wants
+# the plain harness should get the plain harness.
+
+# --- planning ---------------------------------------------------------------
+# `write_todos` + the `todo/write` event + the prompt section (G1). `disabled`
+# in its own bundle — the `rlm-context-loader` idiom — because layering this
+# bundle for offload or compaction must not, by itself, hand the model a tool:
+# upstream dropped `TodoListMiddleware` from its default stack and re-adds it
+# per model, so a profile flips this row on purpose (`rlm-stable` does, P4-15).
+- id: tool-todo
+  name: tool-todo
+  disabled: true

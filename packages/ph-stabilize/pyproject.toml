@@ -11,6 +11,12 @@ requires-python = ">=3.12"
 license = "MIT"
 dependencies = ["ph-core"]
 
+[project.entry-points."ph.bundles"]
+stabilize = "ph_stabilize:BUNDLE"
+
+[project.entry-points."ph.plugins"]
+tool-todo = "ph_stabilize.todo:apply"
+
 [tool.uv.sources]
 ph-core = { workspace = true }
 

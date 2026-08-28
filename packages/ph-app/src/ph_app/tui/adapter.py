@@ -42,7 +42,7 @@ from ph.tools import ToolResult, ToolResultView, parse_arguments
 from .state import ChatItem, ItemRole, ToolCard, TuiState
 from .wire import first, obj, one_line, seq, text_of_wire
 
-__all__ = ["FORWARD_REFERENCES", "HANDLERS", "RECORDLESS", "TuiEventAdapter"]
+__all__ = ["HANDLERS", "RECORDLESS", "TuiEventAdapter"]
 
 
 @dataclass(slots=True)
@@ -461,7 +461,8 @@ class TuiEventAdapter:
         self._row("subagent", "notice", f"Revoked child {run_id} ({reason}).", event)
 
     def _on_todo_write(self, event: SessionEvent, live: bool) -> None:
-        # Phase 4 emits these; the sidebar is ready for them now.
+        # Emitted by ph-stabilize's `tool-todo` (P4-01); folded here so the
+        # sidebar and the model's prompt context read one list.
         self.state.todos = [thaw_json(todo) for todo in seq(event.data.get("todos"))]
 
     def _on_agent_inbox_spliced(self, event: SessionEvent, live: bool) -> None:
@@ -530,7 +531,3 @@ through `queued → running → done` would push the conversation off screen —
 they are no longer record-less: they fold into `TuiState.subagents`, which the
 sidebar's panel draws. `subagent/admitted` and `subagent/deleted` do both, and
 the same split decides ignorability in `ph.session.known_event_types`."""
-
-FORWARD_REFERENCES: frozenset[str] = frozenset({"todo/write"})
-"""Handled here before the log can carry it: Phase 4 adds the type and the
-tool; the sidebar projection is Phase 2's to own."""

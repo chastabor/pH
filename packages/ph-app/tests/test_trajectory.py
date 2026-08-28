@@ -30,7 +30,6 @@ from ph.session import Session, SurfaceIntent, SurfaceReplace, is_fork_boundary
 from ph.session.json import thaw_json
 from ph.session.known_event_types import KNOWN_SESSION_EVENT_TYPES
 from ph.testing import assistant_payload, user_payload
-from ph_app.tui.adapter import FORWARD_REFERENCES
 from ph_app.tui.adapter import RECORDLESS as TRANSCRIPT_RECORDLESS
 from ph_app.tui.trajectory import HANDLERS, RECORDLESS, TrajectoryRecord, build_trajectory
 
@@ -58,13 +57,10 @@ def test_every_known_event_type_produces_a_record_or_is_classified() -> None:
     here. It is a set equality now, the shape `adapter.py` has used all along,
     and the dispatch table has no `else` for it to hide behind.
     """
-    assert (set(HANDLERS) | RECORDLESS) - FORWARD_REFERENCES == KNOWN_SESSION_EVENT_TYPES, (
+    assert set(HANDLERS) | RECORDLESS == KNOWN_SESSION_EVENT_TYPES, (
         "a known event type has neither a handler nor a record-less classification"
     )
     assert not set(HANDLERS) & RECORDLESS, "a type cannot both produce a record and not"
-    # The same forward reference the transcript carries: Phase 4 adds the type
-    # and the tool, and both projections are ready for it.
-    assert set(HANDLERS) >= FORWARD_REFERENCES
 
 
 def test_the_gate_fails_when_a_type_goes_unclassified() -> None:
@@ -75,7 +71,7 @@ def test_the_gate_fails_when_a_type_goes_unclassified() -> None:
     been shown to reject anything is a gate nobody has tested.
     """
     invented = KNOWN_SESSION_EVENT_TYPES | {"future/thing"}
-    assert (set(HANDLERS) | RECORDLESS) - FORWARD_REFERENCES != invented
+    assert set(HANDLERS) | RECORDLESS != invented
 
 
 def test_recordless_is_a_subset_of_the_vocabulary() -> None:
