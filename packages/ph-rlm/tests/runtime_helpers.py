@@ -50,6 +50,23 @@ async def run_ipython_cell(
     return await run_cell(ctx, program, agent=agent, session=session, call_id=call_id, name=IPYTHON)
 
 
+def namespace(name: str, **handlers: Any) -> Any:
+    """A `CodeBindingNamespace` whose bindings are the handlers given.
+
+    Here rather than in one test module because two wanted it and the second
+    copied the first — the same reason the row constants moved to `conftest`.
+    """
+    from ph.seams.code_runtime import CodeBinding, CodeBindingNamespace
+
+    return CodeBindingNamespace(
+        name=name,
+        bindings=tuple(
+            CodeBinding(name=binding, description=binding, parameters={}, dispatch=handler)
+            for binding, handler in handlers.items()
+        ),
+    )
+
+
 def dispatch_names(session: Any) -> list[str]:
     """The governed tools a session's cells dispatched, in submission order."""
     return [event.data["name"] for event in session.events if event.type == DISPATCH_START]

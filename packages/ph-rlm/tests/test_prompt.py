@@ -78,7 +78,12 @@ async def test_the_doctrine_names_the_one_callable_and_the_kernel(prompted: Moun
     # The two facts the constant would be wrong without: the transport's
     # *presented* name, and the shell-cell rule.
     assert IPYTHON in DOCTRINE
+    # Named, and refused. The doctrine used to promise `%%bash` shell cells —
+    # ported from prime-agent, where they existed — while pH's guest raises a
+    # `SyntaxError` for one (P3-22). It still names the case the model was
+    # trained on, because that is the thing it would otherwise try.
     assert "%%bash" in DOCTRINE
+    assert "no IPython magics" in DOCTRINE
 
 
 async def test_the_doctrine_does_not_re_describe_the_sdk_surface(prompted: Mounted) -> None:

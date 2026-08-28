@@ -116,19 +116,27 @@ def shipped_profile(mount: Any) -> Callable[..., Any]:
     becomes one patch. Appending raw patches instead is how the interpreter pin
     got dropped: two patches for one row means the second replaces the first
     whole, and nothing says so.
+
+    `profile` is what to layer. The default is the bundle document; a caller that
+    wants the *composed* profile — what `ph --profile rlm` resolves, `tui` layer
+    and all — passes `resolve_profile("rlm")`. It goes through here rather than
+    through `mount` directly so that merging rule keeps applying: three call
+    sites had re-spelled the pin as a raw patch, which is the bypass this
+    docstring is about.
     """
 
     async def build(
         config: dict[str, dict[str, Any]] | None = None,
         *,
         session_id: str = "profile",
+        profile: Any = BUNDLE,
     ) -> tuple[Any, Any, Any]:
         merged: dict[str, dict[str, Any]] = {"code-runtime-python": dict(HOST_INTERPRETER)}
         for row_id, overrides in (config or {}).items():
             merged.setdefault(row_id, {}).update(overrides)
         ctx = await mount(
             *({"id": row_id, "config": values} for row_id, values in merged.items()),
-            profile=BUNDLE,
+            profile=profile,
         )
         session = ctx.sessions.create(session_id)
         return ctx, session, ctx.agents.create(session, FAKE_OPTIONS)

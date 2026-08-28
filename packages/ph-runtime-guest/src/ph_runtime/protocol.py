@@ -40,6 +40,7 @@ __all__ = [
     "NAMESPACE_ENV",
     "PROTOCOL_FD",
     "PROTOCOL_VERSION",
+    "UNPRODUCED_FRAMES",
     "truncation_marker",
 ]
 
@@ -62,6 +63,16 @@ NAMESPACE_ENV: Final = "PH_NAMESPACE_ID"
 
 HOST_FRAMES: Final = frozenset({"boot", "run", "reply", "restore", "cancel", "shutdown"})
 GUEST_FRAMES: Final = frozenset({"boot-ack", "call", "log", "display", "snapshot", "done", "fault"})
+
+UNPRODUCED_FRAMES: Final = frozenset({"display"})
+"""Frames defined here that nothing emits yet.
+
+`display` is decoded by the host, collected, carried out through `CodeRunResult`
+and counted on the code cell's card — but the guest has no `display()` in the
+cell namespace, so nothing can send one. Declared beside the vocabulary rather
+than in a test, because the person who adds `display()` reads this file and the
+constraint has to be where they are looking. The conformance suite reads this
+set; emptying it without a producer fails there."""
 
 
 FRAME_FIELDS: Final[dict[str, tuple[frozenset[str], frozenset[str]]]] = {

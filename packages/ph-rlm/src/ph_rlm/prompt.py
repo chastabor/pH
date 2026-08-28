@@ -29,12 +29,21 @@ from typing import Any
 from ph.cordis import Context, plugin
 from ph.seams.subagents import reachable_family
 from ph.system_prompt.assembly import ORDER_TOOL_GUIDANCE, PromptContext, PromptSection
+from ph_runtime.cell import MAGIC_PREFIXES
 
 from .bindings import RUN_TOOL
 from .presentation import IPYTHON
 from .subagents import RLM_MAX_DEPTH, TASK_PREFIX, delegation_depth
 
-__all__ = ["CHILD_DOCTRINE", "DELEGATION", "DOCTRINE", "WORKSPACE_LINE", "apply"]
+__all__ = ["CHILD_DOCTRINE", "DELEGATION", "DOCTRINE", "MAGICS", "WORKSPACE_LINE", "apply"]
+
+MAGICS = ", ".join(f"`{prefix}`" for prefix in MAGIC_PREFIXES)
+"""The prefixes the guest actually refuses, rendered for the doctrine.
+
+Derived rather than restated: a fourth prefix added to the runtime would
+otherwise leave the prompt describing a different runtime from the one the model
+is talking to — which is exactly the drift that had the doctrine promising
+`%%bash` shell cells for a phase (P3-22)."""
 
 ORDER_RLM_DOCTRINE = ORDER_TOOL_GUIDANCE + 10
 ORDER_RLM_DELEGATION = ORDER_TOOL_GUIDANCE + 20
@@ -55,8 +64,10 @@ from the target project's own environment for project imports, tests, scripts an
 CLIs — that is what the kernel is for — rather than reimplementing what the
 project already does.
 
-A cell whose first line is `%%bash` is a shell cell. It runs in a temporary
-subshell, so it does not share the Python namespace and `cd` does not persist.
+There are no IPython magics — no {MAGICS}, so no `%%bash` cell. A cell that
+starts with one is a syntax error. Shell commands go through
+`await tools.bash(...)`, which is governed and recorded like every other
+binding; the magic was the one shell that nothing could see.
 
 Every capability outside plain Python is reached as an `await` on a binding — the
 SDK block above lists them. Those calls are governed and recorded individually: a

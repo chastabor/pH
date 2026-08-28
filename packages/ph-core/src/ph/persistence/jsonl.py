@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -34,7 +35,7 @@ from ..paths import resolve_roots
 from ..session import Session, SessionEvent, SessionHeader
 from ..session.json import dumps
 
-__all__ = ["JsonlSessionStore", "apply", "read_session", "session_path"]
+__all__ = ["JsonlSessionStore", "apply", "read_records", "read_session", "session_path"]
 
 log = logging.getLogger("ph.persistence.jsonl")
 
@@ -110,6 +111,43 @@ def _append_and_sync(path: Path, records: list[dict[str, Any]]) -> None:
         handle.write(payload)
         handle.flush()
         os.fsync(handle.fileno())
+
+
+def read_records(path: Path) -> Iterator[dict[str, Any]]:
+    """Every JSON object in an **append-only** log, tolerating a torn tail.
+
+    The tolerance is the whole point, and it is one rule rather than a
+    convenience: a log that is only ever appended to has exactly one way to be
+    malformed — a process died between the write and the flush — and that
+    damage is confined to the last line. Everything before it is sound, so a
+    reader that refused the file would discard good records to protect against
+    the one bad one. `ph_rlm`'s orphan journal and the Continual Harness's
+    global log are both this shape, and both said so in their own comments
+    before they said it here.
+
+    Contrast `read_session`, which is deliberately **strict**: a session is a
+    conversation, and silently truncating one at the first unreadable line would
+    hand the model a history that is missing its middle. Nothing about JSONL
+    decides which rule applies — the *log's* contract does.
+
+    Streamed, and a missing file is an empty log: both callers grow without
+    bound, and both had already reached for `read_text()`.
+    """
+    try:
+        handle = path.open("r", encoding="utf-8")
+    except OSError:
+        return
+    with handle:
+        for line in handle:
+            text = line.strip()
+            if not text:
+                continue
+            try:
+                record = json.loads(text)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(record, dict):
+                yield record
 
 
 def read_session(path: Path) -> tuple[SessionHeader, list[SessionEvent]]:

@@ -60,7 +60,16 @@ IPYTHON_DESCRIPTION = (
 
 Verbatim on purpose: the description is the contract the model was trained
 against, and paraphrasing it is a silent behaviour change with no test that
-would catch it."""
+would catch it.
+
+**It says `%%bash` and pH has no magics.** That is a known, deliberate
+inconsistency, not an oversight — D19 removed the magic *because* it was the one
+shell nothing could see, and this sentence is the trained contract rather than a
+statement of fact. The correction is the doctrine's job (`ph_rlm.prompt`), which
+states plainly that there are no magics and names `await tools.bash(...)`; the
+conformance suite asserts the doctrine and the runtime agree. Do not "fix" this
+string to match — changing it changes what the model was trained against, and
+`test_presentation.py` pins it verbatim for that reason."""
 
 
 class IpythonToolDetails(WireModel):

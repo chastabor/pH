@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from runtime_helpers import namespace
 
 from ph.seams.code_runtime import CodeBinding, CodeBindingNamespace
 from ph.tools.code_mode import CodeRunFailure, ToolCallError
@@ -33,13 +34,7 @@ def tools(**handlers: Callable[..., Any]) -> CodeBindingNamespace:
     half of C1 — that a call reaches a host closure and its answer reaches the
     program — and `test_governance.py` tests the pipeline's half.
     """
-    return CodeBindingNamespace(
-        name="tools",
-        bindings=tuple(
-            CodeBinding(name=name, description=name, parameters={}, dispatch=handler)
-            for name, handler in handlers.items()
-        ),
-    )
+    return namespace("tools", **handlers)
 
 
 # ------------------------------------------------------------------ execution --

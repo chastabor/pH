@@ -53,6 +53,7 @@ from ph.wire import WireModel
 
 __all__ = [
     "INLINE_BLOB_MAX",
+    "RESERVED_KINDS",
     "SNAPSHOT_KINDS",
     "KernelSnapshotPolicy",
     "SnapshotKind",
@@ -66,8 +67,19 @@ log = logging.getLogger("ph_rlm.snapshot")
 
 SnapshotKind: TypeAlias = Literal["snap", "patch", "clear", "recipe"]
 SNAPSHOT_KINDS: Final[tuple[SnapshotKind, ...]] = ("snap", "patch", "clear", "recipe")
-"""The full vocabulary D17 defines. `patch` is reserved, not emitted — see the
-module docstring for why a delta chain over `dill` bytes is benchmark-gated."""
+"""The full vocabulary D17 defines."""
+
+RESERVED_KINDS: Final[frozenset[str]] = frozenset({"patch", "recipe"})
+"""Kinds defined here that nothing writes, and what each is waiting for.
+
+`patch` is benchmark-gated: a `bsdiff4` chain over `dill` bytes earns its
+complexity only if the delta ratio justifies it, and the module docstring argues
+why that is not obvious. `recipe` needs a *harness-owned declarative load of a
+kernel variable* — P3-17's corpus is the obvious candidate and deliberately is
+not one, because it never enters the kernel (see `ph_rlm.context_loader`).
+
+Declared beside the vocabulary rather than in a test: whoever implements one
+reads this module, and the conformance suite reads this set."""
 
 INLINE_BLOB_MAX: Final = 64 * 1024
 """Above this a payload goes to `ctx.spill_store` and the event carries the

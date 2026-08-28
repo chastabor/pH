@@ -28,13 +28,13 @@ that have to agree about one operation.
 
 from __future__ import annotations
 
-import json
 from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any, Literal, TypeAlias, get_args
 
 from pydantic import Field
 
+from ph.persistence import read_records
 from ph.session import Session, SessionFoldCache
 from ph.wire import WireModel
 
@@ -286,22 +286,14 @@ def extend_session(state: HarnessState, session: Session, from_seq: int) -> Harn
 
 
 def read_global_events(directory: Path) -> list[dict[str, Any]]:
-    """The global log's payloads, in order. A missing log is an empty harness."""
-    path = directory / GLOBAL_LOG_NAME
-    if not path.exists():
-        return []
-    payloads: list[dict[str, Any]] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        text = line.strip()
-        if not text:
-            continue
-        try:
-            payloads.append(json.loads(text))
-        except json.JSONDecodeError:
-            # A half-written last line is what a crash mid-append looks like;
-            # the refinements before it are still sound.
-            continue
-    return payloads
+    """The global log's payloads, in order. A missing log is an empty harness.
+
+    `read_records` carries the tolerance and the reason for it: a torn last line
+    is a crash mid-append, and the refinements before it are still sound. The
+    orphan journal is the same shape and now shares the rule rather than
+    restating it.
+    """
+    return list(read_records(directory / GLOBAL_LOG_NAME))
 
 
 def local_fold_cache() -> SessionFoldCache[HarnessState]:

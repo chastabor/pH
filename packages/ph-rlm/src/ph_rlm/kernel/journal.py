@@ -32,6 +32,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ph.persistence import read_records
+
 __all__ = ["JOURNAL_NAME", "OrphanJournal", "SweepReport", "argv_digest", "process_start_token"]
 
 log = logging.getLogger("ph_rlm.kernel.journal")
@@ -147,19 +149,13 @@ class OrphanJournal:
             log.warning("ph_rlm.kernel: could not journal %r", record, exc_info=True)
 
     def _records(self) -> Iterator[dict[str, Any]]:
-        try:
-            text = self.path.read_text(encoding="utf-8")
-        except OSError:
-            return
-        for line in text.splitlines():
-            if not line.strip():
-                continue
-            try:
-                record = json.loads(line)
-            except ValueError:
-                continue
-            if isinstance(record, dict):
-                yield record
+        """This journal's lines, tolerating the tail a hard kill leaves.
+
+        The tolerance is `read_records`' — the journal exists precisely because
+        pH was killed mid-write, so refusing the file over its last line would
+        discard the strays it was written to find.
+        """
+        return read_records(self.path)
 
     def _live(self) -> dict[int, dict[str, Any]]:
         live: dict[int, dict[str, Any]] = {}

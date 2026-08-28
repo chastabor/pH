@@ -28,13 +28,27 @@ from __future__ import annotations
 import ast
 from typing import Any
 
-__all__ = ["CELL_FILENAME", "CELL_FUNCTION", "MAGIC_HINT", "bound_names", "compile_cell"]
+__all__ = [
+    "CELL_FILENAME",
+    "CELL_FUNCTION",
+    "MAGIC_HINT",
+    "MAGIC_PREFIXES",
+    "bound_names",
+    "compile_cell",
+]
 
 CELL_FUNCTION = "__ph_cell__"
 
 CELL_FILENAME = "<cell>"
 """The compiled name. Also the marker a traceback is trimmed to, so the model
 sees its own frames and not the runner's."""
+
+MAGIC_PREFIXES = ("%%", "%", "!")
+"""Every IPython escape, exported because three layers describe this rule.
+
+The guest refuses them, the RLM doctrine tells the model so, and the conformance
+suite checks the two agree. A hole left in one prefix is the hole, so the list
+has one home rather than three that drift."""
 
 MAGIC_HINT = (
     "IPython magics are not available: pH runs plain Python, so there is no "
@@ -176,5 +190,4 @@ def compile_cell(program: str, filename: str = CELL_FILENAME) -> Any:
 
 
 def _looks_like_magic(program: str) -> bool:
-    stripped = program.lstrip()
-    return stripped.startswith(("%%", "%", "!"))
+    return program.lstrip().startswith(MAGIC_PREFIXES)

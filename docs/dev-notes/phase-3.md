@@ -42,9 +42,10 @@ construction: the only guest→host channel is a `call` frame.
 | P3-18 | `rlm-skills-python`: `SKILL.md` discovery, editable install, import names to the kernel at boot, catalog section | `ph_rlm/skills.py`, `ph_runtime/runner.py` |
 | P3-19 | `CodeCellWidget` and the subagent panel: the two P3-09/P3-11 records that had no consumer | `ph_app/tui/widgets/{transcript,status}.py`, `ph_app/tui/{state,adapter}.py` |
 | P3-20 | The `rlm` profile, reachable by name: bundles discovered through a `ph.bundles` entry point rather than imported | `ph/bundles/__init__.py`, `ph_app/profiles.py` |
+| P3-22 | The conformance suite: the protocol's vocabulary enumerated, so an untested frame fails | `ph-rlm/tests/test_conformance.py` |
+| P3-23 | The fixture replay and its triaged report | `docs/dev-notes/prime-agent-replay.md`, `ph-rlm/tests/{fixture_replay,test_fixture_replay}.py` |
 
-**Still to come:** P3-22…P3-25 — the runtime conformance gate, the fixture
-replay, and the trajectory view. P3-13's remaining half — passivation
+**Still to come:** P3-24 and P3-25 — the trajectory projection and its view. P3-13's remaining half — passivation
 across a *restart*, where the child's session is gone and has to come off disk —
 is the daemon's (Phase 5); the in-process half landed here.
 
@@ -2057,3 +2058,271 @@ accepts a whole resolved profile. A `_plural` helper replaced three copies of
 the pluralization ternary that produced the "1 governed calls" bug in the first
 place, `STATUS_GLYPHS` is a module constant rather than a dict literal rebuilt
 per row per frame, and a test that compared a file with itself is gone.
+
+---
+
+## P3-22: the suite whose job is knowing what it does not test
+
+Almost every behaviour this row lists was already covered — `test_kernel.py`
+drives the process boundary, `test_codec.py` fuzzes the decoder, `test_snapshot.py`
+folds the namespace, `test_journal.py` sweeps strays, `test_lifecycle.py` kills
+the host. Writing those tests again would have added nothing.
+
+What none of them can claim is **completeness**. A hand-written list of "the
+frames we test" agrees with the protocol right up until someone adds a frame,
+and then agrees with nothing: the suite stays green while an unexercised frame
+type ships. So the conformance suite reads `FRAME_FIELDS` and the *mounted*
+profile's namespaces and asserts coverage against them — the absence of a test
+is what breaks, which is the only version of this that keeps working.
+
+The same enumeration runs over `SNAPSHOT_KINDS`, and both tables record their
+gaps rather than omitting them, because *untested* and *unimplemented* are
+different facts and only a table can tell them apart:
+
+- **`display` has no producer.** It is defined on both twins, decoded, collected,
+  carried out through `CodeRunResult` and counted on P3-19's card — and the guest
+  has no `display()` in the cell namespace, so nothing can send one. It became
+  visible at P3-09 when `IpythonToolDetails.attachments` was written; now that
+  the widget exists, it is the next thing to close.
+- **`patch` and `recipe` are reserved.** `patch` is benchmark-gated by D17 itself
+  — a `bsdiff4` chain over `dill` bytes earns its complexity only if the ratio
+  justifies it. `recipe` waits on a harness-owned declarative load of a *kernel
+  variable*; P3-17's corpus is the obvious candidate and deliberately is not one,
+  because it never enters the kernel.
+
+New behaviour did come out of the enumeration: `fault` had no test, so one now
+drives a guest with a bumped protocol version and asserts it refuses at boot
+naming the fix (D7's "a guest that misreads one frame at a time is worse than a
+guest that will not start"). And the magic check was `%%bash` only, while the
+guest refuses `%%`, `%` **and** `!` — a hole left in one of the three is the
+hole, so all three are pinned.
+
+### The bug a cross-layer suite exists to find
+
+The RLM doctrine told the model:
+
+> A cell whose first line is `%%bash` is a shell cell. It runs in a temporary
+> subshell, so it does not share the Python namespace and `cd` does not persist.
+
+pH's guest raises a `SyntaxError` for exactly that cell. The line was ported
+faithfully from prime-agent's `rlm.ts` — where it was true — and D19 is the
+decision that made it false: *"Own runtime → no magics → the hole never opens"*,
+and the feature map's item 4 closes "by construction". The doctrine was
+advertising the bypass the runtime was built to remove, and a model reading it
+would have spent turns on cells that cannot run.
+
+No single-layer test could see it. The guest's tests assert the `SyntaxError`;
+the prompt's tests assert the doctrine renders. Only a suite that reads both
+notices they disagree — and that is now an assertion, not a hope.
+
+One tension it does **not** resolve: the transport's *description* still says
+"Python scratchpad code or `%%bash` shell cells", because P3-09 ports it verbatim
+on purpose — it is the contract the model was trained against, and paraphrasing
+it is a silent behaviour change. The doctrine is the layer that states rules, and
+it now contradicts that phrase deliberately rather than echoing it accidentally.
+
+### Honest scope
+
+The row's exit criterion says "green on Linux, macOS, Windows". It is green on
+Linux. macOS is untried in this environment; Windows is *unimplemented* rather
+than untested — `pass_fds` is POSIX-only and the Job Object work has no code —
+which the phase's known-gaps section has said since P3-04 and P6-11 is the row
+that closes.
+
+---
+
+## P3-23: what a replay can honestly claim
+
+The row says "prime-agent fixtures under the new surface". The first decision was
+what that can mean. Replaying a trajectory needs the model, the key and the
+network — and even with all three, a recorded session is not a deterministic
+program: the same prompt against the same model does not reproduce the same tool
+calls. So "replay" here is a **structural comparison**: reduce each recorded
+session to the facts the port could change, and account for every difference.
+
+The full argument and the numbers are in `docs/dev-notes/prime-agent-replay.md`;
+what belongs in the phase notes is what the exercise turned up.
+
+**The fixtures are the coding agent, not the RLM.** 454 and 391 tool calls
+across the two, all `bash`/`edit`/`read`/`write`, not one `ipython` cell and not
+one spawn. That reframes the whole row: it is a statement about surface
+translation, across precisely the surface C1–C3 replaced — and it means the two
+RLM-specific diffs the plan predicted cannot be observed here. `access-default`
+is now asserted *absent*, so a future fixture that delegates fails the test
+rather than letting the report quietly go stale.
+
+**The triage is a coverage table, not a list of diff names.** The first draft
+compared a set of literals against a set of literals written in the same
+function — unfalsifiable, and the report said otherwise in as many words. What
+replaced it is the same shape `test_conformance.py` uses: enumerate the
+fixtures' own record types and roles, and require each to map somewhere in pH's
+log or be named as a gap. That is the version of "unexpected diffs triaged" that
+survives someone adding a fixture later, and the cleanup pass is what caught it.
+
+**One diff is a real gap.** `bashExecution` records are prime-agent logging a
+*user's* interactive shell into the session alongside the model's turns. pH has
+no counterpart: `ctx.commands` is the right mechanism and nothing shipped uses it
+to shell out, so a person running `ls` today does it outside the session and the
+log does not know. Filed as a missing feature for the Phase 4 TUI work, not as a
+porting error — the distinction being that nothing in pH is wrong, there is
+simply less of it.
+
+**Nothing was unrepresentable.** No tool called is missing, no record type in
+either fixture has no home in pH's log, and the compaction the one fixture is
+named for maps onto `surface_op: replace` — the mechanism pH already uses for
+compaction, offload and rollback alike.
+
+---
+
+## The cleanup pass over P3-22/P3-23
+
+Four reviewers, and two of them independently found the same thing: **the
+replay's triage assertion could not fail.**
+
+`EXPECTED_DIFFS` was compared against an `observed` set whose every member was a
+string literal in the same function — `"sdk-block"` added unconditionally, the
+others behind conditions that were themselves asserted elsewhere. So
+`observed - EXPECTED_DIFFS` was empty by construction: a fifth diff could only
+arrive by someone editing the test, and that edit would add it to both sets. The
+report, the plan row and these notes all stated the opposite as fact.
+
+What replaced it is the shape the sibling module already used: enumerate the
+**fixtures' own vocabulary** — five record types, four roles, both closed — and
+require every member to map to a place in pH's log or be named as a gap. That is
+the report's actual claim ("no record type in either fixture is unrepresentable
+here"), and it was tested by nothing. `bashExecution` is now the single entry
+with an empty mapping, and the test asserts it is the only one.
+
+The lesson is narrow and worth keeping: a test that compares two hand-written
+sets is a test of whether someone edited both. Enumerating the *subject's*
+vocabulary is what makes the absence of coverage fail.
+
+### Vocabulary facts moved to the vocabulary
+
+`UNPRODUCED = {"display"}` and `UNEMITTED_KINDS = {"patch", "recipe"}` were
+hand-written in a test in ph-rlm — facts about the protocol and about D17's
+snapshot chain, not about the tests. They now live beside what they describe, as
+`ph_runtime.protocol.UNPRODUCED_FRAMES` and `ph_rlm.snapshot.RESERVED_KINDS`,
+and the suite reads them. ph-runtime-guest is a separate distribution: someone
+adding a `display()` producer reads the guest's protocol module, and the
+constraint has to be where they are standing. `snapshot.py` had already
+documented `patch`'s reserved status and said nothing about `recipe`; the two
+now agree because there is one of them.
+
+The paired tables went with it. `EXERCISED_BY` mapped frame → prose and was only
+ever checked for emptiness, with `UNPRODUCED` a hand-maintained recomputation of
+"the empty ones" — two structures to keep in step, and a failure message that
+printed an empty list in the likelier direction. One frozenset of covered frames
+with the test names as comments does the same job.
+
+### The magic rule had three homes
+
+The prefix tuple `("%%", "%", "!")` was written in the guest's
+`_looks_like_magic`, restated in the doctrine's prose, and restated again in the
+test's `parametrize` — in the module whose thesis is that hand-written lists rot.
+`MAGIC_PREFIXES` is now exported from `ph_runtime.cell`, the doctrine renders
+from it, and the parametrize reads it. A fourth escape added to the guest reaches
+the prompt and the test by construction.
+
+The doctrine also names `%%bash` explicitly again — not as a promise this time,
+but as the concrete case the model was trained on and would otherwise try.
+
+### The boot frame was a second copy of the schema
+
+`test_a_protocol_mismatch_is_refused_at_boot` hand-typed a camelCase JSON byte
+literal with `%d` splicing — including the `skills` field protocol 2 had just
+added. The next required field would have left it stale and failed the test for
+the wrong reason, which is the drift the mirror test exists to prevent. It now
+builds the frame with `KernelLimits().to_boot(...)` and `encode()`, spawns with
+`FD_ENV` and `scrub_env` rather than a literal env var and a hard-coded POSIX
+`PATH`, and reads the reply through `decode` instead of a whitespace-normalising
+substring dance. It also stopped booting a whole kernel to read
+`environment.python` off it.
+
+### Four fewer child processes
+
+`%%bash` was being driven through a real kernel three times across the suite, and
+the parametrized test booted a fresh guest per prefix — to observe a
+*compile-time* property. `compile_cell` is pure and importable, so the prefix
+tests call it directly and `test_kernel.py` keeps the one real round trip. With
+the boot-test's spurious kernel, that is four fewer spawns: the module went from
+0.61 s to 0.22 s.
+
+### And the pin bypass, again
+
+Three call sites had re-spelled `{"id": "code-runtime-python", "config": HOST_INTERPRETER}`
+as a raw patch instead of going through `shipped_profile`, whose docstring
+records that this exact bypass once dropped the interpreter pin and started
+building a `uv` venv over the network. `shipped_profile` gained a `profile=`
+keyword so the composed `rlm` profile can go through the merging path, and the
+new call sites use it.
+
+Also: the fixture reader streams instead of `read_text().splitlines()` (16.7 MB
+peak → 0.6 MB, and marginally faster), the shapes are parsed once per module
+rather than once per test, `TrajectoryShape` lost a field that was `sum()` of
+another and a property nothing read, `_namespace` joined `runtime_helpers`
+beside the other shared builders, and a `pytest.importorskip("yaml")` that could
+never fire — pyyaml is a hard dependency two layers down — is gone.
+
+---
+
+## Two skipped cleanup items, revisited
+
+Both were deferred out of the P3-22/P3-23 pass as "outside this diff". Looked at
+directly, one was worth doing and one was worth doing *smaller* than proposed.
+
+### The JSONL readers: two of the four share a rule, not four
+
+The proposal was one `read_jsonl` for four near-identical loops. Reading them,
+they are not four instances of one thing:
+
+- `ph.persistence.read_session` is **strict** — it raises with a line number. A
+  session is a conversation, and truncating one at its first bad line hands the
+  model a history missing its middle.
+- `fixture_replay.read_shape` is tolerant for a *different* reason: it parses
+  another project's format at a version this port does not pin, and it lives in
+  tests.
+- The orphan journal and the Continual Harness's global log are the same thing:
+  **append-only logs where the only way to be malformed is a crash between the
+  write and the flush**, damage confined to the last line, everything before it
+  sound. Both said exactly that in their own comments.
+
+So the extraction is those two, and `ph.persistence.read_records` states the
+rule once — including the part that matters, which is *why* tolerance is right
+here and wrong for `read_session`, contrasted in the same docstring. Nothing
+about JSONL decides that; the log's contract does.
+
+Both callers were also reading eagerly, and the harness's global log grows
+without bound: `read_records` streams, so a large one is no longer materialized
+whole to fold. `_records` narrowed from `except ValueError` to
+`json.JSONDecodeError`, which is the subclass it meant.
+
+The two that stayed apart stayed apart. A helper with a `strict=` flag would
+have unified the code and lost the reason.
+
+### The interpreter probe: measured, then cached
+
+`_host_can_import_guest` spawns `python -c "import ph_runtime"` and was
+uncached. Measured across the suite: **79 spawns, 1.45 s** of a 43 s run, all
+re-answering one question about one interpreter.
+
+Worth stating what the fix is *not* worth: `PythonCodeRuntime.environment()`
+already memoizes its resolution behind a lock, so a real deployment paid this
+once per process before and after. The cost is concentrated in tests, which
+build many contexts. That makes it a test-speed fix — but a one-decorator one
+that also makes `resolve_interpreter` cheap to call repeatedly, which is a
+reasonable property for a resolver.
+
+The safety argument is the part worth recording. Caching a *negative* is the
+risky direction, and it is safe here because **both callers refuse on `False`**:
+`resolve_interpreter` raises, and the caller does not continue — so a stale
+negative cannot strand a process that would otherwise have recovered, because
+there is no recovery path. A stale positive means someone uninstalled the guest
+from a live interpreter mid-run, which the next spawn reports anyway.
+
+The one trap it introduces is in tests: keyed on the path, a test that rewrote a
+single interpreter from broken to working in place would see the first answer.
+`test_venv.py` already gives its cases distinct `tmp_path` names, and the
+docstring says so.
+
+Result: 1.45 s → 0.02 s for the same call sites, suite 43.1 s → 40.5 s.
