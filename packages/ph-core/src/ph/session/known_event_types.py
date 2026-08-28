@@ -68,6 +68,17 @@ KNOWN_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         "subagent/deleted",
         "subagent/status",
         "subagent/usage-attributed",
+        # The Continual Harness (P3-16). Its state *is* this fold — there is no
+        # side file to fall back on — so a reader that skipped one would show a
+        # harness the session does not have. A rollback is a refinement with
+        # `rollbackOf` set, so there is one type rather than two fold cases that
+        # have to agree about one operation.
+        "harness/refined",
+        # Considering and declining. Unlike the refinement itself this changes no
+        # state — it is what advances the auto-refine cooldown (H7) — so it is
+        # ignorable: a reader that skips it gets one extra review pass, not a
+        # harness the session does not have.
+        "harness/refine-considered",
     }
 )
 
@@ -81,6 +92,7 @@ IGNORABLE_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         # that skipped either would show a parent the wrong family.
         "subagent/status",
         "subagent/usage-attributed",
+        "harness/refine-considered",
     }
 )
 """Types a *different* build may skip without misreading the rest of the log.

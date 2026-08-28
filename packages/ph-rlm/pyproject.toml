@@ -9,7 +9,7 @@ description = "pH RLM bundle: the CPython fd-3 code runtime, bindings, subagents
 readme = "README.md"
 requires-python = ">=3.12"
 license = "MIT"
-dependencies = ["ph-core", "ph-runtime-guest", "dill>=0.3.8"]
+dependencies = ["ph-core", "ph-runtime-guest", "dill>=0.3.8", "filelock>=3.15"]
 
 [project.entry-points."ph.plugins"]
 code-runtime-python = "ph_rlm.kernel.manager:apply"
@@ -18,6 +18,7 @@ rlm-presentation = "ph_rlm.presentation:apply"
 rlm-bindings = "ph_rlm.bindings:apply"
 rlm-messaging = "ph_rlm.messaging:apply"
 rlm-prompt = "ph_rlm.prompt:apply"
+rlm-harness = "ph_rlm.harness:apply"
 rlm-subagent-provider = "ph_rlm.subagents:apply"
 
 [tool.uv.sources]

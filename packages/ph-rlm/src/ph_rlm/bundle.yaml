@@ -85,6 +85,13 @@
 - id: rlm-prompt
   name: rlm-prompt
 
+# The Continual Harness (P3-16, D14): state is a fold over `harness/refined`
+# rather than a file, so a fork inherits the harness as of its boundary and a
+# rollback is derivable from the event that made the change. `/refine` is a
+# command, not a tool — it is something the human asks for.
+- id: rlm-harness
+  name: rlm-harness
+
 # The row that makes `persistence: namespace` true rather than declared (D17).
 # Mounted with the runtime, not optionally: the seam takes the provider's promise
 # at registration, and these events are the promise being kept.

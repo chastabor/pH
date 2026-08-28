@@ -355,6 +355,41 @@ class TuiEventAdapter:
             event,
         )
 
+    def _on_harness_refined(self, event: SessionEvent, live: bool) -> None:
+        """A refinement, rendered because it changes the model's own prompt.
+
+        Not left to the auditor's view: `/refine` is only one way here — the
+        planner refines at turn end with no command to show for it — and a user
+        who cannot see the harness change cannot know why the next turn behaves
+        differently. Rejections are on the same row: an edit the harness refused
+        is the interesting half.
+        """
+        summary = str(event.data.get("summary") or "the harness")
+        edits = len(seq(event.data.get("appliedEdits")))
+        rejected = len(seq(event.data.get("rejected")))
+        rolled = event.data.get("rollbackOf")
+        text = (
+            f"Rolled back {rolled}: {edits} edit(s) undone."
+            if rolled
+            else f"Refined the harness: {summary} ({edits} edit(s))."
+        )
+        if rejected:
+            text = f"{text} {rejected} edit(s) refused."
+        self._row("harness", "notice", text, event)
+
+    def _on_harness_refine_considered(self, event: SessionEvent, live: bool) -> None:
+        """A pass that decided not to refine — shown only when a human asked.
+
+        The automatic passes (H7) are the auditor's business: one line every
+        twenty-five turns saying nothing changed is noise. A `/refine` the user
+        typed is the opposite — without this row the command would answer
+        "refining in the background" and then never come back.
+        """
+        if event.data.get("trigger") != "user":
+            return
+        reason = str(event.data.get("reason") or "nothing to record")
+        self._row("harness", "notice", f"No refinement: {reason}", event)
+
     def _on_subagent_admitted(self, event: SessionEvent, live: bool) -> None:
         """A delegation the human should see starting.
 
@@ -413,6 +448,8 @@ HANDLERS: Mapping[str, Handler] = {
     "agent/inbox/spliced": TuiEventAdapter._on_agent_inbox_spliced,
     "todo/write": TuiEventAdapter._on_todo_write,
     "kernel/restored": TuiEventAdapter._on_kernel_restored,
+    "harness/refined": TuiEventAdapter._on_harness_refined,
+    "harness/refine-considered": TuiEventAdapter._on_harness_refine_considered,
     "subagent/admitted": TuiEventAdapter._on_subagent_admitted,
     "subagent/deleted": TuiEventAdapter._on_subagent_deleted,
 }

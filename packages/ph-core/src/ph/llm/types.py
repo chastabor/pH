@@ -492,12 +492,17 @@ class GenerateOptions:
     max_tokens: int | None = None
     stop: tuple[str, ...] = ()
     session_id: str | None = None
-    purpose: Literal["compaction", "session-title"] | None = None
+    purpose: Literal["compaction", "session-title", "refine"] | None = None
     """Why an auxiliary call is being made. Ordinary conversation requests leave
     it unset — so a session-bound request with no `purpose` *is* a loop request,
     and the "model-visible means logged" invariant holds it to the log. Nothing
     outside the loop can opt a conversation request out by leaving a flag at its
-    default; it would have to name a purpose it does not have."""
+    default; it would have to name a purpose it does not have.
+
+    A closed set rather than a free string, for that reason: opting out has to be
+    a declaration this file can enumerate. `refine` is the Continual Harness's
+    planner and its review gate (P3-16) — calls *about* the conversation, whose
+    prompt is deliberately not its derivation."""
 
     @property
     def is_loop_request(self) -> bool:

@@ -37,10 +37,11 @@ construction: the only guest→host channel is a `call` frame.
 | P3-13 | Rehydration on address: a settled child is woken by a send | `ph/seams/subagents.py`, `ph_rlm/subagents.py` |
 | P3-14 | `rlm-prompt`: doctrine, child doctrine, conditional delegation section, volatile facts as a `context()` | `ph_rlm/prompt.py` |
 | P3-21 | The governance gate: C1-C4 and C7 against the shipped profile | `ph-rlm/tests/test_governance_gate.py` |
+| P3-16 | The Continual Harness: the fold at both scopes, validation (H1/H2/H3/H5), apply, rollback (H6), the prompt section, `/refine`, the planner and auto-refine (H7) | `ph_rlm/harness/{state,service,planner,auto,__init__}.py` |
 
-**Still to come:** P3-16…P3-20 and P3-22…P3-25 — the Continual Harness, the context loader, Python skills, the TUI code
-cell and subagent panel, the profile bundle, the two conformance gates, the
-fixture replay, and the trajectory view. P3-13's remaining half — passivation
+**Still to come:** P3-17…P3-20 and P3-22…P3-25 — the context loader, Python
+skills, the TUI code cell and subagent panel, the profile bundle, the runtime
+conformance gate, the fixture replay, and the trajectory view. P3-13's remaining half — passivation
 across a *restart*, where the child's session is gone and has to come off disk —
 is the daemon's (Phase 5); the in-process half landed here.
 
@@ -1388,3 +1389,300 @@ of restating it. Three prose copies became one.
   tests could share; three register process-wide mutating listeners, in the one
   module whose job is asserting what policy does. Fixing the glob root was 6× the
   saving with none of the coupling.
+
+---
+
+## P3-16: the harness as a fold, and what writing the gates found
+
+Increment 1 is everything except the planner: the fold at both scopes
+(`state.py`), validation and apply (`service.py`), the prompt section, `/refine`
+and its rollback (`__init__.py`). A caller supplies a `RefinementProposal`; the
+LLM that writes one is increment 2, and it is a thin layer over
+`HarnessService.apply` rather than a second path into the state.
+
+### Three bugs the tests found, in order of how quietly they failed
+
+**`_local` was not a field at all.** `_local = field(default_factory=…)` with no
+annotation is a plain class attribute, and `slots=True` keeps it as one — so
+`self._local` was a `dataclasses.Field` object and the first `local()` call would
+have raised. It type-checked, linted and imported cleanly; the first test that
+folded anything caught it.
+
+**Every global refinement was refused, however the human answered.** `_approved`
+compared the outcome against `"allowed"`, and `ApprovalOutcome` has no such
+member — it is `allowed-once | rejected | cancelled | unavailable`. The failure
+direction is the safe one, which is exactly why nothing else would have noticed:
+a fail-closed gate that always fails closed looks like a working gate until
+someone tries to use it. Only the test that asserted a global edit *lands* could
+see it.
+
+**`harness/refined` was unrendered.** Adding the type to
+`KNOWN_SESSION_EVENT_TYPES` tripped the TUI adapter's vocabulary equality — the
+P2-01 invariant doing its job across a package boundary. It is a row, not an
+auditor's record: `/refine` is only one way here, the planner refines at turn end
+with no command to show for it, and a user who cannot see the harness change has
+no way to know why the next turn behaves differently. Rejections go on the same
+row, because an edit the harness *refused* is the interesting half.
+
+### Four divergences from the plan, and why
+
+**One event type, not two.** The plan folds `harness/refined` and
+`harness/rolled-back`. A rollback is an inverse *applied*, and the refined record
+already carries `rollbackOf`, so a second type would be a second fold case that
+has to agree with the first about one operation.
+
+**A rollback is the inverse record, not an inverse proposal.** The first version
+built inverse `HarnessEdit`s and re-ran them through `apply`. That restored the
+title and content and left the entry at `v3` — so `after.entries ==
+before.entries` failed, which is the plan's own gate ("rollback restores fold").
+Re-proposing cannot satisfy it: `apply` constructs entries and bumps versions by
+construction. The inverse of a record is that record reversed with `before` and
+`after` swapped, which is both shorter and actually an inverse; the churn stays in
+the refinement history, which an append-only log keeps anyway. It is also
+deliberately not revalidated — that state passed validation when it was written,
+and refusing to undo a bad refinement because the world has since moved would
+trap a user in the state they are trying to leave. `apply`'s `rollback_of`
+parameter went away with it, and both paths now commit through one `_commit`, so
+a rollback and an apply cannot come to differ in what they leave behind.
+
+**H3's gate is an approval request, not a `tools/pre-execute` `ask`.** The plan
+describes a global edit as an `ask` "on the `refine` tool". There is no such
+tool — precisely because `/refine` is a command — so no `pre-execute` waterfall
+ever fires for it. `ctx.approval.request(tool_name="refine")` asks the same
+question through the same answerers, records both halves in the log, and fails
+closed with nowhere to ask. Registering a model-callable `refine` tool to satisfy
+the letter would hand the model the one operation the design says is the human's.
+
+**Kinds are `note | procedure | skill`.** Prime Agent has
+`prompt | memory | skill | subagent`. A `note` rendered in the prompt section *is*
+a prompt patch with the doctrine off-limits (H5), so `prompt` and `memory` collapse
+into one; a `subagent` entry would be a preset, and a preset is capability, which
+Q13's own boundary puts outside the knowledge layer.
+
+### Two things the design got for free, and one it paid for
+
+The fork test is three lines: apply, note the boundary seq, apply again, then
+`ctx.sessions.fork(session, boundary)` and fold. Nothing was copied and no state
+was handed over — that is the whole D14 claim, and a file could not express it.
+Likewise the delete-and-re-derive gate is `fold_session(session).to_wire() ==
+local(session).to_wire()`, asserted against a *cold* fold so the cache cannot be
+what makes them agree.
+
+What it paid for is H1. Resolving a reference in the runtime the model actually
+uses means the probe boots a kernel — one per deployment, in a `harness-probe`
+namespace of its own so `_m`/`_c` never land in the namespace the model is using
+(they would otherwise show up in its snapshots). Checking the import against the
+host process instead would have been free and would have proved something about
+the harness's own `sys.path` rather than the model's. The whole module still runs
+in 1.4 s.
+
+One thing H2 is worth naming precisely: `render_call_pattern` matches on the
+callable's *name*, so an entry pointing at stdlib `glob.glob` renders
+`await tools.glob(...)`. That is a real ambiguity, and it fails in the safe
+direction — the only way it can be wrong is by steering the model toward the
+governed path, never away from it.
+
+### Fixed while writing it
+
+The projection was written to one shared `$PH_HOME/harness/harness_state.json`,
+but it is a projection of *local layered over global* — so two sessions would
+overwrite each other's, and P6-01's "the file equals the fold" invariant would
+flap in any deployment running more than one. It is now one file per session
+(`projection_path`), which is the shape the plan's `<session artifacts>/harness/`
+describes; artifact roots do not exist yet, so a directory named for the session
+under the harness root stands in.
+
+It was also written with `path.write_text`, which truncates: a human can read the
+file while a refinement applies, and under the daemon two sessions project at
+once. It now stages and renames. And `_probe` reached past `ctx.code_runtime` to
+`.provider.run(...)` when the seam has its own `run` — the seam checks the
+provider exists in one place and the harness should not be the second.
+
+---
+
+## P3-16, increment 2: the planner, and where the trigger state went
+
+Increment 1 could apply a `RefinementProposal`. This is where one comes from:
+`planner.py` (the two model calls) and `auto.py` (when they run unasked).
+
+### Two calls, deliberately different sizes
+
+The **review gate** is cheap and answers one question — is there anything here
+worth recording — because auto-refine fires on a turn count and most turns teach
+nothing. The **planner** is the expensive one and runs only when something says
+yes, or when a human typed `/refine`. A user-triggered pass skips the gate
+entirely: asking a model whether to do what the human just asked for spends a
+call to second-guess them.
+
+Neither is a turn. Both name `purpose="refine"`, which is what keeps them out of
+`is_loop_request` and therefore out of the "model-visible means logged"
+invariant — correctly, because their prompt is *about* the conversation rather
+than part of it. That meant adding `"refine"` to `GenerateOptions.purpose`, which
+is a closed union on purpose: opting out of the invariant has to be a declaration
+this file can enumerate, not a flag anyone can leave at its default.
+
+The planner reads `derive_messages()`, not the raw log — so a compacted range
+reaches it as its summary, and it cannot learn from history the agent has already
+been told to forget.
+
+### The trigger state is a fold, and it has no clock
+
+Prime Agent keeps a turn counter and a last-run timestamp beside the session. All
+four of its numbers are ported — 25 turns, post-compaction, a cheap gate, a
+20-minute cooldown — but every one of the inputs is now read off the log by
+`due()`, in a single backwards pass that stops at the most recent
+`harness/refine-considered` or `harness/refined`.
+
+The part worth naming: **the clock is the log's**. `due()` compares against the
+timestamp of the event that triggered the check rather than `time.time()`. That
+event was appended moments ago, so nothing is lost — and the whole decision
+becomes a pure function of a prefix, which answers the same on a resumed session,
+on a fork, and in a test with no clock to freeze. The cooldown tests are three
+fabricated events and no monkeypatching.
+
+Compaction is a trigger in its own right because it is the one moment the
+conversation gets *shorter*: what the summary dropped is exactly what the harness
+should have kept, and after it nobody can read it. It is detected as
+`is_replacement_surface_event`, which already exists — so this works today rather
+than waiting for Phase 4's compaction row to name itself.
+
+### `harness/refine-considered`, and why a non-event is an event
+
+Every outcome that is not a refinement appends one: a declined review, an empty
+proposal, a planner that returned prose, a veto. It is what advances the
+cooldown, so a broken planner or a quiet conversation costs one cheap call rather
+than one per turn for the rest of the session.
+
+It is **ignorable** — a reader that skips it gets one extra review pass, not a
+harness the session does not have, which is exactly the line
+`IGNORABLE_SESSION_EVENT_TYPES` draws — and in the TUI it renders **only when the
+trigger was `user`**. Automatic passes saying "nothing changed" every
+twenty-five turns are the auditor's business; a `/refine` the human typed is the
+opposite, because without that row the command would answer "refining in the
+background" and never come back. `_on_kernel_restored` had already established
+the shape: a handler that renders only when there is news.
+
+### Two things that only showed up once it was wired together
+
+**A vetoed `/refine` answered with silence.** The veto ran inside the job, wrote
+nothing, and returned a string to a caller that had already replied. It now
+records a consideration like any other non-refinement, so the reason reaches the
+transcript. "A veto costs nothing" narrowed to "a veto costs no tokens", which is
+the claim that was actually load-bearing.
+
+**Finished passes accreted in `ctx.jobs`.** A refine job is owned by the agent's
+scope, so nothing dropped its entry until the agent went — one per pass, for the
+life of a long session. `jobs.forget` exists for precisely this ("released", not
+"abandoned"), and the seam's own docstring names `/refine` as its example; the
+body now calls it in a `finally`.
+
+### `/refine --show`
+
+Increment 1's placeholder — a status line saying the planner was not mounted yet —
+had to go. What replaced it is `--show`, which prints the harness **unbounded**,
+unlike the prompt section: the entries the per-kind bound elides are exactly the
+ones a human cannot see any other way.
+
+### Known gap
+
+**A subagent's own session auto-refines.** A child runs a real loop, so 25 turns
+in one child triggers a local pass over a harness nothing reads after the child
+settles. The clean fix needs the harness row to know a session is a delegation,
+and `rlm-harness` deliberately mounts without the delegation rows. Cheap in
+practice (children rarely run 25 turns) and worth revisiting when P3-19's panel
+gives the two rows a reason to know about each other.
+
+---
+
+## The cleanup pass over P3-16
+
+Four reviewers (reuse, simplification, efficiency, altitude), findings deduped.
+Every reviewer independently flagged `_collect_text`; the interesting fixes are
+the two caching ones.
+
+### The "incremental" fold wasn't
+
+`SessionFoldCache` keys on `session.seq`, and `seq` bumps on every event —
+chunks included — so the per-step prompt read missed the key on essentially
+every model step and refolded the local harness from zero: a full log scan plus
+one pydantic validation per historical refinement, to reproduce a state that
+changes at most once per 25 turns. The plan's own line ("incremental … so a long
+session does not re-fold from zero on every prompt assembly") said what this was
+supposed to be; the cache alone was not it.
+
+The fix is at the seam, not in the plugin: `SessionFoldCache` gained an optional
+`extend(previous, session, from_seq)` — a miss now folds only `events[from_seq:]`
+(exact, because `seq` *is* the log length). The requirement is stated where
+`compute`'s was: extending the fold of a prefix must equal folding the whole
+log. The harness's `extend_session` scans the new slice, hands back the *same
+object* when it holds no refinement, and folds onto a copy when it does — and
+`fold_session` stays a pure function a fork slice can use. The roster fold gets
+the same option for free and keeps its full-refold behaviour until it opts in.
+
+Same shape one level up: `state()` merged local over global on every read,
+re-copying every entry and the entire refinement history for a byte-identical
+answer. It now memoizes on the *identity* of the two folds — each cache returns
+the same object until its log actually gained a refinement, so `is` on the pair
+is an exact "nothing changed" test.
+
+### Applied
+
+- `_collect_text` deleted; the planner pushes chunks through `BlockAssembler` —
+  "the single canonical assembly algorithm" — and takes `text_of(blocks())`.
+  All four reviewers converged on this one: a second assembly fold beside the
+  loop's could disagree with the transcript about what a reply said.
+- `on_session_event` resolves the agent with `ctx.agents.get(session.id)`
+  (the loop agent's id *is* the session id) instead of a linear scan over
+  `agents.list()` with a duck-typed identity test — the registry's docstring
+  warns against exactly that side table.
+- `start` takes the `running` flag down if `ctx.jobs.start` itself fails;
+  before, a failed start left the session answering "already running" forever.
+- `_conversation` renders newest-first and stops at the char budget instead of
+  rendering the whole derivation and keeping the tail.
+- Dead `slugify` fallbacks in `apply`/`_entry` removed: `validate` stamps the id
+  on every accepted edit, and the dead copies derived it *differently*
+  (`edit.title` vs `edit.title or edit.content`) — a latent divergence.
+- The proposal's `rationale`/`expected_outcome` are now recorded on
+  `harness/refined`: the prompt demanded them, the models parsed them, and then
+  nothing kept them — the docstring's "the proposal that produced it is on that
+  event" was false for exactly those fields.
+- One rendering identity: `KINDS` (derived from `HarnessKind` via `get_args`),
+  `entry_label`, `refinement_line` in `state.py`, shared by the prompt section
+  and the planner overview — the planner says "use its exact id" about text
+  that must therefore match what the section shows.
+- `RefineRequest` built once at the two entry points and threaded as one object;
+  `refine`/`start`/`_considered` had five parallel parameters re-spelling it.
+- `_probe` no longer peeks at `runtime.provider` — the seam's `require()` owns
+  that refusal (the increment-1 note said this rule; the peek had survived).
+- `_append_global` appends through `ph.paths.write_text_under` (the telemetry
+  seam's idiom) inside the lock; `rederive` (a one-line alias of `fold_session`)
+  deleted; package `__all__` trimmed to the consumed surface; `HARNESS_ROW`
+  moved to the tests' conftest beside the other row constants; the TUI test uses
+  the file's own `_replay`; two stray `bool(…)` wraps and an identity
+  comprehension dropped; one stat call instead of `exists()` + `stat()`.
+
+### Skipped, with reasons
+
+- **A `ctx.llm` "one auxiliary call → text" helper** (altitude): warranted the
+  moment compaction or session-title lands — both are the same shape — but today
+  it would have one caller. The `BlockAssembler` swap removes the drift risk now.
+- **Jobs-seam `key=` dedup replacing the `running` set** (altitude): the right
+  eventual home — the seam's docstring names `/refine` as its example — but a
+  core seam change beyond this diff. The desync edge it protected against is
+  fixed locally.
+- **A shared ph-core `slug()`** (reuse): the twin lives inline in the subagents
+  seam, outside this diff; extracting it moves settled code for two callers.
+- **Suffix-reading the global log / folding the in-hand record into the cache**
+  (efficiency): growth is human-approval-gated, so the file stays small; the
+  refold happens only when the size actually changed.
+- **`due()`'s backwards scan** (efficiency): structurally bounded — every pass
+  that fires writes a marker (`refined` or `refine-considered`), so the scan
+  range is capped by the trigger cadence itself, and it runs once per turn, not
+  per event.
+- **Batching H1 probes / caching the review-vs-plan double render** (efficiency):
+  proposals carry few skill edits, and both sit next to an LLM call that costs
+  orders of magnitude more.
+- **`metadata` on entries** (simplification): the plan's edit schema names it;
+  dropping it would refuse proposals the plan says are valid.
+- **Closure mount → class** (efficiency): the closure-bodied `apply()` is the
+  house pattern for every row; nothing large is uselessly pinned.

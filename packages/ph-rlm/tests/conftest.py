@@ -57,6 +57,9 @@ DOCTRINE_ROW: dict[str, Any] = {"id": "rlm-prompt", "name": "rlm-prompt"}
 """The delegation rows, here rather than re-spelled in four test modules — a row
 set that drifts between them tests different things while appearing to test one."""
 
+HARNESS_ROW: dict[str, Any] = {"id": "rlm-harness", "name": "rlm-harness"}
+"""The Continual Harness row (P3-16), shared by both harness test modules."""
+
 HOST_INTERPRETER: dict[str, Any] = {"python": "host", "sweepOrphans": False}
 """The offline pin for `code-runtime-python`, as a *config fragment*.
 

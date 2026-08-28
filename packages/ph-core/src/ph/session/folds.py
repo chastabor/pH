@@ -53,18 +53,36 @@ class SessionFoldCache[T]:
     projection of a session nobody can reach.
     """
 
-    __slots__ = ("_compute", "_entries")
+    __slots__ = ("_compute", "_entries", "_extend")
 
-    def __init__(self, compute: Callable[[Any], T]) -> None:
+    def __init__(
+        self,
+        compute: Callable[[Any], T],
+        *,
+        extend: Callable[[T, Any, int], T] | None = None,
+    ) -> None:
         self._compute = compute
+        self._extend = extend
         self._entries: dict[str, tuple[int, T]] = {}
 
     def read(self, session: _Log) -> T:
-        """The fold over this session, folded at most once per appended event."""
+        """The fold over this session, folded at most once per appended event.
+
+        With `extend`, a miss folds only the new slice: `session.seq` bumps on
+        every event of any type — a long session is mostly chunks — so a
+        projection read each model step misses the key almost every time even
+        though the events it folds are rare. `extend(previous, session,
+        from_seq)` carries the same requirement as `compute`, resumed from a
+        prefix: extending the fold of a prefix must equal folding the whole log.
+        Without it a miss refolds from zero, which is still correct.
+        """
         cached = self._entries.get(session.id)
         if cached is not None and cached[0] == session.seq:
             return cached[1]
-        value = self._compute(session)
+        if cached is not None and self._extend is not None and session.seq > cached[0]:
+            value = self._extend(cached[1], session, cached[0])
+        else:
+            value = self._compute(session)
         self._entries[session.id] = (session.seq, value)
         return value
 

@@ -187,6 +187,41 @@ async def test_usage_feeds_the_context_gauge(mount: Any) -> None:
     assert _replay(session).tokens == live_state.tokens
 
 
+async def test_a_refinement_says_what_changed(mount: Any) -> None:
+    """A refinement changes the model's own prompt, so it is a row, not a record.
+
+    `/refine` is only one way here — the planner refines at turn end with no
+    command to show for it — so a user who could not see this would have no way
+    to know why the next turn behaves differently.
+    """
+    ctx: Context = await mount()
+    session = ctx.sessions.create("tui-harness")
+    session.append(
+        "harness/refined",
+        {
+            "refineId": "refine-1",
+            "scope": "local",
+            "summary": "learned to prefer uv",
+            "appliedEdits": [{"action": "create", "kind": "note", "id": "prefer-uv"}],
+            "rejected": ['skill "imaginary" does not resolve'],
+        },
+    )
+    session.append(
+        "harness/refined",
+        {
+            "refineId": "refine-2",
+            "scope": "local",
+            "summary": "rollback of refine-1",
+            "appliedEdits": [{"action": "delete", "kind": "note", "id": "prefer-uv"}],
+            "rollbackOf": "refine-1",
+        },
+    )
+    applied, rolled = (item.text for item in _replay(session).items)
+    assert "learned to prefer uv" in applied and "1 edit(s)" in applied
+    assert "1 edit(s) refused" in applied, "the refused half is the interesting one"
+    assert "Rolled back refine-1" in rolled
+
+
 def test_every_known_event_type_is_rendered_or_classified() -> None:
     """The adapter's vocabulary equals the log's — no silent omissions.
 
