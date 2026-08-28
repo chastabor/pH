@@ -123,11 +123,18 @@ class KernelLimits(WireModel):
     max_value_bytes: int = 65_536
     max_snapshot_bytes: int = 16 * 1024 * 1024
 
-    def to_boot(self, *, namespaces: list[dict[str, Any]], namespace_id: str | None) -> BootFrame:
+    def to_boot(
+        self,
+        *,
+        namespaces: list[dict[str, Any]],
+        namespace_id: str | None,
+        skills: Sequence[str],
+    ) -> BootFrame:
         return BootFrame(
             **{name: getattr(self, name) for name in KernelLimits.model_fields},
             namespaces=namespaces,
             namespace_id=namespace_id,
+            skills=list(skills),
         )
 
 
@@ -189,6 +196,8 @@ class Kernel:
     """The child's working directory. Set from `ctx.workspace` in Phase 4 (D21);
     until then the child inherits the host's."""
     snapshots: SnapshotPolicy | None = None
+    skills: tuple[str, ...] = ()
+    """Import names bound callable at boot (P3-18), from `rlm-skills-python`."""
     boot_timeout: float = 30.0
     shutdown_grace: float = 5.0
     cancel_grace: float = 2.0
@@ -266,7 +275,11 @@ class Kernel:
         if pid is not None:
             self.journal.record(pid=pid, argv=argv, namespace=self.namespace)
 
-        await self._send(self.limits.to_boot(namespaces=namespaces, namespace_id=self.namespace))
+        await self._send(
+            self.limits.to_boot(
+                namespaces=namespaces, namespace_id=self.namespace, skills=self.skills
+            )
+        )
         try:
             with anyio.fail_after(self.boot_timeout):
                 fault = await self._await_boot_ack()
@@ -699,6 +712,14 @@ class PythonCodeRuntime:
     interpreter_mode: InterpreterMode = "managed"
     interpreter_override: str | None = None
     skills: tuple[str, ...] = ()
+    """Requirement specs installed into the managed venv. A local directory is
+    installed editable, so editing a skill does not need a venv rebuild."""
+    skill_modules: tuple[str, ...] = ()
+    """The import names those specs provide, handed to each kernel at boot.
+
+    Two lists rather than one because they answer different questions and can
+    legitimately differ: a distribution named `acme-websearch` imports as
+    `acme_websearch`, and `rlm-skills-python` is what knows both."""
     cwd: Path | None = None
     boot_timeout: float = 30.0
     shutdown_grace: float = 5.0
@@ -761,6 +782,7 @@ class PythonCodeRuntime:
             journal=self.journal,
             cwd=self.cwd,
             snapshots=self.snapshots,
+            skills=self.skill_modules,
             boot_timeout=self.boot_timeout,
             shutdown_grace=self.shutdown_grace,
             cancel_grace=self.cancel_grace,

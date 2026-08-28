@@ -50,7 +50,8 @@ __all__ = [
     "truncation_marker",
 ]
 
-PROTOCOL_VERSION: Final = 1
+PROTOCOL_VERSION: Final = 2
+# 2: `boot` gained the required `skills` field (P3-18).
 PROTOCOL_FD: Final = 3
 FD_ENV: Final = "PH_RUNTIME_FD"
 NAMESPACE_ENV: Final = "PH_NAMESPACE_ID"
@@ -79,6 +80,11 @@ class BootFrame(WireModel):
     max_snapshot_bytes: int
     namespaces: list[dict[str, Any]]
     namespace_id: str | None = None
+    skills: list[str]
+    """Python skills to import and bind callable before any cell runs (P3-18).
+
+    Import names, not requirement specs: what to install is the venv builder's
+    business and happens once, while this is what the *namespace* should hold."""
 
 
 class RunFrame(WireModel):

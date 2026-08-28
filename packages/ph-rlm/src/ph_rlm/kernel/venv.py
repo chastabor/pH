@@ -184,7 +184,16 @@ def _build(root: Path, skills: Sequence[str]) -> None:
 
     project = guest_project_dir()
     requirements = [str(project) if project is not None else "ph-runtime-guest"]
-    requirements.extend(skills)
+    for spec in skills:
+        # A local directory is installed **editable** (P3-18): the staleness
+        # marker digests the specs, not their contents, so a non-editable local
+        # skill would keep serving the bytes it had at build time after every
+        # subsequent edit. A published requirement is installed normally.
+        local = Path(spec).expanduser()
+        if local.is_dir():
+            requirements.extend(["--editable", str(local)])
+        else:
+            requirements.append(spec)
     _run([uv, "pip", "install", "--python", str(root), *requirements])
 
 

@@ -222,6 +222,21 @@ async def test_a_refinement_says_what_changed(mount: Any) -> None:
     assert "Rolled back refine-1" in rolled
 
 
+async def test_a_corpus_is_a_row_only_when_it_changed(mount: Any) -> None:
+    """The ordinary load is already described in the system prompt; what is news
+    is the corpus having changed under a conversation that was told about it."""
+    ctx: Context = await mount()
+    session = ctx.sessions.create("tui-context")
+    session.append("context/loaded", {"corpus": "notes", "digest": "a", "note": ""})
+    session.append(
+        "context/loaded",
+        {"corpus": "notes", "digest": "b", "note": "`notes` was rebuilt from changed sources"},
+    )
+
+    (item,) = _replay(session).items
+    assert "was rebuilt from changed sources" in item.text
+
+
 def test_every_known_event_type_is_rendered_or_classified() -> None:
     """The adapter's vocabulary equals the log's — no silent omissions.
 

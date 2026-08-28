@@ -43,7 +43,8 @@ __all__ = [
     "truncation_marker",
 ]
 
-PROTOCOL_VERSION: Final = 1
+PROTOCOL_VERSION: Final = 2
+# 2: `boot` gained the required `skills` field (P3-18).
 """Bumped when a frame's field set changes. A `boot` the guest cannot serve is
 refused at `boot-ack` rather than misread one frame at a time."""
 
@@ -79,6 +80,9 @@ FRAME_FIELDS: Final[dict[str, tuple[frozenset[str], frozenset[str]]]] = {
                 "maxValueBytes",
                 "maxSnapshotBytes",
                 "namespaces",
+                # Always sent, like `namespaces`: an empty list is a deployment
+                # with no Python skills, which is a fact rather than an absence.
+                "skills",
             }
         ),
         frozenset({"namespaceId"}),

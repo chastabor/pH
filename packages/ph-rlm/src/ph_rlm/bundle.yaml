@@ -92,6 +92,24 @@
 - id: rlm-harness
   name: rlm-harness
 
+# Capability-layer skills (P3-18): `SKILL.md` for the catalog, an installable
+# package for the kernel. The knowledge layer (`/refine`) may point at these and
+# may not create them — I7, and the reason the two share a word, not a mechanism.
+# No `paths` means no skills, so the row costs nothing until a deployment
+# configures one.
+- id: rlm-skills-python
+  name: rlm-skills-python
+
+# "Prompt-as-a-variable" (P3-17, Q4): a corpus the model queries through
+# `await tools.context_search(...)` — bindings, so each query is its own governed
+# dispatch and one oversized result can be offloaded without its siblings.
+# Disabled here and opt-in in `rlm-stable`: C3 gave the model governed
+# `read`/`grep`/`glob`, which demoted this from a headline feature to a
+# specialist one for non-file corpora. A row with no `sources` stands down anyway.
+- id: rlm-context-loader
+  name: rlm-context-loader
+  disabled: true
+
 # The row that makes `persistence: namespace` true rather than declared (D17).
 # Mounted with the runtime, not optionally: the seam takes the provider's promise
 # at registration, and these events are the promise being kept.

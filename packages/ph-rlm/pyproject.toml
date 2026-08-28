@@ -19,6 +19,8 @@ rlm-bindings = "ph_rlm.bindings:apply"
 rlm-messaging = "ph_rlm.messaging:apply"
 rlm-prompt = "ph_rlm.prompt:apply"
 rlm-harness = "ph_rlm.harness:apply"
+rlm-context-loader = "ph_rlm.context_loader:apply"
+rlm-skills-python = "ph_rlm.skills:apply"
 rlm-subagent-provider = "ph_rlm.subagents:apply"
 
 [tool.uv.sources]

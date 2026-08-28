@@ -79,6 +79,10 @@ KNOWN_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         # ignorable: a reader that skips it gets one extra review pass, not a
         # harness the session does not have.
         "harness/refine-considered",
+        # The context loader's recipe (P3-17): which corpus a session was told
+        # about, and the digest of the sources it was built from. Ignorable — a
+        # reader that skips it loses the note, not the conversation.
+        "context/loaded",
     }
 )
 
@@ -93,6 +97,7 @@ IGNORABLE_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         "subagent/status",
         "subagent/usage-attributed",
         "harness/refine-considered",
+        "context/loaded",
     }
 )
 """Types a *different* build may skip without misreading the rest of the log.

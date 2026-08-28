@@ -168,6 +168,7 @@ class Runner:
         """Owns the per-variable memo, so an unchanged variable is neither
         re-serialized nor re-sent (D17)."""
         self._install_namespaces(boot.get("namespaces") or [])
+        self.install_skills(boot.get("skills") or [])
         # Everything the bootstrap put in globals is the harness's surface, not
         # the cell's state, so the snapshot skips it (see `snapshot`).
         self._protected = set(self.globals)
@@ -192,7 +193,12 @@ class Runner:
         self.globals.update(namespaces)
 
     def install_skills(self, names: list[str]) -> None:
-        """Import each Python skill and bind it callable (§6.8's ported convention)."""
+        """Import each Python skill and bind it callable (§6.8's ported convention).
+
+        Called from the bootstrap, so the names are `_protected` with the rest of
+        the harness's surface: a skill is capability the deployment installed,
+        not cell state, and snapshotting it would try to pickle a module.
+        """
         import importlib
 
         for name in names:
@@ -202,7 +208,6 @@ class Runner:
                 self.globals[name] = UnavailableSkill(name, str(error)[:200])
             else:
                 self.globals[name] = wrap_skill_module(module)
-        self._protected = set(self.globals)
 
     # -------------------------------------------------------------- frames --
 

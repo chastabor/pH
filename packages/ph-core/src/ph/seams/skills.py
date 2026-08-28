@@ -13,6 +13,7 @@ Phase 4; this is the seam it will attach to.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -21,10 +22,15 @@ from ..cordis import Context, Disposer, plugin
 from ..wire import WireModel
 from ._registry import claim_key
 
-__all__ = ["Skill", "SkillService", "apply"]
+__all__ = ["NAME_PATTERN", "Skill", "SkillService", "apply"]
 
 NAME_MAX = 64
 DESCRIPTION_MAX = 1_024
+NAME_PATTERN = re.compile(rf"^[a-z0-9-]{{1,{NAME_MAX}}}$")
+"""The one format of a skill name, owned here because two readers of `SKILL.md`
+share it (`rlm-skills-python` now, `skills-progressive` in Phase 4) and a
+catalog whose names another reader refuses would be two definitions of "valid
+skill" drifting apart."""
 
 
 class Skill(WireModel):
@@ -45,8 +51,10 @@ class SkillService:
 
     def register(self, skill: Skill, *, scope: Context | None = None) -> Disposer:
         """Install a skill. Bounds are enforced here so a catalog stays a catalog."""
-        if not skill.name or len(skill.name) > NAME_MAX:
-            raise ValueError(f"a skill name must be 1..{NAME_MAX} characters")
+        if NAME_PATTERN.match(skill.name) is None:
+            raise ValueError(
+                f'"{skill.name}" is not a skill name: 1..{NAME_MAX} of lowercase [a-z0-9-]'
+            )
         if len(skill.description) > DESCRIPTION_MAX:
             raise ValueError(f"a skill description must be at most {DESCRIPTION_MAX} characters")
         return claim_key(scope or self.ctx, self._skills, skill.name, skill, label="skill")

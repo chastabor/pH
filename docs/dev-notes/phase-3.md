@@ -38,10 +38,12 @@ construction: the only guest→host channel is a `call` frame.
 | P3-14 | `rlm-prompt`: doctrine, child doctrine, conditional delegation section, volatile facts as a `context()` | `ph_rlm/prompt.py` |
 | P3-21 | The governance gate: C1-C4 and C7 against the shipped profile | `ph-rlm/tests/test_governance_gate.py` |
 | P3-16 | The Continual Harness: the fold at both scopes, validation (H1/H2/H3/H5), apply, rollback (H6), the prompt section, `/refine`, the planner and auto-refine (H7) | `ph_rlm/harness/{state,service,planner,auto,__init__}.py` |
+| P3-17 | `rlm-context-loader`: a corpus queried through three registered tools, metadata-only prompt section, the recipe as `context/loaded` | `ph_rlm/context_loader.py` |
+| P3-18 | `rlm-skills-python`: `SKILL.md` discovery, editable install, import names to the kernel at boot, catalog section | `ph_rlm/skills.py`, `ph_runtime/runner.py` |
 
-**Still to come:** P3-17…P3-20 and P3-22…P3-25 — the context loader, Python
-skills, the TUI code cell and subagent panel, the profile bundle, the runtime
-conformance gate, the fixture replay, and the trajectory view. P3-13's remaining half — passivation
+**Still to come:** P3-19, P3-20 and P3-22…P3-25 — the TUI code cell and subagent
+panel, the profile bundle and its smoke run, the runtime conformance gate, the
+fixture replay, and the trajectory view. P3-13's remaining half — passivation
 across a *restart*, where the child's session is gone and has to come off disk —
 is the daemon's (Phase 5); the in-process half landed here.
 
@@ -1686,3 +1688,178 @@ is an exact "nothing changed" test.
   dropping it would refuse proposals the plan says are valid.
 - **Closure mount → class** (efficiency): the closure-bodied `apply()` is the
   house pattern for every row; nothing large is uselessly pinned.
+
+---
+
+## P3-17: the corpus, and the event the plan filed in the wrong place
+
+`rlm-context-loader` is "prompt-as-a-variable" — a body of text the agent can
+consult without any of it entering the prompt. Three things about the port.
+
+**It is three ordinary tools, not a namespace.** The plan writes
+`tools.context_search/chunks/head`, and the reason that spelling is achievable
+with no namespace machinery is that Code Mode builds the `tools` namespace *from
+the registry*: registering a tool called `context_search` is what makes
+`await tools.context_search(...)` exist. So the row registers three tools and is
+done — and gets per-query dispatch records and per-query offload for free, which
+is the entire argument Q4 makes for the binding form over a bare
+`context.search(...)` on a kernel variable.
+
+**The recipe is `context/loaded`, not `kernel/snapshot {kind: "recipe"}`.** The
+plan files the corpus under the snapshot chain. That is right for a *kernel
+variable* the harness built and which exceeds the per-variable cap — but this
+corpus never enters the kernel, precisely because access is a binding. Recording
+it as a namespace variable would have `fold_namespace` describing a namespace
+that does not contain it, and `materialize` trying to restore something with no
+blob. The recipe *semantics* are what matter and they are kept exactly:
+`{loader, sources, digest}` over the resolved source set, a matching digest is
+silent, a changed one tells the model the corpus was rebuilt, an unreadable
+source says so. `kernel/snapshot {kind: "recipe"}` still has no producer, and now
+has a documented reason to wait for the case it was designed for.
+
+**A `Document` stores line offsets, not lines.** Splitting a corpus large enough
+to be worth this row would hold every line as its own Python string for the life
+of the process. A line is a slice; `_end_of` is the one place that knows a
+trailing newline ends the last line rather than beginning another.
+
+The prompt contribution is a `section`, not a `context()` — the opposite of the
+harness's. The corpus is resolved once at mount and cannot change mid-session, so
+its text is fixed and belongs in the cached prefix (A12). The recipe is appended
+on first assembly rather than at mount, because that is when the corpus becomes
+model-visible, and I3 says model-visible means logged.
+
+## P3-18: the skills row, and the dead code it turned out to need
+
+`install_skills` was written in P3-08 and **nothing ever called it**. The `boot`
+frame had no `skills` field, so the guest's import-and-bind path — including
+`UnavailableSkill`, the stub that explains itself — had been shipped, tested at
+the unit level, and was unreachable. P3-18 is what connects it, and three edits
+outside the new row were needed:
+
+- The `boot` frame carries `skills` on **both** protocol twins. The mirror test
+  is what caught the second one missing, which is the entire reason it exists
+  (D7). It is required rather than optional, like `namespaces`: an empty list is
+  a deployment with no Python skills, which is a fact, not an absence.
+- `install_skills` is now called from the bootstrap, *before* `_protected` is
+  computed, so skill names join the harness's surface rather than the cell's
+  state — snapshotting one would try to pickle a module. Its own duplicate
+  `_protected` assignment went away with that.
+- The venv builder decides editability, in one place with the reason: the
+  staleness marker digests the requirement *specs*, not their contents, so a
+  non-editable local skill would keep serving its build-time bytes after every
+  subsequent edit.
+
+**Two lists, deliberately.** `runtime.skills` is what to install (once, per venv
+build) and `runtime.skill_modules` is what to import (at every kernel boot). A
+distribution named `acme-websearch` imports as `acme_websearch`, and the import
+name is read from `[project] name` in `pyproject.toml` rather than guessed from
+the directory — a package whose name differs from its folder is the normal case.
+
+**Validation refuses rather than half-accepts.** A skill whose frontmatter `name`
+disagrees with its directory is dropped with a logged reason: registering it
+would put one string in the catalog and leave the body under another on disk,
+which surfaces later as a confused model reporting a bug.
+
+The gate — *a skill's `run()` is callable in a cell* — runs against a real
+kernel with the package on `PYTHONPATH`, so it drives discovery → boot frame →
+`wrap_skill_module` without building a venv (which shells out to `uv` and reaches
+the network). What it proves is the wiring the venv path shares.
+
+One thing worth recording about the failure mode: calling an unimportable skill
+raises *inside the cell*, so the traceback is the cell's result rather than a
+tool failure. That is right — a skill that did not import is the deployment's
+problem to fix, not a refusal the model should route around — and it is what the
+test asserts.
+
+---
+
+## The cleanup pass over P3-17/P3-18
+
+Four reviewers (reuse, simplification, efficiency, altitude). The fixes worth
+explaining; the mechanical ones are listed at the end.
+
+### The offsets design was being defeated by its own callers
+
+`Document` keeps line *offsets* precisely so a large corpus is never split into
+per-line strings — and then `Corpus.chunk` joined the entire corpus into a fresh
+string and `splitlines()` it **on every page request**, making a full walk
+O(corpus²/size), and `Corpus.search` called `line(number)` in a Python loop,
+re-slicing every line per query. Both now use the machinery as designed: the
+joined view is built once (`cached_property` — `Corpus` dropped `slots` for a
+`__dict__`, one instance per mount) and a chunk is arithmetic over its offsets;
+search hands the whole text to `pattern.finditer` (the regex engine scans in C,
+with `re.MULTILINE` so a model's `^`/`$` keep their per-line meaning) and maps
+hits to lines by bisecting the offsets. At most `limit` matches are ever built —
+the `ceiling` parameter died with the discard-buffer it existed to bound, and
+`max_matches` is now simply the cap on `limit`. `Document.of` also stopped
+enumerating half a gigabyte of characters in the interpreter (`str.find` loop).
+
+And a real bug the rename fix uncovered: threading `name` into `_resolve` was
+shadowed by the per-document `name` loop variable, so every corpus was named
+after its last document. The prompt test caught it on the first re-run.
+
+### The per-step costs
+
+`announce` ran inside the prompt section on every model step and scanned the
+whole log backwards for `context/loaded` — the event it looks for is appended
+near the *start* of a session, so the scan was effectively O(log) per step.
+`session.latest(LOADED)` is the incrementally-folded helper built for exactly
+this shape (its docstring says so), and the service now also memoizes the note
+per session and the rendered manifest per note: the log stays the durable
+answer, the memo just stops re-asking a question that cannot change while the
+mount lives. `note_for` — dead outside one test — went away.
+
+### The protocol version finally earned its keep
+
+`boot` gained a required field and `PROTOCOL_VERSION` said "bumped when a
+frame's field set changes" — and had not been. Now 1 → 2 on both twins. The
+managed venv was covered incidentally (the staleness marker digests the skills
+specs), but **override mode** — the mode that exists for deployments whose
+skills need a particular interpreter — had no staleness story: a stale guest
+there would pass the version check and silently boot with no skills bound,
+handing the model bare `NameError`s instead of the `UnavailableSkill` stub. The
+bump converts that silent degrade into the loud boot refusal D7 specifies.
+`BootFrame.skills` also lost its default (the host twin could construct a frame
+the guest twin's required-set would refuse), and `to_boot`'s parameter followed.
+
+### One YAML policy, one name format
+
+Frontmatter now parses through `ph.cordis.safe_yaml_load` — the codebase's one
+hardened loader, which refuses unknown tags *and* implicit date coercion, so
+`description: 2024-01-01` stays the string the author wrote. That deleted
+ph-rlm's day-old direct `pyyaml` dependency. And `NAME_PATTERN` moved to
+`ph.seams.skills` beside `NAME_MAX` (interpolated, so 64 is written once), with
+`register()` now enforcing the charset — two readers of `SKILL.md` will share
+the format, and the seam is where a shared format lives. `_read` also reads only
+the first 64 KiB of a `SKILL.md`: the fields it validates are capped at a
+kilobyte, and the body — up to 10 MiB — staying on disk is the G9 point of the
+row.
+
+### The catalog was giving an unfollowable instruction
+
+"Read its `SKILL.md` with `tools.read`" — with no path rendered anywhere. Each
+entry now names its file, and the sentence stopped naming the tool, so Phase 4's
+progressive disclosure can supersede the route without this row's prompt text
+becoming a lie.
+
+### Mechanical
+
+One `Corpus` construction instead of two (name passed into `_resolve`); the
+`context/loaded` payload trimmed to the recipe its own docstring defines
+(`{corpus, loader, sources, digest, note}`); uniform `output=Model, render=fn`
+across the three tools with the chunk lambda named; `SEARCH_TOOL` out of
+`__all__`; the gate test's `if False` await replaced by an *actually awaited*
+async `run()` (which is the §6.8 convention the test claims to pin); the
+oversized-skill test uses a sparse `os.truncate` since the size gate stats
+before reading; `expanduser()` bound once in the venv's editable branch; the
+guest's redundant `list()` copy dropped; `FAKE_OPTIONS` imported at module top.
+
+### Skipped, with reasons
+
+- **Parallel source reads in `_resolve`** (efficiency): one-off mount cost;
+  task-group machinery for the rare many-file corpus isn't earned yet.
+- **`Corpus.document` linear scan** (efficiency): per `context_head` call over
+  typically few documents; the reviewer's own caveat.
+- **`_read`'s description pre-check duplicating `register()`** (altitude): kept
+  deliberately — the pre-check skips-with-a-log where `register()` would raise
+  and take the whole mount down with one bad skill.

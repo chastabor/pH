@@ -390,6 +390,18 @@ class TuiEventAdapter:
         reason = str(event.data.get("reason") or "nothing to record")
         self._row("harness", "notice", f"No refinement: {reason}", event)
 
+    def _on_context_loaded(self, event: SessionEvent, live: bool) -> None:
+        """A loaded corpus — rendered only when there is something to say.
+
+        The ordinary load is described in the system prompt already; what is news
+        is the corpus having *changed* under a conversation that was told about
+        it, or a source that could not be read.
+        """
+        note = str(event.data.get("note") or "")
+        if not note:
+            return
+        self._row("context", "notice", note, event)
+
     def _on_subagent_admitted(self, event: SessionEvent, live: bool) -> None:
         """A delegation the human should see starting.
 
@@ -450,6 +462,7 @@ HANDLERS: Mapping[str, Handler] = {
     "kernel/restored": TuiEventAdapter._on_kernel_restored,
     "harness/refined": TuiEventAdapter._on_harness_refined,
     "harness/refine-considered": TuiEventAdapter._on_harness_refine_considered,
+    "context/loaded": TuiEventAdapter._on_context_loaded,
     "subagent/admitted": TuiEventAdapter._on_subagent_admitted,
     "subagent/deleted": TuiEventAdapter._on_subagent_deleted,
 }
