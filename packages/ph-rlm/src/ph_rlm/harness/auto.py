@@ -33,7 +33,7 @@ from dataclasses import dataclass
 from typing import Any, Literal, TypeAlias
 
 from ph.cordis import Context, events
-from ph.session import Session, is_replacement_surface_event
+from ph.session import Session
 
 from .state import REFINED, HarnessScope
 
@@ -107,7 +107,12 @@ def _since_last_consideration(session: Session) -> tuple[int, int | None, bool]:
             return turns, now - event.time, compacted
         if event.type == "turn/end":
             turns += 1
-        elif is_replacement_surface_event(event):
+        elif event.type == "compaction/summarized":
+            # The compaction's own record, not `is_replacement_surface_event`.
+            # A surface `replace` is a *mechanism*: `input-offload` (P4-02) uses
+            # it to relocate a pasted blob, which teaches the harness nothing and
+            # is not the moment this trigger exists for. Compaction says so about
+            # itself (P4-03), so the discriminator is the log's own attribution.
             compacted = True
     return turns, None, compacted
 

@@ -33,3 +33,20 @@
 # model reads a preview.
 - id: input-offload
   name: input-offload
+
+# --- compaction -------------------------------------------------------------
+# When the conversation itself is the thing that no longer fits (G4). Enabled,
+# for the same reason the offload rows are: this changes nothing until a session
+# actually reaches 85% of its window, and there is no posture in which losing
+# the turn to an overflow is preferable to summarizing what has already been
+# answered. The engine is the `ctx.compaction` provider; the seam ships in
+# `ph-base` with no backend, so a profile that layers nothing here simply never
+# compacts.
+- id: compaction-summarize
+  name: compaction-summarize
+
+# The human verb, split from the policy exactly as dsh splits them: a deployment
+# may want automatic compaction without handing anyone a command, or the command
+# with a different engine behind it.
+- id: command-compact
+  name: command-compact

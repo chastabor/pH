@@ -99,6 +99,27 @@ KNOWN_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         # assemble a different prompt than the session had. Required, not
         # ignorable: the difference is model-visible.
         "todo/write",
+        # Compaction (P4-03, G4; emitted by `ph-stabilize`'s `compaction-summarize`).
+        # The accounting for one landed summary: what it shadowed, what that
+        # cost, and which model wrote it. Ignorable — the summary the model
+        # actually reads is the `user/message` appended immediately after this,
+        # a required surface event, so a reader that skips this loses the
+        # metering and the provenance rather than the conversation. Kept
+        # adjacent to its replacement on purpose: that adjacency is what lets a
+        # consumer price a shadowed range without retaining per-node prices.
+        "compaction/summarized",
+        # An attempt that changed nothing, and why. Also ignorable: nothing in
+        # the derivation moved, so a reader that skips it reads the same
+        # conversation — it just cannot say why the session was never compacted.
+        "compaction/declined",
+        # The model-free half of the same row: long tool-call arguments elided
+        # from retained history. The elision itself is an `assistant/message`
+        # surface `replace`, so a reader that skips this still derives exactly
+        # what the model saw — it loses the harness's statement of what it took
+        # out and why, not the message. Ignorable for that reason, and adjacent
+        # to nothing: it names the seqs it rewrote rather than relying on
+        # position, because a truncation pass rewrites several at once.
+        "compaction/args-truncated",
         # The context loader's recipe (P3-17): which corpus a session was told
         # about, and the digest of the sources it was built from. Ignorable — a
         # reader that skips it loses the note, not the conversation.
@@ -120,6 +141,9 @@ IGNORABLE_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         "context/loaded",
         "offload/spilled",
         "offload/input-spilled",
+        "compaction/summarized",
+        "compaction/declined",
+        "compaction/args-truncated",
     }
 )
 """Types a *different* build may skip without misreading the rest of the log.

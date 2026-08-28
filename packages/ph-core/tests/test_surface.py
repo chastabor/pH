@@ -12,7 +12,13 @@ from __future__ import annotations
 
 import pytest
 
-from ph.session import Session, SurfaceIntent, SurfaceReplace, fold_surface
+from ph.session import (
+    Session,
+    SurfaceIntent,
+    SurfaceReplace,
+    fold_surface,
+    is_in_place_rewrite,
+)
 from ph.session.surface import (
     SurfaceError,
     is_append_surface_event,
@@ -165,3 +171,35 @@ def test_surface_predicates() -> None:
     # never erases conversation the user already saw.
     assert is_replacement_surface_event(session.events[4])
     assert not is_append_surface_event(session.events[4])
+
+
+def test_an_in_place_rewrite_is_told_apart_from_a_substitution() -> None:
+    """The two shapes a `replace` comes in, distinguished structurally.
+
+    A consumer that keyed on `is_replacement_surface_event` alone had to carry a
+    list of which producers do which. A node replacing *itself* — a truncated
+    argument, a relocated tool result — removes nothing from the conversation and
+    should update the row a reader already has; a substitution stands in for a
+    range and shadows it.
+    """
+    session = Session("shapes")
+    first = session.append("user/message", user_payload("one", "m1"), SurfaceIntent("append"))
+    second = session.append("user/message", user_payload("two", "m2"), SurfaceIntent("append"))
+
+    in_place = session.append(
+        "user/message",
+        user_payload("one, elided", "m3"),
+        SurfaceIntent(SurfaceReplace(start=first.seq, end=first.seq), (first.seq,)),
+    )
+    substitution = session.append(
+        "user/message",
+        user_payload("a summary of both", "m4"),
+        SurfaceIntent(
+            SurfaceReplace(start=in_place.seq, end=second.seq), (in_place.seq, second.seq)
+        ),
+    )
+
+    assert is_in_place_rewrite(in_place)
+    assert not is_in_place_rewrite(substitution)
+    assert is_replacement_surface_event(substitution), "both are still replacements"
+    assert not is_in_place_rewrite(first), "an append is not a rewrite"

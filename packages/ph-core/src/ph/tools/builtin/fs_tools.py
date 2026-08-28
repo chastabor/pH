@@ -203,6 +203,10 @@ async def apply(ctx: Context, config: Any) -> None:
             output=ToolOutput(schema=WriteValue, render=_render_write),
             execute=write,
             self_limits=True,
+            # The file body is a payload this call delivered, not an instruction
+            # the model refers back to — and the file is on disk, where `read`
+            # can fetch it. Retained history may elide it under pressure.
+            arguments_disposable=True,
             **simple_views("diff", "Write", "path"),
         ),
         define_tool(
@@ -212,6 +216,7 @@ async def apply(ctx: Context, config: Any) -> None:
             output=ToolOutput(schema=EditValue, render=_render_edit),
             execute=edit,
             self_limits=True,
+            arguments_disposable=True,
             **simple_views("diff", "Edit", "path"),
         ),
         define_tool(

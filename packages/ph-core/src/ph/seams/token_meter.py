@@ -25,15 +25,68 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..cordis import Context, plugin
-from ..llm.types import Message, TokenUsage
+from ..llm.types import AttachmentRef, Message, TokenUsage, attachment_of
 from ..session import Session
 
-__all__ = ["CHARS_PER_TOKEN", "TokenBaseline", "TokenMeter", "apply"]
+__all__ = [
+    "CHARS_PER_TOKEN",
+    "IMAGE_TOKENS_UNKNOWN",
+    "MEDIA_TOKENS_UNKNOWN",
+    "PDF_TOKENS_PER_PAGE",
+    "TokenBaseline",
+    "TokenMeter",
+    "apply",
+    "estimate_media_tokens",
+]
 
 log = logging.getLogger("ph.seams.token_meter")
 
 CHARS_PER_TOKEN = 4
 """The `len/4` fallback ratio, matching dsh and Deep Agents."""
+
+IMAGE_PIXELS_PER_TOKEN = 750
+"""Anthropic's published approximation for an image: about `width x height / 750`.
+
+The one figure below that comes from a provider's own documentation rather than
+from judgement. It needs dimensions, which an ingester supplies only when it
+already knew them — decoding an image to find out is the dependency P7-02 keeps
+optional — so the unknown case falls back to a flat number."""
+
+IMAGE_TOKENS_UNKNOWN = 1_600
+PDF_TOKENS_PER_PAGE = 2_000
+PDF_TOKENS_UNKNOWN = 4_000
+AUDIO_TOKENS_PER_SECOND = 25
+MEDIA_TOKENS_UNKNOWN = 1_000
+"""Order-of-magnitude costs for media whose exact price this cannot know.
+
+Deliberately rough, and that is defensible here in a way it would not be for
+billing: this estimate exists to answer "should we compact *before* asking", and
+the module's opening argument is that a guess 15% off is fine for a threshold.
+What is *not* fine is the answer these replace. A media block matched none of
+`measure`'s branches and contributed **zero**, so a conversation of forty images
+reported no pressure at all, and G2/G3's character thresholds — counted over text
+— never fired on it either. Being wrong by a factor is a rounding error against
+being wrong by everything."""
+
+
+def estimate_media_tokens(attachment: AttachmentRef) -> int:
+    """What one attachment plausibly costs in a request.
+
+    Uses the facts the ingester recorded when it has them and a flat figure when
+    it does not, per kind. Never zero: a block the model is shown must cost
+    something, or the pressure trigger is measuring a different conversation than
+    the one being sent.
+    """
+    mime = attachment.mime
+    if mime.startswith("image/"):
+        if attachment.width and attachment.height:
+            return max(1, (attachment.width * attachment.height) // IMAGE_PIXELS_PER_TOKEN)
+        return IMAGE_TOKENS_UNKNOWN
+    if mime == "application/pdf":
+        return attachment.pages * PDF_TOKENS_PER_PAGE if attachment.pages else PDF_TOKENS_UNKNOWN
+    if (mime.startswith("audio/") or mime.startswith("video/")) and attachment.duration_ms:
+        return max(1, (attachment.duration_ms * AUDIO_TOKENS_PER_SECOND) // 1000)
+    return MEDIA_TOKENS_UNKNOWN
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,6 +140,10 @@ class TokenMeter:
             text = getattr(block, "text", None)
             if isinstance(text, str):
                 total += self._encode(text)
+                continue
+            attachment = attachment_of(block)
+            if attachment is not None:
+                total += estimate_media_tokens(attachment)
                 continue
             arguments = getattr(block, "arguments", None)
             if isinstance(arguments, str):

@@ -49,6 +49,7 @@ from .surface import (
     SurfaceManager,
     fold_surface,
     is_append_surface_event,
+    is_in_place_rewrite,
     is_replacement_surface_event,
     is_surface_event,
 )
@@ -89,6 +90,7 @@ __all__ = [
     "header_equals",
     "is_append_surface_event",
     "is_fork_boundary",
+    "is_in_place_rewrite",
     "is_json_value",
     "is_replacement_surface_event",
     "is_surface_eligible_type",

@@ -34,7 +34,7 @@ from ph.llm.types import (
 )
 from ph.session import Session, SessionEvent, SurfaceIntent, SurfaceReplace
 from ph.session.known_event_types import KNOWN_SESSION_EVENT_TYPES
-from ph.testing import simple_tool, user_payload
+from ph.testing import assistant_payload, plugin_payload, simple_tool, user_payload
 from ph_app.tui.adapter import HANDLERS, RECORDLESS, TuiEventAdapter
 from ph_app.tui.state import TuiState
 
@@ -163,7 +163,17 @@ async def test_compaction_marks_what_it_replaced_and_keeps_it(mount: Any) -> Non
     )
     session.append(
         "user/message",
-        user_payload("(summary of earlier conversation)", "m2"),
+        # Attributed the way `compaction-summarize` attributes it (P4-03): a
+        # plugin's text, declaring `form: compaction`. Built with
+        # `user_payload` this test passed while asserting against a message no
+        # producer writes — a person's own words never shadow anything.
+        plugin_payload(
+            "(summary of earlier conversation)",
+            "m2",
+            plugin="compaction-summarize",
+            form="compaction",
+            summary="1 message summarized",
+        ),
         SurfaceIntent(SurfaceReplace(start=0, end=0), (first.seq,)),
     )
     adapter = TuiEventAdapter()
@@ -176,6 +186,114 @@ async def test_compaction_marks_what_it_replaced_and_keeps_it(mount: Any) -> Non
     original = next(item for item in adapter.state.items if item.role == "user")
     assert original.text == "the original question"
     assert original.is_visible_to_model is False
+
+
+async def test_an_argument_truncation_does_not_add_a_second_assistant_row(
+    mount: Any,
+) -> None:
+    """Argument truncation (P4-03) rewrites an old assistant message in place.
+
+    Two things must not happen. Its text is the model's own and is already on
+    screen, so rendering the replacement would show the assistant saying the
+    same thing twice; and the rows it stands for must *not* be dimmed, because
+    the message is still exactly what the model sees — only a tool-call argument
+    was elided.
+    """
+    ctx: Context = await mount()
+    session = ctx.sessions.create("tui-truncated")
+    original = session.append(
+        "assistant/message",
+        {
+            **assistant_payload("here is the file", "a1"),
+            "usage": {"inputTokens": 400, "outputTokens": 10},
+        },
+        SurfaceIntent("append"),
+    )
+    session.append(
+        "assistant/message",
+        assistant_payload("here is the file", "a1"),
+        SurfaceIntent(SurfaceReplace(start=original.seq, end=original.seq), (original.seq,)),
+    )
+    adapter = TuiEventAdapter()
+    for event in session.events:
+        adapter.apply(event, live=False)
+
+    rows = [(item.role, item.shadowed) for item in adapter.state.visible_items()]
+    assert rows == [("assistant", False)], "the replacement drew a second row"
+
+
+async def test_a_truncation_replacement_does_not_reset_the_token_footer(
+    mount: Any,
+) -> None:
+    """The other half of the same hazard, and the one a reader would not guess.
+
+    The footer shows the last reported usage it saw. A replacement is appended
+    at the end of the log, so falling through would set the footer from whatever
+    turn the *rewritten* message belonged to — the same stale-baseline bug the
+    engine avoids by dropping `usage` from the replacement.
+    """
+    ctx: Context = await mount()
+    session = ctx.sessions.create("tui-truncated-usage")
+    old = session.append(
+        "assistant/message",
+        {**assistant_payload("first", "a1"), "usage": {"inputTokens": 100, "outputTokens": 0}},
+        SurfaceIntent("append"),
+    )
+    session.append(
+        "assistant/message",
+        {**assistant_payload("second", "a2"), "usage": {"inputTokens": 900, "outputTokens": 0}},
+        SurfaceIntent("append"),
+    )
+    session.append(
+        "assistant/message",
+        assistant_payload("first", "a1"),
+        SurfaceIntent(SurfaceReplace(start=old.seq, end=old.seq), (old.seq,)),
+    )
+    adapter = TuiEventAdapter()
+    for event in session.events:
+        adapter.apply(event, live=False)
+
+    assert adapter.state.tokens == 900
+
+
+async def test_truncated_arguments_are_announced(mount: Any) -> None:
+    """The tool cards above still show the arguments as sent, so this notice is
+    the only place the transcript can say the model is no longer shown them."""
+    ctx: Context = await mount()
+    session = ctx.sessions.create("tui-truncation-notice")
+    session.append(
+        "compaction/args-truncated",
+        {"trigger": "pressure", "seqs": [3, 7], "savedChars": 41_000},
+    )
+    adapter = TuiEventAdapter()
+    for event in session.events:
+        adapter.apply(event, live=False)
+
+    (row,) = [item for item in adapter.state.visible_items() if item.role == "notice"]
+    assert "2 messages" in row.text
+    assert "41000" in row.text
+
+
+async def test_a_declined_compaction_is_a_notice(mount: Any) -> None:
+    """A compaction that did not happen leaves no row of its own.
+
+    Its successful sibling does — the summary the replacement carries — which is
+    why `compaction/summarized` is record-less here and this one is not. The
+    reader is at the limit the compaction would have relieved, and the next
+    thing they may see is a turn ending in a provider refusal.
+    """
+    ctx: Context = await mount()
+    session = ctx.sessions.create("tui-declined")
+    session.append(
+        "compaction/declined",
+        {"trigger": "overflow", "code": "summary", "reason": "the summarize call failed"},
+    )
+    adapter = TuiEventAdapter()
+    for event in session.events:
+        adapter.apply(event, live=False)
+
+    (row,) = [item for item in adapter.state.visible_items() if item.role == "notice"]
+    assert "the summarize call failed" in row.text
 
 
 async def test_a_plugins_replacement_is_not_called_a_compaction(mount: Any) -> None:
@@ -195,12 +313,13 @@ async def test_a_plugins_replacement_is_not_called_a_compaction(mount: Any) -> N
     )
     session.append(
         "user/message",
-        {
-            "id": "m2",
-            "role": "user",
-            "content": [{"type": "text", "text": "Message content too large…"}],
-            "source": {"kind": "plugin", "plugin": "input-offload", "form": "notice"},
-        },
+        plugin_payload(
+            "Message content too large…",
+            "m2",
+            plugin="input-offload",
+            form="notice",
+            summary="2 MB offloaded",
+        ),
         SurfaceIntent(SurfaceReplace(start=0, end=0), (pasted.seq,)),
     )
     adapter = TuiEventAdapter()

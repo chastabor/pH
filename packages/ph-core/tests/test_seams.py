@@ -25,6 +25,11 @@ from ph.seams.code_runtime import (
     validate_binding_name,
 )
 from ph.seams.commands import CommandDefinition, CommandRegistry
+from ph.seams.compaction import (
+    CompactionError,
+    CompactionNote,
+    CompactionSeam,
+)
 from ph.seams.credentials import CredentialService
 from ph.seams.jobs import JobService
 from ph.seams.permission_presets import PermissionPresetService
@@ -255,6 +260,83 @@ async def test_a_missing_credential_raises_rather_than_returning_empty() -> None
     service = CredentialService(ctx=Context())
     with pytest.raises(KeyError, match="not available"):
         service.require(service.reference("PH_TEST_ABSENT_KEY"))
+
+
+# ----------------------------------------------------------------- compaction --
+
+
+async def test_an_absent_engine_is_a_no_op_automatically_and_an_error_on_request() -> None:
+    """The seam's one asymmetry, and it is deliberate.
+
+    A profile that layered no compaction row has *chosen* not to compact, so the
+    policy hooks must not raise at it every step. But a person who typed
+    `/compact` asked for something this deployment cannot do, and answering them
+    with silence would read as "there was nothing to compact".
+    """
+    seam = CompactionSeam(ctx=Context())
+    session = Session("no-engine")
+
+    assert await seam.compact_if_needed(_agent(session), "pressure") is None
+    with pytest.raises(CompactionError) as caught:
+        await seam.compact_now(_agent(session))
+    assert caught.value.code == "unavailable"
+
+
+async def test_only_one_engine_may_hold_the_seam() -> None:
+    """Two answers to "when and how is history replaced" is a contradiction."""
+    seam = CompactionSeam(ctx=Context())
+
+    class Engine:
+        async def compact_if_needed(self, agent: Any, trigger: Any) -> Any:
+            return None
+
+        async def compact_now(self, agent: Any) -> Any:
+            return None
+
+    release = seam.register(Engine())
+    with pytest.raises(RuntimeError, match="already registered"):
+        seam.register(Engine())
+    release()
+    seam.register(Engine())
+
+
+async def test_notes_render_in_order_and_an_empty_one_contributes_nothing() -> None:
+    """`order` decides the sequence; `""` means absent, as `PromptContext` does."""
+    seam = CompactionSeam(ctx=Context())
+    session = Session("notes")
+    seam.note(CompactionNote(name="second", text=lambda _s: "B", order=10))
+    seam.note(CompactionNote(name="first", text=lambda _s: "A", order=1))
+    seam.note(CompactionNote(name="quiet", text=lambda _s: ""))
+
+    assert seam.notes(session) == ["A", "B"]
+
+
+async def test_a_note_that_raises_is_dropped_rather_than_taking_the_compaction_down() -> None:
+    """A summary missing one block is worth more than an uncompacted session."""
+    seam = CompactionSeam(ctx=Context())
+    session = Session("broken-note")
+
+    def explode(_session: Session) -> str:
+        raise RuntimeError("no runtime")
+
+    seam.note(CompactionNote(name="broken", text=explode))
+    seam.note(CompactionNote(name="fine", text=lambda _s: "still here"))
+
+    assert seam.notes(session) == ["still here"]
+
+
+async def test_a_note_registered_for_one_agent_does_not_reach_another() -> None:
+    """The one visibility rule, shared with event dispatch and every scoped
+    registry (B7): a global registration reaches everything, an agent-scoped one
+    reaches that agent alone."""
+    root = Context()
+    seam = CompactionSeam(ctx=root)
+    session = Session("scoped-notes")
+    mine, theirs = root.scope("agent:mine"), root.scope("agent:theirs")
+    seam.note(CompactionNote(name="mine", text=lambda _s: "only mine"), scope=mine)
+
+    assert seam.notes(session, scope=mine) == ["only mine"]
+    assert seam.notes(session, scope=theirs) == []
 
 
 # --------------------------------------------------------------- code runtime --

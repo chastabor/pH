@@ -110,7 +110,10 @@ def _sample(model: type[BaseModel]) -> BaseModel | None:
         "ReasoningBlock": {"text": "thinking"},
         "ToolResultBlock": {"toolCallId": "c1", "content": [TextBlock(text="out")]},
         "ToolCallBlock": {"id": "c1", "name": "read", "arguments": "{}"},
-        "ImageBlock": {"attachment": {"attachmentId": "sha256:abc", "bytes": 3}},
+        "AttachmentRef": {"attachmentId": "sha256:abc", "mime": "image/png", "bytes": 3},
+        "MediaBlock": {
+            "attachment": {"attachmentId": "sha256:abc", "mime": "image/png", "bytes": 3}
+        },
         "PluginSource": {"plugin": "ph.test", "form": "notice", "summary": "did a thing"},
         "ModelSource": {"provider": "fake", "model": "fake-1"},
         "ToolSource": {"callId": "c1"},

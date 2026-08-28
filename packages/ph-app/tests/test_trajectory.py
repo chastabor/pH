@@ -84,18 +84,23 @@ def test_the_auditor_renders_what_the_transcript_does_not() -> None:
 
     Record-less in the *conversation* view on purpose — they are not transcript
     defects — and rendering them is the whole reason this projection is
-    separate. Stated as the four names rather than as a set difference with
+    separate. Stated as the names rather than as a set difference with
     `RECORDLESS` subtracted from both sides, which cancelled two of them and
     read as six.
+
+    `compaction/summarized` is the newest of them and the clearest case: the
+    transcript already shows a compaction as the summary row its replacement
+    produces, so the accounting beside it would be the same event twice — while
+    an auditor came for exactly that accounting.
     """
     assert {
         "request/header",
         "approval/policy",
         "fs/observed",
         "session/end-seed",
+        "compaction/summarized",
     } == TRANSCRIPT_RECORDLESS - RECORDLESS
-    # And the reverse: what this view skips that the transcript renders. The two
-    # sets are the same size, so "smaller" was never the relationship.
+    # And the reverse: what this view skips that the transcript renders.
     assert {
         "assistant/chunk",
         "tool/code-dispatch-start",

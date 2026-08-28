@@ -35,6 +35,7 @@ __all__ = [
     "SurfaceManager",
     "fold_surface",
     "is_append_surface_event",
+    "is_in_place_rewrite",
     "is_replacement_surface_event",
     "is_surface_event",
 ]
@@ -62,6 +63,30 @@ def is_append_surface_event(event: SessionEvent) -> bool:
 
 def is_replacement_surface_event(event: SessionEvent) -> bool:
     return is_surface_event(event) and event.surface_op != "append"
+
+
+def is_in_place_rewrite(event: SessionEvent) -> bool:
+    """Whether a replacement stands for exactly the one node it replaces.
+
+    The two shapes a `replace` comes in, told apart structurally rather than by
+    guessing from the producer. A **substitution** stands in for a range with
+    something new — a compaction summary, an offloaded paste — and the rows it
+    shadows leave the model's view. An **in-place rewrite** replaces a single
+    node with a near-copy of itself: a tool result whose content was relocated,
+    an assistant message whose call arguments were elided. Nothing leaves the
+    conversation, so a reader should update the row it already has rather than
+    draw a second one and dim the first.
+
+    A consumer that keyed on `is_replacement_surface_event` alone had to hold a
+    list of which producers do which — exactly the shape-matching that the
+    `form` discriminator replaced one layer up.
+    """
+    operation = event.surface_op
+    if not is_replacement_surface_event(event) or not isinstance(operation, SurfaceReplace):
+        return False
+    return operation.start == operation.end and tuple(event.source_event_seqs or ()) == (
+        operation.start,
+    )
 
 
 @dataclass(frozen=True, slots=True)

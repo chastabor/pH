@@ -41,10 +41,12 @@ from typing import Any
 
 from ph.cordis import Context, plugin
 from ph.llm.types import text_of
+from ph.session import Session
 from ph.tools.definition import Accept, ToolExecution, ToolExecutionResult, text_content
 from ph.wire import WireModel
 
 __all__ = [
+    "HISTORY_PREFIX",
     "NUM_CHARS_PER_TOKEN",
     "TOOL_TOKEN_LIMIT_BEFORE_EVICT",
     "TOO_LARGE_TOOL_MSG",
@@ -52,6 +54,7 @@ __all__ = [
     "apply",
     "content_preview",
     "over_token_limit",
+    "spill_tool_result",
 ]
 
 NUM_CHARS_PER_TOKEN = 4
@@ -150,6 +153,53 @@ def oversized(text: str, config: Config) -> bool:
     )
 
 
+HISTORY_PREFIX = "conversation_history"
+"""Where a *conversation* is relocated to, as opposed to a tool result.
+
+Here rather than in either of the two rows that write to it — `input-offload`
+for a pasted message, `compaction-summarize` for a shadowed range — because a
+directory two rows share is a convention, and a convention stated twice is one a
+rename silently splits.
+"""
+
+
+async def spill_tool_result(
+    ctx: Context, session: Session, *, call_id: str, source: str, text: str
+) -> str | None:
+    """Relocate one tool result and return the text that stands in for it.
+
+    The whole recipe in one place: where the file goes, the `offload/spilled`
+    accounting, and the wording the model reads to find it. Two rows perform this
+    — this one when a result is oversized on arrival (G2), and the overflow clip
+    when a retained batch has to shrink (§7.4 item 7) — and the second had
+    already drifted on `source`, which becomes `SpillRef.retrieval_hint` and is
+    therefore the *sentence the model is given*. One relocation described two
+    ways depending on which row did it is exactly the drift this prevents.
+
+    `None` is the fail-open path both callers need: an offload that cannot store
+    the content must not be the reason the model loses it. The seam logs why.
+    """
+    ref = await ctx.spill_store.try_save_text(
+        owner=session.id,
+        source=source,
+        suggested_name=f"large_tool_results/{call_id}",
+        content=text,
+    )
+    if ref is None:
+        return None
+    # Where the original went. Declared ignorable in the vocabulary (the property
+    # is the type's, not this call site's) — a reader that skips it loses the
+    # forwarding address, not the conversation, because the replacement the model
+    # saw is what `tool/result` carries.
+    session.append(
+        "offload/spilled",
+        {"callId": call_id, "locator": ref.locator, "bytes": ref.bytes},
+    )
+    return TOO_LARGE_TOOL_MSG.format(
+        tool_call_id=call_id, file_path=ref.locator, content_sample=content_preview(text)
+    )
+
+
 @plugin("tool-result-offload", inject=["tools", "spill_store"], config=Config)
 async def apply(ctx: Context, config: Config) -> None:
     """Replace an oversized result with a preview and a path to the rest."""
@@ -174,29 +224,17 @@ async def apply(ctx: Context, config: Config) -> None:
         text = text_of(content)
         if not oversized(text, config):
             return decision
-        ref = await ctx.spill_store.try_save_text(
-            owner=session.id,
+        replacement = await spill_tool_result(
+            ctx,
+            session,
+            call_id=execution.call_id,
             source=f"{execution.name} result",
-            suggested_name=f"large_tool_results/{execution.call_id}",
-            content=text,
+            text=text,
         )
-        if ref is None:
+        if replacement is None:
             # Fail open, as upstream: an offload that cannot store the content
-            # must not be the reason the model loses it. The seam logs why.
+            # must not be the reason the model loses it.
             return decision
-        # Where the original went. Declared ignorable in the vocabulary (the
-        # property is the type's, not this call site's) — a reader that skips it
-        # loses the forwarding address, not the conversation, because the
-        # replacement the model saw is what `tool/result` carries.
-        session.append(
-            "offload/spilled",
-            {"callId": execution.call_id, "locator": ref.locator, "bytes": ref.bytes},
-        )
-        replacement = TOO_LARGE_TOOL_MSG.format(
-            tool_call_id=execution.call_id,
-            file_path=ref.locator,
-            content_sample=content_preview(text),
-        )
         return Accept(
             content=text_content(replacement),
             additional_contexts=decision.additional_contexts,

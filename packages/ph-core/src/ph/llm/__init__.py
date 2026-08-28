@@ -5,6 +5,7 @@ from __future__ import annotations
 from .adapter import AdapterHandle, LlmAdapter, LlmError, LlmRuntime, ResolvedModel
 from .assembler import BlockAssembler
 from .types import (
+    AttachmentRef,
     BlockEnd,
     BlockStart,
     ContentBlock,
@@ -12,10 +13,10 @@ from .types import (
     Finish,
     FinishReason,
     GenerateOptions,
-    ImageBlock,
     LlmCallConfig,
     LlmCallConfigAdapterDefaults,
     LlmFailure,
+    MediaBlock,
     Message,
     MessageSource,
     ModelSource,
@@ -33,6 +34,7 @@ from .types import (
     ToolSource,
     UsageChunk,
     UserSource,
+    attachment_of,
     chunk_from_wire,
     content_from_wire,
     create_assistant_message,
@@ -45,6 +47,7 @@ from .types import (
 
 __all__ = [
     "AdapterHandle",
+    "AttachmentRef",
     "BlockAssembler",
     "BlockEnd",
     "BlockStart",
@@ -53,13 +56,13 @@ __all__ = [
     "Finish",
     "FinishReason",
     "GenerateOptions",
-    "ImageBlock",
     "LlmAdapter",
     "LlmCallConfig",
     "LlmCallConfigAdapterDefaults",
     "LlmError",
     "LlmFailure",
     "LlmRuntime",
+    "MediaBlock",
     "Message",
     "MessageSource",
     "ModelSource",
@@ -78,6 +81,7 @@ __all__ = [
     "ToolSource",
     "UsageChunk",
     "UserSource",
+    "attachment_of",
     "chunk_from_wire",
     "content_from_wire",
     "create_assistant_message",

@@ -16,8 +16,10 @@ The real-API smoke test is skipped without a key, per P1-15's gate.
 
 from __future__ import annotations
 
+import base64
 import json
 import os
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -27,12 +29,15 @@ from ph.llm.adapter import LlmError
 from ph.llm.assembler import BlockAssembler
 from ph.llm.types import (
     GenerateOptions,
+    MediaBlock,
     ToolSchema,
     create_tool_result_message,
     create_user_message,
 )
 from ph.seams.credentials import CredentialService
 from ph_app.adapters._http import failure_from_status
+from ph_app.adapters.anthropic import AnthropicAdapter
+from ph_app.adapters.anthropic import Config as AnthropicConfig
 from ph_app.adapters.openai_compatible import (
     OpenAiCompatibleAdapter,
     ProviderProfile,
@@ -169,7 +174,7 @@ def test_tool_results_become_their_own_wire_role() -> None:
     message = create_tool_result_message(
         call_id="c1", content=[{"type": "text", "text": "output"}], is_error=False
     )
-    (entry,) = _to_openai(message)
+    (entry,) = _to_openai(message, {})
     # A tool result cannot be merged into a user message on this wire.
     assert entry["role"] == "tool"
     assert entry["tool_call_id"] == "c1"
@@ -180,7 +185,7 @@ def test_a_plain_user_message_stays_a_user_message() -> None:
     message = create_user_message(
         content=[{"type": "text", "text": "hello"}], source={"kind": "user"}
     )
-    assert _to_openai(message) == [{"role": "user", "content": "hello"}]
+    assert _to_openai(message, {}) == [{"role": "user", "content": "hello"}]
 
 
 async def test_a_missing_credential_fails_before_any_request() -> None:
@@ -212,10 +217,10 @@ async def test_the_credential_is_read_only_at_the_edge() -> None:
     assert "sk-secret" not in json.dumps(ref.to_wire())
 
 
-def test_the_openai_request_body_carries_tools_and_the_system_slot() -> None:
+async def test_the_openai_request_body_carries_tools_and_the_system_slot() -> None:
     root = Context()
     adapter = OpenAiCompatibleAdapter(ctx=root, profile=ProviderProfile(provider="p"))
-    body = adapter._body(
+    body = await adapter._body(
         GenerateOptions(
             provider="p",
             model="m",
@@ -259,7 +264,7 @@ def test_anthropic_puts_tool_results_in_user_content() -> None:
     message = create_tool_result_message(
         call_id="c1", content=[{"type": "text", "text": "output"}], is_error=True
     )
-    entry = _to_anthropic(message)
+    entry = _to_anthropic(message, {})
     # The main structural difference from the OpenAI wire.
     assert entry["role"] == "user"
     assert entry["content"][0]["type"] == "tool_result"
@@ -362,3 +367,137 @@ async def test_real_api_smoke(tmp_path: Any, monkeypatch: Any) -> None:  # pragm
         await agent.prompt("Reply with the single word: ok")
         assert session.events[-1].data["reason"]["kind"] == "completed"
         assert any(event.type == "assistant/chunk" for event in session.events)
+
+
+# ------------------------------------------------------------------ media --
+# P7-01. Before this, both wire renderers built branches for the block kinds
+# they knew and silently omitted the rest — so a message that was only an image
+# reached the provider as an empty text block, and nobody would ever have known.
+
+
+PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"pixels" * 32
+
+
+async def _with_attachment(root: Context, tmp_path: Path, mime: str) -> Any:
+    """Mount a store on `root`, save one blob, and hand back its reference."""
+    from ph.seams.attachments import AttachmentStore
+
+    store = AttachmentStore(ctx=root, root=tmp_path / "attachments")
+    root.provide("attachments", store)
+    return await store.save_bytes(content=PNG_BYTES, mime=mime, name="shot.png")
+
+
+def _media_message(ref: Any) -> Any:
+    return create_user_message(
+        content=[{"type": "text", "text": "what is this?"}, MediaBlock(attachment=ref)],
+        source={"kind": "user"},
+    )
+
+
+async def test_anthropic_sends_an_image_as_a_base64_source(tmp_path: Path) -> None:
+    """The capability the adapter now declares, actually exercised."""
+    root = Context()
+    ref = await _with_attachment(root, tmp_path, "image/png")
+    adapter = AnthropicAdapter(ctx=root, config=AnthropicConfig())
+
+    body = await adapter._body(
+        GenerateOptions(provider="anthropic", model="m", messages=(_media_message(ref),))
+    )
+
+    (entry,) = body["messages"]
+    image = next(block for block in entry["content"] if block["type"] == "image")
+    assert image["source"]["media_type"] == "image/png"
+    assert base64.b64decode(image["source"]["data"]) == PNG_BYTES
+
+
+async def test_anthropic_sends_a_pdf_as_a_document(tmp_path: Path) -> None:
+    """One block keyed on MIME, two wire shapes — which is exactly why the
+    branching lives in the adapter and not in the content-block union."""
+    root = Context()
+    ref = await _with_attachment(root, tmp_path, "application/pdf")
+    adapter = AnthropicAdapter(ctx=root, config=AnthropicConfig())
+
+    body = await adapter._body(
+        GenerateOptions(provider="anthropic", model="m", messages=(_media_message(ref),))
+    )
+
+    (entry,) = body["messages"]
+    assert any(block["type"] == "document" for block in entry["content"])
+
+
+async def test_a_route_that_cannot_read_it_gets_a_pointer_not_a_silence(
+    tmp_path: Path,
+) -> None:
+    """The bug, as a gate.
+
+    An OpenAI-compatible chat route carries PDFs by `file_id` through the Files
+    API (P7-03), not inline — so it declines this one. What must never happen is
+    the block vanishing: the model is told, in words it can act on, that a file
+    was not sent.
+    """
+    root = Context()
+    ref = await _with_attachment(root, tmp_path, "application/pdf")
+    adapter = OpenAiCompatibleAdapter(ctx=root, profile=ProviderProfile(provider="p"))
+
+    body = await adapter._body(
+        GenerateOptions(provider="p", model="m", messages=(_media_message(ref),))
+    )
+
+    rendered = json.dumps(body["messages"])
+    assert "application/pdf" in rendered and "shot.png" in rendered
+    assert "was not sent" in rendered
+    assert "input_audio" not in rendered and "image_url" not in rendered
+
+
+async def test_a_blob_that_is_gone_degrades_rather_than_failing(tmp_path: Path) -> None:
+    """A session copied without its attachments still opens and still runs."""
+    root = Context()
+    ref = await _with_attachment(root, tmp_path, "image/png")
+    root.attachments.path_for(ref).unlink()
+    adapter = AnthropicAdapter(ctx=root, config=AnthropicConfig())
+
+    body = await adapter._body(
+        GenerateOptions(provider="anthropic", model="m", messages=(_media_message(ref),))
+    )
+
+    assert "was not sent" in json.dumps(body["messages"])
+
+
+async def test_openai_keeps_a_plain_user_message_a_string(tmp_path: Path) -> None:
+    """A message with no media is byte-for-byte the request it always was.
+
+    This wire takes both a string and a content list, and switching every user
+    message to a list would have changed every existing prefix — which is what
+    the cache is counting on (A12).
+    """
+    root = Context()
+    adapter = OpenAiCompatibleAdapter(ctx=root, profile=ProviderProfile(provider="p"))
+
+    body = await adapter._body(
+        GenerateOptions(
+            provider="p",
+            model="m",
+            messages=(
+                create_user_message(
+                    content=[{"type": "text", "text": "hello"}], source={"kind": "user"}
+                ),
+            ),
+        )
+    )
+
+    assert body["messages"] == [{"role": "user", "content": "hello"}]
+
+
+def test_each_adapter_declares_what_it_accepts() -> None:
+    """`accepts` empty means text-only, and text-only is the safe default —
+    so an adapter that grows a media branch without declaring it would send
+    nothing, rather than an adapter that declares one it cannot serialize."""
+    anthropic = AnthropicAdapter(ctx=Context(), config=AnthropicConfig()).resolve_model("a", "m")
+    openai = OpenAiCompatibleAdapter(
+        ctx=Context(), profile=ProviderProfile(provider="p")
+    ).resolve_model("p", "m")
+
+    assert "image/png" in anthropic.accepts and "application/pdf" in anthropic.accepts
+    assert "image/png" in openai.accepts
+    assert "application/pdf" not in openai.accepts, "this wire needs the Files API (P7-03)"
+    assert anthropic.max_attachment_bytes and openai.max_attachment_bytes

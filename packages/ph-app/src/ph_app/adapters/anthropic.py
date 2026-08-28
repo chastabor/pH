@@ -49,6 +49,7 @@ from ph.llm.types import (
 from ph.wire import WireModel
 
 from ._http import HttpClient, resolve_secret
+from ._media import load_media, media_pointer
 
 __all__ = ["AnthropicAdapter", "apply"]
 
@@ -89,12 +90,18 @@ class AnthropicAdapter:
             "Content-Type": "application/json",
         }
 
-    def _body(self, options: GenerateOptions) -> dict[str, Any]:
+    async def _body(self, options: GenerateOptions) -> dict[str, Any]:
+        media = await load_media(
+            self.ctx.get("attachments"),
+            options.messages,
+            self.resolve_model(options.provider, options.model),
+            provider="anthropic",
+        )
         body: dict[str, Any] = {
             "model": options.model,
             "max_tokens": options.max_tokens or self.config.default_max_tokens,
             "stream": True,
-            "messages": [_to_anthropic(message) for message in options.messages],
+            "messages": [_to_anthropic(message, media) for message in options.messages],
         }
         if options.system:
             body["system"] = options.system
@@ -118,7 +125,7 @@ class AnthropicAdapter:
         async for event, payload in self.http.stream_sse(
             f"{self.config.base_url.rstrip('/')}/messages",
             headers=self._headers(),
-            json=self._body(options),
+            json=await self._body(options),
             is_overflow=_is_overflow,
         ):
             for chunk in state.consume(event, payload):
@@ -130,6 +137,8 @@ class AnthropicAdapter:
         return ResolvedModel(
             context_window=self.config.context_window,
             default_max_tokens=self.config.default_max_tokens,
+            accepts=ACCEPTED_MEDIA,
+            max_attachment_bytes=MAX_ATTACHMENT_BYTES,
         )
 
 
@@ -268,17 +277,53 @@ def _merge_usage(current: TokenUsage | None, raw: dict[str, Any]) -> TokenUsage:
     )
 
 
-def _to_anthropic(message: Any) -> dict[str, Any]:
+ACCEPTED_MEDIA: frozenset[str] = frozenset(
+    {"image/png", "image/jpeg", "image/gif", "image/webp", "application/pdf"}
+)
+"""What this route takes as message content.
+
+Images and PDFs; a PDF rides an Anthropic `document` block rather than an
+`image` one, which is the whole reason `MediaBlock` is keyed on MIME and the
+branching lives here instead of in the content-block union."""
+
+MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024
+"""The published per-attachment ceiling, declared so a caller can act on it."""
+
+
+def _to_anthropic(message: Any, media: dict[str, str]) -> dict[str, Any]:
     """One pH message as an Anthropic message.
 
     Tool results are user-role content blocks here rather than their own role,
     which is the main structural difference from the OpenAI wire.
+
+    `media` holds base64 for the attachments this route will take; anything
+    absent from it becomes a pointer. Nothing is dropped — the previous version
+    of this function built branches for four block kinds and silently omitted
+    everything else, so a message that was only an image reached the wire as an
+    empty text block.
     """
     blocks: list[dict[str, Any]] = []
     for block in message.content:
         kind = getattr(block, "type", "")
         if kind == "text":
             blocks.append({"type": "text", "text": block.text})
+        elif kind == "media":
+            data = media.get(block.attachment.attachment_id)
+            if data is None:
+                blocks.append(media_pointer(block.attachment))
+            else:
+                blocks.append(
+                    {
+                        "type": (
+                            "document" if block.attachment.mime == "application/pdf" else "image"
+                        ),
+                        "source": {
+                            "type": "base64",
+                            "media_type": block.attachment.mime,
+                            "data": data,
+                        },
+                    }
+                )
         elif kind == "reasoning":
             blocks.append({"type": "thinking", "thinking": block.text})
         elif kind == "tool-call":

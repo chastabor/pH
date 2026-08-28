@@ -16,6 +16,7 @@ from typing import Any
 
 from ..agent.types import AgentOptions
 from ..cordis import Context
+from ..llm.types import ContextForm, PluginSource
 from ..session import Session
 from ..tools.definition import ToolDefinition, ToolOutput, define_tool, text_content
 from ..tools.registry import ToolRuntime
@@ -24,6 +25,7 @@ __all__ = [
     "FAKE_OPTIONS",
     "StubAgent",
     "assistant_payload",
+    "plugin_payload",
     "raising",
     "run_tool",
     "simple_tool",
@@ -129,6 +131,30 @@ def user_payload(text: str, message_id: str = "m1") -> dict[str, Any]:
         "role": "user",
         "content": [{"type": "text", "text": text}],
         "source": {"kind": "user"},
+    }
+
+
+def plugin_payload(
+    text: str,
+    message_id: str = "m1",
+    *,
+    plugin: str,
+    form: ContextForm | None = None,
+    summary: str | None = None,
+) -> dict[str, Any]:
+    """A `user/message` payload for text a *plugin* injected, not a person.
+
+    The second shape a `user/message` takes, and the one a hand-built fixture
+    keeps getting wrong: injected context, an offload preview and a compaction
+    summary all ride the user role, and what distinguishes them is `source`.
+    A test that reached for `user_payload` for one of those was asserting
+    against a message no producer writes.
+    """
+    return {
+        "id": message_id,
+        "role": "user",
+        "content": [{"type": "text", "text": text}],
+        "source": PluginSource(plugin=plugin, form=form, summary=summary).to_wire(),
     }
 
 

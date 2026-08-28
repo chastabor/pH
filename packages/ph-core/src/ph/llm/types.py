@@ -25,6 +25,7 @@ from ..wire import WireDataclass, WireModel
 
 __all__ = [
     "AssistantMessage",
+    "AttachmentRef",
     "BlockEnd",
     "BlockStart",
     "ContentBlock",
@@ -33,10 +34,10 @@ __all__ = [
     "Finish",
     "FinishReason",
     "GenerateOptions",
-    "ImageBlock",
     "LlmCallConfig",
     "LlmCallConfigAdapterDefaults",
     "LlmFailure",
+    "MediaBlock",
     "Message",
     "MessageSource",
     "ModelSource",
@@ -56,6 +57,7 @@ __all__ = [
     "UsageChunk",
     "UserMessage",
     "UserSource",
+    "attachment_of",
     "chunk_from_wire",
     "content_from_wire",
     "create_assistant_message",
@@ -90,15 +92,58 @@ class ReasoningBlock(WireModel):
     text: str
 
 
-class ImageBlock(WireModel):
-    """A durable raster image reference.
+class AttachmentRef(WireModel):
+    """Where an attachment's bytes are, and what a reader needs without opening them.
 
-    Role-neutral by design; today's adapters declare text-only output, so only
-    user content carries one.
+    The log is lossless JSON (A1), so bytes never enter it — a message carries
+    this reference and `ctx.attachments` resolves it. `attachment_id` is
+    `sha256:<hex>` of the content, which is what makes two sessions attaching one
+    photo share one file and what lets a fork reference its parent's media
+    without owning a directory.
+
+    The measurement fields are *optional facts an ingester happened to know*,
+    never something this type goes and computes: reading an image's dimensions
+    means decoding it, and the decoder is exactly the dependency `media-transform`
+    (P7-02) exists to keep optional. Present, they make the token estimate
+    accurate; absent, it falls back to a flat figure — which is still infinitely
+    better than the zero a media block counted for before.
     """
 
-    type: Literal["image"] = "image"
-    attachment: dict[str, Any]
+    attachment_id: str
+    """`sha256:<hex>` — the content digest, and the store's whole index."""
+    mime: str
+    bytes: int
+    name: str | None = None
+    """The filename a person would recognize. Never used to locate the blob."""
+    width: int | None = None
+    height: int | None = None
+    duration_ms: int | None = None
+    pages: int | None = None
+
+
+class MediaBlock(WireModel):
+    """Durable, MIME-typed media the model may be shown.
+
+    One block keyed on MIME rather than a family of per-medium blocks. Providers
+    *do* distinguish them on the wire — Anthropic `image` against `document`,
+    OpenAI `image_url` against `input_audio` against `file` — but that branching
+    belongs in the adapter, where the differences actually live, rather than in a
+    union that grows a member every time a provider learns a format. It is also
+    the shape pH's other media path already has: the kernel's `display` frame is
+    `{mime, data}`, and the two are meant to become one.
+
+    Deliberately *not* a general file block. What a provider ingests as content —
+    images, PDFs at some routes, audio at a few — belongs here; a CSV or an
+    archive belongs in the workspace with a path the model can `read`, which the
+    spill store, the `read` tool and `rlm-context-loader` already answer three
+    ways. A block that accepted anything would claim a capability no provider has.
+
+    Role-neutral by design: user content carries one today, and a route that
+    generates images will carry one back.
+    """
+
+    type: Literal["media"] = "media"
+    attachment: AttachmentRef
 
 
 class ToolCallBlock(WireModel):
@@ -122,7 +167,7 @@ class ToolResultBlock(WireModel):
 
 
 ContentBlock: TypeAlias = Annotated[
-    "TextBlock | ReasoningBlock | ImageBlock | ToolCallBlock | ToolResultBlock",
+    "TextBlock | ReasoningBlock | MediaBlock | ToolCallBlock | ToolResultBlock",
     Field(discriminator="type"),
 ]
 
@@ -152,15 +197,34 @@ def text_of(blocks: Sequence[Any], *, placeholder: Callable[[str], str] | None =
     return "\n".join(parts)
 
 
+def attachment_of(block: Any) -> AttachmentRef | None:
+    """The attachment a block carries, or `None` — the one "is this media" test.
+
+    Beside `text_of` for the same reason that exists: the pair
+    `getattr(block, "attachment", None)` plus an `isinstance` check is the rule
+    for reading a brand-new content type, and every consumer that spelled it by
+    hand would be copying whichever call site it happened to read.
+    """
+    attachment = getattr(block, "attachment", None)
+    return attachment if isinstance(attachment, AttachmentRef) else None
+
+
 # ------------------------------------------------------------------ sources --
 
-ContextForm: TypeAlias = Literal["instructions", "catalog", "snapshot", "notice", "relay", "recall"]
+ContextForm: TypeAlias = Literal[
+    "instructions", "catalog", "snapshot", "notice", "relay", "recall", "compaction"
+]
 """What kind of thing a piece of injected context is.
 
 Deliberately semantic, never visual: a value says the content is a file's
 instructions or a catalog, and the consumer decides what that looks like.
 Colours, icons and collapse defaults are the consumer's business and must not
 enter this union.
+
+`compaction` is the one form that is also a *claim about the surface*: this text
+stands in for conversation that has left the derivation (A3). It is what lets a
+reader tell a compaction summary from the other plugin-authored replacement — an
+offloaded paste — without guessing from the shape of the replace op.
 """
 
 CONTEXT_SUMMARY_MAX_CHARS = 120

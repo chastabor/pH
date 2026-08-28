@@ -378,6 +378,20 @@ class ToolDefinition:
     result inline: a model that hit this tool's own cap already knows how to ask
     for the next page, so spending a spill file to tell it again teaches nothing.
     """
+    arguments_disposable: bool = False
+    """The model does not need to re-read this call's arguments.
+
+    Set by a tool whose arguments are a *payload it already delivered* — a file
+    body handed to `write`, the replacement text handed to `edit` — rather than
+    an instruction the model refers back to. Retained history may then elide them
+    under context pressure (`compaction-summarize`'s truncation pass, G4).
+
+    Declared here rather than matched by name in a policy row, for the reason
+    `self_limits` is: these are *registered plugins*, so a deployment renames
+    them and an MCP server adds its own, and a name list in another package
+    cannot know. The distinction is real and narrow — a long `run_code` cell is
+    exactly the argument a model re-reads, so it stays.
+    """
     is_concurrency_safe: Callable[[Any], bool] | None = None
     """Only `True` opts a call into a parallel group. Omission, a raise, and any
     non-`True` return are all exclusive — the safe default, since a tool that
@@ -467,6 +481,7 @@ def define_tool(
     finalize_content: Callable[..., Sequence[Any] | None] | None = None,
     timeout_ms: int | None = None,
     self_limits: bool = False,
+    arguments_disposable: bool = False,
     is_concurrency_safe: Callable[[Any], bool] | bool | None = None,
     present_call: Callable[[Any], ToolCallView | None] | None = None,
     present_result: Callable[[Any, ToolResult], ToolResultView | None] | None = None,
@@ -514,6 +529,7 @@ def define_tool(
         finalize_content=finalize_content,
         timeout_ms=timeout_ms,
         self_limits=self_limits,
+        arguments_disposable=arguments_disposable,
         is_concurrency_safe=safe,
         present_call=present_call,
         present_result=present_result,

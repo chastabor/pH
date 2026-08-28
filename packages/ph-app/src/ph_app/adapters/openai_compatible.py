@@ -32,6 +32,7 @@ from typing import Any
 from ph.cordis import Context, plugin
 from ph.llm.adapter import ResolvedModel
 from ph.llm.types import (
+    AttachmentRef,
     BlockEnd,
     BlockStart,
     Finish,
@@ -45,11 +46,13 @@ from ph.llm.types import (
     ToolCallBlock,
     ToolCallDelta,
     UsageChunk,
+    attachment_of,
     text_of,
 )
 from ph.wire import WireModel
 
 from ._http import HttpClient, resolve_secret
+from ._media import load_media, media_pointer
 
 __all__ = ["OpenAiCompatibleAdapter", "apply"]
 
@@ -89,12 +92,18 @@ class OpenAiCompatibleAdapter:
         secret = resolve_secret(self.ctx, self.profile.api_key_env, self.profile.provider)
         return {"Authorization": f"Bearer {secret}", "Content-Type": "application/json"}
 
-    def _body(self, options: GenerateOptions) -> dict[str, Any]:
+    async def _body(self, options: GenerateOptions) -> dict[str, Any]:
+        media = await load_media(
+            self.ctx.get("attachments"),
+            options.messages,
+            self.resolve_model(options.provider, options.model),
+            provider=self.profile.provider,
+        )
         messages: list[dict[str, Any]] = []
         if options.system:
             messages.append({"role": "system", "content": options.system})
         for message in options.messages:
-            messages.extend(_to_openai(message))
+            messages.extend(_to_openai(message, media))
         body: dict[str, Any] = {
             "model": options.model,
             "messages": messages,
@@ -127,7 +136,7 @@ class OpenAiCompatibleAdapter:
         async for _event, payload in self.http.stream_sse(
             f"{self.profile.base_url.rstrip('/')}/chat/completions",
             headers=self._headers(),
-            json=self._body(options),
+            json=await self._body(options),
             is_overflow=_is_overflow,
         ):
             for chunk in state.consume(payload):
@@ -139,6 +148,8 @@ class OpenAiCompatibleAdapter:
         return ResolvedModel(
             context_window=self.profile.context_window,
             default_max_tokens=self.profile.default_max_tokens,
+            accepts=ACCEPTED_MEDIA,
+            max_attachment_bytes=MAX_ATTACHMENT_BYTES,
         )
 
 
@@ -267,8 +278,38 @@ def _to_usage(raw: dict[str, Any]) -> TokenUsage:
     )
 
 
-def _to_openai(message: Any) -> list[dict[str, Any]]:
-    """One pH message as the wire's (sometimes several) messages."""
+ACCEPTED_MEDIA: frozenset[str] = frozenset(
+    {"image/png", "image/jpeg", "image/gif", "image/webp", "audio/wav", "audio/mpeg"}
+)
+"""What an OpenAI-compatible chat route takes inline.
+
+Images as `image_url` data URIs and audio as `input_audio` — two different wire
+shapes for two MIME families, which is the branching a per-medium block union
+would have duplicated one layer up. PDFs are deliberately absent: this wire
+carries them by `file_id` through the Files API, which is P7-03's row, and
+claiming them here would produce a request the provider rejects."""
+
+MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024
+
+_AUDIO_FORMATS = {"audio/wav": "wav", "audio/mpeg": "mp3"}
+
+
+def _media_part(attachment: AttachmentRef, data: str) -> dict[str, Any]:
+    """One accepted attachment in this wire's shape."""
+    audio = _AUDIO_FORMATS.get(attachment.mime)
+    if audio is not None:
+        return {"type": "input_audio", "input_audio": {"data": data, "format": audio}}
+    return {"type": "image_url", "image_url": {"url": f"data:{attachment.mime};base64,{data}"}}
+
+
+def _to_openai(message: Any, media: dict[str, str]) -> list[dict[str, Any]]:
+    """One pH message as the wire's (sometimes several) messages.
+
+    A user message becomes a *content list* as soon as it carries media, and a
+    plain string otherwise — this wire accepts both, and keeping the string form
+    for the overwhelmingly common case leaves every existing request byte-for-byte
+    what it was, which is what the prefix cache is counting on (A12).
+    """
     if message.role == "assistant":
         text = "".join(
             block.text for block in message.content if getattr(block, "type", "") == "text"
@@ -297,6 +338,27 @@ def _to_openai(message: Any) -> list[dict[str, Any]]:
             }
             for block in results
         ]
+    parts: list[dict[str, Any]] = []
+    carries_media = False
+    for block in message.content:
+        attachment = attachment_of(block)
+        if attachment is not None:
+            carries_media = True
+            data = media.get(attachment.attachment_id)
+            parts.append(
+                media_pointer(attachment) if data is None else _media_part(attachment, data)
+            )
+        elif getattr(block, "type", "") == "text":
+            parts.append({"type": "text", "text": block.text})
+    if carries_media:
+        # Keyed on the message *having* media, not on the rendered parts still
+        # looking like media. A degraded attachment renders as a text part, so
+        # asking "are any parts non-text" sent the list form only when the
+        # attachment succeeded — and fell back to `text_of`, which reads
+        # `TextBlock`s alone, for exactly the case the pointer exists to cover.
+        # That is the silent drop this row is here to end, reintroduced one
+        # branch lower down.
+        return [{"role": "user", "content": parts}]
     return [{"role": "user", "content": text_of(message.content)}]
 
 

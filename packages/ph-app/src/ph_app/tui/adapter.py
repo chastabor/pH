@@ -35,7 +35,13 @@ from typing import Any
 from pydantic import ValidationError
 
 from ph.seams.subagents import downgrade_text, fold_subagent_event
-from ph.session import Session, SessionEvent, is_replacement_surface_event, thaw_json
+from ph.session import (
+    Session,
+    SessionEvent,
+    is_in_place_rewrite,
+    is_replacement_surface_event,
+    thaw_json,
+)
 from ph.session.request_header import parse_request_context
 from ph.text import count_of
 from ph.tools import ToolResult, ToolResultView, parse_arguments
@@ -97,19 +103,20 @@ class TuiEventAdapter:
     # ------------------------------------------------------------ messages --
 
     def _on_user_message(self, event: SessionEvent, live: bool) -> None:
-        kind = obj(event.data.get("source")).get("kind")
+        source = obj(event.data.get("source"))
+        kind = source.get("kind")
         text = text_of_wire(event.data.get("content"))
         if is_replacement_surface_event(event):
             # Whatever its cause, a replacement shadows the rows it cites: they
             # stay above it, dimmed.
             self._mark_shadowed(event.source_event_seqs or ())
-            # But only compaction is compaction. `input-offload` (P4-02) is the
-            # first row to substitute on the surface for another reason, and
-            # calling its preview "history compacted" would tell the reader
-            # their conversation was summarized when a paste was relocated. A
-            # plugin-attributed replacement is that plugin's context row, which
-            # is what the line below already renders for the non-shadowing case.
-            if kind != "plugin":
+            # But only compaction is compaction. `input-offload` (P4-02) also
+            # substitutes on the surface, and calling its preview "history
+            # compacted" would tell the reader their conversation was summarized
+            # when a paste was relocated. The discriminator is the log's own
+            # attribution: a compaction summary declares `form: compaction`
+            # (P4-03), which is a claim about the surface and not a colour.
+            if source.get("form") == "compaction":
                 self._row("compaction", "compaction", text or "(history compacted)", event)
                 return
         self._row("msg", "context" if kind == "plugin" else "user", text, event)
@@ -155,6 +162,20 @@ class TuiEventAdapter:
         item.text += text
 
     def _on_assistant_message(self, event: SessionEvent, live: bool) -> None:
+        if is_in_place_rewrite(event):
+            # A node replacing *itself* — argument truncation (P4-03) eliding a
+            # long tool-call argument. The text is the model's own and is already
+            # on screen, so rendering the replacement would show the assistant
+            # speaking twice; the row it stands for is deliberately not dimmed,
+            # because the message is still what the model sees. Falling through
+            # would also let `_count_usage` reset the footer to an old turn's.
+            #
+            # Keyed on the shape rather than on "any replacement": a
+            # *substitution* of an assistant message is a different event that
+            # does remove conversation, and blanket-returning would drop it
+            # silently — the mechanism-not-cause mistake this file already fixed
+            # once, fifty lines up.
+            return
         turn, step = int(event.data.get("turn", 0)), int(event.data.get("step", 0))
         blocks = obj(event.data.get("message")).get("content")
         streamed = self.state.end_streaming(turn, step)
@@ -416,6 +437,35 @@ class TuiEventAdapter:
             return
         self._row("context", "notice", note, event)
 
+    def _on_compaction_args_truncated(self, event: SessionEvent, live: bool) -> None:
+        """Long tool-call arguments elided from retained history (P4-03).
+
+        A notice, not silence: the tool cards above still show the arguments as
+        sent, and this is the only place the transcript can say the model is no
+        longer being shown all of them.
+        """
+        seqs = seq(event.data.get("seqs"))
+        saved = int(event.data.get("savedChars") or 0)
+        self._row(
+            "compaction",
+            "notice",
+            f"Shortened tool arguments in {count_of(len(seqs), 'message')} "
+            f"(~{saved} characters) to make room.",
+            event,
+        )
+
+    def _on_compaction_declined(self, event: SessionEvent, live: bool) -> None:
+        """An automatic compaction that changed nothing, and why (P4-03).
+
+        News, and the one place it can be news: the session is at its limit and
+        stayed there, so the next thing the reader sees may be a turn that ends
+        in a provider refusal. Its sibling `compaction/summarized` is
+        record-less by contrast — the summary row the replacement produces is
+        already the visible half of a compaction that worked.
+        """
+        reason = str(event.data.get("reason") or event.data.get("code") or "no reason given")
+        self._row("compaction", "notice", f"Compaction declined: {reason}", event)
+
     def _on_subagent_admitted(self, event: SessionEvent, live: bool) -> None:
         """A delegation the human should see starting.
 
@@ -524,6 +574,8 @@ HANDLERS: Mapping[str, Handler] = {
     "todo/write": TuiEventAdapter._on_todo_write,
     "offload/spilled": TuiEventAdapter._on_offload_spilled,
     "offload/input-spilled": TuiEventAdapter._on_offload_spilled,
+    "compaction/declined": TuiEventAdapter._on_compaction_declined,
+    "compaction/args-truncated": TuiEventAdapter._on_compaction_args_truncated,
     "kernel/restored": TuiEventAdapter._on_kernel_restored,
     "harness/refined": TuiEventAdapter._on_harness_refined,
     "harness/refine-considered": TuiEventAdapter._on_harness_refine_considered,
@@ -545,6 +597,7 @@ RECORDLESS: frozenset[str] = frozenset(
         "fs/observed",
         "session/end-seed",
         "kernel/snapshot",
+        "compaction/summarized",
     }
 )
 """Known types that produce no transcript row on purpose. They are the auditor's
@@ -555,6 +608,14 @@ trajectory view (P3-24), not the conversation.
 per changed variable per cell, so rendering them would bury the conversation in
 its own bookkeeping. Its companion `kernel/restored` *is* rendered, but only when
 a variable failed to come back — see `_on_kernel_restored`.
+
+`compaction/summarized` is here for a third reason again: it is the *accounting*
+for a compaction, and the compaction itself already produced a row — the
+replacement `user/message` the summary rides on. Rendering both would show one
+event twice, once as the summary a person can read and once as a token count.
+Its sibling `compaction/declined` is not record-less: a compaction that did not
+happen leaves no row of its own, and the reader is about to hit the limit it
+would have relieved.
 
 `subagent/status` and `subagent/usage-attributed` were here until P3-19 gave them
 their consumer. They still produce **no transcript row** — eight children ticking

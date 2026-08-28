@@ -369,6 +369,13 @@ HANDLERS: Mapping[str, Handler] = {
     "todo/write": _on_harness_event,
     "offload/spilled": _on_harness_event,
     "offload/input-spilled": _on_harness_event,
+    # Both, and generically: an auditor came for exactly this — what a summary
+    # shadowed, what it cost, which model wrote it, and every attempt that
+    # decided not to. The transcript renders neither (the summary rides on its
+    # replacement `user/message`), which is the split this view exists for.
+    "compaction/summarized": _on_harness_event,
+    "compaction/declined": _on_harness_event,
+    "compaction/args-truncated": _on_harness_event,
     "session/end-seed": _on_harness_event,
 }
 """Event type → the record it produces.

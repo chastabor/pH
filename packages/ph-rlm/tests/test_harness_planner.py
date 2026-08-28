@@ -398,13 +398,11 @@ async def test_a_refinement_itself_starts_the_cooldown(refining: Refining) -> No
 def test_a_compaction_triggers_a_pass_on_its_own() -> None:
     """The one moment the conversation gets *shorter*: what the summary dropped is
     what the harness should have kept, and after it nobody can read it."""
-    compaction = SessionEvent(
-        type="user/message",
-        seq=0,
-        time=0,
-        data={"content": []},
-        surface_op=SurfaceReplace(start=0, end=0),
-    )
+    # The compaction's own record, not a bare surface `replace`: `input-offload`
+    # (P4-02) also replaces on the surface, and a paste being relocated teaches
+    # the harness nothing. Written as this event because that is what
+    # `compaction-summarize` appends beside its replacement (P4-03).
+    compaction = SessionEvent(type="compaction/summarized", seq=0, time=0, data={})
     assert due(_Log([compaction, *_turns(2, start_ms=1_000)]), turns_between=25) == "compaction"
 
 

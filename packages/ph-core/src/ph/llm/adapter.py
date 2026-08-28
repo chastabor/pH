@@ -61,6 +61,23 @@ class ResolvedModel:
     context_window: int | None = None
     default_max_tokens: int | None = None
     reasoning: tuple[str, ...] = ()
+    accepts: frozenset[str] = frozenset()
+    """MIME types this route takes as message *content* (P7-01).
+
+    Empty means text only, which is every route until an adapter says otherwise —
+    the safe default, since the failure it prevents is a media block reaching a
+    wire that silently drops it. A caller that finds a block outside this set
+    degrades it to a text pointer and logs a notice; it never sends it and hopes,
+    and never fails the turn, because a session begun on a vision model and
+    resumed on a text one must still open."""
+    max_attachment_bytes: int | None = None
+    """Per-attachment ceiling, when the route publishes one.
+
+    A limit and not just `accepts`, because it is what lets an over-sized block
+    degrade to a pointer here rather than be rejected at the provider. A pixel
+    ceiling belongs beside it and lands with `media-transform` (P7-02), the row
+    that would resize to it — declaring one now would be a knob wired to
+    nothing, which is the shape this codebase declines to ship."""
 
 
 class LlmAdapter(Protocol):

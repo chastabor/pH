@@ -55,7 +55,7 @@ from ph.session.events import SurfaceReplace
 from ph.text import count_of
 from ph.wire import WireModel
 
-from .offload import content_preview, over_token_limit
+from .offload import HISTORY_PREFIX, content_preview, over_token_limit
 
 __all__ = [
     "HUMAN_TOKEN_LIMIT_BEFORE_EVICT",
@@ -124,7 +124,7 @@ async def apply(ctx: Context, config: Config) -> None:
             # Named by the seq it replaces rather than upstream's uuid: the
             # store already dedupes by content digest, so a random name buys
             # nothing a traceable one does not.
-            suggested_name=f"conversation_history/{event.seq}.md",
+            suggested_name=f"{HISTORY_PREFIX}/{event.seq}.md",
             content=text,
         )
         if ref is None:

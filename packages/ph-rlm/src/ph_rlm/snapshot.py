@@ -48,6 +48,7 @@ from dataclasses import dataclass
 from typing import Any, Final, Literal, TypeAlias
 
 from ph.cordis import Context, plugin
+from ph.seams.compaction import CompactionNote
 from ph.session import Session
 from ph.wire import WireModel
 
@@ -61,6 +62,7 @@ __all__ = [
     "fold_namespace",
     "namespaces_in",
     "referenced_locators",
+    "render_live_variables",
 ]
 
 log = logging.getLogger("ph_rlm.snapshot")
@@ -335,6 +337,36 @@ class KernelSnapshotPolicy:
         return removed
 
 
+def render_live_variables(session: Session) -> str:
+    """The names the kernel still holds, for a compaction summary prompt (G10).
+
+    Compaction rewrites a *surface*; a REPL is not on it, so every variable here
+    survives the cut completely untouched. That is exactly why the summary has to
+    say so: the model is about to read "the conversation history has been
+    summarized" and has no way, from the conversation alone, to tell whether the
+    namespace went with it. A model that assumed it did would spend the next cell
+    recomputing a DataFrame it already has — and D17 exists so that it does not
+    have to.
+
+    Read from the same fold `materialize` restores from, so what the summary
+    names and what a restart brings back cannot disagree. Empty when there is no
+    kernel state, which contributes nothing rather than a paragraph saying so.
+    """
+    lines: list[str] = []
+    for namespace in sorted(namespaces_in(session)):
+        names = sorted(record.var for record in fold_namespace(session, namespace).values())
+        if names:
+            lines.append(f"- namespace `{namespace}`: " + ", ".join(f"`{name}`" for name in names))
+    if not lines:
+        return ""
+    return (
+        "The Python kernel is still running and still holds these variables. "
+        "Summarizing the conversation does not clear them: every name below is "
+        "still defined and can be used in the next cell without recomputing it.\n"
+        + "\n".join(lines)
+    )
+
+
 def _owner(namespace: str) -> str:
     """The spill owner one namespace's blobs live under."""
     return f"kernel/{namespace}"
@@ -365,3 +397,18 @@ async def apply(ctx: Context, config: Config) -> None:
             log.info("ph_rlm.snapshot: swept %d unreferenced kernel blob(s)", len(removed))
 
     ctx.on("session/created", sweep_on_open)
+
+    def announce_live_variables(scope: Context) -> None:
+        """Tell a compaction summary what the kernel still holds (G10, P4-03).
+
+        Through `ctx.inject` rather than this row's own `inject` list: the
+        compaction seam is a *nice to have* here, and a deployment that removed
+        the compaction row must not thereby lose kernel snapshots. When the seam
+        appears the note registers; when it goes, the scope disposes and takes
+        the registration with it.
+        """
+        scope.compaction.note(
+            CompactionNote(name="rlm:live-variables", text=render_live_variables), scope=scope
+        )
+
+    ctx.inject(["compaction"], announce_live_variables, label="rlm-compaction-note")

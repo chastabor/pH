@@ -87,6 +87,12 @@
 - id: spill
   name: spill-local
 
+# Media the log points at but cannot rebuild. Beside the spill store and
+# deliberately not part of it: a spilled result is a forwarding address, an
+# attachment is content, and clearing a cache must never delete conversation.
+- id: attachments
+  name: attachments-local
+
 - id: token-meter
   name: token-meter
 
@@ -98,6 +104,13 @@
 
 - id: code-runtime
   name: code-runtime
+
+# Replacing history with a summary. The seam only, like the two above: *when* a
+# conversation is too long and *what* a summary should say are policy, and a
+# deployment that wants the plain harness should get a session that grows until
+# the provider says no. `ph-stabilize` layers the engine (P4-03).
+- id: compaction
+  name: compaction
 
 # The front end's own registration seam (P4-17). Here rather than in a TUI
 # profile because a seam is a seam: a headless run that mounts a row

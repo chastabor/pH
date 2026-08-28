@@ -17,9 +17,16 @@ from typing import Any
 import pytest
 from runtime_helpers import run_cell
 
-from ph.session import IGNORABLE_SESSION_EVENT_TYPES
-from ph.testing import FAKE_OPTIONS
-from ph_rlm.snapshot import KernelSnapshotPolicy, fold_namespace, referenced_locators
+from ph.llm.types import text_of
+from ph.session import IGNORABLE_SESSION_EVENT_TYPES, SurfaceIntent
+from ph.session.events import SurfaceReplace
+from ph.testing import FAKE_OPTIONS, plugin_payload, user_payload
+from ph_rlm.snapshot import (
+    KernelSnapshotPolicy,
+    fold_namespace,
+    referenced_locators,
+    render_live_variables,
+)
 
 pytestmark = pytest.mark.anyio
 
@@ -268,3 +275,95 @@ async def test_a_namespace_only_sees_its_own_records(mounted_runtime: Mounted) -
     await run_cell(ctx, "mine = 1", agent=agent, session=session)
     assert set(fold_namespace(session, agent.id)) == {"mine"}
     assert fold_namespace(session, "some-other-agent") == {}
+
+
+# ------------------------------------------------------- surviving a summary --
+# G10. Compaction rewrites a *surface*; a REPL is not on one, so a namespace
+# crosses a summary untouched. The risk is not that the state is lost — it is
+# that the model is told the conversation was summarized and concludes its
+# variables went with it, then spends the next cell recomputing a DataFrame it
+# still has.
+
+
+async def test_the_note_names_the_variables_the_kernel_still_holds(
+    mounted_runtime: Mounted,
+) -> None:
+    """Read from the same fold `materialize` restores from, so what a summary
+    promises and what a restart delivers cannot disagree."""
+    ctx, session, agent = await mounted_runtime(session_id="live-variables")
+    await run_cell(ctx, "frame = list(range(64))\nlabel = 'x'", agent=agent, session=session)
+
+    text = render_live_variables(session)
+
+    assert "`frame`" in text and "`label`" in text
+    assert "live-variables" in text, "the namespace is named, because a fork has more than one"
+    assert "still defined" in text
+
+
+async def test_a_variable_that_is_gone_is_not_promised(
+    mounted_runtime: Mounted,
+) -> None:
+    """The failure worth guarding: a note is a *claim* the model will act on, so
+    a name the fold has cleared must not appear in it."""
+    ctx, session, agent = await mounted_runtime(session_id="cleared")
+    await run_cell(ctx, "temporary = 1", agent=agent, session=session)
+    await run_cell(ctx, "del temporary", agent=agent, session=session, call_id="call-2")
+
+    assert render_live_variables(session) == ""
+
+
+async def test_an_empty_namespace_contributes_no_note(mounted_runtime: Mounted) -> None:
+    """Empty means absent — a session that has run no cell spends no prompt on a
+    paragraph saying its kernel holds nothing."""
+    _ctx, session, _agent = await mounted_runtime(session_id="nothing-yet")
+    assert render_live_variables(session) == ""
+
+
+async def test_the_note_is_registered_on_the_compaction_seam(
+    mounted_runtime: Mounted,
+) -> None:
+    """The wiring, which is `ctx.inject` rather than this row's own `inject`.
+
+    Deliberately: the compaction seam is a nice-to-have here, and a deployment
+    that dropped the compaction row must not thereby lose kernel snapshots. The
+    inverse is what this asserts — with the seam present (it ships in `ph-base`),
+    the note is there for whatever engine a profile layers on top.
+    """
+    ctx, session, agent = await mounted_runtime(session_id="wired")
+    await run_cell(ctx, "answer = 42", agent=agent, session=session)
+
+    assert any("`answer`" in note for note in ctx.compaction.notes(session))
+
+
+async def test_the_namespace_outlives_a_compaction_of_the_conversation(
+    mounted_runtime: Mounted,
+) -> None:
+    """ "Runtime state itself is untouched" (G10), with a real kernel.
+
+    The replacement is hand-built here because what is under test is the
+    *kernel's independence from the surface*, not the engine that writes one —
+    `ph-stabilize` owns that half and tests it against its own gates. Shadowing
+    every message the conversation had is the strongest form of the question:
+    the cell after it still sees the variable, because a surface rewrite appends
+    events and never speaks to the runtime.
+    """
+    ctx, session, agent = await mounted_runtime(session_id="survives")
+    session.append("user/message", user_payload("build the frame"), SurfaceIntent("append"))
+    await run_cell(ctx, "frame = list(range(8))", agent=agent, session=session)
+    nodes = session.surface.nodes
+    session.append(
+        "user/message",
+        plugin_payload(
+            "(the conversation, summarized)",
+            "summary",
+            plugin="compaction-summarize",
+            form="compaction",
+            summary="history summarized",
+        ),
+        SurfaceIntent(SurfaceReplace(start=nodes[0], end=nodes[-1]), nodes),
+    )
+
+    result = await run_cell(ctx, "print(sum(frame))", agent=agent, session=session, call_id="c2")
+
+    assert "28" in text_of(result.content), "the namespace did not survive the summary"
+    assert "`frame`" in render_live_variables(session), "the fold lost it"
