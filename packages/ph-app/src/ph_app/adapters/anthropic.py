@@ -58,6 +58,23 @@ log = logging.getLogger("ph_app.adapters.anthropic")
 API_VERSION = "2023-06-01"
 
 
+ACCEPTED_MEDIA: tuple[str, ...] = (
+    "image/png",
+    "image/jpeg",
+    "image/gif",
+    "image/webp",
+    "application/pdf",
+)
+"""The default for `Config.accepts` — what this provider's own models take.
+
+A PDF rides a `document` block rather than an `image` one, which is the whole
+reason `MediaBlock` is keyed on MIME and the branching lives in this file
+instead of in the content-block union."""
+
+MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024
+"""The default per-attachment ceiling, declared so a caller can act on it."""
+
+
 class Config(WireModel):
     """Row config for the Anthropic route."""
 
@@ -66,6 +83,15 @@ class Config(WireModel):
     api_key_env: str = "ANTHROPIC_API_KEY"
     context_window: int | None = 200_000
     default_max_tokens: int = 8_192
+    accepts: tuple[str, ...] = ACCEPTED_MEDIA
+    """MIME types this route takes as message content (P7-01).
+
+    Row config beside `context_window`, not a module constant, for the same
+    reason that one is: what a *route* can do is a property of the route, and
+    this adapter serves whatever `base_url` a deployment points it at. A gateway
+    in front of a text-only model sets `accepts: []` and gets honest pointers
+    instead of requests the far end rejects."""
+    max_attachment_bytes: int = MAX_ATTACHMENT_BYTES
 
 
 def _is_overflow(body: str) -> bool:
@@ -137,8 +163,8 @@ class AnthropicAdapter:
         return ResolvedModel(
             context_window=self.config.context_window,
             default_max_tokens=self.config.default_max_tokens,
-            accepts=ACCEPTED_MEDIA,
-            max_attachment_bytes=MAX_ATTACHMENT_BYTES,
+            accepts=frozenset(self.config.accepts),
+            max_attachment_bytes=self.config.max_attachment_bytes,
         )
 
 
@@ -275,19 +301,6 @@ def _merge_usage(current: TokenUsage | None, raw: dict[str, Any]) -> TokenUsage:
         cache_read_tokens=incoming.cache_read_tokens or current.cache_read_tokens,
         cache_write_tokens=incoming.cache_write_tokens or current.cache_write_tokens,
     )
-
-
-ACCEPTED_MEDIA: frozenset[str] = frozenset(
-    {"image/png", "image/jpeg", "image/gif", "image/webp", "application/pdf"}
-)
-"""What this route takes as message content.
-
-Images and PDFs; a PDF rides an Anthropic `document` block rather than an
-`image` one, which is the whole reason `MediaBlock` is keyed on MIME and the
-branching lives here instead of in the content-block union."""
-
-MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024
-"""The published per-attachment ceiling, declared so a caller can act on it."""
 
 
 def _to_anthropic(message: Any, media: dict[str, str]) -> dict[str, Any]:

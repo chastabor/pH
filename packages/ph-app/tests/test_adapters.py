@@ -488,6 +488,46 @@ async def test_openai_keeps_a_plain_user_message_a_string(tmp_path: Path) -> Non
     assert body["messages"] == [{"role": "user", "content": "hello"}]
 
 
+async def test_a_route_can_narrow_what_it_takes(tmp_path: Path) -> None:
+    """The reason the capability is row config and not a module constant.
+
+    One `openai-compatible` row serves many routes — a hosted gateway, Groq,
+    Together, a local llama.cpp — and they do not agree about media. A constant
+    made every one of them promise images and a 20 MB ceiling, so a text-only
+    local model was declaring a capability it does not have and its requests
+    would have been rejected at the far end instead of degraded here.
+    """
+    root = Context()
+    ref = await _with_attachment(root, tmp_path, "image/png")
+    text_only = OpenAiCompatibleAdapter(
+        ctx=root, profile=ProviderProfile(provider="local", accepts=())
+    )
+
+    assert text_only.resolve_model("local", "m").accepts == frozenset()
+    body = await text_only._body(
+        GenerateOptions(provider="local", model="m", messages=(_media_message(ref),))
+    )
+
+    assert "was not sent" in json.dumps(body["messages"])
+    assert "image_url" not in json.dumps(body["messages"])
+
+
+async def test_a_route_can_lower_its_size_ceiling(tmp_path: Path) -> None:
+    """The other half of the same declaration, and the one a gateway in front of
+    a small model actually needs."""
+    root = Context()
+    ref = await _with_attachment(root, tmp_path, "image/png")
+    tiny = OpenAiCompatibleAdapter(
+        ctx=root, profile=ProviderProfile(provider="tiny", max_attachment_bytes=8)
+    )
+
+    body = await tiny._body(
+        GenerateOptions(provider="tiny", model="m", messages=(_media_message(ref),))
+    )
+
+    assert "was not sent" in json.dumps(body["messages"])
+
+
 def test_each_adapter_declares_what_it_accepts() -> None:
     """`accepts` empty means text-only, and text-only is the safe default —
     so an adapter that grows a media branch without declaring it would send

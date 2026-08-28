@@ -59,6 +59,26 @@ __all__ = ["OpenAiCompatibleAdapter", "apply"]
 log = logging.getLogger("ph_app.adapters.openai")
 
 
+ACCEPTED_MEDIA: tuple[str, ...] = (
+    "image/png",
+    "image/jpeg",
+    "image/gif",
+    "image/webp",
+    "audio/wav",
+    "audio/mpeg",
+)
+"""The default for `ProviderProfile.accepts` — the OpenAI baseline.
+
+Images as `image_url` data URIs and audio as `input_audio`: two wire shapes for
+two MIME families, which is the branching a per-medium block union would have
+duplicated one layer up. PDFs are deliberately absent — this wire carries them
+by `file_id` through the Files API (P7-03), and claiming them would produce a
+request the provider rejects."""
+
+MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024
+"""The default per-attachment ceiling."""
+
+
 class ProviderProfile(WireModel):
     """One route this adapter serves."""
 
@@ -67,6 +87,15 @@ class ProviderProfile(WireModel):
     api_key_env: str = "OPENAI_API_KEY"
     context_window: int | None = None
     default_max_tokens: int | None = None
+    accepts: tuple[str, ...] = ACCEPTED_MEDIA
+    """MIME types this route takes as message content (P7-01).
+
+    Per *profile*, which is the point: one `openai-compatible` row serves many
+    routes — a hosted gateway, Groq, Together, a local llama.cpp — and they do
+    not agree about media. A module constant made every one of them declare
+    images and a 20 MB ceiling, so a text-only local model was promised
+    capabilities it does not have. A route that takes none sets `accepts: []`."""
+    max_attachment_bytes: int = MAX_ATTACHMENT_BYTES
 
 
 class Config(WireModel):
@@ -148,8 +177,8 @@ class OpenAiCompatibleAdapter:
         return ResolvedModel(
             context_window=self.profile.context_window,
             default_max_tokens=self.profile.default_max_tokens,
-            accepts=ACCEPTED_MEDIA,
-            max_attachment_bytes=MAX_ATTACHMENT_BYTES,
+            accepts=frozenset(self.profile.accepts),
+            max_attachment_bytes=self.profile.max_attachment_bytes,
         )
 
 
@@ -277,19 +306,6 @@ def _to_usage(raw: dict[str, Any]) -> TokenUsage:
         reasoning_tokens=int(details.get("reasoning_tokens") or 0) or None,
     )
 
-
-ACCEPTED_MEDIA: frozenset[str] = frozenset(
-    {"image/png", "image/jpeg", "image/gif", "image/webp", "audio/wav", "audio/mpeg"}
-)
-"""What an OpenAI-compatible chat route takes inline.
-
-Images as `image_url` data URIs and audio as `input_audio` — two different wire
-shapes for two MIME families, which is the branching a per-medium block union
-would have duplicated one layer up. PDFs are deliberately absent: this wire
-carries them by `file_id` through the Files API, which is P7-03's row, and
-claiming them here would produce a request the provider rejects."""
-
-MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024
 
 _AUDIO_FORMATS = {"audio/wav": "wav", "audio/mpeg": "mp3"}
 
