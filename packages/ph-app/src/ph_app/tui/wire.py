@@ -15,10 +15,19 @@ a missing one must cost a row rather than the transcript.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
-__all__ = ["first", "obj", "one_line", "seq", "text_of_wire"]
+__all__ = [
+    "first",
+    "matches_terms",
+    "message_of",
+    "obj",
+    "one_line",
+    "seq",
+    "source_of",
+    "text_of_wire",
+]
 
 
 def obj(value: Any) -> Mapping[str, Any]:
@@ -39,18 +48,63 @@ def first(value: Any) -> Mapping[str, Any]:
     return obj(items[0]) if items else {}
 
 
-def text_of_wire(blocks: Any, *, kind: str = "text") -> str:
+def text_of_wire(
+    blocks: Any, *, kind: str = "text", placeholder: Callable[[str], str] | None = None
+) -> str:
     """Join the text of wire-form content blocks of one kind.
 
     The wire-form twin of `ph.llm.types.text_of`, which needs models. `kind`
-    selects `text` or `reasoning`; anything else in the list is skipped.
+    selects `text` or `reasoning`. `placeholder` names the blocks it skips —
+    an auditor wants to see that an image was there; a transcript row does not
+    — and mirrors the same argument on `text_of` so the two joins stay one
+    behaviour described twice rather than two behaviours.
     """
-    return "\n".join(
-        str(block.get("text", ""))
-        for block in seq(blocks)
-        if isinstance(block, Mapping)
-        if block.get("type") == kind
-    )
+    parts: list[str] = []
+    for block in seq(blocks):
+        if not isinstance(block, Mapping):
+            continue
+        block_kind = block.get("type")
+        if block_kind == kind:
+            parts.append(str(block.get("text", "")))
+        elif placeholder is not None and isinstance(block_kind, str):
+            parts.append(placeholder(block_kind))
+    return "\n".join(parts)
+
+
+def message_of(event: Any) -> Mapping[str, Any]:
+    """The message inside an event's payload, whichever shape it takes.
+
+    `user/message`'s payload *is* the message; `assistant/message` wraps one
+    beside `turn`, `step` and `usage`. Both projections need to know that, and
+    getting it wrong is silent — a message with no content rather than an error
+    — so the knowledge lives here instead of in each reader.
+    """
+    payload = obj(getattr(event, "data", event))
+    return obj(payload.get("message")) if "message" in payload else payload
+
+
+def source_of(message: Any) -> tuple[str, str, str]:
+    """`(kind, name, form)` for a message's producer.
+
+    The wire keys `plugin`/`model`/`callId` are the discriminated members of
+    `MessageSource`; naming them in one place is what stops two readers
+    disagreeing about who produced a record.
+    """
+    source = obj(obj(message).get("source"))
+    kind = str(source.get("kind") or "")
+    name = str(source.get("plugin") or source.get("model") or source.get("callId") or "")
+    return kind, name, str(source.get("form") or "")
+
+
+def matches_terms(haystack: str, query: str) -> bool:
+    """Every whitespace-separated term appears in `haystack`, case-folded.
+
+    One definition of what filtering means, because the TUI now filters in two
+    places — the choice picker and the trajectory table — and `modals/base.py`
+    predicted exactly this: bespoke screens "would mean five places to get the
+    escape key, the focus order and the filter semantics subtly different".
+    """
+    return all(term in haystack.lower() for term in query.lower().split())
 
 
 def one_line(text: str, limit: int = 120) -> str:

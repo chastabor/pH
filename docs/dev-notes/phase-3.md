@@ -44,8 +44,10 @@ construction: the only guest→host channel is a `call` frame.
 | P3-20 | The `rlm` profile, reachable by name: bundles discovered through a `ph.bundles` entry point rather than imported | `ph/bundles/__init__.py`, `ph_app/profiles.py` |
 | P3-22 | The conformance suite: the protocol's vocabulary enumerated, so an untested frame fails | `ph-rlm/tests/test_conformance.py` |
 | P3-23 | The fixture replay and its triaged report | `docs/dev-notes/prime-agent-replay.md`, `ph-rlm/tests/{fixture_replay,test_fixture_replay}.py` |
+| P3-24 | The auditor's projection: dsh's record set plus `event`, timings derived from the log | `ph_app/tui/trajectory.py` |
+| P3-25 | The auditor's view: table, filter, details panel, fork-at-record, and a harness-free entry point | `ph_app/tui/trajectory_app.py`, `tui/widgets/trajectory.py` |
 
-**Still to come:** P3-24 and P3-25 — the trajectory projection and its view. P3-13's remaining half — passivation
+**Phase 3 is complete.** Every row P3-01…P3-25 has landed. P3-13's remaining half — passivation
 across a *restart*, where the child's session is gone and has to come off disk —
 is the daemon's (Phase 5); the in-process half landed here.
 
@@ -2326,3 +2328,179 @@ single interpreter from broken to working in place would see the first answer.
 docstring says so.
 
 Result: 1.45 s → 0.02 s for the same call sites, suite 43.1 s → 40.5 s.
+
+---
+
+## P3-24 and P3-25: the auditor's view
+
+The plan's §5.5 argues these can be added late at zero cost because the log
+already records everything they need. That held: no event type was added, no
+producer changed, and the projection is a fold over what was already there.
+
+### The projection needed one kind dsh does not have
+
+dsh's record set — `system | user | context | compacted | message | tool |
+subtool` — describes a *conversation*. pH's log also carries harness facts that
+a conversation has no kind for: a policy change, an observed file read, the seed
+boundary of a resumed session. Folding those into `context` would say they were
+shown to the model, which is exactly the lie an auditor's view exists to make
+impossible. So there is an eighth kind, `event`, and its handler renders from
+the payload generically — a type this build has no phrase for still gets a
+readable row, because hiding what it could not name would be the silent omission
+A11 forbids.
+
+The other asymmetry is the interesting one: this view's `RECORDLESS` is
+**differently shaped** from the transcript's — the cleanup pass caught a first
+draft calling it "smaller", which it is not; both hold seven, and four of this
+one's are types the transcript renders. The difference is the second projection:
+`request/header`, `approval/policy`, `fs/observed` and `session/end-seed` are
+record-less for a reader and are precisely what an auditor came for, while
+chunks and a dispatch's opening half are rows in a conversation and duplicates
+in an audit. A test now pins the difference in both directions rather than
+letting the two lists drift toward each other.
+
+**Timings are derived, never measured.** TTFT and decode throughput come from
+`step/start`, the first `assistant/chunk` and the settling `assistant/message` —
+event *times*, so a replayed log reproduces them exactly. A clock read at render
+would not, and A11 is the reason. Where the log does not carry enough, `Timing`
+reports `None`: an auditor's view that invents a number is worse than one that
+admits it cannot say.
+
+The fold gate turned up a real asymmetry worth keeping. A seeded session appends
+`session/end-seed` to mark where its history ended, so a stored log genuinely
+has one event the live one never had. The test asserts the *shared prefix*
+projects identically and that the boundary record is there — which is more
+useful than the equality it replaced, because the extra record is a feature.
+
+### The view is its own App
+
+The plan describes `App.MODES` with chat and trajectory as co-equal views. What
+landed is a separate `App`, and the reason is the plan's own argument: shape (b)
+exists because the view must run with **nothing mounted**, and sharing
+`PHTuiApp` means sharing its mount, its trust prompt and its agent. Splitting at
+the process boundary instead makes `ph --mode trajectory --session <id|path>`
+fall out with no conditional — which is what §5.5 says the entry point should
+cost.
+
+**Fork is the headline action and it refuses out loud.** A6 permits a fork at a
+closed turn only, so the table *marks* those rows rather than letting a person
+aim anywhere and be rejected afterwards. Both refusals name their reason: off a
+boundary it cites A6, and with no session store it says the view is reading a
+file. The plan warns that "a trajectory view whose fork key is dead is worse
+than no trajectory view"; a key that reports why is the version that is not
+dead.
+
+**Focus was a design question, not a detail.** The first cut auto-focused the
+filter input, which swallowed `f` as typed text — the fork key silently did
+nothing, the exact failure above. The table holds focus, `/` hands it to the
+filter, `escape` takes it back.
+
+### Found by using it
+
+Driving the real CLI against a real log surfaced a path bug: a target that
+looked like a path but did not exist fell through to "maybe it is a session id",
+which appended `.jsonl` and reported `/nope.jsonl.jsonl` missing — a file nobody
+had named. A target that looks like a path now is one, and is reported as
+itself.
+
+---
+
+## The cleanup pass over P3-24/P3-25
+
+Four reviewers, and the headline is the same failure as the pass before it,
+which is why it is worth writing down twice.
+
+### The completeness gate could not fail — again
+
+The projection's dispatch ended in `else: builder.on_event(event, kind,
+_describe(event))`, and the gate asked, for every known type, whether a record
+appeared. With a catch-all, everything outside `RECORDLESS` produces one
+*because the fallback produces one*: the predicate was a tautology, and a type
+added to the vocabulary would have got a generic `key=value` row while the test
+stayed green. A reviewer demonstrated it by adding a hypothetical type — the
+transcript's gate broke, this one did not.
+
+The module's own docstring claimed "a test holds that". It did not. This is the
+second time in two passes that a gate I wrote asserted something it could not
+check, and both times the fix was the same: stop asking a question whose answer
+is manufactured by the code under test, and compare **sets** instead. There is
+now an explicit `HANDLERS` mapping — the shape `adapter.py` has used since
+Phase 2 — no `else`, and a test asserting the gate *rejects* an invented type.
+
+The lesson, stated plainly because I keep relearning it: a gate that has never
+been shown to reject anything is not a gate.
+
+### The view was stating A6 in parallel with the layer that owns it
+
+`is_fork_point` was `event.type == "turn/end"`. The store's actual rule
+(`_fork_seed`) is *"not inside an open turn"* — any between-turn event
+qualifies, including the seed-boundary record this view exists to show. Measured
+on a real log, the view marked **one legal target in four** and told the reader
+the other three were "refused (A6)" — a claim about A6 the layer enforcing A6
+does not make.
+
+`open_turn_at` / `is_fork_boundary` are now exported from `ph.session.store`,
+used by `_fork_seed` itself and by the view, so the marks *are* the store's
+answer. `action_fork` no longer writes its own refusal text either: it calls
+`fork` and reports `SessionForkError`, which already carries a sentence and a
+code. A real log that marked 1 fork point now marks 3, and a test asserts every
+row against `is_fork_boundary` rather than against the view's own predicate —
+the old test compared the predicate with itself.
+
+### Half the chrome was reimplemented
+
+`TrajectoryApp` called `load_catalog` but not `load_tui_settings`, and hardcoded
+`DEFAULT_THEME` — so it honoured the user's *theme catalog* and ignored the
+theme they chose, and its bindings carried no `id`, making them unremappable
+while `PHTuiApp`'s neighbours are. Both halves come from `config.py`; one was
+read and the other rewritten. Fixed with `set_keymap` and `settings.theme`.
+
+`self.notice` prose had become API: the fork test recovered the child session by
+`rsplit("→ ", 1)` on a header string. `action_fork` returns the `Session` now,
+reports through `App.notify` (the project's stated idiom, markup-safe, with
+severity carrying refused-versus-done structurally), and keeps `notice` only as
+the record of what the person was told.
+
+### Three helpers that already existed, and one that should have
+
+`_Block` was a 13-line shim so `ph.llm.types.text_of` could read wire dicts —
+next door to `wire.text_of_wire`, which is documented as exactly that twin and
+is used at six call sites. It needed one thing `text_of_wire` lacked, a
+`placeholder` hook, which is a two-line addition mirroring the argument
+`text_of` already takes. `parse_request_header` replaced hand-dug wire keys.
+`matches_terms` in `wire.py` is now the TUI's one definition of filtering,
+shared with `Choice.matches` — `modals/base.py` had predicted this drift in so
+many words. And `message_of`/`source_of` moved there too: the user-vs-assistant
+payload shape and the `plugin`/`model`/`callId` source keys were spelled in both
+projections, and getting either wrong is silent.
+
+### What the records were carrying
+
+`payload` held a deep copy of every event — **2.29 MB on a 1000-record log, half
+the record list's memory, 40% of build time** — and nothing read it. `step` was
+never rendered. `title` was computed for every record and shown nowhere, while
+duplicating the source label in the search index. Removing the first two and
+*rendering* the third (the table's fourth column is `title` now, which reads as
+"turn end" rather than `harness:turn/end`) took `build_trajectory` from 28.5 ms
+to 5.6 ms, with identical output. `_describe` was deep-copying a payload to
+build one truncated line; the frozen form iterates fine.
+
+### And the filter was rebuilding a thousand rows per keystroke
+
+`DataTable` virtualizes rendering, not row construction, so a refill measures
+every cell of every row: ~150 ms per keystroke, 625 ms to type "read". Row
+surgery is *worse* — removing the rows that drop out reindexes the table each
+time — so the primitive is right and the frequency was the bug. A 150 ms reset
+timer coalesces the burst into one rebuild. `show_details` was also running
+twice per refresh, because the first `add_row` after a `clear()` moves the
+cursor and the highlight event draws it anyway.
+
+### Skipped
+
+**Cross-navigation between the two views by `sourceSeq`**, and a way to reach
+the trajectory from inside the running TUI. §5.5 lists cross-navigation among
+the three things that "mean anything" in shape (b), and it is not built — today
+`source_seq` has one consumer, the fork. That is a missing feature rather than a
+wrong one, and it wants a `TuiVerb`, a binding and a screen push; it is P4 work,
+not a cleanup. Recorded here because the reviewers were right that the deviation
+was argued without naming what it cost.

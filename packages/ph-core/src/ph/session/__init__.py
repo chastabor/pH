@@ -34,7 +34,7 @@ from .request_header import (
     header_equals,
 )
 from .session import Session, SessionHeader, SessionObserver
-from .store import SessionForkError, SessionStore, new_session_id
+from .store import SessionForkError, SessionStore, is_fork_boundary, new_session_id, open_turn_at
 from .surface import (
     SurfaceError,
     SurfaceFoldReplacement,
@@ -80,12 +80,14 @@ __all__ = [
     "freeze_json_value",
     "header_equals",
     "is_append_surface_event",
+    "is_fork_boundary",
     "is_json_value",
     "is_replacement_surface_event",
     "is_surface_eligible_type",
     "is_surface_event",
     "new_session_id",
     "now_ms",
+    "open_turn_at",
     "snapshot_json_value",
     "thaw_json",
 ]

@@ -26,6 +26,8 @@ from textual.content import Content
 from textual.screen import ModalScreen
 from textual.widgets import Button, Input, ListItem, ListView, Static
 
+from ..wire import matches_terms
+
 __all__ = ["Action", "Choice", "ChoicePicker", "ConfirmModal", "PhModal"]
 
 ResultT = TypeVar("ResultT")
@@ -55,10 +57,7 @@ class Choice:
     """Rendered as the current selection — the active model, the live theme."""
 
     def matches(self, needle: str) -> bool:
-        if not needle:
-            return True
-        haystack = f"{self.label} {self.detail} {self.value}".lower()
-        return all(part in haystack for part in needle.lower().split())
+        return matches_terms(f"{self.label} {self.detail} {self.value}", needle)
 
 
 class ChoicePicker(PhModal[str | None]):

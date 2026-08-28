@@ -51,7 +51,7 @@ err = Console(stderr=True)
 
 DEFAULT_PROFILE = "headless"
 
-OutputMode = Literal["text", "json", "transcript", "rpc", "tui"]
+OutputMode = Literal["text", "json", "transcript", "rpc", "tui", "trajectory"]
 
 ModeRunner: TypeAlias = Callable[..., Awaitable[Any]]
 """Each mode returns its own result type — `json` reports a count, `text` and
@@ -77,11 +77,12 @@ def default(
     provider: Annotated[str, typer.Option("--provider")] = "fake",
     model: Annotated[str, typer.Option("--model")] = "fake-1",
     session_id: Annotated[
-        str | None, typer.Option("--session", help="Session id to create.")
+        str | None,
+        typer.Option("--session", help="Session id to create, or to read under --mode trajectory."),
     ] = None,
     mode: Annotated[
         OutputMode,
-        typer.Option("--mode", help="text (default), json, transcript, rpc, or tui."),
+        typer.Option("--mode", help="text (default), json, transcript, rpc, tui, or trajectory."),
     ] = "text",
     resume: Annotated[
         str | None, typer.Option("--resume", help="Session id to reopen (tui only).")
@@ -104,6 +105,22 @@ def default(
         console.print(
             yaml.safe_dump(loader.dump(), sort_keys=False, default_flow_style=False).rstrip()
         )
+        return
+
+    if mode == "trajectory":
+        # The auditor's view. Deliberately *before* any profile work: it mounts
+        # nothing — no agent, no provider, no answerers — because the logs worth
+        # auditing are the ones nobody can reopen (P3-25).
+        if session_id is None:
+            err.print("[red]--mode trajectory needs --session <id|path>[/red]")
+            raise typer.Exit(code=2)
+        from .tui.trajectory_app import run_trajectory
+
+        try:
+            anyio.run(partial(run_trajectory, session_id))
+        except (OSError, ValueError) as error:
+            err.print(f"[red]{error}[/red]")
+            raise typer.Exit(code=2) from error
         return
 
     if mode == "rpc":

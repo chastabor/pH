@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import secrets
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Literal
@@ -25,7 +26,14 @@ from ..cordis import Context, events, plugin
 from .events import SessionEvent, now_ms
 from .session import Session, SessionHeader
 
-__all__ = ["SessionForkError", "SessionStore", "apply", "new_session_id"]
+__all__ = [
+    "SessionForkError",
+    "SessionStore",
+    "apply",
+    "is_fork_boundary",
+    "new_session_id",
+    "open_turn_at",
+]
 
 log = logging.getLogger("ph.session")
 
@@ -177,6 +185,7 @@ class SessionStore:
 
     @staticmethod
     def _fork_seed(session: Session, requested_boundary: int | None) -> tuple[SessionEvent, ...]:
+        """The prefix a fork copies, or the reason it may not (A6)."""
         log = session.events
         if requested_boundary is None:
             if not log:
@@ -203,17 +212,38 @@ class SessionStore:
                 f'session "{session.id}"',
                 "INVALID_BOUNDARY",
             )
-        last_turn_boundary: SessionEvent | None = None
-        for event in log[: boundary + 1]:
-            if event.type in ("turn/start", "turn/end"):
-                last_turn_boundary = event
-        if last_turn_boundary is not None and last_turn_boundary.type == "turn/start":
-            turn = last_turn_boundary.data.get("turn")
+        open_turn = open_turn_at(log, boundary)
+        if open_turn is not None:
             raise SessionForkError(
-                f'fork boundary {boundary} in session "{session.id}" ends inside open turn {turn}',
+                f'fork boundary {boundary} in session "{session.id}" ends inside '
+                f"open turn {open_turn.data.get('turn')}",
                 "OPEN_TURN",
             )
         return tuple(log[: boundary + 1])
+
+
+def open_turn_at(log: Sequence[SessionEvent], boundary: int) -> SessionEvent | None:
+    """The `turn/start` a boundary would cut into, or `None` if it is safe (A6).
+
+    The rule, in one place: a fork may end on any between-turn event, and may
+    not end inside a turn that has not closed. Exported because a *reader* needs
+    the same answer before it offers the action — the trajectory view marks
+    which records a fork may aim at, and a second statement of this rule there
+    said `turn/end` only, refusing three legal boundaries out of four and citing
+    A6 while doing it.
+    """
+    if boundary < 0 or boundary >= len(log):
+        return None
+    last: SessionEvent | None = None
+    for event in log[: boundary + 1]:
+        if event.type in ("turn/start", "turn/end"):
+            last = event
+    return last if last is not None and last.type == "turn/start" else None
+
+
+def is_fork_boundary(log: Sequence[SessionEvent], boundary: int) -> bool:
+    """Whether `ctx.sessions.fork` would accept this boundary."""
+    return 0 <= boundary < len(log) and open_turn_at(log, boundary) is None
 
 
 @plugin("session")
