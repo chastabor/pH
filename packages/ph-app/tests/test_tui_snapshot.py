@@ -133,6 +133,38 @@ def test_a_code_mode_card_lists_its_dispatches(snap_compare: Any) -> None:
     assert snap_compare(_Snapshot(items), terminal_size=(80, 14))
 
 
+def test_a_code_cell_shows_its_program_and_what_it_cost(snap_compare: Any) -> None:
+    """P3-19: the program is the interesting half of a cell.
+
+    Every other card is a header and a body, because its input fits on the header
+    line. A cell's input is the code the model wrote. The facts line under it
+    carries what the collapsible does not — the dispatch count is the
+    collapsible's, from the fold that owns those rows, so one number is never
+    rendered twice from two folds inside one widget (A11).
+    """
+    card = ToolCard(
+        call_id="c1",
+        name="ipython",
+        arguments='{"program": "..."}',
+        title="ipython",
+        subtitle="3 lines",
+        card="terminal",
+        input_text="rows = await tools.read(path='data.csv')\ntotal = len(rows)\ntotal",
+        settled=True,
+        body="[result] 128",
+        details={"status": "ok", "dispatches": 2, "attachments": 1, "truncated": True},
+        dispatches=[
+            ToolCard(call_id="s1", name="read", arguments='{"path": "data.csv"}', settled=True),
+            ToolCard(call_id="s2", name="glob", arguments='{"pattern": "*.csv"}', settled=True),
+        ],
+    )
+    items = _state(
+        ChatItem(key="u1", role="user", text="how many rows?", seq=1),
+        ChatItem(key="t1", role="tool", tool=card, seq=2),
+    )
+    assert snap_compare(_Snapshot(items), terminal_size=(80, 18))
+
+
 def test_a_compaction_marker_keeps_what_it_replaced(snap_compare: Any) -> None:
     items = _state(
         ChatItem(key="u1", role="user", text="the original question", seq=1, shadowed=True),

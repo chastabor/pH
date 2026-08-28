@@ -44,9 +44,16 @@ async def mount(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AsyncIterato
 
         One keyword rather than a second fixture, because "mount the shipped
         profile" and "mount base plus these rows" differ by one document and
-        should not differ by a lifecycle.
+        should not differ by a lifecycle. A *sequence* of paths is the whole
+        profile — what `resolve_profile` returns — so a test can mount exactly
+        what a person's `--profile` composes rather than re-deriving it.
         """
-        paths = [BASE, HEADLESS] if profile is None else [BASE, HEADLESS, profile]
+        if profile is None:
+            paths = [BASE, HEADLESS]
+        elif isinstance(profile, (list, tuple)):
+            paths = list(profile)
+        else:
+            paths = [BASE, HEADLESS, profile]
         documents = Loader.from_paths(paths).documents
         if overlay_rows:
             documents.append(("test-overlay", list(overlay_rows)))

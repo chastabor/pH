@@ -33,9 +33,17 @@ from textual.content import Content
 from textual.widgets import Collapsible, Markdown, Static
 from textual.widgets.markdown import MarkdownStream
 
+from ph.text import count_of
+
 from ..state import ChatItem, ToolCard
 
-__all__ = ["StreamingMessage", "ToolCardWidget", "TranscriptRow", "TranscriptView"]
+__all__ = [
+    "CodeCellWidget",
+    "StreamingMessage",
+    "ToolCardWidget",
+    "TranscriptRow",
+    "TranscriptView",
+]
 
 _ROLE_LABEL = {
     "user": "you",
@@ -197,9 +205,19 @@ class ToolCardWidget(Vertical):
 
     def compose(self) -> ComposeResult:
         yield Static(self._header(), classes="tool-header")
+        yield from self._rows_after_header()
         yield Static(Content(self._body()), classes="tool-body")
+        yield from self._rows_after_body()
         with Collapsible(title="governed calls", collapsed=True, id="dispatches"):
             yield self._dispatch_box
+
+    def _rows_after_header(self) -> ComposeResult:
+        """What a card kind adds above its output. Empty for most cards."""
+        return iter(())
+
+    def _rows_after_body(self) -> ComposeResult:
+        """What a card kind adds below its output."""
+        return iter(())
 
     async def on_mount(self) -> None:
         self.query_one(Collapsible).display = False
@@ -237,9 +255,17 @@ class ToolCardWidget(Vertical):
         card = self.item.tool
         return self.item.text if card is None else card.body
 
-    async def refresh_card(self) -> None:
+    async def refresh_card(self) -> bool:
+        """Redraw if anything changed; answer whether it did.
+
+        The answer is what lets a subclass extend the card without defeating the
+        memo: `Static.update` always re-lays-out, so a row that redrew
+        unconditionally would force a full arrange on every dirty frame — which
+        is the cost this memo exists to remove, and `sync` visits every row.
+        """
         current = self._snapshot()
-        if current != self._shown:
+        changed = current != self._shown
+        if changed:
             self._shown = current
             card = self.item.tool
             self.set_class(bool(card and card.settled), "-settled")
@@ -247,6 +273,7 @@ class ToolCardWidget(Vertical):
             self.query_one(".tool-header", Static).update(self._header())
             self.query_one(".tool-body", Static).update(Content(self._body()))
         await self._sync_dispatches()
+        return changed
 
     async def _sync_dispatches(self) -> None:
         card = self.item.tool
@@ -254,7 +281,7 @@ class ToolCardWidget(Vertical):
             return
         collapsible = self.query_one(Collapsible)
         collapsible.display = True
-        collapsible.title = f"{len(card.dispatches)} governed calls"
+        collapsible.title = count_of(len(card.dispatches), "governed call")
         for dispatch in card.dispatches:
             state = (dispatch.settled, dispatch.is_error)
             known = self._dispatch_rows.get(dispatch.call_id)
@@ -275,6 +302,83 @@ class ToolCardWidget(Vertical):
             name=dispatch.name,
             args=dispatch.arguments,
         )
+
+
+def _cell_facts(details: dict[str, Any]) -> str:
+    """The `IpythonToolDetails` line — only the facts that are true.
+
+    Read as a plain mapping rather than by importing the model: the payload is
+    ph-rlm's, and ph-app does not depend on the bundle. A field this build does
+    not know is ignored, which is what lets a tool enrich its own card without
+    the transcript learning its schema.
+
+    The dispatch *count* is deliberately absent: the collapsible below already
+    reports it, from the `tool/code-dispatch-start` fold that owns those rows.
+    Rendering it here too would put two projections of one number in one widget,
+    able to disagree — which is what A11 forbids, and what the first draft of
+    this card did (a snapshot showing "3 governed calls" over a section titled
+    "1 governed call").
+    """
+    facts: list[str] = []
+    attachments = int(details.get("attachments") or 0)
+    if attachments:
+        facts.append(count_of(attachments, "attachment"))
+    if details.get("truncated"):
+        facts.append("output truncated")
+    if details.get("reset"):
+        facts.append("kernel restarted — namespace empty")
+    return " · ".join(facts)
+
+
+class CodeCellWidget(ToolCardWidget):
+    """A Code Mode cell: the program, what it printed, and every call it made.
+
+    The card kind `terminal` earns its own widget for one reason: the *program*
+    is the interesting half. Every other tool's card is a header and a body,
+    because its input is a path or a query that fits on the header line; a cell's
+    input is the code the model wrote, and a transcript that showed only its
+    first line would hide the thing a reader is trying to follow.
+
+    Everything drawn here comes from the settled record — `ToolCallView.body` for
+    the program, `tool/result.meta` for the facts line — so a replayed cell is
+    the cell that ran (P2-01).
+    """
+
+    DEFAULT_CSS = """
+    CodeCellWidget > .cell-program {
+        background: $ph-panel; color: $ph-foreground; padding: 0 1; height: auto;
+    }
+    CodeCellWidget > .cell-facts { color: $ph-muted; }
+    """
+
+    def _rows_after_header(self) -> ComposeResult:
+        yield Static(Content(self._program()), classes="cell-program")
+
+    def _rows_after_body(self) -> ComposeResult:
+        yield Static(Content(""), classes="cell-facts")
+
+    def _program(self) -> str:
+        card = self.item.tool
+        return "" if card is None else card.input_text
+
+    def _facts(self) -> str:
+        card = self.item.tool
+        return "" if card is None else _cell_facts(card.details)
+
+    def _snapshot(self) -> tuple[Any, ...]:
+        return (*super()._snapshot(), self._program(), self._facts())
+
+    async def refresh_card(self) -> bool:
+        changed = await super().refresh_card()
+        if changed:
+            # `self._shown` is the tuple `super()` just stored, so the program
+            # and the facts are read back rather than recomputed.
+            program, facts = self._shown[-2:] if self._shown else ("", "")
+            self.query_one(".cell-program", Static).update(Content(str(program)))
+            widget = self.query_one(".cell-facts", Static)
+            widget.display = bool(facts)
+            widget.update(Content(str(facts)))
+        return changed
 
 
 class TranscriptView(VerticalScroll):
@@ -311,7 +415,8 @@ class TranscriptView(VerticalScroll):
 
     def _build(self, item: ChatItem) -> Any:
         if item.role == "tool":
-            return ToolCardWidget(item)
+            kind = item.tool.card if item.tool is not None else "generic"
+            return CodeCellWidget(item) if kind == "terminal" else ToolCardWidget(item)
         if item.role in MARKDOWN_ROLES:
             return StreamingMessage(item)
         return TranscriptRow(item)

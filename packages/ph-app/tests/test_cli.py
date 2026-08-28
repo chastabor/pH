@@ -142,6 +142,18 @@ def test_profiles_resolve_to_bundle_documents() -> None:
         resolve_profile("nope")
 
 
+def test_an_unknown_profile_names_what_is_available() -> None:
+    """The error is a person's next step, so it lists what this install can
+    actually compose — a bundle profile whose distribution is missing is not
+    offered rather than offered and then failing (P3-20)."""
+    result = runner.invoke(app, ["--dump-config", "--profile", "nonesuch"])
+    assert result.exit_code != 0
+    # The literal built-ins, not `available_profiles()` — an expectation built
+    # from the function under test passes even when both are empty.
+    for name in ("base", "headless", "tui", "deepseek", "anthropic"):
+        assert name in result.output
+
+
 def test_the_tui_profile_layers_onto_headless() -> None:
     documents = resolve_profile("tui")
     assert [path.name for path in documents] == ["base.yaml", "headless.yaml", "tui.yaml"]

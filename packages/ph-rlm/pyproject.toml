@@ -11,6 +11,9 @@ requires-python = ">=3.12"
 license = "MIT"
 dependencies = ["ph-core", "ph-runtime-guest", "dill>=0.3.8", "filelock>=3.15"]
 
+[project.entry-points."ph.bundles"]
+rlm = "ph_rlm:BUNDLE"
+
 [project.entry-points."ph.plugins"]
 code-runtime-python = "ph_rlm.kernel.manager:apply"
 rlm-kernel-snapshot = "ph_rlm.snapshot:apply"

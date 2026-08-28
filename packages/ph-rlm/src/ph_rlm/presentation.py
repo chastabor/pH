@@ -34,9 +34,11 @@ Three things, and the reason each is here rather than in `ph-core`:
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 from ph.cordis import Context, plugin
+from ph.text import count_of
 from ph.tools.code_mode import CodeCellValue
 from ph.tools.definition import ToolOutput, ToolResult, TransportPresentation, text_content
 from ph.tools.presentation import ToolCallView, ToolResultView
@@ -121,23 +123,27 @@ def _program(args: Any) -> str:
 
 
 def _present_call(args: Any) -> ToolCallView:
-    # A bounded prefix: the card wants one line, not a list built from every
-    # line of a program these views re-materialize per replayed cell.
+    # A bounded prefix: the card wants the program, not every line of a
+    # generated file these views re-materialize per replayed cell. `input` is the
+    # header line, `body` the program the code cell renders under it (P3-19).
     head = _program(args)[:2048]
     first = next((line for line in head.splitlines() if line.strip()), "")
-    return ToolCallView(card="terminal", title=IPYTHON, input=first)
+    return ToolCallView(card="terminal", title=IPYTHON, input=first, body=head)
 
 
 def _present_result(args: Any, result: ToolResult) -> ToolResultView:
     program = _program(args)
     count = program.count("\n") + (0 if program.endswith("\n") or not program else 1)
-    subtitle = f"{count} line{'' if count == 1 else 's'}"
+    subtitle = count_of(count, "line")
     return ToolResultView(
         card="terminal",
         title=IPYTHON,
         subtitle=subtitle,
         is_error=result.is_error,
-        meta=result.meta if isinstance(result.meta, dict) else None,
+        # `Mapping`, not `dict`: a live result's meta arrives frozen as a
+        # `MappingProxyType`, which is a Mapping and is *not* a dict instance —
+        # so a `dict` test silently dropped the payload the card is drawn from.
+        meta=dict(result.meta) if isinstance(result.meta, Mapping) else None,
     )
 
 

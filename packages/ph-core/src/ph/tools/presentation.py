@@ -30,6 +30,11 @@ class ToolCallView(WireModel):
     subtitle: str | None = None
     input: str | None = None
     """The call's salient input as one line — a path, a command, a query."""
+    body: str | None = None
+    """The call's full input, when a card is meant to show it — the program of a
+    code cell, a whole command. `input` is the one-line header; this is what a
+    widget renders underneath, and leaving it unset keeps the header-only card
+    every other tool gets (P3-19)."""
 
 
 class ToolResultView(WireModel):

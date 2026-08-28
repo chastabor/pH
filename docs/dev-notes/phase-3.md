@@ -40,10 +40,11 @@ construction: the only guest→host channel is a `call` frame.
 | P3-16 | The Continual Harness: the fold at both scopes, validation (H1/H2/H3/H5), apply, rollback (H6), the prompt section, `/refine`, the planner and auto-refine (H7) | `ph_rlm/harness/{state,service,planner,auto,__init__}.py` |
 | P3-17 | `rlm-context-loader`: a corpus queried through three registered tools, metadata-only prompt section, the recipe as `context/loaded` | `ph_rlm/context_loader.py` |
 | P3-18 | `rlm-skills-python`: `SKILL.md` discovery, editable install, import names to the kernel at boot, catalog section | `ph_rlm/skills.py`, `ph_runtime/runner.py` |
+| P3-19 | `CodeCellWidget` and the subagent panel: the two P3-09/P3-11 records that had no consumer | `ph_app/tui/widgets/{transcript,status}.py`, `ph_app/tui/{state,adapter}.py` |
+| P3-20 | The `rlm` profile, reachable by name: bundles discovered through a `ph.bundles` entry point rather than imported | `ph/bundles/__init__.py`, `ph_app/profiles.py` |
 
-**Still to come:** P3-19, P3-20 and P3-22…P3-25 — the TUI code cell and subagent
-panel, the profile bundle and its smoke run, the runtime conformance gate, the
-fixture replay, and the trajectory view. P3-13's remaining half — passivation
+**Still to come:** P3-22…P3-25 — the runtime conformance gate, the fixture
+replay, and the trajectory view. P3-13's remaining half — passivation
 across a *restart*, where the child's session is gone and has to come off disk —
 is the daemon's (Phase 5); the in-process half landed here.
 
@@ -1863,3 +1864,196 @@ guest's redundant `list()` copy dropped; `FAKE_OPTIONS` imported at module top.
 - **`_read`'s description pre-check duplicating `register()`** (altitude): kept
   deliberately — the pre-check skips-with-a-log where `register()` would raise
   and take the whole mount down with one bad skill.
+
+---
+
+## P3-19: two records that had been written and never read
+
+Both halves of this row are consumers catching up with producers.
+`IpythonToolDetails` shipped at P3-09 with nothing to draw it;
+`subagent/status` and `subagent/usage-attributed` sat in the adapter's
+`RECORDLESS` set with a docstring naming *this* row as the reason they were
+classified rather than rendered. Neither needed new events — which is the point:
+the log already had what the view wanted.
+
+### The cell is a subclass, not a second widget
+
+`CodeCellWidget` extends `ToolCardWidget` and the view picks it by **card kind**
+(`terminal`), so a tool declaring that kind gets the rendering without
+`TranscriptView` knowing which tool it was. It adds exactly two things to the
+base card: the program above the output, and the facts line under it. Everything
+else — the header, the dispatch collapsible, the redraw memo — is inherited, so
+there is one card implementation and one place where a change to how tool rows
+work has to land.
+
+The facts line reads `IpythonToolDetails` as a **plain mapping**, not by
+importing ph-rlm's model, because ph-app does not depend on the bundle. A field
+this build does not know is ignored, which is what lets a tool enrich its own
+card without the transcript learning its schema. Only true facts are shown:
+`0 governed calls · not truncated` is a line that costs space to say nothing.
+
+### The program needed a field, and the right one already had a name
+
+The widget must not parse `card.arguments`: that is the raw JSON the model
+emitted, and a malformed one is exactly the case where a card still has to draw.
+`ToolCallView` gained `body` — the call's full input — symmetric with
+`ToolResultView.body`, which had also never been wired. So ph-rlm's
+`_present_call` decides what a cell's program is, ph-app renders whatever it is
+handed, and a bash tool could show its full command tomorrow with no change here.
+Likewise `ToolCard.details` carries `tool/result.meta` verbatim: the tool's own
+durable payload, threaded rather than re-derived, so a replayed cell is the cell
+that ran.
+
+### The panel is a projection, and it is the *same* projection
+
+`TuiState.subagents` folds `subagent/*` with the same rules
+`ph.seams.subagents.subagent_roster` uses — admission seeds a row at `queued`
+(the first status comes from a detached job, so a reader in between must not see
+a child with no status), status updates it, deletion tombstones rather than
+removes it. A test asserts the two agree, because "two projections of one fold
+that disagree" is precisely what A11 forbids and what the seam's own docstring
+warns about when it explains why the roster lives in ph-core rather than in the
+bundle that produces the events.
+
+`cause` is set by the event carrying one and cleared by the next that does not,
+so P3-13's `rehydrated` describes the wake rather than sticking to the child for
+the rest of its life — and a woken child still reads as `running`, which was the
+whole reason `cause` is not a status member.
+
+The two types are no longer record-less but still produce no rows. The
+`RECORDLESS` docstring now says which half changed and which did not, so the
+distinction stays legible: *no transcript row* and *no consumer at all* are
+different claims, and this row turned one into the other.
+
+### Fixed in passing
+
+The dispatch collapsible has always rendered "1 governed calls". The new snapshot
+made it visible, and the card is this row's to own.
+
+---
+
+## P3-20: the profile needed a mechanism, not a table entry
+
+`ph --profile rlm` looks like one line in `BUILTIN_PROFILES`. It could not be
+one, because **ph-app does not depend on ph-rlm** — the same rule that lets the
+app fold `subagent/*` events without importing the row that emits them, and the
+reason those event names live in `ph.seams.subagents` rather than in the bundle.
+A table entry would have had to `from ph_rlm import BUNDLE`.
+
+So a bundle is now discovered the way a plugin is: `ph.bundles` is an
+entry-point group, ph-rlm registers `rlm = "ph_rlm:BUNDLE"`, and
+`ph.bundles.resolve_bundle(name)` returns the path or `None`. `None` rather than
+an exception, because "that profile needs ph-rlm installed" is a *configuration*
+answer and only the caller has the context to word it — which `resolve_profile`
+then does, naming the package to install.
+
+`available_profiles()` follows from the same fact: a profile whose distribution
+is absent is left out of the list rather than offered and then failing. `ph
+--help`'s profile line and the unknown-profile error both read from it, so what
+a person is offered is what the install can actually compose.
+
+The smoke run mounts `resolve_profile("rlm")` rather than the bundle path. That
+distinction is the point of the test: `test_bundle.py` and the governance gate
+both mount `BASE + HEADLESS + BUNDLE`, which is *not* what `--profile rlm`
+composes — the real profile carries the `tui` layer, and its
+`sandbox: workspace-write` could have been clobbered by the bundle layering on
+top without any existing test noticing. One cell through the whole stack (kernel
+→ governed binding → dispatch record → value) plus the three surfaces the
+profile promises (`ipython`, `ctx.harness`, `/refine`), booted from the same
+resolution path a person's command line takes.
+
+---
+
+## The cleanup pass over P3-19/P3-20
+
+Four reviewers. This one found **two dead paths** — code that was written,
+tested and shipped while doing nothing in a real session — and both were hidden
+by the same testing mistake.
+
+### The code cell rendered a blank program, and an empty facts line
+
+`ToolCallView.body` was added to ph-core, read by the adapter, rendered by the
+widget, and **never set by any producer**: ph-rlm's `_present_call` computed
+`head` and returned without it. So `ToolCard.input_text` was `""` in every real
+session, and the one row `CodeCellWidget` exists to draw was blank.
+
+`ToolCard.details` was worse, because it looked wired: `_present_result` guarded
+its payload with `isinstance(result.meta, dict)`, and a live result's meta
+arrives off the log frozen as a `MappingProxyType` — which is a `Mapping` and is
+**not** a `dict`. The facts line was therefore empty too. This is the third time
+this exact guard has bitten this project (usage attribution was the first).
+
+Both hid for one reason: every widget test constructed a `ToolCard(...)` by
+hand, so nothing crossed the ph-rlm → ph-core → ph-app seam the fields exist to
+create. The fix is the assertion that was missing — the smoke run now reads
+`present_call`/`present_result` off the **mounted** definition and pushes the
+meta through `freeze_json_value` first, so the frozen-mapping case is pinned
+rather than assumed.
+
+### One number, two folds, inside one widget
+
+The card rendered "N governed calls" twice: the collapsible from
+`len(card.dispatches)` (the `tool/code-dispatch-start` fold) and the facts line
+from `details["dispatches"]` (the kernel's returned count). The accepted snapshot
+shipped **"3 governed calls" above a section titled "1 governed call"** — A11
+violated inside a single widget, in the artifact whose whole job is to make
+rendering regressions visible. The facts line no longer carries the count; the
+collapsible owns it, because it owns the rows.
+
+### The memo the base card exists to provide, defeated
+
+`CodeCellWidget.refresh_card` called `super().refresh_card()` and then updated
+its two Statics **unconditionally**. `TranscriptView.sync` visits every visible
+row on every dirty frame (up to 30/s, and a frame is dirtied by events that draw
+nothing), and `Static.update` always re-lays-out — so one code cell in the
+transcript forced a full arrange on every frame, which is precisely the cost the
+`_shown` memo was written to remove. `refresh_card` now returns whether it
+redrew, the subclass gates on that, and it reads the program and facts back out
+of the tuple `super()` just stored instead of recomputing them.
+
+`compose` was also a copy of the base's, contradicting the class docstring's
+"one card implementation". The base grew two empty hooks (`_rows_after_header`,
+`_rows_after_body`) and the subclass fills them.
+
+### The panel is now the seam's fold, not a second one
+
+`subagent_roster`'s docstring says it lives in ph-core because "the two
+consumers live in different packages — the model's roster tool in the RLM
+bundle, **the subagent panel in the app**". The panel then hand-rolled the same
+rules, and had already diverged: the adapter cleared `cause` on a status event
+without one, the seam keeps it. The equality test compared `status` and
+`deleted`, so it passed straight over the field it was written to protect.
+
+The seam now exports `fold_subagent_event` — `subagent_roster`'s own per-event
+step — because the two consumers need different *shapes* (a whole log vs. one
+event at a time) of one *rule*. `TuiState.roster` holds the seam's fold verbatim
+and `SubagentRow` is its drawn projection; the test compares them field by
+field. Sharing the loop was never possible, sharing the step always was.
+
+### One entry-point mechanism, one profile table
+
+`ph/bundles` had copied `_entry_point_targets` and `resolve_plugin`'s importlib
+dance out of `ph/cordis/loader.py` — two process-lifetime caches over
+distribution metadata with no single place to clear, and two divergent error
+policies. `entry_point_targets(group)` and `resolve_entry_point(group, name)`
+are now the shared mechanism; `resolve_plugin` and `resolve_bundle` are the
+policy over it (raise vs. `None`, and each says why).
+
+`BUNDLE_PROFILES` beside `BUILTIN_PROFILES` was two tables for one concept, with
+**two different predicates for "available"** — `available_profiles` asked
+"registered?" while `resolve_profile` asked "registered *and* imports *and*
+exists?", so `--help` could offer a profile the command line then refused. A
+profile is now one ordered list of layers where a layer is `Path | Bundle`, and
+availability is answered by the same resolution that composes.
+
+### Also
+
+Five panel tests mounted a whole plugin tree to reach an empty `Session`; they
+build one directly and are synchronous now (0.02 s for the module). The smoke
+run stopped hand-rolling the `mount` fixture — whose `monkeypatch.setenv` was
+the *only* thing keeping it out of the developer's real `$PH_HOME`, and only
+incidentally, because the fixture was declared and never called; `mount` now
+accepts a whole resolved profile. A `_plural` helper replaced three copies of
+the pluralization ternary that produced the "1 governed calls" bug in the first
+place, `STATUS_GLYPHS` is a module constant rather than a dict literal rebuilt
+per row per frame, and a test that compared a file with itself is gone.

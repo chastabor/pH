@@ -24,6 +24,7 @@ from typing import Any
 from pydantic import Field
 
 from ...cordis import Context, plugin
+from ...text import count_of
 from ..definition import ToolModel, ToolOutput, ToolRunContext, define_tool, text_content
 from ..presentation import simple_views
 
@@ -112,8 +113,9 @@ def _render_write(args: Any, value: Any) -> Any:
 
 
 def _render_edit(args: Any, value: Any) -> Any:
-    count = value["replacements"]
-    return text_content(f"Edited {value['path']} ({count} replacement{'' if count == 1 else 's'})")
+    return text_content(
+        f"Edited {value['path']} ({count_of(value['replacements'], 'replacement')})"
+    )
 
 
 def _render_glob(args: Any, value: Any) -> Any:

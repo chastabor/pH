@@ -35,7 +35,7 @@ from ph.cordis.events import events as event_registry
 from ph.paths import RuntimeDirError, resolve_roots
 
 from .modes import run_json, run_print, run_rpc, run_transcript
-from .profiles import BUILTIN_PROFILES, resolve_profile
+from .profiles import available_profiles, resolve_profile
 
 __all__ = ["app", "main"]
 
@@ -164,7 +164,9 @@ def doctor() -> None:
         table.add_row(name, value)
     console.print(table)
     console.print(f"[dim]platform: {sys.platform} · python {sys.version.split()[0]}[/dim]")
-    console.print(f"[dim]profiles: {', '.join(sorted(BUILTIN_PROFILES))}[/dim]")
+    # What this install can actually compose — a bundle profile whose
+    # distribution is missing is not offered (P3-20).
+    console.print(f"[dim]profiles: {', '.join(available_profiles())}[/dim]")
 
 
 @app.command()

@@ -34,7 +34,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from ph.seams.subagents import downgrade_text
+from ph.seams.subagents import downgrade_text, fold_subagent_event
 from ph.session import Session, SessionEvent, is_replacement_surface_event, thaw_json
 from ph.session.request_header import parse_request_context
 from ph.tools import ToolResult, ToolResultView, parse_arguments
@@ -209,6 +209,7 @@ class TuiEventAdapter:
         card.title = view.title
         card.subtitle = view.input or view.subtitle or ""
         card.card = view.card
+        card.input_text = view.body or ""
 
     def _on_tool_result(self, event: SessionEvent, live: bool) -> None:
         message = obj(event.data.get("message"))
@@ -243,6 +244,7 @@ class TuiEventAdapter:
         card.title = view.title
         card.subtitle = view.subtitle or card.subtitle
         card.card = view.card
+        card.details = dict(view.meta or {})
 
     def _definition(self, name: str) -> Any:
         if self.tools is None:
@@ -413,6 +415,7 @@ class TuiEventAdapter:
         name = str(event.data.get("name") or event.data.get("runId") or "child")
         model = str(event.data.get("model") or "?")
         access = str(event.data.get("grantedAccess") or "read")
+        self._fold_roster(event)
         text = f"Delegated to {name} on {model} ({access} workspace)."
         reason = event.data.get("downgradeReason")
         if reason:
@@ -421,10 +424,40 @@ class TuiEventAdapter:
             text = f"{text} {downgrade_text(str(reason))}"
         self._row("subagent", "notice", text, event)
 
+    def _fold_roster(self, event: SessionEvent) -> None:
+        """Fold one delegation record through the *seam's* rule (A11).
+
+        `fold_subagent_event` is `subagent_roster`'s own per-event step, so the
+        panel and the roster the model reads cannot disagree about seeding,
+        tombstones or `cause` — there is one rule, not two kept in step by a
+        test. `SubagentRow` is the drawn projection of those rows, plus `tokens`,
+        which is the panel's own addition because usage is not a roster fact.
+        """
+        fold_subagent_event(self.state.roster, event)
+        self.state.sync_subagents()
+
+    def _on_subagent_status(self, event: SessionEvent, live: bool) -> None:
+        """A child moved. Panel only — see `RECORDLESS` for why not a row."""
+        self._fold_roster(event)
+
+    def _on_subagent_usage(self, event: SessionEvent, live: bool) -> None:
+        """Attributed tokens, summed per child (P3-11).
+
+        Not a roster fact: `subagent/usage-attributed` is deliberately outside
+        the seam's `_ROSTER_TYPES`, and the sum is what the panel adds to it.
+        """
+        row = self.state.subagents.get(str(event.data.get("runId")))
+        if row is None:
+            return
+        usage = obj(event.data.get("childUsage"))
+        row.tokens += int(usage.get("inputTokens") or 0) + int(usage.get("outputTokens") or 0)
+
     def _on_subagent_deleted(self, event: SessionEvent, live: bool) -> None:
         """A revoked child. The transcript stays on disk; the row says it went."""
         run_id = str(event.data.get("runId") or "child")
         reason = str(event.data.get("reason") or "user")
+        # A tombstone, not a removal — the seam's rule, applied by the seam.
+        self._fold_roster(event)
         self._row("subagent", "notice", f"Revoked child {run_id} ({reason}).", event)
 
     def _on_todo_write(self, event: SessionEvent, live: bool) -> None:
@@ -465,6 +498,8 @@ HANDLERS: Mapping[str, Handler] = {
     "context/loaded": TuiEventAdapter._on_context_loaded,
     "subagent/admitted": TuiEventAdapter._on_subagent_admitted,
     "subagent/deleted": TuiEventAdapter._on_subagent_deleted,
+    "subagent/status": TuiEventAdapter._on_subagent_status,
+    "subagent/usage-attributed": TuiEventAdapter._on_subagent_usage,
 }
 """Event type → handler. Explicit, so the set of what renders is a value a test
 can hold against the log's vocabulary rather than a naming convention."""
@@ -478,8 +513,6 @@ RECORDLESS: frozenset[str] = frozenset(
         "fs/observed",
         "session/end-seed",
         "kernel/snapshot",
-        "subagent/status",
-        "subagent/usage-attributed",
     }
 )
 """Known types that produce no transcript row on purpose. They are the auditor's
@@ -491,12 +524,12 @@ per changed variable per cell, so rendering them would bury the conversation in
 its own bookkeeping. Its companion `kernel/restored` *is* rendered, but only when
 a variable failed to come back — see `_on_kernel_restored`.
 
-The two delegation records are here for the same reason plus one: a child's
-status and its token attribution belong to the **subagent panel** (P3-19), a live
-projection beside the transcript rather than rows inside it — eight children
-ticking through `queued → running → done` would push the conversation off screen.
-`subagent/admitted` and `subagent/deleted` *are* rendered; the same split decides
-ignorability, in `ph.session.known_event_types`."""
+`subagent/status` and `subagent/usage-attributed` were here until P3-19 gave them
+their consumer. They still produce **no transcript row** — eight children ticking
+through `queued → running → done` would push the conversation off screen — but
+they are no longer record-less: they fold into `TuiState.subagents`, which the
+sidebar's panel draws. `subagent/admitted` and `subagent/deleted` do both, and
+the same split decides ignorability in `ph.session.known_event_types`."""
 
 FORWARD_REFERENCES: frozenset[str] = frozenset({"todo/write"})
 """Handled here before the log can carry it: Phase 4 adds the type and the

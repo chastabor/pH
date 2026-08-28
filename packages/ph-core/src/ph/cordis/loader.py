@@ -40,9 +40,11 @@ __all__ = [
     "Loader",
     "Row",
     "compose_rows",
+    "entry_point_targets",
     "import_plugin_modules",
     "interpolate",
     "load_profile_documents",
+    "resolve_entry_point",
     "resolve_plugin",
     "safe_yaml_load",
 ]
@@ -272,13 +274,38 @@ def load_profile_documents(paths: Sequence[Path]) -> list[tuple[str, Any]]:
 
 
 @cache
-def _entry_point_targets() -> dict[str, str]:
-    """The `ph.plugins` group, scanned once per process.
+def entry_point_targets(group: str) -> dict[str, str]:
+    """One entry-point group's `{name: target}`, scanned once per process.
 
     Reading every installed distribution's metadata is the expensive part of
-    resolution, and the set cannot change while the process runs.
+    resolution, and the set cannot change while the process runs. Cached per
+    group so a second group — `ph.bundles` — pays the same once and there is one
+    place a cache would ever have to be cleared.
     """
-    return {entry.name: entry.value for entry in entry_points(group=ENTRY_POINT_GROUP)}
+    return {entry.name: entry.value for entry in entry_points(group=group)}
+
+
+def resolve_entry_point(group: str, name: str, *, default_attribute: str = "") -> Any:
+    """Import what `name` registers in `group`, or `None` if nothing does.
+
+    The mechanical half of resolution — look up, import, `getattr` — with no
+    policy: a caller that wants an exception raises its own, and one that wants
+    to offer an alternative gets `None`. Both `resolve_plugin` and
+    `ph.bundles.resolve_bundle` are thin wrappers over this, so a third group
+    does not bring a third copy of the importlib dance.
+    """
+    target = _entry_point_targets(group).get(name)
+    if target is None:
+        return None
+    module_path, _, attribute = target.partition(":")
+    module = importlib.import_module(module_path)
+    attribute = attribute or default_attribute
+    return getattr(module, attribute) if attribute else module
+
+
+def _entry_point_targets(group: str = ENTRY_POINT_GROUP) -> dict[str, str]:
+    """The plugin group by default, so existing callers read unchanged."""
+    return entry_point_targets(group)
 
 
 def import_plugin_modules() -> list[ModuleType]:

@@ -56,6 +56,7 @@ __all__ = [
     "default_child_name",
     "downgrade_text",
     "family_reach",
+    "fold_subagent_event",
     "reachable_family",
     "roster_name",
     "subagent_roster",
@@ -309,7 +310,7 @@ class SubagentService:
         self._rosters.forget(session_id)
 
     def name_of(self, sessions: Iterable[Session], agent_id: str) -> str:
-        """`roster_name`, through the cached fold."""
+        """`roster_name`, through the cached fold. The live path."""
         by_id = {session.id: session for session in sessions}
         session = by_id.get(agent_id)
         parent = by_id.get(session.header.parent_session or "") if session else None
@@ -386,27 +387,40 @@ def subagent_roster(session: Session) -> dict[str, dict[str, Any]]:
     """
     roster: dict[str, dict[str, Any]] = {}
     for event in session.events:
-        # The type test first: a long parent log is mostly `assistant/chunk`,
-        # and reading `data["runId"]` off every one of them to discover it is
-        # absent costs a mapping get and a string per event.
-        if event.type not in _ROSTER_TYPES:
-            continue
-        run_id = str(event.data.get("runId"))
-        if event.type == ADMITTED:
-            # `queued` by default: `to_wire()` deliberately omits status, and the
-            # first `subagent/status` comes from a detached job — so without this
-            # a reader between the two sees a child with no status at all.
-            roster[run_id] = {"status": "queued", **event.data}
-            continue
-        row = roster.get(run_id)
-        if row is None:
-            continue
-        if event.type == STATUS:
-            row.update({key: value for key, value in event.data.items() if key != "runId"})
-        else:
-            row["deleted"] = True
-            row["deletedReason"] = event.data.get("reason")
+        fold_subagent_event(roster, event)
     return roster
+
+
+def fold_subagent_event(roster: dict[str, dict[str, Any]], event: Any) -> None:
+    """Fold one event into a roster, in place. The rules, in one place.
+
+    Exported because there is a second consumer with a different *shape* — the
+    TUI's panel folds incrementally, one event at a time, and cannot call the
+    whole-log version. Sharing the step rather than the loop is what stops the
+    two from being two implementations of one fold (A11): the app's panel and
+    the model's roster now cannot disagree about `cause`, seeding or tombstones,
+    because there is nothing for them to disagree with.
+    """
+    # The type test first: a long parent log is mostly `assistant/chunk`, and
+    # reading `data["runId"]` off every one of them to discover it is absent
+    # costs a mapping get and a string per event.
+    if event.type not in _ROSTER_TYPES:
+        return
+    run_id = str(event.data.get("runId"))
+    if event.type == ADMITTED:
+        # `queued` by default: `to_wire()` deliberately omits status, and the
+        # first `subagent/status` comes from a detached job — so without this
+        # a reader between the two sees a child with no status at all.
+        roster[run_id] = {"status": "queued", **event.data}
+        return
+    row = roster.get(run_id)
+    if row is None:
+        return
+    if event.type == STATUS:
+        row.update({key: value for key, value in event.data.items() if key != "runId"})
+    else:
+        row["deleted"] = True
+        row["deletedReason"] = event.data.get("reason")
 
 
 FamilyRole: TypeAlias = Literal["self", "parent", "sibling", "child"]
@@ -451,10 +465,14 @@ def roster_name(sessions: Iterable[Session], agent_id: str) -> str:
 
     The name is a fact the *parent* recorded at admission, so it is only knowable
     from the parent's roster fold — which is why it lives beside that fold rather
-    than in whichever module needed it first. Two modules and the P3-19 panel
-    need it, and two copies of one lookup is how a prompt names one agent while a
-    send delivers to another. Prefer `SubagentService.name_of`, which folds
-    through the cache; this is for a reader holding stored sessions and no `ctx`.
+    than in whichever module needed it first.
+
+    **Prefer `SubagentService.name_of`**, which asks the same question through
+    the cached fold; every live caller does. This is the variant for a reader
+    holding stored sessions and no `ctx` — the trajectory view (P3-24) is the
+    one that will want it. Both delegate to `_name_in`, so the two cannot answer
+    differently: two copies of one lookup is how a prompt names one agent while
+    a send delivers to another.
     """
     by_id = {session.id: session for session in sessions}
     session = by_id.get(agent_id)

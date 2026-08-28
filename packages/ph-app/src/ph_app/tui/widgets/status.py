@@ -19,7 +19,7 @@ from textual.widgets import Static
 
 from ..state import TuiState
 
-__all__ = ["COMPACTION_THRESHOLD", "Sidebar", "StatusBar"]
+__all__ = ["COMPACTION_THRESHOLD", "Sidebar", "StatusBar", "render_subagents"]
 
 COMPACTION_THRESHOLD = 0.85
 """Where Phase 4's `compaction-summarize` triggers. The gauge warns here."""
@@ -27,6 +27,24 @@ COMPACTION_THRESHOLD = 0.85
 SPINNER = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
 
 _HOME = str(Path.home())
+
+
+def render_subagents(state: TuiState) -> str:
+    """The delegation panel: one line per child, admission order (P3-19).
+
+    A *panel*, not transcript rows, because a fan-out of eight ticking through
+    `queued → running → done` would push the conversation off screen — and
+    because the interesting thing about a family is its current shape, which is
+    a projection rather than a history. Folded from the same `subagent/*` events
+    `subagent_roster` folds; a tombstoned child stays listed, since a parent
+    asking what happened to the one it revoked deserves an answer.
+    """
+    lines: list[str] = []
+    for row in state.subagents.values():
+        detail = row.cause or (row.model if row.status == "queued" else row.status)
+        tokens = f" {row.tokens // 1000}k" if row.tokens >= 1000 else ""
+        lines.append(f"{row.glyph} {row.name} {detail}{tokens}".rstrip())
+    return "\n".join(lines)
 
 
 class StatusBar(Vertical):
@@ -97,13 +115,19 @@ class Sidebar(Vertical):
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self.styles.width = self.WIDTH
-        self._shown: tuple[str, str] | None = None
+        self._shown: tuple[str, str, str] | None = None
 
     def compose(self) -> ComposeResult:
         yield Static(Content.from_markup("[b]session[/b]"), classes="section-title")
         yield Static(Content(""), id="session-facts", classes="section-body")
         yield Static(Content.from_markup("[b]todo[/b]"), classes="section-title")
         yield Static(Content(""), id="todo-list", classes="section-body")
+        # Hidden until a child exists: an empty heading costs a line of a
+        # 32-column panel to say nothing.
+        yield Static(
+            Content.from_markup("[b]children[/b]"), id="children-title", classes="section-title"
+        )
+        yield Static(Content(""), id="children", classes="section-body")
 
     def show(self, state: TuiState, *, session_id: str, cwd: str) -> None:
         facts = "\n".join(
@@ -124,11 +148,16 @@ class Sidebar(Vertical):
             )
             or "—"
         )
-        if (facts, todos) == self._shown:
+        children = render_subagents(state)
+        if (facts, todos, children) == self._shown:
             return
-        self._shown = (facts, todos)
+        self._shown = (facts, todos, children)
         self.query_one("#session-facts", Static).update(Content(facts))
         self.query_one("#todo-list", Static).update(Content(todos))
+        self.query_one("#children-title", Static).display = bool(children)
+        panel = self.query_one("#children", Static)
+        panel.display = bool(children)
+        panel.update(Content(children))
 
 
 def _shorten(path: str, width: int = Sidebar.WIDTH - 10) -> str:

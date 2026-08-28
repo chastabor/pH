@@ -12,6 +12,10 @@ __pycache__/
 .ruff_cache/
 .coverage
 htmlcov/
+# Dropped at the repo root by pytest-textual-snapshot when a snapshot test
+# fails. The reference snapshots under `__snapshots__/` are the committed
+# expectation; this is the diff viewer for a run that did not match one.
+snapshot_report.html
 
 # Reference checkouts of the upstream projects this port reads from. Vendored
 # locally so the plans' citations are verifiable; never part of this repo.
