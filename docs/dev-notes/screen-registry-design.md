@@ -214,12 +214,22 @@ hands back an idempotent release, which is exactly what lets one teardown belong
 to two lifetimes — the row unloading and the front end detaching — with whichever
 runs second doing nothing.
 
-### `scope=ctx` is the registrant's job, and is documented as such
+### `scope=ctx` is the registrant's job — which turned out to be a repo-wide gap
 
 A service cannot discover its caller's activation scope, so a row that wants its
 screen to unwind with it has to say so. The default is the service's own context,
 which is right for something the harness contributes and wrong for a row's; the
 docstring says which, in those words.
+
+Reviewing that sentence turned up the general case. `claim_key`'s
+`scope or self.ctx` is the same in every seam, and **this row's registrant is 1
+of 38 registration call sites in `packages/*/src` that passes `scope=`** — so
+every `ctx.tools.register(...)` in ph-rlm is an effect of the tools seam rather
+than of the row that made it, and I2 holds where someone remembered. It
+reproduces in fifteen lines. The fix is one change at the choke point every seam
+funnels through (`Context._activation_scope` already builds the right owner), but
+it changes what unwinds when across the whole harness, so it is **P6-12** with
+its own gates rather than a line in this row's diff.
 
 ### The registry row is in `ph-base`; the trajectory row is not
 

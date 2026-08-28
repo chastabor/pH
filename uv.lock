@@ -625,7 +625,7 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.27" },
     { name = "ph-core", editable = "packages/ph-core" },
     { name = "rich", specifier = ">=13.0" },
-    { name = "textual", specifier = ">=1.0" },
+    { name = "textual", specifier = ">=8.2.5,<9" },
     { name = "typer", specifier = ">=0.12" },
 ]
 
