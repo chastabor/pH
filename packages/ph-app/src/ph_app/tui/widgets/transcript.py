@@ -36,6 +36,7 @@ from textual.widgets.markdown import MarkdownStream
 from ph.text import count_of
 
 from ..state import ChatItem, ToolCard
+from ..wire import index_at_or_before
 
 __all__ = [
     "CodeCellWidget",
@@ -395,6 +396,7 @@ class TranscriptView(VerticalScroll):
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self._rows: dict[str, Any] = {}
+        self._followed = False
 
     async def sync(self, items: list[ChatItem]) -> None:
         """Bring the view in line with `items`. Idempotent and cheap when nothing changed."""
@@ -405,12 +407,21 @@ class TranscriptView(VerticalScroll):
                 self._rows[item.key] = widget
                 await self.mount(widget)
             await self._update(widget, item)
-        if not self.is_anchored and self.max_scroll_y > 0:
-            # Stick to the bottom while rows arrive; release when the reader
-            # scrolls up. Textual's `anchor()` does that from one call — but
-            # engaged only once there is something to scroll: anchoring an
-            # underfull pane scrolls it to a *negative* offset and every row
-            # renders pushed to the bottom.
+        # Stick to the bottom while rows arrive; release when the reader scrolls
+        # up. Textual's `anchor()` does that from one call — but engaged only
+        # once there is something to scroll: anchoring an underfull pane scrolls
+        # it to a *negative* offset and every row renders pushed to the bottom.
+        #
+        # Re-armed only from the bottom. Textual releases the anchor when the
+        # reader scrolls away, and an unconditional re-arm here undid that on
+        # the very next dirty frame — which also meant a jump to a record
+        # (`scroll_to_seq`) survived exactly until the next event.
+        if (
+            self.max_scroll_y > 0
+            and not self.is_anchored
+            and (not self._followed or self.scroll_offset.y >= self.max_scroll_y)
+        ):
+            self._followed = True
             self.anchor()
 
     def _build(self, item: ChatItem) -> Any:
@@ -439,6 +450,49 @@ class TranscriptView(VerticalScroll):
         await self.remove_children()
         self._rows.clear()
         await self.sync(items)
+
+    # ------------------------------------------------------ cross-navigation --
+    # The join with the auditor's view (P4-17): `ChatItem.seq` and
+    # `TrajectoryRecord.source_seq` are the same log position, stored on both
+    # sides since P3-24. These two methods are all it took to read it.
+
+    def scroll_to_seq(self, seq: int) -> bool:
+        """Bring the row for a log seq into view. `False` if none is shown.
+
+        The anchor is released first: a view stuck to the bottom would scroll
+        straight back, which is the whole of "the jump did nothing".
+        """
+        widget = self._row_for_seq(seq)
+        if widget is None:
+            return False
+        self.release_anchor()
+        self.scroll_to_widget(widget, top=True, animate=False, immediate=True)
+        return True
+
+    def seq_in_view(self) -> int:
+        """The seq of the topmost row on screen, or `-1` when nothing is.
+
+        "Where the reader is" without inventing per-row focus: rows are widgets
+        in a scroll, not a table with a cursor, so the honest answer to "which
+        row am I looking at" is the first one still visible.
+        """
+        top = self.content_region.y
+        for widget in self._rows.values():
+            region = widget.region
+            if region.height and region.bottom > top:
+                return int(widget.item.seq)
+        return -1
+
+    def _row_for_seq(self, seq: int) -> Any:
+        """The row for `seq`, or the nearest one before it.
+
+        `index_at_or_before` owns the "nearest" rule and why it is nearest, so
+        this side and the trajectory's cannot drift apart. `_rows` is in
+        transcript order, which is log order.
+        """
+        rows = list(self._rows.values())
+        index = index_at_or_before((row.item.seq for row in rows), seq)
+        return rows[index] if index >= 0 else None
 
 
 def _slug(key: str) -> str:

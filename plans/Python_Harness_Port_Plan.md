@@ -601,6 +601,67 @@ What this does **not** defer: if Phase 3 slips, (a) remains available as a
 one-week subset against the record kinds that exist, and upgrading it to (b)
 later is additive.
 
+#### What P3-25 actually built, and the row that finishes it (P4-17)
+
+Shape (b) shipped as a **separate `App`** rather than as an entry in
+`App.MODES`, and the reason is sound: the view's defining property is that it
+runs with *nothing mounted*, and sharing `PHTuiApp` means sharing its mount, its
+trust prompt and its agent. Splitting at the process boundary is what makes
+`ph --mode trajectory --session <id|path>` fall out with no conditional.
+
+It cost two things this section listed, and they were not recorded at the time:
+
+* **Cross-navigation by `sourceSeq` is not built.** The join exists on both
+  sides — `TrajectoryRecord.source_seq` and `ChatItem.seq` — and is read by
+  neither. `source_seq`'s only consumer is the fork.
+* **There is no route into the view from the running TUI**, so the claim above
+  that "(a) is a strict subset of (b)" stopped holding: the projection is
+  shared, but nothing in the chat can reach it.
+
+Both are missing features rather than wrong ones. **P4-17 landed both**, and
+did it by porting the mechanism rather than special-casing either: the view is
+now a `TrajectoryScreen` that the standalone `App` and `ctx.tui_screens` each
+compose, so (a) is a strict subset of (b) by construction, and the join is read
+in both directions.
+
+#### The mechanism: dsh's slot service, which this plan had not named
+
+Reading `packages/client/` settles a question §5.5 left implicit. dsh does not
+have "two UI packages"; it has **~35**, contributing into a named-slot registry
+(`ui-slots`) under keys like `conversation.view`, `conversation.composer`,
+`conversation.chat.node`, `sidebar.workspaces`, `settings.section` and
+`tool.call.toolview`. A plugin calls `ctx.slots.register({name, id, order,
+label, inject})`, and the registration *rides the slot service's effect
+wrapper, so plugin unload removes the tab* — which is I2, in the front end,
+already stated in dsh's own words.
+
+**`ui-trajectory` is a registrant, not a shell.** It contributes one entry to
+`conversation.view` at `order: 10`, declaring
+`inject = ['slots', 'conversationEvents', 'conversationViews', 'sessions',
+'locale']`. The conversation owns the slot; the trajectory is a tab in it. Any
+port that inverts that — making the auditor's view the shell and launching the
+chat from it — is not what dsh does, and pays for it three ways: the
+nothing-mounted property becomes conditional, every ordinary launch traverses an
+audit surface to reach a conversation, and the view acquires a dependency on the
+chat's mounting and trust flow.
+
+So P4-17 ports the *registry*, not the inversion: `PHTuiApp` stays the shell,
+`ctx.tui_screens` is the seam, `claim_key` supplies the identity-checked
+disposer, and `TrajectoryScreen` is its first registrant — composed by both the
+shell and the standalone entry point, so shape (a) becomes a strict subset of
+(b) again by construction.
+
+One thing the port had to add that dsh's shape does not spell out. Registering
+has to *do* something, and what it does — a slash command, a key — has its own
+lifetime. Owning those in the app would have left a row able to unload while its
+verb stayed behind, so the seam takes a **presenter**: a front end attaches with
+`present_with`, and each presentation it makes is owned by the *registration's*
+scope. dsh gets this for free from its effect wrapper because the component and
+its tab are one registration; pH's are two things derived from one, and the
+seam is where they are held together. The contract, and every place the built
+row differs from the design it was written from, is in
+`docs/dev-notes/screen-registry-design.md`.
+
 ---
 
 ## 6. The RLM plugin bundle (`ph-rlm`) — Prime Agent's design as plugins

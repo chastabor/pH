@@ -7,6 +7,8 @@ Layered so the interesting parts are testable without a terminal:
 * `frontend` — the harness bridge: which seams pH answers, and how a prompt
   becomes a turn;
 * `app` — widgets, keys, and the worker a modal may be awaited in;
+* `screens` — what a screen a *row* contributed becomes here: a verb, a key and
+  a palette entry, all of them effects of that row's registration;
 * `themes` / `config` — data under `$PH_HOME`, never code.
 
 @module ph_app.tui

@@ -2,7 +2,8 @@
 
 The projection (`ph_app.tui.trajectory`) says what happened; this says how to
 read it. Three things it offers that the transcript cannot, and each is why the
-view exists rather than being a screen inside the chat:
+view exists at all — `TrajectoryScreen` then makes it reachable from both the
+standalone entry point and the chat, over the same records:
 
 * **It reads any log.** The records come from a `Session`, which a *stored* log
   becomes through `read_session` with nothing mounted — no agent, no provider,
@@ -29,7 +30,7 @@ from textual.timer import Timer
 from textual.widgets import DataTable, Input, Static
 
 from ..trajectory import TrajectoryRecord
-from ..wire import matches_terms
+from ..wire import index_at_or_before, matches_terms
 
 __all__ = ["FORK_MARK", "TrajectoryPanel", "matches", "search_index"]
 
@@ -116,6 +117,16 @@ class TrajectoryPanel(Vertical):
         if self._table is not None:
             self._table.focus()
 
+    @property
+    def filtering(self) -> bool:
+        """Whether the filter holds focus.
+
+        Asked rather than remembered: `escape` means "leave the filter" while it
+        has focus and "leave the screen" otherwise, and a flag this widget set
+        would disagree with the focus a click moved.
+        """
+        return self.query_one("#trajectory-filter", Input).has_focus
+
     # ---------------------------------------------------------------- rows --
 
     def refresh_rows(self, query: str = "") -> None:
@@ -149,6 +160,23 @@ class TrajectoryPanel(Vertical):
         # after a `clear()` moves the cursor and the highlight event draws them.
         if not self.visible_records:
             self.show_details(None)
+
+    def select_seq(self, seq: int) -> bool:
+        """Put the cursor on the record for a log seq, or the nearest before it.
+
+        `index_at_or_before` owns the "nearest" rule, shared with the transcript
+        so the two sides of the join cannot come to disagree about which row it
+        means. Moving the cursor posts `RowHighlighted`, which draws the details
+        panel — so this does not draw it too.
+        """
+        table = self._table
+        if table is None:
+            return False
+        row = index_at_or_before((record.source_seq for record in self.visible_records), seq)
+        if row < 0:
+            return False
+        table.move_cursor(row=row)
+        return True
 
     def selected(self) -> TrajectoryRecord | None:
         """The record under the cursor, or `None` when the filter emptied the

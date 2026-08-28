@@ -21,7 +21,7 @@ def make_tui_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Callable[..
     """
     monkeypatch.setenv("PH_HOME", str(tmp_path))
 
-    def make(*, trusted: bool = True, **overrides: Any) -> PHTuiApp:
+    def make(*, trusted: bool = True, profile: str = "headless", **overrides: Any) -> PHTuiApp:
         options: dict[str, Any] = {
             "provider": "fake",
             "model": "fake-1",
@@ -29,7 +29,10 @@ def make_tui_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Callable[..
             "home": tmp_path,
         }
         options.update(overrides)
-        app = PHTuiApp(resolve_profile("headless"), **options)
+        # `headless` by default because most of the TUI is not about the
+        # posture; `profile="tui"` is what a test asking about a row the
+        # interactive profile contributes — a screen, say — passes.
+        app = PHTuiApp(resolve_profile(profile), **options)
         if trusted:
             app.trust.trust(app.project)
         return app

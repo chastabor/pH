@@ -34,7 +34,14 @@ from .request_header import (
     header_equals,
 )
 from .session import Session, SessionHeader, SessionObserver
-from .store import SessionForkError, SessionStore, is_fork_boundary, new_session_id, open_turn_at
+from .store import (
+    SessionForkError,
+    SessionStore,
+    fork_boundaries,
+    is_fork_boundary,
+    new_session_id,
+    open_turn_at,
+)
 from .surface import (
     SurfaceError,
     SurfaceFoldReplacement,
@@ -77,6 +84,7 @@ __all__ = [
     "fold_request_context",
     "fold_request_header",
     "fold_surface",
+    "fork_boundaries",
     "freeze_json_value",
     "header_equals",
     "is_append_surface_event",

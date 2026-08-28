@@ -13,7 +13,13 @@ from __future__ import annotations
 import pytest
 
 from ph.cordis import Context
-from ph.session import Session, SessionForkError, SurfaceIntent
+from ph.session import (
+    Session,
+    SessionForkError,
+    SurfaceIntent,
+    fork_boundaries,
+    is_fork_boundary,
+)
 from ph.session.events import SessionEvent
 from ph.session.store import SessionStore
 from ph.testing import user_payload
@@ -150,3 +156,33 @@ def test_forking_an_empty_session_yields_an_empty_child() -> None:
     assert child.header.seed_length == 0
     assert child.first_live_seq == 0
     assert child.derive_messages() == ()
+
+
+def test_fork_boundaries_agrees_with_the_per_boundary_rule() -> None:
+    """A6 has two statements now, and they must not drift.
+
+    `is_fork_boundary` answers for one seq by rescanning the prefix;
+    `fork_boundaries` answers for the whole log in one pass, because the reader
+    that *marks* which records a fork may aim at asks for every one of them and
+    the rescan is quadratic — 8 000 events cost 467 ms, on a keypress. A second
+    statement of a rule is exactly how the trajectory came to mark one legal
+    boundary in four while citing A6, so the two are pinned to each other here
+    over a log holding open turns, closed turns and events between them.
+    """
+    session = Session("boundaries")
+    _closed_turn(session, 1, "first")
+    session.append("approval/policy", {"mode": "ask"})
+    _closed_turn(session, 2, "second")
+    session.append("turn/start", {"turn": 3})
+    session.append("user/message", user_payload("mid-turn"), SurfaceIntent("append"))
+    log = session.events
+
+    fast = fork_boundaries(log)
+    slow = {event.seq for event in log if is_fork_boundary(log, event.seq)}
+
+    assert fast == slow
+    # And it is answering something, rather than agreeing by being empty: the
+    # targets are the two closed turns and the event between them, and nothing
+    # inside the turn that never closed.
+    assert {log[seq].type for seq in fast} == {"turn/end", "approval/policy"}
+    assert not fast & {event.seq for event in log[-2:]}, "an open turn is not a target"

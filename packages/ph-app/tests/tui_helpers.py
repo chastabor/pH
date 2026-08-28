@@ -25,8 +25,17 @@ async def until(pilot: Pilot[object], predicate: Callable[[], bool], *, tries: i
 
 
 @asynccontextmanager
-async def running(app: PHTuiApp) -> AsyncIterator[tuple[PHTuiApp, Pilot[object]]]:
-    async with app.run_test() as pilot:
+async def running(
+    app: PHTuiApp, *, size: tuple[int, int] = (80, 24)
+) -> AsyncIterator[tuple[PHTuiApp, Pilot[object]]]:
+    """`size` for a test that needs the transcript to actually scroll: the
+    default is Textual's own, tall enough to hold a short conversation whole.
+
+    Not `None`, which `run_test` reads as "detect the real terminal" — a test
+    whose assertions depend on the viewport must not depend on the window it
+    happened to run in.
+    """
+    async with app.run_test(size=size) as pilot:
         await pilot.pause()
         await until(pilot, lambda: app.front is not None)
         yield app, pilot

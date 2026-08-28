@@ -5,9 +5,10 @@ satisfies `ModalHost`, so the one rule that cannot be forgotten is enforced by
 where the code sits: turns run in a Textual worker, and only a worker may await
 a modal.
 
-Keys are Textual bindings built from `TUI_VERBS` and remapped from `tui.json`
-with one `set_keymap` — screens and modals included, since their bindings carry
-the same ids. `priority=True` puts them ahead of the prompt's `TextArea`, which
+Keys are Textual bindings built from `TUI_VERBS` — plus one per screen a row
+contributed through `ctx.tui_screens` (P4-17) — and remapped from `tui.json`
+with one `set_keymap`, screens and modals included, since every binding carries
+an id. `priority=True` puts them ahead of the prompt's `TextArea`, which
 binds `ctrl+k`, `ctrl+y` and others for editing and would otherwise fire as well
 as, or instead of, the app. `check_action` keeps them quiet while a modal is up.
 
@@ -29,7 +30,7 @@ from typing import Any, ClassVar
 
 from textual import work
 from textual.app import App, ComposeResult
-from textual.binding import BindingType
+from textual.binding import Binding, BindingType
 from textual.containers import Horizontal, Vertical
 
 from ph.paths import resolve_roots
@@ -53,6 +54,7 @@ from .modals.pickers import (
     theme_choices,
 )
 from .modals.trust import TrustStore, project_trust_modal
+from .screens import Revealing, RevealSeq, present_screens
 from .terminal import TerminalTitle
 from .themes import ThemeCatalog, fallback_variables, load_catalog
 from .widgets.prompt import PromptInput
@@ -131,6 +133,43 @@ class PHTuiApp(App[str | None]):
     def get_theme_variable_defaults(self) -> dict[str, str]:
         return fallback_variables()
 
+    def add_binding(self, binding: Binding) -> Callable[[], Any]:
+        """Bind a key on the live app, and hand back its removal.
+
+        Here rather than in `screens.py` because this is the one place that
+        reaches into Textual's internals, and it belongs beside the other
+        binding concerns — `BINDINGS`, `set_keymap`, `check_action` — where a
+        Textual upgrade will be looked for.
+
+        Written against `BindingsMap.key_to_bindings` rather than the public
+        `bind()`, which drops the `id`: the id is what `apply_keymap` matches
+        on, so without it a contributed screen's key would be the one key in
+        the app a user could not rebind.
+        """
+        table = self._bindings.key_to_bindings
+        table.setdefault(binding.key, []).append(binding)
+        self._refresh_bindings()
+
+        def remove() -> None:
+            bindings = table.get(binding.key)
+            if bindings is None or binding not in bindings:
+                return
+            bindings.remove(binding)
+            if not bindings:
+                del table[binding.key]
+            self._refresh_bindings()
+
+        return remove
+
+    def _refresh_bindings(self) -> None:
+        """Tell the app its bindings moved, if there is still an app to tell.
+
+        Teardown reaches here: unwinding a row's scope removes its key after the
+        app has stopped, and `refresh_bindings` walks the screen stack.
+        """
+        if self.is_running:
+            self.refresh_bindings()
+
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
         """Keep global keys quiet while a modal owns the screen — except quit."""
         if action == "quit":
@@ -196,6 +235,12 @@ class PHTuiApp(App[str | None]):
             self.notify(str(error), title="pH could not start", severity="error", markup=False)
             return
         self._command_disposers = register_tui_commands(self.front.ctx, self)
+        # A screen a row contributed gets its verb, its key and its palette
+        # entry from here — but each of those unwinds with the *row*, not with
+        # this list, which is what makes unloading one take all three with it.
+        attached = present_screens(self.front.ctx, self)
+        if attached is not None:
+            self._command_disposers.append(attached)
         self._dirty = True
 
     async def on_unmount(self) -> None:
@@ -310,6 +355,58 @@ class PHTuiApp(App[str | None]):
         **options: Any,
     ) -> None:
         self.push_screen(ChoicePicker(title=title, choices=choices, **options), then)
+
+    def action_open_screen(self, screen_id: str) -> None:
+        """Open a screen a row contributed (P4-17).
+
+        One action for every registered screen, reached by its key and by its
+        `/<id>` command alike. `build` runs here rather than at registration, so
+        what opens is a fold of the log as it stands.
+        """
+        front = self.front
+        if front is None:
+            return
+        definition = self._screen(screen_id)
+        if definition is None:
+            self.notify(
+                f"no screen is registered as {screen_id!r}",
+                title="screen",
+                severity="warning",
+                markup=False,
+            )
+            return
+        screen = definition.build(front.session)
+        if isinstance(screen, Revealing) and self._view is not None:
+            # Opened where the reader is, when the screen can take a position.
+            seq = self._view.seq_in_view()
+            if seq >= 0:
+                screen.reveal(seq)
+        self.push_screen(screen)
+
+    def on_reveal_seq(self, message: RevealSeq) -> None:
+        """A screen asking for the transcript row behind one of its own.
+
+        The other half of the join: the screen names a log seq, the transcript
+        owns which widget that is. Popping first, so what the reader lands on is
+        the row and not the screen they were leaving.
+        """
+        message.stop()
+        if len(self.screen_stack) > 1:
+            self.pop_screen()
+        if self._view is not None and not self._view.scroll_to_seq(message.seq):
+            definition = self._screen(message.screen_id)
+            self.notify(
+                "that row has no counterpart in the transcript",
+                title=definition.label if definition is not None else "screen",
+                severity="warning",
+                markup=False,
+            )
+
+    def _screen(self, screen_id: str) -> Any:
+        """The registered screen with this id, or `None`."""
+        front = self.front
+        registry = front.ctx.get("tui_screens") if front is not None else None
+        return registry.get(screen_id) if registry is not None else None
 
     def action_open_commands(self) -> None:
         if self.front is not None:

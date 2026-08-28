@@ -80,7 +80,7 @@ async def test_it_opens_a_stored_log_with_nothing_mounted(mount: Any) -> None:
         "event",  # the seed boundary a stored log records
     ]
     app = TrajectoryApp(records, session_id=session_id)
-    assert app.sessions is None, "a file-backed view has no store, and says so"
+    assert app.trajectory.sessions is None, "a file-backed view has no store, and says so"
 
 
 def test_a_missing_log_is_named_as_the_person_typed_it(tmp_path: Path) -> None:
@@ -153,15 +153,15 @@ async def test_the_fork_key_refuses_off_a_boundary_and_says_why(mount: Any) -> N
 
     async with app.run_test() as pilot:
         await pilot.pause()
-        panel = app.panel
+        panel = app.trajectory.panel
         # The cursor starts on record #1 — a `turn start`, not a boundary.
         assert panel.selected() is not None
         assert not panel.selected().fork_point
         await pilot.press("f")
         # The store's own words, with its own code — this view no longer states
         # A6 in parallel with the layer that enforces it.
-        assert "open turn" in app.notice
-        assert f"#{app.panel.selected().index}" in app.notice
+        assert "open turn" in app.trajectory.notice
+        assert f"#{app.trajectory.panel.selected().index}" in app.trajectory.notice
 
 
 async def test_a_fork_at_a_boundary_produces_a_byte_identical_prefix(mount: Any) -> None:
@@ -178,17 +178,17 @@ async def test_a_fork_at_a_boundary_produces_a_byte_identical_prefix(mount: Any)
     child = None
     async with app.run_test() as pilot:
         await pilot.pause()
-        table = app.panel.query_one("#trajectory-table")
-        table.move_cursor(row=app.panel.visible_records.index(boundary))
+        table = app.trajectory.panel.query_one("#trajectory-table")
+        table.move_cursor(row=app.trajectory.panel.visible_records.index(boundary))
         await pilot.pause()
-        assert app.panel.selected() is boundary
+        assert app.trajectory.panel.selected() is boundary
         # Through the action the key invokes, and taking the *session* back:
         # recovering the child by string-parsing a notification made the
         # user-facing wording part of the test's contract.
-        child = app.action_fork()
+        child = app.trajectory.action_fork()
 
     assert child is not None
-    assert "forked at" in app.notice
+    assert "forked at" in app.trajectory.notice
 
     # Byte-identical, through the wire form the log is written in.
     source_prefix = [
@@ -207,13 +207,13 @@ async def test_forking_without_a_harness_says_so() -> None:
     async with app.run_test() as pilot:
         await pilot.pause()
         boundary = next(record for record in records if record.fork_point)
-        app.panel.query_one("#trajectory-table").move_cursor(
-            row=app.panel.visible_records.index(boundary)
+        app.trajectory.panel.query_one("#trajectory-table").move_cursor(
+            row=app.trajectory.panel.visible_records.index(boundary)
         )
         await pilot.pause()
         await pilot.press("f")
 
-    assert "needs a running harness" in app.notice
+    assert "needs a running harness" in app.trajectory.notice
 
 
 # ------------------------------------------------- the table and panel --
@@ -226,7 +226,7 @@ async def test_the_table_and_the_details_panel_follow_the_cursor() -> None:
 
     async with app.run_test() as pilot:
         await pilot.pause()
-        panel = app.panel
+        panel = app.trajectory.panel
         assert panel.query_one("#trajectory-table").row_count == len(records)
         # The header states what the log holds, including where forks may aim.
         header = app.query_one("#trajectory-header").render()
@@ -245,7 +245,7 @@ async def test_filtering_narrows_the_table_and_keeps_a_selection() -> None:
 
     async with app.run_test() as pilot:
         await pilot.pause()
-        panel = app.panel
+        panel = app.trajectory.panel
         panel.query_one("#trajectory-filter").value = "read"
         await until(pilot, lambda: len(panel.visible_records) < len(records))
 
@@ -270,15 +270,15 @@ async def test_the_fork_mark_reaches_the_table(mount: Any) -> None:
 
     async with app.run_test() as pilot:
         await pilot.pause()
-        table = app.panel.query_one("#trajectory-table", DataTable)
+        table = app.trajectory.panel.query_one("#trajectory-table", DataTable)
         marked = {
             str(table.get_cell_at(Coordinate(row, 0)))
-            for row, record in enumerate(app.panel.visible_records)
+            for row, record in enumerate(app.trajectory.panel.visible_records)
             if record.fork_point
         }
         unmarked = {
             str(table.get_cell_at(Coordinate(row, 0)))
-            for row, record in enumerate(app.panel.visible_records)
+            for row, record in enumerate(app.trajectory.panel.visible_records)
             if not record.fork_point
         }
 

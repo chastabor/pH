@@ -99,6 +99,12 @@
 - id: code-runtime
   name: code-runtime
 
+# The front end's own registration seam (P4-17). Here rather than in a TUI
+# profile because a seam is a seam: a headless run that mounts a row
+# registering a screen nothing draws needs no special case for it.
+- id: tui-screens
+  name: tui-screens
+
 # --- model-facing tools ----------------------------------------------------
 - id: tool-fs
   name: tool-fs

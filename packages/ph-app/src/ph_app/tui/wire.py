@@ -15,11 +15,12 @@ a missing one must cost a row rather than the transcript.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import Any
 
 __all__ = [
     "first",
+    "index_at_or_before",
     "matches_terms",
     "message_of",
     "obj",
@@ -111,3 +112,26 @@ def one_line(text: str, limit: int = 120) -> str:
     """Whitespace collapsed and truncated with an ellipsis — a card subtitle."""
     flat = " ".join(text.split())
     return flat if len(flat) <= limit else f"{flat[: limit - 1]}…"
+
+
+def index_at_or_before(seqs: Iterable[int], target: int) -> int:
+    """The position of the last seq at or before `target`, or `-1`.
+
+    The one definition of the join between the two projections (P4-17). Both
+    readers need the *nearest preceding* entry rather than an exact hit, because
+    they do not render the same events: a `request/header` is a record with no
+    transcript row by design, and a streamed chunk is a row with no record. A
+    reader that answered "nothing" for those would strand someone who asked to
+    be taken somewhere.
+
+    Written once because two readers with their own version of "nearest" is how
+    the two views come to disagree about which row that is. The sequence is in
+    log order, so this stops at the first entry past the target.
+    """
+    found = -1
+    for index, value in enumerate(seqs):
+        if value > target:
+            break
+        if value >= 0:
+            found = index
+    return found

@@ -18,7 +18,12 @@ from ph_app.tui.autocomplete import (
     build_completion_state,
     parse_completion_token,
 )
-from ph_app.tui.config import DEFAULT_THEME, load_tui_settings, tui_settings_from_json
+from ph_app.tui.config import (
+    DEFAULT_THEME,
+    load_tui_settings,
+    save_tui_settings,
+    tui_settings_from_json,
+)
 from ph_app.tui.modals.login import credential_choices, credential_names
 from ph_app.tui.modals.pickers import session_choices
 from ph_app.tui.sessions import session_summaries
@@ -101,6 +106,28 @@ def test_an_unknown_key_in_settings_is_ignored() -> None:
     assert settings.keybindings.quit == "ctrl+d"
     # Unnamed bindings keep their defaults rather than becoming unset.
     assert settings.keybindings.cancel
+
+
+def test_a_binding_this_build_has_no_field_for_is_kept(tmp_path: Path) -> None:
+    """A screen contributed by a row is rebound in `tui.json` like a built-in.
+
+    Its binding id is the screen's, and this build has no field for it — so
+    dropping the unrecognized key would make exactly one class of key
+    unrebindable, which is the rule the settings file exists to prevent.
+    """
+    settings = tui_settings_from_json(
+        {"keybindings": {"quit": "ctrl+q", "trajectory": "ctrl+j", "malformed": 7}}
+    )
+    keymap = settings.keybindings.as_map()
+
+    assert keymap["quit"] == "ctrl+q"
+    assert keymap["trajectory"] == "ctrl+j"
+    assert "malformed" not in keymap, "only strings are keys"
+
+    # And it survives a save, so a rebound plugin key is not lost on the next
+    # toggle the app writes.
+    save_tui_settings(tmp_path, settings)
+    assert load_tui_settings(tmp_path).keybindings.as_map()["trajectory"] == "ctrl+j"
 
 
 # --------------------------------------------------------------- autocomplete --

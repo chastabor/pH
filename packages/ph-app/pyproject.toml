@@ -20,6 +20,7 @@ dependencies = [
 [project.entry-points."ph.plugins"]
 llm-openai-compatible = "ph_app.adapters.openai_compatible:apply"
 llm-anthropic = "ph_app.adapters.anthropic:apply"
+tui-screen-trajectory = "ph_app.tui.trajectory_screen:apply"
 
 [project.scripts]
 ph = "ph_app.cli:main"

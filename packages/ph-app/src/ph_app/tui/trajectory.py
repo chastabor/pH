@@ -31,7 +31,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal, TypeAlias
 
-from ph.session import Session, SessionEvent, is_fork_boundary, is_replacement_surface_event
+from ph.session import Session, SessionEvent, fork_boundaries, is_replacement_surface_event
 from ph.session.request_header import parse_request_header
 
 from .wire import first, message_of, obj, one_line, source_of, text_of_wire
@@ -383,11 +383,15 @@ def build_trajectory(session: Session) -> list[TrajectoryRecord]:
     `ph.persistence.read_session` with nothing mounted — the property P3-25's
     harness-free entry point rests on.
 
-    Fork points are decided against `is_fork_boundary`, the store's own rule, so
-    the rows this marks are exactly the ones `ctx.sessions.fork` accepts.
+    Fork points are decided against `fork_boundaries`, the store's own rule, so
+    the rows this marks are exactly the ones `ctx.sessions.fork` accepts. Asked
+    once for the whole log rather than once per record: the per-record form
+    rescanned the prefix each time, which is quadratic and became a frozen UI
+    when P4-17 put this fold on a keypress.
     """
     builder = _Builder()
     log = session.events
+    boundaries = fork_boundaries(log)
     for event in log:
         handler = HANDLERS.get(event.type)
         if handler is None:
@@ -401,7 +405,7 @@ def build_trajectory(session: Session) -> list[TrajectoryRecord]:
                 builder._first_chunk = event.time
             continue
         handler(builder, event)
-        builder.records[-1].fork_point = is_fork_boundary(log, event.seq)
+        builder.records[-1].fork_point = event.seq in boundaries
     return builder.records
 
 

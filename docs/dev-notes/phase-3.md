@@ -2501,6 +2501,20 @@ cursor and the highlight event draws it anyway.
 the trajectory from inside the running TUI. §5.5 lists cross-navigation among
 the three things that "mean anything" in shape (b), and it is not built — today
 `source_seq` has one consumer, the fork. That is a missing feature rather than a
-wrong one, and it wants a `TuiVerb`, a binding and a screen push; it is P4 work,
-not a cleanup. Recorded here because the reviewers were right that the deviation
-was argued without naming what it cost.
+wrong one. Recorded here because the reviewers were right that the deviation was
+argued without naming what it cost.
+
+**Now built, as P4-17**, and the investigation that produced it changed the
+shape. Reading dsh's `packages/client/` shows it does not have "two UI
+packages" but ~35, contributing into a named-slot registry (`ui-slots`) whose
+own comment states the pH-shaped property: *"the registration rides the slot
+service's effect wrapper, so plugin unload removes the tab"* — I2 in the front
+end. And `ui-trajectory` is a **registrant**, not a shell: it contributes one
+entry to `conversation.view` at `order: 10`. So the row ports the registry
+rather than the trajectory-as-shell inversion that was considered — `PHTuiApp`
+stays the host, `ctx.tui_screens` is the seam, `claim_key` already supplies the
+identity-checked disposer, and `TrajectoryScreen` is its first registrant,
+composed by both the shell and the standalone entry so that §5.5's "(a) is a
+strict subset of (b)" holds again. The full contract, the three reasons against
+the inversion, what the design deliberately leaves out, and the nine places the
+built row departs from it are in `docs/dev-notes/screen-registry-design.md`.

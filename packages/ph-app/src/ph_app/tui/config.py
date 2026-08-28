@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field, fields, replace
 from pathlib import Path
 from typing import Any, Literal, TypeAlias
@@ -65,10 +66,19 @@ class TuiKeybindings:
     toggle_tool_results: str = "ctrl+o"
     toggle_sidebar: str = "ctrl+b"
     quit: str = "ctrl+d"
+    extra: Mapping[str, str] = field(default_factory=dict)
+    """Binding ids this build has no field for — a plugin screen's key, under
+    its screen id (P4-17).
+
+    Kept rather than dropped, and that is the whole point: a screen contributed
+    by a row is remapped in `tui.json` exactly like a built-in, because
+    `set_keymap` rebinds by binding id and does not care where the id came
+    from. An id nothing binds costs nothing."""
 
     def as_map(self) -> dict[str, str]:
         """Binding id → key: the shape `App.set_keymap` takes."""
-        return {f.name: getattr(self, f.name) for f in fields(self)}
+        named = {f.name: getattr(self, f.name) for f in fields(self) if f.name != "extra"}
+        return {**named, **self.extra}
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,12 +118,20 @@ def tui_settings_from_json(data: Any) -> TuiSettings:
     raw_keys = data.get("keybindings")
     keys = defaults
     if isinstance(raw_keys, dict):
-        overrides = {
-            f.name: raw_keys[f.name]
-            for f in fields(defaults)
-            if isinstance(raw_keys.get(f.name), str) and raw_keys[f.name]
+        named = {f.name for f in fields(defaults)} - {"extra"}
+        usable = {
+            name: value
+            for name, value in raw_keys.items()
+            if isinstance(name, str) and isinstance(value, str) and value
         }
-        keys = replace(defaults, **overrides)
+        # What is left over is a binding id this build has no field for — a
+        # contributed screen's. Dropping it would make exactly one class of key
+        # unrebindable, which is the rule this file exists to prevent.
+        keys = replace(
+            defaults,
+            **{name: value for name, value in usable.items() if name in named},
+            extra={name: value for name, value in usable.items() if name not in named},
+        )
     return TuiSettings(
         keybindings=keys,
         theme=data["theme"] if isinstance(data.get("theme"), str) else DEFAULT_THEME,

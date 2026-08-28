@@ -32,6 +32,7 @@ from ph.seams.settings import SettingsService
 from ph.seams.skills import Skill, SkillService
 from ph.seams.spill import SpillStore
 from ph.seams.subprocess import SubprocessService, SubprocessSpawnSpec, scrub_env
+from ph.seams.tui_screens import ScreenDefinition, TuiScreenRegistry
 from ph.session import Session
 from ph.testing import StubAgent
 
@@ -485,3 +486,92 @@ async def test_skill_bounds_are_enforced() -> None:
         service.register(Skill(name="x" * 65, description="too long a name"))
     with pytest.raises(ValueError, match="at most 1024"):
         service.register(Skill(name="ok", description="y" * 1025))
+
+
+# ------------------------------------------------------------- tui screens --
+# The front end's registration seam (P4-17). What is worth testing here is not
+# that a dict holds a value, but the lifetime: a screen, and everything a front
+# end derived from it, has to be one effect of the row that registered it.
+
+
+def _screen(screen_id: str, **overrides: Any) -> ScreenDefinition:
+    return ScreenDefinition(
+        id=screen_id,
+        label=screen_id.title(),
+        build=lambda session: (screen_id, session),
+        **overrides,
+    )
+
+
+async def test_screens_list_in_slot_order_then_id() -> None:
+    """dsh orders slot entries by `order`; the id breaks ties so the list is
+    stable rather than dependent on which row mounted first."""
+    registry = TuiScreenRegistry(ctx=Context())
+    registry.register(_screen("zebra", order=10))
+    registry.register(_screen("apple"))
+    registry.register(_screen("acorn"))
+
+    assert [screen.id for screen in registry.list()] == ["zebra", "acorn", "apple"]
+
+
+async def test_a_screen_id_must_be_addressable_as_a_command() -> None:
+    """An id becomes `/<id>`, so what bounds it is the command grammar: a name
+    with a space in it would be a command whose argument is part of its name."""
+    registry = TuiScreenRegistry(ctx=Context())
+    registry.register(_screen("audit"))
+    with pytest.raises(ValueError, match="already registered"):
+        registry.register(_screen("audit"))
+    with pytest.raises(ValueError, match=r"1\.\.32"):
+        registry.register(_screen("two words"))
+
+
+async def test_a_front_end_presents_screens_registered_before_and_after_it() -> None:
+    """Attachment order must not decide what gets drawn: rows mount before a
+    terminal exists in a resume, and after it when one is loaded late."""
+    root = Context()
+    registry = TuiScreenRegistry(ctx=root)
+    drawn: list[str] = []
+    registry.register(_screen("early"))
+
+    registry.present_with(lambda screen: drawn.append(screen.id))
+    registry.register(_screen("late"))
+
+    assert drawn == ["early", "late"]
+
+
+async def test_unloading_a_row_undoes_what_the_front_end_drew_for_it() -> None:
+    """The gate, and the property ported from dsh: *"the registration rides the
+    slot service's effect wrapper, so plugin unload removes the tab."*"""
+    root = Context()
+    registry = TuiScreenRegistry(ctx=root)
+    undrawn: list[str] = []
+    registry.present_with(lambda screen: lambda: undrawn.append(screen.id))
+
+    row = root.scope("a-row")
+    registry.register(_screen("audit"), scope=row)
+    assert registry.get("audit") is not None
+
+    await row.dispose()
+
+    assert registry.get("audit") is None, "the screen outlived the row that registered it"
+    assert undrawn == ["audit"], "the verb and the key outlived the row that registered them"
+
+
+async def test_a_detaching_front_end_undoes_its_own_presentations() -> None:
+    """The other lifetime. A terminal can close while the harness runs on, and
+    a command left pointing at a dead app is worse than no command."""
+    root = Context()
+    registry = TuiScreenRegistry(ctx=root)
+    undrawn: list[str] = []
+    detach = registry.present_with(lambda screen: lambda: undrawn.append(screen.id))
+    row = root.scope("a-row")
+    registry.register(_screen("audit"), scope=row)
+
+    detach()
+    assert undrawn == ["audit"]
+    assert registry.get("audit") is not None, "detaching a front end must not unregister rows"
+
+    # The same teardown belongs to both lifetimes; whichever runs second does
+    # nothing, which is why `add_disposer` hands back an idempotent release.
+    await row.dispose()
+    assert undrawn == ["audit"]

@@ -7,6 +7,11 @@ Textual action on the app, and, when it has a `key`, as a binding remapped from
 `tui.json`. Adding a verb is adding a row here plus an `action_<name>` method;
 nothing re-dispatches on the name string.
 
+This table is the *built-in* source of verbs. A screen contributed through
+`ctx.tui_screens` gets the same three routes from `screens.py`, which builds
+them per registration rather than per table row — because those come and go with
+the plugin that registered them, and this table does not.
+
 The commands are registered on the *root* context, so they unwind with it (I2).
 
 @module ph_app.tui.commands
@@ -25,7 +30,7 @@ from ph.seams.commands import CommandDefinition
 
 from .config import TuiKeybindings
 
-__all__ = ["TUI_VERBS", "TuiVerb", "app_bindings", "register_tui_commands"]
+__all__ = ["TUI_VERBS", "TuiVerb", "action_command", "app_bindings", "register_tui_commands"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,22 +81,33 @@ def app_bindings(keys: TuiKeybindings) -> list[BindingType]:
 
 
 def register_tui_commands(ctx: Context, app: Any) -> list[Callable[[], Any]]:
-    """Register one slash command per verb. Returns their disposers.
-
-    Each body runs the app action. A command body is dispatched on the message
-    pump, so an action that opens a screen does so with a callback and returns
-    — the same constraint every key handler already lives under.
-    """
+    """Register one slash command per verb. Returns their disposers."""
     return [
-        ctx.commands.register(
-            CommandDefinition(name=verb.name, summary=verb.summary, run=_body(app, verb))
-        )
+        ctx.commands.register(action_command(app, verb.name, verb.summary, verb.action))
         for verb in TUI_VERBS
     ]
 
 
-def _body(app: Any, verb: TuiVerb) -> Callable[..., Any]:
-    async def run(_argument: str, _context: Any) -> None:
-        await app.run_action(verb.action)
+def action_command(app: Any, name: str, summary: str, action: str) -> CommandDefinition:
+    """A slash command whose whole body is one Textual action.
 
-    return run
+    The one spelling of that, because there are two sources of verbs — this
+    table and `screens.py`'s registered screens — and a command-body contract
+    that had to be honoured in both places is one that will be honoured in one.
+    A body is dispatched on the message pump, so an action that opens a screen
+    does so with a callback and returns, the same constraint every key handler
+    already lives under.
+    """
+    return CommandDefinition(name=name, summary=summary, run=_RunAction(app, action))
+
+
+@dataclass(frozen=True, slots=True)
+class _RunAction:
+    """The body itself. A dataclass because it outlives the call that made it
+    and is stored in a registry — the fields it needs are the fields it holds."""
+
+    app: Any
+    action: str
+
+    async def __call__(self, _argument: str, _context: Any) -> None:
+        await self.app.run_action(self.action)

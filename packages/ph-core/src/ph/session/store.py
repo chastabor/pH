@@ -30,6 +30,7 @@ __all__ = [
     "SessionForkError",
     "SessionStore",
     "apply",
+    "fork_boundaries",
     "is_fork_boundary",
     "new_session_id",
     "open_turn_at",
@@ -244,6 +245,31 @@ def open_turn_at(log: Sequence[SessionEvent], boundary: int) -> SessionEvent | N
 def is_fork_boundary(log: Sequence[SessionEvent], boundary: int) -> bool:
     """Whether `ctx.sessions.fork` would accept this boundary."""
     return 0 <= boundary < len(log) and open_turn_at(log, boundary) is None
+
+
+def fork_boundaries(log: Sequence[SessionEvent]) -> set[int]:
+    """Every seq `fork` would accept, from one pass over the log (A6).
+
+    The same rule as `open_turn_at`, answered for the whole log at once, because
+    a reader that marks *which records* a fork may aim at needs it for every one
+    of them — and asking per record rescans the prefix each time. That is
+    quadratic: an 8 000-event session cost 467 ms to fold, which became a frozen
+    UI once the trajectory could be opened from a running chat (P4-17).
+
+    Keyed by seq and admitted only where the seq is the event's own index, which
+    is the contiguity `_fork_seed` requires anyway — so this marks nothing the
+    fork would then refuse.
+    """
+    boundaries: set[int] = set()
+    open_turn = False
+    for index, event in enumerate(log):
+        if event.type == "turn/start":
+            open_turn = True
+        elif event.type == "turn/end":
+            open_turn = False
+        if not open_turn and event.seq == index:
+            boundaries.add(event.seq)
+    return boundaries
 
 
 @plugin("session")
