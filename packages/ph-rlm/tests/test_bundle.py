@@ -19,7 +19,7 @@ from conftest import HOST_INTERPRETER
 from runtime_helpers import dispatch_names, run_ipython_cell
 
 from ph.bundles import BASE, HEADLESS
-from ph.cordis import Loader
+from ph.cordis import Context, Loader
 from ph.system_prompt.assembly import AssembleContext, render_prompt
 from ph.tools.registry import RUN_CODE
 from ph_rlm import BUNDLE
@@ -46,16 +46,32 @@ def test_a_patch_in_the_bundle_addresses_a_row_that_exists() -> None:
     Loader.from_documents(documents)
 
 
-def test_every_row_in_the_profile_activates() -> None:
+async def test_every_row_in_the_profile_activates(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A row that mounts nothing is worse than one that fails: it looks fine.
 
     `Loader.inactive()` is the loader's own answer to "which rows never met their
     `inject` keys", and a profile with any is one where a capability silently
     is not there.
+
+    **Mounted first**, and that is the whole test: `inactive()` reads the forks
+    `mount()` creates, so the version this replaced asked the question of an
+    empty table and returned `[]` for every profile, broken or not. Found when
+    P4-01 copied it into `ph-stabilize` and the copy was checked for
+    falsifiability.
     """
+    monkeypatch.setenv("PH_HOME", str(tmp_path))
     documents = Loader.from_paths([BASE, HEADLESS, BUNDLE]).documents
     documents.append(("test-overlay", [{"id": "code-runtime-python", "config": HOST_INTERPRETER}]))
-    assert Loader.from_documents(documents).inactive() == []
+    loader = Loader.from_documents(documents)
+    ctx = Context()
+    try:
+        await loader.mount(ctx)
+        assert loader.inactive() == []
+    finally:
+        await ctx.drain()
+        await ctx.dispose()
 
 
 async def test_the_bundle_mounts_over_base(shipped_profile: Any) -> None:

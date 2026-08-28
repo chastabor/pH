@@ -180,6 +180,11 @@ async def apply(ctx: Context, config: Any) -> None:
             "truncated": len(matches) >= GREP_LIMIT,
         }
 
+    # Every one of these bounds its own output and offers the model a way to
+    # ask for more — `read` takes an offset and a limit, `glob`/`grep` cap
+    # their match lists, `write`/`edit` return a confirmation. Declared so
+    # the offload row (G2) can leave their results inline without another
+    # package keeping a list of this package's tool names.
     for definition in (
         define_tool(
             "read",
@@ -187,6 +192,7 @@ async def apply(ctx: Context, config: Any) -> None:
             parameters=ReadArgs,
             output=ToolOutput(schema=ReadValue, render=_render_read),
             execute=read,
+            self_limits=True,
             is_concurrency_safe=True,
             **simple_views("read", "Read", "path"),
         ),
@@ -196,6 +202,7 @@ async def apply(ctx: Context, config: Any) -> None:
             parameters=WriteArgs,
             output=ToolOutput(schema=WriteValue, render=_render_write),
             execute=write,
+            self_limits=True,
             **simple_views("diff", "Write", "path"),
         ),
         define_tool(
@@ -204,6 +211,7 @@ async def apply(ctx: Context, config: Any) -> None:
             parameters=EditArgs,
             output=ToolOutput(schema=EditValue, render=_render_edit),
             execute=edit,
+            self_limits=True,
             **simple_views("diff", "Edit", "path"),
         ),
         define_tool(
@@ -212,6 +220,7 @@ async def apply(ctx: Context, config: Any) -> None:
             parameters=GlobArgs,
             output=ToolOutput(schema=GlobValue, render=_render_glob),
             execute=glob_tool,
+            self_limits=True,
             is_concurrency_safe=True,
             **simple_views("search", "Glob", "pattern"),
         ),
@@ -221,6 +230,7 @@ async def apply(ctx: Context, config: Any) -> None:
             parameters=GrepArgs,
             output=ToolOutput(schema=GrepValue, render=_render_grep),
             execute=grep_tool,
+            self_limits=True,
             is_concurrency_safe=True,
             **simple_views("search", "Grep", "pattern"),
         ),

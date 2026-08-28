@@ -18,8 +18,8 @@ import json
 from typing import Any
 
 import pytest
+from stabilize_helpers import PROFILE
 
-from ph.bundles import BASE, HEADLESS
 from ph.cancel import CancelToken
 from ph.cordis import Context, Loader
 from ph.llm.types import ToolCallBlock
@@ -44,7 +44,6 @@ from ph_stabilize.todo import (
 
 pytestmark = pytest.mark.anyio
 
-PROFILE = [BASE, HEADLESS, BUNDLE]
 
 ENABLED: dict[str, Any] = {"id": "tool-todo", "disabled": False}
 """The opt-in, spelled as a profile spells it: a patch flipping the row."""

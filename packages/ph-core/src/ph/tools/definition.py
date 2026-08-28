@@ -368,6 +368,16 @@ class ToolDefinition:
     """Cooperative budget, enforced by the `tools-timeout` row's `tools/execute`
     wrapper. Never sent to the model: `schemas()` whitelists
     name/description/parameters only."""
+    self_limits: bool = False
+    """The tool bounds its own output and offers the model a way to page.
+
+    Declared by the tool rather than matched by name in a policy row, because
+    `read`, `grep` and their kin are *registered plugins* — a deployment renames
+    them, an MCP server adds its own, and a name list in another package cannot
+    know. Read by `ph-stabilize`'s offload row (G2), which leaves a self-limiting
+    result inline: a model that hit this tool's own cap already knows how to ask
+    for the next page, so spending a spill file to tell it again teaches nothing.
+    """
     is_concurrency_safe: Callable[[Any], bool] | None = None
     """Only `True` opts a call into a parallel group. Omission, a raise, and any
     non-`True` return are all exclusive — the safe default, since a tool that
@@ -456,6 +466,7 @@ def define_tool(
     presentation_meta: Callable[[Any, Any], Any] | None = None,
     finalize_content: Callable[..., Sequence[Any] | None] | None = None,
     timeout_ms: int | None = None,
+    self_limits: bool = False,
     is_concurrency_safe: Callable[[Any], bool] | bool | None = None,
     present_call: Callable[[Any], ToolCallView | None] | None = None,
     present_result: Callable[[Any, ToolResult], ToolResultView | None] | None = None,
@@ -502,6 +513,7 @@ def define_tool(
         execute=run,
         finalize_content=finalize_content,
         timeout_ms=timeout_ms,
+        self_limits=self_limits,
         is_concurrency_safe=safe,
         present_call=present_call,
         present_result=present_result,

@@ -178,6 +178,41 @@ async def test_compaction_marks_what_it_replaced_and_keeps_it(mount: Any) -> Non
     assert original.is_visible_to_model is False
 
 
+async def test_a_plugins_replacement_is_not_called_a_compaction(mount: Any) -> None:
+    """A surface `replace` is a mechanism, not a cause (P4-02).
+
+    `input-offload` is the first row to substitute on the surface for a reason
+    other than compaction, and until this test the adapter keyed on the
+    replacement alone: an offloaded paste rendered as "(history compacted)",
+    telling the reader their conversation had been summarized when a blob had
+    been relocated. The attribution the log already carries is the discriminator
+    — and the shadowing, which *is* the mechanism, applies either way.
+    """
+    ctx: Context = await mount()
+    session = ctx.sessions.create("tui-offload")
+    pasted = session.append(
+        "user/message", user_payload("a two megabyte paste", "m1"), SurfaceIntent("append")
+    )
+    session.append(
+        "user/message",
+        {
+            "id": "m2",
+            "role": "user",
+            "content": [{"type": "text", "text": "Message content too large…"}],
+            "source": {"kind": "plugin", "plugin": "input-offload", "form": "notice"},
+        },
+        SurfaceIntent(SurfaceReplace(start=0, end=0), (pasted.seq,)),
+    )
+    adapter = TuiEventAdapter()
+    for event in session.events:
+        adapter.apply(event, live=False)
+
+    roles = [(item.role, item.shadowed) for item in adapter.state.visible_items()]
+    assert ("context", False) in roles, "a plugin's notice is that plugin's row"
+    assert "compaction" not in [role for role, _ in roles]
+    assert ("user", True) in roles, "the paste is still there, dimmed — the mechanism holds"
+
+
 async def test_usage_feeds_the_context_gauge(mount: Any) -> None:
     """The gauge reads the provider's count from `assistant/message.usage`."""
     live_state, session = await _drive(mount)

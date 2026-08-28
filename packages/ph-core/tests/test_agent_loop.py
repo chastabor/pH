@@ -38,8 +38,10 @@ from ph.llm.types import (
     TextDelta,
     create_user_message,
 )
+from ph.session import SurfaceIntent
 from ph.system_prompt.assembly import PromptContext, PromptSection
 from ph.testing import FAKE_OPTIONS as FAKE
+from ph.testing import user_payload
 
 pytestmark = pytest.mark.anyio
 
@@ -146,6 +148,45 @@ async def test_agent_request_waterfall_can_reroute(mount: Any) -> None:
     assert header is not None
     assert header.config.model == "rerouted"
     assert header.config.temperature == 0.1
+
+
+async def test_the_request_derives_its_messages_after_the_waterfall(mount: Any) -> None:
+    """A listener may append, and the request it is proposing will carry it.
+
+    Pinned because `ph-stabilize`'s `input-offload` leans on exactly this
+    ordering: it appends a surface `replace` from `agent/request` and returns
+    the config untouched, and the loop's own `derive_messages()` is what applies
+    the substitution. Nothing in the waterfall's declared contract — "the call
+    config the loop proposes" — says derivation happens afterwards, so the row
+    depended on an ordering no test held. It does now.
+    """
+    ctx = await mount()
+    session = ctx.sessions.create("s")
+
+    async def inject(proposal: RequestProposal, next_: Any) -> LlmCallConfig:
+        if not any(event.type == "assistant/message" for event in session.events):
+            session.append(
+                "user/message",
+                user_payload("appended from agent/request", "injected"),
+                SurfaceIntent("append"),
+            )
+        return await next_()
+
+    ctx.on("agent/request", inject)
+    await ctx.agents.create(session, FAKE).prompt("hello")
+
+    # Read off the adapter, which is the only place the *sent* messages exist.
+    sent = ctx.llm_fake.requests
+    assert sent, "no request reached the adapter"
+    text = [
+        block.text
+        for message in sent[0].messages
+        for block in message.content
+        if getattr(block, "type", None) == "text"
+    ]
+    assert "appended from agent/request" in text, (
+        "the request was derived before the waterfall could add to the log"
+    )
 
 
 async def test_request_header_is_logged_only_when_it_changes(mount: Any) -> None:

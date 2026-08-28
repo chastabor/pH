@@ -14,6 +14,7 @@ model's own vocabulary (`read` this path, offset N), rather than making it guess
 from __future__ import annotations
 
 import hashlib
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -24,6 +25,8 @@ from ..paths import default_home_path
 from ..wire import WireModel
 
 __all__ = ["SpillRef", "SpillStore", "apply"]
+
+log = logging.getLogger("ph.seams.spill")
 
 
 class SpillRef(WireModel):
@@ -80,6 +83,31 @@ class SpillStore:
             suggested_name=suggested_name,
             content=content.encode("utf-8"),
         )
+
+    async def try_save_text(
+        self, *, owner: str, source: str, suggested_name: str, content: str
+    ) -> SpillRef | None:
+        """`save_text`, or `None` when the store could not take it.
+
+        The **fail-open** spelling, for the callers whose content is an
+        optimisation rather than an obligation: an offload that cannot store the
+        text must not be the reason the model loses it. Written here because
+        three callers were each remembering the rule in their own `try`, and had
+        already drifted on which exception counts.
+
+        `| None` rather than a raised-and-caught exception, so the failure
+        branch is type-checked at every call site instead of remembered.
+        `save_text` stays for a caller that must not proceed without durability.
+        """
+        try:
+            return await self.save_text(
+                owner=owner, source=source, suggested_name=suggested_name, content=content
+            )
+        except Exception:
+            log.warning(
+                "ph.seams.spill: could not spill %s for %s", suggested_name, owner, exc_info=True
+            )
+            return None
 
     async def load_text(self, locator: str) -> str:
         return await anyio.to_thread.run_sync(lambda: Path(locator).read_text(encoding="utf-8"))

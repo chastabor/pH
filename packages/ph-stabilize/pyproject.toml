@@ -15,6 +15,8 @@ dependencies = ["ph-core"]
 stabilize = "ph_stabilize:BUNDLE"
 
 [project.entry-points."ph.plugins"]
+input-offload = "ph_stabilize.input_offload:apply"
+tool-result-offload = "ph_stabilize.offload:apply"
 tool-todo = "ph_stabilize.todo:apply"
 
 [tool.uv.sources]

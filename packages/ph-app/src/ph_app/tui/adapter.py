@@ -37,6 +37,7 @@ from pydantic import ValidationError
 from ph.seams.subagents import downgrade_text, fold_subagent_event
 from ph.session import Session, SessionEvent, is_replacement_surface_event, thaw_json
 from ph.session.request_header import parse_request_context
+from ph.text import count_of
 from ph.tools import ToolResult, ToolResultView, parse_arguments
 
 from .state import ChatItem, ItemRole, ToolCard, TuiState
@@ -99,16 +100,27 @@ class TuiEventAdapter:
         kind = obj(event.data.get("source")).get("kind")
         text = text_of_wire(event.data.get("content"))
         if is_replacement_surface_event(event):
-            # Compaction: the summary joins the transcript *and* says what it
-            # stands in for. The rows it shadows stay above it.
-            self._mark_compacted(event.source_event_seqs or ())
-            self._row("compaction", "compaction", text or "(history compacted)", event)
-            return
+            # Whatever its cause, a replacement shadows the rows it cites: they
+            # stay above it, dimmed.
+            self._mark_shadowed(event.source_event_seqs or ())
+            # But only compaction is compaction. `input-offload` (P4-02) is the
+            # first row to substitute on the surface for another reason, and
+            # calling its preview "history compacted" would tell the reader
+            # their conversation was summarized when a paste was relocated. A
+            # plugin-attributed replacement is that plugin's context row, which
+            # is what the line below already renders for the non-shadowing case.
+            if kind != "plugin":
+                self._row("compaction", "compaction", text or "(history compacted)", event)
+                return
         self._row("msg", "context" if kind == "plugin" else "user", text, event)
 
-    def _mark_compacted(self, shadowed: tuple[int, ...]) -> None:
-        """Mark the rows a summary replaced. They stay; they are just no longer
-        what the model sees."""
+    def _mark_shadowed(self, shadowed: tuple[int, ...]) -> None:
+        """Mark the rows a replacement stands in for.
+
+        They stay; they are just no longer what the model sees. Named for the
+        mechanism rather than for compaction, because compaction is one cause
+        of it and no longer the only one.
+        """
         targets = set(shadowed)
         for item in self.state.items:
             if item.seq in targets:
@@ -465,6 +477,23 @@ class TuiEventAdapter:
         # sidebar and the model's prompt context read one list.
         self.state.todos = [thaw_json(todo) for todo in seq(event.data.get("todos"))]
 
+    def _on_offload_spilled(self, event: SessionEvent, live: bool) -> None:
+        """An oversized result or pasted message was relocated (P4-02).
+
+        A notice rather than silence: the reader is looking at a preview where
+        the tool produced far more, and the path is how they get the rest —
+        the same thing the model was told.
+        """
+        locator = str(event.data.get("locator") or "")
+        size = int(event.data.get("bytes") or 0)
+        what = "Message" if event.type == "offload/input-spilled" else "Result"
+        self._row(
+            "offload",
+            "notice",
+            f"{what} too large ({count_of(size, 'byte')}); full text at {locator}",
+            event,
+        )
+
     def _on_agent_inbox_spliced(self, event: SessionEvent, live: bool) -> None:
         inserted = len(seq(event.data.get("inserted")))
         removed = int(event.data.get("removedCount", 0))
@@ -493,6 +522,8 @@ HANDLERS: Mapping[str, Handler] = {
     "llm/retry": TuiEventAdapter._on_llm_retry,
     "agent/inbox/spliced": TuiEventAdapter._on_agent_inbox_spliced,
     "todo/write": TuiEventAdapter._on_todo_write,
+    "offload/spilled": TuiEventAdapter._on_offload_spilled,
+    "offload/input-spilled": TuiEventAdapter._on_offload_spilled,
     "kernel/restored": TuiEventAdapter._on_kernel_restored,
     "harness/refined": TuiEventAdapter._on_harness_refined,
     "harness/refine-considered": TuiEventAdapter._on_harness_refine_considered,

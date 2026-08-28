@@ -367,6 +367,8 @@ HANDLERS: Mapping[str, Handler] = {
     "context/loaded": _on_harness_event,
     "agent/inbox/spliced": _on_harness_event,
     "todo/write": _on_harness_event,
+    "offload/spilled": _on_harness_event,
+    "offload/input-spilled": _on_harness_event,
     "session/end-seed": _on_harness_event,
 }
 """Event type → the record it produces.

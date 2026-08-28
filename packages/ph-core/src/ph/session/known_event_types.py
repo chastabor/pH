@@ -82,6 +82,17 @@ KNOWN_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         # ignorable: a reader that skips it gets one extra review pass, not a
         # harness the session does not have.
         "harness/refine-considered",
+        # Offloading (P4-02, G2; emitted by `ph-stabilize`'s `tool-result-offload`).
+        # The forwarding address for a result the model was handed a preview of.
+        # Ignorable: `tool/result` already carries what the model saw, so a
+        # reader that skips this loses the way back to the original, not the
+        # conversation — the same test the `context/loaded` recipe passes.
+        "offload/spilled",
+        # And the input side (G3): where a pasted message went. Ignorable for
+        # the same reason — the surface `replace` beside it is what the model
+        # reads, and that is a required `user/message`, so a reader skipping
+        # this loses the forwarding address and nothing else.
+        "offload/input-spilled",
         # Planning (P4-01, G1; emitted by `ph-stabilize`'s `tool-todo`). The
         # list *is* this fold — there is no side table — and it reaches the
         # model through a prompt context, so a reader that skipped it would
@@ -107,6 +118,8 @@ IGNORABLE_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         "subagent/usage-attributed",
         "harness/refine-considered",
         "context/loaded",
+        "offload/spilled",
+        "offload/input-spilled",
     }
 )
 """Types a *different* build may skip without misreading the rest of the log.

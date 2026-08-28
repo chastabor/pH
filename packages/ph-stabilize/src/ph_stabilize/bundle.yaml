@@ -17,3 +17,19 @@
 - id: tool-todo
   name: tool-todo
   disabled: true
+
+# --- context offloading -----------------------------------------------------
+# One oversized tool result can end a session's usefulness on its own, and the
+# model rarely needs all of it (G2/C5). Enabled: unlike planning, this changes
+# nothing until a result actually exceeds 80 000 characters, so a profile that
+# layered this bundle for any reason wants it — there is no posture in which
+# losing the context window to one `find /` is the preferred outcome.
+- id: tool-result-offload
+  name: tool-result-offload
+
+# The other direction: a pasted build log or dumped table (G3). Same reasoning
+# as above for being on — and the same shape, except that the substitution is a
+# surface `replace`, so the log keeps what the person actually sent while the
+# model reads a preview.
+- id: input-offload
+  name: input-offload
