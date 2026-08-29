@@ -117,3 +117,28 @@
   name: rlm-kernel-snapshot
   config:
     inlineBlobMax: 65536
+
+# The containment ladder for an RLM session (P4-11, §4.8). The *root* agent
+# stays `advisory`: a person running `rlm` is working in the directory they
+# opened, and moving their agent to a checkout elsewhere is a surprise a
+# deployment should have to ask for. Children go to `worktree`, because eight of
+# them writing one tree concurrently is the fan-out hazard the tier exists for —
+# and the parent then reviews a diff instead of trusting sibling writes (E2).
+- id: containment
+  config:
+    tier: advisory
+    child_tier: worktree
+
+# The rungs themselves. Layered here rather than in `ph-base` because they cost
+# a checkout per agent, and inert until `containment` above asks for them.
+- id: workspace-git-worktree
+  name: workspace-git-worktree
+
+- id: workspace-checkpoint
+  name: workspace-checkpoint
+
+- id: workspace-commands
+  name: workspace-commands
+
+- id: workspace-revert
+  name: workspace-revert

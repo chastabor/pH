@@ -604,6 +604,13 @@ async def _cached_checkpoint(
     one of four spawns spent learning a constant — the same finding
     `_toplevels` records for `--show-toplevel` one class up.
     """
+    if workspace.kind not in ("worktree", "worktree-ephemeral"):
+        # The gate `checkpoint` applies anyway, hoisted above the `rev-parse`
+        # that would otherwise run — a subprocess in the person's own checkout,
+        # for a `shared` workspace that can never have a restore point. Newly
+        # reachable once a profile layers this row and puts the root agent on
+        # `advisory`, which the shipped `rlm` bundle does.
+        return
     if workspace.root not in git_dirs:
         git_dirs[workspace.root] = await _git_dir(ctx, workspace.root)
     if git_dirs[workspace.root] is None:

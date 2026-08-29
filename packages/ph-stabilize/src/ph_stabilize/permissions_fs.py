@@ -71,6 +71,7 @@ from ph.cordis import Context, plugin
 from ph.paths import is_under
 from ph.seams.approval import denial_reason
 from ph.seams.fs import EditIntent, FsService, ReadIntent, WriteIntent, matches_glob
+from ph.seams.sandbox import enforcement_of
 from ph.seams.workspace import workspace_of, writable_roots
 from ph.wire import WireModel
 
@@ -221,9 +222,15 @@ class FsPermissions:
 
     @property
     def confined(self) -> bool:
-        """Whether a backend is mounted that bounds what this row cannot."""
-        sandbox = None if self.ctx is None else self.ctx.get("sandbox")
-        return sandbox is not None and bool(sandbox.available)
+        """Whether something actually bounds what this row cannot.
+
+        `full`, not merely *mounted*: E9's sentence promises a person that "a
+        sandbox provider bounds what a code cell can reach directly", and a
+        backend enforcing `partial` does not — saying so would be the tier-name
+        overstatement E1 exists to prevent, and it would contradict `strict`,
+        which refuses a partial backend outright.
+        """
+        return self.ctx is not None and enforcement_of(self.ctx) == "full"
 
     @property
     def reach(self) -> str:

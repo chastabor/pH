@@ -55,6 +55,16 @@ async def mount(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AsyncIterato
         else:
             paths = [BASE, HEADLESS, profile]
         documents = Loader.from_paths(paths).documents
+        # The filesystem root goes to `tmp_path` for the same reason `PH_HOME`
+        # does, and it is the stronger of the two: `fs.root` is what a workspace
+        # tier *branches a git worktree from*, so a test that left it at the
+        # process cwd would make checkouts and `ph/*` branches in the
+        # developer's own repository. That has happened three times in this
+        # suite — a test repo inside the checkout, a stray `parent-tree`, and a
+        # real worktree off `main` — and each time the fix was local. This is
+        # the guarantee stated once. A test that genuinely needs the cwd
+        # overrides the row.
+        documents.append(("test-root", [{"id": "fs", "config": {"root": str(tmp_path)}}]))
         if overlay_rows:
             documents.append(("test-overlay", list(overlay_rows)))
         ctx = Context()

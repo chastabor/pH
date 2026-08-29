@@ -34,6 +34,7 @@ import yaml
 
 from .context import Context, ForkScope
 from .errors import LoaderError
+from .events import events
 
 __all__ = [
     "ENTRY_POINT_GROUP",
@@ -53,6 +54,19 @@ ENTRY_POINT_GROUP = "ph.plugins"
 
 _ENV_PATTERN = re.compile(r"\$\{env:(?P<name>[A-Za-z_][A-Za-z0-9_]*)(?::-(?P<default>[^}]*))?\}")
 _PREDICATE_PATTERN = re.compile(r"^\$\{(?P<kind>platform|env):(?P<value>[^}]*)\}$")
+
+
+events.declare(
+    "profile/mounted",
+    "serial",
+    owner="ph.cordis",
+    doc="A composed profile finished mounting. A listener that raises refuses the run.",
+)
+"""The one moment a profile is whole and nothing has run yet (E8).
+
+Declared here rather than in a seam because the loader is what dispatches
+it, and a declaration in a module the loader never imports is one that has
+not happened by the time the dispatch checks for it."""
 
 
 class SafeRowLoader(yaml.SafeLoader):
@@ -385,6 +399,14 @@ class Loader:
         for row in self.enabled_rows():
             self.forks[row.id] = ctx.plugin(resolve_plugin(row.name), interpolate(row.config))
         await ctx.reconcile()
+        # The one moment a composed profile is whole and nothing has run yet, so
+        # a row can refuse the deployment it finds itself in (E8). `serial`
+        # rather than `emit`: a listener that raises must stop the process, and
+        # a contained emit would swallow exactly the refusal that matters. A row
+        # cannot check this in its own `apply` — a backend it depends on may be
+        # layered after it, so a verdict computed then would be wrong for
+        # precisely the profile that orders things that way.
+        await ctx.serial("profile/mounted")
 
     def inactive(self) -> list[str]:
         """Row ids whose plugin never activated — an unmet `inject` key."""

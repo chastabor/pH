@@ -34,7 +34,13 @@ from stabilize_helpers import (
 
 from ph.llm.types import ToolCallBlock
 from ph.seams.fs import FsDenied
-from ph.testing import FAKE_OPTIONS, StubAgent, StubWorkspaceProvider, run_tool
+from ph.testing import (
+    FAKE_OPTIONS,
+    StubAgent,
+    StubSandboxProvider,
+    StubWorkspaceProvider,
+    run_tool,
+)
 from ph_stabilize.permissions_fs import (
     BOUNDED_REACH,
     UNBOUNDED_REACH,
@@ -398,7 +404,7 @@ async def test_the_reach_message_toggles_with_a_sandbox(mount: Any, tmp_path: Pa
     # P6-04's backend does not exist yet, so the stand-in is what the seam
     # actually reads: a provider in the slot. The claim under test is the
     # toggle, not what any particular backend enforces.
-    ctx.sandbox.register_provider(object())
+    ctx.sandbox.register_provider(StubSandboxProvider())
     assert ctx.fs_permissions.reach == BOUNDED_REACH
     assert "not covered" not in ctx.fs_permissions.reach
 

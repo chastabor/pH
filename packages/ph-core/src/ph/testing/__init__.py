@@ -18,6 +18,7 @@ from .fake_adapter import FakeAdapter, text_script
 from .git import WORKTREE_ROWS, git, git_repo, needs_git, worktree_agent
 from .replay_adapter import RecordedStep, ReplayAdapter, recorded_steps
 from .stub_runtime import StubCodeRuntime
+from .stub_sandbox import StubSandboxProvider
 from .stub_workspace import StubWorkspaceProvider
 
 __all__ = [
@@ -28,6 +29,7 @@ __all__ = [
     "ReplayAdapter",
     "StubAgent",
     "StubCodeRuntime",
+    "StubSandboxProvider",
     "StubWorkspaceProvider",
     "assistant_payload",
     "git",

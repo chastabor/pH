@@ -21,7 +21,7 @@ log, and neither is guessed.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Literal, TypeAlias, cast, get_args
+from typing import Literal, Protocol, TypeAlias, cast, get_args, runtime_checkable
 
 from ..cordis import Context, Disposer, plugin
 from ..session import Session
@@ -31,11 +31,14 @@ from ._registry import claim_slot
 
 __all__ = [
     "ConfinedArgv",
+    "Enforcement",
     "SandboxError",
     "SandboxMode",
     "SandboxPolicy",
+    "SandboxProvider",
     "SandboxSeam",
     "apply",
+    "enforcement_of",
 ]
 
 SandboxMode: TypeAlias = Literal["read-only", "workspace-write", "danger-full-access"]
@@ -79,15 +82,39 @@ class ConfinedArgv:
     backend: str
 
 
+@runtime_checkable
+class SandboxProvider(Protocol):
+    """A confinement backend.
+
+    `enforcement` is a *descriptor*, readable before any call, because
+    `containment.strict` has to decide at startup whether this deployment is
+    actually confined — and a property only discoverable by confining something
+    would make that check "run a command and see", which is not a thing a
+    refusal-to-start can do. `partial` is a refusal under strict, not a
+    downgrade (E8).
+
+    Typed rather than duck-typed for the reason `WorkspaceProvider` is: a
+    backend whose method drifted would fail inside a caller's `except` and be
+    reported as *unconfined*, which is the one direction this seam must never
+    fail in silently.
+    """
+
+    enforcement: Enforcement
+
+    def confine(self, argv: tuple[str, ...], policy: SandboxPolicy) -> ConfinedArgv: ...
+
+
 @dataclass(slots=True)
 class SandboxSeam:
     """The service published as `ctx.sandbox`."""
 
     ctx: Context
     default_mode: SandboxMode = "read-only"
-    provider: Any = None
+    provider: SandboxProvider | None = None
 
-    def register_provider(self, provider: Any, *, scope: Context | None = None) -> Disposer:
+    def register_provider(
+        self, provider: SandboxProvider, *, scope: Context | None = None
+    ) -> Disposer:
         return claim_slot(scope or self.ctx, self, "provider", provider, label="sandbox.provider")
 
     def resolve_mode(
@@ -109,6 +136,17 @@ class SandboxSeam:
     def available(self) -> bool:
         return self.provider is not None
 
+    @property
+    def enforcement(self) -> Enforcement | None:
+        """How much the mounted backend actually enforces, or `None` for none.
+
+        Read at startup by `containment.strict`, which refuses on anything but
+        `full` — including on `None`, since "no backend" and "a backend that
+        bounds some of it" are both "not confined" to a deployment that asked to
+        be sure.
+        """
+        return None if self.provider is None else self.provider.enforcement
+
     def confine(self, argv: tuple[str, ...], policy: SandboxPolicy) -> ConfinedArgv:
         """Wrap `argv` so the kernel enforces `policy`.
 
@@ -126,6 +164,21 @@ class SandboxSeam:
         if not isinstance(confined, ConfinedArgv):  # pragma: no cover - provider bug
             raise SandboxError("sandbox provider did not return a ConfinedArgv")
         return confined
+
+
+def enforcement_of(ctx: Context) -> Enforcement | None:
+    """How much confinement this deployment actually has. `None` is none at all.
+
+    Asked of a seam that may not be mounted, the way `workspace_of` is — and
+    written once because the copies had begun to *disagree*: `permissions-fs`
+    read "a backend exists" while `containment` read "a backend that says
+    `full`", so a `partial` backend would have had E9's reach sentence telling
+    an operator a sandbox bounds their code cells while E8's refusal told them a
+    partial boundary is not confinement at all. Two operator-facing statements
+    about one fact, in two packages, is the drift this seam exists to prevent.
+    """
+    seam = ctx.get("sandbox")
+    return None if seam is None else seam.enforcement
 
 
 class Config(WireModel):

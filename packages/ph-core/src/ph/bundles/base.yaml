@@ -70,6 +70,14 @@
 - id: workspace-lifecycle
   name: workspace-lifecycle
 
+# Which rung of the ladder this deployment asked for (E1, E8, P4-11). **No rung
+# by default** — which is not the same as `advisory`: mounting this must not opt
+# a profile out of a tier provider it deliberately layered, so an unset `tier`
+# means nobody chose and a provider that is present is used. A profile says
+# `advisory` when it means "this agent stays in the person's own checkout".
+- id: containment
+  name: containment
+
 - id: fs
   name: fs-local
 

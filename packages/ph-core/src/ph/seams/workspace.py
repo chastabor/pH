@@ -498,13 +498,27 @@ class WorkspaceSeam:
 
     @property
     def tier(self) -> ContainmentTier:
-        """The *effective* tier, which is what `ph doctor` must report.
+        """The *effective* tier for a root agent, which is what `ph doctor` prints.
 
-        Effective, not configured: a `worktree` row over a directory that is not
-        a repository declines on every acquire, and a doctor that read the config
-        would tell an operator they have containment they do not have.
+        Effective, not configured, in both directions. A `worktree` row over a
+        directory that is not a repository declines on every acquire, so a
+        doctor reading the config would report containment nobody has — and
+        since P4-11 the inverse is just as reachable: the shipped `rlm` profile
+        layers the git provider *and* chooses `advisory` for the person's own
+        agent, so reading the provider alone would report a worktree the root
+        agent never gets. Both are the defect §4.8 closes on, from opposite
+        sides.
+
+        A root agent's rung: `child_tier` is a different answer, and P4-12
+        prints them per agent from the workspace each one holds.
         """
-        return "advisory" if self.provider is None else self.provider.tier
+        if self.provider is None:
+            return "advisory"
+        containment = self.ctx.get("containment")
+        chosen = None if containment is None else containment.for_role(child=False)
+        if chosen == "advisory":
+            return "advisory"
+        return self.provider.tier
 
     async def acquire(
         self,
@@ -515,8 +529,22 @@ class WorkspaceSeam:
         access: WorkspaceAccess = "write",
         session: Session | None = None,
         scope: Context | None = None,
+        tier: ContainmentTier | None = None,
     ) -> Workspace:
         """Take a workspace for one agent. Never fails, never returns `None`.
+
+        **The rung is derived, not asked of the caller** (P4-11). `shell.run`
+        made the same call in writing — "the seam resolves it itself, rather
+        than making each shell-shaped tool remember to" — and the reason is
+        sharper here: a caller that forgets gets the provider, which for a
+        *root* agent is the escalation the shipped profile says a deployment
+        should have to ask for. The role is already in hand, because a child's
+        session says so (`origin: "subagent"`), so nothing has to be passed and
+        no third caller can forget.
+
+        `tier` overrides that derivation for a caller who means something
+        specific, exactly as `cwd` overrides `shell.run`'s. `advisory` declines
+        a registered provider; anything else consults it.
 
         `scope` is what bounds the workspace's life — the agent's own scope, for
         the lifecycle that lands in P4-08. Disposing it releases the workspace
@@ -524,9 +552,10 @@ class WorkspaceSeam:
         explicit `dispose` is not a leak.
         """
         scratch = await self._scratch_for(session_id, agent_id)
+        chosen = self._chosen_tier(session) if tier is None else tier
         workspace = None
         declined: DeclineReason | None = None
-        if self.provider is not None:
+        if self.provider is not None and chosen != "advisory":
             try:
                 workspace = await self.provider.acquire(
                     session_id=session_id,
@@ -625,6 +654,26 @@ class WorkspaceSeam:
         scratch = self.scratch_root / session_id / agent_id
         await anyio.to_thread.run_sync(lambda: scratch.mkdir(parents=True, exist_ok=True))
         return scratch
+
+    def _chosen_tier(self, session: Session | None) -> ContainmentTier | None:
+        """Which rung this acquisition gets, read off the deployment's choice.
+
+        The role comes from the session rather than from an argument: a child's
+        header carries `origin: "subagent"` (the spawn stamps it), so "is this a
+        child" is a fact the seam already holds. `None` — no containment row —
+        means nobody chose, and a deployment that layered a provider and never
+        mentioned containment gets that provider: layering it *was* the choice.
+
+        A runtime `ctx.get` rather than an import, which is how every other
+        cross-seam consult in this package is spelled — and it is what keeps the
+        selector free to depend on this module's vocabulary without a cycle.
+        """
+        containment = self.ctx.get("containment")
+        if containment is None:
+            return None
+        child = session is not None and session.header.origin == "subagent"
+        chosen: ContainmentTier | None = containment.for_role(child=child)
+        return chosen
 
     async def _track(self, workspace: Workspace, agent_id: str, scope: Context | None) -> _Held:
         """Register the teardown as an effect, so the workspace has an owner.
