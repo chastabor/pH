@@ -118,6 +118,12 @@
 - id: tui-screens
   name: tui-screens
 
+# The other half of the same idea: a row contributes one live *reading* to
+# the footer rather than a whole screen. The context gauge is the shape being
+# generalized — the number worth seeing is the one where the harness will act.
+- id: tui-status
+  name: tui-status
+
 # --- model-facing tools ----------------------------------------------------
 - id: tool-fs
   name: tool-fs

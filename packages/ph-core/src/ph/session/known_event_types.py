@@ -120,6 +120,13 @@ KNOWN_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         # to nothing: it names the seqs it rewrote rather than relying on
         # position, because a truncation pass rewrites several at once.
         "compaction/args-truncated",
+        # Hard boundaries (P4-04, G5; emitted by `ph-stabilize`'s `limits`).
+        # Why a turn stopped, or why a tool stopped being called. Both ignorable:
+        # the model read the denial as a `tool/result`, and a rejected step logs
+        # its own `turn/end{blocked}` — a reader that skips these loses the
+        # *reason*, which is accounting, not the conversation.
+        "limits/exceeded",
+        "limits/breaker-tripped",
         # Media that could not be sent (P7-01). Appended when the route a
         # request went to would not take an attachment — an unaccepted MIME, an
         # over-limit file, bytes no longer on disk — so that "the model was not
@@ -154,6 +161,8 @@ IGNORABLE_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         "compaction/declined",
         "compaction/args-truncated",
         "attachment/degraded",
+        "limits/exceeded",
+        "limits/breaker-tripped",
     }
 )
 """Types a *different* build may skip without misreading the rest of the log.

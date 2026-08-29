@@ -18,12 +18,11 @@ import json
 from typing import Any
 
 import pytest
-from stabilize_helpers import PROFILE
+from stabilize_helpers import PROFILE, run_tool_calls
 
-from ph.cancel import CancelToken
 from ph.cordis import Context, Loader
 from ph.llm.types import ToolCallBlock
-from ph.session import Session, SurfaceIntent
+from ph.session import Session
 from ph.session.known_event_types import KNOWN_SESSION_EVENT_TYPES
 from ph.system_prompt.assembly import (
     AssembleContext,
@@ -31,8 +30,7 @@ from ph.system_prompt.assembly import (
     render_context_sections,
     render_prompt,
 )
-from ph.testing import StubAgent, assistant_payload
-from ph.tools.batch import execute_tool_calls
+from ph.testing import StubAgent
 from ph_stabilize import BUNDLE
 from ph_stabilize.todo import (
     PARALLEL_CALL_ERROR,
@@ -57,23 +55,15 @@ def _call(call_id: str, todos: list[dict[str, str]]) -> ToolCallBlock:
     return ToolCallBlock(id=call_id, name=TOOL_NAME, arguments=json.dumps({"todos": todos}))
 
 
-def _asked_for(session: Session, *calls: ToolCallBlock) -> None:
-    """Commit the assistant message that requested these calls.
-
-    The loop does this before executing any of them, and the parallel rule is
-    read from it — so a test that skipped it would be testing a code path the
-    harness never takes.
-    """
-    blocks = [call.model_dump(mode="json", by_alias=True) for call in calls]
-    session.append(
-        "assistant/message", assistant_payload("", "a1", content=blocks), SurfaceIntent("append")
-    )
-
-
 async def _run(ctx: Any, session: Session, *calls: ToolCallBlock) -> None:
-    agent = StubAgent(ctx, session)
-    _asked_for(session, *calls)
-    await execute_tool_calls(ctx, agent, 1, 1, list(calls), CancelToken(), lambda _c: None)
+    """One batch, through the shared driver.
+
+    The assistant message it commits first is load-bearing: the loop does that
+    before executing any of a message's calls, and the parallel rule is read
+    from it — a test that skipped it would exercise a path the harness never
+    takes. Shared with `test_limits` so there is one statement of that.
+    """
+    await run_tool_calls(ctx, session, *calls)
 
 
 # ----------------------------------------------------------------- the bundle --

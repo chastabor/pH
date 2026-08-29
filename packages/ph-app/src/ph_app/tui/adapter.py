@@ -461,6 +461,21 @@ class TuiEventAdapter:
             event,
         )
 
+    def _on_limits_exceeded(self, event: SessionEvent, live: bool) -> None:
+        """Why the turn stopped (P4-04). The person's only account of it —
+        `turn/end{blocked}` says that it stopped, not what stopped it."""
+        self._row("limits", "notice", str(event.data.get("message") or "Limit reached."), event)
+
+    def _on_breaker_tripped(self, event: SessionEvent, live: bool) -> None:
+        """A tool taken out of service after repeated failure."""
+        tool, failures = event.data.get("tool"), event.data.get("failures")
+        self._row(
+            "limits",
+            "notice",
+            f"Stopped calling {tool} after {count_of(int(failures or 0), 'failure')} in a row.",
+            event,
+        )
+
     def _on_attachment_degraded(self, event: SessionEvent, live: bool) -> None:
         """Media a route would not take (P7-01).
 
@@ -597,6 +612,8 @@ HANDLERS: Mapping[str, Handler] = {
     "offload/input-spilled": TuiEventAdapter._on_offload_spilled,
     "compaction/declined": TuiEventAdapter._on_compaction_declined,
     "attachment/degraded": TuiEventAdapter._on_attachment_degraded,
+    "limits/exceeded": TuiEventAdapter._on_limits_exceeded,
+    "limits/breaker-tripped": TuiEventAdapter._on_breaker_tripped,
     "compaction/args-truncated": TuiEventAdapter._on_compaction_args_truncated,
     "kernel/restored": TuiEventAdapter._on_kernel_restored,
     "harness/refined": TuiEventAdapter._on_harness_refined,

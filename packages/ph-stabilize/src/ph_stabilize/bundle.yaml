@@ -50,3 +50,12 @@
 # with a different engine behind it.
 - id: command-compact
   name: command-compact
+
+# --- limits -----------------------------------------------------------------
+# Hard boundaries on a loop that has stopped making progress (G5). Mounted with
+# every ceiling unset, so layering the bundle changes nothing until a profile
+# names a number — a limit nobody chose is a limit that fires on someone's
+# longest legitimate turn. The breaker is the exception and is on by default:
+# five identical failures in a row is not a long task, it is a stuck one.
+- id: limits
+  name: limits

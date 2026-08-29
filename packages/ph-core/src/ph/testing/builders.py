@@ -187,9 +187,20 @@ def assistant_payload(
 
 
 def tool_result_payload(
-    text: str, message_id: str, call_id: str = "c1", *, turn: int = 1, step: int = 1
+    text: str,
+    message_id: str,
+    call_id: str = "c1",
+    *,
+    turn: int = 1,
+    step: int = 1,
+    is_error: bool = False,
 ) -> dict[str, Any]:
-    """A `tool/result` payload carrying one text block."""
+    """A `tool/result` payload carrying one text block.
+
+    `is_error` is a keyword for the same reason `assistant_payload` takes
+    `content`: so a test states the outcome it wants rather than reaching into
+    this dict's shape to overwrite it afterwards.
+    """
     return {
         "turn": turn,
         "step": step,
@@ -201,7 +212,7 @@ def tool_result_payload(
                     "type": "tool-result",
                     "toolCallId": call_id,
                     "content": [{"type": "text", "text": text}],
-                    "isError": False,
+                    "isError": is_error,
                 }
             ],
             "source": {"kind": "tool", "callId": call_id},

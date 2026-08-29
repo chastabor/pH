@@ -22,7 +22,7 @@ from __future__ import annotations
 import inspect
 import json
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from dataclasses import replace as dataclasses_replace
 from typing import Any, Literal, TypeAlias
 
@@ -160,9 +160,12 @@ def error_result(
     )
 
 
-def denied_result(reason: str) -> ToolExecutionResult:
+def denied_result(reason: str, *, concludes_turn: bool = False) -> ToolExecutionResult:
     """Policy said no. Routable as a denial, so Code Mode can end the run (C3)."""
-    return error_result(reason, {"name": "ToolDenied", "code": TOOL_DENIED}, kind="denied")
+    return replace(
+        error_result(reason, {"name": "ToolDenied", "code": TOOL_DENIED}, kind="denied"),
+        concludes_turn=concludes_turn,
+    )
 
 
 def aborted_result(*, started: bool) -> ToolExecutionResult:
@@ -313,6 +316,15 @@ class Allow:
 @dataclass(frozen=True, slots=True)
 class Deny:
     reason: str
+    concludes_turn: bool = False
+    """Whether this refusal also ends the turn.
+
+    The same flag a *successful* result carries (`ToolRunContext.conclude_turn`),
+    reached from the other side: `commit_ready` reads `concludes_turn` on every
+    committed result, a denial from `prepare()` included, so a policy row that
+    must stop the conversation says so here rather than inventing a second way
+    to end a turn. The batch already in flight still settles — what ends is what
+    comes after it."""
     kind: Literal["deny"] = "deny"
 
 

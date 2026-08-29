@@ -266,7 +266,7 @@ class PHTuiApp(App[str | None]):
             self.title_writer.set(f"{status.glyph} working")
         if not (running or self._dirty):
             return
-        status.show(front.state)
+        status.show(front.state, front.status_readings())
         if not self._dirty:
             return
         self._dirty = False

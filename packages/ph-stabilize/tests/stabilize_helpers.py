@@ -19,7 +19,7 @@ from ph.bundles import BASE, HEADLESS
 from ph.seams.spill import SpillStore
 from ph_stabilize import BUNDLE
 
-__all__ = ["PROFILE", "blob", "break_spill"]
+__all__ = ["PROFILE", "blob", "break_spill", "events_of", "run_tool_calls"]
 
 PROFILE = [BASE, HEADLESS, BUNDLE]
 """Base, the fake adapter, and this bundle — what a profile layering it gets."""
@@ -47,3 +47,36 @@ def break_spill(monkeypatch: pytest.MonkeyPatch) -> None:
         raise OSError("no space left on device")
 
     monkeypatch.setattr(SpillStore, "save_text", refuse)
+
+
+def events_of(session: Any, event_type: str) -> list[Any]:
+    """Every event of one type. Written out in three test modules before this."""
+    return [event for event in session.events if event.type == event_type]
+
+
+async def run_tool_calls(ctx: Any, session: Any, *calls: Any, step: int = 1) -> Any:
+    """Commit the assistant message that asked, then run the batch for real.
+
+    The commit is load-bearing and is why this is shared: the loop appends the
+    assistant message *before* dispatching any of its calls, and rows read it
+    back — `tool-todo`'s parallel rule counts `write_todos` in it. A test that
+    skipped it would exercise a path the harness never takes, and two copies of
+    that invariant are one that gets fixed when the loop's ordering changes.
+
+    Returns the `BatchOutcome`, whose `concluded` is how the loop learns a turn
+    is over.
+    """
+    from ph.cancel import CancelToken
+    from ph.session import SurfaceIntent
+    from ph.testing import StubAgent, assistant_payload
+    from ph.tools.batch import execute_tool_calls
+
+    blocks = [call.model_dump(mode="json", by_alias=True) for call in calls]
+    session.append(
+        "assistant/message",
+        assistant_payload("", f"a{step}", content=blocks),
+        SurfaceIntent("append"),
+    )
+    return await execute_tool_calls(
+        ctx, StubAgent(ctx, session), 1, step, list(calls), CancelToken(), lambda _c: None
+    )

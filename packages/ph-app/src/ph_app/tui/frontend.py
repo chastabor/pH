@@ -38,6 +38,7 @@ from ph.agent.types import AgentCancelCause, AgentOptions
 from ph.cordis import Context
 from ph.llm.types import create_user_message
 from ph.seams.approval import ApprovalOutcome, ApprovalRequest
+from ph.seams.tui_status import StatusReading
 from ph.seams.user_questions import UserQuestion
 from ph.session import Session, SessionEvent
 
@@ -82,6 +83,17 @@ class HarnessSession:
     instance — instead of maintaining a second list of what pH supports."""
     _stack: AsyncExitStack = field(default_factory=AsyncExitStack)
     _disposers: list[Callable[[], Any]] = field(default_factory=list)
+
+    def status_readings(self) -> list[StatusReading]:
+        """What the rows want the footer to say (P4-04's budget, and later ones).
+
+        Here rather than in `app.py`, which is "the terminal": resolving a seam
+        and asking it for a projection is harness-shaped work, and doing it
+        inline in the frame callback put a service lookup on every redraw with
+        nowhere to test it from.
+        """
+        registry = self.ctx.get("tui_status")
+        return [] if registry is None else registry.readings(self.session)
 
     # ----------------------------------------------------------------- turns --
 

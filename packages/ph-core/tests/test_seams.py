@@ -39,6 +39,7 @@ from ph.seams.skills import NAME_MAX, NAME_PATTERN, Skill, SkillService
 from ph.seams.spill import SpillStore
 from ph.seams.subprocess import SubprocessService, SubprocessSpawnSpec, scrub_env
 from ph.seams.tui_screens import ID_MAX, ScreenDefinition, TuiScreenRegistry
+from ph.seams.tui_status import StatusField, StatusReading, TuiStatusRegistry
 from ph.session import Session
 from ph.testing import StubAgent
 
@@ -337,6 +338,54 @@ async def test_a_note_registered_for_one_agent_does_not_reach_another() -> None:
 
     assert seam.notes(session, scope=mine) == ["only mine"]
     assert seam.notes(session, scope=theirs) == []
+
+
+# ----------------------------------------------------------------- tui status --
+
+
+async def test_a_status_field_reads_and_orders() -> None:
+    """The footer's registration seam: `order`, then id, and nothing else."""
+    registry = TuiStatusRegistry(ctx=Context())
+    session = Session("footer")
+    registry.register(StatusField(id="second", read=lambda _s: StatusReading("b"), order=10))
+    registry.register(StatusField(id="first", read=lambda _s: StatusReading("a"), order=1))
+
+    assert [one.text for one in registry.readings(session)] == ["a", "b"]
+
+
+async def test_a_field_with_nothing_to_say_shows_nothing() -> None:
+    """`None` rather than a placeholder: a line that always carries every field
+    is a line where the one that matters cannot be seen."""
+    registry = TuiStatusRegistry(ctx=Context())
+    registry.register(StatusField(id="quiet", read=lambda _s: None))
+
+    assert registry.readings(Session("footer")) == []
+
+
+async def test_a_field_that_raises_does_not_take_the_footer_down() -> None:
+    """It is read on every spinner frame; one bad row must not stop the rest."""
+    registry = TuiStatusRegistry(ctx=Context())
+
+    def explode(_session: Session) -> StatusReading:
+        raise RuntimeError("no")
+
+    registry.register(StatusField(id="broken", read=explode))
+    registry.register(StatusField(id="fine", read=lambda _s: StatusReading("still here")))
+
+    assert [one.text for one in registry.readings(Session("footer"))] == ["still here"]
+
+
+async def test_a_field_unwinds_with_the_row_that_registered_it() -> None:
+    """I2 in the footer: a row that unloads leaves no reading behind."""
+    root = Context()
+    registry = TuiStatusRegistry(ctx=root)
+    row = root.scope("row")
+    registry.register(StatusField(id="owned", read=lambda _s: StatusReading("x")), scope=row)
+    assert registry.readings(Session("footer"))
+
+    await row.dispose()
+
+    assert registry.readings(Session("footer")) == []
 
 
 # --------------------------------------------------------------- code runtime --

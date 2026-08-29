@@ -207,6 +207,17 @@ class Session:
             self._events_snapshot = tuple(self._log)
         return self._events_snapshot
 
+    def events_from(self, index: int) -> tuple[SessionEvent, ...]:
+        """The events appended at or after `index`.
+
+        The accessor an incremental fold wants. `events` caches one snapshot of
+        the *whole* log and rebuilds it whenever the log grew — right for a
+        reader that wants all of it, and quadratic for one that runs per event
+        and only ever looks at the tail. A `SessionFoldCache` extender reads
+        through here.
+        """
+        return tuple(self._log[index:])
+
     @property
     def seq(self) -> int:
         """The next event's sequence number — always the log length (A1)."""

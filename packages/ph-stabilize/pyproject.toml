@@ -18,6 +18,7 @@ stabilize = "ph_stabilize:BUNDLE"
 command-compact = "ph_stabilize.compact_command:apply"
 compaction-summarize = "ph_stabilize.compaction:apply"
 input-offload = "ph_stabilize.input_offload:apply"
+limits = "ph_stabilize.limits:apply"
 tool-result-offload = "ph_stabilize.offload:apply"
 tool-todo = "ph_stabilize.todo:apply"
 

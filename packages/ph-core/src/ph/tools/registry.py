@@ -628,7 +628,8 @@ class ToolRuntime:
             # and asking a guard to confirm it would invite a re-permit.
             reason = self.guard_reason(execution) if isinstance(gate, Allow) else gate.reason
             if reason is not None:
-                return PreparedCall(run=run, result=denied_result(reason))
+                concludes = isinstance(gate, Deny) and gate.concludes_turn
+                return PreparedCall(run=run, result=denied_result(reason, concludes_turn=concludes))
             return PreparedCall(run=run)
         except Exception as error:
             return PreparedCall(run=run, result=_failure(error), needs_post=False)

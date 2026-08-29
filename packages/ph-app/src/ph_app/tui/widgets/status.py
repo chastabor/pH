@@ -9,6 +9,7 @@ the harness will act (G4's 0.85 fraction, Phase 4).
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +17,8 @@ from textual.app import ComposeResult
 from textual.containers import Vertical
 from textual.content import Content
 from textual.widgets import Static
+
+from ph.seams.tui_status import StatusReading
 
 from ..state import TuiState
 
@@ -73,7 +76,7 @@ class StatusBar(Vertical):
     def tick(self) -> None:
         self._frame += 1
 
-    def show(self, state: TuiState) -> None:
+    def show(self, state: TuiState, readings: Sequence[StatusReading] = ()) -> None:
         parts = [
             "[$ph-accent]$glyph[/]",
             "[$ph-muted]$model[/]",
@@ -93,6 +96,14 @@ class StatusBar(Vertical):
             style = "$ph-warning" if pressure >= COMPACTION_THRESHOLD else "$ph-muted"
             parts.append(f"[$ph-muted]·[/] [{style}]$context[/]")
             values["context"] = f"context {min(pressure, 1.0) * 100:.0f}%"
+        for index, reading in enumerate(readings):
+            # Contributed by a row through `ctx.tui_status` — the footer knows
+            # what a reading *is* and nothing about what any of them mean, which
+            # is what lets `limits` show a budget here without ph-app importing
+            # the package that owns one.
+            style = "$ph-warning" if reading.level == "warning" else "$ph-muted"
+            parts.append(f"[$ph-muted]·[/] [{style}]$field{index}[/]")
+            values[f"field{index}"] = reading.text
         self.query_one("#status-line", Static).update(
             Content.from_markup("  ".join(parts), **values)
         )
