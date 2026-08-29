@@ -12,7 +12,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-__all__ = ["write_skill"]
+from ..seams.skills import Skill
+
+__all__ = ["skill", "write_skill"]
 
 
 def write_skill(
@@ -32,3 +34,13 @@ def write_skill(
         encoding="utf-8",
     )
     return directory
+
+
+def skill(name: str, *, description: str = "does a thing", hint: str = "") -> Skill:
+    """One registered skill, with no file behind it.
+
+    For the tests that care about the *registry* — visibility, narrowing, the
+    catalog — rather than about the format on disk. Written out in three modules
+    before it moved here, which is the same road `write_skill` took.
+    """
+    return Skill(name=name, description=description, hint=hint)

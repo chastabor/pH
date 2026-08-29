@@ -17,6 +17,7 @@ owed and the one a stub is tempted to skip.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any
 
 from ..seams.subagents import (
     Access,
@@ -43,6 +44,13 @@ class StubSubagentProvider:
     waitable: bool = True
     """`False` leaves `result` unset — a provider whose children only reply by
     message, which a blocking caller must refuse rather than hang on."""
+    root: Any = None
+    """A context to make child scopes under. Set it to exercise narrowing.
+
+    `ctx`, not the parent: `AgentRegistry.create` scopes every agent under the
+    *registry*, so a real child's scope is its parent's **sibling**. A stub that
+    nested one under the parent would inherit filters production does not, and
+    would pass a ceiling test that production fails."""
     requests: list[SubagentRequest] = field(default_factory=list)
     """Every request this provider was handed, in order."""
 
@@ -61,6 +69,8 @@ class StubSubagentProvider:
             granted_access=granted,
             downgrade_reason=self.downgrade_reason,
         )
+        if self.root is not None:
+            run.scope = self.root.scope(f"agent:{run.id}")
         if self.waitable:
             run.result = self._settle
         return run

@@ -74,6 +74,17 @@ class RunArgs(ToolModel):
     """`read` | `write`. Defaults to `read` (E4): a child that only needs to read
     must not be handed a writable repo because nobody said otherwise. Typed, so
     pydantic validates it and the model sees the two values in the schema."""
+    preset: str | None = None
+    """A named kind of child this deployment configured. Fills in what you did not
+    name; it cannot give the child more than you have (P4-13b)."""
+    skills: tuple[str, ...] | None = None
+    """Skills the child gets, by name from your own catalog. Naming one is also an
+    instruction: its full text goes in the child's prompt, so the child starts by
+    following that procedure rather than having to fetch it. `None` gives it
+    everything you have; you cannot name a skill you do not have (P4-13b)."""
+    tools: tuple[str, ...] | None = None
+    """Tools the child may call. `None` gives it everything you have. You cannot
+    name a tool you do not have."""
 
 
 class DeleteArgs(ToolModel):
@@ -131,6 +142,9 @@ async def apply(ctx: Context, config: Config) -> None:
                     reasoning_effort=args.thinking,
                     model=args.model,
                     access=args.access,
+                    preset=args.preset,
+                    skills=args.skills,
+                    tools=args.tools,
                 ),
             )
         except SubagentSpawnError as error:

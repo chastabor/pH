@@ -31,6 +31,7 @@ from typing import Any, Literal
 from ..cancel import Cancelled, is_cancelled
 from ..cordis import Context, Disposer, events, plugin
 from ..llm.types import ToolSchema, text_of
+from ..seams._restriction import NameFilter
 from ..seams.approval import Edited, Responded, denial_reason
 from ..seams.code_runtime import CodeBindingNamespace, validate_binding_name
 from ..session.json import freeze_json_value, thaw_json
@@ -129,17 +130,13 @@ events.declare(
 # One reason per non-grant, distinct on purpose: a model must be able to tell a
 # human's "no" from a missing channel, because only one is worth re-planning
 # around and the other is a misconfiguration to report.
-@dataclass(frozen=True, slots=True)
-class ToolRestriction:
-    """A per-scope filter over global tools. Restrictions intersect."""
+ToolRestriction = NameFilter
+"""A per-scope filter over global tools. Restrictions intersect.
 
-    allow: frozenset[str] | None = None
-    deny: frozenset[str] | None = None
-
-    def admits(self, name: str) -> bool:
-        if self.allow is not None and name not in self.allow:
-            return False
-        return not (self.deny is not None and name in self.deny)
+The rule itself is `ph.seams._restriction.NameFilter`, shared with `ctx.skills`,
+which asks the same question of a different table. The name stays because it is
+what every call site and every profile-facing docstring says.
+"""
 
 
 @dataclass(slots=True)

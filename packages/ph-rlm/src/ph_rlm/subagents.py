@@ -224,6 +224,10 @@ class RlmChildProvider:
             requested_access=request.access,
             granted_access=granted,
             downgrade_reason=downgrade,
+            # Handed back so the *seam* can bound this child (P4-13b). The scope
+            # is the provider's to create and the ceiling is not the provider's
+            # to remember — `rehydrate` below makes a second one, and forgot.
+            scope=child_agent.ctx,
         )
         child = _Child(
             run=run,
@@ -350,6 +354,12 @@ class RlmChildProvider:
             return False
         child.session = session
         child.agent = self.ctx.agents.create(session, child.options)
+        # A fresh scope means a fresh ceiling: the filters applied at admission
+        # were disposed with the scope that settled, so a rehydrated child would
+        # otherwise come back holding the whole deployment (P4-13b).
+        child.run.scope = child.agent.ctx
+        if child.run.grant is not None:
+            child.run.grant.apply(self.ctx, child.agent.ctx)
         # A fresh gate, which the awaiter already on the run reads at await time —
         # its closure holds the `_Child`, not the old Event.
         child.finished = anyio.Event()

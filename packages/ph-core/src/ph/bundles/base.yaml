@@ -144,6 +144,14 @@
 - id: subagents
   name: subagents
 
+# Named kinds of child a deployment is willing to spawn (P4-13b) — a `reviewer`
+# is `skills: [code-review]`, written once. **A menu, never a grant**: a parent
+# selecting one still gets only what it holds itself, because a preset that
+# widened whatever selected it would put an escalation one indirection away and
+# under the model's control. Empty here; a profile names its own.
+- id: subagent-presets
+  name: subagent-presets
+
 - id: code-runtime
   name: code-runtime
 

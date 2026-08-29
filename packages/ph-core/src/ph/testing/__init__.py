@@ -18,7 +18,7 @@ from .diagnostics import report_section
 from .fake_adapter import FakeAdapter, text_script
 from .git import WORKTREE_ROWS, git, git_repo, needs_git, worktree_agent
 from .replay_adapter import RecordedStep, ReplayAdapter, recorded_steps
-from .skills import write_skill
+from .skills import skill, write_skill
 from .stub_runtime import StubCodeRuntime
 from .stub_sandbox import StubSandboxProvider
 from .stub_subagent import StubSubagentProvider
@@ -46,6 +46,7 @@ __all__ = [
     "report_section",
     "run_tool",
     "simple_tool",
+    "skill",
     "text_script",
     "tool_result_payload",
     "tool_runtime",

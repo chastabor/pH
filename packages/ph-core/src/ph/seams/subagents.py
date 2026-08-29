@@ -30,12 +30,18 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Awaitable, Callable, Iterable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Literal, Protocol, TypeAlias, runtime_checkable
+
+from pydantic import Field
 
 from ..cordis import Context, Disposer, plugin
 from ..session import Session, SessionFoldCache
+from ..system_prompt.assembly import PromptSection
+from ..tools.registry import ToolRestriction
+from ..wire import WireModel
 from ._registry import claim_key
+from .skills import ORDER_SKILLS, SkillRestriction
 
 __all__ = [
     "ADMITTED",
@@ -46,6 +52,8 @@ __all__ = [
     "FamilyRole",
     "RehydratableProvider",
     "StatusCause",
+    "SubagentPreset",
+    "SubagentPresetService",
     "SubagentProvider",
     "SubagentRequest",
     "SubagentResult",
@@ -64,6 +72,11 @@ __all__ = [
 ]
 
 log = logging.getLogger("ph.seams.subagents")
+
+ORDER_BRIEF = ORDER_SKILLS + 10
+"""After the skills catalog, because the brief is the *assignment* and the
+catalog is the menu — a reader who has just been told what to do should meet the
+list of other things last."""
 
 ADMITTED = "subagent/admitted"
 DELETED = "subagent/deleted"
@@ -140,6 +153,33 @@ class SubagentRequest:
     result the parent cannot interpret."""
     reasoning_effort: str | None = None
     access: Access = "read"
+    preset: str | None = None
+    """A named kind of child the deployment configured (`subagent-presets`).
+
+    Resolved into the fields below before the ceiling is checked, so a preset is
+    a set of defaults and never a way past it.
+    """
+    skills: tuple[str, ...] | None = None
+    """Which skills the child gets. `None` inherits the parent's whole set.
+
+    A **subset of the parent's, always** — naming one the parent does not hold
+    is refused rather than granted, because a spawn that could widen would make
+    delegation the privilege escalation I7 exists to prevent (P4-13b). To give a
+    child a skill, install it, which gives it to the parent too.
+
+    `()` is a real answer and not the same as `None`: a child that should read
+    no skill at all. Naming one is also *direction* — the named skills' bodies
+    are put in the child's own prompt, because a child spawned to follow a
+    procedure should not have to spend a turn fetching it.
+    """
+    tools: tuple[str, ...] | None = None
+    """Which tools the child gets. `None` inherits the parent's whole set.
+
+    Same ceiling, same reason. Applied as a `ToolRestriction`, which can only
+    subtract — the Code Mode transport stays reachable regardless, because it is
+    unrestrictable by construction and a child with no way to call anything is
+    not a narrower child, it is a broken one.
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -200,6 +240,22 @@ class SubagentRun:
     dispose: Callable[[], Any] | None = None
     """Releases the child early. Registered as an effect of the parent's scope by
     the provider, so a disposed parent unwinds its children (I2)."""
+    grant: Grant | None = None
+    """What this child was bounded to, stamped by the seam once it has applied it.
+
+    On the run because the run is what a provider keeps: a rehydration builds a
+    *new* scope for a settled child and the filters that bounded the old one
+    went with it, so replaying the ceiling needs the grant to have outlived the
+    scope — and the parent it was computed from."""
+    scope: Context | None = None
+    """The child's own scope, set by the provider so the **seam** can bound it.
+
+    The ceiling was a documented obligation on providers before this field, and
+    the second call site had already missed it: `rehydrate` builds a fresh scope
+    for a settled child and narrowed nothing, so a child that outlived its own
+    restriction came back holding the deployment-wide set. Handing the scope
+    back makes the enforcement the seam's, on both paths, rather than a rule a
+    provider is trusted to remember."""
 
     def to_wire(self) -> dict[str, Any]:
         """The admission facts, for an event or a roster row.
@@ -324,13 +380,139 @@ class SubagentService:
             )
         return provider
 
+    def held_by(self, request: SubagentRequest) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        """What the parent holds, in the two registries a grant covers.
+
+        One reader for both halves of the ceiling — the refusal, the
+        materialization and the "did this narrow anything" check all need the
+        same two sets, and computing them three times in three spellings is how
+        the three come to disagree about what "holds" means.
+        """
+        parent_scope = getattr(request.parent, "ctx", None)
+        skills = self.ctx.get("skills")
+        tools = self.ctx.get("tools")
+        return (
+            tuple(sorted(skills.reach(parent_scope))) if skills is not None else (),
+            tuple(tools.names(scope=parent_scope)) if tools is not None else (),
+        )
+
+    def check_grant(
+        self, request: SubagentRequest, held: tuple[tuple[str, ...], tuple[str, ...]] | None = None
+    ) -> None:
+        """Refuse a spawn that asks for more than the parent holds (P4-13b).
+
+        **Here rather than in each provider**, because this is the one path
+        every delegation takes and a ceiling one provider forgot would not be
+        one. An earlier draft split it — the seam refusing, each provider
+        narrowing — on the theory that a forgetful provider would lose a
+        preference rather than a boundary. That was false, and the second call
+        site had already proved it: `rehydrate` builds a fresh scope for a
+        settled child, narrowed nothing, and handed it the deployment-wide set.
+        So the seam applies the grant too, through `SubagentRun.scope`.
+
+        Refused rather than silently intersected, on `_resolve_model`'s argument
+        one field over: a child that came back with something other than what
+        was asked for is a result the parent cannot interpret. A `reviewer`
+        child missing its review skill does the job wrong and reports success.
+        """
+        held_skills, held_tools = held if held is not None else self.held_by(request)
+        for kind, asked, holds in (
+            ("skill", request.skills, held_skills),
+            ("tool", request.tools, held_tools),
+        ):
+            if asked is None:
+                continue
+            missing = sorted(name for name in asked if name not in holds)
+            if missing:
+                raise SubagentSpawnError(
+                    f"a child cannot be granted {kind}s its parent does not hold: "
+                    f"{', '.join(missing)}. Grant it to the parent first "
+                    f"(the parent holds: {', '.join(sorted(holds)) or 'none'})."
+                )
+
+    def resolve_preset(self, request: SubagentRequest) -> SubagentRequest:
+        """Fill what a named preset supplies and the caller left unsaid.
+
+        Defaults, not a ceiling: a caller may still narrow further, and cannot
+        widen past the parent whatever it names, because `check_grant` runs on
+        the *resolved* request. An unknown name is refused rather than ignored —
+        a spawn that asked for a `reviewer` and silently got a generic child is
+        the failure `_resolve_model` refuses for the same reason one field over.
+        """
+        if request.preset is None:
+            return request
+        service = self.ctx.get("subagent_presets")
+        preset = service.get(request.preset) if service is not None else None
+        if preset is None:
+            offered = ", ".join(service.names()) if service is not None else ""
+            raise SubagentSpawnError(
+                f'no subagent preset named "{request.preset}" is configured '
+                f"(configured: {offered or 'none'})"
+            )
+        return replace(
+            request,
+            skills=request.skills if request.skills is not None else preset.skills,
+            tools=request.tools if request.tools is not None else preset.tools,
+        )
+
+    def grant_for(
+        self, request: SubagentRequest, held: tuple[tuple[str, ...], tuple[str, ...]] | None = None
+    ) -> Grant:
+        """Materialize what this child may reach, from a parent that still exists.
+
+        `None` means "everything the parent holds" and is written out as that
+        explicit list, which is not a nicety: `AgentRegistry.create` scopes every
+        agent under the *registry*, so a child's scope is its parent's
+        **sibling** and a parent's filter does not reach it. Applying nothing
+        would hand the child of a narrowed parent the deployment-wide set.
+        """
+        held_skills, held_tools = held if held is not None else self.held_by(request)
+        named = request.skills
+        skills = self.ctx.get("skills")
+        return Grant(
+            skills=named if named is not None else held_skills,
+            tools=request.tools if request.tools is not None else held_tools,
+            brief=(
+                _brief_text(skills, named, getattr(request.parent, "ctx", None))
+                if named and skills is not None
+                else ""
+            ),
+        )
+
+    def _enforce(
+        self, grant: Grant, run: SubagentRun, held: tuple[tuple[str, ...], tuple[str, ...]]
+    ) -> None:
+        """Bound the child, or refuse the spawn if this provider cannot be bounded.
+
+        Fail-closed, and narrowly: a provider that does not hand back a scope is
+        unbounded, which is only *unsafe* when the grant actually narrows
+        something. So a deployment where nothing is restricted keeps working
+        with any provider, and the moment a spawn means to narrow, a provider
+        that cannot deliver that is refused rather than silently ignored.
+        """
+        if run.scope is not None:
+            run.grant = grant
+            grant.apply(self.ctx, run.scope)
+            return
+        if (grant.skills, grant.tools) != held or grant.brief:
+            raise SubagentSpawnError(
+                f'the "{run.owner or "subagent"}" provider does not expose a child scope, '
+                "so a narrowed child cannot be bounded; it can only run children that "
+                "inherit everything their parent holds"
+            )
+
     async def start(self, name: str, request: SubagentRequest) -> SubagentRun:
         """Admit a child and return its handle. Does not wait for an answer."""
+        request = self.resolve_preset(request)
+        held = self.held_by(request)
+        self.check_grant(request, held)
+        grant = self.grant_for(request, held)
         run = await self.require(name).start(request)
         # Stamped here rather than trusted from the provider: the service is what
         # knows which name the caller asked for, and `rehydrate` has to be able
         # to find its way back to the same provider.
         run.owner = name
+        self._enforce(grant, run, held)
         self._runs[run.id] = run
         return run
 
@@ -397,6 +579,62 @@ class SubagentService:
         return self._runs.pop(run_id, None)
 
 
+class SubagentPreset(WireModel):
+    """A named kind of child a deployment is willing to spawn.
+
+    **No prompt field, deliberately.** The obvious design gives a preset its own
+    standing instructions, and then a directing skill and a preset are two
+    channels saying what a child is for — competing where they disagree and
+    duplicated where they do not. A skill body already *is* a standing
+    instruction (P4-13b), so a preset binds a name to the capability and lets the
+    skill do the directing: `reviewer` is `skills: [code-review]`, and what a
+    reviewer does is written once, in the skill, where a human edits it.
+    """
+
+    skills: tuple[str, ...] | None = None
+    tools: tuple[str, ...] | None = None
+
+
+class PresetConfig(WireModel):
+    """Row config for `subagent-presets`."""
+
+    presets: dict[str, SubagentPreset] = Field(default_factory=dict)
+    """Named by the deployment, selected by a parent.
+
+    A **menu, never a grant**: naming a preset whose entries the parent does not
+    hold is refused like any other spawn, because a preset that widened whatever
+    selected it would put the escalation one indirection away and under the
+    model's control (P4-13b). Presets exist so a deployment writes "what a
+    reviewer is" once, not so it can hand out more than the parent has.
+    """
+
+
+@dataclass(slots=True)
+class SubagentPresetService:
+    """The service published as `ctx.subagent_presets`.
+
+    Config-only, with no `register(..., scope=)` — the one table under
+    `ph.seams` without one, and deliberately: a preset is what a *deployment* is
+    willing to spawn, so a package that could ship one would be widening what a
+    profile allows without the profile saying so. A package ships the skill; a
+    profile decides which children may hold it.
+    """
+
+    presets: dict[str, SubagentPreset] = field(default_factory=dict)
+
+    def get(self, name: str) -> SubagentPreset | None:
+        return self.presets.get(name)
+
+    def names(self) -> list[str]:
+        return sorted(self.presets)
+
+
+@plugin("subagent-presets", config=PresetConfig)
+async def presets(ctx: Context, config: PresetConfig) -> None:
+    """Publish the deployment's named child kinds. None ship in `ph-base`."""
+    ctx.provide("subagent_presets", SubagentPresetService(presets=dict(config.presets)))
+
+
 @plugin("subagents", inject=["sessions"])
 async def apply(ctx: Context, config: Any) -> None:
     """Mount the subagent seam definition. No provider ships in ph-base."""
@@ -405,6 +643,76 @@ async def apply(ctx: Context, config: Any) -> None:
     # A disposed session's last projection is a value nobody can reach; the cache
     # is bounded either way, but holding it is holding it for nothing.
     ctx.on("session/disposed", lambda session: service.forget_session(session.id))
+
+
+@dataclass(frozen=True, slots=True)
+class Grant:
+    """What one child may reach, resolved to names and independent of its parent.
+
+    **Materialized, and that is the point.** The parent may be gone by the time
+    this is applied — a settled child that is rehydrated gets a fresh scope long
+    after the agent that spawned it stopped existing — so a grant that still had
+    to ask "what does the parent hold" would silently fall back to the
+    deployment-wide set at exactly the moment nobody is watching. `_Child`
+    already keeps the child's *options* for this reason; the capability half
+    needs the same treatment.
+
+    `brief` is rendered here rather than read per assembly: it is the cached
+    prompt prefix, and a `PromptSection` that hits the filesystem on every model
+    step is neither static nor free.
+    """
+
+    skills: tuple[str, ...]
+    tools: tuple[str, ...]
+    brief: str = ""
+
+    def apply(self, ctx: Context, scope: Context) -> None:
+        """Bound a child's scope to this grant.
+
+        **Narrowing is by restriction, never by registration.** `ctx.tools`
+        treats a scope's own registration as unmaskable — "a restriction filters
+        GLOBAL names only, so an agent's own registration cannot be masked out
+        from under it" — which makes registering on a child a way to hand it
+        something its parent cannot see. Filters only intersect, so they are the
+        only instrument a spawn is allowed to use. The Code Mode transport
+        survives either way, by construction: a child that cannot call anything
+        is not a narrower child, it is a broken one.
+        """
+        skills = ctx.get("skills")
+        if skills is not None:
+            skills.restrict(SkillRestriction(allow=frozenset(self.skills)), scope=scope)
+        tools = ctx.get("tools")
+        if tools is not None:
+            tools.restrict(ToolRestriction(allow=frozenset(self.tools)), scope=scope)
+        prompt = ctx.get("system_prompt")
+        if self.brief and prompt is not None:
+            prompt.section(
+                PromptSection(name="subagent:brief", text=self.brief, order=ORDER_BRIEF),
+                scope=scope,
+            )
+
+
+def _brief_text(skills: Any, named: Sequence[str], scope: Context | None) -> str:
+    """The named skills' instructions, read once.
+
+    **A named skill is direction, not a lookup.** G9 keeps bodies out of the
+    prompt because a catalog of twenty is twenty bodies the model probably will
+    not need; a child spawned *for* one will need that one, certainly. Making it
+    spend a turn fetching what it was created to do is a wasted call and a real
+    chance it never fetches at all — so the named bodies go in its prompt, and
+    everything else it can still reach stays catalog-only.
+    """
+    parts = []
+    for name in named:
+        body = skills.body(name, scope)
+        if body:
+            parts.append(f"## {name}\n\n{body.strip()}")
+    if not parts:
+        return ""
+    return (
+        "You were delegated this task to follow the instructions below. "
+        "They are not background reading.\n\n" + "\n\n".join(parts)
+    )
 
 
 def subagent_roster(session: Session) -> dict[str, dict[str, Any]]:

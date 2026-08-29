@@ -67,6 +67,30 @@ class TaskArgs(ToolModel):
             "the task is to change files; the deployment may grant less."
         ),
     )
+    preset: str | None = Field(
+        None,
+        description=(
+            "A named kind of child this deployment configured. Fills in skills, tools "
+            "and access you did not name; it cannot give the child more than you have."
+        ),
+    )
+    skills: tuple[str, ...] | None = Field(
+        None,
+        description=(
+            "Skills the child gets, by name from your own catalog. Naming one is also "
+            "an instruction: its full text goes in the child's prompt, so it starts by "
+            "following that procedure. Omit to give it everything you have. You cannot "
+            "name a skill you do not have yourself."
+        ),
+    )
+    tools: tuple[str, ...] | None = Field(
+        None,
+        description=(
+            "Tools the child may call. Omit to give it everything you have. Narrowing "
+            "is a way to keep a child on its task; you cannot name a tool you do not "
+            "have yourself."
+        ),
+    )
 
 
 class TaskValue(ToolModel):
@@ -110,7 +134,13 @@ async def apply(ctx: Context, config: Config) -> None:
             handle = await ctx.subagents.start(
                 provider,
                 SubagentRequest(
-                    prompt=args.prompt, parent=run.agent, name=args.name, access=args.access
+                    prompt=args.prompt,
+                    parent=run.agent,
+                    name=args.name,
+                    access=args.access,
+                    preset=args.preset,
+                    skills=args.skills,
+                    tools=args.tools,
                 ),
             )
         except SubagentSpawnError as error:

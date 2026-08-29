@@ -33,13 +33,14 @@ import anyio
 from pydantic import Field
 
 from ..cordis import Context, Disposer, LoaderError, plugin, safe_yaml_load
-from ..system_prompt.assembly import ORDER_TOOL_GUIDANCE, PromptSection
+from ..system_prompt.assembly import ORDER_TOOL_GUIDANCE, AssembleContext, PromptSection
 from ..tools.definition import ToolModel, ToolOutput, ToolRunContext, define_tool, text_content
 from ..tools.presentation import simple_views
 from ..tools.registry import register_when_composed
 from ..wire import WireModel
 from ._names import require_slug, slug_pattern
 from ._registry import claim_key
+from ._restriction import NameFilter
 
 __all__ = [
     "FRONTMATTER_MAX",
@@ -48,6 +49,7 @@ __all__ = [
     "NAME_PATTERN",
     "SKILL_FILE",
     "Skill",
+    "SkillRestriction",
     "SkillService",
     "apply",
     "discover_skills",
@@ -107,12 +109,53 @@ class Skill(WireModel):
     telling the model about the same skill twice in one prompt."""
 
 
+SkillRestriction = NameFilter
+"""A per-scope filter over installed skills. Restrictions intersect.
+
+The same `NameFilter` `ctx.tools` narrows with — one rule, so a change to what
+`allow` and `deny` mean cannot reach one registry and miss the other.
+**Intersecting is the load-bearing word**: a restriction can only subtract, so a
+scope cannot grant itself a skill by adding one, and a child under a restricted
+parent cannot climb back out (P4-13b).
+"""
+
+
 @dataclass(slots=True)
 class SkillService:
-    """The service published as `ctx.skills`."""
+    """The service published as `ctx.skills`.
+
+    **Installation is global; only *reach* is scoped.** `register`'s `scope=` is
+    a lifetime, not a visibility — it says which row's unloading takes the skill
+    away, and the skill is in the catalog of every agent until then. Narrowing
+    is a separate verb (`restrict`) for the reason P4-13b states as its whole
+    security content: a child may hold a subset of its parent and never more, so
+    the registry offers subtraction and no addition. There is deliberately no
+    way to give one agent a skill another cannot see — to give a child a skill,
+    install it, which gives it to the parent too.
+    """
 
     ctx: Context
     _skills: dict[str, Skill] = field(default_factory=dict)
+    _restrictions: dict[Context | None, list[SkillRestriction]] = field(default_factory=dict)
+    """Filters keyed by the scope they belong to, as `ctx.tools` keys its layers.
+
+    A flat list scanned per read was the first shape and it made **every agent
+    pay for every other agent's narrowing**: a fan-out of sixteen children put
+    sixteen filters in front of the parent's own catalog, none of which could
+    change what the parent sees, and the parent's prompt assembly measured 3.9 times
+    slower for it. Keyed, a read walks `isolation_chain()` — the filters that
+    can possibly apply and no others.
+    """
+    _reach: dict[tuple[Context | None, ...], tuple[int, frozenset[str]]] = field(
+        default_factory=dict
+    )
+    """What each chain may reach, memoized against `_generation`.
+
+    `ToolRuntime.view`'s arrangement for the same reason: the answer is read once
+    per skill per prompt assembly and changes only when something registers or
+    unloads.
+    """
+    _generation: int = 0
 
     def register(self, skill: Skill, *, scope: Context | None = None) -> Disposer:
         """Install a skill. Bounds are enforced here so a catalog stays a catalog."""
@@ -121,15 +164,71 @@ class SkillService:
             raise ValueError(f"a skill description must be at most {DESCRIPTION_MAX} characters")
         if len(skill.hint) > HINT_MAX:
             raise ValueError(f"a skill hint must be at most {HINT_MAX} characters")
-        return claim_key(scope or self.ctx, self._skills, skill.name, skill, label="skill")
+        released = claim_key(scope or self.ctx, self._skills, skill.name, skill, label="skill")
+        self._changed()
 
-    def list(self) -> list[Skill]:
-        return [self._skills[name] for name in sorted(self._skills)]
+        def release() -> None:
+            released()
+            self._changed()
 
-    def get(self, name: str) -> Skill | None:
-        return self._skills.get(name)
+        return release
 
-    def body(self, name: str) -> str | None:
+    def restrict(self, restriction: SkillRestriction, *, scope: Context | None = None) -> Disposer:
+        """Narrow what one scope may see. Filters along the chain intersect.
+
+        Pass `scope=` — a filter owned by this service's context applies to every
+        agent, which is a deployment-wide policy and almost never what a caller
+        narrowing one child meant.
+        """
+        owner = scope or self.ctx
+        key = owner.isolation
+        bucket = self._restrictions.setdefault(key, [])
+        bucket.append(restriction)
+        self._changed()
+
+        def release() -> None:
+            # By identity, never by `==`: a filter is a *value*, and two children
+            # narrowed to the same set compare equal — `list.remove` would have
+            # one child's disposer release the other's.
+            for index, held in enumerate(bucket):
+                if held is restriction:
+                    del bucket[index]
+                    break
+            self._changed()
+
+        return owner.add_disposer(release, label="skill-restriction")
+
+    def _changed(self) -> None:
+        self._generation += 1
+
+    def reach(self, scope: Context | None = None) -> frozenset[str]:
+        """Every skill name this scope may use. The one place filters compose."""
+        target = scope or self.ctx
+        chain = tuple(target.isolation_chain())
+        cached = self._reach.get(chain)
+        if cached is not None and cached[0] == self._generation:
+            return cached[1]
+        names = frozenset(
+            name
+            for name in self._skills
+            if all(one.admits(name) for key in chain for one in self._restrictions.get(key, ()))
+        )
+        self._reach[chain] = (self._generation, names)
+        return names
+
+    def admits(self, name: str, scope: Context | None = None) -> bool:
+        """Whether `scope` may reach this skill at all."""
+        return name in self.reach(scope)
+
+    def list(self, scope: Context | None = None) -> list[Skill]:
+        """What this scope may use, sorted. The catalog and every gate read this."""
+        reachable = self.reach(scope)
+        return [self._skills[name] for name in sorted(reachable)]
+
+    def get(self, name: str, scope: Context | None = None) -> Skill | None:
+        return self._skills.get(name) if self.admits(name, scope) else None
+
+    def body(self, name: str, scope: Context | None = None) -> str | None:
         """The skill's full text, read only when asked for (G9).
 
         Capped again here rather than trusting discovery: a file is validated
@@ -138,7 +237,7 @@ class SkillService:
         `git pull`ed. `None` for an unknown name or a body that no longer fits,
         because both mean "there is nothing to hand you".
         """
-        skill = self._skills.get(name)
+        skill = self.get(name, scope)
         if skill is None or skill.path is None:
             return None
         path = Path(skill.path)
@@ -296,25 +395,35 @@ async def progressive(ctx: Context, config: Config) -> None:
         for skill in await anyio.to_thread.run_sync(discover_skills, config.paths):
             ctx.skills.register(skill, scope=ctx)
 
-    def catalog(_request: Any) -> str:
-        # Asked per assembly, so a skill registered by a later row is in the
-        # catalog — and the `skill` tool it names is checked the same way,
+    def catalog(request: AssembleContext) -> str:
+        # Per assembly *and* per agent: a child narrowed at spawn (P4-13b) must
+        # not be told about skills it cannot read, or the catalog is a list of
+        # things to try and fail at. The `skill` tool is checked the same way,
         # because the two can legitimately disagree for one deployment.
-        return render_catalog(ctx.skills.list(), tool=ctx.tools.get("skill") is not None)
+        return render_catalog(
+            ctx.skills.list(request.scope),
+            # Scoped too: a child narrowed away from the `skill` tool must not be
+            # told in prose to call it. Telling a model to use something absent
+            # from its schema reads as the model's mistake, not the profile's.
+            tool=ctx.tools.get("skill", scope=request.scope) is not None,
+        )
 
     ctx.system_prompt.section(
         PromptSection(name="skills", order=ORDER_SKILLS, text=catalog), scope=ctx
     )
 
-    async def read_body(args: SkillArgs, _run: ToolRunContext) -> Any:
-        skill = ctx.skills.get(args.name)
-        body = ctx.skills.body(args.name)
+    async def read_body(args: SkillArgs, run: ToolRunContext) -> Any:
+        # The *agent's* scope, so a narrowed child is refused a skill it can see
+        # named nowhere — the catalog and the gate answer the same question.
+        scope = getattr(run.agent, "ctx", None)
+        skill = ctx.skills.get(args.name, scope)
+        body = ctx.skills.body(args.name, scope)
         if skill is None or body is None:
             # Named, because "unknown skill" and "this skill has no readable
             # body" are different problems for the model: one is a typo it can
             # fix from the catalog, the other is a deployment fault it cannot.
-            known = ", ".join(one.name for one in ctx.skills.list()) or "none"
-            raise ValueError(f"no readable skill named {args.name!r}; installed: {known}")
+            known = ", ".join(one.name for one in ctx.skills.list(scope)) or "none"
+            raise ValueError(f"no readable skill named {args.name!r}; available: {known}")
         return {"name": skill.name, "path": skill.path, "instructions": body}
 
     def build_tool() -> Any:

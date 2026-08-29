@@ -21,7 +21,7 @@ from ph.seams.subagents import (
     family_reach,
     subagent_roster,
 )
-from ph.testing import FAKE_OPTIONS, StubWorkspaceProvider
+from ph.testing import FAKE_OPTIONS, StubWorkspaceProvider, skill
 from ph_rlm.subagents import PROVIDER_NAME, TASK_PREFIX, delegation_depth
 
 pytestmark = pytest.mark.anyio
@@ -482,3 +482,63 @@ def test_a_default_name_describes_the_task_and_stays_unique() -> None:
     assert default_child_name("x", "abcdef123456", taken=[name]) != name
     # An unslugifiable prompt still yields an addressable name.
     assert default_child_name("!!!", "abcdef123456") == "subagent-task-abcdef12"
+
+
+# ------------------------------------------------------------------- the grant --
+
+
+async def test_a_real_child_is_narrowed_by_its_spawn(delegating: Mounted) -> None:
+    """P4-13b through the provider that actually ships it.
+
+    The seam refuses what the parent does not hold and the provider applies the
+    narrowing, so this is the half a unit test of `apply_grant` cannot reach: a
+    child agent created by `agents.create` — whose scope is the parent's
+    *sibling* — really does end up with the subset.
+    """
+    ctx, _session, parent = await delegating()
+    for name in ("review", "deploy"):
+        ctx.skills.register(skill(name))
+
+    run = await _spawn(ctx, parent, skills=("review",), tools=("read",))
+    child_scope = next(one.ctx for one in ctx.agents.list() if one.session.id == run.session_id)
+
+    assert [one.name for one in ctx.skills.list(child_scope)] == ["review"]
+    assert "read" in ctx.tools.view(child_scope).visible
+    assert "write" not in ctx.tools.view(child_scope).visible
+    # The parent kept everything, which is what makes this narrowing.
+    assert "write" in ctx.tools.view(parent.ctx).visible
+
+
+async def test_a_real_spawn_cannot_widen(delegating: Mounted) -> None:
+    ctx, _session, parent = await delegating()
+
+    with pytest.raises(SubagentSpawnError) as refused:
+        await _spawn(ctx, parent, skills=("nonesuch",))
+
+    assert "Grant it to the parent first" in str(refused.value)
+
+
+async def test_a_rehydrated_child_is_narrowed_again(delegating: Mounted) -> None:
+    """The hole this row nearly shipped, and the reason the seam owns the ceiling.
+
+    Settlement disposes the child's scope, and the filters bounding it are
+    effects of that scope — so they go too. `rehydrate` then builds a **fresh**
+    scope from the retained options, and narrowed nothing: a child that outlived
+    its own restriction came back holding the whole deployment, which is exactly
+    what the ruling forbids and is reachable from a public method on the
+    shipping provider.
+    """
+    ctx, _session, parent = await delegating()
+    for name in ("review", "deploy"):
+        ctx.skills.register(skill(name))
+    run = await _spawn(ctx, parent, skills=("review",))
+    assert [one.name for one in ctx.skills.list(run.scope)] == ["review"]
+
+    await ctx.drain()
+    assert ctx.agents.get(run.session_id) is None, "the child should have settled"
+
+    assert await ctx.subagents.rehydrate(run.id)
+
+    assert [one.name for one in ctx.skills.list(run.scope)] == ["review"], (
+        "a rehydrated child came back holding more than its parent granted"
+    )
