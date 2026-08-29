@@ -58,6 +58,11 @@ KNOWN_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         # which only works if both halves are in the vocabulary.
         "workspace/acquired",
         "workspace/disposed",
+        # Materials that did not reach a fresh workspace (E14). Appended only
+        # when something failed — a silent success is the ordinary case, and one
+        # event per agent saying "nothing went wrong" is noise in a log whose
+        # whole value is that everything in it happened.
+        "workspace/provisioned",
         # retry
         "llm/retry",
         # Code Mode dispatch records (log-only; see ph.tools.code_mode)
@@ -177,6 +182,7 @@ IGNORABLE_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         "limits/breaker-tripped",
         "workspace/acquired",
         "workspace/disposed",
+        "workspace/provisioned",
     }
 )
 """Types a *different* build may skip without misreading the rest of the log.

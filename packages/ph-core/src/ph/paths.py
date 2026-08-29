@@ -43,7 +43,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-__all__ = ["PathRoots", "RuntimeDirError", "default_home_path", "resolve_roots", "write_text_under"]
+__all__ = [
+    "PathRoots",
+    "RuntimeDirError",
+    "default_home_path",
+    "is_under",
+    "resolve_roots",
+    "write_text_under",
+]
 
 RuntimeTier = Literal["override", "windows", "xdg-runtime", "tmpdir", "tmp-uid"]
 
@@ -192,6 +199,23 @@ def resolve_roots(*, create: bool = False) -> PathRoots:
 def default_home_path(configured: str | None, name: str) -> Path:
     """A row's `path` setting, else `$PH_HOME/<name>` — the idiom every seam shares."""
     return Path(configured).expanduser() if configured else resolve_roots().home / name
+
+
+def is_under(candidate: Path, root: Path) -> bool:
+    """Whether `candidate` is `root` or inside it, both taken as given.
+
+    Neither is resolved here: a caller that needs symlink-safety must
+    `resolve()` *before* asking, because resolving inside would answer a
+    different question than the one a security check means to ask — and one that
+    silently passes for a path whose parent is a link out of the tree.
+    """
+    if candidate == root:
+        return True
+    try:
+        candidate.relative_to(root)
+    except ValueError:
+        return False
+    return True
 
 
 def write_text_under(path: Path, text: str, *, append: bool = False) -> None:

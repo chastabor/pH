@@ -46,12 +46,37 @@ from pathlib import Path
 from ..cordis import Context, plugin
 from ..paths import default_home_path
 from ..wire import WireModel
-from .subprocess import SubprocessSpawnSpec
-from .workspace import ContainmentTier, Workspace, WorkspaceAccess, redirection_env
+from .subprocess import SubprocessSpawnSpec, scrub_env
+from .workspace import (
+    ContainmentTier,
+    DeclineReason,
+    Workspace,
+    WorkspaceAccess,
+    WorkspaceDeclined,
+    redirection_env,
+)
 
 __all__ = ["GitWorktreeProvider", "apply", "sanitize_ref"]
 
 log = logging.getLogger("ph.seams.workspace_git")
+
+
+async def git(ctx: Context, cwd: Path, *args: str) -> tuple[int, str, str]:
+    """One git invocation, through `ctx.subprocess` — never `os.system`.
+
+    The seam scrubs the credential-shaped environment (F1) and reaps the child in
+    a `finally` (F4); a bare `subprocess.run` here would opt this module out of
+    both for no gain.
+
+    `LC_ALL=C` because pH reads what git says. `--porcelain` is stable by
+    contract, but stderr is gettext-translated and `ctx.subprocess` passes
+    `LANG` through — so without this a decline reason, and anything else read
+    off git's words, would depend on the operator's locale.
+    """
+    spec = SubprocessSpawnSpec(argv=("git", *args), cwd=cwd, env=scrub_env(extra={"LC_ALL": "C"}))
+    result: tuple[int, str, str] = await ctx.subprocess.run(spec)
+    return result
+
 
 _UNSAFE_REF = re.compile(r"[^A-Za-z0-9._-]+")
 """Everything git refuses in a ref component, plus `/`, which would nest.
@@ -101,20 +126,22 @@ class GitWorktreeProvider:
         scratch: Path,
         access: WorkspaceAccess = "write",
     ) -> Workspace | None:
-        """A checkout for this agent, or `None` when `base` is not a repository.
+        """A checkout for this agent, or a named decline.
 
         Declining is the normal answer for half the directories a person runs pH
         in, and the seam's fallback makes it a notice rather than a refusal to
-        start.
+        start. It declines by *raising* `WorkspaceDeclined` rather than returning
+        `None`, so the reason survives to `workspace/acquired` and to `ph doctor`
+        — a fallback that cannot say why is indistinguishable from no tier at
+        all, which is the confusion E15 exists to remove.
         """
         toplevel = await self._toplevel(base)
         if toplevel is None:
-            return None
+            raise WorkspaceDeclined("not-a-repository", f"{base} is not a git repository")
 
         ref = f"ph/{sanitize_ref(session_id)}/{sanitize_ref(agent_id)}"
         path = self.root / sanitize_ref(session_id) / sanitize_ref(agent_id)
-        if not await self._add(toplevel, path, ref):
-            return None
+        await self._add(toplevel, path, ref)
 
         ephemeral = access == "read"
         return Workspace(
@@ -127,7 +154,9 @@ class GitWorktreeProvider:
             repo_writable=True,
             ref=ref,
             env=redirection_env(scratch),
-            release=lambda: self._release(toplevel, path, ref, discard=ephemeral),
+            release=lambda workspace: self._release(
+                toplevel, path, ref, discard=ephemeral, workspace=workspace
+            ),
         )
 
     async def _toplevel(self, base: Path) -> Path | None:
@@ -153,7 +182,7 @@ class GitWorktreeProvider:
             return None
         return Path(out.strip())
 
-    async def _add(self, toplevel: Path, path: Path, ref: str) -> bool:
+    async def _add(self, toplevel: Path, path: Path, ref: str) -> None:
         """`git worktree add`, tolerating the two states a resume can find.
 
         A worktree already checked out at this path is *reused*: the agent id is
@@ -164,7 +193,7 @@ class GitWorktreeProvider:
         """
         if (path / ".git").exists():
             log.info("ph.seams.workspace_git: reusing the worktree already at %s", path)
-            return True
+            return
         code, _, err = await self._git(toplevel, "worktree", "add", "-b", ref, str(path), "HEAD")
         if code != 0:
             # Both recoveries hang off the failure, which is what makes them
@@ -179,14 +208,50 @@ class GitWorktreeProvider:
             )
             code, _, err = await self._git(toplevel, *retry)
         if code != 0:
+            detail = err.strip() or f"git exited {code}"
+            reason = await self._why(toplevel, path, ref)
             log.warning(
-                "ph.seams.workspace_git: could not create a worktree at %s (%s); declining",
+                "ph.seams.workspace_git: could not create a worktree at %s (%s); declining as %s",
                 path,
-                err.strip() or f"git exited {code}",
+                detail,
+                reason,
             )
-        return code == 0
+            raise WorkspaceDeclined(reason, detail)
 
-    async def _release(self, toplevel: Path, path: Path, ref: str, *, discard: bool) -> bool:
+    async def _why(self, toplevel: Path, path: Path, ref: str) -> DeclineReason:
+        """Which decline this was, asked of git's *state* rather than its prose.
+
+        The first version matched `"already used by worktree"` in stderr. That is
+        gettext-translated — `ctx.subprocess` passes `LANG`/`LC_ALL` through,
+        since they are not credential-shaped — so on a non-English host every
+        decline collapsed to the generic code, in the row whose entire purpose is
+        telling an operator why. Both facts are available structurally, and one
+        of them (`_has_ref`) was already being asked two lines above.
+        """
+        if await self._checked_out(toplevel, ref):
+            return "branch-in-use"
+        if path.exists():
+            return "path-exists"
+        return "provider-failed"
+
+    async def _checked_out(self, toplevel: Path, ref: str) -> bool:
+        """Whether some worktree already holds this branch.
+
+        `--porcelain` rather than the human listing, so this reads the same on
+        every locale as the thing it replaced did not.
+        """
+        code, out, _ = await self._git(toplevel, "worktree", "list", "--porcelain")
+        return code == 0 and f"branch refs/heads/{ref}" in out.splitlines()
+
+    async def _release(
+        self,
+        toplevel: Path,
+        path: Path,
+        ref: str,
+        *,
+        discard: bool,
+        workspace: Workspace,
+    ) -> bool:
         """Remove or keep, and report which. The disposal policy, in one place.
 
         Returns whether anything was **kept**, which is what rides
@@ -197,7 +262,7 @@ class GitWorktreeProvider:
         that failed leaves the tree on disk, and saying `False` there would make
         the field a statement of policy instead of a record.
         """
-        if not discard and await self._dirty(path):
+        if not discard and await self._dirty(path, workspace):
             log.info(
                 "ph.seams.workspace_git: keeping %s on %s — it has changes to review", path, ref
             )
@@ -224,14 +289,26 @@ class GitWorktreeProvider:
         code, _, _ = await self._git(toplevel, "branch", "-d", ref)
         return code != 0
 
-    async def _dirty(self, path: Path) -> bool:
+    async def _dirty(self, path: Path, workspace: Workspace) -> bool:
         """Whether this worktree holds anything worth keeping.
 
         `--porcelain` with untracked files included: a new file nobody staged is
         exactly the work a discarded worktree would lose, and it is the common
         shape of what an agent produces.
+
+        The pathspec comes from `Workspace.agent_work_pathspec()` rather than
+        being built here, because two other consumers ask the same question —
+        `/workspaces list` and, next row, `/revert` — and when they each built
+        their own they disagreed about the same tree.
         """
-        code, out, _ = await self._git(path, "status", "--porcelain", "--untracked-files=all")
+        code, out, _ = await self._git(
+            path,
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
+            "--",
+            *workspace.agent_work_pathspec(),
+        )
         if code != 0:
             # Unreadable is treated as dirty: keeping a tree nobody wanted costs
             # disk, and removing one that held work costs the work.
@@ -245,15 +322,7 @@ class GitWorktreeProvider:
         return code == 0
 
     async def _git(self, cwd: Path, *args: str) -> tuple[int, str, str]:
-        """One git invocation, through `ctx.subprocess` — never `os.system`.
-
-        The seam scrubs the credential-shaped environment (F1) and reaps the
-        child in a `finally` (F4); a bare `subprocess.run` here would opt this
-        module out of both for no gain.
-        """
-        spec = SubprocessSpawnSpec(argv=("git", *args), cwd=cwd)
-        result: tuple[int, str, str] = await self.ctx.subprocess.run(spec)
-        return result
+        return await git(self.ctx, cwd, *args)
 
 
 class Config(WireModel):

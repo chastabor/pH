@@ -47,29 +47,37 @@ somewhere the container can reach — but never has to invent the layout.
 from __future__ import annotations
 
 import logging
-from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass, field
+from collections.abc import Awaitable, Callable, Mapping, Sequence
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal, Protocol, TypeAlias, runtime_checkable
 
 import anyio
+from pydantic import Field
 
-from ..cordis import Context, Disposer, maybe_await, plugin
+from ..cordis import Context, Disposer, maybe_await, plugin, safe_yaml_load
 from ..paths import default_home_path
 from ..session import Session
 from ..wire import WireModel
-from ._registry import claim_slot
+from . import workspace_provision
+from ._registry import claim_entry, claim_slot
+from .workspace_provision import ProvisionEntry, ProvisionReport
 
 __all__ = [
+    "PROJECT_PROVISION_FILE",
     "ContainmentTier",
+    "DeclineReason",
     "LifecycleConfig",
     "SharedWorkspaceProvider",
     "Workspace",
     "WorkspaceAccess",
+    "WorkspaceDeclined",
     "WorkspaceKind",
     "WorkspaceProvider",
     "WorkspaceSeam",
     "apply",
+    "discover_provisioning",
+    "fresh_root",
     "lifecycle",
     "project_access",
     "redirection_env",
@@ -124,6 +132,23 @@ def project_access(kind: WorkspaceKind) -> WorkspaceAccess:
             return "write"
         case "worktree-ephemeral" | "readonly-scratch":
             return "read"
+
+
+def fresh_root(kind: WorkspaceKind) -> bool:
+    """Whether this kind hands the agent a directory that is not the base.
+
+    Exhaustive over `WorkspaceKind` rather than `root == base`, for the reason
+    `project_access` next door already gives: a kind added in this module should
+    fail to type-check here rather than silently classify. `shared` is the only
+    one whose root *is* the base, which is why nothing is provisioned into it —
+    every material is already there, and copying `.env` onto itself is the one
+    way this could destroy the file it exists to provide.
+    """
+    match kind:
+        case "shared":
+            return False
+        case "worktree" | "worktree-ephemeral" | "readonly-scratch":
+            return True
 
 
 def redirection_env(scratch: Path) -> dict[str, str]:
@@ -215,8 +240,22 @@ class Workspace:
     toolchain that insists on writing beside its sources will still fail, and the
     answer to that is `access="write"` for that agent, not a weaker tier.
     """
-    release: Callable[[], Awaitable[bool]] | None = None
+    provisioned: tuple[str, ...] = ()
+    """Paths the seam put in this workspace (E14) — not the agent's work."""
+    provision_failures: tuple[str, ...] = ()
+    """Materials the seam could not put in place (E14).
+
+    On the value rather than in a log line because the party that has to know
+    `.env` is missing is the *agent* about to wonder why the tests fail — it is
+    read straight onto the workspace prompt line. Empty is the ordinary case,
+    including "this profile provisions nothing"."""
+    release: Callable[[Workspace], Awaitable[bool]] | None = None
     """The provider's teardown, returning whether anything was **kept**.
+
+    Takes the whole workspace, not one field of it: a teardown policy needs to
+    know what was provisioned *and* what kind it is holding, and P4-09's
+    checkpoint refs will be the third such fact — a callback that takes the value
+    costs no protocol change when that happens.
 
     The answer is only knowable here: P4-08's policy is "keep dirty, remove
     clean, discard ephemeral even if dirty", so a field set at acquire time could
@@ -224,6 +263,45 @@ class Workspace:
     seam records the answer on `workspace/disposed` so a reader can tell "nothing
     changed, so it was removed" from "these writes were thrown away by design".
     """
+
+    def agent_work_pathspec(self) -> list[str]:
+        """A `git` pathspec selecting this tree *minus* what the seam put in it.
+
+        The one definition of "the agent's work", because there are already
+        three consumers and they must not disagree: the disposal policy
+        (`workspace_git._dirty`), `/workspaces list`, and P4-09's `/revert`,
+        whose "restore tracked + untracked-not-ignored" is exactly the set that
+        must not clobber a provisioned `node_modules`. Two of those answered it
+        separately at first, and called the same tree clean and dirty.
+
+        The positive `.` is required: exclusions alone match everything, which is
+        the opposite of what they read as.
+        """
+        return [".", *(f":(exclude){entry}" for entry in self.provisioned)]
+
+
+DeclineReason: TypeAlias = Literal[
+    "not-a-repository", "branch-in-use", "path-exists", "provider-failed"
+]
+"""Why a tier could not serve a request, as a code rather than prose.
+
+`ph doctor` prints it (P4-12) and the fallback is otherwise indistinguishable
+from "no tier configured" — an operator who set `worktree` and got `shared` is
+owed the reason, and a durable event carrying an English sentence is unparseable
+by the consumer that has to branch on it.
+"""
+
+
+class WorkspaceDeclined(Exception):
+    """A provider declining *with* a reason. Never fatal; the seam falls back.
+
+    Raised rather than returned so the `acquire` protocol keeps one shape: a
+    bare `None` is still a decline, it simply cannot say why.
+    """
+
+    def __init__(self, reason: DeclineReason, detail: str = "") -> None:
+        super().__init__(detail or reason)
+        self.reason: DeclineReason = reason
 
 
 @runtime_checkable
@@ -290,6 +368,10 @@ class _Held:
 
     workspace: Workspace
     dispose: Disposer | None = None
+    session: Session | None = None
+    """Where this workspace's closing event goes, set once the acquisition is
+    logged — the release closure reads it here rather than capturing it, so the
+    two halves of the pair cannot disagree about which log they belong to."""
 
 
 @dataclass(slots=True)
@@ -300,6 +382,13 @@ class WorkspaceSeam:
     shared: SharedWorkspaceProvider
     scratch_root: Path
     provider: WorkspaceProvider | None = None
+    _provisioning: list[ProvisionEntry] = field(default_factory=list)
+    """Materials to put in a fresh workspace, in registration order (E14).
+
+    A list rather than a `claim_slot`, because two sources legitimately compose:
+    the profile's own row, and a repository's `.ph-workspace.yml`. Later entries
+    win a collision, which is the same last-write-wins a single list has.
+    """
     _held: dict[str, _Held] = field(default_factory=dict)
     """Live workspaces by agent id.
 
@@ -319,6 +408,44 @@ class WorkspaceSeam:
         """
         held = self._held.get(agent_id)
         return None if held is None else held.workspace
+
+    def provision(
+        self, entries: Sequence[ProvisionEntry], *, scope: Context | None = None
+    ) -> Disposer:
+        """Contribute materials for every fresh workspace this seam hands out.
+
+        On the *seam* rather than on the tier, so `readonly-scratch` (P6-05) and
+        any later fresh-root kind inherit the guards without re-implementing
+        them — the same argument that put `scratch` here. Nothing is provisioned
+        into a `shared` workspace, whose root *is* the base.
+
+        Pass `scope=ctx` from a row's `apply`, so the entries leave with the row.
+        Removal is by identity (`claim_entry`), because a `ProvisionEntry` is a
+        *value*: two rows contributing `{source: .env}` compare equal, and
+        `list.remove` would have one row's disposer take the other's.
+        """
+        disposers = [
+            claim_entry(scope or self.ctx, self._provisioning, entry, label="workspace.provision")
+            for entry in entries
+        ]
+
+        def release() -> None:
+            for disposer in disposers:
+                disposer()
+
+        return (scope or self.ctx).add_disposer(release, label="workspace.provision")
+
+    def live(self) -> list[Workspace]:
+        """Every workspace an agent currently holds.
+
+        Keyed lookups (`of`) answer "does *this* agent hold one"; this answers
+        "is this tree anybody's", which is what `/workspaces` needs before it
+        offers to delete a directory. Matching by root rather than by inverting
+        a directory name back into an agent id is the point: `sanitize_ref` is
+        lossy, so an id that does not sanitize to itself would read as unheld and
+        lose the refusal that protects it.
+        """
+        return [held.workspace for held in self._held.values()]
 
     def register_provider(
         self, provider: WorkspaceProvider, *, scope: Context | None = None
@@ -355,6 +482,7 @@ class WorkspaceSeam:
         """
         scratch = await self._scratch_for(session_id, agent_id)
         workspace = None
+        declined: DeclineReason | None = None
         if self.provider is not None:
             try:
                 workspace = await self.provider.acquire(
@@ -364,13 +492,30 @@ class WorkspaceSeam:
                     scratch=scratch,
                     access=access,
                 )
+            except WorkspaceDeclined as refusal:
+                # A decline that says why. Not an error path: half the
+                # directories a person runs pH in are not repositories.
+                declined = refusal.reason
+                log.info(
+                    "ph.seams.workspace: tier declined %s for agent %s (%s); using a shared "
+                    "workspace, so this agent is not contained",
+                    base,
+                    agent_id,
+                    refusal.reason,
+                )
             except Exception:
                 # A tier that broke is a tier that is not in force. Falling back
                 # is the honest outcome and `workspace/acquired` will say
                 # `shared`, which is what an operator needs to see.
+                declined = "provider-failed"
                 log.exception("ph.seams.workspace: provider failed; falling back to shared")
             else:
                 if workspace is None:
+                    # No reason *fabricated* here. A provider that declined
+                    # without giving one has not told us why, and inventing
+                    # a reason for it would reintroduce one level down the
+                    # very confusion this field exists to remove — and would say
+                    # "git" about a tier that may not be git at all.
                     log.info(
                         "ph.seams.workspace: provider declined %s for agent %s; using a shared "
                         "workspace, so this agent is not contained",
@@ -385,7 +530,33 @@ class WorkspaceSeam:
                 scratch=scratch,
                 access=access,
             )
-        return await self._record(workspace, agent_id, session, scope)
+        # Owned *before* provisioning, not after. Materialising a dependency
+        # directory is thousands of syscalls, and running it between
+        # `provider.acquire()` and the `ctx.effect` registration would put the
+        # widest window in this module exactly where the worktree exists and
+        # nothing yet unwinds it — against I2, in the module that argues I2.
+        held = await self._track(workspace, agent_id, scope)
+        held.workspace = await self._provision(workspace, base)
+        self._log(held.workspace, agent_id, session, declined)
+        return held.workspace
+
+    async def _provision(self, workspace: Workspace, base: Path) -> Workspace:
+        """Put the configured materials in a *fresh* root (E14)."""
+        if not self._provisioning or not fresh_root(workspace.kind):
+            return workspace
+        # Qualified: `provision` on this class is the *registration* and the
+        # module function is the work, and the module name is what keeps a call
+        # site from doing the wrong one.
+        report: ProvisionReport = await workspace_provision.provision(
+            self._provisioning, base=base, root=workspace.root
+        )
+        if report.failed:
+            log.warning(
+                "ph.seams.workspace: %d material(s) did not reach %s",
+                len(report.failed),
+                workspace.root,
+            )
+        return replace(workspace, provisioned=report.provisioned, provision_failures=report.failed)
 
     async def dispose(self, agent_id: str) -> None:
         """Release this agent's workspace early.
@@ -412,19 +583,13 @@ class WorkspaceSeam:
         await anyio.to_thread.run_sync(lambda: scratch.mkdir(parents=True, exist_ok=True))
         return scratch
 
-    async def _record(
-        self,
-        workspace: Workspace,
-        agent_id: str,
-        session: Session | None,
-        scope: Context | None,
-    ) -> Workspace:
-        """Register the teardown as an effect and log the acquisition.
+    async def _track(self, workspace: Workspace, agent_id: str, scope: Context | None) -> _Held:
+        """Register the teardown as an effect, so the workspace has an owner.
 
-        Both halves of the durable pair are written here rather than by the
-        provider, because a pair only reconciles if one place owns both — a
-        provider that forgot the second would leave every workspace looking
-        leaked.
+        The release closure reads `held.workspace` rather than capturing one,
+        because provisioning replaces the value a moment later and the teardown
+        policy needs the *final* one — what was put in the tree is what it must
+        not mistake for the agent's work.
         """
         held = _Held(workspace=workspace)
         self._held[agent_id] = held
@@ -436,27 +601,51 @@ class WorkspaceSeam:
                 if self._held.get(agent_id) is not held:
                     return
                 del self._held[agent_id]
-                kept = True if workspace.release is None else await workspace.release()
-                if session is not None:
-                    session.append(
-                        "workspace/disposed", self._payload(workspace, agent_id, kept=kept)
+                current = held.workspace
+                kept = True if current.release is None else await current.release(current)
+                if held.session is not None:
+                    held.session.append(
+                        "workspace/disposed", self._payload(current, agent_id, kept=kept)
                     )
 
             return release
 
         held.dispose = await (scope or self.ctx).effect(enter, label=f"workspace({agent_id})")
-        if session is not None:
+        return held
+
+    def _log(
+        self,
+        workspace: Workspace,
+        agent_id: str,
+        session: Session | None,
+        declined: DeclineReason | None,
+    ) -> None:
+        """Both halves of the durable pair are written by the seam.
+
+        A pair only reconciles if one place owns both — a provider that forgot
+        the second would leave every workspace looking leaked.
+        """
+        if session is None:
+            return
+        self._held[agent_id].session = session
+        data = self._payload(
+            workspace,
+            agent_id,
+            kind=workspace.kind,
+            root=str(workspace.root),
+            repoWritable=workspace.repo_writable,
+        )
+        if declined is not None:
+            # Only when a tier was asked and could not serve: absent means
+            # "no tier configured", which is a different fact and the one
+            # `ph doctor` must not confuse it with (E15).
+            data["declined"] = declined
+        session.append("workspace/acquired", data)
+        if workspace.provision_failures:
             session.append(
-                "workspace/acquired",
-                self._payload(
-                    workspace,
-                    agent_id,
-                    kind=workspace.kind,
-                    root=str(workspace.root),
-                    repoWritable=workspace.repo_writable,
-                ),
+                "workspace/provisioned",
+                {"agentId": agent_id, "failed": list(workspace.provision_failures)},
             )
-        return workspace
 
     def _payload(self, workspace: Workspace, agent_id: str, **extra: Any) -> dict[str, Any]:
         """The keys both halves of the pair share, spelled once.
@@ -471,6 +660,20 @@ class WorkspaceSeam:
         return data
 
 
+PROJECT_PROVISION_FILE = ".ph-workspace.yml"
+"""Where a repository states what its worktrees need (E14).
+
+Discovered the way `agent-instructions` finds `AGENTS.md` — walking up from the
+project directory — and read for **data only**: a `copy`/`symlink`/`hardlink`
+entry, nothing that executes. That is what makes cloning a repository and
+starting pH safe in a way `wtp`'s `.wtp.yml` is not, and it is why the `command`
+hook was refused rather than trust-gated.
+
+Read once, at mount. A file that appears later needs a restart, which is the
+right trade for a list that is read before every agent starts.
+"""
+
+
 class LifecycleConfig(WireModel):
     """Row config for the lifecycle."""
 
@@ -481,6 +684,11 @@ class LifecycleConfig(WireModel):
     (E4, Q11); this is the person at the keyboard, who asked for a harness in
     their own repository.
     """
+    provision: list[ProvisionEntry] = Field(default_factory=list)
+    """Materials every fresh workspace gets — `.env`, a dependency directory, a
+    local config the project gitignores (E14). Empty by default: a profile that
+    names none provisions none, and a `shared` workspace is never provisioned at
+    all because its root already *is* the base."""
 
 
 @plugin("workspace-lifecycle", inject=["workspace", "fs"], config=LifecycleConfig)
@@ -508,6 +716,13 @@ async def lifecycle(ctx: Context, config: LifecycleConfig) -> None:
 
     ctx.fs.rebase(root_of, scope=ctx)
 
+    # The profile's list and the project's, composed here rather than by two
+    # registrations: `provision()` accepts many contributors, and this row is
+    # simply the one that knows about both sources.
+    entries = [*config.provision, *discover_provisioning(ctx.fs.root)]
+    if entries:
+        ctx.workspace.provision(entries, scope=ctx)
+
     async def ensure(request: Any, next_: Callable[..., Any]) -> Any:
         agent = request.agent
         if ctx.workspace.of(agent.id) is None:
@@ -531,6 +746,42 @@ async def lifecycle(ctx: Context, config: LifecycleConfig) -> None:
     # compaction's summariser, a permissions row — sees the agent's own root
     # rather than the process's.
     ctx.on("agent/pre-step", ensure, prepend=True)
+
+
+def discover_provisioning(start: Path) -> list[ProvisionEntry]:
+    """The project's own materials list, walking up from `start`.
+
+    Nearest-first and *first-wins*, which is `agent-instructions`' rule: the file
+    beside the code is the one that knows what the code needs, and a monorepo
+    root should not override a package that states its own.
+
+    Read with `safe_yaml_load`, the same reader every profile row goes through:
+    this is the *least* trusted config the harness opens, so it is the last one
+    that should have its own parsing rules — that reader rejects unknown `!tag`s
+    ("pH config is data, not code") and the implicit timestamp coercion that
+    would otherwise turn `source: 2024-01-02` into a `datetime` here and a `str`
+    everywhere else.
+
+    Every failure is a shrug: a malformed file, an entry with an unknown key, a
+    `source` naming somewhere outside the tree. Refusing to start because a
+    repository's optional config is wrong would make this list load-bearing,
+    and the guards in `resolve_entry` refuse the dangerous ones per entry
+    anyway.
+    """
+    for directory in (start, *start.parents):
+        candidate = directory / PROJECT_PROVISION_FILE
+        if not candidate.is_file():
+            continue
+        try:
+            document = (
+                safe_yaml_load(candidate.read_text(encoding="utf-8"), origin=str(candidate)) or {}
+            )
+            raw = document.get("provision", []) if isinstance(document, dict) else []
+            return [ProvisionEntry.model_validate(item) for item in raw]
+        except Exception:
+            log.warning("ph.seams.workspace: ignoring %s", candidate, exc_info=True)
+            return []
+    return []
 
 
 class Config(WireModel):

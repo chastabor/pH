@@ -23,6 +23,7 @@ import pytest
 from ph.seams.subprocess import SubprocessSpawnSpec, scrub_env
 from ph.seams.workspace import redirection_env
 from ph.seams.workspace_git import sanitize_ref
+from ph.testing import git, git_repo
 
 pytestmark = [
     pytest.mark.anyio,
@@ -46,29 +47,7 @@ async def _tiered(mount: Any, tmp_path: Path) -> tuple[Any, Path]:
     pH's own tree and sharing one branch namespace.
     """
     ctx = await mount(TIER_ROW)
-    return ctx, await _repo(ctx, tmp_path / "repo")
-
-
-async def _repo(ctx: Any, path: Path) -> Path:
-    """A repository with one commit — the least a worktree can branch from."""
-    path.mkdir(parents=True, exist_ok=True)
-    for args in (
-        ("init", "-b", "main"),
-        ("config", "user.email", "ph@example.invalid"),
-        ("config", "user.name", "pH"),
-    ):
-        await _git(ctx, path, *args)
-    (path / "README.md").write_text("base\n", encoding="utf-8")
-    await _git(ctx, path, "add", "-A")
-    await _git(ctx, path, "commit", "-m", "base")
-    return path
-
-
-async def _git(ctx: Any, cwd: Path, *args: str) -> tuple[int, str, str]:
-    result: tuple[int, str, str] = await ctx.subprocess.run(
-        SubprocessSpawnSpec(argv=("git", *args), cwd=cwd)
-    )
-    return result
+    return ctx, await git_repo(ctx, tmp_path / "repo")
 
 
 # ------------------------------------------------------------------ acquire --
@@ -115,11 +94,11 @@ async def test_two_children_work_without_collision_and_merge_back(
     assert not (two.root / "one.txt").exists()
 
     for workspace, agent in ((one, "a1"), (two, "a2")):
-        await _git(ctx, workspace.root, "add", "-A")
-        await _git(ctx, workspace.root, "commit", "-m", f"work from {agent}")
+        await git(ctx, workspace.root, "add", "-A")
+        await git(ctx, workspace.root, "commit", "-m", f"work from {agent}")
 
     for ref in ("ph/s1/a1", "ph/s1/a2"):
-        code, _, err = await _git(ctx, base, "merge", "--no-edit", ref)
+        code, _, err = await git(ctx, base, "merge", "--no-edit", ref)
         assert code == 0, err
 
     assert (base / "one.txt").exists()
@@ -221,7 +200,7 @@ async def test_an_ephemeral_worktree_is_discarded_even_when_dirty(
 
     assert not workspace.root.exists()
     assert not (base / "discarded.txt").exists()
-    _, out, _ = await _git(ctx, base, "branch", "--list", "ph/s1/a1")
+    _, out, _ = await git(ctx, base, "branch", "--list", "ph/s1/a1")
     assert out.strip() == "", "the ephemeral branch is deleted with its tree"
 
 
@@ -241,12 +220,12 @@ async def test_committed_work_survives_disposal_of_a_clean_worktree(
         session_id="s1", agent_id="a1", base=base, access="write", session=session
     )
     (workspace.root / "work.txt").write_text("finished\n", encoding="utf-8")
-    await _git(ctx, workspace.root, "add", "-A")
-    await _git(ctx, workspace.root, "commit", "-m", "the child's work")
+    await git(ctx, workspace.root, "add", "-A")
+    await git(ctx, workspace.root, "commit", "-m", "the child's work")
 
     await ctx.workspace.dispose("a1")
 
-    _, branches, _ = await _git(ctx, base, "branch", "--list", "ph/s1/a1")
+    _, branches, _ = await git(ctx, base, "branch", "--list", "ph/s1/a1")
     assert branches.strip().endswith("ph/s1/a1"), "the branch holding the work was deleted"
     (disposed,) = [event for event in session.events if event.type == "workspace/disposed"]
     assert disposed.data["kept"] is True
@@ -314,8 +293,8 @@ async def test_the_redirection_env_keeps_a_test_run_out_of_the_tree(
     assert workspace.kind == "worktree"
 
     (workspace.root / "test_sample.py").write_text("def test_ok():\n    assert True\n", "utf-8")
-    await _git(ctx, workspace.root, "add", "-A")
-    await _git(ctx, workspace.root, "commit", "-m", "add a test")
+    await git(ctx, workspace.root, "add", "-A")
+    await git(ctx, workspace.root, "commit", "-m", "add a test")
 
     code, out, err = await ctx.subprocess.run(
         SubprocessSpawnSpec(
@@ -326,7 +305,7 @@ async def test_the_redirection_env_keeps_a_test_run_out_of_the_tree(
     )
     assert code == 0, out + err
 
-    _, status, _ = await _git(ctx, workspace.root, "status", "--porcelain", "-uall")
+    _, status, _ = await git(ctx, workspace.root, "status", "--porcelain", "-uall")
     assert status.strip() == "", f"the test run dirtied the worktree: {status}"
     assert not (workspace.root / ".pytest_cache").exists()
 
@@ -369,3 +348,180 @@ async def test_mounting_the_row_claims_the_tier(mount: Any) -> None:
     ctx = await mount(TIER_ROW)
 
     assert ctx.workspace.tier == "worktree"
+
+
+# -------------------------------------------------------------- provisioning --
+
+
+PROVISION_ROW = {
+    "id": "workspace-lifecycle",
+    "config": {"provision": [{"source": ".env"}, {"source": "deps", "mode": "hardlink"}]},
+}
+"""Materials on the row `ph-base` already layers, patched rather than inserted.
+
+Composition happens *inside* the row — the profile's list plus the project's
+`.ph-workspace.yml` — not by mounting a second copy: `workspace-lifecycle` also
+claims `fs.rebase`, and two answers to "where does this agent write" is the
+contradiction `claim_slot` exists to refuse.
+"""
+
+
+async def _repo_with_materials(ctx: Any, path: Path) -> Path:
+    base = await git_repo(ctx, path)
+    (base / ".gitignore").write_text(".env\ndeps/\n", encoding="utf-8")
+    (base / ".env").write_text("TOKEN=shhh\n", encoding="utf-8")
+    (base / "deps").mkdir()
+    (base / "deps" / "lib.py").write_text("VALUE = 1\n", encoding="utf-8")
+    await git(ctx, base, "add", "-A")
+    await git(ctx, base, "commit", "-m", "ignore the materials")
+    return base
+
+
+async def test_a_worktree_arrives_with_the_materials_a_checkout_lacks(
+    mount: Any, tmp_path: Path
+) -> None:
+    """E14 against real git, which is the only way to show the problem exists:
+    `git worktree add` genuinely does not carry a gitignored file, so the child
+    starts without `.env` and without its dependencies."""
+    ctx = await mount(TIER_ROW, PROVISION_ROW)
+    base = await _repo_with_materials(ctx, tmp_path / "repo")
+
+    workspace = await ctx.workspace.acquire(
+        session_id="s1", agent_id="a1", base=base, access="write"
+    )
+
+    assert workspace.kind == "worktree"
+    assert (workspace.root / ".env").read_text(encoding="utf-8") == "TOKEN=shhh\n"
+    assert (workspace.root / "deps" / "lib.py").read_text(encoding="utf-8") == "VALUE = 1\n"
+    assert workspace.provision_failures == ()
+
+
+async def test_a_worktree_holding_only_its_materials_is_still_clean(
+    mount: Any, tmp_path: Path
+) -> None:
+    """The property that keeps this row from defeating the tier it serves.
+
+    The project here deliberately does *not* gitignore its materials, so a
+    provisioned `.env` and `deps/` are untracked files and `git status` calls the
+    tree dirty. If disposal read that at face value, every worktree an agent was
+    given materials in would be kept, and "remove a clean worktree, keep a dirty
+    one" would decay into "keep everything" — P4-08's `.pytest_cache` finding
+    from the other direction.
+
+    Asserted on the *disposal decision* rather than on `git status`, because that
+    is the only consumer that should care: the person looking at the worktree
+    should still see the files, which is why this is a pathspec at the check and
+    not an `info/exclude` write (git has no per-worktree exclude — it resolves
+    that path against the common directory).
+    """
+    ctx = await mount(TIER_ROW, PROVISION_ROW)
+    base = await _repo_with_materials(ctx, tmp_path / "repo")
+    (base / ".gitignore").write_text("", encoding="utf-8")
+    await git(ctx, base, "commit", "-am", "stop ignoring them")
+    session = ctx.sessions.create("s1")
+
+    workspace = await ctx.workspace.acquire(
+        session_id="s1", agent_id="a1", base=base, access="write", session=session
+    )
+    assert (workspace.root / ".env").exists()
+    # Untracked as far as git is concerned — the materials really are there.
+    _, status, _ = await git(ctx, workspace.root, "status", "--porcelain", "-uall")
+    assert ".env" in status
+
+    await ctx.workspace.dispose("a1")
+
+    (disposed,) = [e for e in session.events if e.type == "workspace/disposed"]
+    assert disposed.data["kept"] is False, "materials were mistaken for the agent's work"
+    assert not workspace.root.exists()
+
+
+async def test_work_beside_the_materials_still_keeps_the_worktree(
+    mount: Any, tmp_path: Path
+) -> None:
+    """The other direction, and the one that matters more: subtracting the
+    materials must not subtract the work sitting next to them."""
+    ctx = await mount(TIER_ROW, PROVISION_ROW)
+    base = await _repo_with_materials(ctx, tmp_path / "repo")
+    session = ctx.sessions.create("s1")
+    workspace = await ctx.workspace.acquire(
+        session_id="s1", agent_id="a1", base=base, access="write", session=session
+    )
+    (workspace.root / "real-work.txt").write_text("the agent did this\n", encoding="utf-8")
+
+    await ctx.workspace.dispose("a1")
+
+    (disposed,) = [e for e in session.events if e.type == "workspace/disposed"]
+    assert disposed.data["kept"] is True
+    assert (workspace.root / "real-work.txt").exists()
+
+
+async def test_nothing_is_provisioned_into_a_shared_workspace(mount: Any, tmp_path: Path) -> None:
+    """The root *is* the base, so every material is already in it — and copying
+    `.env` onto itself is the one way this could destroy the file it exists to
+    provide."""
+    ctx = await mount(PROVISION_ROW)
+    base = tmp_path / "plain"
+    base.mkdir()
+    (base / ".env").write_text("TOKEN=shhh\n", encoding="utf-8")
+
+    workspace = await ctx.workspace.acquire(session_id="s1", agent_id="a1", base=base)
+
+    assert workspace.kind == "shared"
+    assert (base / ".env").read_text(encoding="utf-8") == "TOKEN=shhh\n"
+    assert workspace.provision_failures == ()
+
+
+async def test_a_material_that_does_not_arrive_reaches_the_agent(
+    mount: Any, tmp_path: Path
+) -> None:
+    """A failure in a log line reaches an operator tomorrow; this reaches the
+    model on the step it matters, because the agent is the one about to wonder
+    why the tests fail (E14)."""
+    ctx = await mount(
+        TIER_ROW,
+        {"id": "workspace-lifecycle", "config": {"provision": [{"source": "../outside"}]}},
+    )
+    base = await git_repo(ctx, tmp_path / "repo")
+    session = ctx.sessions.create("s1")
+
+    workspace = await ctx.workspace.acquire(
+        session_id="s1", agent_id="a1", base=base, session=session
+    )
+
+    assert len(workspace.provision_failures) == 1
+    (event,) = [e for e in session.events if e.type == "workspace/provisioned"]
+    assert event.data["agentId"] == "a1"
+
+
+# ------------------------------------------------------------------ declines --
+
+
+async def test_a_decline_says_which_one_it_was(mount: Any, tmp_path: Path) -> None:
+    """E15. A fallback that cannot say *why* is indistinguishable from "no tier
+    configured", which is the confusion `ph doctor` exists to remove: an operator
+    who set `worktree` and got `shared` is owed the reason."""
+    ctx = await mount(TIER_ROW)
+    base = tmp_path / "plain"
+    base.mkdir()
+    session = ctx.sessions.create("s1")
+
+    workspace = await ctx.workspace.acquire(
+        session_id="s1", agent_id="a1", base=base, session=session
+    )
+
+    assert workspace.kind == "shared"
+    (event,) = [e for e in session.events if e.type == "workspace/acquired"]
+    assert event.data["declined"] == "not-a-repository"
+
+
+async def test_no_tier_configured_is_not_a_decline(mount: Any, tmp_path: Path) -> None:
+    """The distinction the field exists for: `advisory` because nobody asked for
+    containment is a different fact from `advisory` because the tier could not
+    serve, and a doctor that ran them together would be useless."""
+    ctx = await mount()
+    session = ctx.sessions.create("s1")
+
+    await ctx.workspace.acquire(session_id="s1", agent_id="a1", base=tmp_path, session=session)
+
+    (event,) = [e for e in session.events if e.type == "workspace/acquired"]
+    assert "declined" not in event.data

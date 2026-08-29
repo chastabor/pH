@@ -238,6 +238,14 @@ def _workspace(ctx: Context, agent_id: str) -> list[str]:
     ]
     if workspace.ref:
         lines.append(f"Branch: {workspace.ref}")
+    if workspace.provision_failures:
+        # The one party who has to know `.env` did not arrive is the agent about
+        # to wonder why the tests fail (E14). A log line would reach an operator
+        # tomorrow; this reaches the model on the step it matters.
+        lines.append(
+            "Missing from this workspace (do not treat these failures as your own bug): "
+            + "; ".join(workspace.provision_failures)
+        )
     return lines
 
 

@@ -22,6 +22,7 @@ from typing import Any
 
 import pytest
 
+from ph.seams.workspace import PROJECT_PROVISION_FILE, discover_provisioning
 from ph.testing import FAKE_OPTIONS, StubWorkspaceProvider, run_tool
 
 pytestmark = pytest.mark.anyio
@@ -185,3 +186,87 @@ async def test_bash_runs_in_the_agents_workspace(mount: Any, tmp_path: Path) -> 
     # And the workspace's own environment rides the call, which is what keeps a
     # test run's caches out of the tree (E12).
     assert str(tmp_path / "scratch") in stdout
+
+
+# -------------------------------------------------------------- provisioning --
+
+
+def test_a_project_states_its_own_materials(tmp_path: Path) -> None:
+    """A repository is the only party that knows it keeps dependencies in
+    `vendor/` rather than `node_modules/`, so it gets to say so — as **data**.
+
+    That is the whole trade the `command` hook was refused for: a list of paths
+    cannot execute, so cloning a repository and starting pH runs nothing that
+    repository authored. `wtp` accepts shell in the equivalent file on the
+    grounds that it is "controlled by developer"; that assumption is not
+    available here.
+    """
+    project = tmp_path / "repo" / "packages" / "api"
+    project.mkdir(parents=True)
+    (tmp_path / "repo" / PROJECT_PROVISION_FILE).write_text(
+        "provision:\n  - source: .env\n  - source: vendor\n    mode: hardlink\n",
+        encoding="utf-8",
+    )
+
+    entries = discover_provisioning(project)
+
+    assert [(e.source, e.mode) for e in entries] == [(".env", "copy"), ("vendor", "hardlink")]
+
+
+def test_the_nearest_file_wins(tmp_path: Path) -> None:
+    """`agent-instructions`' rule, for the same reason: the file beside the code
+    is the one that knows what the code needs, and a monorepo root should not
+    override a package that states its own."""
+    root, package = tmp_path / "repo", tmp_path / "repo" / "packages" / "api"
+    package.mkdir(parents=True)
+    (root / PROJECT_PROVISION_FILE).write_text(
+        "provision: [{source: root-thing}]", encoding="utf-8"
+    )
+    (package / PROJECT_PROVISION_FILE).write_text(
+        "provision: [{source: package-thing}]", encoding="utf-8"
+    )
+
+    assert [e.source for e in discover_provisioning(package)] == ["package-thing"]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "provision: [{source: .env, command: rm -rf /}]",
+        "provision: [{mode: copy}]",
+        "provision: not-a-list",
+        ":::not yaml at all",
+    ],
+    ids=["a-key-that-would-execute", "no-source", "wrong-shape", "malformed"],
+)
+def test_a_project_file_that_does_not_parse_is_ignored(tmp_path: Path, text: str) -> None:
+    """Every failure is a shrug, and the first case is the point: `extra="forbid"`
+    means a `command:` key is not silently dropped but *rejects the file*, so a
+    repository cannot smuggle one past a reader who assumed the model was
+    data-only. Refusing to start would make an optional file load-bearing."""
+    (tmp_path / PROJECT_PROVISION_FILE).write_text(text, encoding="utf-8")
+
+    assert discover_provisioning(tmp_path) == []
+
+
+async def test_the_project_list_is_guarded_like_any_other(mount: Any, tmp_path: Path) -> None:
+    """The end of the claim the row is built on.
+
+    A repository may state what its worktrees need and may **not** name anything
+    outside its own tree, in either direction. The guards do not care where an
+    entry came from — a discovered one is checked exactly like a profile's — and
+    the refusal is per entry, so the workspace is still handed over.
+    """
+    ctx = await mount()
+    base = tmp_path / "project"
+    base.mkdir()
+    (base / PROJECT_PROVISION_FILE).write_text(
+        "provision: [{source: ../../etc/passwd, dest: stolen}]", encoding="utf-8"
+    )
+    ctx.workspace.provision(discover_provisioning(base))
+    ctx.workspace.register_provider(_tier(tmp_path))
+
+    workspace = await ctx.workspace.acquire(session_id="s", agent_id="a1", base=base)
+
+    assert not (workspace.root / "stolen").exists()
+    assert len(workspace.provision_failures) == 1

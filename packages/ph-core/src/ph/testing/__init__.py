@@ -15,6 +15,7 @@ from .builders import (
     user_payload,
 )
 from .fake_adapter import FakeAdapter, text_script
+from .git import git, git_repo
 from .replay_adapter import RecordedStep, ReplayAdapter, recorded_steps
 from .stub_runtime import StubCodeRuntime
 from .stub_workspace import StubWorkspaceProvider
@@ -28,6 +29,8 @@ __all__ = [
     "StubCodeRuntime",
     "StubWorkspaceProvider",
     "assistant_payload",
+    "git",
+    "git_repo",
     "plugin_payload",
     "raising",
     "recorded_steps",

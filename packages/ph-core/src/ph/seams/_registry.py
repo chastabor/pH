@@ -16,7 +16,7 @@ from typing import Any
 
 from ..cordis import Context, Disposer
 
-__all__ = ["claim_key", "claim_slot"]
+__all__ = ["claim_entry", "claim_key", "claim_slot"]
 
 
 def claim_key(
@@ -32,6 +32,26 @@ def claim_key(
             del table[key]
 
     return owner.add_disposer(release, label=f"{label}({key})")
+
+
+def claim_entry(owner: Context, entries: list[Any], value: Any, *, label: str) -> Disposer:
+    """Append `value`; the disposer removes **that object**, not one equal to it.
+
+    `list.remove` compares with `==`, which is identity for the closures and
+    objects the other contribution lists in this package hold — so those got the
+    right answer by accident. A registry of *values* does not: two rows
+    contributing an equal entry would have one disposer take the other's, which
+    is this module's whole complaint one container over.
+    """
+    entries.append(value)
+
+    def release() -> None:
+        for index, held in enumerate(entries):
+            if held is value:
+                del entries[index]
+                return
+
+    return owner.add_disposer(release, label=label)
 
 
 def claim_slot(owner: Context, holder: Any, attribute: str, value: Any, *, label: str) -> Disposer:

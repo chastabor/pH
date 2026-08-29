@@ -69,7 +69,7 @@ def _worktree(
     *,
     kind: WorkspaceKind = "worktree",
     ref: str | None = None,
-    release: Callable[[], Awaitable[bool]] | None = None,
+    release: Callable[[Workspace], Awaitable[bool]] | None = None,
 ) -> Workspace:
     """What a tier hands back: a value, with its own teardown and nothing else.
 
@@ -247,7 +247,7 @@ async def test_disposal_runs_the_providers_teardown_and_forgets_the_agent(
     an entry outliving its agent would report a workspace that is gone."""
     released: list[str] = []
 
-    async def release() -> bool:
+    async def release(_workspace: Workspace) -> bool:
         released.append("released")
         return True
 
@@ -277,7 +277,7 @@ async def test_disposing_the_owning_scope_releases_the_workspace(tmp_path: Path)
     """
     released: list[str] = []
 
-    async def release() -> bool:
+    async def release(_workspace: Workspace) -> bool:
         released.append("released")
         return True
 
@@ -309,7 +309,7 @@ async def test_a_discarded_workspace_says_so(tmp_path: Path) -> None:
     were thrown away by design".
     """
 
-    async def release() -> bool:
+    async def release(_workspace: Workspace) -> bool:
         return False
 
     seam = _seam(tmp_path)
@@ -330,7 +330,7 @@ async def test_a_broken_teardown_still_forgets_the_agent(tmp_path: Path) -> None
     agent holds a workspace for the life of the process, and every reader of
     `of()` — the prompt, the doctor — repeats it."""
 
-    async def release() -> bool:
+    async def release(_workspace: Workspace) -> bool:
         raise RuntimeError("worktree is locked")
 
     seam = _seam(tmp_path)
@@ -386,7 +386,7 @@ async def test_acquiring_without_a_session_records_nothing_and_still_works(
     case, and it must not be the one that raises."""
     released: list[str] = []
 
-    async def release() -> bool:
+    async def release(_workspace: Workspace) -> bool:
         released.append("released")
         return True
 

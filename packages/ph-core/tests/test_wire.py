@@ -123,6 +123,7 @@ def _sample(model: type[BaseModel]) -> BaseModel | None:
         "LlmCallConfigAdapterDefaults": {"maxTokens": True},
         "ToolSchema": {"name": "read", "description": "read a file", "parameters": {}},
         "ContextSnapshotSection": {"name": "workspace", "text": "cwd: /x"},
+        "ProvisionEntry": {"source": ".env"},
         "SessionHeader": {"id": "s1", "createdAt": 1},
         "EpochHeader": {
             "config": LlmCallConfig(provider="fake", model="fake-1"),
