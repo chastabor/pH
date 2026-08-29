@@ -15,13 +15,14 @@ from .builders import (
     user_payload,
 )
 from .fake_adapter import FakeAdapter, text_script
-from .git import git, git_repo
+from .git import WORKTREE_ROWS, git, git_repo, needs_git, worktree_agent
 from .replay_adapter import RecordedStep, ReplayAdapter, recorded_steps
 from .stub_runtime import StubCodeRuntime
 from .stub_workspace import StubWorkspaceProvider
 
 __all__ = [
     "FAKE_OPTIONS",
+    "WORKTREE_ROWS",
     "FakeAdapter",
     "RecordedStep",
     "ReplayAdapter",
@@ -31,6 +32,7 @@ __all__ = [
     "assistant_payload",
     "git",
     "git_repo",
+    "needs_git",
     "plugin_payload",
     "raising",
     "recorded_steps",
@@ -40,4 +42,5 @@ __all__ = [
     "tool_result_payload",
     "tool_runtime",
     "user_payload",
+    "worktree_agent",
 ]

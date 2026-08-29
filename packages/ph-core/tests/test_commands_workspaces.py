@@ -12,18 +12,14 @@ removed worktree deregisters — not our arithmetic about it.
 
 from __future__ import annotations
 
-import shutil
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from ph.testing import FAKE_OPTIONS, git, git_repo
+from ph.testing import FAKE_OPTIONS, git, git_repo, needs_git
 
-pytestmark = [
-    pytest.mark.anyio,
-    pytest.mark.skipif(shutil.which("git") is None, reason="the worktree tier needs git"),
-]
+pytestmark = [pytest.mark.anyio, needs_git]
 
 ROWS = (
     {"insert": [{"id": "workspace-git-worktree", "name": "workspace-git-worktree"}]},

@@ -33,6 +33,14 @@ outside the worktree and survives disposal. Best-effort by construction: a
 toolchain that insists on writing beside its sources still will, and the answer
 to that is `access="write"` for that agent, not a weaker tier.
 
+**Per-run restore points live here too (E7, §12 Q9c).** A denial settles the
+whole run (C3), which bounds partial state to *about* one cell — "about",
+because the program had already written whatever preceded the refused line. So
+before a run this tier captures the agent's worktree as a git **tree object**
+under a hidden ref, and `/revert` restores it. That is a capability of *this*
+tier and not of the seam: it is `git add -A`, `git write-tree` and a ref
+namespace from end to end, and a tier that is not git could not supply it.
+
 @module ph.seams.workspace_git
 """
 
@@ -40,11 +48,18 @@ from __future__ import annotations
 
 import logging
 import re
+import shutil
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
+
+import anyio
 
 from ..cordis import Context, plugin
 from ..paths import default_home_path
+from ..session import Session
+from ..tools.definition import ToolExecution
 from ..wire import WireModel
 from .subprocess import SubprocessSpawnSpec, scrub_env
 from .workspace import (
@@ -54,26 +69,46 @@ from .workspace import (
     WorkspaceAccess,
     WorkspaceDeclined,
     redirection_env,
+    workspace_of,
 )
 
-__all__ = ["GitWorktreeProvider", "apply", "sanitize_ref"]
+__all__ = [
+    "CHECKPOINT",
+    "GitWorktreeProvider",
+    "apply",
+    "checkpoint",
+    "checkpoint_policy",
+    "checkpoints",
+    "git",
+    "ref_for",
+    "restore",
+    "sanitize_ref",
+]
 
 log = logging.getLogger("ph.seams.workspace_git")
 
 
-async def git(ctx: Context, cwd: Path, *args: str) -> tuple[int, str, str]:
+async def git(
+    ctx: Context, cwd: Path, *args: str, env: Mapping[str, str] | None = None
+) -> tuple[int, str, str]:
     """One git invocation, through `ctx.subprocess` — never `os.system`.
 
     The seam scrubs the credential-shaped environment (F1) and reaps the child in
     a `finally` (F4); a bare `subprocess.run` here would opt this module out of
     both for no gain.
 
+    `env` *adds to* the scrubbed parent environment rather than replacing it —
+    `GIT_INDEX_FILE` is the caller with a reason, and a git that inherited
+    nothing else would not find its own configuration.
+
     `LC_ALL=C` because pH reads what git says. `--porcelain` is stable by
     contract, but stderr is gettext-translated and `ctx.subprocess` passes
     `LANG` through — so without this a decline reason, and anything else read
     off git's words, would depend on the operator's locale.
     """
-    spec = SubprocessSpawnSpec(argv=("git", *args), cwd=cwd, env=scrub_env(extra={"LC_ALL": "C"}))
+    spec = SubprocessSpawnSpec(
+        argv=("git", *args), cwd=cwd, env=scrub_env(extra={"LC_ALL": "C", **(env or {})})
+    )
     result: tuple[int, str, str] = await ctx.subprocess.run(spec)
     return result
 
@@ -345,3 +380,239 @@ async def apply(ctx: Context, config: Config) -> None:
     """
     provider = GitWorktreeProvider(ctx=ctx, root=default_home_path(config.root, "worktrees"))
     ctx.workspace.register_provider(provider, scope=ctx)
+
+
+# ------------------------------------------------- per-run restore points --
+
+
+CHECKPOINT = "workspace/checkpoint"
+
+_INDEX = "ph-checkpoint-index"
+"""pH's own index, beside the worktree's git dir.
+
+Per worktree, because `rev-parse --git-dir` inside a linked worktree answers with
+that worktree's own directory — so two agents checkpointing at once do not share
+a staging area, and neither touches the index the agent's `git` commands use.
+
+**Seeded from the worktree's real index the first time.** `git worktree add`
+has just written one full of valid stat data; starting from an empty file
+instead makes the first `add -A` re-hash every file in the repository —
+measured at 2.6 s on an 11 000-file checkout, paid per agent, on the first cell.
+Copying it costs half a millisecond.
+"""
+
+
+def ref_for(session_id: str, agent_id: str, seq: int) -> str:
+    """`refs/ph/<session>/<agent>/pre-run/<seq>` — hidden, and outside `refs/heads`.
+
+    Not a branch: `git branch` does not list it, `git log` does not walk it, and
+    a person's `git push` does not carry it. It exists for exactly one reason —
+    to keep the tree object from being garbage-collected between the run and the
+    revert — which is why disposal prunes the whole `pre-run` namespace.
+    """
+    return f"refs/ph/{sanitize_ref(session_id)}/{sanitize_ref(agent_id)}/pre-run/{seq}"
+
+
+async def checkpoint(
+    ctx: Context, workspace: Workspace, *, session: Session, agent_id: str, call_id: str
+) -> str | None:
+    """Capture the worktree and record the restore point. `None` when not applicable.
+
+    Only for a workspace *this tier* made: `ref` is a git ref and `tree` is a git
+    object, so a kind this provider did not produce has no restore point to take
+    — and a `shared` workspace is the person's own checkout, where offering to
+    overwrite their uncommitted work with whatever an agent found is the one
+    thing this must never do.
+
+    What is captured is `agent_work_pathspec()` — the tree *minus* what the seam
+    provisioned (E14). A copied `.env` or a hardlinked `node_modules` is not the
+    agent's work, so hashing it into every cell's tree would be both wrong and
+    the most expensive thing here.
+    """
+    if workspace.kind not in ("worktree", "worktree-ephemeral"):
+        return None
+    git_dir = await _git_dir(ctx, workspace.root)
+    if git_dir is None:
+        return None
+
+    index = await _checkpoint_index(git_dir)
+    environ = {"GIT_INDEX_FILE": str(index)}
+    pathspec = workspace.agent_work_pathspec()
+    code, _, err = await git(ctx, workspace.root, "add", "-A", "--", *pathspec, env=environ)
+    if code != 0:
+        log.warning("ph.seams.workspace_git: could not stage %s (%s)", workspace.root, err)
+        return None
+    code, out, err = await git(ctx, workspace.root, "write-tree", env=environ)
+    if code != 0:
+        log.warning("ph.seams.workspace_git: could not write a tree (%s)", err)
+        return None
+
+    # Write-ahead (A10): the event precedes the ref that keeps the tree alive, so
+    # a crash in between leaves a checkpoint that is *unavailable* and says so,
+    # never a ref nobody recorded. The event's own seq is the address `/revert`
+    # takes, so nothing here predicts what `append` will assign.
+    event = session.append(
+        CHECKPOINT, {"agentId": agent_id, "tree": out.strip(), "callId": call_id}
+    )
+    ref = ref_for(session.id, agent_id, event.seq)
+    code, _, err = await git(ctx, workspace.root, "update-ref", ref, out.strip())
+    if code != 0:
+        log.warning("ph.seams.workspace_git: could not write %s (%s)", ref, err)
+    return ref
+
+
+async def _checkpoint_index(git_dir: Path) -> Path:
+    """pH's index, seeded once from the worktree's own so the first cell is cheap."""
+    index = git_dir / _INDEX
+
+    def seed() -> None:
+        if index.exists():
+            return
+        live = git_dir / "index"
+        if live.exists():
+            shutil.copyfile(live, index)
+
+    await anyio.to_thread.run_sync(seed)
+    return index
+
+
+async def restore(ctx: Context, workspace: Workspace, tree: str) -> tuple[str, ...]:
+    """Put the worktree back to `tree`. Returns the paths the run had added.
+
+    **`read-tree --reset -u` against a *seeded* scratch index**, which is the
+    whole trick. Seeding from the checkpoint index — refreshed first, so its stat
+    data is current — lets git touch only the paths that actually differ.
+    `checkout-index -a -f` was the obvious alternative and rewrites *every* file
+    in the tree: 2.3 s of a 2.4 s restore on an 11 000-file checkout, and worse
+    than the time, it stamps a new mtime on 11 000 unchanged files and so
+    invalidates every mtime-keyed cache the person has — pytest, mypy, ruff, the
+    editor's index — making them pay for the full-tree rewrite again on their
+    next command.
+
+    Scratch, not the agent's index, so a file that was untracked before the run
+    is untracked after the restore rather than silently staged. `.gitignore`d
+    paths were never in the checkpoint, so they are never considered in either
+    direction — a `/revert` that wiped a build cache would turn a recovery into a
+    rebuild — and `scratch` is outside the worktree entirely.
+    """
+    git_dir = await _git_dir(ctx, workspace.root)
+    if git_dir is None:
+        raise FileNotFoundError(f"{workspace.root} is not a git checkout")
+
+    checkpoint_index = await _checkpoint_index(git_dir)
+    environ = {"GIT_INDEX_FILE": str(checkpoint_index)}
+    await git(ctx, workspace.root, "add", "-A", "--", *workspace.agent_work_pathspec(), env=environ)
+    index = git_dir / "ph-restore-index"
+    await anyio.to_thread.run_sync(lambda: shutil.copyfile(checkpoint_index, index))
+    environ = {"GIT_INDEX_FILE": str(index)}
+
+    # What the run added, asked once and before the reset takes it away.
+    added = await _lines(
+        ctx,
+        workspace.root,
+        "diff-index",
+        "--cached",
+        "--name-only",
+        "--diff-filter=A",
+        "-z",
+        tree,
+        env=environ,
+    )
+    code, _, err = await git(ctx, workspace.root, "read-tree", "--reset", "-u", tree, env=environ)
+    if code != 0:
+        raise FileNotFoundError(f"checkpoint tree {tree} is gone: {err.strip() or code}")
+    await anyio.to_thread.run_sync(lambda: _prune_empty(workspace.root, added))
+    return tuple(sorted(added))
+
+
+def _prune_empty(root: Path, paths: list[str]) -> None:
+    """`read-tree -u` removes files, never the directories they were alone in."""
+    for name in paths:
+        parent = (root / name).parent
+        while parent != root and parent.is_dir() and not any(parent.iterdir()):
+            parent.rmdir()
+            parent = parent.parent
+
+
+async def _lines(
+    ctx: Context, cwd: Path, *args: str, env: Mapping[str, str] | None = None
+) -> list[str]:
+    """A `-z` listing, split the way git wrote it.
+
+    NUL-separated because a path may contain a newline, and a restore that
+    skipped such a file would leave exactly the thing it promised to remove.
+    """
+    code, out, _ = await git(ctx, cwd, *args, env=env)
+    return [] if code != 0 else [item for item in out.split("\0") if item]
+
+
+async def _git_dir(ctx: Context, root: Path) -> Path | None:
+    code, out, _ = await git(ctx, root, "rev-parse", "--absolute-git-dir")
+    return Path(out.strip()) if code == 0 and out.strip() else None
+
+
+def checkpoints(session: Session) -> dict[int, dict[str, Any]]:
+    """Every restore point in this session, by the event's own seq — a fold.
+
+    A checkpoint is a fact in the log, so a resumed or forked session finds the
+    same restore points a live one has, without anything having remembered them.
+    """
+    return {event.seq: dict(event.data) for event in session.events if event.type == CHECKPOINT}
+
+
+@plugin("workspace-checkpoint", inject=["tools", "workspace", "subprocess"])
+async def checkpoint_policy(ctx: Context, _config: Any) -> None:
+    """Take a restore point before every code run that has a worktree to save.
+
+    Around the *transport*, because a run is the unit that can be denied with
+    work already done (Q9a) — a native call that is denied never ran, so there is
+    nothing to restore it to. The transport is identified by the view's own
+    `transport_name`, since a profile may present it as `ipython`.
+    """
+    git_dirs: dict[Path, Path | None] = {}
+
+    async def around(execution: ToolExecution, next_: Callable[..., Any]) -> Any:
+        # A failure here never blocks the run: a missing restore point is worse
+        # than no restore point only if it is believed in, and the log records
+        # which runs have one. The guard is inside the `try` on purpose — reading
+        # the tool view is itself a call that must not take a cell down.
+        try:
+            view = ctx.tools.view(execution.scope)
+            workspace = workspace_of(ctx, execution.agent)
+            if (
+                execution.session is not None
+                and execution.name == view.transport_name
+                and workspace is not None
+            ):
+                await _cached_checkpoint(ctx, git_dirs, workspace, execution)
+        except Exception:
+            log.warning("ph.seams.workspace_git: no restore point for this run", exc_info=True)
+        return await next_()
+
+    ctx.on("tools/execute", around)
+
+
+async def _cached_checkpoint(
+    ctx: Context,
+    git_dirs: dict[Path, Path | None],
+    workspace: Workspace,
+    execution: ToolExecution,
+) -> None:
+    """`checkpoint`, with the one immutable answer in it remembered.
+
+    A worktree's git directory does not move, so asking `rev-parse` per cell is
+    one of four spawns spent learning a constant — the same finding
+    `_toplevels` records for `--show-toplevel` one class up.
+    """
+    if workspace.root not in git_dirs:
+        git_dirs[workspace.root] = await _git_dir(ctx, workspace.root)
+    if git_dirs[workspace.root] is None:
+        return
+    assert execution.session is not None
+    await checkpoint(
+        ctx,
+        workspace,
+        session=execution.session,
+        agent_id=getattr(execution.agent, "id", ""),
+        call_id=execution.call_id,
+    )

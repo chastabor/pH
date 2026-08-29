@@ -449,6 +449,35 @@ class ToolDefinition:
     cannot know. The distinction is real and narrow — a long `run_code` cell is
     exactly the argument a model re-reads, so it stays.
     """
+    effects_confined_to_workspace: bool = False
+    """Every effect of this call is a file inside the agent's workspace (E7, N3).
+
+    Named for what the *tool* knows rather than for what a consumer does with it:
+    `/revert` derives "a workspace restore undoes this" from it, but that is the
+    row's inference, and a second consumer asking a different question should not
+    have to read a git verb to find the fact it needs.
+
+    True for a tool whose entire effect is a file inside the workspace — and for
+    one with no effect at all, since there is nothing left to undo. False, the
+    default, for anything that can reach past the tree: a shell command that
+    published a package, a spawn, a message. **Git restores the tree, not the
+    world**, so `/revert` lists the run's dispatches this does not cover rather
+    than letting the word "revert" imply them.
+
+    **Coarser than the truth, and stated so.** `ctx.fs.resolve` passes an
+    absolute path through untouched, so `write`/`edit` — which declare this —
+    can land outside the workspace and be reported as covered when they were
+    not. The mechanism that stops that is a permission row prompting on a write
+    leaving the tree, which is P4-10's; per-call precision here would be an
+    argument-inspecting predicate, the shape `is_concurrency_safe` already has.
+
+    Declared here rather than matched by name in the command, for the reason
+    `self_limits` and `arguments_disposable` are: these are *registered plugins*,
+    so a deployment renames them and an MCP server adds its own, and a name list
+    in another package cannot know. The default is the safe direction — a tool
+    that says nothing is reported as *not* undone, so a new capability is
+    over-reported rather than silently trusted.
+    """
     is_concurrency_safe: Callable[[Any], bool] | None = None
     """Only `True` opts a call into a parallel group. Omission, a raise, and any
     non-`True` return are all exclusive — the safe default, since a tool that
@@ -539,6 +568,7 @@ def define_tool(
     timeout_ms: int | None = None,
     self_limits: bool = False,
     arguments_disposable: bool = False,
+    effects_confined_to_workspace: bool = False,
     is_concurrency_safe: Callable[[Any], bool] | bool | None = None,
     present_call: Callable[[Any], ToolCallView | None] | None = None,
     present_result: Callable[[Any, ToolResult], ToolResultView | None] | None = None,
@@ -587,6 +617,7 @@ def define_tool(
         timeout_ms=timeout_ms,
         self_limits=self_limits,
         arguments_disposable=arguments_disposable,
+        effects_confined_to_workspace=effects_confined_to_workspace,
         is_concurrency_safe=safe,
         present_call=present_call,
         present_result=present_result,

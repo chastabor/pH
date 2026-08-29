@@ -638,6 +638,7 @@ RECORDLESS: frozenset[str] = frozenset(
         "workspace/acquired",
         "workspace/disposed",
         "workspace/provisioned",
+        "workspace/checkpoint",
         "session/end-seed",
         "kernel/snapshot",
         "compaction/summarized",

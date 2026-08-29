@@ -194,12 +194,18 @@ async def apply(ctx: Context, config: Any) -> None:
     # the offload row (G2) can leave their results inline without another
     # package keeping a list of this package's tool names.
     for definition in (
+        # `effects_confined_to_workspace` on all five: every effect these have is a
+        # file inside the agent's workspace, or — for the three that only look —
+        # no effect at all. `/revert` therefore does not list them as things it
+        # failed to undo, which is what keeps the listing about the calls that
+        # actually reached past the tree (N3).
         define_tool(
             "read",
             "Read a file, or a window of one. Prefer this over shelling out to cat.",
             parameters=ReadArgs,
             output=ToolOutput(schema=ReadValue, render=_render_read),
             execute=read,
+            effects_confined_to_workspace=True,
             self_limits=True,
             is_concurrency_safe=True,
             **simple_views("read", "Read", "path"),
@@ -210,6 +216,7 @@ async def apply(ctx: Context, config: Any) -> None:
             parameters=WriteArgs,
             output=ToolOutput(schema=WriteValue, render=_render_write),
             execute=write,
+            effects_confined_to_workspace=True,
             self_limits=True,
             # The file body is a payload this call delivered, not an instruction
             # the model refers back to — and the file is on disk, where `read`
@@ -223,6 +230,7 @@ async def apply(ctx: Context, config: Any) -> None:
             parameters=EditArgs,
             output=ToolOutput(schema=EditValue, render=_render_edit),
             execute=edit,
+            effects_confined_to_workspace=True,
             self_limits=True,
             arguments_disposable=True,
             **simple_views("diff", "Edit", "path"),
@@ -233,6 +241,7 @@ async def apply(ctx: Context, config: Any) -> None:
             parameters=GlobArgs,
             output=ToolOutput(schema=GlobValue, render=_render_glob),
             execute=glob_tool,
+            effects_confined_to_workspace=True,
             self_limits=True,
             is_concurrency_safe=True,
             **simple_views("search", "Glob", "pattern"),
@@ -243,6 +252,7 @@ async def apply(ctx: Context, config: Any) -> None:
             parameters=GrepArgs,
             output=ToolOutput(schema=GrepValue, render=_render_grep),
             execute=grep_tool,
+            effects_confined_to_workspace=True,
             self_limits=True,
             is_concurrency_safe=True,
             **simple_views("search", "Grep", "pattern"),

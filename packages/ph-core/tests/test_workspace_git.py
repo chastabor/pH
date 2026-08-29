@@ -14,7 +14,6 @@ regression §12 Q10 exists to prevent.
 
 from __future__ import annotations
 
-import shutil
 from pathlib import Path
 from typing import Any
 
@@ -23,12 +22,9 @@ import pytest
 from ph.seams.subprocess import SubprocessSpawnSpec, scrub_env
 from ph.seams.workspace import redirection_env
 from ph.seams.workspace_git import sanitize_ref
-from ph.testing import git, git_repo
+from ph.testing import git, git_repo, needs_git
 
-pytestmark = [
-    pytest.mark.anyio,
-    pytest.mark.skipif(shutil.which("git") is None, reason="the worktree tier needs git"),
-]
+pytestmark = [pytest.mark.anyio, needs_git]
 
 
 TIER_ROW = {"insert": [{"id": "workspace-git-worktree", "name": "workspace-git-worktree"}]}

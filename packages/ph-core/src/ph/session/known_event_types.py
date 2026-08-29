@@ -63,6 +63,11 @@ KNOWN_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         # event per agent saying "nothing went wrong" is noise in a log whose
         # whole value is that everything in it happened.
         "workspace/provisioned",
+        # The per-run restore point (E7). **Not** ignorable: a reader that
+        # skipped it would offer `/revert` a session with no restore points
+        # while the refs are sitting in the repository, which is a build
+        # misreading recoverable state as unrecoverable.
+        "workspace/checkpoint",
         # retry
         "llm/retry",
         # Code Mode dispatch records (log-only; see ph.tools.code_mode)
