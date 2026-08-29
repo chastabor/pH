@@ -19,7 +19,7 @@ import json
 from typing import Any
 
 import pytest
-from stabilize_helpers import PROFILE, events_of, run_tool_calls
+from stabilize_helpers import PROFILE, bash_call, events_of, result_text, row, run_tool_calls
 
 from ph.llm.types import ToolCallBlock
 from ph.session import Session, SurfaceIntent
@@ -39,21 +39,6 @@ from ph_stabilize.limits import (
 pytestmark = pytest.mark.anyio
 
 
-def _row(**config: Any) -> dict[str, Any]:
-    """The `limits` row with one set of ceilings — always spelled in the test."""
-    return {"id": "limits", "config": config}
-
-
-def _result_text(session: Session, call_id: str) -> str:
-    for event in session.events:
-        if event.type != "tool/result":
-            continue
-        block = event.data["message"]["content"][0]
-        if block["toolCallId"] == call_id:
-            return str(block["content"][0]["text"])
-    return ""
-
-
 async def _pre_step(ctx: Any, agent: Any, *, turn: int, step: int) -> Any:
     """The decision `agent/pre-step` reaches, with the loop's own `inner`."""
     from ph.agent.types import PreStepDecision, PreStepRequest
@@ -63,10 +48,6 @@ async def _pre_step(ctx: Any, agent: Any, *, turn: int, step: int) -> Any:
         PreStepRequest(agent=agent, messages=(), turn=turn, step=step),
         inner=lambda request: PreStepDecision(kind="enter", messages=request.messages),
     )
-
-
-def _bash(call_id: str, command: str = "true") -> ToolCallBlock:
-    return ToolCallBlock(id=call_id, name="bash", arguments=json.dumps({"command": command}))
 
 
 def _failing_read(call_id: str) -> ToolCallBlock:
@@ -86,7 +67,7 @@ def _denied(session: Session, call_id: str, reason: str) -> bool:
     (B5), so the ported sentence is what the model reads *inside* a normalized
     error rather than the whole of it.
     """
-    return reason in _result_text(session, call_id)
+    return reason in result_text(session, call_id)
 
 
 # ------------------------------------------------------------- the counting --
@@ -146,7 +127,7 @@ async def test_the_model_call_limit_ends_the_turn_and_says_why(mount: Any) -> No
     `limits/exceeded` instead, because inventing model speech is the thing this
     codebase refuses everywhere else — the person still sees it, as a notice.
     """
-    ctx = await mount(_row(modelCalls={"turnLimit": 2}), profile=PROFILE)
+    ctx = await mount(row("limits", modelCalls={"turnLimit": 2}), profile=PROFILE)
     session = ctx.sessions.create("capped")
     agent = ctx.agents.create(session, FAKE_OPTIONS)
     session.append("turn/start", {"turn": 1})
@@ -164,7 +145,7 @@ async def test_the_model_call_limit_ends_the_turn_and_says_why(mount: Any) -> No
 async def test_the_session_limit_outlives_the_turn(mount: Any) -> None:
     """Upstream's *thread* limit under pH's name: it does not reset at a turn
     boundary, which is the whole difference between the two."""
-    ctx = await mount(_row(modelCalls={"sessionLimit": 3}), profile=PROFILE)
+    ctx = await mount(row("limits", modelCalls={"sessionLimit": 3}), profile=PROFILE)
     session = ctx.sessions.create("session-capped")
     agent = ctx.agents.create(session, FAKE_OPTIONS)
 
@@ -180,7 +161,7 @@ async def test_the_session_limit_outlives_the_turn(mount: Any) -> None:
 async def test_error_raises_instead_of_ending(mount: Any) -> None:
     """`exit: error`. The turn does not end quietly — a deployment that would
     rather crash than truncate gets to say so."""
-    ctx = await mount(_row(modelCalls={"turnLimit": 1, "exit": "error"}), profile=PROFILE)
+    ctx = await mount(row("limits", modelCalls={"turnLimit": 1, "exit": "error"}), profile=PROFILE)
     session = ctx.sessions.create("raising")
     agent = ctx.agents.create(session, FAKE_OPTIONS)
     engine = ctx.get("limits")
@@ -211,24 +192,26 @@ async def test_no_limit_is_the_default(mount: Any) -> None:
 async def test_continue_denies_the_call_and_keeps_the_turn(mount: Any) -> None:
     """`exit: continue`, the default. The model is told, in upstream's own
     words, not to call that tool again — and the turn goes on."""
-    ctx = await mount(_row(toolCalls={"turnLimit": 1}), profile=PROFILE)
+    ctx = await mount(row("limits", toolCalls={"turnLimit": 1}), profile=PROFILE)
     session = ctx.sessions.create("tool-capped")
 
-    await run_tool_calls(ctx, session, _bash("c1"))
-    await run_tool_calls(ctx, session, _bash("c2"), step=2)
+    await run_tool_calls(ctx, session, bash_call("c1"))
+    await run_tool_calls(ctx, session, bash_call("c2"), step=2)
 
-    assert "exit status" not in _result_text(session, "c1"), "the first call ran"
+    assert "exit status" not in result_text(session, "c1"), "the first call ran"
     assert _denied(session, "c2", TOOL_DENIAL.format(tool="bash"))
     assert not events_of(session, "limits/exceeded"), "continue is not a turn-ending breach"
 
 
 async def test_a_per_tool_budget_is_checked_beside_the_aggregate(mount: Any) -> None:
     """One table where upstream mounts one middleware per tool."""
-    ctx = await mount(_row(toolCalls={"perTool": {"bash": {"turnLimit": 1}}}), profile=PROFILE)
+    ctx = await mount(
+        row("limits", toolCalls={"perTool": {"bash": {"turnLimit": 1}}}), profile=PROFILE
+    )
     session = ctx.sessions.create("per-tool")
 
-    await run_tool_calls(ctx, session, _bash("c1"))
-    await run_tool_calls(ctx, session, _bash("c2"), step=2)
+    await run_tool_calls(ctx, session, bash_call("c1"))
+    await run_tool_calls(ctx, session, bash_call("c2"), step=2)
 
     assert _denied(session, "c2", TOOL_DENIAL.format(tool="bash"))
 
@@ -242,10 +225,10 @@ async def test_end_denies_the_siblings_in_upstreams_words(mount: Any) -> None:
     calls did nothing wrong and the model must not read the refusal as being
     about them.
     """
-    ctx = await mount(_row(toolCalls={"turnLimit": 1, "exit": "end"}), profile=PROFILE)
+    ctx = await mount(row("limits", toolCalls={"turnLimit": 1, "exit": "end"}), profile=PROFILE)
     session = ctx.sessions.create("ending")
 
-    await run_tool_calls(ctx, session, _bash("c1"), _bash("c2"), _bash("c3"))
+    await run_tool_calls(ctx, session, bash_call("c1"), bash_call("c2"), bash_call("c3"))
 
     assert _denied(session, "c2", TOOL_DENIAL.format(tool="bash"))
     assert _denied(session, "c3", SIBLING_STOPPED)
@@ -263,20 +246,20 @@ async def test_an_end_breach_concludes_the_batch(mount: Any) -> None:
     pre-step, which made an **ignorable** event into control state — a build that
     skipped it, as the vocabulary says one may, would not have ended the turn.
     """
-    ctx = await mount(_row(toolCalls={"turnLimit": 1, "exit": "end"}), profile=PROFILE)
+    ctx = await mount(row("limits", toolCalls={"turnLimit": 1, "exit": "end"}), profile=PROFILE)
     session = ctx.sessions.create("closing")
 
-    outcome = await run_tool_calls(ctx, session, _bash("c1"), _bash("c2"))
+    outcome = await run_tool_calls(ctx, session, bash_call("c1"), bash_call("c2"))
 
     assert outcome.concluded, "the batch did not tell the loop the turn is over"
 
 
 async def test_continue_leaves_the_turn_running(mount: Any) -> None:
     """The pair to the test above, and the whole difference between the modes."""
-    ctx = await mount(_row(toolCalls={"turnLimit": 1}), profile=PROFILE)
+    ctx = await mount(row("limits", toolCalls={"turnLimit": 1}), profile=PROFILE)
     session = ctx.sessions.create("continuing")
 
-    outcome = await run_tool_calls(ctx, session, _bash("c1"), _bash("c2"))
+    outcome = await run_tool_calls(ctx, session, bash_call("c1"), bash_call("c2"))
 
     assert not outcome.concluded
 
@@ -290,11 +273,11 @@ async def test_a_later_turn_is_not_ended_by_an_earlier_breach(mount: Any) -> Non
     batch outcome makes that whole class of question disappear: a new turn's
     counts are reset by `turn/start` and there is no latch to expire.
     """
-    ctx = await mount(_row(toolCalls={"turnLimit": 1, "exit": "end"}), profile=PROFILE)
+    ctx = await mount(row("limits", toolCalls={"turnLimit": 1, "exit": "end"}), profile=PROFILE)
     session = ctx.sessions.create("later")
     agent = ctx.agents.create(session, FAKE_OPTIONS)
     session.append("turn/start", {"turn": 1})
-    await run_tool_calls(ctx, session, _bash("c1"), _bash("c2"))
+    await run_tool_calls(ctx, session, bash_call("c1"), bash_call("c2"))
     session.append("turn/start", {"turn": 2})
 
     assert (await _pre_step(ctx, agent, turn=2, step=1)).kind == "enter"
@@ -305,7 +288,7 @@ async def test_a_later_turn_is_not_ended_by_an_earlier_breach(mount: Any) -> Non
 
 async def test_the_breaker_trips_after_repeated_failure(mount: Any) -> None:
     """The row's second gate. Five identical failures is not a long task."""
-    ctx = await mount(_row(breaker={"consecutiveFailures": 3}), profile=PROFILE)
+    ctx = await mount(row("limits", breaker={"consecutiveFailures": 3}), profile=PROFILE)
     session = ctx.sessions.create("stuck")
 
     for step in range(1, 5):
@@ -320,13 +303,13 @@ async def test_the_breaker_trips_after_repeated_failure(mount: Any) -> None:
 async def test_a_success_resets_the_breaker(mount: Any) -> None:
     """Consecutive, not cumulative — a tool that works intermittently is not
     the failure this catches."""
-    ctx = await mount(_row(breaker={"consecutiveFailures": 2}), profile=PROFILE)
+    ctx = await mount(row("limits", breaker={"consecutiveFailures": 2}), profile=PROFILE)
     session = ctx.sessions.create("recovering")
 
     await run_tool_calls(ctx, session, _failing_read("c1"), step=1)
-    await run_tool_calls(ctx, session, _bash("c2"), step=2)
+    await run_tool_calls(ctx, session, bash_call("c2"), step=2)
     await run_tool_calls(ctx, session, _failing_read("c3"), step=3)
-    await run_tool_calls(ctx, session, _bash("c4"), step=4)
+    await run_tool_calls(ctx, session, bash_call("c4"), step=4)
 
     assert not events_of(session, "limits/breaker-tripped")
     assert not _denied(session, "c4", "is not being called again")
@@ -356,7 +339,7 @@ async def test_the_footer_shows_the_tightest_budget(mount: Any) -> None:
     same argument about context, and this is that argument for a budget.
     """
     ctx = await mount(
-        _row(modelCalls={"turnLimit": 10}, toolCalls={"turnLimit": 4}), profile=PROFILE
+        row("limits", modelCalls={"turnLimit": 10}, toolCalls={"turnLimit": 4}), profile=PROFILE
     )
     session = ctx.sessions.create("gauged")
     session.append("turn/start", {"turn": 1})

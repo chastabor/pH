@@ -31,8 +31,9 @@ from typing import Any, Literal
 from ..cancel import Cancelled, is_cancelled
 from ..cordis import Context, Disposer, events, plugin
 from ..llm.types import ToolSchema, text_of
+from ..seams.approval import Edited, Responded
 from ..seams.code_runtime import CodeBindingNamespace, validate_binding_name
-from ..session.json import freeze_json_value
+from ..session.json import freeze_json_value, thaw_json
 from ..wire import WireModel
 from .definition import (
     Accept,
@@ -43,6 +44,7 @@ from .definition import (
     ExecutionMode,
     FailureKind,
     PostToolDecision,
+    Respond,
     ToolDefinition,
     ToolExecution,
     ToolExecutionInput,
@@ -54,6 +56,7 @@ from .definition import (
     aborted_result,
     denied_result,
     error_result,
+    text_content,
 )
 from .errors import HarnessError, ToolNotFoundError, error_info, error_message
 
@@ -622,6 +625,23 @@ class ToolRuntime:
             )
             if isinstance(gate, Ask):
                 gate = await self._service_ask(execution, gate)
+            if isinstance(gate, Respond):
+                # Answered in the tool's own voice. A *successful* result,
+                # because the model asked a question and got one — a denial it
+                # would have had to interpret is the wrong shape for "here is the
+                # answer, no need to run it".
+                return PreparedCall(
+                    run=run,
+                    result=ToolExecutionResult(
+                        is_error=False, content=tuple(text_content(gate.message))
+                    ),
+                    needs_post=False,
+                )
+            if isinstance(gate, Allow) and gate.has_arguments:
+                # The substitution lands here, in the one place that owns the
+                # execution — after every `tools/pre-execute` listener has seen
+                # the call the model actually made.
+                execution.arguments = freeze_json_value(gate.arguments, frozen_input=True)
             if is_cancelled(execution.signal):
                 return PreparedCall(run=run, result=aborted_result(started=False))
             # Guards run last and only on an allow: a denial already decided,
@@ -634,12 +654,18 @@ class ToolRuntime:
         except Exception as error:
             return PreparedCall(run=run, result=_failure(error), needs_post=False)
 
-    async def _service_ask(self, execution: ToolExecution, ask: Ask) -> Allow | Deny:
+    async def _service_ask(self, execution: ToolExecution, ask: Ask) -> Allow | Deny | Respond:
         """Resolve an `ask` through the approval seam. Fail closed (B3).
 
         The seam is consumed opportunistically: a deployment that mounts no
         approval service, and an agent-less call with nowhere to route the
         prompt, both deny.
+
+        The two answers that carry data are translated into the pipeline's own
+        vocabulary on the way back — `Edited` into an `Allow` that substitutes,
+        `Responded` into a `Respond` — so `prepare()`'s switch stays closed over
+        the pipeline's own decisions and neither capability is reachable only
+        through approval.
         """
         approval = self.ctx.get("approval")
         name = execution.name
@@ -658,9 +684,19 @@ class ToolRuntime:
             call_id=execution.call_id,
             reason=ask.reason,
             cancel=execution.signal,
+            allowed_decisions=ask.allowed_decisions,
+            arguments=thaw_json(execution.arguments),
         )
         if outcome == "allowed-once":
             return Allow()
+        if isinstance(outcome, Edited):
+            # The human corrected the call rather than refusing it. `tool/call`
+            # already recorded what the model asked for and `approval/decided`
+            # carries the substitution, so the log holds both and attributes each
+            # to whoever made it.
+            return Allow(arguments=outcome.arguments, has_arguments=True)
+        if isinstance(outcome, Responded):
+            return Respond(message=outcome.message)
         template = _APPROVAL_DENIALS.get(outcome, _APPROVAL_DENIALS["unavailable"])
         return Deny(reason=template.format(name=name))
 

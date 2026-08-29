@@ -25,6 +25,7 @@ from ph.tools import (
     Ask,
     Block,
     Deny,
+    Respond,
     ToolExecutionInput,
     ToolNotFoundError,
     ToolOutput,
@@ -165,6 +166,50 @@ async def test_a_pre_execute_denial_skips_the_guards() -> None:
     # Nothing left to decide: asking a guard to confirm a denial would only
     # create a chance to re-permit it.
     assert guarded == []
+
+
+async def test_a_pre_execute_row_can_answer_in_the_tools_own_voice() -> None:
+    """`Respond` (P4-05) is the pipeline's own decision, not approval's.
+
+    The human answering "you don't need that, the port is 8080" is the case that
+    motivated it, but the capability is *short-circuit this call with a result*
+    — which a cache row, a replay row, and a "disabled here, do this instead"
+    row all want. Wired to one consumer it would have been reinvented by the
+    next; and it is a **successful** result, because the model asked a question
+    and got one.
+    """
+    root, tools = tool_runtime()
+    ran: list[str] = []
+    tools.register(simple_tool("echo", lambda _args, _run: ran.append("body") or "ran"))
+    root.on("tools/pre-execute", lambda execution, next_: Respond(message="8080"))
+
+    result = await tools.execute(_call("echo", text="x"))
+    assert not result.is_error, "an answer is not a failure"
+    assert result.content[0].text == "8080"
+    assert ran == [], "the body ran anyway"
+
+
+async def test_a_pre_execute_row_can_substitute_the_arguments() -> None:
+    """`Allow(arguments=…)` — the correction path, applied by the pipeline.
+
+    The substitution lands on the decision rather than on `execution.arguments`
+    directly, because the run belongs to the pipeline: a listener assigning to it
+    would be rewriting the one field every listener before it has already been
+    handed. `tool/call` is untouched either way — it recorded what the *model*
+    asked for, and attributing a human's arguments to the model is the falsehood
+    this codebase refuses everywhere.
+    """
+    root, tools = tool_runtime()
+    seen: list[Any] = []
+    tools.register(simple_tool("echo", lambda args, _run: seen.append(dict(args)) or "ran"))
+    root.on(
+        "tools/pre-execute",
+        lambda execution, next_: Allow(arguments={"text": "corrected"}, has_arguments=True),
+    )
+
+    result = await tools.execute(_call("echo", text="original"))
+    assert not result.is_error
+    assert seen == [{"text": "corrected"}]
 
 
 async def test_ask_without_an_approval_service_denies() -> None:

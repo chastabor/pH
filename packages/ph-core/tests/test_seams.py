@@ -17,7 +17,7 @@ import pytest
 
 from ph.cordis import Context
 from ph.seams._names import SLUG_CHARACTERS
-from ph.seams.approval import ApprovalRequest, ApprovalService, pending_approvals
+from ph.seams.approval import ApprovalRequest, ApprovalService, Edited, pending_approvals
 from ph.seams.code_runtime import (
     CodeBindingNamespace,
     CodeRuntimeSeam,
@@ -100,6 +100,55 @@ async def test_an_answerer_that_raises_denies() -> None:
 
     root.on("approval/request", broken)
     assert await service.request(agent=_agent(session), tool_name="edit") == "unavailable"
+
+
+async def test_an_answerer_cannot_decide_what_the_asking_row_withheld() -> None:
+    """`allowed_decisions` is policy, so the seam that fails closed enforces it.
+
+    A row withholds `edit` for a tool whose arguments must not be hand-written.
+    Leaving that to the front end would make it a *rendering* rule — obeyed by
+    the modal that hides the button and ignored by the next answerer, an RPC one
+    or a test's, that returns an `Edited` anyway.
+
+    A refusal is never withheld: `rejected`, `cancelled` and `unavailable` are
+    how this seam says no, and a row that could suppress them would be a row
+    that could force a call through.
+    """
+    root = Context()
+    service = ApprovalService(ctx=root)
+    session = Session("s")
+
+    async def answerer(request: ApprovalRequest, next_: Any) -> Any:
+        return Edited(arguments={"path": "elsewhere"})
+
+    root.on("approval/request", answerer)
+    outcome = await service.request(
+        agent=_agent(session),
+        tool_name="write",
+        allowed_decisions=("approve", "reject"),
+    )
+    assert outcome == "unavailable"
+
+    decided = next(event for event in session.events if event.type == "approval/decided")
+    assert decided.data["outcome"] == "unavailable"
+    assert "arguments" not in decided.data, "a withheld decision was recorded as if it took"
+
+
+async def test_the_ask_does_not_carry_the_arguments_it_shows() -> None:
+    """The field exists so a front end can put the call in front of a human;
+    `tool/call` already recorded it (B4), and two copies of one fact in an
+    append-only log are two that can disagree."""
+    root = Context()
+    session = Session("s")
+    root.on("approval/request", lambda request, next_: "rejected")
+    await ApprovalService(ctx=root).request(
+        agent=_agent(session), tool_name="write", arguments={"path": "/etc/hosts"}
+    )
+    (asked,) = [event for event in session.events if event.type == "approval/asked"]
+    assert "arguments" not in asked.data
+    # Nor an empty one for a field nobody set: the record is built from what the
+    # ask actually says, not by subtracting one key from the answerer's view.
+    assert "allowedDecisions" not in asked.data
 
 
 async def test_an_asked_approval_with_no_decision_is_pending_on_resume() -> None:

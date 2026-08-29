@@ -20,9 +20,10 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from textual.widgets import Input
 from tui_helpers import running, turn_done, until
 
-from ph.seams.approval import ApprovalRequest
+from ph.seams.approval import ApprovalRequest, Edited, Responded
 from ph.seams.commands import CommandDefinition
 from ph.seams.user_questions import UserQuestion
 from ph.testing import StubAgent, simple_tool
@@ -124,28 +125,110 @@ async def test_a_global_key_does_not_also_edit_the_prompt(make_tui_app: MakeApp)
 # ----------------------------------------------------------------- approval --
 
 
+async def _decide(app: Any, pilot: Any, front: Any, *, arguments: Any = None) -> list[Any]:
+    """Put one approval on screen and hand back the list the answer lands in."""
+    answers: list[Any] = []
+
+    async def ask() -> None:
+        answers.append(
+            await front.ctx.approval.request(
+                agent=StubAgent(ctx=front.ctx, session=front.session),
+                tool_name="write",
+                call_id="c1",
+                reason="writes outside the workspace",
+                arguments=arguments,
+            )
+        )
+
+    app.run_worker(ask())
+    await until(pilot, lambda: isinstance(app.screen, ApprovalModal))
+    return answers
+
+
+async def test_the_modal_answers_in_the_tools_voice(make_tui_app: MakeApp) -> None:
+    """`respond` (P4-05): the body never runs and the model reads an answer.
+
+    A person who knows the answer should not have to reject a call and then
+    explain — the round trip is the cost this decision removes.
+    """
+    async with running(make_tui_app()) as (app, pilot):
+        front = app.front
+        assert front is not None
+        answers = await _decide(app, pilot, front)
+
+        await pilot.click("#approval-respond")
+        await pilot.pause()
+        # Enter in the box, which is the gesture a person actually makes after
+        # typing — the button stays a second route for the mouse.
+        app.screen.query_one("#approval-why", Input).value = "the port is 8080"
+        await pilot.press("enter")
+        await until(pilot, lambda: bool(answers))
+
+        assert isinstance(answers[0], Responded)
+        assert answers[0].message == "the port is 8080"
+        decided = next(e for e in front.session.events if e.type == "approval/decided")
+        assert decided.data["outcome"] == "responded"
+
+
+async def test_the_modal_corrects_the_call_rather_than_refusing_it(
+    make_tui_app: MakeApp,
+) -> None:
+    """`edit` (P4-05), opening on the call as it stands.
+
+    Prefilled because a person correcting one wrong path should not retype the
+    whole argument object — and because what they are editing is the model's
+    own request, which they need to see.
+    """
+    async with running(make_tui_app()) as (app, pilot):
+        front = app.front
+        assert front is not None
+        answers = await _decide(app, pilot, front, arguments={"path": "/etc/hosts"})
+
+        await pilot.click("#approval-edit")
+        await pilot.pause()
+        box = app.screen.query_one("#approval-why", Input)
+        assert json.loads(box.value) == {"path": "/etc/hosts"}, "the edit box did not prefill"
+        box.value = json.dumps({"path": "notes.md"})
+        await pilot.press("enter")
+        await until(pilot, lambda: bool(answers))
+
+        assert isinstance(answers[0], Edited)
+        assert answers[0].arguments == {"path": "notes.md"}
+        decided = next(e for e in front.session.events if e.type == "approval/decided")
+        assert decided.data["arguments"]["path"] == "notes.md"
+        # The ask itself does not carry them: `tool/call` already did, and two
+        # copies of one fact in the log are two that can disagree.
+        asked = next(e for e in front.session.events if e.type == "approval/asked")
+        assert "arguments" not in asked.data
+
+
+async def test_a_mistyped_edit_keeps_the_box_open(make_tui_app: MakeApp) -> None:
+    """Not a refusal: the person meant to edit and mistyped, and rejecting the
+    call on a stray comma would be the harness deciding for them."""
+    async with running(make_tui_app()) as (app, pilot):
+        front = app.front
+        assert front is not None
+        answers = await _decide(app, pilot, front, arguments={"path": "a"})
+
+        await pilot.click("#approval-edit")
+        await pilot.pause()
+        app.screen.query_one("#approval-why", Input).value = "{not json"
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert not answers, "a typo was taken as a decision"
+        assert isinstance(app.screen, ApprovalModal)
+
+
 async def test_approval_round_trips_through_the_log(make_tui_app: MakeApp) -> None:
     """The P2-04 gate: asked, decided, and both in the log."""
     async with running(make_tui_app()) as (app, pilot):
         front = app.front
         assert front is not None
-        outcomes: list[str] = []
-
-        async def ask() -> None:
-            outcomes.append(
-                await front.ctx.approval.request(
-                    agent=StubAgent(ctx=front.ctx, session=front.session),
-                    tool_name="write",
-                    call_id="c1",
-                    reason="writes outside the workspace",
-                )
-            )
-
-        app.run_worker(ask())
-        await until(pilot, lambda: isinstance(app.screen, ApprovalModal))
+        outcomes = await _decide(app, pilot, front)
         assert isinstance(app.screen, ApprovalModal)
         assert app.screen.request.tool_name == "write"
-        await pilot.click("#approval-allow")
+        await pilot.click("#approval-approve")
         await until(pilot, lambda: bool(outcomes))
 
         assert outcomes == ["allowed-once"]

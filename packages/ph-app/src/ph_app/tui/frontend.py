@@ -37,7 +37,7 @@ from typing import Any, Protocol
 from ph.agent.types import AgentCancelCause, AgentOptions
 from ph.cordis import Context
 from ph.llm.types import create_user_message
-from ph.seams.approval import ApprovalOutcome, ApprovalRequest
+from ph.seams.approval import ApprovalAnswer, ApprovalRequest
 from ph.seams.tui_status import StatusReading
 from ph.seams.user_questions import UserQuestion
 from ph.session import Session, SessionEvent
@@ -54,7 +54,7 @@ log = logging.getLogger("ph_app.tui.frontend")
 class ModalHost(Protocol):
     """What the front-end needs from whatever is drawing it."""
 
-    async def ask_approval(self, request: ApprovalRequest) -> tuple[ApprovalOutcome, str]:
+    async def ask_approval(self, request: ApprovalRequest) -> tuple[ApprovalAnswer, str]:
         """Put the approval modal up and wait. Must be called from a worker."""
         ...
 
@@ -219,7 +219,7 @@ def _attach(ctx: Context, front: HarnessSession) -> list[Callable[[], Any]]:
             log.exception("ph_app.tui: the adapter refused an event")
         front.host.state_changed()
 
-    async def answer_approval(request: ApprovalRequest, _next: Any = None) -> ApprovalOutcome:
+    async def answer_approval(request: ApprovalRequest, _next: Any = None) -> ApprovalAnswer:
         outcome, reason = await front.host.ask_approval(request)
         if reason:
             # "No, use the existing helper" redirects a turn where a bare

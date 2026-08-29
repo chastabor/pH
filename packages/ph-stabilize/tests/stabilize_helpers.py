@@ -11,15 +11,27 @@ then shadows with a parameter of the same name.
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import pytest
 
 from ph.bundles import BASE, HEADLESS
+from ph.llm.types import ToolCallBlock, ToolResultBlock, text_of
 from ph.seams.spill import SpillStore
+from ph.session import derive_event_message
 from ph_stabilize import BUNDLE
 
-__all__ = ["PROFILE", "blob", "break_spill", "events_of", "run_tool_calls"]
+__all__ = [
+    "PROFILE",
+    "bash_call",
+    "blob",
+    "break_spill",
+    "events_of",
+    "result_text",
+    "row",
+    "run_tool_calls",
+]
 
 PROFILE = [BASE, HEADLESS, BUNDLE]
 """Base, the fake adapter, and this bundle — what a profile layering it gets."""
@@ -80,3 +92,30 @@ async def run_tool_calls(ctx: Any, session: Any, *calls: Any, step: int = 1) -> 
     return await execute_tool_calls(
         ctx, StubAgent(ctx, session), 1, step, list(calls), CancelToken(), lambda _c: None
     )
+
+
+def row(plugin_id: str, **config: Any) -> dict[str, Any]:
+    """One row, with its ceilings or its rules spelled out in the test."""
+    return {"id": plugin_id, "config": config}
+
+
+def bash_call(call_id: str, command: str = "true") -> ToolCallBlock:
+    """The one tool every row in this bundle is exercised against."""
+    return ToolCallBlock(id=call_id, name="bash", arguments=json.dumps({"command": command}))
+
+
+def result_text(session: Any, call_id: str) -> str:
+    """What the model reads back from one call.
+
+    Through `derive_event_message` — THE projection — rather than by indexing
+    `event.data["message"]["content"][0]`, for the reason `limits._result_facts`
+    gives: a second route to that shape is one that keeps passing after the
+    shape moves, and a test that reads the log by hand stops testing what the
+    model sees.
+    """
+    for event in events_of(session, "tool/result"):
+        message = derive_event_message(event)
+        for block in message.content if message else ():
+            if isinstance(block, ToolResultBlock) and block.tool_call_id == call_id:
+                return text_of(block.content)
+    return ""

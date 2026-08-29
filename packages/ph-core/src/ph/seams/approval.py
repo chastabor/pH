@@ -25,17 +25,24 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Literal, TypeAlias, cast, get_args
 
+from pydantic import Field
+
 from ..cancel import CancelToken, is_cancelled
 from ..cordis import Context, Disposer, events, plugin
 from ..session import Session
 from ..wire import WireModel
 
 __all__ = [
+    "ApprovalAnswer",
+    "ApprovalDecisionName",
     "ApprovalOutcome",
     "ApprovalPolicy",
     "ApprovalRequest",
     "ApprovalService",
+    "Edited",
     "PendingApproval",
+    "Responded",
+    "answer_kind",
     "apply",
     "pending_approvals",
 ]
@@ -43,7 +50,77 @@ __all__ = [
 log = logging.getLogger("ph.seams.approval")
 
 ApprovalOutcome: TypeAlias = Literal["allowed-once", "rejected", "cancelled", "unavailable"]
+"""The four answers that carry no data. Only `allowed-once` proceeds (B3)."""
+
 ApprovalPolicy: TypeAlias = Literal["ask", "never"]
+
+ApprovalDecisionName: TypeAlias = Literal["approve", "edit", "reject", "respond"]
+"""The four things a human may *do* about a prompt, as a row and a front end
+name them.
+
+A closed vocabulary, so it is a `Literal` — the rule `ApprovalOutcome`,
+`CardKind`, `ReadingLevel` and `PresetName` are already held to. Distinct from
+`ApprovalOutcome`, which names what an answerer *returned*: `approve` is the
+button, `allowed-once` is the verdict, and the two are the same decision seen
+from either side of the prompt."""
+
+_ANSWER_DECISIONS: dict[str, ApprovalDecisionName] = {
+    "allowed-once": "approve",
+    "edited": "edit",
+    "responded": "respond",
+}
+"""Which answers a restricted ask has to check. `rejected` is absent because
+refusing is always available — a row that withheld every button would still be
+refused by a dismissal — and `cancelled`/`unavailable` are failures rather than
+decisions."""
+
+
+@dataclass(frozen=True, slots=True)
+class Edited:
+    """Run it, but with these arguments instead (P4-05).
+
+    The human corrected the call rather than refusing it — a path or a flag was
+    wrong, and stopping the turn to say so costs a round trip that changing it
+    does not.
+
+    **Both versions end up in the log, and they have to.** `tool/call` is
+    appended before the pipeline runs (B4), so it already records what the
+    *model* asked for; the substitution is recorded on `approval/decided`. A
+    reader sees the request, the correction, and who made it — where quietly
+    rewriting the call's own record would have attributed the human's arguments
+    to the model, which is the falsehood this codebase refuses everywhere else.
+    """
+
+    arguments: Any
+    kind: Literal["edited"] = "edited"
+
+
+@dataclass(frozen=True, slots=True)
+class Responded:
+    """Do not run it; tell the model this instead (P4-05).
+
+    The answer to "why are you calling that?" — the human replies in the tool's
+    own voice, the body never runs, and the model reads a *successful* result
+    rather than a refusal it has to interpret. A rejection says no; this says
+    what to do instead, in the one place the model is already looking.
+    """
+
+    message: str
+    kind: Literal["responded"] = "responded"
+
+
+ApprovalAnswer: TypeAlias = "ApprovalOutcome | Edited | Responded"
+"""What an answerer may return.
+
+The four bare outcomes stay strings so the fail-closed reading is unchanged and
+every existing answerer keeps working; the two that carry data are objects
+because they have data to carry."""
+
+
+def answer_kind(answer: ApprovalAnswer) -> str:
+    """The one word that names an answer, whichever shape it took."""
+    return answer if isinstance(answer, str) else answer.kind
+
 
 events.declare(
     "approval/request",
@@ -60,6 +137,20 @@ class ApprovalRequest(WireModel):
     call_id: str | None = None
     reason: str | None = None
     agent_id: str | None = None
+    allowed_decisions: list[ApprovalDecisionName] = Field(default_factory=list)
+    """What the asking row will accept. Empty means all four.
+
+    A `list`, not the `tuple` the config uses, because this model is appended:
+    `freeze_json_value` refuses a tuple outright (A1 — "would come back as a
+    list"), and a wire model that cannot be logged is one whose first append
+    fails in someone's session rather than here."""
+    arguments: Any = None
+    """The call as it stands, so a human can correct it rather than only refuse.
+
+    **Deliberately not recorded on `approval/asked`.** `tool/call` is appended
+    before the pipeline runs (B4) and already holds them; a second copy in the
+    log is two statements of one fact that can disagree, and this one is here to
+    be *shown*, not stored."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,7 +217,9 @@ class ApprovalService:
         call_id: str | None = None,
         reason: str | None = None,
         cancel: CancelToken | None = None,
-    ) -> ApprovalOutcome:
+        allowed_decisions: tuple[ApprovalDecisionName, ...] = (),
+        arguments: Any = None,
+    ) -> ApprovalAnswer:
         """Ask, record both halves, and return the outcome. Never raises."""
         session: Session | None = getattr(agent, "session", None)
         request = ApprovalRequest(
@@ -134,6 +227,8 @@ class ApprovalService:
             call_id=call_id,
             reason=reason,
             agent_id=getattr(agent, "id", None),
+            allowed_decisions=list(allowed_decisions),
+            arguments=arguments,
         )
         if session is not None and approval_policy(session) == "never":
             # A deployment that turned prompting off has answered in advance;
@@ -150,7 +245,7 @@ class ApprovalService:
             self._record_decided(session, request, outcome, automatic=False)
         return outcome
 
-    async def _route(self, request: ApprovalRequest, cancel: CancelToken | None) -> ApprovalOutcome:
+    async def _route(self, request: ApprovalRequest, cancel: CancelToken | None) -> ApprovalAnswer:
         if is_cancelled(cancel):
             return "cancelled"
 
@@ -163,23 +258,65 @@ class ApprovalService:
         except Exception:
             log.exception("ph.seams.approval: an answerer failed; denying")
             return "unavailable"
-        if outcome in get_args(ApprovalOutcome):
-            return cast(ApprovalOutcome, outcome)
-        log.error("ph.seams.approval: answerer returned %r; denying", outcome)
-        return "unavailable"
+        if not isinstance(outcome, (Edited, Responded)) and outcome not in get_args(
+            ApprovalOutcome
+        ):
+            log.error("ph.seams.approval: answerer returned %r; denying", outcome)
+            return "unavailable"
+        answer = cast(ApprovalAnswer, outcome)
+        # What *may* be decided is the asking row's policy, so the seam that owns
+        # the fail-closed reading is the one that has to hold it: enforcing this
+        # only in the front end would let a second answerer — an RPC one, a
+        # test's — return an `Edited` for a tool whose arguments the row said
+        # must not be hand-written.
+        decision = _ANSWER_DECISIONS.get(answer_kind(answer))
+        if request.allowed_decisions and decision not in (None, *request.allowed_decisions):
+            log.error(
+                "ph.seams.approval: answerer chose %r, which %r does not allow; denying",
+                decision,
+                request.tool_name,
+            )
+            return "unavailable"
+        return answer
 
     def _record_asked(self, session: Session, request: ApprovalRequest) -> None:
-        session.append("approval/asked", request.to_wire())
+        """The ask, as the log keeps it.
+
+        Built field by field rather than by subtracting `arguments` from
+        `to_wire()`, and symmetric with `_record_decided` for the reason: the
+        request is the *answerer's* view and will grow fields for its benefit — a
+        diff preview, a risk label — and every one of them would otherwise land
+        in the log by default, silently, with the filter needing to be remembered
+        at each new serialization site. The arguments themselves stay out because
+        `tool/call` recorded them before the pipeline ran (B4); two statements of
+        one fact are two that can disagree.
+        """
+        data: dict[str, Any] = {"toolName": request.tool_name}
+        if request.call_id is not None:
+            data["callId"] = request.call_id
+        if request.reason is not None:
+            data["reason"] = request.reason
+        if request.agent_id is not None:
+            data["agentId"] = request.agent_id
+        if request.allowed_decisions:
+            data["allowedDecisions"] = list(request.allowed_decisions)
+        session.append("approval/asked", data)
 
     def _record_decided(
         self,
         session: Session,
         request: ApprovalRequest,
-        outcome: ApprovalOutcome,
+        outcome: ApprovalAnswer,
         *,
         automatic: bool,
     ) -> None:
-        data: dict[str, Any] = {"toolName": request.tool_name, "outcome": outcome}
+        data: dict[str, Any] = {"toolName": request.tool_name, "outcome": answer_kind(outcome)}
+        if isinstance(outcome, Edited):
+            # The substitution itself, because `tool/call` already recorded what
+            # the model asked for and the model is about to run something else.
+            data["arguments"] = outcome.arguments
+        elif isinstance(outcome, Responded):
+            data["message"] = outcome.message
         if request.call_id is not None:
             data["callId"] = request.call_id
         if automatic:

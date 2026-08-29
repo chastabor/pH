@@ -34,7 +34,7 @@ from textual.binding import Binding, BindingType
 from textual.containers import Horizontal, Vertical
 
 from ph.paths import resolve_roots
-from ph.seams.approval import ApprovalOutcome, ApprovalRequest
+from ph.seams.approval import ApprovalAnswer, ApprovalRequest
 from ph.seams.permission_presets import PRESETS
 from ph.seams.user_questions import UserQuestion
 
@@ -334,9 +334,9 @@ class PHTuiApp(App[str | None]):
 
     # ------------------------------------------------------------ modal host --
 
-    async def ask_approval(self, request: ApprovalRequest) -> tuple[ApprovalOutcome, str]:
+    async def ask_approval(self, request: ApprovalRequest) -> tuple[ApprovalAnswer, str]:
         decision = await self.push_screen_wait(ApprovalModal(request))
-        return decision.outcome, decision.reason
+        return decision.answer, decision.reason
 
     async def ask_question(self, question: UserQuestion) -> str | None:
         answer = await self.push_screen_wait(AskUserModal(question))

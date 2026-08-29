@@ -59,3 +59,12 @@
 # five identical failures in a row is not a long task, it is a stuck one.
 - id: limits
   name: limits
+
+# --- human in the loop ------------------------------------------------------
+# A person between the model and what it cannot take back (G6). `interrupt_on`
+# is empty by default, so layering the bundle prompts about nothing: a harness
+# that asks on first run teaches its user to approve without reading, which is
+# worse than not asking. A profile names the tools and the patterns it cares
+# about — `rlm-stable` does, at P4-15.
+- id: hitl
+  name: hitl

@@ -52,6 +52,7 @@ __all__ = [
     "FailureKind",
     "PostToolDecision",
     "PreToolDecision",
+    "Respond",
     "ToolDefinition",
     "ToolExecution",
     "ToolExecutionInput",
@@ -310,6 +311,21 @@ class ToolRunContext:
 
 @dataclass(frozen=True, slots=True)
 class Allow:
+    arguments: Any = None
+    """Run it with these arguments instead of the ones the model sent.
+
+    `None` — the ordinary case — leaves the call untouched. A substitution lands
+    here, applied by `prepare()`, because the execution belongs to the pipeline:
+    a listener reaching into `execution.arguments` itself would be writing the
+    one field the run's owner has already handed to every listener before it.
+
+    The model's own request is *not* rewritten. `tool/call` is appended before
+    the pipeline runs (B4), so it stands as the record of what the model asked
+    for and whoever substituted says so in their own record.
+    """
+    has_arguments: bool = False
+    """Whether `arguments` is a substitution. Separate from `None`, because
+    `None` is a value a tool may legitimately be called with."""
     kind: Literal["allow"] = "allow"
 
 
@@ -329,12 +345,41 @@ class Deny:
 
 
 @dataclass(frozen=True, slots=True)
+class Respond:
+    """Do not run it; hand the model this result instead.
+
+    A *successful* result, because whoever answered answered the question the
+    call was asking — a denial the model would have to interpret is the wrong
+    shape for "you don't need to run that, here is the answer".
+
+    A member of the pipeline's own vocabulary rather than something only the
+    approval seam can reach, for the reason `Deny.concludes_turn` is one: a cache
+    row, a replay row, or a "disabled here, do this instead" row all want to
+    short-circuit a call with an answer, and a capability wired to a single
+    consumer is one the next consumer has to reinvent.
+    """
+
+    message: str
+    kind: Literal["respond"] = "respond"
+
+
+@dataclass(frozen=True, slots=True)
 class Ask:
     reason: str | None = None
+    allowed_decisions: tuple[str, ...] = ()
+    """Which of `approve | edit | reject | respond` a front end should offer.
+    (`ph.seams.approval.ApprovalDecisionName` names them; spelled as bare strings
+    here so the tools pipeline does not have to import the seam that consumes an
+    `Ask` — the dependency runs the other way.)
+
+    Empty means all of them. Carried from the row that asked to the answerer
+    that prompts, because *what may be decided* is a policy question and a front
+    end that guessed would offer `edit` for a tool whose arguments must not be
+    hand-written."""
     kind: Literal["ask"] = "ask"
 
 
-PreToolDecision: TypeAlias = "Allow | Deny | Ask"
+PreToolDecision: TypeAlias = "Allow | Deny | Ask | Respond"
 
 
 @dataclass(frozen=True, slots=True)

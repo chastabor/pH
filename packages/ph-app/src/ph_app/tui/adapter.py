@@ -632,6 +632,7 @@ RECORDLESS: frozenset[str] = frozenset(
         "request/header",
         "step/start",
         "step/end",
+        "approval/mode",
         "approval/policy",
         "fs/observed",
         "session/end-seed",

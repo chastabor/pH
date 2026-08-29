@@ -95,6 +95,7 @@ def test_the_auditor_renders_what_the_transcript_does_not() -> None:
     """
     assert {
         "request/header",
+        "approval/mode",
         "approval/policy",
         "fs/observed",
         "session/end-seed",

@@ -40,6 +40,13 @@ KNOWN_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         "approval/asked",
         "approval/decided",
         "approval/policy",
+        # The gating *posture* (P4-05; emitted by ph-stabilize's `hitl`). Its own
+        # type rather than a field on `approval/policy`, which `permission-presets`
+        # also writes: one last-write-wins fold with two writers, one of which
+        # does not know the field exists, is a posture that silently reverts when
+        # someone switches preset. Listed here because the reader that refuses an
+        # unknown type is ph-core's.
+        "approval/mode",
         "command/done",
         "command/run",
         "permission/preset",
