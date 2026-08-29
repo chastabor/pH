@@ -76,3 +76,16 @@
 # row says out loud what it does not reach when no sandbox is mounted (E9).
 - id: permissions-fs
   name: permissions-fs
+  config:
+    rules:
+      # The default write scope (E6, §12 Q9b), and the *last* rule on purpose:
+      # first-match-wins means every explicit rule an operator writes above it
+      # decides first, so this is a default rather than an override. A write
+      # inside the agent's own workspace or its scratch matches nothing and is
+      # allowed; one leaving them asks, once. Inert until a containment tier is
+      # in force — with no acquired workspace there is nothing to be outside of.
+      - operations: [write]
+        paths: ["**"]
+        scope: outside-workspace
+        mode: interrupt
+

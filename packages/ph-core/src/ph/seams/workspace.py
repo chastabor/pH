@@ -61,6 +61,7 @@ from ..session import Session
 from ..wire import WireModel
 from . import workspace_provision
 from ._registry import claim_entry, claim_slot
+from .sandbox import SandboxPolicy
 from .workspace_provision import ProvisionEntry, ProvisionReport
 
 __all__ = [
@@ -82,6 +83,8 @@ __all__ = [
     "project_access",
     "redirection_env",
     "workspace_of",
+    "workspace_policy",
+    "writable_roots",
 ]
 
 log = logging.getLogger("ph.seams.workspace")
@@ -180,6 +183,46 @@ def redirection_env(scratch: Path) -> dict[str, str]:
         "UV_CACHE_DIR": str(scratch / "uv"),
         "GIT_CONFIG_GLOBAL": str(scratch / "gitconfig"),
     }
+
+
+def writable_roots(workspace: Workspace) -> tuple[Path, ...]:
+    """Where this agent may write without being asked (E6).
+
+    The one definition, because two consumers need the same set and a third
+    arrives with P6-05: `permissions-fs`'s default rule prompts about what falls
+    outside it, and `workspace_policy` below hands the same set to a backend to
+    enforce. Two spellings that drifted would be exactly the defect §4.8's tier
+    table exists to prevent — and a test asserting they agree catches drift
+    rather than preventing it, which is why this is a function and not a
+    convention. `Workspace.agent_work_pathspec` next door is the same move.
+
+    `scratch` is in it, always. It is outside the worktree by design (E5) and is
+    the one place a read-only or ephemeral agent is *told* it may write, so a
+    scope naming only `root` would prompt on exactly the writes the design
+    invites.
+    """
+    return (workspace.root, workspace.scratch)
+
+
+def workspace_policy(workspace: Workspace) -> SandboxPolicy:
+    """The workspace as a confinement request: write here, ask about elsewhere.
+
+    On the seam, beside the value it describes, because two consumers need the
+    *same* set — `ctx.shell` requests it of a backend, and `workspace-write-scope`
+    prompts about what falls outside it. Two spellings of one boundary that
+    drifted would be the defect §4.8's tier table exists to prevent, where a
+    tier's name promises what its policy does not do.
+
+    `scratch` is writable too, always: it is outside the worktree by design (E5)
+    and is the one place a read-only agent is *told* it may write, so a policy
+    that named only `root` would confine away the writes the design invites.
+    """
+    first, *extra = writable_roots(workspace)
+    return SandboxPolicy(
+        mode="workspace-write",
+        workspace_root=str(first),
+        writable_extra=[str(path) for path in extra],
+    )
 
 
 def workspace_of(ctx: Context, agent: Any) -> Workspace | None:

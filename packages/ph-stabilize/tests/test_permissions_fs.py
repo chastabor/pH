@@ -29,11 +29,12 @@ from stabilize_helpers import (
     result_text,
     row,
     run_tool_calls,
+    scoped_agent,
 )
 
 from ph.llm.types import ToolCallBlock
 from ph.seams.fs import FsDenied
-from ph.testing import StubAgent
+from ph.testing import FAKE_OPTIONS, StubAgent, StubWorkspaceProvider, run_tool
 from ph_stabilize.permissions_fs import (
     BOUNDED_REACH,
     UNBOUNDED_REACH,
@@ -46,7 +47,35 @@ pytestmark = pytest.mark.anyio
 
 def _policy(*rules: Rule, root: str = "/w") -> FsPermissions:
     """The decision half on its own, for the questions no tool can ask yet."""
-    return FsPermissions(rules=rules, root=Path(root))
+    return FsPermissions(
+        rules=rules, roots=lambda agent=None: getattr(agent, "root", None) or Path(root)
+    )
+
+
+DEFAULT_WRITE_SCOPE: dict[str, Any] = {
+    "operations": ["write"],
+    "paths": ["**"],
+    "scope": "outside-workspace",
+    "mode": "interrupt",
+}
+"""E6's rule, spelled here as the bundle spells it.
+
+Restated rather than read from `bundle.yaml` because a row patch replaces a
+row's config *wholesale* — so a test that adds a rule of its own drops the
+bundle's, and composing the two by hand is what makes the ordering the tests are
+about visible in the test.
+"""
+
+
+async def _scoped(mount: Any, tmp_path: Path, *rules: dict[str, Any]) -> Any:
+    """The bundle's default write scope, with any explicit rules *above* it.
+
+    Above, because first-match-wins is the whole precedence mechanism: an
+    operator's rule decides before the default is reached, and a test that
+    appended instead would be testing the opposite arrangement.
+    """
+    (tmp_path / "project").mkdir(exist_ok=True)
+    return await _mounted(mount, tmp_path, *rules, DEFAULT_WRITE_SCOPE)
 
 
 async def _mounted(mount: Any, tmp_path: Path, *rules: dict[str, Any]) -> Any:
@@ -379,3 +408,177 @@ def test_a_policy_with_no_sandbox_seam_reports_unconfined() -> None:
     paths these rules cannot see."""
     assert _policy().reach == UNBOUNDED_REACH
     assert not _policy().confined
+
+
+async def test_an_anchored_rule_still_applies_inside_a_worktree(mount: Any, tmp_path: Path) -> None:
+    """The hole D21 opened, and the reason the root is asked per agent.
+
+    A rule written `secrets/**` is anchored to *the workspace*. With the root
+    captured at mount, an agent at the `worktree` tier writes in a directory
+    outside that prefix, so `_spellings` offered only the absolute path and the
+    rule silently stopped applying — in the one place a rule is most needed,
+    with nothing failing to say so.
+    """
+    ctx = await _mounted(mount, tmp_path, {"operations": ["write"], "paths": ["secrets/**"]})
+    session = ctx.sessions.create("s1")
+    agent = ctx.agents.create(session, FAKE_OPTIONS)
+    ctx.workspace.register_provider(StubWorkspaceProvider(root=tmp_path / "trees"))
+    workspace = await ctx.workspace.acquire(
+        session_id="s1", agent_id=agent.id, base=tmp_path, session=session
+    )
+    assert workspace.root != ctx.fs.root, "this test is only meaningful for a fresh root"
+
+    result = await run_tool(
+        ctx,
+        "write",
+        {"path": str(workspace.root / "secrets" / "key.pem"), "content": "x"},
+        agent=agent,
+    )
+
+    assert result.is_error
+    assert not (workspace.root / "secrets" / "key.pem").exists()
+
+
+def test_two_agents_are_judged_against_their_own_roots(tmp_path: Path) -> None:
+    """The same rule, two agents, two answers — which is the point.
+
+    `secrets/**` names a different directory in each agent's tree, and a policy
+    that resolved one root for everybody would answer for the wrong one.
+    """
+
+    class _Agent:
+        def __init__(self, root: Path) -> None:
+            self.root = root
+
+    policy = _policy(Rule(operations=("write",), paths=("secrets/**",)), root="/w")
+    one, two = _Agent(Path("/w/a")), _Agent(Path("/w/b"))
+
+    assert policy.objection("write", Path("/w/a/secrets/k"), one) is not None
+    assert policy.objection("write", Path("/w/a/secrets/k"), two) is None
+    assert policy.objection("write", Path("/w/b/secrets/k"), two) is not None
+
+
+# ----------------------------------------------- the default write scope --
+
+
+async def test_writing_inside_the_workspace_never_asks(mount: Any, tmp_path: Path) -> None:
+    """E6's first half, and the whole reason the row exists.
+
+    Not one prompt, for any number of writes: the agent owns this checkout, so
+    asking about its own tree is asking about nothing.
+    """
+    ctx = await _scoped(mount, tmp_path)
+    agent, workspace = await scoped_agent(ctx, tmp_path)
+    asked = answer_approvals(ctx, "rejected")
+
+    for name in ("one.txt", "two.txt", "nested/three.txt"):
+        await run_tool(
+            ctx, "write", {"path": str(workspace.root / name), "content": "x"}, agent=agent
+        )
+
+    assert asked == []
+    assert (workspace.root / "nested" / "three.txt").read_text(encoding="utf-8") == "x"
+
+
+async def test_writing_to_scratch_never_asks(mount: Any, tmp_path: Path) -> None:
+    """Scratch is outside the worktree *by design* (E5) and is the one place a
+    read-only or ephemeral agent is told it may write — so a scope covering only
+    `root` would prompt on exactly the writes the design invites."""
+    ctx = await _scoped(mount, tmp_path)
+    agent, workspace = await scoped_agent(ctx, tmp_path)
+    asked = answer_approvals(ctx, "rejected")
+
+    await run_tool(
+        ctx, "write", {"path": str(workspace.scratch / "notes.md"), "content": "kept"}, agent=agent
+    )
+
+    assert asked == []
+    assert (workspace.scratch / "notes.md").read_text(encoding="utf-8") == "kept"
+
+
+async def test_one_write_outside_asks_once(mount: Any, tmp_path: Path) -> None:
+    """E6's second half. The rare prompt is the meaningful one, and it carries
+    the boundary being left rather than only the path."""
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    ctx = await _scoped(mount, tmp_path)
+    agent, workspace = await scoped_agent(ctx, tmp_path)
+    asked = answer_approvals(ctx, "allowed-once")
+
+    await run_tool(ctx, "write", {"path": str(outside / "escape.txt"), "content": "x"}, agent=agent)
+
+    assert len(asked) == 1
+    assert str(outside / "escape.txt") in str(asked[0].reason)
+    assert str(workspace.root) in str(asked[0].reason), "the prompt does not say what is being left"
+    assert (outside / "escape.txt").exists()
+
+
+async def test_a_refused_write_outside_does_not_happen(mount: Any, tmp_path: Path) -> None:
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    ctx = await _scoped(mount, tmp_path)
+    agent, _workspace = await scoped_agent(ctx, tmp_path)
+    answer_approvals(ctx, "rejected")
+
+    result = await run_tool(
+        ctx, "write", {"path": str(outside / "escape.txt"), "content": "x"}, agent=agent
+    )
+
+    assert result.is_error
+    assert not (outside / "escape.txt").exists()
+
+
+async def test_no_answerer_denies_rather_than_allowing(mount: Any, tmp_path: Path) -> None:
+    """Fail-closed, the reading every asking row in this package shares: an
+    approval nobody can answer is not an approval."""
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    ctx = await _scoped(mount, tmp_path)
+    agent, _workspace = await scoped_agent(ctx, tmp_path)
+
+    result = await run_tool(
+        ctx, "write", {"path": str(outside / "escape.txt"), "content": "x"}, agent=agent
+    )
+
+    assert result.is_error
+    assert not (outside / "escape.txt").exists()
+
+
+async def test_an_agent_with_no_workspace_is_unaffected(mount: Any, tmp_path: Path) -> None:
+    """No workspace, no scope to be outside of.
+
+    A profile that layers this row without the lifecycle gets today's behaviour
+    rather than a boundary drawn around a directory nobody chose.
+    """
+    ctx = await _scoped(mount, tmp_path)
+    session = ctx.sessions.create("s1")
+    agent = ctx.agents.create(session, FAKE_OPTIONS)
+    answer_approvals(ctx, "rejected")
+    target = tmp_path / "anywhere.txt"
+
+    await run_tool(ctx, "write", {"path": str(target), "content": "x"}, agent=agent)
+
+    assert target.read_text(encoding="utf-8") == "x"
+
+
+async def test_an_explicit_deny_beats_the_default(mount: Any, tmp_path: Path) -> None:
+    """The layering *is* the precedence.
+
+    Waterfall listeners run outermost-first in registration order, so
+    `permissions-fs` layered before this row refuses first and this row is never
+    reached. That is what makes "default write scope" a default rather than an
+    override of the operator's own rules.
+    """
+    ctx = await _scoped(mount, tmp_path, {"operations": ["write"], "paths": ["secrets/**"]})
+    agent, workspace = await scoped_agent(ctx, tmp_path)
+    answer_approvals(ctx, "allowed-once")
+
+    result = await run_tool(
+        ctx,
+        "write",
+        {"path": str(workspace.root / "secrets" / "key.pem"), "content": "x"},
+        agent=agent,
+    )
+
+    assert result.is_error
+    assert not (workspace.root / "secrets" / "key.pem").exists()

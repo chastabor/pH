@@ -11,6 +11,7 @@ confinement when the policy says to.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -18,7 +19,9 @@ from typing import Any
 from ..cordis import Context, plugin
 from .sandbox import SandboxPolicy
 from .subprocess import SubprocessSpawnSpec, platform_shell, scrub_env
-from .workspace import workspace_of
+from .workspace import workspace_of, workspace_policy
+
+log = logging.getLogger("ph.seams.shell")
 
 __all__ = ["ShellResult", "ShellService", "apply"]
 
@@ -65,6 +68,26 @@ class ShellService:
         if cwd is None:
             fs = self.ctx.get("fs")
             cwd = Path.cwd() if fs is None else fs.root_for(agent)
+        if policy is None and workspace is not None:
+            # The agent's own workspace as the writable root (E6), but *only*
+            # where something can enforce it: `confine()` refuses rather than
+            # passing through, so requesting confinement with no backend would
+            # turn every shell command into a `SANDBOX_UNAVAILABLE` denial. The
+            # policy is the same set `workspace-write-scope` prompts about, so
+            # the two describe one boundary.
+            sandbox = self.ctx.get("sandbox")
+            if sandbox is not None and sandbox.available:
+                policy = workspace_policy(workspace)
+            else:
+                # Said out loud, because `confined_by=None` cannot tell "the tier
+                # wanted confinement and there was no backend" from "nobody
+                # asked" — and collapsing those two is the passthrough this seam
+                # refuses one layer down. P4-11's `containment.strict` is what
+                # turns this from a notice into a refusal.
+                log.debug(
+                    "ph.seams.shell: %s has a workspace but no sandbox backend; running unconfined",
+                    cwd,
+                )
         confined_by: str | None = None
         if policy is not None:
             # Requesting confinement and getting none is an error, not a

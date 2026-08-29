@@ -61,13 +61,17 @@ is wrong half the time.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from collections.abc import Callable
+from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal, TypeAlias
 
 from ph.cordis import Context, plugin
+from ph.paths import is_under
 from ph.seams.approval import denial_reason
 from ph.seams.fs import EditIntent, FsService, ReadIntent, WriteIntent, matches_glob
+from ph.seams.workspace import workspace_of, writable_roots
 from ph.wire import WireModel
 
 __all__ = [
@@ -76,6 +80,7 @@ __all__ = [
     "FsPermissions",
     "Operation",
     "Rule",
+    "Scope",
     "apply",
 ]
 
@@ -91,6 +96,11 @@ open, and — the trap that decided it — where the obvious
 deleting `secrets/`. Deletion has a different *blast radius*, which is why
 `deletion_reason` asks a different question; it is not a different permission.
 """
+
+Scope: TypeAlias = Literal["anywhere", "outside-workspace"]
+"""Whether a rule speaks about every path or only about ones leaving the agent's
+own workspace. A closed vocabulary, so a `Literal` — the rule this package holds
+`Decision`, `ApprovalMode` and `ContainmentTier` to."""
 
 Decision: TypeAlias = Literal["allow", "deny", "interrupt"]
 """What a rule says to do. `interrupt` asks a human through `ctx.approval`, which
@@ -111,6 +121,12 @@ BOUNDED_REACH = (
 
 DENIAL = "{operation} denied by permissions-fs: {path}"
 INTERRUPT_REASON = "{operation} {path} — permissions-fs asks about this path"
+OUTSIDE_REASON = "{operation} {path} — outside this agent's workspace ({root}) and its scratch"
+"""What a `scope: outside-workspace` rule asks.
+
+The path *and* the boundary it is leaving, because "approve this write?" with no
+frame is a question nobody can answer well — and the whole point of prompting
+rarely is that the rare prompt carries enough to decide on."""
 RECURSIVE_DENIAL = (
     "recursive delete of {path} refused: permissions-fs has a rule that could match "
     "something inside it, and a subtree cannot be checked one path at a time"
@@ -133,6 +149,18 @@ class Rule(WireModel):
     `.env` and `/etc/**` both be written the obvious way. Empty matches nothing,
     because a rule with no paths is far more likely to be unfinished config than
     a deliberate match-everything."""
+    scope: Scope = "anywhere"
+    """Which paths this rule is *eligible* for, before its globs are consulted.
+
+    `outside-workspace` is what makes E6's default write scope a rule rather
+    than a second gate: the agent's own tree is per-agent and unnameable in a
+    static `paths:` list, but "is this path outside the tree the seam gave this
+    agent" is a question `decide` can now ask, because it has the agent and the
+    per-agent root. One first-match-wins list, one prompt, and precedence that
+    comes from the rule's position rather than from which row a bundle happened
+    to layer first — two gates on one waterfall queue rather than compose, and a
+    write refused by one and asked about by the other prompts *twice*.
+    """
     mode: Decision = "deny"
     """What to do on a match. `deny` by default: a rule someone wrote and left
     half-configured should be the restrictive one."""
@@ -163,7 +191,20 @@ class FsPermissions:
     """
 
     rules: tuple[Rule, ...]
-    root: Path
+    roots: Callable[[Any], Path]
+    """`ctx.fs.root_for` — the acting agent's root, asked rather than captured.
+
+    The one member of `ctx.fs` this needs, so it is that member and not the
+    service: a `frozen=True` value holding a `slots=True` service is unhashable
+    and compares by a live mutable object, and typing it `Any` was what made the
+    tests build a stub class to stand in for one call.
+
+    A root read once was right until D21: under the `worktree` tier an agent's
+    paths sit *outside* `fs.root`, so `_spellings` offered only the absolute
+    form and every anchored rule — `secrets/*`, a bare `.env` — silently stopped
+    applying inside a worktree, which is the one place a rule is most needed. The
+    seam already answers this per agent (`root_for`), and the intents already
+    carry the agent."""
     ctx: Context | None = None
     """The activation scope, held so `reach` stays *live*.
 
@@ -174,18 +215,9 @@ class FsPermissions:
     sandbox seam itself is layered later. `None` — no scope, as in the policy
     tests — reports unconfined, which is the fail-closed direction and true.
     """
-    _prefix: str = field(default="", init=False, repr=False, compare=False)
-    """`root` as a posix path with a trailing slash, computed once.
 
-    `_spellings` runs per gated read *and per file a walk visits*, and
-    `Path.relative_to` allocates a `Path` per root segment on every call — 26 µs
-    at a five-segment root, which measured as 92% of the concealment check and
-    nearly doubled the wall time of a repository-wide `grep`. A string prefix
-    strip is the same answer for 0.16 µs.
-    """
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "_prefix", f"{self.root.as_posix().rstrip('/')}/")
+    def _prefix(self, agent: Any) -> str:
+        return _prefix_of(self.roots(agent))
 
     @property
     def confined(self) -> bool:
@@ -198,12 +230,20 @@ class FsPermissions:
         """What these rules do and do not cover, as it stands (E9)."""
         return BOUNDED_REACH if self.confined else UNBOUNDED_REACH
 
-    def decide(self, operation: Operation, path: Path) -> Rule | None:
+    def decide(self, operation: Operation, path: Path, agent: Any = None) -> Rule | None:
         """The first rule that matches, or `None` for the default allow."""
-        candidates = self._spellings(path)
+        candidates = self._spellings(path, agent)
+        outside = None
         for rule in self.rules:
             if operation not in rule.operations:
                 continue
+            if rule.scope == "outside-workspace":
+                # Computed at most once per decision, and only if a scoped rule
+                # is actually reached: the common list has none.
+                if outside is None:
+                    outside = self._outside_workspace(path, agent)
+                if not outside:
+                    continue
             if any(
                 matches_glob(candidate, pattern)
                 for pattern in rule.paths
@@ -212,7 +252,7 @@ class FsPermissions:
                 return rule
         return None
 
-    def objection(self, operation: Operation, path: Path) -> Rule | None:
+    def objection(self, operation: Operation, path: Path, agent: Any = None) -> Rule | None:
         """The first rule that would *stop* this, or `None`.
 
         `decide` answers "which rule spoke"; this answers "did it say no", which
@@ -220,19 +260,19 @@ class FsPermissions:
         three hand-written `rule is not None and rule.mode != "allow"` checks are
         three edit sites the day `Decision` grows a fourth member.
         """
-        rule = self.decide(operation, path)
+        rule = self.decide(operation, path, agent)
         return rule if rule is not None and rule.mode != "allow" else None
 
-    def conceals(self, path: Path) -> bool:
+    def conceals(self, path: Path, agent: Any = None) -> bool:
         """Whether a listing must not reveal this path.
 
         `interrupt` conceals as well as `deny`: enumeration cannot ask, and the
         alternative — showing a path the rules said to check with a human — is
         the leak the rule was written to prevent.
         """
-        return self.objection("read", path) is not None
+        return self.objection("read", path, agent) is not None
 
-    def deletion_reason(self, path: Path, *, recursive: bool) -> str | None:
+    def deletion_reason(self, path: Path, *, recursive: bool, agent: Any = None) -> str | None:
         """Why this delete must not happen, or `None`.
 
         A non-recursive delete is an ordinary first-match question. A recursive
@@ -242,14 +282,14 @@ class FsPermissions:
         one file inside it is a rule the delete would violate without ever
         asking about that file.
         """
-        if self.objection("write", path) is not None:
+        if self.objection("write", path, agent) is not None:
             return DENIAL.format(operation="delete", path=path)
         if not recursive:
             return None
         # Both spellings, for `decide`'s reason: a rule written `build/**` and a
         # rule written `/w/build/**` are the same rule, and a check that knew
         # only one of them would let the other kind of config through.
-        spellings = self._spellings(path)
+        spellings = self._spellings(path, agent)
         for candidate in self.rules:
             if candidate.mode == "allow" or "write" not in candidate.operations:
                 continue
@@ -261,7 +301,37 @@ class FsPermissions:
                 return RECURSIVE_DENIAL.format(path=path)
         return None
 
-    def _spellings(self, path: Path) -> tuple[str, ...]:
+    def prompt(self, rule: Rule, operation: Operation, path: Path, agent: Any) -> str:
+        """The sentence an `interrupt` puts in front of a person.
+
+        A rule's own `description` wins where it has one. Otherwise a scoped rule
+        names the boundary rather than only the path: the default write scope
+        prompts *because* a write is leaving the agent's tree, and a prompt that
+        did not say which tree would be the rare interruption arriving without
+        the one fact it exists to convey.
+        """
+        if rule.description:
+            return rule.description
+        if rule.scope == "outside-workspace":
+            workspace = None if self.ctx is None else workspace_of(self.ctx, agent)
+            if workspace is not None:
+                return OUTSIDE_REASON.format(operation=operation, path=path, root=workspace.root)
+        return INTERRUPT_REASON.format(operation=operation, path=path)
+
+    def _outside_workspace(self, path: Path, agent: Any) -> bool:
+        """Whether this write is leaving the workspace the seam gave this agent.
+
+        `None` — no workspace — means there is no scope to be outside of, so a
+        scoped rule simply does not apply: a profile layering the rule without a
+        containment tier gets today's behaviour rather than a boundary drawn
+        around a directory nobody chose.
+        """
+        workspace = None if self.ctx is None else workspace_of(self.ctx, agent)
+        if workspace is None:
+            return False
+        return not any(is_under(path, root) for root in writable_roots(workspace))
+
+    def _spellings(self, path: Path, agent: Any = None) -> tuple[str, ...]:
         """Both ways to name this path: absolute, and relative to the workspace.
 
         A prefix strip rather than `Path.relative_to` — see `_prefix`. A path
@@ -269,9 +339,23 @@ class FsPermissions:
         the only honest way to name one anyway.
         """
         absolute = path.as_posix()
-        if absolute.startswith(self._prefix):
-            return (absolute, absolute[len(self._prefix) :])
+        prefix = self._prefix(agent)
+        if absolute.startswith(prefix):
+            return (absolute, absolute[len(prefix) :])
         return (absolute,)
+
+
+@lru_cache(maxsize=256)
+def _prefix_of(root: Path) -> str:
+    """`root` as a posix path with a trailing slash.
+
+    Cached because `_spellings` runs per gated read *and per file a walk visits*
+    — P4-06 measured `Path.relative_to` at 26 µs there, 92% of the check — and
+    `lru_cache` rather than a field on the value because the bound is then the
+    cache size rather than "every root ever seen", and because a mutable cache
+    on a frozen dataclass is a public constructor argument nobody meant to add.
+    """
+    return f"{root.as_posix().rstrip('/')}/"
 
 
 def _could_match_under(pattern: str, directory: str) -> bool:
@@ -298,7 +382,7 @@ def _under(inner: str, outer: str) -> bool:
 async def apply(ctx: Context, config: Config) -> None:
     """Attach the rules to `ctx.fs`."""
     fs: FsService = ctx.fs
-    permissions = FsPermissions(rules=config.rules, root=fs.root, ctx=ctx)
+    permissions = FsPermissions(rules=config.rules, roots=fs.root_for, ctx=ctx)
     ctx.provide("fs_permissions", permissions)
     if not config.rules:
         # Nothing to enforce, so nothing is attached — not even a predicate that
@@ -332,11 +416,11 @@ def _gate(ctx: Context, permissions: FsPermissions, operation: Operation) -> Any
     """
 
     async def gate(intent: ReadIntent | WriteIntent | EditIntent, next_: Any) -> Any:
-        rule = permissions.objection(operation, intent.path)
+        rule = permissions.objection(operation, intent.path, intent.agent)
         if rule is None:
             return await next_()
         if rule.mode == "interrupt":
-            granted = await _ask(ctx, intent, rule, operation)
+            granted = await _ask(ctx, permissions, intent, rule, operation)
             if granted is None:
                 return await next_()
             return granted
@@ -345,7 +429,9 @@ def _gate(ctx: Context, permissions: FsPermissions, operation: Operation) -> Any
     return gate
 
 
-async def _ask(ctx: Context, intent: Any, rule: Rule, operation: Operation) -> str | None:
+async def _ask(
+    ctx: Context, permissions: FsPermissions, intent: Any, rule: Rule, operation: Operation
+) -> str | None:
     """Route an `interrupt` to whoever answers approvals. `None` means granted.
 
     Fails closed on both halves of "there is nobody to ask", the way
@@ -367,7 +453,7 @@ async def _ask(ctx: Context, intent: Any, rule: Rule, operation: Operation) -> s
     outcome = await approval.request(
         agent=intent.agent,
         tool_name=f"fs.{operation}",
-        reason=rule.description or INTERRUPT_REASON.format(operation=operation, path=intent.path),
+        reason=permissions.prompt(rule, operation, intent.path, intent.agent),
         cancel=getattr(intent.agent, "signal", None),
         allowed_decisions=("approve", "reject"),
     )

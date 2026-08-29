@@ -34,7 +34,7 @@ import re
 from collections.abc import Callable, Iterator
 from contextlib import suppress
 from dataclasses import dataclass, field
-from functools import lru_cache
+from functools import lru_cache, partial
 from pathlib import Path
 from typing import Any
 
@@ -170,7 +170,7 @@ class FsService:
     get."""
     _observed: dict[Path, float] = field(default_factory=dict)
     """Last-read mtime per path — the state read-before-edit consults."""
-    _hidden: list[Callable[[Path], bool]] = field(default_factory=list)
+    _hidden: list[Callable[[Path, Any], bool]] = field(default_factory=list)
     """Predicates that conceal a path from enumeration. See `hide`."""
     _rebase: Callable[[Any], Path | None] | None = None
     """Where *this agent's* relative paths resolve. See `rebase`."""
@@ -223,7 +223,9 @@ class FsService:
 
     # ------------------------------------------------------------------ read --
 
-    def hide(self, predicate: Callable[[Path], bool], *, scope: Context | None = None) -> Disposer:
+    def hide(
+        self, predicate: Callable[[Path, Any], bool], *, scope: Context | None = None
+    ) -> Disposer:
         """Conceal matching paths from `glob` and `grep`.
 
         The enumeration half of a policy row, and deliberately *not* a waterfall:
@@ -233,6 +235,12 @@ class FsService:
         row that both hides and vetoes keeps the two consistent — this seam does
         not try to derive one from the other, because they answer different
         questions ("may I be told this exists" and "may I open it").
+
+        The predicate is asked about a path **and the agent walking**, because
+        the root a rule is written against is per-agent once a containment tier
+        is in force (D21): a rule written `secrets/**` names one directory in the
+        person's checkout and a different one in each agent's worktree, and a
+        predicate that could not tell them apart would answer for the wrong tree.
 
         **Pass `scope=ctx` from a row's `apply`**, so the predicate leaves with
         the row rather than outliving it inside this long-lived service.
@@ -246,16 +254,20 @@ class FsService:
 
         return (scope or self.ctx).add_disposer(release, label="fs.hide")
 
-    def concealed(self, path: Path) -> bool:
+    def concealed(self, path: Path, agent: Any) -> bool:
         """Whether any registered predicate hides this path.
 
         A predicate that raises conceals: a policy row whose matcher broke must
         not become an open door, which is the same fail-closed reading the
         approval seam is built on.
+
+        `agent` is required rather than defaulted: a default would silently
+        answer for the *process* root, which is the exact bug per-agent roots
+        were introduced to fix, and the one caller always has one.
         """
         for predicate in self._hidden:
             try:
-                if predicate(path):
+                if predicate(path, agent):
                     return True
             except Exception:
                 log.warning("ph.seams.fs: a hide predicate failed; concealing", exc_info=True)
@@ -374,8 +386,9 @@ class FsService:
         agent: Any = None,
     ) -> list[str]:
         base = self.resolve(root, agent=agent) if root is not None else self.root_for(agent)
+        hidden = partial(self.concealed, agent=agent)
         return await anyio.to_thread.run_sync(
-            lambda: [str(path) for path in _walk(base, pattern, limit, self.concealed)]
+            lambda: [str(path) for path in _walk(base, pattern, limit, hidden)]
         )
 
     async def grep(
@@ -388,6 +401,7 @@ class FsService:
         agent: Any = None,
     ) -> list[GrepMatch]:
         base = self.resolve(root, agent=agent) if root is not None else self.root_for(agent)
+        hidden = partial(self.concealed, agent=agent)
         try:
             expression = re.compile(pattern)
         except re.error as error:
@@ -395,7 +409,7 @@ class FsService:
 
         def scan() -> list[GrepMatch]:
             matches: list[GrepMatch] = []
-            for candidate in _walk(base, glob, None, self.concealed):
+            for candidate in _walk(base, glob, None, hidden):
                 if not _greppable(candidate):
                     continue
                 try:

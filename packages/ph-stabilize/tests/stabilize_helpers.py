@@ -12,6 +12,7 @@ then shadows with a parameter of the same name.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -20,6 +21,7 @@ from ph.bundles import BASE, HEADLESS
 from ph.llm.types import ToolCallBlock, ToolResultBlock, text_of
 from ph.seams.spill import SpillStore
 from ph.session import derive_event_message
+from ph.testing import FAKE_OPTIONS, StubWorkspaceProvider
 from ph_stabilize import BUNDLE
 
 __all__ = [
@@ -33,6 +35,7 @@ __all__ = [
     "result_text",
     "row",
     "run_tool_calls",
+    "scoped_agent",
 ]
 
 PROFILE = [BASE, HEADLESS, BUNDLE]
@@ -119,17 +122,46 @@ def result_text(session: Any, call_id: str) -> str:
     return "" if block is None else text_of(block.content)
 
 
-def answer_approvals(ctx: Any, answer: Any) -> None:
-    """Register the answerer a front end would, returning one fixed decision.
+def answer_approvals(ctx: Any, answer: Any) -> list[Any]:
+    """Register the answerer a front end would, and return what it was asked.
 
     `answer` may be a value or a zero-argument callable, so a test that changes
     its mind mid-run does not need a second helper.
-    """
 
-    async def respond(_request: Any, _next: Any = None) -> Any:
+    The returned list fills as prompts arrive. Half the questions a permission
+    test asks are about *how many* prompts and *what they said* — "prompts zero
+    times", "prompts once", "the prompt names the boundary" — and without this
+    they were being answered three ways: an ad-hoc answerer, a
+    `lambda: asked.append(...) or "allowed-once"` smuggled through the callable
+    escape hatch, and reading `approval/asked` back out of the log.
+    """
+    asked: list[Any] = []
+
+    async def respond(request: Any, _next: Any = None) -> Any:
+        asked.append(request)
         return answer() if callable(answer) else answer
 
     ctx.approval.register_answerer(respond)
+    return asked
+
+
+async def scoped_agent(ctx: Any, tmp_path: Path, *, session_id: str = "s1") -> tuple[Any, Any]:
+    """`(agent, workspace)` — an agent holding a workspace of its own.
+
+    A stub tier rather than real git: what a permission rule asks is "is this
+    path inside the workspace the seam handed out", which is true of every tier
+    that hands out a fresh root. `test_workspace_git.py` owns the checkout.
+    """
+    session = ctx.sessions.create(session_id)
+    agent = ctx.agents.create(session, FAKE_OPTIONS)
+    ctx.workspace.register_provider(StubWorkspaceProvider(root=tmp_path / "trees"))
+    workspace = await ctx.workspace.acquire(
+        session_id=session_id,
+        agent_id=agent.id,
+        base=tmp_path / "project",
+        session=session,
+    )
+    return agent, workspace
 
 
 def result_block(session: Any, call_id: str) -> Any:
