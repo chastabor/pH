@@ -145,7 +145,13 @@ async def apply(ctx: Context, config: Any) -> None:
     fs = ctx.fs
 
     async def read(args: ReadArgs, run: ToolRunContext) -> Any:
-        window = await fs.read(args.path, offset=args.offset, limit=args.limit, session=run.session)
+        window = await fs.read(
+            args.path,
+            offset=args.offset,
+            limit=args.limit,
+            agent=run.agent,
+            session=run.session,
+        )
         return window.model_dump()
 
     async def write(args: WriteArgs, run: ToolRunContext) -> Any:

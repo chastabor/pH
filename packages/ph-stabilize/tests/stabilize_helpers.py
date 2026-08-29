@@ -24,10 +24,12 @@ from ph_stabilize import BUNDLE
 
 __all__ = [
     "PROFILE",
+    "answer_approvals",
     "bash_call",
     "blob",
     "break_spill",
     "events_of",
+    "result_block",
     "result_text",
     "row",
     "run_tool_calls",
@@ -113,9 +115,34 @@ def result_text(session: Any, call_id: str) -> str:
     shape moves, and a test that reads the log by hand stops testing what the
     model sees.
     """
+    block = result_block(session, call_id)
+    return "" if block is None else text_of(block.content)
+
+
+def answer_approvals(ctx: Any, answer: Any) -> None:
+    """Register the answerer a front end would, returning one fixed decision.
+
+    `answer` may be a value or a zero-argument callable, so a test that changes
+    its mind mid-run does not need a second helper.
+    """
+
+    async def respond(_request: Any, _next: Any = None) -> Any:
+        return answer() if callable(answer) else answer
+
+    ctx.approval.register_answerer(respond)
+
+
+def result_block(session: Any, call_id: str) -> Any:
+    """The `ToolResultBlock` one call produced, or `None`.
+
+    Split out of `result_text` so a test asserting `is_error` reaches it through
+    `derive_event_message` too, rather than indexing
+    `event.data["message"]["content"][0]` by hand — the second route to a shape
+    is the one that keeps passing after the shape moves.
+    """
     for event in events_of(session, "tool/result"):
         message = derive_event_message(event)
         for block in message.content if message else ():
             if isinstance(block, ToolResultBlock) and block.tool_call_id == call_id:
-                return text_of(block.content)
-    return ""
+                return block
+    return None

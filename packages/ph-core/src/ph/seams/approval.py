@@ -33,6 +33,7 @@ from ..session import Session
 from ..wire import WireModel
 
 __all__ = [
+    "DENIAL_REASONS",
     "ApprovalAnswer",
     "ApprovalDecisionName",
     "ApprovalOutcome",
@@ -44,6 +45,7 @@ __all__ = [
     "Responded",
     "answer_kind",
     "apply",
+    "denial_reason",
     "pending_approvals",
 ]
 
@@ -53,6 +55,32 @@ ApprovalOutcome: TypeAlias = Literal["allowed-once", "rejected", "cancelled", "u
 """The four answers that carry no data. Only `allowed-once` proceeds (B3)."""
 
 ApprovalPolicy: TypeAlias = Literal["ask", "never"]
+
+DENIAL_REASONS: dict[str, str] = {
+    "rejected": "the user rejected {subject}",
+    "cancelled": "approval for {subject} was cancelled",
+    "unavailable": "{subject} requires approval, but no approval channel is available",
+}
+"""What a consumer tells the model when an ask did not grant.
+
+Three sentences rather than one, and that distinction is the reason this table
+exists at all: a model told "the user rejected this" can re-plan, while one told
+"there is no approval channel" knows the deployment is misconfigured rather than
+that a human said no. Collapsing them makes a missing UI look like a decision.
+
+Here rather than in each consumer because there are three of them — the tools
+pipeline, `permissions-fs`, and the RLM harness service — and the *first* copy to
+disagree was the one that collapsed all four outcomes into one string. `{subject}`
+is the caller's, since a tool call, a path and a refinement are named differently
+and only the caller knows which it is holding."""
+
+
+def denial_reason(outcome: Any, subject: str) -> str:
+    """The sentence for one non-grant outcome. Unknown answers read as absence,
+    which is the fail-closed direction and the honest one."""
+    template = DENIAL_REASONS.get(str(outcome), DENIAL_REASONS["unavailable"])
+    return template.format(subject=subject)
+
 
 ApprovalDecisionName: TypeAlias = Literal["approve", "edit", "reject", "respond"]
 """The four things a human may *do* about a prompt, as a row and a front end

@@ -68,3 +68,11 @@
 # about — `rlm-stable` does, at P4-15.
 - id: hitl
   name: hitl
+
+# Path rules over filesystem access (G7). Attached to `ctx.fs`'s intent
+# waterfalls rather than to the fs tools, so a second editing tool or a Code
+# Mode binding is covered by the same rules; `rules` is empty by default, for
+# `hitl`'s reason — layering a bundle must not start refusing file access. The
+# row says out loud what it does not reach when no sandbox is mounted (E9).
+- id: permissions-fs
+  name: permissions-fs

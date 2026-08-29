@@ -17,7 +17,15 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-from stabilize_helpers import PROFILE, bash_call, events_of, result_text, row, run_tool_calls
+from stabilize_helpers import (
+    PROFILE,
+    answer_approvals,
+    bash_call,
+    events_of,
+    result_text,
+    row,
+    run_tool_calls,
+)
 
 from ph.seams.approval import Edited, Responded
 from ph_stabilize.hitl import DESTRUCTIVE_PATTERNS, matches, set_mode
@@ -28,15 +36,6 @@ pytestmark = pytest.mark.anyio
 def _gated(mode: str = "auto", **rules: Any) -> dict[str, Any]:
     """The row with one rule per named tool, spelled the way a profile spells it."""
     return row("hitl", mode=mode, interruptOn=rules)
-
-
-def _answer(ctx: Any, answer: Any) -> None:
-    """Register the answerer a front end would, returning one fixed decision."""
-
-    async def respond(_request: Any, _next: Any = None) -> Any:
-        return answer
-
-    ctx.approval.register_answerer(respond)
 
 
 # ------------------------------------------------------------ the classifier --
@@ -87,7 +86,7 @@ async def test_a_destructive_call_is_asked_about(mount: Any) -> None:
     """The row's gate. The verdict rides the ask, so the person is told what the
     harness is worried about and an auditor can tune against it."""
     ctx = await mount(_gated(bash={"when": list(DESTRUCTIVE_PATTERNS)}), profile=PROFILE)
-    _answer(ctx, "rejected")
+    answer_approvals(ctx, "rejected")
     session = ctx.sessions.create("destructive")
 
     await run_tool_calls(ctx, session, bash_call("c1", "rm -rf /tmp/x"))
@@ -101,7 +100,7 @@ async def test_auto_lets_the_routine_case_through(mount: Any) -> None:
     """`auto` trusts the condition — which is the whole reason a condition
     exists. Nothing matched, so nothing is asked."""
     ctx = await mount(_gated(bash={"when": list(DESTRUCTIVE_PATTERNS)}), profile=PROFILE)
-    _answer(ctx, "rejected")
+    answer_approvals(ctx, "rejected")
     session = ctx.sessions.create("routine")
 
     await run_tool_calls(ctx, session, bash_call("c1", "ls -R src"))
@@ -113,7 +112,7 @@ async def test_manual_asks_even_when_nothing_matched(mount: Any) -> None:
     """Which is what `manual` means: the condition selects, the posture decides
     whether selection is enough."""
     ctx = await mount(_gated("manual", bash={"when": list(DESTRUCTIVE_PATTERNS)}), profile=PROFILE)
-    _answer(ctx, "rejected")
+    answer_approvals(ctx, "rejected")
     session = ctx.sessions.create("manual")
 
     await run_tool_calls(ctx, session, bash_call("c1", "ls -R src"))
@@ -124,7 +123,7 @@ async def test_manual_asks_even_when_nothing_matched(mount: Any) -> None:
 async def test_yolo_asks_about_nothing(mount: Any) -> None:
     """A thing a person turns on deliberately, for a session they are watching."""
     ctx = await mount(_gated("yolo", bash={"when": list(DESTRUCTIVE_PATTERNS)}), profile=PROFILE)
-    _answer(ctx, "rejected")
+    answer_approvals(ctx, "rejected")
     session = ctx.sessions.create("yolo")
 
     await run_tool_calls(ctx, session, bash_call("c1", "rm -rf /tmp/x"))
@@ -136,7 +135,7 @@ async def test_the_mode_is_read_from_the_log_so_a_resume_keeps_it(mount: Any) ->
     """A toggle that lived in a field would be one a restart silently undid, and
     the posture is the last thing a person wants quietly reset."""
     ctx = await mount(_gated("manual", bash={}), profile=PROFILE)
-    _answer(ctx, "rejected")
+    answer_approvals(ctx, "rejected")
     session = ctx.sessions.create("toggled")
     set_mode(session, "yolo")
 
@@ -149,7 +148,7 @@ async def test_nothing_is_gated_by_default(mount: Any) -> None:
     """Layering the bundle must not start prompting: a harness that asks about
     everything on first run teaches its user to approve without reading."""
     ctx = await mount(profile=PROFILE)
-    _answer(ctx, "rejected")
+    answer_approvals(ctx, "rejected")
     session = ctx.sessions.create("ungated")
 
     await run_tool_calls(ctx, session, bash_call("c1", "rm -rf /tmp/x"))
@@ -162,7 +161,7 @@ async def test_nothing_is_gated_by_default(mount: Any) -> None:
 
 async def test_approve_runs_the_call_as_asked(mount: Any) -> None:
     ctx = await mount(_gated(bash={}), profile=PROFILE)
-    _answer(ctx, "allowed-once")
+    answer_approvals(ctx, "allowed-once")
     session = ctx.sessions.create("approved")
 
     await run_tool_calls(ctx, session, bash_call("c1", "echo hello"))
@@ -172,7 +171,7 @@ async def test_approve_runs_the_call_as_asked(mount: Any) -> None:
 
 async def test_reject_stops_it_and_says_who(mount: Any) -> None:
     ctx = await mount(_gated(bash={}), profile=PROFILE)
-    _answer(ctx, "rejected")
+    answer_approvals(ctx, "rejected")
     session = ctx.sessions.create("rejected")
 
     await run_tool_calls(ctx, session, bash_call("c1", "echo hello"))
@@ -191,7 +190,7 @@ async def test_edit_runs_the_humans_arguments_and_logs_both(mount: Any) -> None:
     attributed to whoever made it.
     """
     ctx = await mount(_gated(bash={}), profile=PROFILE)
-    _answer(ctx, Edited(arguments={"command": "echo corrected"}))
+    answer_approvals(ctx, Edited(arguments={"command": "echo corrected"}))
     session = ctx.sessions.create("edited")
 
     await run_tool_calls(ctx, session, bash_call("c1", "echo original"))
@@ -211,7 +210,7 @@ async def test_respond_skips_the_body_and_answers_in_its_place(mount: Any) -> No
     to run that, here is the answer".
     """
     ctx = await mount(_gated(bash={}), profile=PROFILE)
-    _answer(ctx, Responded(message="the port is 8080, no need to look"))
+    answer_approvals(ctx, Responded(message="the port is 8080, no need to look"))
     session = ctx.sessions.create("responded")
 
     await run_tool_calls(ctx, session, bash_call("c1", "cat config.toml"))

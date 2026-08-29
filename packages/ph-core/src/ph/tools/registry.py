@@ -31,7 +31,7 @@ from typing import Any, Literal
 from ..cancel import Cancelled, is_cancelled
 from ..cordis import Context, Disposer, events, plugin
 from ..llm.types import ToolSchema, text_of
-from ..seams.approval import Edited, Responded
+from ..seams.approval import Edited, Responded, denial_reason
 from ..seams.code_runtime import CodeBindingNamespace, validate_binding_name
 from ..session.json import freeze_json_value, thaw_json
 from ..wire import WireModel
@@ -124,16 +124,10 @@ events.declare(
     doc="The visible tool set changed; consumers re-read schemas().",
 )
 
+
 # One reason per non-grant, distinct on purpose: a model must be able to tell a
 # human's "no" from a missing channel, because only one is worth re-planning
 # around and the other is a misconfiguration to report.
-_APPROVAL_DENIALS = {
-    "rejected": 'the user rejected tool "{name}"',
-    "cancelled": 'approval for tool "{name}" was cancelled',
-    "unavailable": 'tool "{name}" requires approval, but no approval channel is available',
-}
-
-
 @dataclass(frozen=True, slots=True)
 class ToolRestriction:
     """A per-scope filter over global tools. Restrictions intersect."""
@@ -697,8 +691,7 @@ class ToolRuntime:
             return Allow(arguments=outcome.arguments, has_arguments=True)
         if isinstance(outcome, Responded):
             return Respond(message=outcome.message)
-        template = _APPROVAL_DENIALS.get(outcome, _APPROVAL_DENIALS["unavailable"])
-        return Deny(reason=template.format(name=name))
+        return Deny(reason=denial_reason(outcome, f'tool "{name}"'))
 
     async def dispatch(self, run: ToolRunContext) -> PreparedCall:
         """The around-dispatch stage: `tools/execute` wrappers, then the body."""

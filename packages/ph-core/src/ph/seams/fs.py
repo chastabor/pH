@@ -1,11 +1,19 @@
-"""`ctx.fs` — filesystem access with an interception point before every mutation.
+"""`ctx.fs` — filesystem access with an interception point before every access.
 
-Every write and every edit passes through a waterfall (`fs/write-intent`,
-`fs/edit-intent`) *before* it touches the disk. That ordering is the whole
-value: a policy plugin that ran after the write would be a reporter, not a
-gate — which is precisely the failure the feature map records in prime-agent's
-`edit` skill, where the diff is emitted **after** the file changed, so "there is
-no point at which anything can say no".
+Every read, every write and every edit passes through a waterfall
+(`fs/read-intent`, `fs/write-intent`, `fs/edit-intent`) *before* it touches the
+disk. That ordering is the whole value: a policy plugin that ran after the write
+would be a reporter, not a gate — which is precisely the failure the feature map
+records in prime-agent's `edit` skill, where the diff is emitted **after** the
+file changed, so "there is no point at which anything can say no".
+
+**Enumeration is filtered, not gated** (`hide`). `glob` and `grep` visit
+thousands of candidates and a waterfall per candidate would be both slow and
+absurd — nobody approves nine hundred prompts — so a policy row registers a
+synchronous predicate and the walk simply never yields a concealed path. It runs
+*during* the walk rather than over the results, because `grep` reads the files
+it visits: post-filtering its matches would return no rows while having read
+every byte of the file the rule was protecting.
 
 `fs/observed` records reads, which is what lets read-before-edit be a policy
 row rather than a hard-coded rule.
@@ -20,18 +28,19 @@ is for, and no wording in this module should suggest otherwise.
 
 from __future__ import annotations
 
-import fnmatch
 import logging
 import os
 import re
 from collections.abc import Callable, Iterator
+from contextlib import suppress
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
 import anyio
 
-from ..cordis import Context, events, plugin
+from ..cordis import Context, Disposer, events, plugin
 from ..session import Session
 from ..tools.errors import FailureKind, HarnessError
 from ..wire import WireModel
@@ -41,13 +50,21 @@ __all__ = [
     "FileSlice",
     "FsService",
     "GrepMatch",
+    "ReadIntent",
     "WriteIntent",
     "apply",
+    "matches_glob",
     "read_before_edit",
 ]
 
 log = logging.getLogger("ph.seams.fs")
 
+events.declare(
+    "fs/read-intent",
+    "waterfall",
+    owner="ph.seams.fs",
+    doc="Before a file is read. A listener that vetoes prevents it.",
+)
 events.declare(
     "fs/write-intent",
     "waterfall",
@@ -84,6 +101,20 @@ class GrepMatch(WireModel):
     path: str
     line: int
     text: str
+
+
+@dataclass(frozen=True, slots=True)
+class ReadIntent:
+    """A read awaiting policy.
+
+    Carries the `agent` its siblings carry, so a row that wants to *ask* about
+    one has somewhere to route the prompt — a permission rule that could only
+    ever refuse a read would be a narrower thing than the one that gates writes,
+    for no reason anybody chose.
+    """
+
+    path: Path
+    agent: Any = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,6 +166,8 @@ class FsService:
     root: Path
     _observed: dict[Path, float] = field(default_factory=dict)
     """Last-read mtime per path — the state read-before-edit consults."""
+    _hidden: list[Callable[[Path], bool]] = field(default_factory=list)
+    """Predicates that conceal a path from enumeration. See `hide`."""
 
     def resolve(self, path: str | Path) -> Path:
         """Resolve against the workspace root.
@@ -148,16 +181,57 @@ class FsService:
 
     # ------------------------------------------------------------------ read --
 
+    def hide(self, predicate: Callable[[Path], bool], *, scope: Context | None = None) -> Disposer:
+        """Conceal matching paths from `glob` and `grep`.
+
+        The enumeration half of a policy row, and deliberately *not* a waterfall:
+        a walk visits thousands of candidates, so asking a human about each one
+        is not a thing anyone would sit through, and awaiting a listener per file
+        would make a `grep` over a repository a different kind of operation. A
+        row that both hides and vetoes keeps the two consistent — this seam does
+        not try to derive one from the other, because they answer different
+        questions ("may I be told this exists" and "may I open it").
+
+        **Pass `scope=ctx` from a row's `apply`**, so the predicate leaves with
+        the row rather than outliving it inside this long-lived service.
+        """
+        hidden = self._hidden
+        hidden.append(predicate)
+
+        def release() -> None:
+            with suppress(ValueError):
+                hidden.remove(predicate)
+
+        return (scope or self.ctx).add_disposer(release, label="fs.hide")
+
+    def concealed(self, path: Path) -> bool:
+        """Whether any registered predicate hides this path.
+
+        A predicate that raises conceals: a policy row whose matcher broke must
+        not become an open door, which is the same fail-closed reading the
+        approval seam is built on.
+        """
+        for predicate in self._hidden:
+            try:
+                if predicate(path):
+                    return True
+            except Exception:
+                log.warning("ph.seams.fs: a hide predicate failed; concealing", exc_info=True)
+                return True
+        return False
+
     async def read(
         self,
         path: str | Path,
         *,
         offset: int = 0,
         limit: int | None = 2_000,
+        agent: Any = None,
         session: Session | None = None,
     ) -> FileSlice:
-        """Read a line window and record the observation."""
+        """Read a line window, after `fs/read-intent` allows it."""
         target = self.resolve(path)
+        await self._gate("fs/read-intent", ReadIntent(path=target, agent=agent))
         text = await anyio.to_thread.run_sync(
             lambda: target.read_text(encoding="utf-8", errors="replace")
         )
@@ -254,7 +328,7 @@ class FsService:
     ) -> list[str]:
         base = self.resolve(root) if root is not None else self.root
         return await anyio.to_thread.run_sync(
-            lambda: [str(path) for path in _walk(base, pattern, limit)]
+            lambda: [str(path) for path in _walk(base, pattern, limit, self.concealed)]
         )
 
     async def grep(
@@ -273,7 +347,7 @@ class FsService:
 
         def scan() -> list[GrepMatch]:
             matches: list[GrepMatch] = []
-            for candidate in _walk(base, glob, None):
+            for candidate in _walk(base, glob, None, self.concealed):
                 if not _greppable(candidate):
                     continue
                 try:
@@ -299,12 +373,18 @@ GREP_MAX_BYTES = 2 * 1024 * 1024
 match `**/*` must not be read whole into memory line by line."""
 
 
-def _walk(base: Path, pattern: str, limit: int | None) -> Iterator[Path]:
+def _walk(
+    base: Path, pattern: str, limit: int | None, concealed: Callable[[Path], bool]
+) -> Iterator[Path]:
     """Matching files under `base`, pruning ignored directories *before* descent.
 
     `Path.glob` would materialize `node_modules` in full and then let `_ignored`
     discard it; pruning `dirs` in place means an ignored tree is never entered.
     Directories and files are visited in sorted order so results are stable.
+
+    `concealed` is consulted here rather than over the results, because `grep`
+    reads every file this yields: filtering afterwards would hide the matches
+    and still have opened the file.
     """
     yielded = 0
     for current, dirs, files in os.walk(base):
@@ -313,7 +393,9 @@ def _walk(base: Path, pattern: str, limit: int | None) -> Iterator[Path]:
         for name in sorted(files):
             path = directory / name
             relative = path.relative_to(base).as_posix()
-            if not _matches(relative, pattern):
+            if not matches_glob(relative, pattern):
+                continue
+            if concealed(path):
                 continue
             yield path
             yielded += 1
@@ -321,16 +403,64 @@ def _walk(base: Path, pattern: str, limit: int | None) -> Iterator[Path]:
                 return
 
 
-def _matches(relative: str, pattern: str) -> bool:
-    """Glob semantics close to `Path.glob`: `**/` matches any depth, including none."""
-    if pattern.startswith("**/"):
-        tail = pattern[3:]
-        return bool(
-            fnmatch.fnmatchcase(relative, tail) or fnmatch.fnmatchcase(relative, f"*/{tail}")
-        )
-    if "**" in pattern:
-        return bool(fnmatch.fnmatchcase(relative, pattern.replace("**", "*")))
-    return bool(fnmatch.fnmatchcase(relative, pattern))
+def matches_glob(candidate: str, pattern: str) -> bool:
+    """`Path.glob` semantics: `*` stays inside one segment, `**` crosses them.
+
+    Public because a permission row's path patterns and this seam's own `glob`
+    tool must mean the same thing by `**/*.env`. Two glob dialects in one
+    harness is a rule someone writes once and is then wrong about forever.
+
+    **`*` does not cross a separator, and getting that wrong has a direction.**
+    The first version of this was `fnmatch`, whose `*` matches `/` — so
+    `docs/*.md` also matched `docs/private/keys.md`. For a search box that is a
+    quirk; for an ACL evaluated first-match-wins it is a hole, because the idiom
+    the rules are written in is a narrow `allow` above a broad `deny`, and an
+    `allow` that is silently wider than written permits what the `deny` under it
+    was there to stop.
+    """
+    return _compiled(pattern).match(candidate) is not None
+
+
+@lru_cache(maxsize=512)
+def _compiled(pattern: str) -> re.Pattern[str]:
+    """One glob, as a regex. Cached, because a walk asks per candidate file.
+
+    Bounded rather than unbounded: patterns come from a model's `glob` calls as
+    well as from config, so an LRU is what keeps a session that greps a thousand
+    different patterns from holding a thousand compiled regexes forever.
+    """
+    parts: list[str] = []
+    index = 0
+    while index < len(pattern):
+        if pattern.startswith("**/", index):
+            # Any number of leading segments, including none — which is why
+            # `**/*.py` finds `main.py` at the root as well as `a/b/main.py`.
+            parts.append("(?:[^/]*/)*")
+            index += 3
+        elif pattern.startswith("**", index):
+            parts.append(".*")
+            index += 2
+        elif pattern[index] == "*":
+            parts.append("[^/]*")
+            index += 1
+        elif pattern[index] == "?":
+            parts.append("[^/]")
+            index += 1
+        elif pattern[index] == "[":
+            close = pattern.find("]", index + 1)
+            if close == -1:
+                # An unbalanced bracket is a literal, not a syntax error: a
+                # pattern typed by a model must not raise out of a policy check.
+                parts.append(re.escape("["))
+                index += 1
+            else:
+                inner = pattern[index + 1 : close].replace("\\", "\\\\")
+                parts.append(f"[{'^' + inner[1:] if inner.startswith('!') else inner}]")
+                index = close + 1
+        else:
+            parts.append(re.escape(pattern[index]))
+            index += 1
+    return re.compile("".join(parts) + r"\Z")
 
 
 def _greppable(path: Path) -> bool:

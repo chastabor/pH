@@ -20,6 +20,7 @@ compaction-summarize = "ph_stabilize.compaction:apply"
 hitl = "ph_stabilize.hitl:apply"
 input-offload = "ph_stabilize.input_offload:apply"
 limits = "ph_stabilize.limits:apply"
+permissions-fs = "ph_stabilize.permissions_fs:apply"
 tool-result-offload = "ph_stabilize.offload:apply"
 tool-todo = "ph_stabilize.todo:apply"
 
