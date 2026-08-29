@@ -29,14 +29,20 @@ from anyio.abc import ByteStream
 
 from ph.paths import resolve_roots
 
+from ..protocol import (
+    SNAPSHOT_EVENTS,
+    capabilities,
+    cursor_of,
+    notification,
+    respond,
+    resume_at,
+)
 from .framing import FramingError, read_frames, write_frame
 from .supervisor import Supervisor
 
 __all__ = ["DaemonServer", "serve"]
 
 log = logging.getLogger("ph_app.daemon")
-
-PROTOCOL_VERSION = 1
 
 
 @dataclass(slots=True)
@@ -101,84 +107,112 @@ class _Connection:
         """
         if self.outbox is None:
             raise RuntimeError("this connection is closed")
-        self.outbox.send_nowait({"method": method, "params": params})
+        self.outbox.send_nowait(notification(method, params))
 
     async def _handle(self, request: dict[str, Any]) -> None:
-        request_id = request.get("id")
-        method = str(request.get("method", ""))
-        params = request.get("params") or {}
-        try:
-            result = await self._dispatch(method, params)
-        except Exception as error:
-            if request_id is not None and self.outbox is not None:
-                self.outbox.send_nowait(
-                    {"id": request_id, "error": {"code": -32000, "message": str(error)}}
-                )
-            return
-        if request_id is not None and self.outbox is not None:
-            self.outbox.send_nowait({"id": request_id, "result": result})
+        reply = await respond(request, self._dispatch)
+        if reply is not None and self.outbox is not None:
+            self.outbox.send_nowait(reply)
 
     async def _dispatch(self, method: str, params: dict[str, Any]) -> Any:
+        """The daemon's half of the vocabulary — dsh's names (P5-02).
+
+        `session/*` rather than P5-01's `root/*`: a supervised root *is* a
+        session here, and the dsh client already ships against these names. The
+        supervisory additions (`daemon/hello`, `session/attach`) are declared in
+        the capability block rather than inferred from which socket answered.
+        """
         supervisor = self.server.supervisor
-        if method == "initialize":
-            return {
-                "protocolVersion": PROTOCOL_VERSION,
-                "capabilities": {"roots": True, "attach": True, "streaming": True},
-            }
-        if method == "roots/list":
-            return {"roots": supervisor.describe()}
-        if method == "root/start":
-            root = await supervisor.start(str(params["rootId"]))
+        if method in ("initialize", "daemon/hello"):
+            return capabilities("roots", "attach", "cursors", "snapshots")
+        if method == "sessions/list":
+            return {"sessions": supervisor.describe()}
+        if method == "session/new":
+            root = await supervisor.start(str(params["sessionId"]))
             return root.describe()
-        if method == "root/prompt":
-            root = await supervisor.prompt(str(params["rootId"]), str(params.get("prompt", "")))
+        if method == "session/prompt":
+            # Joined here, at the wire edge, so the key has one construction.
+            command_id = str(params.get("commandId", ""))
+            client_id = str(params.get("clientId", ""))
+            root = await supervisor.prompt(
+                str(params["sessionId"]),
+                str(params.get("prompt", "")),
+                command=f"{client_id}:{command_id}" if command_id else "",
+            )
             return root.describe()
-        if method == "root/attach":
-            return self._attach(str(params["rootId"]), int(params.get("replay", 0)))
-        if method == "root/detach":
-            return self._detach(str(params["rootId"]))
+        if method == "session/attach":
+            return self._attach(str(params["sessionId"]), params.get("cursor"))
+        if method == "session/detach":
+            return self._detach(str(params["sessionId"]))
+        if method == "session/snapshot":
+            return self._snapshot(str(params["sessionId"]), params.get("cursor"))
         if method == "shutdown":
-            # Actually stops it. An earlier draft set a flag nothing read, so
-            # `serve`'s "runs until shutdown" and the CLI's "blocks until a
-            # client sends shutdown" were both false, and every test cancelled
-            # the scope by hand to terminate.
-            #
-            # Sent without an id, by contract: a client awaiting a reply would
-            # be waiting on a frame the daemon is concurrently tearing down the
-            # ability to write. "Stop" is not a question.
+            # Actually stops it, and takes no id by contract: a client awaiting
+            # a reply would be waiting on a frame the daemon is concurrently
+            # losing the ability to write. "Stop" is not a question.
             self.server.stop.set()
             return {"ok": True}
         raise ValueError(f'unknown method "{method}"')
 
-    def _attach(self, root_id: str, replay: int) -> dict[str, Any]:
-        root = self.server.supervisor.roots.get(root_id)
+    def _root(self, session_id: str) -> Any:
+        root = self.server.supervisor.roots.get(session_id)
         if root is None:
-            raise ValueError(f'no root "{root_id}"')
-        if root_id in self.attached:
-            return root.describe()
-        self.attached.add(root_id)
-        root.subscribe(self.notify)
-        if replay:
-            # What happened while nobody was watching. A cursor rather than a
-            # count is P5-02's; this is enough to prove a reattachment sees the
-            # work it missed.
-            # `events_from`, not a slice of `events`: the latter materializes a
-            # snapshot of the whole log to keep its tail, which is 1.3 ms on a
-            # 200 000-event root and is what P5-02's cursor will index into.
-            for event in root.session.events_from(max(0, root.session.seq - replay)):
-                self.notify("session.event", {"rootId": root_id, "event": event.to_wire()})
-        return root.describe()
+            raise ValueError(f'no session "{session_id}"')
+        return root
 
-    def _detach(self, root_id: str) -> dict[str, Any]:
-        was_attached = root_id in self.attached
-        self.attached.discard(root_id)
-        root = self.server.supervisor.roots.get(root_id)
+    def _attach(self, session_id: str, cursor: Any) -> dict[str, Any]:
+        """Subscribe to what happens *next*, and say where that starts.
+
+        **Attach does not replay.** The first draft streamed the whole gap here,
+        one `session.event` frame per event, straight into a 1024-slot outbox
+        with no await point — so a client reattaching to a root that had moved
+        on by more than a thousand events got a `WouldBlock` out of its own
+        attach, after the subscription had already been made. Measured: it
+        failed at exactly 1 025. The gate test passed only because its log was
+        three events long.
+
+        So catch-up has one mechanism, and it is the paged one: the reply says
+        where the live stream begins, and the client reads `session/snapshot`
+        from its cursor up to that point. That also makes the 512 KiB-class
+        bound apply to replay, which it never did before.
+        """
+        root = self._root(session_id)
+        if session_id not in self.attached:
+            self.attached.add(session_id)
+            root.subscribe(self.notify)
+        return {
+            **root.describe(),
+            # Where this client is being resumed from, said out loud: a stale
+            # generation silently means "from the beginning", and a client
+            # should not have to infer that from sequence numbers arriving in
+            # an order it did not expect.
+            "from": resume_at(root.session, cursor),
+        }
+
+    def _snapshot(self, session_id: str, cursor: Any) -> dict[str, Any]:
+        """One bounded page of a session's history, and the cursor for the next."""
+        root = self._root(session_id)
+        start = resume_at(root.session, cursor)
+        events = [
+            event.to_wire(thaw=False) for event in root.session.events_from(start)[:SNAPSHOT_EVENTS]
+        ]
+        return {
+            "sessionId": session_id,
+            "events": events,
+            "cursor": cursor_of(root.session, start + len(events)),
+            "more": start + len(events) < root.session.seq,
+        }
+
+    def _detach(self, session_id: str) -> dict[str, Any]:
+        was_attached = session_id in self.attached
+        self.attached.discard(session_id)
+        root = self.server.supervisor.roots.get(session_id)
         if root is not None:
             root.unsubscribe(self.notify)
         # Deliberately *not* an error when nothing was attached: detach is what a
         # client does while tidying up, often twice, and a teardown path that
         # raises is one nobody can write correctly.
-        return {"rootId": root_id, "detached": was_attached}
+        return {"sessionId": session_id, "detached": was_attached}
 
 
 @dataclass(slots=True)

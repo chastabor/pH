@@ -368,6 +368,9 @@ HANDLERS: Mapping[str, Handler] = {
     # where somebody else's work ends and this run's begins, and that the turn
     # above the seam may have been closed by the repair rather than by the model.
     "session/resumed": _on_harness_event,
+    # A record: "who asked for this, and had they asked before" is exactly the
+    # provenance an auditor reading a daemon-driven run needs.
+    "client/command": _on_harness_event,
     "kernel/restored": _on_harness_event,
     "subagent/admitted": _on_harness_event,
     "subagent/deleted": _on_harness_event,

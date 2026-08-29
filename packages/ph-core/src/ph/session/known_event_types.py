@@ -30,6 +30,9 @@ KNOWN_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         "request/header",
         "session/end-seed",
         "session/resumed",
+        # A mutating command a protocol client asked for, recorded so asking
+        # twice is safe across a restart (P5-02). Not a slash `command/*`.
+        "client/command",
         "step/end",
         "step/start",
         "tool/call",
@@ -184,6 +187,9 @@ IGNORABLE_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         "compaction/declined",
         "compaction/args-truncated",
         "attachment/degraded",
+        # Protocol bookkeeping a reader can skip without misreading anything
+        # else: the turn it deduplicated is in the log either way.
+        "client/command",
         "limits/exceeded",
         "limits/breaker-tripped",
         "workspace/acquired",

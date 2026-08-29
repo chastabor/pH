@@ -42,11 +42,15 @@ from ph.llm.types import create_user_message
 from ph.persistence import resume_session, resumption_of, session_path
 from ph.session import Session, SessionEvent
 
+from ..protocol import cursor_of
 from ..runtime import compose, mounted
 
 __all__ = ["Root", "Supervisor"]
 
 log = logging.getLogger("ph_app.daemon")
+
+COMMAND_ACCEPTED = "client/command"
+"""The record that makes a mutating command idempotent (P5-02)."""
 
 WAKE_SLOTS = 8
 """How many un-acted-on doorbell rings to hold.
@@ -82,6 +86,12 @@ class Root:
     """
     waiting: MemoryObjectReceiveStream[None]
     exits: AsyncExitStack
+    commands: set[str] = field(default_factory=set)
+    """Commands already run, folded from this session's own log.
+
+    A set rather than a scan, and derived rather than remembered: it is rebuilt
+    from `client/command` events when a root starts, so a resumed root knows
+    what it already did."""
     subscribers: set[Subscriber] = field(default_factory=set)
     """Attached connections. A set of bound methods, which compare by
     `(__self__, __func__)`, so attaching and detaching are symmetric without a
@@ -121,16 +131,54 @@ class Root:
         """
         return str(self.agent.status)
 
+    @property
+    def generation(self) -> str:
+        """Which incarnation of this session a cursor belongs to.
+
+        A cursor is `{generation, sequence}` and not a bare sequence because a
+        sequence alone is only meaningful against the log it counted. Two things
+        can invalidate it: a session forked from a prefix, and a log replaced
+        rather than continued. The header's `createdAt` identifies the log a
+        `seq` was counted against — stable across a resume (which continues the
+        same log, by P5-01's fix) and different for anything that is not that
+        log, which is exactly the distinction a client needs.
+        """
+        return str(self.session.header.created_at)
+
+    def cursor(self) -> dict[str, Any]:
+        """Where a client that has seen everything should resume from."""
+        return {"generation": self.generation, "sequence": self.session.seq}
+
+    def accepted(self, command: str) -> bool:
+        """Whether this exact command already ran for this client.
+
+        **Folded once, then kept.** The set is built from the log when the root
+        starts — so it survives a restart, which is the one moment a client is
+        most likely to retry: it reconnects, cannot know whether its last
+        `session/prompt` landed, and sends it again. The first draft re-scanned
+        the whole log per command instead, which measured 4.9 ms at 200 000
+        events on the daemon's own event loop, stalling every other connection
+        for that long.
+        """
+        return command in self.commands
+
+    def remember(self, command: str) -> None:
+        """Record a command in the log and in the fold that reads it back."""
+        self.session.append(COMMAND_ACCEPTED, {"command": command})
+        self.commands.add(command)
+
     def describe(self) -> dict[str, Any]:
+        """What a client is told about this root.
+
+        One name per fact: `rootId` and `sessionId` were the same string (a root
+        *is* its session here) and `events` was `cursor.sequence`, which left a
+        client picking which of two spellings was authoritative.
+        """
         return {
-            "rootId": self.id,
             "sessionId": self.session.id,
             "status": self.status,
             "watchers": len(self.subscribers),
-            # `seq` is the log length by definition (A1). `len(session.events)`
-            # rebuilds a snapshot of the whole log, and this is on the reply
-            # path of every call a polling client makes.
-            "events": self.session.seq,
+            "cursor": cursor_of(self.session),
         }
 
 
@@ -181,6 +229,13 @@ class Supervisor:
             waiting=waiting,
             exits=exits,
         )
+        # What this session already did, read back from its own log — which is
+        # what makes a retry after a restart safe rather than a second turn.
+        root.commands.update(
+            str(event.data.get("command", ""))
+            for event in session.events_from(0)
+            if event.type == COMMAND_ACCEPTED
+        )
         self.roots[root_id] = root
 
         def relay(source: Session, event: SessionEvent) -> None:
@@ -194,12 +249,12 @@ class Supervisor:
                 # `thaw=False`: this payload's only destination is `dumps`,
                 # which handles the frozen forms, and thawing deep-copies the
                 # tree for nobody.
-                {"rootId": root.id, "event": event.to_wire(thaw=False)},
+                {"sessionId": root.id, "event": event.to_wire(thaw=False)},
             )
 
         def announce(agent_: Any, status: str) -> None:
             if agent_ is agent:
-                root.publish("session.status", {"rootId": root.id, "status": status})
+                root.publish("session.status", {"sessionId": root.id, "status": status})
 
         # The session's own feed, not the store-wide `session/event` bus: a
         # child agent's events belong to its own transcript, and subscribing
@@ -260,15 +315,30 @@ class Supervisor:
                 await root.agent.run()
                 await root.ctx.sessions.flush(root.session)
 
-    async def prompt(self, root_id: str, text: str) -> Root:
+    async def prompt(self, root_id: str, text: str, *, command: str = "") -> Root:
         """Splice a turn into the agent's inbox and wake its task.
 
         Returns as soon as the message is *logged*, not when the turn is done:
         the caller is a socket handler serving other clients, and "the root is
         working" is a thing a watcher learns from `agent/status` rather than
         from a reply that never came.
+
+        `command` is the client's idempotence key, already joined at the wire
+        edge — one join, in the module that owns the wire, rather than the same
+        f-string in two places that have to stay in step.
         """
         root = await self.start(root_id)
+        if command:
+            if root.accepted(command):
+                # The retry a reconnecting client cannot avoid sending: it does
+                # not know whether the first one landed. Answering "yes, that
+                # one" is what makes asking twice safe.
+                return root
+            # Written *before* the splice, so a crash between the two re-runs a
+            # command rather than losing it — the same write-ahead ordering A10
+            # applies to blobs. A duplicated turn is visible in the transcript;
+            # a dropped one is not.
+            root.remember(command)
         root.agent.followup(
             create_user_message(content=[{"type": "text", "text": text}], source={"kind": "user"})
         )

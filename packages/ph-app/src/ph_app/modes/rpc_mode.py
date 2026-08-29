@@ -24,11 +24,10 @@ import anyio
 from ph.agent.types import AgentOptions
 from ph.session import Session, SessionEvent, dumps
 
+from ..protocol import capabilities, notification, respond
 from ..runtime import mounted
 
 __all__ = ["RpcServer", "run_rpc"]
-
-PROTOCOL_VERSION = 1
 
 
 @dataclass(slots=True)
@@ -46,33 +45,18 @@ class RpcServer:
         self.out.flush()
 
     def _notify(self, method: str, params: dict[str, Any]) -> None:
-        self._write({"jsonrpc": "2.0", "method": method, "params": params})
+        self._write(notification(method, params))
 
     async def handle(self, request: dict[str, Any]) -> None:
-        request_id = request.get("id")
-        method = request.get("method")
-        params = request.get("params") or {}
-        try:
-            result = await self._dispatch(str(method), params)
-        except Exception as error:
-            if request_id is not None:
-                self._write(
-                    {
-                        "jsonrpc": "2.0",
-                        "id": request_id,
-                        "error": {"code": -32000, "message": str(error)},
-                    }
-                )
-            return
-        if request_id is not None:
-            self._write({"jsonrpc": "2.0", "id": request_id, "result": result})
+        reply = await respond(request, self._dispatch)
+        if reply is not None:
+            self._write(reply)
 
     async def _dispatch(self, method: str, params: dict[str, Any]) -> Any:
-        if method == "initialize":
-            return {
-                "protocolVersion": PROTOCOL_VERSION,
-                "capabilities": {"sessions": True, "tools": True, "streaming": True},
-            }
+        if method in ("initialize", "daemon/hello"):
+            # The same block the daemon answers with, minus what stdio cannot
+            # do: one process, one peer, no supervision.
+            return capabilities("tools")
         if method == "session/new":
             session = self.ctx.sessions.create(params.get("sessionId"))
             self._attach(session)

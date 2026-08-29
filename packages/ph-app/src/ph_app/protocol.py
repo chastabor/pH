@@ -1,0 +1,141 @@
+"""The wire vocabulary both transports speak (P5-02, I-7).
+
+pH answers on two: `--mode rpc` over stdio, for a caller that owns the process,
+and `$PH_RUNTIME/daemon.sock`, for one that does not. They are the same
+protocol. P5-01 shipped them as two — the daemon grew `root/*` methods and
+dropped the `"jsonrpc": "2.0"` field the RPC mode sends — and the divergence was
+invisible because each transport only ever tested itself.
+
+**The names are dsh's**, deliberately: `initialize`, `session/prompt`,
+`session.event`, `session.status`. dsh already ships a Python client for this
+shape, and a second vocabulary would make "use the client you have" false in
+exactly the deployment Phase 5 exists for.
+
+**Envelope here, methods there.** What is genuinely transport-independent is the
+request/reply/error shaping and the version; what a transport serves — one
+session over a pipe, or many supervised roots over a socket — is its own. So
+this module owns `respond`, `notify` and the capability block, and each server
+owns its method table.
+
+@module ph_app.protocol
+"""
+
+from __future__ import annotations
+
+from collections.abc import Awaitable, Callable
+from typing import Any
+
+__all__ = [
+    "PROTOCOL_VERSION",
+    "SNAPSHOT_EVENTS",
+    "Dispatch",
+    "capabilities",
+    "cursor_of",
+    "notification",
+    "request",
+    "respond",
+    "resume_at",
+]
+
+PROTOCOL_VERSION = 1
+"""One number, in one place.
+
+It was declared twice — once per transport — which is how two servers come to
+claim the same version for two different vocabularies.
+"""
+
+SNAPSHOT_EVENTS = 2048
+"""How many events one `session/snapshot` reply carries.
+
+A resumed root can hold hundreds of thousands of events, and a client that asked
+for its history should not be handed a frame that trips the transport's own
+`MAX_LINE` — or a reply it must buffer whole before rendering a line. The cursor
+in each reply is what asks for the next page.
+
+**A count, not a byte budget.** The first draft measured each event with its own
+`dumps` to fill a 512 KiB page, which cost 8.2 ms per page — *2.2x the encode it
+existed to bound*, and all of it discarded. A count needs no measuring pass, and
+the transport's `MAX_LINE` is the real protection against an oversized frame.
+"""
+
+Dispatch = Callable[[str, dict[str, Any]], Awaitable[Any]]
+"""A server's method table: `(method, params) -> result`, raising to refuse."""
+
+
+def capabilities(*names: str) -> dict[str, Any]:
+    """The `initialize` reply, with whatever this transport adds.
+
+    `sessions` and `streaming` are true of both; a transport that supervises
+    adds `roots`, `attach`, `cursors`, `snapshots`, and one that does not simply
+    omits them — a client reads the block rather than inferring from which
+    socket it happened to open. Names rather than `**kwargs`, because every
+    value is `True` by construction: a capability is present or absent.
+    """
+    return {
+        "protocolVersion": PROTOCOL_VERSION,
+        "capabilities": {"sessions": True, "streaming": True, **dict.fromkeys(names, True)},
+    }
+
+
+def notification(method: str, params: dict[str, Any]) -> dict[str, Any]:
+    """A frame with no id, which is what makes it a notification."""
+    return {"jsonrpc": "2.0", "method": method, "params": params}
+
+
+def request(request_id: int, method: str, params: dict[str, Any]) -> dict[str, Any]:
+    """A frame that expects a reply. The client's half of the envelope."""
+    return {"jsonrpc": "2.0", "id": request_id, "method": method, "params": params}
+
+
+def cursor_of(session: Any, sequence: int | None = None) -> dict[str, Any]:
+    """Where a reader has got to, as `{generation, sequence}`.
+
+    A sequence alone is only meaningful against the log that counted it, so it
+    travels with the identity of that log. `generation` is the header's
+    `createdAt`: durable, already on the wire, stable across a resume — which
+    continues the same log — and different for anything that is not that log.
+
+    Here rather than on the daemon's `Root`, because it is a fact about a
+    *session*: the stdio transport serves the same protocol and would otherwise
+    have to re-derive it.
+    """
+    return {
+        "generation": str(session.header.created_at),
+        "sequence": session.seq if sequence is None else sequence,
+    }
+
+
+def resume_at(session: Any, cursor: Any) -> int:
+    """The index a cursor asks to resume from, or 0 when it cannot say.
+
+    A cursor from another incarnation of the log is neither honoured nor
+    refused: honouring it would skip events the client never saw, refusing it
+    would strand a client that did nothing wrong. So a stale generation reads as
+    "you have seen nothing of *this* log" — the only safe reading of the two,
+    and the reply says where it actually started so the client is not left
+    inferring it from sequence numbers.
+    """
+    if not isinstance(cursor, dict):
+        return 0
+    if str(cursor.get("generation", "")) != str(session.header.created_at):
+        return 0
+    seq: int = session.seq
+    return max(0, min(int(cursor.get("sequence", 0)), seq))
+
+
+async def respond(request_frame: dict[str, Any], dispatch: Dispatch) -> dict[str, Any] | None:
+    """Run one request and shape its reply, or `None` if it wanted none.
+
+    A failing method is *this call's* failure, not the connection's: an unknown
+    method or a bad argument comes back as an error frame and the peer keeps
+    talking. Framing errors are the transport's and end the stream, because
+    after a bad frame there is no way to know where the next one starts.
+    """
+    request_id = request_frame.get("id")
+    method = str(request_frame.get("method", ""))
+    params = request_frame.get("params") or {}
+    try:
+        body: dict[str, Any] = {"result": await dispatch(method, params)}
+    except Exception as error:
+        body = {"error": {"code": -32000, "message": str(error)}}
+    return None if request_id is None else {"jsonrpc": "2.0", "id": request_id, **body}

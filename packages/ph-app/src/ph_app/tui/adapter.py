@@ -660,6 +660,9 @@ RECORDLESS: frozenset[str] = frozenset(
         "workspace/provisioned",
         "workspace/checkpoint",
         "session/end-seed",
+        # Protocol bookkeeping: which client asked for which turn. The turn
+        # itself renders; who deduplicated it is not conversation.
+        "client/command",
         "kernel/snapshot",
         "compaction/summarized",
     }

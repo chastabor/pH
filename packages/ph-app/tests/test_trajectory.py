@@ -104,6 +104,9 @@ def test_the_auditor_renders_what_the_transcript_does_not() -> None:
         "workspace/disposed",
         "workspace/provisioned",
         "workspace/checkpoint",
+        # Who asked for a turn, and whether they had asked before: bookkeeping
+        # to a reader, provenance to an auditor of a daemon-driven run (P5-02).
+        "client/command",
     } == TRANSCRIPT_RECORDLESS - RECORDLESS
     # And the reverse: what this view skips that the transcript renders.
     assert {
