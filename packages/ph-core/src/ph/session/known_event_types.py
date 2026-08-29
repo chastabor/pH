@@ -29,6 +29,7 @@ KNOWN_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         "request/context",
         "request/header",
         "session/end-seed",
+        "session/resumed",
         "step/end",
         "step/start",
         "tool/call",

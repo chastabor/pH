@@ -24,6 +24,25 @@ from ph.cordis import Context, Loader
 MountProfile = Callable[..., Awaitable[Context]]
 
 
+@pytest.fixture(autouse=True)
+def _isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every test gets its own `$PH_HOME`, whether or not it asked.
+
+    Autouse because the opt-in version did not hold. `mount` pinned it and
+    `make_tui_app` pinned it, so a test that mounted a profile through neither
+    wrote its sessions into the developer's real home — which the daemon tests
+    did (five logs under fixed ids that later runs append to), and which
+    something else had been doing for days before anyone looked.
+
+    That is the *fourth* appearance of this class in this suite: a test repo in
+    the checkout, a stray `parent-tree`, a real `ph/*` worktree, and now
+    sessions. Each earlier one was fixed where it happened. This is the rule
+    stated once, in the one place no test can route around — a test that
+    genuinely needs another home sets it after this runs and wins.
+    """
+    monkeypatch.setenv("PH_HOME", str(tmp_path))
+
+
 @pytest.fixture
 def anyio_backend() -> str:
     return "asyncio"

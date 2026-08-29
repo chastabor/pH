@@ -379,6 +379,25 @@ class TuiEventAdapter:
         text = f"Retrying after {event.data.get('code')} (attempt {event.data.get('attempt')})."
         self._row("retry", "notice", text, event)
 
+    def _on_session_resumed(self, event: SessionEvent, live: bool) -> None:
+        """Say that this transcript is a continuation, and whether it crashed.
+
+        The person who opened this may not know a previous run existed, let
+        alone that it stopped mid-turn — and the events above this row are
+        somebody else's work, which changes how the ones below should be read.
+        Worth a line for the same reason `llm/retry` is: quiet recovery that
+        nobody is told about is indistinguishable from nothing having happened.
+        """
+        events = event.data.get("events", 0)
+        if event.data.get("interrupted"):
+            text = (
+                f"Resumed after an interrupted run — {events} earlier events, "
+                "and the turn that was open when it stopped has been closed."
+            )
+        else:
+            text = f"Resumed an existing session — {events} earlier events."
+        self._row("resumed", "notice", text, event)
+
     def _on_kernel_restored(self, event: SessionEvent, live: bool) -> None:
         """A resumed namespace, but only when something did not come back.
 
@@ -606,6 +625,7 @@ HANDLERS: Mapping[str, Handler] = {
     "command/run": TuiEventAdapter._on_command_run,
     "command/done": TuiEventAdapter._on_command_done,
     "llm/retry": TuiEventAdapter._on_llm_retry,
+    "session/resumed": TuiEventAdapter._on_session_resumed,
     "agent/inbox/spliced": TuiEventAdapter._on_agent_inbox_spliced,
     "todo/write": TuiEventAdapter._on_todo_write,
     "offload/spilled": TuiEventAdapter._on_offload_spilled,

@@ -77,6 +77,20 @@ class PathRoots:
     def profiles_dir(self) -> Path:
         return self.home / "profiles"
 
+    def daemon_socket(self) -> Path:
+        """Where the supervisor listens (P5-01).
+
+        Under `$PH_RUNTIME` because that is the tier chosen for exactly this: a
+        per-boot, per-user, `0o700` directory that a cloud sync will not carry
+        to another machine and a reboot clears. A socket in `$PH_HOME` would be
+        synced, and a socket carried between machines is one whose peer is a
+        process that never existed here.
+
+        On Windows the same path names a named pipe rather than a filesystem
+        socket; `resolve_roots` already picks a runtime tier that can hold one.
+        """
+        return self.runtime / "daemon.sock"
+
     def ensure(self) -> PathRoots:
         """Create whatever is missing, with the mode its tier requires."""
         self.home.mkdir(parents=True, exist_ok=True)

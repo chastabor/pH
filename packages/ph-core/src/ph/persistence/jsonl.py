@@ -35,7 +35,27 @@ from ..paths import resolve_roots
 from ..session import Session, SessionEvent, SessionHeader
 from ..session.json import dumps
 
-__all__ = ["JsonlSessionStore", "apply", "read_records", "read_session", "session_path"]
+__all__ = [
+    "JsonlSessionStore",
+    "apply",
+    "read_records",
+    "read_session",
+    "resumption_of",
+    "session_path",
+]
+
+
+def resumption_of(session: Any) -> dict[str, Any] | None:
+    """What this session's last resume recorded, or `None` if it never was.
+
+    Read from the log rather than returned from `resume_session`, so a front end
+    that did not perform the resume — a TUI attaching to a daemon root, a
+    trajectory reader opening a file — learns it the same way as the process
+    that did.
+    """
+    event = session.latest("session/resumed")
+    return dict(event.data) if event is not None else None
+
 
 log = logging.getLogger("ph.persistence.jsonl")
 
@@ -184,14 +204,35 @@ async def resume_session(ctx: Any, session_id: str) -> Any:
     session is provider-valid the first time anything reads it — an open turn
     that reached `derive_messages()` would be rejected by the provider before
     anyone noticed it was unclosed (A5).
+
+    `interrupted` says whether the tail had to be closed, which is the honest
+    signal for "this crashed" as against "this was reopened": a clean stop
+    synthesizes no closers.
     """
     from ..session import Session
-    from .repair import repaired
+    from .repair import interrupted_turn_closers
 
     store = ctx.session_persistence
     path = session_path(store.root, session_id)
     header, events = read_session(path)
-    return ctx.sessions.adopt(Session(session_id, seed=repaired(events), header=header))
+    closers = interrupted_turn_closers(events)
+    session = ctx.sessions.adopt(Session(session_id, seed=[*events, *closers], header=header))
+    # Recorded, not just returned. A resume is a fact about *provenance* — this
+    # process picked up work somebody else started — and it is not derivable
+    # from anything else in the log: a session that was reopened and one that
+    # ran straight through look identical afterwards. It matters most where
+    # nobody is watching, which is the daemon and a cron-started agent, and it
+    # is what lets `ph doctor`, a trajectory reader or a person scrolling back
+    # find the seam. One event per reopen, not per turn.
+    session.append(
+        "session/resumed",
+        {
+            "events": len(events),
+            "interrupted": bool(closers),
+            "closed": len(closers),
+        },
+    )
+    return session
 
 
 @plugin("session-persistence-jsonl", inject=["sessions"])

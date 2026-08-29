@@ -178,4 +178,14 @@ async def test_resume_repairs_a_crashed_log_on_load(mount, tmp_path) -> None:
 
     revived = await resume_session(ctx, "crashed")
     types = [event.type for event in revived.events]
-    assert types[-4:] == ["tool/result", "step/end", "turn/end", "session/end-seed"]
+    # The closers, then the record that this was a resume: the repair is what
+    # makes the log readable, and `session/resumed` is what makes the *seam*
+    # visible to anything reading it afterwards.
+    assert types[-5:] == [
+        "tool/result",
+        "step/end",
+        "turn/end",
+        "session/end-seed",
+        "session/resumed",
+    ]
+    assert revived.events[-1].data["interrupted"] is True, "a crashed tail was not reported"

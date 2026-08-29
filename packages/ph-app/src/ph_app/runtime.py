@@ -13,6 +13,7 @@ from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from ph.agent.types import AgentOptions
 from ph.cordis import Context, Loader
@@ -31,10 +32,29 @@ class MountedRun:
     loader: Loader
 
 
+def compose(documents: Sequence[Path]) -> list[tuple[str, Any]]:
+    """Read and parse the profile once, for a caller that mounts it repeatedly.
+
+    The daemon mounts one `Context` per root and the YAML never changes between
+    them, so re-reading it per root was ~74% of the cost of starting one. Every
+    other mode composes exactly once and should keep calling `mounted(paths)`.
+    """
+    return Loader.from_paths(list(documents)).documents
+
+
 @asynccontextmanager
-async def mounted(documents: Sequence[Path]) -> AsyncIterator[MountedRun]:
-    """Compose a profile, mount it, and unwind the whole tree on exit."""
-    loader = Loader.from_paths(list(documents))
+async def mounted(
+    documents: Sequence[Path], *, parsed: Sequence[tuple[str, Any]] | None = None
+) -> AsyncIterator[MountedRun]:
+    """Compose a profile, mount it, and unwind the whole tree on exit.
+
+    `parsed` skips the read for a caller that already has `compose()`'s result;
+    the rows are rebuilt per mount either way, so two roots still get two
+    independent configurations and never share a `Context`.
+    """
+    loader = (
+        Loader.from_documents(parsed) if parsed is not None else Loader.from_paths(list(documents))
+    )
     ctx = Context()
     try:
         await loader.mount(ctx)

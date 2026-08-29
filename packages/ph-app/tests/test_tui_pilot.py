@@ -692,5 +692,10 @@ async def test_resuming_rebuilds_the_transcript_from_the_log(make_tui_app: MakeA
         assert resumed.front is not None
         after = [(item.role, item.text) for item in resumed.front.state.visible_items()]
 
-    assert after == before
+    # The conversation comes back whole, plus one line saying it is a
+    # continuation — a person who did not know a previous run existed should not
+    # have to infer that from the scrollback (P5-01's resume notice).
+    notices = [item for item in after if item[0] == "notice" and "Resumed" in item[1]]
+    assert len(notices) == 1, "a resumed transcript did not say it was resumed"
+    assert [item for item in after if item not in notices] == before
     assert ("user", "remember this") in after

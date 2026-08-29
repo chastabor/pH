@@ -267,6 +267,34 @@ def doctor(profile: ProfileOption = DEFAULT_PROFILE) -> None:
 
 
 @app.command()
+def daemon(
+    profile: ProfileOption = DEFAULT_PROFILE,
+    provider: Annotated[str, typer.Option("--provider")] = "fake",
+    model: Annotated[str, typer.Option("--model")] = "fake-1",
+) -> None:
+    """Run the supervisor: roots that outlive the clients watching them (P5-01).
+
+    Blocks until a client sends `shutdown`. The socket is
+    `$PH_RUNTIME/daemon.sock` — per boot and per user, which is the tier chosen
+    for exactly this — and a stale one from a crashed daemon is cleared, while a
+    live one is refused rather than stolen.
+    """
+    from .daemon import serve
+
+    documents = _documents(profile)
+    socket_path = resolve_roots().ensure().daemon_socket()
+    err.print(f"[dim]listening on {socket_path}[/dim]")
+    try:
+        # The path that was printed, not a second resolution of it: a message
+        # naming one socket while the bind takes another is the kind of thing
+        # someone debugs for an hour.
+        anyio.run(partial(serve, documents, provider=provider, model=model, path=socket_path))
+    except RuntimeError as error:
+        err.print(f"[red]{error}[/red]")
+        raise typer.Exit(code=1) from error
+
+
+@app.command()
 def events(as_json: Annotated[bool, typer.Option("--json", help="Emit JSON.")] = False) -> None:
     """Print the event producer/consumer matrix.
 
