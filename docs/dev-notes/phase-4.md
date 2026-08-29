@@ -1,8 +1,8 @@
 # Phase 4 — The stabilization bundle
 
-**Status:** in progress. Every row but the containment test module (P4-16) has landed.
+**Status:** complete. Every row has landed.
 
-**Gate so far:** `ruff` + `ruff format` + `mypy --strict` across all five packages + 1 246 tests, green.
+**Gate:** `ruff` + `ruff format` + `mypy --strict` across all five packages + 1 250 tests, green.
 
 Phase 3 gave pH the RLM's semantics. Phase 4 gives it the things that keep a
 long run from falling over: planning, offload, compaction, limits, a human in
@@ -36,6 +36,7 @@ version of it.
 | P4-13b | Per-agent skills and tools, bounded by the parent (I7, B7) | `ph/seams/{skills,subagents}.py` |
 | P4-14 | Paired-event reconciliation at session open (F6) | `ph/seams/workspace.py` |
 | P4-15 | The `rlm-stable` profile; these notes | `ph_app/profiles/rlm-stable.yaml` |
+| P4-16 | The ladder's claims asserted, escape included (E1, E13) | `ph-core/tests/test_containment_ladder.py` |
 | P4-17 | `ctx.tui_screens` and the trajectory as its first registrant (I1, I2) | `ph/seams/tui_screens.py` |
 
 ---
@@ -165,7 +166,9 @@ that asks about everything teaches its user to approve without reading.
 
 ## What is left
 
-P4-16, the containment test module: `worktree` bounds relative writes, an
-absolute-path `open()` escapes it (asserted, so E1 cannot regress), ephemeral
-discard, scratch, the redirection env, and doctor's effective tier. The
-`sandbox` half of that argument lands in P6-06.
+Nothing in Phase 4. P4-16 closed it by asserting the ladder's claims rather than
+its mechanisms — including, deliberately, that an absolute-path raw write
+**escapes** `worktree`, so the tier table cannot quietly become a lie. The
+`sandbox` half of that argument — the same write, refused — is P6-06, together
+with the docs test that checks no tier is described as bounding writes it does
+not bound.
