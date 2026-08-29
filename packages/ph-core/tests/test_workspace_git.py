@@ -343,7 +343,7 @@ async def test_mounting_the_row_claims_the_tier(mount: Any) -> None:
     does not, which is P4-07's gate and still holds."""
     ctx = await mount(TIER_ROW)
 
-    assert ctx.workspace.tier == "worktree"
+    assert ctx.workspace.effective_tier(child=False) == "worktree"
 
 
 # -------------------------------------------------------------- provisioning --

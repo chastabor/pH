@@ -40,14 +40,17 @@ from dataclasses import dataclass
 
 from ..cordis import Context, plugin
 from ..wire import WireModel
+from .diagnostics import Diagnostic, contribute
 from .sandbox import enforcement_of
 from .workspace import ContainmentTier
 
 __all__ = [
     "STRICT_REFUSAL",
+    "TIERS",
     "Config",
     "ContainmentService",
     "ContainmentUnavailableError",
+    "TierDescription",
     "apply",
 ]
 
@@ -61,6 +64,52 @@ STRICT_REFUSAL = (
 Both ways, because a refusal that names only the problem leaves an operator
 guessing whether the answer is to install something or to change a setting — and
 one of those is a decision they may be entitled to make.
+"""
+
+
+@dataclass(frozen=True, slots=True)
+class TierDescription:
+    """One rung of §4.8's table: what it bounds, what it does not, what it buys.
+
+    Three columns and no severity, which is §12 Q10's own instruction for
+    `ph doctor` — *"prints the same three columns rather than a severity
+    colour"*. A colour invites a reader to skip the sentence, and the sentence is
+    the entire point of E1: the failure being prevented is a **tier name**
+    overstating what the tier does, and only prose can correct that.
+    """
+
+    bounds: str
+    does_not_bound: str
+    buys: str
+
+
+TIERS: dict[ContainmentTier, TierDescription] = {
+    "advisory": TierDescription(
+        bounds="nothing",
+        does_not_bound="anything — the whole host, at the user's own permissions",
+        buys="convention only",
+    ),
+    "worktree": TierDescription(
+        bounds="every tool-mediated write, and every relative-path raw write, "
+        "since both resolve against the agent's cwd",
+        does_not_bound='an absolute-path raw write — open("/etc/passwd", "w") never consults a cwd',
+        buys="collision isolation and revertibility (fan-out safety, per-run checkpoints, /revert)",
+    ),
+    "sandbox": TierDescription(
+        bounds="every write, absolute paths included, refused at the kernel",
+        does_not_bound="side effects that are not filesystem writes — network, "
+        "already-published artifacts",
+        buys="confinement",
+    ),
+}
+"""§4.8's table, once, where every reader can reach it.
+
+E1's gate is a docs test asserting no tier is described as bounding writes it
+does not bound (P6-06). That is only worth running against a single home: a
+table in prose and a second copy in `ph doctor` would drift, and the drift would
+be invisible precisely because each copy looks right on its own. So the
+sentences live here, `ph doctor` prints them verbatim, and the docs row when it
+lands has one thing to check rather than two things to reconcile.
 """
 
 
@@ -107,6 +156,54 @@ class ContainmentService:
     def for_role(self, *, child: bool) -> ContainmentTier | None:
         """The rung this role gets. The one place the two knobs are read."""
         return (self.child_tier or self.tier) if child else self.tier
+
+    def describe(self) -> list[tuple[str, str]]:
+        """What `ph doctor` prints about this deployment (E1, E10).
+
+        Three claims, and each one is a defect this row could otherwise hide.
+
+        **Effective, not configured.** It asks the workspace seam rather than
+        reading its own config back to the operator: a `worktree` row over a
+        directory that is not a repository declines on every acquire, and being
+        told your own setting is not being told what you have.
+
+        **Both rungs, each with its own three columns.** The shipped `rlm`
+        posture puts the person's agent on `advisory` and its children on
+        `worktree`, so a report printing one rung's table would say "bounds:
+        nothing" about a process where most of the writing is bounded — or the
+        reverse, which is worse.
+
+        **No severity, by §12 Q10's own instruction.** The three columns *are*
+        the finding; a colour would let a reader skip the sentence, and the
+        sentence is what stops a tier's name from overstating it (E1).
+        """
+        workspace = self.ctx.get("workspace")
+        root: ContainmentTier = "advisory"
+        child: ContainmentTier = "advisory"
+        if workspace is not None:
+            root, child = (
+                workspace.effective_tier(child=False),
+                workspace.effective_tier(child=True),
+            )
+        rows: list[tuple[str, str]] = [("tier (effective)", root)]
+        if self.tier is not None and self.tier != root:
+            rows.append(("tier (configured)", f"{self.tier} — not in force here"))
+        rungs = [root]
+        if child != root:
+            rows.append(("tier for children", child))
+            rungs.append(child)
+        for rung in rungs:
+            # Prefixed only when there are two, so the ordinary single-rung
+            # report reads as the table §4.8 prints rather than as a matrix.
+            prefix = "" if len(rungs) == 1 else f"{rung} "
+            description = TIERS[rung]
+            rows.append((f"{prefix}bounds", description.bounds))
+            rows.append((f"{prefix}does NOT bound", description.does_not_bound))
+            rows.append((f"{prefix}buys", description.buys))
+        rows.append(("strict", "yes" if self.strict else "no"))
+        if self.strict:
+            rows.append(("strict is satisfied", "no" if self._unconfined() else "yes"))
+        return rows
 
     def _unconfined(self) -> str | None:
         """Why confinement is not real under `strict`, or `None`.
@@ -158,3 +255,7 @@ async def apply(ctx: Context, config: Config) -> None:
     # profile is composed — and so a *second* row wanting to refuse a deployment
     # registers one too, instead of another `if` in whoever starts the process.
     ctx.on("profile/mounted", lambda: containment.verify())
+
+    contribute(
+        ctx, Diagnostic(id="containment", title="Containment", read=containment.describe, order=10)
+    )

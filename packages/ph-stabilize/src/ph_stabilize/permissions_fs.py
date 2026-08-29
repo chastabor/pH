@@ -70,6 +70,7 @@ from typing import Any, Literal, TypeAlias
 from ph.cordis import Context, plugin
 from ph.paths import is_under
 from ph.seams.approval import denial_reason
+from ph.seams.diagnostics import Diagnostic, contribute
 from ph.seams.fs import EditIntent, FsService, ReadIntent, WriteIntent, matches_glob
 from ph.seams.sandbox import enforcement_of
 from ph.seams.workspace import workspace_of, writable_roots
@@ -183,12 +184,11 @@ class FsPermissions:
 
     Provided rather than kept in a closure because the reach sentence is only
     worth anything if something can read it back, and `ph-app` cannot import this
-    package. That makes this the fourth row wanting to hand `ph doctor` a
-    reading — after the sandbox tier, the workspace kind and the worker model —
-    which is `ctx.tui_status`' problem again and wants the same answer: a
-    registry of named readings, contributed with `scope=`, iterated once by
-    whoever is printing. P4-12 owns that seam; until it exists this is a bespoke
-    name, and saying so is cheaper than pretending it was the plan.
+    package. Being the fourth row to want that is what bought `ctx.diagnostics`
+    (P4-12) — `ctx.tui_status`' shape, minus the `Session` — so `ph doctor`
+    prints `reach` without knowing this module exists. The name stays published
+    as well: `describe` is for a person reading a report, and `objection` is for
+    the three callers that need a verdict.
     """
 
     rules: tuple[Rule, ...]
@@ -236,6 +236,32 @@ class FsPermissions:
     def reach(self) -> str:
         """What these rules do and do not cover, as it stands (E9)."""
         return BOUNDED_REACH if self.confined else UNBOUNDED_REACH
+
+    def describe(self) -> list[tuple[str, str]]:
+        """What `ph doctor` prints about file permissions (E9).
+
+        **The reach sentence even when there are no rules**, which is the
+        counter-intuitive half: a deployment that wrote nothing has a *wider*
+        reach than one that wrote a deny list, and a report that stayed silent
+        about the empty case would only tell people what they cannot do — never
+        that nothing was stopping them.
+
+        Read live, not at mount, for the reason `confined` is a property: a
+        profile may layer its sandbox after this row.
+        """
+        rows = [
+            ("rules", str(len(self.rules)) if self.rules else "none — nothing is refused here"),
+            ("reach", self.reach),
+        ]
+        for rule in self.rules:
+            # The paths are the label and the verdict is the value, because
+            # "what happens to this path" is the question a person is reading
+            # the report to answer — and it keeps every contributed row a plain
+            # pair rather than a nesting convention the printer has to learn.
+            operations = "/".join(rule.operations)
+            where = " outside the workspace" if rule.scope == "outside-workspace" else ""
+            rows.append((", ".join(rule.paths), f"{rule.mode} on {operations}{where}"))
+        return rows
 
     def decide(self, operation: Operation, path: Path, agent: Any = None) -> Rule | None:
         """The first rule that matches, or `None` for the default allow."""
@@ -391,6 +417,16 @@ async def apply(ctx: Context, config: Config) -> None:
     fs: FsService = ctx.fs
     permissions = FsPermissions(rules=config.rules, roots=fs.root_for, ctx=ctx)
     ctx.provide("fs_permissions", permissions)
+
+    # Offered before the no-rules return below: "nothing is refused here, and
+    # here is how far that goes" is the reading a person most needs, and it is
+    # the one an early return would have silently dropped.
+    contribute(
+        ctx,
+        Diagnostic(
+            id="permissions-fs", title="File permissions", read=permissions.describe, order=30
+        ),
+    )
     if not config.rules:
         # Nothing to enforce, so nothing is attached — not even a predicate that
         # would return False. `hide` is consulted once per file a walk visits,

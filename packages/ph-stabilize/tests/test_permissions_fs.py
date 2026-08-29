@@ -39,6 +39,7 @@ from ph.testing import (
     StubAgent,
     StubSandboxProvider,
     StubWorkspaceProvider,
+    report_section,
     run_tool,
 )
 from ph_stabilize.permissions_fs import (
@@ -407,6 +408,31 @@ async def test_the_reach_message_toggles_with_a_sandbox(mount: Any, tmp_path: Pa
     ctx.sandbox.register_provider(StubSandboxProvider())
     assert ctx.fs_permissions.reach == BOUNDED_REACH
     assert "not covered" not in ctx.fs_permissions.reach
+
+
+async def test_the_reading_reaches_doctor_even_with_no_rules(mount: Any, tmp_path: Path) -> None:
+    """P4-12. The empty case is the one worth printing: a deployment that wrote
+    no rules has a *wider* reach than one that wrote a deny list, and a report
+    that only appeared once someone configured something would tell people what
+    they cannot do and never that nothing was stopping them.
+    """
+    ctx = await _mounted(mount, tmp_path)
+
+    rows = report_section(ctx, "File permissions")
+
+    assert rows["rules"] == "none — nothing is refused here"
+    assert rows["reach"] == UNBOUNDED_REACH
+
+
+async def test_the_reading_names_each_rule(mount: Any, tmp_path: Path) -> None:
+    """A person reading `ph doctor` is asking "what is refused here", and a
+    count answers a different question than the one they asked."""
+    ctx = await _mounted(mount, tmp_path, {"paths": ["*.env"], "mode": "deny"})
+
+    rows = report_section(ctx, "File permissions")
+
+    assert rows["rules"] == "1"
+    assert "*.env" in " ".join(f"{label} {value}" for label, value in rows.items())
 
 
 def test_a_policy_with_no_sandbox_seam_reports_unconfined() -> None:

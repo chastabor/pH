@@ -61,6 +61,7 @@ from ..session import Session
 from ..wire import WireModel
 from . import workspace_provision
 from ._registry import claim_entry, claim_slot
+from .diagnostics import Diagnostic, contribute
 from .sandbox import SandboxPolicy
 from .workspace_provision import ProvisionEntry, ProvisionReport
 
@@ -496,29 +497,63 @@ class WorkspaceSeam:
         """Claim the tier. One at a time; `shared` remains the fallback."""
         return claim_slot(scope or self.ctx, self, "provider", provider, label="workspace.provider")
 
-    @property
-    def tier(self) -> ContainmentTier:
-        """The *effective* tier for a root agent, which is what `ph doctor` prints.
+    def effective_tier(self, *, child: bool) -> ContainmentTier:
+        """What one role actually gets, provider and choice reconciled.
 
-        Effective, not configured, in both directions. A `worktree` row over a
-        directory that is not a repository declines on every acquire, so a
-        doctor reading the config would report containment nobody has — and
-        since P4-11 the inverse is just as reachable: the shipped `rlm` profile
-        layers the git provider *and* chooses `advisory` for the person's own
-        agent, so reading the provider alone would report a worktree the root
-        agent never gets. Both are the defect §4.8 closes on, from opposite
-        sides.
+        **Effective, not configured, in both directions.** A `worktree` row over
+        a directory that is not a repository declines on every acquire, so a
+        report reading the config would name containment nobody has — and since
+        P4-11 the inverse is just as reachable: the shipped `rlm` profile layers
+        the git provider *and* chooses `advisory` for the person's own agent, so
+        reading the provider alone would name a worktree the root agent never
+        gets. Both are the defect §4.8 closes on, from opposite sides.
 
-        A root agent's rung: `child_tier` is a different answer, and P4-12
-        prints them per agent from the workspace each one holds.
+        The two halves can each only *lower* the answer and neither can raise
+        it: a chosen `advisory` declines a registered provider, and an absent
+        provider cannot deliver whatever was chosen. `acquire` makes the same
+        reconciliation by *doing* it, which is why this is the only other place
+        allowed to state it — a third spelling would be a report that disagrees
+        with the tree on disk, and `ph doctor` (P4-12) prints both roles because
+        a deployment where they differ is the shipped one.
         """
         if self.provider is None:
             return "advisory"
         containment = self.ctx.get("containment")
-        chosen = None if containment is None else containment.for_role(child=False)
+        chosen = None if containment is None else containment.for_role(child=child)
         if chosen == "advisory":
             return "advisory"
         return self.provider.tier
+
+    def describe(self) -> list[tuple[str, str]]:
+        """What `ph doctor` prints about workspaces (E10).
+
+        **Per agent, not per profile**, because since P4-11 there is no single
+        answer: the shipped `rlm` posture puts the person's own agent in their
+        checkout and its children in worktrees, so a report naming one kind
+        would be wrong about half the process. An agent that has acquired
+        nothing prints nothing — `doctor` on an idle process legitimately has
+        only the profile-level rows to show, and inventing a row per configured
+        agent would describe workspaces nobody holds.
+        """
+        provider = self.provider
+        rows: list[tuple[str, str]] = [
+            (
+                "provider",
+                "none — every agent works in place" if provider is None else provider.tier,
+            ),
+            ("scratch root", str(self.scratch_root)),
+        ]
+        if self._provisioning:
+            materials = ", ".join(entry.dest or entry.source for entry in self._provisioning)
+            rows.append(("provisions", materials))
+        for agent_id, held in sorted(self._held.items()):
+            workspace = held.workspace
+            writable = "writable" if workspace.repo_writable else "read-only (enforced)"
+            detail = f"{workspace.kind}, {writable}, at {workspace.root}"
+            if workspace.ref:
+                detail += f" on {workspace.ref}"
+            rows.append((f"agent {agent_id}", detail))
+        return rows
 
     async def acquire(
         self,
@@ -893,11 +928,11 @@ async def apply(ctx: Context, config: Config) -> None:
     `confine()` refuses, since refusing is a real answer, but an agent with no
     working directory is not.
     """
-    ctx.provide(
-        "workspace",
-        WorkspaceSeam(
-            ctx=ctx,
-            shared=SharedWorkspaceProvider(),
-            scratch_root=default_home_path(config.scratch, "scratch"),
-        ),
+    seam = WorkspaceSeam(
+        ctx=ctx,
+        shared=SharedWorkspaceProvider(),
+        scratch_root=default_home_path(config.scratch, "scratch"),
     )
+    ctx.provide("workspace", seam)
+
+    contribute(ctx, Diagnostic(id="workspaces", title="Workspaces", read=seam.describe, order=20))

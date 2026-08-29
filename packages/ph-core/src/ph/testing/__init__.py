@@ -14,12 +14,13 @@ from .builders import (
     tool_runtime,
     user_payload,
 )
+from .diagnostics import report_section
 from .fake_adapter import FakeAdapter, text_script
 from .git import WORKTREE_ROWS, git, git_repo, needs_git, worktree_agent
 from .replay_adapter import RecordedStep, ReplayAdapter, recorded_steps
 from .stub_runtime import StubCodeRuntime
 from .stub_sandbox import StubSandboxProvider
-from .stub_workspace import StubWorkspaceProvider
+from .stub_workspace import StubWorkspaceProvider, acquire_for_role
 
 __all__ = [
     "FAKE_OPTIONS",
@@ -31,6 +32,7 @@ __all__ = [
     "StubCodeRuntime",
     "StubSandboxProvider",
     "StubWorkspaceProvider",
+    "acquire_for_role",
     "assistant_payload",
     "git",
     "git_repo",
@@ -38,6 +40,7 @@ __all__ = [
     "plugin_payload",
     "raising",
     "recorded_steps",
+    "report_section",
     "run_tool",
     "simple_tool",
     "text_script",

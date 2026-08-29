@@ -21,6 +21,7 @@ from runtime_helpers import dispatch_names, run_ipython_cell
 from ph.bundles import BASE, HEADLESS
 from ph.cordis import Context, Loader
 from ph.system_prompt.assembly import AssembleContext, render_prompt
+from ph.testing import report_section
 from ph.tools.registry import RUN_CODE
 from ph_rlm import BUNDLE
 from ph_rlm.presentation import IPYTHON
@@ -176,3 +177,21 @@ async def test_the_shipped_runtime_gets_the_configured_graces(shipped_profile: A
     assert runtime.cancel_grace == 0.25
     assert runtime.shutdown_grace == 1.5
     assert runtime.boot_timeout == 30.0, "an untouched knob keeps its default"
+
+
+async def test_the_runtime_tells_doctor_what_runs_model_code(shipped_profile: Any) -> None:
+    """I-2's reading, contributed rather than imported (P4-12).
+
+    `ph-app` cannot import this package, so the worker model reaches `ph doctor`
+    through `ctx.diagnostics` — and the assertion that matters is the last one:
+    **reading it must not resolve the interpreter**, because `environment()`
+    shells out to `uv` and a diagnostic that builds a venv the first time
+    somebody runs it is a diagnostic people stop running.
+    """
+    ctx, _session, _agent = await shipped_profile()
+
+    rows = report_section(ctx, "Code runtime")
+
+    assert rows["workers"].startswith("one CPython child per agent")
+    assert rows["live kernels"] == "0"
+    assert "not resolved yet" in rows["interpreter"]

@@ -40,6 +40,16 @@
 - id: tools-timeout
   name: tools-timeout
 
+# What `ph doctor` says about this deployment (P4-12). `ctx.tui_status` minus
+# the `Session`: a row hands the report a reading, so the one command whose job
+# is to be complete does not have to import three packages to be it. A
+# contributor offers its section through `diagnostics.contribute`, which waits
+# on the key rather than reading it at `apply` — so this row keeps the promise
+# at the top of this file and may sit anywhere, above or below the rows it
+# collects from.
+- id: diagnostics
+  name: diagnostics
+
 # --- capability seams ------------------------------------------------------
 # Definition + one local provider each. A deployment swaps a provider by
 # addressing the row; consumers never learn which one answered (I5).

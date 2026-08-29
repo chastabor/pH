@@ -208,10 +208,10 @@ async def test_the_effective_tier_is_reported_not_the_configured_one(tmp_path: P
     distinction: a `worktree` row over a non-repository declines on every
     acquire, and a doctor reading config would report containment nobody has."""
     seam = _seam(tmp_path)
-    assert seam.tier == "advisory"
+    assert seam.effective_tier(child=False) == "advisory"
 
     seam.register_provider(_Provider(answer=None))
-    assert seam.tier == "worktree"
+    assert seam.effective_tier(child=False) == "worktree"
 
 
 # ---------------------------------------------------------------- the pair --
@@ -406,5 +406,5 @@ async def test_mounting_the_seam_changes_nothing(mount: Any) -> None:
     been acquired until the agent lifecycle does it (P4-08)."""
     ctx = await mount()
 
-    assert ctx.workspace.tier == "advisory"
+    assert ctx.workspace.effective_tier(child=False) == "advisory"
     assert ctx.workspace.of("any-agent") is None

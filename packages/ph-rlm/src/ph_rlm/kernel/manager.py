@@ -62,6 +62,7 @@ from ph.seams.code_runtime import (
     CodeRunRequest,
     CodeRunResult,
 )
+from ph.seams.diagnostics import Diagnostic, contribute
 from ph.seams.subprocess import scrub_env
 from ph.seams.workspace import workspace_of
 from ph.session.json import thaw_json
@@ -755,6 +756,31 @@ class PythonCodeRuntime:
     _environment: RuntimeEnvironment | None = None
     _resolve_lock: anyio.Lock = field(default_factory=anyio.Lock)
 
+    def describe(self) -> list[tuple[str, str]]:
+        """What `ph doctor` prints about the workers that run model code (I-2).
+
+        **Nothing here resolves the interpreter.** `environment()` shells out to
+        `uv` to build the managed venv, and a diagnostic that took thirty
+        seconds and a network the first time someone ran it would be a
+        diagnostic people stop running. So an unresolved interpreter is reported
+        as unresolved, which is also the more useful fact: it says the venv has
+        not been built yet.
+        """
+        environment = self._environment
+        interpreter = (
+            environment.describe()
+            if environment is not None
+            else f"{self.interpreter_mode} — not resolved yet, built on the first cell"
+        )
+        gib = self.limits.address_space_bytes / 1024**3
+        return [
+            ("workers", "one CPython child per agent namespace, spawned lazily"),
+            ("on a dead child", "replaced, and the model is told the namespace was lost"),
+            ("interpreter", interpreter),
+            ("per-child limits", f"{self.limits.cpu_seconds}s CPU, {gib:.3g} GiB address space"),
+            ("live kernels", str(len(self._kernels))),
+        ]
+
     async def environment(self) -> RuntimeEnvironment:
         """Resolve the interpreter once, on first use.
 
@@ -934,3 +960,7 @@ async def apply(ctx: Context, config: Config) -> None:
     # acquired after the agent exists (P4-08) and a value read at mount would be
     # `None` for every kernel this runtime ever spawns.
     runtime.workspaces = partial(workspace_of, ctx)
+
+    contribute(
+        ctx, Diagnostic(id="code-runtime", title="Code runtime", read=runtime.describe, order=40)
+    )

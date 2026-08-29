@@ -23,34 +23,13 @@ from typing import Any
 import pytest
 
 from ph.seams.containment import ContainmentUnavailableError
-from ph.testing import StubSandboxProvider, StubWorkspaceProvider
+from ph.testing import StubSandboxProvider, acquire_for_role
 
 pytestmark = pytest.mark.anyio
 
 
 def _row(**config: Any) -> dict[str, Any]:
     return {"id": "containment", "config": config}
-
-
-async def _acquired(ctx: Any, tmp_path: Path, *, child: bool = False) -> Any:
-    """Acquire for one role, with the tier this deployment chose for it.
-
-    The provider is registered once — one slot, because two answers to "what
-    makes a workspace" is a contradiction; what differs per role is whether the
-    caller *asks* for it.
-    """
-    if ctx.workspace.provider is None:
-        ctx.workspace.register_provider(StubWorkspaceProvider(root=tmp_path / "trees"))
-    session = ctx.sessions.create(
-        "child-session" if child else "root-session",
-        meta={"origin": "subagent"} if child else None,
-    )
-    return await ctx.workspace.acquire(
-        session_id=session.id,
-        agent_id="child" if child else "root",
-        base=tmp_path,
-        session=session,
-    )
 
 
 # ------------------------------------------------------------------ choosing --
@@ -65,7 +44,7 @@ async def test_mounting_the_row_chooses_nothing(mount: Any, tmp_path: Path) -> N
     """
     ctx = await mount()
 
-    workspace = await _acquired(ctx, tmp_path)
+    workspace = await acquire_for_role(ctx, tmp_path)
 
     assert ctx.containment.for_role(child=False) is None
     assert workspace.kind == "worktree", "mounting the selector disabled the tier"
@@ -79,7 +58,7 @@ async def test_advisory_is_a_choice_and_declines_the_provider(mount: Any, tmp_pa
     """
     ctx = await mount(_row(tier="advisory"))
 
-    workspace = await _acquired(ctx, tmp_path)
+    workspace = await acquire_for_role(ctx, tmp_path)
 
     assert workspace.kind == "shared"
     assert workspace.root == tmp_path
@@ -94,8 +73,8 @@ async def test_a_parent_and_its_children_sit_on_different_rungs(mount: Any, tmp_
     """
     ctx = await mount(_row(tier="advisory", child_tier="worktree"))
 
-    root = await _acquired(ctx, tmp_path)
-    child = await _acquired(ctx, tmp_path, child=True)
+    root = await acquire_for_role(ctx, tmp_path)
+    child = await acquire_for_role(ctx, tmp_path, child=True)
 
     assert root.kind == "shared"
     assert child.kind == "worktree"

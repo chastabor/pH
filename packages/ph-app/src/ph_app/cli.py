@@ -38,6 +38,7 @@ from ph.paths import RuntimeDirError, resolve_roots
 from .attach import AttachmentUnavailable
 from .modes import run_json, run_print, run_rpc, run_transcript
 from .profiles import available_profiles, resolve_profile
+from .runtime import mounted
 
 __all__ = ["app", "main"]
 
@@ -52,6 +53,27 @@ console = Console()
 err = Console(stderr=True)
 
 DEFAULT_PROFILE = "headless"
+
+ProfileOption: TypeAlias = Annotated[
+    str, typer.Option("--profile", help="Profile name or path to a .yaml.")
+]
+"""Declared once, so two commands cannot come to disagree about what `--profile`
+means — or, as nearly happened here, about what an unknown one costs."""
+
+
+def _documents(profile: str) -> list[Path]:
+    """The profile's documents, or exit 2 saying which names exist.
+
+    The refusal is the command's, not the resolver's: `resolve_profile` raises a
+    `ValueError` that already names the available profiles, and every caller
+    wants that sentence on stderr under the same exit code.
+    """
+    try:
+        return resolve_profile(profile)
+    except ValueError as error:
+        err.print(f"[red]{error}[/red]")
+        raise typer.Exit(code=2) from error
+
 
 OutputMode = Literal["text", "json", "transcript", "rpc", "tui", "trajectory"]
 
@@ -73,9 +95,7 @@ def default(
     prompt: Annotated[
         str | None, typer.Option("-p", "--print", help="Run one prompt and print the answer.")
     ] = None,
-    profile: Annotated[
-        str, typer.Option("--profile", help="Profile name or path to a .yaml.")
-    ] = DEFAULT_PROFILE,
+    profile: ProfileOption = DEFAULT_PROFILE,
     provider: Annotated[str, typer.Option("--provider")] = "fake",
     model: Annotated[str, typer.Option("--model")] = "fake-1",
     session_id: Annotated[
@@ -104,11 +124,7 @@ def default(
     """Run a prompt, or dump the composed configuration."""
     if ctx.invoked_subcommand is not None:
         return
-    try:
-        documents = resolve_profile(profile)
-    except ValueError as error:
-        err.print(f"[red]{error}[/red]")
-        raise typer.Exit(code=2) from error
+    documents = _documents(profile)
 
     if dump_config:
         loader = Loader.from_paths(documents)
@@ -189,9 +205,24 @@ def default(
     )
 
 
+async def _report(documents: list[Path]) -> list[tuple[str, list[tuple[str, str]]]]:
+    """Compose the profile and ask every row what it has to say (P4-12).
+
+    Mounting is the point. Doctor answered from `resolve_roots()` alone until
+    now, which meant it could report where the log *would* go and nothing about
+    what the process would actually be — and every question this row was written
+    for (which rung is in force, what the file rules reach, what runs model code)
+    is answered by a row, not by a path. Nothing is created here beyond the
+    mount: no session, no agent, no provider call.
+    """
+    async with mounted(documents) as run:
+        registry = run.ctx.get("diagnostics")
+        return [] if registry is None else registry.report()
+
+
 @app.command()
-def doctor() -> None:
-    """Report the resolved path roots and how each was reached."""
+def doctor(profile: ProfileOption = DEFAULT_PROFILE) -> None:
+    """Report the path roots, then mount a profile and report what it composed."""
     try:
         roots = resolve_roots()
     except RuntimeDirError as error:
@@ -207,6 +238,32 @@ def doctor() -> None:
     # What this install can actually compose — a bundle profile whose
     # distribution is missing is not offered (P3-20).
     console.print(f"[dim]profiles: {', '.join(available_profiles())}[/dim]")
+
+    # Resolved *outside* the catch below, and it matters: `typer.Exit` subclasses
+    # `RuntimeError`, so an unknown profile raised inside it would be caught,
+    # reported as "does not mount", and re-raised with the wrong exit code.
+    documents = _documents(profile)
+    try:
+        sections = anyio.run(partial(_report, documents))
+    except typer.Exit:
+        raise
+    except Exception as error:
+        # Broad on purpose, and only here. A profile that refuses to start is
+        # the most important thing doctor can report — `containment.strict` on a
+        # host with no sandbox backend is exactly that (E8) — and a person who
+        # ran the command *because* the process will not start is owed the
+        # sentence rather than a traceback. The exit code says it failed.
+        err.print(f"[red]profile {profile!r} does not mount:[/red] {error}")
+        raise typer.Exit(code=1) from error
+
+    console.print(f"\n[bold]profile:[/bold] {profile}")
+    for title, rows in sections:
+        section = Table(title=title, show_header=False, title_justify="left")
+        section.add_column(style="bold")
+        section.add_column()
+        for label, value in rows:
+            section.add_row(label, value)
+        console.print(section)
 
 
 @app.command()

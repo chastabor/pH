@@ -20,10 +20,11 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from ..seams.workspace import ContainmentTier, Workspace, WorkspaceAccess
 
-__all__ = ["StubWorkspaceProvider"]
+__all__ = ["StubWorkspaceProvider", "acquire_for_role"]
 
 
 @dataclass(slots=True)
@@ -64,3 +65,31 @@ class StubWorkspaceProvider:
             ref=f"ph/{session_id}/{agent_id}",
             env=self.env,
         )
+
+
+async def acquire_for_role(ctx: Any, base: Path, *, child: bool = False) -> Any:
+    """One agent's workspace, acquired the way a real spawn asks for it.
+
+    **A child is a session stamped `origin: "subagent"`, and nothing else.**
+    That is the encoding `WorkspaceSeam.acquire` derives the rung from — P4-11
+    deleted the `tier=` threading precisely so a caller could not forget — so a
+    test that hand-rolled the session would be re-deriving the one fact under
+    test. It was written out in two modules in this directory before it moved
+    here, which is the same road `git_repo` and this file's own provider took.
+
+    The provider is registered on first use and only then: two answers to "what
+    makes a workspace" is a contradiction, and what differs per role is whether
+    the caller asks for one.
+    """
+    if ctx.workspace.provider is None:
+        ctx.workspace.register_provider(StubWorkspaceProvider(root=base / "trees"))
+    session = ctx.sessions.create(
+        "child-session" if child else "root-session",
+        meta={"origin": "subagent"} if child else None,
+    )
+    return await ctx.workspace.acquire(
+        session_id=session.id,
+        agent_id="child" if child else "root",
+        base=base,
+        session=session,
+    )

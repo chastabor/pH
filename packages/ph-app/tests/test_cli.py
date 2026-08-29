@@ -44,14 +44,108 @@ def test_unknown_profile_is_refused() -> None:
     assert "unknown profile" in result.output
 
 
-def test_doctor_prints_three_roots(tmp_path: Path, monkeypatch: Any) -> None:
+def _roots(tmp_path: Path, monkeypatch: Any) -> None:
     monkeypatch.setenv("PH_HOME", str(tmp_path / "home"))
     monkeypatch.setenv("PH_CACHE", str(tmp_path / "cache"))
     monkeypatch.setenv("PH_RUNTIME", str(tmp_path / "run"))
+
+
+def test_doctor_prints_three_roots(tmp_path: Path, monkeypatch: Any) -> None:
+    _roots(tmp_path, monkeypatch)
     result = runner.invoke(app, ["doctor"])
     assert result.exit_code == 0, result.output
     for name in ("PH_HOME", "PH_CACHE", "PH_RUNTIME"):
         assert name in result.stdout
+
+
+def test_doctor_mounts_the_profile_and_prints_the_tier_table(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """P4-12's own gate. Doctor answered from `resolve_roots()` alone until this
+    row, so it could say where the log would go and nothing about what the
+    process would be — and every question worth running it for is a row's."""
+    _roots(tmp_path, monkeypatch)
+
+    result = runner.invoke(app, ["doctor", "--profile", "headless"])
+
+    assert result.exit_code == 0, result.output
+    assert "tier (effective)" in result.stdout
+    # §4.8's third column, which is the one a tier name cannot be trusted to
+    # convey on its own (E1).
+    assert "does NOT bound" in result.stdout
+
+
+def test_a_row_contributes_a_reading_without_ph_app_importing_it(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """The other half of the gate: `permissions-fs` lives in ph-stabilize, which
+    this package must never import (P3-20's rule, and the reason the reading is
+    a seam rather than four `ctx.<name>` lookups doctor would have to know).
+
+    With no rules configured, deliberately: a deployment that wrote nothing has
+    a *wider* reach than one that wrote a deny list, and E9's sentence is most
+    worth printing exactly there.
+    """
+    _roots(tmp_path, monkeypatch)
+    profile = tmp_path / "reach.yaml"
+    profile.write_text(
+        yaml.safe_dump(
+            [
+                {"id": "diagnostics", "name": "diagnostics"},
+                {"id": "fs", "name": "fs-local", "config": {"root": str(tmp_path)}},
+                {"id": "permissions-fs", "name": "permissions-fs"},
+            ]
+        )
+    )
+
+    result = runner.invoke(app, ["doctor", "--profile", str(profile)])
+
+    assert result.exit_code == 0, result.output
+    assert "File permissions" in result.stdout
+    assert "not covered" in result.stdout
+
+
+def test_doctor_reports_a_profile_that_refuses_to_start(tmp_path: Path, monkeypatch: Any) -> None:
+    """E8's refusal reaches the person as a sentence, not a traceback: doctor is
+    what someone runs *because* the process will not start, and the exit code
+    still says it failed."""
+    _roots(tmp_path, monkeypatch)
+    profile = tmp_path / "strict.yaml"
+    profile.write_text(
+        yaml.safe_dump(
+            [
+                {
+                    "id": "containment",
+                    "name": "containment",
+                    "config": {"tier": "sandbox", "strict": True},
+                }
+            ]
+        )
+    )
+
+    result = runner.invoke(app, ["doctor", "--profile", str(profile)])
+
+    assert result.exit_code == 1
+    assert "no sandbox backend is mounted" in result.output
+
+
+def test_doctor_refuses_an_unknown_profile_with_the_same_code(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """Exit 2, as `--dump-config` gives, not the exit 1 a mount failure gives.
+
+    Worth pinning because `typer.Exit` subclasses `RuntimeError`: resolved
+    inside doctor's broad mount-failure catch, an unknown profile came out as
+    "does not mount" under the wrong code, having already printed the right
+    sentence.
+    """
+    _roots(tmp_path, monkeypatch)
+
+    result = runner.invoke(app, ["doctor", "--profile", "nonesuch"])
+
+    assert result.exit_code == 2
+    assert "unknown profile" in result.output
+    assert "does not mount" not in result.output
 
 
 def test_events_matrix_is_generated_from_the_registry() -> None:
