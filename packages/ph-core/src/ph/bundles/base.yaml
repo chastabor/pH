@@ -80,6 +80,14 @@
 - id: workspace-lifecycle
   name: workspace-lifecycle
 
+# The crash half of the same pair (F6). `ctx.effect` unwinds a workspace when
+# the process exits cleanly; a process that dies does not unwind anything, and
+# the only thing that can tell that leak from a tree the disposal policy *kept*
+# on purpose is the log — both leave a worktree git reports identically. So an
+# `acquired` with no `disposed` is reconciled the next time the session opens.
+- id: workspace-reconcile
+  name: workspace-reconcile
+
 # Which rung of the ladder this deployment asked for (E1, E8, P4-11). **No rung
 # by default** — which is not the same as `advisory`: mounting this must not opt
 # a profile out of a tier provider it deliberately layered, so an unset `tier`

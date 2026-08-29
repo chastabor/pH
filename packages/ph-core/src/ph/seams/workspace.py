@@ -70,12 +70,14 @@ __all__ = [
     "ContainmentTier",
     "DeclineReason",
     "LifecycleConfig",
+    "ReclaimingProvider",
     "SharedWorkspaceProvider",
     "Workspace",
     "WorkspaceAccess",
     "WorkspaceDeclined",
     "WorkspaceKind",
     "WorkspaceProvider",
+    "WorkspaceRecord",
     "WorkspaceSeam",
     "apply",
     "discover_provisioning",
@@ -83,6 +85,7 @@ __all__ = [
     "lifecycle",
     "project_access",
     "redirection_env",
+    "workspace_leaks",
     "workspace_of",
     "workspace_policy",
     "writable_roots",
@@ -369,6 +372,25 @@ class WorkspaceProvider(Protocol):
         scratch: Path,
         access: WorkspaceAccess = "write",
     ) -> Workspace | None: ...
+
+
+@runtime_checkable
+class ReclaimingProvider(Protocol):
+    """A provider that can release a workspace it did not create (F6).
+
+    A **second** Protocol rather than a method on `WorkspaceProvider`, and the
+    reasoning is `RehydratableProvider`'s one seam over: not every tier can
+    release a tree from a log record — an in-memory one has nothing to reclaim —
+    and a `getattr` probe would report a provider whose method is misnamed as
+    "cannot reclaim", which is the failure mode that hides a leak instead of
+    closing it.
+
+    Returns whether anything was **kept**, matching `Workspace.release`, so the
+    `workspace/disposed` a reconciliation writes says the same thing an orderly
+    one would have.
+    """
+
+    async def reclaim(self, record: WorkspaceRecord) -> bool: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -731,9 +753,7 @@ class WorkspaceSeam:
                 current = held.workspace
                 kept = True if current.release is None else await current.release(current)
                 if held.session is not None:
-                    held.session.append(
-                        "workspace/disposed", self._payload(current, agent_id, kept=kept)
-                    )
+                    held.session.append(DISPOSED, self._payload(current, agent_id, kept=kept))
 
             return release
 
@@ -767,7 +787,7 @@ class WorkspaceSeam:
             # "no tier configured", which is a different fact and the one
             # `ph doctor` must not confuse it with (E15).
             data["declined"] = declined
-        session.append("workspace/acquired", data)
+        session.append(ACQUIRED, data)
         if workspace.provision_failures:
             session.append(
                 "workspace/provisioned",
@@ -775,17 +795,143 @@ class WorkspaceSeam:
             )
 
     def _payload(self, workspace: Workspace, agent_id: str, **extra: Any) -> dict[str, Any]:
-        """The keys both halves of the pair share, spelled once.
+        return pair_payload(agent_id, workspace.ref, **extra)
 
-        `ref` rides both so a reader can say which branch a turn ran against
-        without inspecting the repository, and is omitted rather than sent as
-        `null` for the kinds that have none.
+    async def reconcile(self, session: Session) -> None:
+        """Close the pairs a crash left open in this session's log (F6).
+
+        On the seam because both the facts it needs are here. `_held` answers
+        "is this tree anybody's" — the same question `live()` exists so
+        `/workspaces` can ask *before it offers to delete a directory*, and a
+        reconciler that skipped it would be a second, weaker definition of
+        leaked. And `_payload` owns the shape of the pair, so the `disposed` a
+        reconciliation writes is the one an orderly release would have written.
+
+        A leak this profile cannot reclaim is **reported and left alone**: the
+        tree belongs to a tier that is not mounted here, and removing a directory
+        on the strength of a record written by a configuration we are not running
+        is the one way this could destroy the work it exists to protect.
         """
-        data: dict[str, Any] = {"agentId": agent_id, **extra}
-        if workspace.ref is not None:
-            data["ref"] = workspace.ref
-        return data
+        leaks = [one for one in workspace_leaks(session) if one.agent_id not in self._held]
+        if not leaks:
+            return
+        provider = self.provider
+        if not isinstance(provider, ReclaimingProvider):
+            log.warning(
+                "ph.seams.workspace: no mounted tier can reclaim %s",
+                ", ".join(str(one.root) for one in leaks),
+            )
+            return
 
+        async def reclaim(record: WorkspaceRecord) -> None:
+            try:
+                kept = await provider.reclaim(record)
+            except Exception:
+                log.warning("ph.seams.workspace: could not reclaim %s", record.root, exc_info=True)
+                return
+            # The pair closes either way: a leak reported and left open is one
+            # reported at every future open, and a record nobody can act on
+            # twice is noise that hides the one that matters.
+            session.append(
+                DISPOSED, pair_payload(record.agent_id, record.ref, kept=kept, reconciled=True)
+            )
+
+        # Concurrent, for `/workspaces`' reason: this is several subprocesses per
+        # leaked tree, and a crash mid-fan-out leaks one tree per child — which
+        # is exactly the shape that accumulates.
+        async with anyio.create_task_group() as group:
+            for record in leaks:
+                group.start_soon(reclaim, record)
+
+
+@dataclass(frozen=True, slots=True)
+class WorkspaceRecord:
+    """One `workspace/acquired` the log never saw closed.
+
+    What survives a crash, and only that: the log's own fields. Not a
+    `Workspace` — `scratch`, `env` and the `release` closure are process state
+    that died with the process, and a value that carried empty versions of them
+    would invite a caller to use them.
+    """
+
+    agent_id: str
+    kind: WorkspaceKind
+    root: Path
+    ref: str | None = None
+
+
+def workspace_leaks(session: Session) -> list[WorkspaceRecord]:
+    """Workspaces this session took and never released (F6).
+
+    **The pair is the only thing that can tell a leak from a keep.** Both leave a
+    worktree on disk and `git worktree list` reports them identically, so
+    `/workspaces` cannot distinguish them — but a `disposed` with `kept: true` is
+    the disposal policy deciding to keep work for review, while no `disposed` at
+    all is a process that died holding the tree. One is a feature and the other
+    is the leak F6 exists to close, and only the log knows which.
+
+    Folded rather than tracked, for `subagent_roster`'s reason one seam over: the
+    answer has to be computable from a log that is being read off disk, by a
+    process that was not running when it was written.
+
+    **From `seed_length`, not from the beginning** — `Inbox` reads its own log
+    the same way and for the same reason. A fork *seeds* the child with the
+    parent's transcript, so a fold over the whole log reports the parent's
+    still-held worktrees as the child's leaks: reconciliation would then remove a
+    tree an agent is actively working in, which is worse than the leak it is
+    fixing. What a session inherited is not what it acquired.
+
+    Only kinds with a fresh root can leak a directory — a `shared` workspace's
+    root *is* the base, so an unclosed pair there records a crash and no stray.
+    """
+    open_records: dict[str, WorkspaceRecord] = {}
+    for event in session.events[session.header.seed_length or 0 :]:
+        # The type test first: a long log is mostly `assistant/chunk`, and
+        # reading `agentId` off every one of them to discover it is absent costs
+        # a mapping get and a string per event.
+        if event.type not in (ACQUIRED, DISPOSED):
+            continue
+        data = event.data
+        agent_id = str(data.get("agentId") or "")
+        if not agent_id:
+            continue
+        if event.type == DISPOSED:
+            # Re-acquire after release is ordinary, so the *last* unclosed
+            # acquire is the live one — a dict keyed by agent, not a list.
+            open_records.pop(agent_id, None)
+            continue
+        kind: WorkspaceKind = data.get("kind", "shared")
+        if not fresh_root(kind):
+            continue
+        ref = data.get("ref")
+        open_records[agent_id] = WorkspaceRecord(
+            agent_id=agent_id,
+            kind=kind,
+            root=Path(str(data.get("root", ""))),
+            ref=str(ref) if ref else None,
+        )
+    return list(open_records.values())
+
+
+def pair_payload(agent_id: str, ref: str | None, **extra: Any) -> dict[str, Any]:
+    """The keys both halves of the durable pair share, spelled once.
+
+    `ref` rides both so a reader can say which branch a turn ran against without
+    inspecting the repository, and is omitted rather than sent as `null` for the
+    kinds that have none. A module function because the pair has two writers —
+    an orderly release and a reconciliation — and the second is the half nobody
+    watches, so it is the one that must not drift.
+    """
+    data: dict[str, Any] = {"agentId": agent_id, **extra}
+    if ref is not None:
+        data["ref"] = ref
+    return data
+
+
+ACQUIRED = "workspace/acquired"
+DISPOSED = "workspace/disposed"
+"""The durable pair, named once. The fold below and both producers have to agree
+on these exactly, and a literal spelled at five sites is five chances not to."""
 
 PROJECT_PROVISION_FILE = ".ph-workspace.yml"
 """Where a repository states what its worktrees need (E14).
@@ -936,3 +1082,24 @@ async def apply(ctx: Context, config: Config) -> None:
     ctx.provide("workspace", seam)
 
     contribute(ctx, Diagnostic(id="workspaces", title="Workspaces", read=seam.describe, order=20))
+
+
+@plugin("workspace-reconcile", inject=["workspace"])
+async def reconcile(ctx: Context, config: Any) -> None:
+    """Run the seam's reconciliation whenever a session is opened (F6).
+
+    **On `session/created`, which is also the resume path** — `sessions.adopt`
+    publishes through it, so a session coming off disk meets the same listener
+    as a fresh one, and a fresh one folds an empty log. One mechanism rather
+    than a resume-only hook a second way of opening a session would miss.
+
+    Detached, because `emit` schedules an async listener and does not wait:
+    reconciliation runs `git` per leaked tree, and a person reopening a session
+    should not sit behind it. `ctx.drain()` is what a test — or a shutdown —
+    uses to know it has settled.
+    """
+    # Catch-up, for the reason `session-persistence-jsonl` does the same: a row
+    # activated after sessions already exist owes them what a fresh one gets.
+    for session in ctx.sessions.list():
+        await ctx.workspace.reconcile(session)
+    ctx.on("session/created", ctx.workspace.reconcile)

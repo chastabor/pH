@@ -60,6 +60,7 @@ workspace-commands = "ph.commands.workspaces:apply"
 workspace-checkpoint = "ph.seams.workspace_git:checkpoint_policy"
 workspace-revert = "ph.commands.revert:apply"
 workspace-lifecycle = "ph.seams.workspace:lifecycle"
+workspace-reconcile = "ph.seams.workspace:reconcile"
 session-telemetry = "ph.seams.telemetry:apply"
 # model-facing tools
 tool-fs = "ph.tools.builtin.fs_tools:apply"

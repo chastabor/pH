@@ -49,7 +49,7 @@ from __future__ import annotations
 import logging
 import re
 import shutil
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -68,6 +68,7 @@ from .workspace import (
     Workspace,
     WorkspaceAccess,
     WorkspaceDeclined,
+    WorkspaceRecord,
     redirection_env,
     workspace_of,
 )
@@ -190,9 +191,59 @@ class GitWorktreeProvider:
             ref=ref,
             env=redirection_env(scratch),
             release=lambda workspace: self._release(
-                toplevel, path, ref, discard=ephemeral, workspace=workspace
+                toplevel, path, ref, discard=ephemeral, pathspec=workspace.agent_work_pathspec()
             ),
         )
+
+    async def reclaim(self, record: WorkspaceRecord) -> bool:
+        """Release a tree this process never acquired (F6).
+
+        The same disposal policy an orderly release runs — clean is removed,
+        dirty is kept for review — because a crash is not a reason to throw away
+        work, and reconciliation that discarded more than a normal exit would
+        make crashing *worse* than the leak it is fixing.
+
+        **The record locates its own repository.** An earlier draft took the
+        base from the reconciling process's `ctx.fs.root`, which is a guess: a
+        pair recorded against a different checkout resolves the wrong toplevel,
+        and `WorkspaceRecord`'s claim to be "the log's own fields" was untrue of
+        the one field the reclaim actually needed. A linked worktree knows its
+        own common directory, so the tree answers the question about itself.
+
+        There is no `Workspace`, so nothing is known to have been *provisioned*
+        and every file counts as the agent's work — which errs toward keeping,
+        where the cost is disk rather than the work. A `worktree-ephemeral`
+        record is discarded exactly as its own release would have discarded it.
+        """
+        if record.ref is None or not record.root.exists():
+            # git pruned it, or a person removed it. Nothing to reclaim, and the
+            # pair still wants closing so the next open stops re-reporting it.
+            return False
+        toplevel = await self._common_root(record.root)
+        if toplevel is None:
+            return True
+        return await self._release(
+            toplevel,
+            record.root,
+            record.ref,
+            discard=record.kind == "worktree-ephemeral",
+            pathspec=(),
+        )
+
+    async def _common_root(self, tree: Path) -> Path | None:
+        """The main worktree of the repository `tree` is linked into.
+
+        `--git-common-dir` rather than `--show-toplevel`, which is the one place
+        this module wants the *shared* directory: inside a linked worktree
+        `--show-toplevel` answers with that worktree, and `worktree remove`
+        cannot remove the tree it is standing in.
+        """
+        code, out, _ = await self._git(
+            tree, "rev-parse", "--path-format=absolute", "--git-common-dir"
+        )
+        if code != 0 or not out.strip():
+            return None
+        return Path(out.strip()).parent
 
     async def _toplevel(self, base: Path) -> Path | None:
         if base not in self._toplevels:
@@ -285,7 +336,7 @@ class GitWorktreeProvider:
         ref: str,
         *,
         discard: bool,
-        workspace: Workspace,
+        pathspec: Sequence[str],
     ) -> bool:
         """Remove or keep, and report which. The disposal policy, in one place.
 
@@ -297,7 +348,7 @@ class GitWorktreeProvider:
         that failed leaves the tree on disk, and saying `False` there would make
         the field a statement of policy instead of a record.
         """
-        if not discard and await self._dirty(path, workspace):
+        if not discard and await self._dirty(path, pathspec):
             log.info(
                 "ph.seams.workspace_git: keeping %s on %s — it has changes to review", path, ref
             )
@@ -324,7 +375,7 @@ class GitWorktreeProvider:
         code, _, _ = await self._git(toplevel, "branch", "-d", ref)
         return code != 0
 
-    async def _dirty(self, path: Path, workspace: Workspace) -> bool:
+    async def _dirty(self, path: Path, pathspec: Sequence[str]) -> bool:
         """Whether this worktree holds anything worth keeping.
 
         `--porcelain` with untracked files included: a new file nobody staged is
@@ -333,16 +384,25 @@ class GitWorktreeProvider:
 
         The pathspec comes from `Workspace.agent_work_pathspec()` rather than
         being built here, because two other consumers ask the same question —
-        `/workspaces list` and, next row, `/revert` — and when they each built
-        their own they disagreed about the same tree.
+        `/workspaces list` and `/revert` — and when they each built their own
+        they disagreed about the same tree.
+
+        An **empty** pathspec is the reconciliation case (F6): a crash leaves a
+        log record and no `Workspace`, so nothing is known to have been
+        provisioned and every file counts as the agent's work. The caller states
+        that rather than the callee decoding a sentinel — and with no exclusion
+        to refine, `--untracked-files=normal` is the right mode, because the
+        answer is a boolean and `all` enumerates every file under a provisioned
+        `node_modules` to say what one `?? node_modules/` line says.
         """
+        untracked = "all" if pathspec else "normal"
         code, out, _ = await self._git(
             path,
             "status",
             "--porcelain",
-            "--untracked-files=all",
+            f"--untracked-files={untracked}",
             "--",
-            *workspace.agent_work_pathspec(),
+            *pathspec,
         )
         if code != 0:
             # Unreadable is treated as dirty: keeping a tree nobody wanted costs
