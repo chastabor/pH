@@ -49,6 +49,7 @@ tui-screens = "ph.seams.tui_screens:apply"
 tui-status = "ph.seams.tui_status:apply"
 token-meter = "ph.seams.token_meter:apply"
 user-questions = "ph.seams.user_questions:apply"
+workspace-shared = "ph.seams.workspace:apply"
 session-telemetry = "ph.seams.telemetry:apply"
 # model-facing tools
 tool-fs = "ph.tools.builtin.fs_tools:apply"

@@ -53,6 +53,11 @@ KNOWN_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         "sandbox/mode",
         # capability observations
         "fs/observed",
+        # Where an agent's writes land (D21, P4-07). A *pair*: an `acquired` with
+        # no `disposed` is how a leaked workspace is detected at session open,
+        # which only works if both halves are in the vocabulary.
+        "workspace/acquired",
+        "workspace/disposed",
         # retry
         "llm/retry",
         # Code Mode dispatch records (log-only; see ph.tools.code_mode)
@@ -170,6 +175,8 @@ IGNORABLE_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         "attachment/degraded",
         "limits/exceeded",
         "limits/breaker-tripped",
+        "workspace/acquired",
+        "workspace/disposed",
     }
 )
 """Types a *different* build may skip without misreading the rest of the log.

@@ -119,19 +119,26 @@ you did the work. Send the answer, then finish.
 """
 
 WORKSPACE_LINE = (
-    "Workspace: no tier is mounted, so file access is whatever this process "
+    "Workspace: none acquired, so file access is whatever this process "
     'already has and a child\'s `access="write"` request is recorded but not granted'
 )
-"""What the workspace line says while `ctx.workspace` does not exist (D21).
+"""What the workspace line says when this agent holds no workspace (D21).
 
 Stated rather than omitted, because the reason the plan wants this line is that
 an agent handed a read-only repo *without notice* attempts writes and reads the
-failures as its own bug — and "no tier is mounted" is the same warning.
+failures as its own bug — and "nothing is bounding you" is the same warning.
 
-It is reached by *asking* — `facts()` emits it only when `ctx.get("workspace")`
-is absent — rather than by asserting an absence. An assertion would keep telling
-every agent that no tier is mounted after one was, and the test pinning it would
-defend the falsehood."""
+It is reached by *asking* — `facts()` emits it only when the seam has no
+workspace for this agent — rather than by asserting an absence. An assertion
+would keep telling every agent that nothing is mounted after something was, and
+the test pinning it would defend the falsehood.
+
+**"none acquired", not "no tier is mounted".** The first draft said the latter,
+which stopped being true the moment P4-07 put `workspace-shared` in `ph-base`:
+the seam is mounted in every profile, and what varies is whether the agent
+lifecycle has taken a workspace and which tier answered. The practical fact for
+the model is the same either way — nothing is bounding it — and that is what the
+sentence has to carry."""
 
 
 @plugin("rlm-prompt", inject=["system_prompt", "tools", "sessions", "subagents"])
@@ -169,7 +176,7 @@ async def apply(ctx: Context, _config: Any) -> None:
         if session.header.cwd:
             lines.append(f"Working directory: {session.header.cwd}")
         lines.append(f"Conversation log: {session.id}")
-        lines.append(_workspace(ctx))
+        lines.extend(_workspace(ctx, getattr(request.agent, "id", "")))
 
         sessions = ctx.sessions.list()
         family = [
@@ -203,20 +210,35 @@ async def apply(ctx: Context, _config: Any) -> None:
     ctx.system_prompt.context(PromptContext(name="rlm:session", order=10, text=facts))
 
 
-def _workspace(ctx: Context) -> str:
-    """What is true about this agent's workspace, asked of the seam.
+def _workspace(ctx: Context, agent_id: str) -> list[str]:
+    """What is true about *this agent's* workspace, asked of the seam.
 
-    When D21 lands, the `workspace` provision answers and this row starts telling
-    the truth without being edited; until then the absence is the fact, and
-    saying so is the whole point of the line.
+    Asked of the seam for a specific agent, not read off `ctx.workspace` as if
+    the provision were a workspace: `ctx.<name>` is a service everywhere in this
+    codebase, and a workspace is per-agent state a service hands out. The first
+    draft of this line duck-typed the provision itself, which would have started
+    describing the seam object the day P4-07 mounted it.
+
+    `repo_writable` is reported as the seam states it and never inferred from the
+    kind: `worktree-ephemeral` is writable and reaches nobody, and a line that
+    called it read-only would be telling the model the opposite of what happens.
+
+    Lines rather than one string with newlines in it, because `facts()` already
+    owns the joining — a second assembly mechanism for one block of text is one
+    that can disagree with the first about spacing.
     """
-    workspace = ctx.get("workspace")
+    seam = ctx.get("workspace")
+    workspace = None if seam is None else seam.of(agent_id)
     if workspace is None:
-        return WORKSPACE_LINE
-    root = getattr(workspace, "root", "?")
-    kind = getattr(workspace, "kind", "unknown")
-    writable = "writable" if getattr(workspace, "repo_writable", False) else "read-only"
-    return f"Workspace: {root} ({writable}, {kind})"
+        return [WORKSPACE_LINE]
+    writable = "writable" if workspace.repo_writable else "read-only"
+    lines = [
+        f"Workspace: {workspace.root} ({writable}, {workspace.kind})",
+        f"Writable scratch: {workspace.scratch}",
+    ]
+    if workspace.ref:
+        lines.append(f"Branch: {workspace.ref}")
+    return lines
 
 
 def _depth_limit(ctx: Context) -> int:

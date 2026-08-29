@@ -100,6 +100,8 @@ def test_the_auditor_renders_what_the_transcript_does_not() -> None:
         "fs/observed",
         "session/end-seed",
         "compaction/summarized",
+        "workspace/acquired",
+        "workspace/disposed",
     } == TRANSCRIPT_RECORDLESS - RECORDLESS
     # And the reverse: what this view skips that the transcript renders.
     assert {

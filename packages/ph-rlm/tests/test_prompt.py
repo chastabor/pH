@@ -10,7 +10,7 @@ re-bill the whole prefix (A12).
 from __future__ import annotations
 
 from collections.abc import Callable
-from types import SimpleNamespace
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -173,10 +173,11 @@ async def test_the_volatile_facts_are_a_context_not_a_section(prompted: Mounted)
     assert f"Conversation log: {session.id}" in snapshot
 
 
-async def test_the_snapshot_says_no_workspace_tier_is_mounted(prompted: Mounted) -> None:
+async def test_the_snapshot_says_no_workspace_has_been_acquired(prompted: Mounted) -> None:
     """A child told nothing about its workspace attempts writes and reads the
     failures as its own bug — which is the failure this line exists to prevent,
-    so it ships saying what is true now (D21 is Phase 4)."""
+    so it ships saying what is true now: the seam is mounted (P4-07) but nothing
+    acquires until the agent lifecycle does (P4-08)."""
     ctx, _session, agent = await prompted()
     snapshot = await _snapshot(ctx, agent)
 
@@ -184,18 +185,27 @@ async def test_the_snapshot_says_no_workspace_tier_is_mounted(prompted: Mounted)
     assert "recorded but not granted" in snapshot
 
 
-async def test_a_mounted_workspace_replaces_the_not_mounted_line(prompted: Mounted) -> None:
-    """The line is reached by *asking*, so the tier landing changes the answer.
+async def test_an_acquired_workspace_replaces_the_none_acquired_line(prompted: Mounted) -> None:
+    """The line is reached by *asking the seam for this agent*, so acquiring one
+    changes the answer.
 
-    An asserted absence would keep telling every agent no tier is mounted after
-    one was — and this test would have defended the falsehood.
+    An asserted absence would keep telling every agent nothing was acquired after
+    something was — and this test would have defended the falsehood. It asks
+    `ctx.workspace.of(agent.id)` rather than reading `ctx.workspace` as if the
+    provision were itself a workspace, which is what the first draft did and what
+    would have started describing the seam object the day it was mounted.
     """
     ctx, _session, agent = await prompted()
-    ctx.provide("workspace", SimpleNamespace(root="/repo", kind="worktree", repo_writable=True))
+    await ctx.workspace.acquire(
+        session_id="s1", agent_id=agent.id, base=Path("/repo"), session=agent.session
+    )
     snapshot = await _snapshot(ctx, agent)
 
     assert WORKSPACE_LINE not in snapshot
-    assert "Workspace: /repo (writable, worktree)" in snapshot
+    assert "Workspace: /repo (writable, shared)" in snapshot
+    # The scratch line is not decoration: it is the only place a child whose repo
+    # is read-only is told where it *may* write.
+    assert "Writable scratch: " in snapshot
 
 
 async def test_the_snapshot_lists_the_family_and_the_children(prompted: Mounted) -> None:
