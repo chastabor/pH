@@ -11,7 +11,7 @@ knowing a single tool name — the failure `compaction`'s truncation pass and
 **Be honest about how much that buys today.** `tool-fs` is currently the *only*
 caller of `FsService.read`/`write`/`edit` in the tree, so the coverage this shape
 earns is mostly future: a Code Mode binding is the namespaced face of a governed
-tool and does route through here, but `agent-instructions` and `ph-rlm`'s harness
+tool and does route through here, but `memory-agents-md` and `ph-rlm`'s harness
 service both read with `Path.read_text` and are not covered, and an MCP server is
 a remote client that can never reach `ctx.fs` at all. The placement is still
 right — it is where the next writer lands for free — but the argument for it is

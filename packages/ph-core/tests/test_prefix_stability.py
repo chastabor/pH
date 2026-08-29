@@ -18,6 +18,8 @@ static `section` instead would break this test, which is exactly what it is for.
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -105,6 +107,34 @@ async def test_a_changing_context_snapshot_keeps_the_prefix_stable(mount: Any) -
     # cached prefix — which is the entire reason `context()` is not a `section`.
     _assert_prefix_stable(ctx.llm_fake.requests)
     assert all(request.system == "You are pH." for request in ctx.llm_fake.requests)
+
+
+async def test_a_memory_edit_does_not_move_the_prefix(mount: Any, tmp_path: Path) -> None:
+    """G8's gate, and the reason `memory-agents-md` is a `context()` (P4-13).
+
+    `AGENTS.md` exists to be edited. Registered as a static section — which is
+    where Phase 1 put it — every edit would rewrite the system prompt and
+    invalidate every cached token before it, on the one file a user is most
+    likely to touch mid-session. The edit still has to *arrive*, so this asserts
+    both halves: the prompt is byte-identical across the edit, and the new text
+    reached the model anyway.
+    """
+    ctx = await mount()
+    ctx.system_prompt.section(PromptSection(name="identity", text="You are pH.", order=-100))
+    memory = tmp_path / "AGENTS.md"
+    memory.write_text("Prefer tabs.", encoding="utf-8")
+
+    session = ctx.sessions.create("s")
+    agent = ctx.agents.create(session, FAKE)
+    await agent.prompt("first")
+    memory.write_text("Prefer spaces, and say why.", encoding="utf-8")
+    await agent.prompt("second")
+
+    requests = ctx.llm_fake.requests
+    _assert_prefix_stable(requests)
+    assert all(request.system == "You are pH." for request in requests)
+    delivered = json.dumps([_shape(message) for message in requests[-1].messages])
+    assert "Prefer spaces, and say why." in delivered, "the edit never reached the model"
 
 
 async def test_a_tool_registration_is_the_kind_of_change_that_does_move_the_prefix(

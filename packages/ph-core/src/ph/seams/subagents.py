@@ -28,6 +28,7 @@ failures as bugs.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Awaitable, Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol, TypeAlias, runtime_checkable
@@ -61,6 +62,8 @@ __all__ = [
     "roster_name",
     "subagent_roster",
 ]
+
+log = logging.getLogger("ph.seams.subagents")
 
 ADMITTED = "subagent/admitted"
 DELETED = "subagent/deleted"
@@ -278,6 +281,39 @@ class SubagentService:
 
     def provider_names(self) -> list[str]:
         return sorted(self._providers)
+
+    def resolve(self, name: str | None) -> str | None:
+        """Which provider a consumer should use, or `None` when there is no answer.
+
+        The policy is here because it is a property of *this* table: empty means
+        the one that is mounted, two mounted with no name chosen is a question
+        this seam refuses to answer for a caller, and a configured name is
+        checked against what is actually mounted rather than trusted.
+
+        That last clause is the one worth stating. A row that trusts its own
+        `provider:` setting advertises a capability whenever the provider row
+        was renamed or removed — the phantom arriving by the one route that
+        looks like a deliberate choice.
+        """
+        names = self.provider_names()
+        if name is not None:
+            if name in names:
+                return name
+            log.warning(
+                "ph.seams.subagents: no provider named %r is mounted (mounted: %s)",
+                name,
+                ", ".join(names) or "none",
+            )
+            return None
+        if len(names) == 1:
+            return names[0]
+        if names:
+            log.warning(
+                "ph.seams.subagents: %s providers are mounted (%s); a consumer must name one",
+                len(names),
+                ", ".join(names),
+            )
+        return None
 
     def require(self, name: str) -> SubagentProvider:
         provider = self._providers.get(name)

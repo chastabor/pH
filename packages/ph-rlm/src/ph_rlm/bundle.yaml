@@ -100,6 +100,15 @@
 - id: rlm-skills-python
   name: rlm-skills-python
 
+# `subagent-task` stands down here. Both delegation shapes are real — one call
+# and one answer, or a handle collected later — but this bundle *is* the second
+# one: `rlm_run` admits a child that replies by agent message, with a roster and
+# an inbox built around that. Offering a blocking twin beside it would put two
+# ways to do one thing in the same prompt, and the model would have to guess
+# which of them the rest of the tools were designed for.
+- id: subagent-task
+  disabled: true
+
 # "Prompt-as-a-variable" (P3-17, Q4): a corpus the model queries through
 # `await tools.context_search(...)` — bindings, so each query is its own governed
 # dispatch and one oversized result can be offloaded without its siblings.

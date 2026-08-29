@@ -1,16 +1,19 @@
-"""Python skills (P3-18): discovered from `SKILL.md`, callable in a cell.
+"""Python skills (P3-18): the half of a skill that only a cell can use.
 
 The row's gate is one sentence — *a skill's `run()` is callable in a cell* — and
-it spans three layers that were built at different times: discovery here, the
-venv's editable install (P3-07), and the guest's `wrap_skill_module` (P3-08),
-which until now had no producer. The last test drives the whole path against a
-real kernel; the rest pin the validation, because a skill that half-registers is
-a name the catalog offers and the runtime cannot import.
+it spans three layers built at different times: the format (now
+`ph.seams.skills`, tested there), the venv's editable install (P3-07), and the
+guest's `wrap_skill_module` (P3-08), which until P3-18 had no producer. The last
+test drives the whole path against a real kernel.
+
+What is left here is what is only true in Code Mode. P4-13 moved the reader, the
+catalog and the `skill` tool into the seam, so this file no longer re-tests the
+frontmatter rules — it tests that a skill directory which is *also* an
+installable package reaches the kernel, and that the catalog says so.
 """
 
 from __future__ import annotations
 
-import os
 import textwrap
 from pathlib import Path
 from typing import Any
@@ -19,10 +22,12 @@ import pytest
 from conftest import HOST_RUNTIME_ROW
 from runtime_helpers import run_ipython_cell
 
+from ph.seams.skills import discover_skills
 from ph.system_prompt import render_prompt
 from ph.system_prompt.assembly import AssembleContext
 from ph.testing import FAKE_OPTIONS
-from ph_rlm.skills import MAX_SKILL_BYTES, discover, render_catalog
+from ph.testing import write_skill as write_skill_md
+from ph_rlm.skills import python_half
 
 pytestmark = pytest.mark.anyio
 
@@ -32,17 +37,16 @@ def write_skill(
     name: str,
     *,
     description: str = "search the web for a query",
-    front_name: str | None = None,
     package: bool = False,
     body: str = "",
 ) -> Path:
-    """One skill directory. `package=True` makes it importable."""
-    directory = root / name
-    directory.mkdir(parents=True, exist_ok=True)
-    (directory / "SKILL.md").write_text(
-        f"---\nname: {front_name if front_name is not None else name}\n"
-        f"description: {description}\n---\n\n# {name}\n\nInstructions here.\n"
-    )
+    """One skill directory. `package=True` makes it importable.
+
+    The `SKILL.md` half is `ph.testing`'s, so the two packages that test against
+    this format cannot come to disagree about what a valid one looks like; the
+    package half is this row's whole subject and stays here.
+    """
+    directory = write_skill_md(root, name, description=description)
     if package:
         module = name.replace("-", "_")
         (directory / "pyproject.toml").write_text(
@@ -78,70 +82,28 @@ def row(paths: list[Path]) -> dict[str, Any]:
 # ------------------------------------------------------------- discovery --
 
 
-def test_a_documentation_skill_is_discovered_without_a_package(tmp_path: Path) -> None:
+def test_a_documentation_skill_has_nothing_to_install(tmp_path: Path) -> None:
     write_skill(tmp_path, "note-taking")
-    (skill,) = discover([str(tmp_path)])
 
-    assert (skill.name, skill.description) == ("note-taking", "search the web for a query")
-    assert skill.module is None
-    assert skill.requirement is None, "nothing to install for a docs-only skill"
+    (skill,) = discover_skills([str(tmp_path)])
+    half = python_half(skill)
+
+    assert half.module is None
+    assert half.requirement is None, "nothing to install for a docs-only skill"
+    assert half.hint == "", "a docs-only skill has no second way to be used"
 
 
 def test_a_package_skill_carries_its_import_name(tmp_path: Path) -> None:
     """Read from `pyproject.toml`, not guessed: `acme-websearch` imports as
     `acme_websearch`, which is the normal case rather than the odd one."""
     write_skill(tmp_path, "acme-websearch", package=True)
-    (skill,) = discover([str(tmp_path)])
 
-    assert skill.module == "acme_websearch"
-    assert skill.requirement == str(tmp_path / "acme-websearch")
+    (skill,) = discover_skills([str(tmp_path)])
+    half = python_half(skill)
 
-
-def test_a_name_that_disagrees_with_its_directory_is_refused(tmp_path: Path) -> None:
-    """Addressed by one string in the catalog and found under another on disk is
-    a bug report from a confused model later."""
-    write_skill(tmp_path, "websearch", front_name="web-search")
-    assert discover([str(tmp_path)]) == []
-
-
-@pytest.mark.parametrize(
-    ("name", "description"),
-    [("Web-Search", "fine"), ("web search", "fine"), ("websearch", "")],
-)
-def test_an_invalid_frontmatter_field_is_refused(
-    tmp_path: Path, name: str, description: str
-) -> None:
-    directory = tmp_path / name.lower().replace(" ", "-")
-    directory.mkdir(parents=True)
-    (directory / "SKILL.md").write_text(f"---\nname: {name}\ndescription: {description}\n---\n")
-    assert discover([str(tmp_path)]) == []
-
-
-def test_a_file_without_frontmatter_is_refused(tmp_path: Path) -> None:
-    directory = tmp_path / "plain"
-    directory.mkdir()
-    (directory / "SKILL.md").write_text("# plain\n\nno frontmatter at all\n")
-    assert discover([str(tmp_path)]) == []
-
-
-def test_a_later_source_shadows_an_earlier_one(tmp_path: Path) -> None:
-    """The layering `skills-progressive` adopts: base → user → project."""
-    first, second = tmp_path / "user", tmp_path / "project"
-    write_skill(first, "websearch", description="the user's version")
-    write_skill(second, "websearch", description="the project's version")
-
-    (skill,) = discover([str(first), str(second)])
-    assert skill.description == "the project's version"
-
-
-def test_an_oversized_skill_is_refused(tmp_path: Path) -> None:
-    """Refused on `stat` alone — the size gate runs before any read, so the test
-    needs a sparse file, not ten real megabytes."""
-    directory = tmp_path / "huge"
-    directory.mkdir()
-    (directory / "SKILL.md").write_text("---\nname: huge\ndescription: big\n---\n")
-    os.truncate(directory / "SKILL.md", MAX_SKILL_BYTES + 1)
-    assert discover([str(tmp_path)]) == []
+    assert half.module == "acme_websearch"
+    assert half.requirement == str(tmp_path / "acme-websearch")
+    assert half.hint == "Callable in a cell as `await acme_websearch(...)`."
 
 
 # --------------------------------------------------------------- the row --
@@ -176,6 +138,8 @@ async def test_the_catalog_reaches_the_prompt_without_the_bodies(
     assembly = await ctx.system_prompt.assemble(AssembleContext(scope=agent.ctx, agent=agent))
     prompt = render_prompt(assembly)
 
+    # One catalog, `skills-progressive`'s, with this row's hint attached to the
+    # skill rather than a second section of its own.
     assert "**acme-websearch** — search the web for a query" in prompt
     assert "await acme_websearch(...)" in prompt
     assert "Instructions here." not in prompt, "a skill body reached the prompt"
@@ -185,10 +149,6 @@ async def test_no_paths_means_no_row(mount: Any) -> None:
     ctx = await mount(HOST_RUNTIME_ROW, {"id": "rlm-skills-python", "name": "rlm-skills-python"})
     assert ctx.skills.list() == []
     assert ctx.python_runtime.skill_modules == ()
-
-
-def test_a_catalog_of_nothing_renders_nothing() -> None:
-    assert render_catalog([]) == ""
 
 
 # ------------------------------------------------------------- the gate --

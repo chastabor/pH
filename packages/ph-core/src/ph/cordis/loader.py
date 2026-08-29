@@ -60,13 +60,30 @@ events.declare(
     "profile/mounted",
     "serial",
     owner="ph.cordis",
-    doc="A composed profile finished mounting. A listener that raises refuses the run.",
+    doc=(
+        "A composed profile finished mounting. A listener that raises refuses the run; "
+        "one that returns a value stops the chain, so a listener doing collection "
+        "rather than refusal must return None."
+    ),
 )
-"""The one moment a profile is whole and nothing has run yet (E8).
+"""The one moment a profile is whole and nothing has run yet.
 
-Declared here rather than in a seam because the loader is what dispatches
-it, and a declaration in a module the loader never imports is one that has
-not happened by the time the dispatch checks for it."""
+Two uses, and the second arrived after the first (P4-13). A row may **refuse the
+deployment** it finds itself in (E8, `containment.strict`), and a row may
+**collect what the whole profile turned out to contain** — whether any subagent
+provider was mounted, whether any skill was installed — which is a question with
+no final answer until this moment and which `ctx.inject` cannot express, since
+neither is a service key.
+
+The two share a dispatch, so the rules of the shared one apply to both: `serial`
+bails on a non-null return, so a collector that returned a value would silently
+skip the refusals registered after it, and it propagates exceptions, so a
+collector that raises stops the process. Collect by side effect, return `None`,
+and let the refusals be the only listeners that can end a run.
+
+Declared here rather than in a seam because the loader is what dispatches it, and
+a declaration in a module the loader never imports is one that has not happened
+by the time the dispatch checks for it."""
 
 
 class SafeRowLoader(yaml.SafeLoader):

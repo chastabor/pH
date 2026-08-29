@@ -118,6 +118,14 @@
 - id: skills
   name: skills
 
+# Progressive disclosure (G9): the catalog goes in the prompt, a body only when
+# the model asks for it by name. `paths` is empty here deliberately — scanning a
+# well-known directory at every start would make "install a skill" mean "drop a
+# file somewhere", and a skill is something a distribution or a user installs
+# on purpose (I7).
+- id: skills-progressive
+  name: skills-progressive
+
 - id: spill
   name: spill-local
 
@@ -165,8 +173,20 @@
 - id: tool-bash
   name: tool-bash
 
-- id: agent-instructions
-  name: agent-instructions
+# Delegation the model can await (P4-13). The seam has no provider in `ph-base`,
+# and this row registers nothing until one is mounted — a tool advertised in
+# every prompt and refused on every call teaches the model a capability the
+# deployment does not have. A profile that layers `rlm-child` gets it.
+- id: subagent-task
+  name: subagent-task
+
+# What the user told this agent to remember (G8): `AGENTS.md` from the agent's
+# own root upward, then `$PH_HOME`. A **post-cache snapshot**, not a prompt
+# section — the file exists to be edited, and an edit that moved the cached
+# prefix would bill every earlier token again. The same placement is what makes
+# an edit take effect in the turn after it, rather than after a restart.
+- id: memory-agents-md
+  name: memory-agents-md
 
 # --- durability ------------------------------------------------------------
 - id: session-persistence

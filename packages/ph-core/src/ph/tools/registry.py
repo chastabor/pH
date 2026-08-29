@@ -68,6 +68,7 @@ __all__ = [
     "ToolRestriction",
     "ToolRuntime",
     "apply",
+    "register_when_composed",
 ]
 
 log = logging.getLogger("ph.tools")
@@ -833,6 +834,40 @@ _UNRESOLVED = ToolDefinition(
 
 A run always has a definition, so `finish` never has to ask whether one exists;
 this one renders nothing and is never dispatched."""
+
+
+def register_when_composed(ctx: Context, build: Callable[[], ToolDefinition | None]) -> None:
+    """Register a tool once the profile is whole, if `build` says there is one.
+
+    For the tool whose *existence* depends on something another row supplies: a
+    `skill` tool needs an installed skill, a `task` tool needs a subagent
+    provider. Both were written as their own `ctx.on("profile/mounted", ...)`
+    and immediately began to diverge, which is the same road
+    `diagnostics.contribute` took one seam over.
+
+    **Why a tool that cannot work must not be registered**, rather than
+    registered and refused: its schema and description are in the prompt of
+    every request, so a tool the deployment cannot perform spends the context
+    window teaching a capability that is not there — and the model spends a turn
+    discovering that.
+
+    **Why `profile/mounted` and not `ctx.inject`.** `inject` waits on a *service
+    key*, and neither condition is one: "the skills registry is non-empty" and
+    "some subagent provider is registered" are facts about a service's contents.
+    `profile/mounted` is the one moment the profile is known to be whole, which
+    is exactly when those questions have their final answer.
+
+    `build` returning `None` means "not in this deployment". A name already
+    registered is left alone, so a second dispatch is a no-op rather than the
+    duplicate-name `ValueError` — which, on this event, would abort the process.
+    """
+
+    def once() -> None:
+        definition = build()
+        if definition is not None and ctx.tools.get(definition.name) is None:
+            ctx.tools.register(definition, scope=ctx)
+
+    ctx.on("profile/mounted", once)
 
 
 @plugin("tools", config=Config)

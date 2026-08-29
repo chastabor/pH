@@ -790,7 +790,7 @@ class WorkspaceSeam:
 PROJECT_PROVISION_FILE = ".ph-workspace.yml"
 """Where a repository states what its worktrees need (E14).
 
-Discovered the way `agent-instructions` finds `AGENTS.md` — walking up from the
+Discovered the way `memory-agents-md` finds `AGENTS.md` — walking up from the
 project directory — and read for **data only**: a `copy`/`symlink`/`hardlink`
 entry, nothing that executes. That is what makes cloning a repository and
 starting pH safe in a way `wtp`'s `.wtp.yml` is not, and it is why the `command`
@@ -878,7 +878,7 @@ async def lifecycle(ctx: Context, config: LifecycleConfig) -> None:
 def discover_provisioning(start: Path) -> list[ProvisionEntry]:
     """The project's own materials list, walking up from `start`.
 
-    Nearest-first and *first-wins*, which is `agent-instructions`' rule: the file
+    Nearest-first and *first-wins*, which is `memory-agents-md`' rule: the file
     beside the code is the one that knows what the code needs, and a monorepo
     root should not override a package that states its own.
 

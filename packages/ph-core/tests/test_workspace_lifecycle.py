@@ -214,7 +214,7 @@ def test_a_project_states_its_own_materials(tmp_path: Path) -> None:
 
 
 def test_the_nearest_file_wins(tmp_path: Path) -> None:
-    """`agent-instructions`' rule, for the same reason: the file beside the code
+    """`memory-agents-md`' rule, for the same reason: the file beside the code
     is the one that knows what the code needs, and a monorepo root should not
     override a package that states its own."""
     root, package = tmp_path / "repo", tmp_path / "repo" / "packages" / "api"
