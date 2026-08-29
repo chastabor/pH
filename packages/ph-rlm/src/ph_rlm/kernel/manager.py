@@ -43,7 +43,7 @@ import logging
 import signal
 import socket
 import subprocess
-from collections.abc import Sequence
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field
 from functools import partial
@@ -63,6 +63,7 @@ from ph.seams.code_runtime import (
     CodeRunResult,
 )
 from ph.seams.subprocess import scrub_env
+from ph.seams.workspace import workspace_of
 from ph.session.json import thaw_json
 from ph.tools.code_mode import CodeRunFailure, ToolCallError
 from ph.tools.errors import error_message
@@ -193,8 +194,20 @@ class Kernel:
     limits: KernelLimits
     journal: OrphanJournal
     cwd: Path | None = None
-    """The child's working directory. Set from `ctx.workspace` in Phase 4 (D21);
-    until then the child inherits the host's."""
+    """The child's working directory — `workspace.root` for this agent (D21).
+
+    **This is what makes the `worktree` tier bound authored code rather than
+    merely observe it.** A cell's `open("notes.txt", "w")` reaches no policy
+    waterfall by construction (N1), but it does resolve against this directory,
+    so a relative write lands in the agent's own checkout. An absolute path still
+    escapes, and only the `sandbox` tier refuses that (§4.8, E13)."""
+    env: Mapping[str, str] = field(default_factory=dict)
+    """Extra environment for the child, from `workspace.env`.
+
+    The build-tool redirection (E12): `TMPDIR`, `PYTEST_ADDOPTS` and friends
+    pointed inside the agent's scratch, so a cell that runs the project's tests
+    does not dirty the worktree with `.pytest_cache/` — which would flip the
+    disposal policy from "remove a clean tree" to "keep everything"."""
     snapshots: SnapshotPolicy | None = None
     skills: tuple[str, ...] = ()
     """Import names bound callable at boot (P3-18), from `rlm-skills-python`."""
@@ -248,6 +261,7 @@ class Kernel:
         # provider credential into its own output, which is then logged.
         environ = scrub_env(
             extra={
+                **self.env,
                 "NO_COLOR": "1",
                 "PYTHONUNBUFFERED": "1",
                 FD_ENV: str(child_fd),
@@ -720,7 +734,8 @@ class PythonCodeRuntime:
     Two lists rather than one because they answer different questions and can
     legitimately differ: a distribution named `acme-websearch` imports as
     `acme_websearch`, and `rlm-skills-python` is what knows both."""
-    cwd: Path | None = None
+    workspaces: Callable[[str], Any] | None = None
+    """Agent id → its `Workspace`, set by the row (D21). See `workspace_for`."""
     boot_timeout: float = 30.0
     shutdown_grace: float = 5.0
     cancel_grace: float = 2.0
@@ -759,6 +774,22 @@ class PythonCodeRuntime:
                 )
             return self._environment
 
+    def workspace_for(self, agent_id: str) -> Any:
+        """This agent's workspace, or `None` before one is acquired.
+
+        Resolved per kernel rather than held as one runtime-wide `cwd`, because
+        the namespace *is* the agent id: a parent and its children share this
+        runtime and must not share a checkout, which is the collision the
+        `worktree` tier exists to prevent.
+        """
+        if self.workspaces is None:
+            return None
+        try:
+            return self.workspaces(agent_id)
+        except Exception:
+            log.warning("ph_rlm.kernel: workspace lookup failed for %s", agent_id, exc_info=True)
+            return None
+
     def remember_scope(self, agent: Any) -> None:
         """Note an agent's scope, so its kernel can be owned by it."""
         agent_id = getattr(agent, "id", None)
@@ -775,12 +806,14 @@ class PythonCodeRuntime:
         return await kernel.run(request.program, request.bindings, token)
 
     async def _acquire(self, namespace: str) -> Kernel:
+        workspace = self.workspace_for(namespace)
         kernel = Kernel(
             namespace=namespace,
             environment=await self.environment(),
             limits=self.limits,
             journal=self.journal,
-            cwd=self.cwd,
+            cwd=None if workspace is None else workspace.root,
+            env={} if workspace is None else workspace.env,
             snapshots=self.snapshots,
             skills=self.skill_modules,
             boot_timeout=self.boot_timeout,
@@ -896,3 +929,8 @@ async def apply(ctx: Context, config: Config) -> None:
     # The namespace *is* the agent id, so a kernel is scoped exactly like the
     # agent's tools, its inbox and its log — and released by the same unwinding.
     ctx.on("agent/created", runtime.remember_scope)
+
+    # Asked at kernel start rather than captured here, because a workspace is
+    # acquired after the agent exists (P4-08) and a value read at mount would be
+    # `None` for every kernel this runtime ever spawns.
+    runtime.workspaces = partial(workspace_of, ctx)

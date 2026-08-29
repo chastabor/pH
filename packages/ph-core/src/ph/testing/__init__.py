@@ -1,4 +1,4 @@
-"""`ph.testing` — fake and replay adapters, builders, a stub runtime."""
+"""`ph.testing` — fake and replay adapters, builders, a stub runtime and tier."""
 
 from __future__ import annotations
 
@@ -17,6 +17,7 @@ from .builders import (
 from .fake_adapter import FakeAdapter, text_script
 from .replay_adapter import RecordedStep, ReplayAdapter, recorded_steps
 from .stub_runtime import StubCodeRuntime
+from .stub_workspace import StubWorkspaceProvider
 
 __all__ = [
     "FAKE_OPTIONS",
@@ -25,6 +26,7 @@ __all__ = [
     "ReplayAdapter",
     "StubAgent",
     "StubCodeRuntime",
+    "StubWorkspaceProvider",
     "assistant_payload",
     "plugin_payload",
     "raising",

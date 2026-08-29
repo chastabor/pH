@@ -62,6 +62,7 @@ from ._registry import claim_slot
 
 __all__ = [
     "ContainmentTier",
+    "LifecycleConfig",
     "SharedWorkspaceProvider",
     "Workspace",
     "WorkspaceAccess",
@@ -69,6 +70,10 @@ __all__ = [
     "WorkspaceProvider",
     "WorkspaceSeam",
     "apply",
+    "lifecycle",
+    "project_access",
+    "redirection_env",
+    "workspace_of",
 ]
 
 log = logging.getLogger("ph.seams.workspace")
@@ -100,6 +105,81 @@ A research child asking for `read` should not be handed a checkout it might
 mutate; but "read-only" is an enforcement claim, and the tier decides whether one
 can be made. The answer comes back as `kind` and `repo_writable`.
 """
+
+
+def project_access(kind: WorkspaceKind) -> WorkspaceAccess:
+    """What a workspace of this kind grants of the **project** (E3).
+
+    Not of the directory: `worktree-ephemeral` may be written freely and merges
+    nothing, so what its holder was granted of the project is `read`. That
+    distinction is `repo_writable`'s, read one level up, and it is what a spawn
+    records as `granted_access` and what `ph doctor` prints per agent.
+
+    Here rather than in the packages that ask, and exhaustive over `WorkspaceKind`
+    rather than a membership test, so a kind added in this module cannot silently
+    classify as `read` in `ph-rlm` — `mypy` refuses the match instead.
+    """
+    match kind:
+        case "shared" | "worktree":
+            return "write"
+        case "worktree-ephemeral" | "readonly-scratch":
+            return "read"
+
+
+def redirection_env(scratch: Path) -> dict[str, str]:
+    """Where the toolchain's droppings go instead of into the workspace (E12).
+
+    Every entry is a cache or temp location a build tool writes *beside the
+    sources* by default. Pointed inside `scratch`, which is outside the workspace
+    and survives disposal, three things follow at once: a read-only repo becomes
+    usable rather than merely safe, an ephemeral child's notes outlive the
+    checkout that is thrown away, and — the one that matters at the `worktree`
+    tier — `git status` reports the agent's work rather than `pytest`'s, so
+    "remove a clean worktree, keep a dirty one" keeps meaning something.
+
+    Beside `Workspace.env` rather than in the git tier that first needed it: the
+    table is a property of *scratch*, not of worktrees, and §4.8 gives the same
+    env to `readonly-scratch`. A copy in each provider is a copy that can drift.
+
+    `PYTEST_ADDOPTS` disables the cache provider outright as well as moving
+    `--basetemp`, because `.pytest_cache/` is written next to `rootdir` and no
+    environment variable relocates it. `TMPDIR` is `scratch` itself: it must
+    exist before the first `tempfile` call, and `scratch` is the one directory
+    the seam guarantees.
+    """
+    return {
+        "TMPDIR": str(scratch),
+        "PYTHONPYCACHEPREFIX": str(scratch / "pycache"),
+        "PYTEST_ADDOPTS": f"-p no:cacheprovider --basetemp={scratch / 'pytest'}",
+        "PIP_CACHE_DIR": str(scratch / "pip"),
+        "UV_CACHE_DIR": str(scratch / "uv"),
+        "GIT_CONFIG_GLOBAL": str(scratch / "gitconfig"),
+    }
+
+
+def workspace_of(ctx: Context, agent: Any) -> Workspace | None:
+    """This agent's workspace, asked of a seam that may not be mounted.
+
+    The question written once. Five callers had it — the prompt line, `bash`, the
+    kernel, the spawn path and the fs resolver — and the copies had already
+    disagreed about whether an agent with no `id` means `None` or a lookup with
+    an empty key, and about whether a raising seam is fatal. `_registry`'s own
+    docstring is about exactly this shape of drift.
+
+    Fail-soft on purpose: a caller asking "where does this agent write" during a
+    teardown, or in a profile that layers no workspace row, gets `None` and
+    carries on with the process's own directory.
+    """
+    seam = ctx.get("workspace")
+    if seam is None or agent is None:
+        return None
+    agent_id = agent if isinstance(agent, str) else getattr(agent, "id", "")
+    try:
+        found: Workspace | None = seam.of(agent_id)
+    except Exception:
+        log.warning("ph.seams.workspace: lookup failed for %s", agent_id, exc_info=True)
+        return None
+    return found
 
 
 @dataclass(frozen=True, slots=True)
@@ -389,6 +469,68 @@ class WorkspaceSeam:
         if workspace.ref is not None:
             data["ref"] = workspace.ref
         return data
+
+
+class LifecycleConfig(WireModel):
+    """Row config for the lifecycle."""
+
+    access: WorkspaceAccess = "write"
+    """What the *root* agent needs of the project directory.
+
+    A child's access is its parent's to decide and arrives with the spawn
+    (E4, Q11); this is the person at the keyboard, who asked for a harness in
+    their own repository.
+    """
+
+
+@plugin("workspace-lifecycle", inject=["workspace", "fs"], config=LifecycleConfig)
+async def lifecycle(ctx: Context, config: LifecycleConfig) -> None:
+    """Give every agent a workspace, and point `ctx.fs` at it.
+
+    **The seam alone changes nothing; this row is what makes a tier bite.** It
+    is separate from the seam's own row because the two answer different
+    questions — "what happens when someone acquires" and "who acquires, and
+    when" — and a deployment driving the lifecycle itself (a test, an embedder)
+    wants the first without the second.
+
+    Acquisition is *lazy and idempotent*, at the first `agent/pre-step`. Two
+    reasons, and neither is convenience. `agent/created` is an `emit`, so a
+    listener that has to `await git worktree add` could not hold the agent up
+    and the first tool call would race the checkout. And a child's workspace is
+    its parent's decision — base and `access` both — so the spawn path acquires
+    first and this row must find that one rather than overwrite it, which
+    `of()` already answers.
+    """
+
+    def root_of(agent: Any) -> Path | None:
+        workspace = workspace_of(ctx, agent)
+        return None if workspace is None else workspace.root
+
+    ctx.fs.rebase(root_of, scope=ctx)
+
+    async def ensure(request: Any, next_: Callable[..., Any]) -> Any:
+        agent = request.agent
+        if ctx.workspace.of(agent.id) is None:
+            await ctx.workspace.acquire(
+                session_id=agent.session.id,
+                agent_id=agent.id,
+                # The process's directory, never `fs.root_for(agent)`: that is
+                # the workspace we are about to take, and branching a worktree
+                # from the previous one would nest a checkout per turn.
+                base=ctx.fs.root,
+                access=config.access,
+                session=agent.session,
+                # The agent's own scope, so the worktree is released when the
+                # agent is — the in-process half of cleanup (I2), with the event
+                # pair covering the crash the scope cannot (§4.9).
+                scope=agent.ctx,
+            )
+        return await next_()
+
+    # Outermost, so a listener that reads or writes files during the step —
+    # compaction's summariser, a permissions row — sees the agent's own root
+    # rather than the process's.
+    ctx.on("agent/pre-step", ensure, prepend=True)
 
 
 class Config(WireModel):

@@ -9,6 +9,7 @@ announced, usage is attributed, a revoked child leaves a tombstone.
 from __future__ import annotations
 
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -20,7 +21,7 @@ from ph.seams.subagents import (
     family_reach,
     subagent_roster,
 )
-from ph.testing import FAKE_OPTIONS
+from ph.testing import FAKE_OPTIONS, StubWorkspaceProvider
 from ph_rlm.subagents import PROVIDER_NAME, TASK_PREFIX, delegation_depth
 
 pytestmark = pytest.mark.anyio
@@ -164,28 +165,96 @@ async def test_an_unroutable_provider_is_refused_at_admission(delegating: Mounte
         await _spawn(ctx, parent, provider="nonexistent", model="m1")
 
 
-async def test_access_defaults_to_read_and_says_what_it_granted(delegating: Mounted) -> None:
-    """E4, plus the honesty D21 requires until `ctx.workspace` exists."""
+async def test_the_default_shapes_the_request_and_the_tier_answers_it(
+    delegating: Mounted,
+) -> None:
+    """E4 and E3 together, at the `advisory` tier — which is the shipped default.
+
+    The default is about the *request*: an omitted `access` asks for `read`, and
+    that is what makes a child research-shaped no matter what the tier does with
+    it. What comes back is the tier's answer, and at `advisory` the answer to
+    both requests is the same shared checkout, because **nothing here can make a
+    repository read-only** (§4.8's table says exactly this, and calls the row
+    "not read-only"). So `granted` says `write` for a `read` request, and the
+    pair — requested beside granted — is the honest record. Claiming `read`
+    would be a promise nothing keeps, which is the one thing this field must
+    never do.
+    """
     ctx, session, parent = await delegating()
     default = await _spawn(ctx, parent, "read some code")
     assert default.requested_access == "read"
-    assert default.granted_access == "read"
+    assert default.granted_access == "write"
 
     asked = await _spawn(ctx, parent, "implement the thing", access="write")
     assert asked.requested_access == "write"
-    # Downgraded, and the log says why rather than pretending it was granted.
-    assert asked.granted_access == "read"
+    assert asked.granted_access == "write"
+
     rows = {
         event.data["runId"]: event.data
         for event in session.events
         if event.type == "subagent/admitted"
     }
-    # A code, not a sentence: a durable log has to stay parseable after the
-    # workspace tier lands, and prose in an event goes stale silently.
-    assert asked.downgrade_reason == "workspace-not-mounted"
-    assert rows[asked.id]["downgradeReason"] == "workspace-not-mounted"
+    # Nothing was *narrowed*, so there is no downgrade to report: the widening a
+    # `read` request meets at this tier is visible in the pair itself, and the
+    # child is told plainly by its own workspace prompt line.
+    assert asked.downgrade_reason is None
     assert default.downgrade_reason is None
     assert "downgradeReason" not in rows[default.id]
+
+
+async def test_a_read_child_gets_an_isolated_checkout_where_a_tier_can_give_one(
+    delegating: Mounted, tmp_path: Path
+) -> None:
+    """E3, through the spawn path: the same request, a tier that can answer it.
+
+    `worktree-ephemeral` is what `access="read"` buys where a tier exists — the
+    child writes freely and **merges nothing**, so what it was granted *of the
+    project* is `read`. That is the seam's own reading of `repo_writable` applied
+    one level up, and the reason `granted` is not copied from the request.
+
+    Branching from the *parent's* root rather than the process's is the other
+    half: it is what puts a fan-out on sibling branches instead of one shared
+    checkout (E2).
+    """
+    ctx, _session, parent = await delegating()
+    parent_root = tmp_path / "parent-tree"
+    parent_root.mkdir()
+    await ctx.workspace.acquire(session_id="parent", agent_id=parent.id, base=parent_root)
+    tier = StubWorkspaceProvider()
+    ctx.workspace.register_provider(tier)
+
+    child = await _spawn(ctx, parent, "read some code")
+
+    assert child.requested_access == "read"
+    assert child.granted_access == "read"
+    assert tier.bases == [parent_root]
+
+
+async def test_a_profile_with_no_workspace_row_refuses_to_promise_one(mount: Any) -> None:
+    """The conservative claim, and the only case that still downgrades.
+
+    With no seam at all nothing can enforce a writable repo, so nothing promises
+    one — and the reason travels as a *code*, not a sentence, because a durable
+    log has to stay parseable and prose in an event goes stale silently.
+    """
+    ctx = await mount(
+        dict(PROVIDER_ROW),
+        {"id": "workspace-lifecycle", "remove": True},
+        {"id": "workspace", "remove": True},
+    )
+    session = ctx.sessions.create("parent")
+    parent = ctx.agents.create(session, FAKE_OPTIONS)
+
+    child = await _spawn(ctx, parent, "implement the thing", access="write")
+
+    assert child.granted_access == "read"
+    assert child.downgrade_reason == "workspace-not-mounted"
+    rows = {
+        event.data["runId"]: event.data
+        for event in session.events
+        if event.type == "subagent/admitted"
+    }
+    assert rows[child.id]["downgradeReason"] == "workspace-not-mounted"
 
 
 # ------------------------------------------------------- what the parent hears --

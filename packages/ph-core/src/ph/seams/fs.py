@@ -44,6 +44,7 @@ from ..cordis import Context, Disposer, events, plugin
 from ..session import Session
 from ..tools.errors import FailureKind, HarnessError
 from ..wire import WireModel
+from ._registry import claim_slot
 
 __all__ = [
     "EditIntent",
@@ -164,20 +165,61 @@ class FsService:
 
     ctx: Context
     root: Path
+    """Where relative paths resolve for an agent that holds no workspace — the
+    process's own directory, and the answer `ph doctor` and a bare CLI probe
+    get."""
     _observed: dict[Path, float] = field(default_factory=dict)
     """Last-read mtime per path — the state read-before-edit consults."""
     _hidden: list[Callable[[Path], bool]] = field(default_factory=list)
     """Predicates that conceal a path from enumeration. See `hide`."""
+    _rebase: Callable[[Any], Path | None] | None = None
+    """Where *this agent's* relative paths resolve. See `rebase`."""
 
-    def resolve(self, path: str | Path) -> Path:
-        """Resolve against the workspace root.
+    def rebase(
+        self, resolver: Callable[[Any], Path | None], *, scope: Context | None = None
+    ) -> Disposer:
+        """Resolve relative paths per agent rather than per process (D21).
+
+        A *slot*, not a list like `hide`: two answers to "where does this agent
+        write" is a contradiction, and the first-match-wins reading a list would
+        need is one nobody could configure. `None` from the resolver means the
+        agent has no workspace and `root` stands.
+
+        The workspace seam is not consulted from here directly, and that is the
+        layering: `ctx.fs` would otherwise have to know which seam owns agent
+        state, when what it needs is one path. The row that knows about both
+        wires them (`workspace-lifecycle`), and a deployment that mounts no such
+        row keeps exactly today's behaviour.
+        """
+        return claim_slot(scope or self.ctx, self, "_rebase", resolver, label="fs.rebase")
+
+    def root_for(self, agent: Any = None) -> Path:
+        """This agent's root — its cwd, and what `bash` and `glob` run against.
+
+        A resolver that raises falls back to `root` rather than failing the
+        call: an agent whose workspace lookup broke still has to be able to read
+        a file, and the wrong-but-working directory is a better failure than a
+        traceback out of `read`.
+        """
+        if self._rebase is None or agent is None:
+            return self.root
+        try:
+            resolved = self._rebase(agent)
+        except Exception:
+            log.warning("ph.seams.fs: the root resolver failed; using %s", self.root, exc_info=True)
+            return self.root
+        return resolved or self.root
+
+    def resolve(self, path: str | Path, *, agent: Any = None) -> Path:
+        """Resolve against the agent's workspace root.
 
         A relative path is the agent's business; an absolute one is passed
         through, because refusing it here would be a confinement claim this
-        layer cannot make (N2).
+        layer cannot make (N2) — which is also why the `worktree` tier bounds a
+        relative write and not an absolute one.
         """
         candidate = Path(path).expanduser()
-        return candidate if candidate.is_absolute() else (self.root / candidate)
+        return candidate if candidate.is_absolute() else (self.root_for(agent) / candidate)
 
     # ------------------------------------------------------------------ read --
 
@@ -230,7 +272,7 @@ class FsService:
         session: Session | None = None,
     ) -> FileSlice:
         """Read a line window, after `fs/read-intent` allows it."""
-        target = self.resolve(path)
+        target = self.resolve(path, agent=agent)
         await self._gate("fs/read-intent", ReadIntent(path=target, agent=agent))
         text = await anyio.to_thread.run_sync(
             lambda: target.read_text(encoding="utf-8", errors="replace")
@@ -264,7 +306,7 @@ class FsService:
         self, path: str | Path, content: str, *, agent: Any = None, session: Session | None = None
     ) -> Path:
         """Write a whole file, after `fs/write-intent` allows it."""
-        target = self.resolve(path)
+        target = self.resolve(path, agent=agent)
         intent = WriteIntent(
             path=target, content=content, creating=not target.exists(), agent=agent
         )
@@ -289,7 +331,7 @@ class FsService:
         Returns the replacement count. A unique-match requirement is the tool's
         to enforce; this layer reports what it did.
         """
-        target = self.resolve(path)
+        target = self.resolve(path, agent=agent)
         intent = EditIntent(
             path=target,
             old_text=old_text,
@@ -324,9 +366,14 @@ class FsService:
     # ------------------------------------------------------------------ find --
 
     async def glob(
-        self, pattern: str, *, root: str | Path | None = None, limit: int = 1_000
+        self,
+        pattern: str,
+        *,
+        root: str | Path | None = None,
+        limit: int = 1_000,
+        agent: Any = None,
     ) -> list[str]:
-        base = self.resolve(root) if root is not None else self.root
+        base = self.resolve(root, agent=agent) if root is not None else self.root_for(agent)
         return await anyio.to_thread.run_sync(
             lambda: [str(path) for path in _walk(base, pattern, limit, self.concealed)]
         )
@@ -338,8 +385,9 @@ class FsService:
         root: str | Path | None = None,
         glob: str = "**/*",
         limit: int = 200,
+        agent: Any = None,
     ) -> list[GrepMatch]:
-        base = self.resolve(root) if root is not None else self.root
+        base = self.resolve(root, agent=agent) if root is not None else self.root_for(agent)
         try:
             expression = re.compile(pattern)
         except re.error as error:

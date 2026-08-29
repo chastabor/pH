@@ -21,7 +21,7 @@ import pytest
 from runtime_helpers import run_cell
 
 from ph.system_prompt.assembly import AssembleContext
-from ph.testing import FAKE_OPTIONS, run_tool, simple_tool
+from ph.testing import FAKE_OPTIONS, StubWorkspaceProvider, run_tool, simple_tool
 from ph.tools.registry import RUN_CODE
 
 pytestmark = pytest.mark.anyio
@@ -159,3 +159,53 @@ async def test_the_kernel_closes_when_the_agent_is_disposed(mounted_runtime: Mou
     # Disposal unwinds the agent's scope, and the kernel is an effect of it.
     await ctx.agents.dispose(agent.id)
     assert agent.id not in runtime._kernels
+
+
+# ------------------------------------------------------------- containment --
+
+
+async def test_a_cell_runs_inside_the_agents_workspace(
+    mounted_runtime: Mounted, tmp_path: Any
+) -> None:
+    """D21, and the sentence the whole `worktree` tier rests on.
+
+    A cell's `open("notes.txt", "w")` reaches no waterfall — a deny-list needs a
+    registered name, and the model is authoring the tool (§4.8). What it *does*
+    do is resolve against the child's cwd, so the tier bounds authored code
+    rather than merely observing it. This asserts the kernel is actually started
+    there: a runtime that inherited the host's directory would leave that whole
+    argument false, and every relative write from a cell would land in the shared
+    tree.
+
+    An absolute path still escapes, which is exactly why §4.8 calls this
+    collision isolation and reserves confinement for `sandbox` (E13).
+    """
+    ctx, session, agent = await mounted_runtime(snapshots=False)
+    scratch = tmp_path / "scratch"
+    ctx.workspace.register_provider(
+        StubWorkspaceProvider(
+            root=tmp_path / "trees", env={"PYTHONPYCACHEPREFIX": str(scratch / "pycache")}
+        )
+    )
+    await ctx.workspace.acquire(
+        session_id=session.id, agent_id=agent.id, base=ctx.fs.root, session=session
+    )
+    root = ctx.workspace.of(agent.id).root
+
+    result = await run_cell(
+        ctx,
+        "import os\n"
+        "open('authored.txt', 'w').write('a cell wrote this')\n"
+        "(os.getcwd(), os.environ['PYTHONPYCACHEPREFIX'])",
+        agent=agent,
+        session=session,
+    )
+
+    where, pycache = result.value["value"]
+    assert where == str(root)
+    # The write a policy row could never have stopped landed in the agent's own
+    # tree, which is the whole property the tier buys.
+    assert (root / "authored.txt").read_text(encoding="utf-8") == "a cell wrote this"
+    # And the redirection env reached the child, so a cell that runs the
+    # project's tests does not dirty that tree with caches (E12).
+    assert pycache == str(scratch / "pycache")

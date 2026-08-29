@@ -17,7 +17,8 @@ from typing import Any
 
 from ..cordis import Context, plugin
 from .sandbox import SandboxPolicy
-from .subprocess import SubprocessSpawnSpec, platform_shell
+from .subprocess import SubprocessSpawnSpec, platform_shell, scrub_env
+from .workspace import workspace_of
 
 __all__ = ["ShellResult", "ShellService", "apply"]
 
@@ -42,13 +43,28 @@ class ShellService:
         self,
         command: str,
         *,
-        cwd: Path,
+        cwd: Path | None = None,
+        agent: Any = None,
         timeout_ms: int | None = None,
         policy: SandboxPolicy | None = None,
         scope: Context | None = None,
     ) -> ShellResult:
-        """Run one command. `policy` requests confinement and fails if it cannot."""
+        """Run one command. `policy` requests confinement and fails if it cannot.
+
+        **`agent` is how a command lands in the right place.** Given one, the
+        seam resolves the working directory and the workspace's redirection
+        environment (D21, E12) itself, rather than making each shell-shaped tool
+        remember to. `tool-bash` was doing that derivation, and it is the same
+        rule for every caller — a command run *for* an agent runs in that
+        agent's workspace, or the tier bounds the tools and nothing else.
+
+        `cwd` overrides, for a caller that means somewhere specific.
+        """
         argv = (*platform_shell(), command)
+        workspace = workspace_of(self.ctx, agent)
+        if cwd is None:
+            fs = self.ctx.get("fs")
+            cwd = Path.cwd() if fs is None else fs.root_for(agent)
         confined_by: str | None = None
         if policy is not None:
             # Requesting confinement and getting none is an error, not a
@@ -56,7 +72,15 @@ class ShellService:
             confined = self.ctx.sandbox.confine(argv, policy)
             argv = confined.argv
             confined_by = confined.backend
-        spec = SubprocessSpawnSpec(argv=argv, cwd=cwd, grace_ms=timeout_ms or 5_000)
+        spec = SubprocessSpawnSpec(
+            argv=argv,
+            cwd=cwd,
+            grace_ms=timeout_ms or 5_000,
+            # Additive, not wholesale: the redirection variables are the only
+            # thing being said here, and a command that inherited nothing else
+            # would not find its own toolchain.
+            env=scrub_env(extra=workspace.env) if workspace and workspace.env else None,
+        )
         code, out, err = await self.ctx.subprocess.run(spec, scope=scope)
         return ShellResult(
             exit_code=code, stdout=out, stderr=err, argv=argv, confined_by=confined_by

@@ -128,7 +128,13 @@ async def test_the_handle_is_not_the_answer(delegating_runtime: Mounted) -> None
 
 
 async def test_access_defaults_to_read_from_a_cell(delegating_runtime: Mounted) -> None:
-    """E4 all the way through: the binding's default is the seam's default."""
+    """E4 all the way through: the binding's default is the seam's default.
+
+    What comes back is the *tier's* answer, and the shipped tier is `advisory`,
+    where nothing can make a repository read-only — so a `read` request is
+    honestly reported as a writable shared checkout rather than flattered with
+    the word it asked for (§4.8's "not read-only" row).
+    """
     ctx, session, agent = await delegating_runtime()
     result = await _cell(
         ctx,
@@ -136,18 +142,25 @@ async def test_access_defaults_to_read_from_a_cell(delegating_runtime: Mounted) 
         agent=agent,
         session=session,
     )
-    assert result.value["value"] == ["read", "read"]
+    assert result.value["value"] == ["read", "write"]
 
 
-async def test_asking_for_write_is_told_what_it_got(delegating_runtime: Mounted) -> None:
+async def test_nothing_narrowed_means_no_note_to_read(delegating_runtime: Mounted) -> None:
+    """The note is for a *narrowing*, and there is none at this tier.
+
+    A note on every spawn is one a model learns to skip; this one appears when a
+    child asked for the repository and a tier refused it, which is the moment
+    the parent has to re-plan.
+    """
     ctx, session, agent = await delegating_runtime()
     result = await _cell(
         ctx,
-        "h = await rlm.run(prompt='implement it', access='write')\nh['note']",
+        "h = await rlm.run(prompt='implement it', access='write')\n"
+        "(h['grantedAccess'], h.get('note'))",
         agent=agent,
         session=session,
     )
-    assert "granted read rather than write" in result.value["value"]
+    assert result.value["value"] == ["write", None]
 
 
 # ---------------------------------------------------------------- governance --

@@ -62,6 +62,14 @@
 - id: workspace
   name: workspace-shared
 
+# Who acquires, and when (P4-08). Separate from the seam because the two answer
+# different questions, and because a deployment driving the lifecycle itself
+# wants the seam without this. Under `workspace-shared` the root it hands an
+# agent *is* the process's directory, so this changes nothing until a profile
+# names a tier.
+- id: workspace-lifecycle
+  name: workspace-lifecycle
+
 - id: fs
   name: fs-local
 

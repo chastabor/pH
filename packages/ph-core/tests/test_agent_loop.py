@@ -60,10 +60,14 @@ async def test_lifecycle_events_appear_in_order(mount: Any) -> None:
     await ctx.agents.create(session, FAKE).prompt("hello")
 
     types = [event.type for event in session.events]
-    assert types[:6] == [
+    assert types[:7] == [
         "agent/inbox/spliced",
         "turn/start",
         "agent/inbox/spliced",
+        # Before the first step, because the agent's cwd has to exist before
+        # anything it does resolves against one (P4-08). Once per agent, not
+        # once per turn: the seam already holds it on the second pass.
+        "workspace/acquired",
         "step/start",
         "user/message",
         "request/header",

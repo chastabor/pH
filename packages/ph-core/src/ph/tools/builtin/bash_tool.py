@@ -12,7 +12,6 @@ the convenient path").
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 
 from pydantic import Field
@@ -64,9 +63,10 @@ async def apply(ctx: Context, config: Any) -> None:
     """Register the bash tool."""
 
     async def run_command(args: BashArgs, run: ToolRunContext) -> Any:
-        fs = ctx.get("fs")
-        cwd = Path(getattr(fs, "root", Path.cwd()))
-        result = await ctx.shell.run(args.command, cwd=cwd, timeout_ms=args.timeout_ms)
+        # The agent, not a directory: `ctx.shell` resolves the cwd and the
+        # workspace environment from it, so this tool states who is running
+        # rather than re-deriving where (D21, E2).
+        result = await ctx.shell.run(args.command, agent=run.agent, timeout_ms=args.timeout_ms)
         return {
             "command": args.command,
             "exit_code": result.exit_code,

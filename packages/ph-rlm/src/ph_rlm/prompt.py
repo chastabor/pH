@@ -28,6 +28,7 @@ from typing import Any
 
 from ph.cordis import Context, plugin
 from ph.seams.subagents import reachable_family
+from ph.seams.workspace import workspace_of
 from ph.system_prompt.assembly import ORDER_TOOL_GUIDANCE, PromptContext, PromptSection
 from ph_runtime.cell import MAGIC_PREFIXES
 
@@ -227,8 +228,7 @@ def _workspace(ctx: Context, agent_id: str) -> list[str]:
     owns the joining — a second assembly mechanism for one block of text is one
     that can disagree with the first about spacing.
     """
-    seam = ctx.get("workspace")
-    workspace = None if seam is None else seam.of(agent_id)
+    workspace = workspace_of(ctx, agent_id)
     if workspace is None:
         return [WORKSPACE_LINE]
     writable = "writable" if workspace.repo_writable else "read-only"

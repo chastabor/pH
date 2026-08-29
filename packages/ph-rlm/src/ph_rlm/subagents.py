@@ -26,9 +26,12 @@ subtract a child's tokens from the parent's own context measurement while billin
 totals still include them. Without it a fan-out of eight reads as context
 pressure on the parent and triggers a compaction it does not need.
 
-**No workspace yet.** `granted` is `read` until `ctx.workspace` lands (Phase 4,
-D21) — a child cannot be handed a guarantee nothing enforces — and the *reason*
-travels as a code, not prose, so the log stays parseable once the tier exists.
+**The child's workspace is taken here, not by the lifecycle row** (P4-08): its
+base is the parent's root and its access is the parent's decision, and the row
+knows neither. `granted` is what the child got *of the project* — a
+`worktree-ephemeral` child writes freely and merges nothing, so it was granted
+`read` — and the *reason* for any narrowing travels as a code, not prose, so the
+log stays parseable.
 
 @module ph_rlm.subagents
 """
@@ -63,6 +66,7 @@ from ph.seams.subagents import (
     SubagentStatus,
     default_child_name,
 )
+from ph.seams.workspace import project_access
 from ph.session import Session, derive_event_message
 from ph.session.json import thaw_json
 from ph.wire import WireModel
@@ -186,13 +190,6 @@ class RlmChildProvider:
         name = self._resolve_name(request.name, prompt, run_id, taken)
         provider_name, model, effort = self._resolve_model(request, parent)
 
-        # `read` until `ctx.workspace` exists (D21): a granted guarantee nothing
-        # enforces is worse than an honest refusal to grant it.
-        granted: Access = "read"
-        downgrade: DowngradeReason | None = (
-            "workspace-not-mounted" if request.access != granted else None
-        )
-
         child_session = self.ctx.sessions.create(
             f"{parent_session.id}-{run_id}",
             meta={
@@ -214,6 +211,8 @@ class RlmChildProvider:
         except Exception as error:
             self.ctx.sessions.dispose(child_session.id)
             raise SubagentSpawnError(f"the child agent could not be created: {error}") from error
+
+        granted, downgrade = await self._workspace(parent, child_agent, child_session, request)
 
         run = SubagentRun(
             id=run_id,
@@ -501,6 +500,49 @@ class RlmChildProvider:
                 return
 
     # ---------------------------------------------------------------- delete --
+
+    async def _workspace(
+        self,
+        parent: Any,
+        child_agent: Any,
+        child_session: Session,
+        request: SubagentRequest,
+    ) -> tuple[Access, DowngradeReason | None]:
+        """Take the child's workspace, and report what it actually got (D21, E3).
+
+        **Acquired here rather than left to the lifecycle row**, because a
+        child's base and access are its *parent's* decision and the row knows
+        neither: it would hand the child a `write` workspace over the process's
+        own directory, which is both the wrong tree and the wrong guarantee.
+        Branching from the parent's root is what makes a fan-out land on
+        sibling branches instead of one shared checkout (E2).
+
+        `granted` is access **to the project**, not to a directory. A
+        `worktree-ephemeral` child may write its checkout freely and none of it
+        is ever merged, so what it was granted of the project is `read` — the
+        seam's own reading of `repo_writable`, applied one level up.
+        """
+        seam = self.ctx.get("workspace")
+        if seam is None:
+            # A profile with no workspace row at all. The conservative claim is
+            # the only honest one: nothing here can enforce a writable repo, so
+            # nothing promises one.
+            return "read", "workspace-not-mounted"
+        workspace = await seam.acquire(
+            session_id=child_session.id,
+            agent_id=child_agent.id,
+            # Asked of `ctx.fs` rather than re-derived from the parent's
+            # workspace: "where does this agent's relative path land" already has
+            # one implementation, and a second one in this package is the one
+            # that must not disagree with it.
+            base=self.ctx.fs.root_for(parent),
+            access=request.access,
+            session=child_session,
+            # The child's own scope: a revoked or finished child releases its
+            # checkout with everything else it took (I2).
+            scope=child_agent.ctx,
+        )
+        return project_access(workspace.kind), None
 
     async def delete(self, parent_session: Session, run_id: str, *, reason: str = "user") -> bool:
         """Revoke one child early. Its transcript stays on disk.

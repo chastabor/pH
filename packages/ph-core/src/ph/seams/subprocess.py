@@ -26,7 +26,7 @@ import logging
 import os
 import re
 import sys
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, TypeAlias
@@ -58,7 +58,7 @@ explicitly rather than by inheritance."""
 
 
 def scrub_env(
-    base: dict[str, str] | None = None, *, extra: dict[str, str] | None = None
+    base: Mapping[str, str] | None = None, *, extra: Mapping[str, str] | None = None
 ) -> dict[str, str]:
     """The parent environment minus anything that looks like a credential."""
     source = os.environ if base is None else base

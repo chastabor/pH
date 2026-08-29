@@ -59,4 +59,9 @@ async def run_json(
         attachments=attachments,
         before=attach,
     ) as (_ctx, session):
-        return JsonResult(session_id=session.id, events=len(session.events))
+        pass
+    # Counted after teardown, not inside it: scopes unwind on the way out and
+    # what they append — a released workspace, a reaped child — is streamed like
+    # any other event, so a count taken one line earlier would report fewer
+    # events than the reader just saw.
+    return JsonResult(session_id=session.id, events=len(session.events))
