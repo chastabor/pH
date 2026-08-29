@@ -41,10 +41,12 @@ from ph.seams.approval import ApprovalDecisionName
 from ph.session import Session
 from ph.session.json import dumps
 from ph.tools.definition import Ask, ToolExecution
+from ph.tools.registry import RUN_CODE
 from ph.wire import WireModel
 
 __all__ = [
     "DESTRUCTIVE_PATTERNS",
+    "PATTERN_SETS",
     "ApprovalMode",
     "Config",
     "Rule",
@@ -86,9 +88,31 @@ because the version with a clause is ordinary work.
 """
 
 
+PATTERN_SETS: dict[str, tuple[str, ...]] = {"destructive": DESTRUCTIVE_PATTERNS}
+"""Pattern sets a profile can name instead of retyping.
+
+`DESTRUCTIVE_PATTERNS` was exported, documented and tested, and reachable only
+from Python — so the first profile that wanted it retyped a subset, which had
+already diverged on its first day: it widened `git push` from force-only to
+every push, against a shipped test that pins `git push origin main` as ordinary,
+and dropped the `wget`, `dd`, `mkfs`, `chmod -R` and SQL entries. A security
+judgement with two homes is one that disagrees with itself.
+
+A named set rather than `${...}` interpolation, because the loader's vocabulary
+is closed on purpose (I-8) and this is a *typed field on a row's config*, which
+is the mechanism a row already has for saying what it accepts.
+"""
+
+
 class Rule(WireModel):
     """When to ask about one tool."""
 
+    preset: str = ""
+    """A shipped pattern set to use, by name — see `PATTERN_SETS`.
+
+    Unioned with `when`, so a profile names the curated set and adds the
+    deployment-specific patterns beside it rather than choosing between them.
+    """
     when: tuple[str, ...] = ()
     """Patterns matched against the call's arguments. Empty means *always ask* —
     the `true` form in upstream's config, spelled as the absence of a condition
@@ -102,6 +126,11 @@ class Rule(WireModel):
     `edit` for a tool whose arguments must not be hand-written."""
     description: str = ""
     """Extra words for the prompt, when the tool's name is not enough."""
+
+    def patterns(self) -> tuple[str, ...]:
+        """Everything this rule matches on. Empty still means *always ask*."""
+        named = PATTERN_SETS.get(self.preset, ()) if self.preset else ()
+        return (*named, *self.when)
 
 
 class Config(WireModel):
@@ -173,15 +202,39 @@ def _mode(session: Session | None, config: Config) -> ApprovalMode:
 async def apply(ctx: Context, config: Config) -> None:
     """Ask a human before a configured call runs."""
 
-    async def gate(execution: ToolExecution, next_: Any) -> Any:
+    def rule_for(execution: ToolExecution) -> Rule | None:
+        """This call's rule, resolving the reserved transport name.
+
+        A profile writes `run_code` because that is the *reserved* transport
+        name — unregisterable, unshadowable, unrestrictable — but the registry
+        renames the transport in place to whatever a presentation row calls it,
+        so under `rlm` the name reaching here is `ipython`. Keyed literally, the
+        Code Mode half of a deployment's human gate is **silently inert**: the
+        config parses, the tests pass, and nothing ever asks.
+
+        Resolved rather than requiring profiles to write the presentation name,
+        because that name is a *rendering* choice and this is a policy about the
+        transport itself — a deployment that renamed its presentation would
+        otherwise turn its own approval gate off without touching it.
+        """
         rule = config.interrupt_on.get(execution.name)
+        if rule is not None:
+            return rule
+        scope = getattr(execution, "scope", None)
+        if execution.name == ctx.tools.view(scope).transport_name:
+            return config.interrupt_on.get(RUN_CODE)
+        return None
+
+    async def gate(execution: ToolExecution, next_: Any) -> Any:
+        rule = rule_for(execution)
         if rule is None:
             return await next_(execution)
         mode = _mode(execution.session, config)
         if mode == "yolo":
             return await next_(execution)
-        matched = matches(execution.arguments, rule.when) if rule.when else []
-        if mode == "auto" and rule.when and not matched:
+        patterns = rule.patterns()
+        matched = matches(execution.arguments, patterns) if patterns else []
+        if mode == "auto" and patterns and not matched:
             # A rule with a condition, in the posture that trusts it: nothing
             # matched, so this is the routine case the condition exists to let
             # through. `manual` asks anyway, which is what `manual` means.

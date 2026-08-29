@@ -1,0 +1,66 @@
+# ph-rlm-stable: the whole harness, with the gates on.
+#
+# `rlm` is the RLM bundle over the interactive posture. This adds `stabilize`
+# and then turns on the two rows those bundles deliberately ship *off* — because
+# a bundle that armed them on layering would make "I want offload" mean "and
+# also a tool, and also a corpus". Each row says in its own comment that a
+# profile flips it, and this is that profile.
+#
+# The containment posture is **not** restated here: the `rlm` bundle already
+# sets `advisory` for the person and `worktree` for their children, and a second
+# writer of one posture is how a profile that only meant to inherit it comes to
+# pin a rung the bundle has since moved off.
+
+# Planning (G1). `write_todos` and the prompt section that renders the list;
+# the TUI's sidebar folds the same `todo/write` events without importing the
+# row that writes them.
+- id: tool-todo
+  disabled: false
+
+# "Prompt-as-a-variable" (P3-17, Q4). Below 200 000 characters the row stands
+# down entirely and the corpus behaves conventionally — the threshold Q4
+# settled on, so a small `context/` directory costs nothing and a large one
+# becomes a thing the model queries rather than a thing it is handed.
+- id: rlm-context-loader
+  disabled: false
+  config:
+    minChars: 200000
+
+# A person between the model and what it cannot take back (G6).
+#
+# `preset: destructive` is the set `ph-stabilize` ships, tested there — the
+# things that cannot be undone by throwing a worktree away (N3). Naming it
+# rather than retyping it is the difference between one security judgement and
+# two that disagree: the first draft of this file retyped a subset and had
+# already widened `git push` from force-only to every push, against a shipped
+# test that pins an ordinary push as ordinary.
+#
+# `when` adds only what is specific to *this* deployment, beside the set.
+- id: hitl
+  config:
+    interruptOn:
+      # Shell is unconstrained by construction: the pattern list is what the
+      # tier cannot see.
+      bash:
+        preset: destructive
+        when:
+          - "\\b(npm|pnpm|yarn|uv|pip)\\s+publish\\b"
+          - "\\bsudo\\b"
+        description: >-
+          This command changes something a worktree cannot undo — it deletes
+          recursively, publishes, or runs as another user.
+      # Code Mode's transport reaches the same places by another road (C3).
+      # Keyed by the *reserved* name: the registry renames the transport to
+      # whatever the presentation calls it (`ipython`, here), and `hitl`
+      # resolves that — a profile naming `ipython` would turn its own gate off
+      # the day a deployment renamed the presentation.
+      run_code:
+        preset: destructive
+        when:
+          - "\\bsubprocess\\b"
+        description: >-
+          This program leaves the sandbox's own surface — it spawns a process or
+          deletes from the filesystem directly.
+        # No `edit`: a program is not something to hand-patch in a modal, and a
+        # half-edited one is worse than either answer.
+        allowedDecisions: [approve, reject]

@@ -41,6 +41,15 @@ TUI_LAYERS: tuple[Layer, ...] = (BASE, HEADLESS, PROFILE_DIR / "tui.yaml")
 """The interactive posture: `headless` plus one row. A person is present to
 answer the seams, so the workspace is writable (see tui.yaml)."""
 
+RLM_LAYERS: tuple[Layer, ...] = (*TUI_LAYERS, Bundle("rlm"))
+"""The interactive posture plus the RLM bundle, because a person is present for
+the approvals Code Mode's dispatches raise (P3-20).
+
+Named for `TUI_LAYERS`' reason four lines up: `rlm-stable` *is* "rlm plus
+stabilize", and re-listing the layers would let the two drift while a comment
+went on claiming they could not."""
+
+
 PROFILES: dict[str, tuple[Layer, ...]] = {
     "base": (BASE,),
     "headless": (BASE, HEADLESS),
@@ -49,9 +58,12 @@ PROFILES: dict[str, tuple[Layer, ...]] = {
     # a misconfigured key fails loudly instead of silently answering "ok".
     "deepseek": (BASE, PROFILE_DIR / "deepseek.yaml"),
     "anthropic": (BASE, PROFILE_DIR / "anthropic.yaml"),
-    # `rlm` is the interactive posture plus the RLM bundle, because a person is
-    # present for the approvals Code Mode's dispatches raise (P3-20).
-    "rlm": (*TUI_LAYERS, Bundle("rlm")),
+    "rlm": RLM_LAYERS,
+    # Everything, with the gates on (P4-15). `rlm` plus `stabilize`, plus the
+    # profile that turns on the two rows those bundles ship disabled — a bundle
+    # that armed them on layering would make "I want offload" mean "and also a
+    # tool, and also a corpus".
+    "rlm-stable": (*RLM_LAYERS, Bundle("stabilize"), PROFILE_DIR / "rlm-stable.yaml"),
 }
 
 
