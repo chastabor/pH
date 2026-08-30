@@ -330,6 +330,17 @@ def socket_identity(path: Path) -> tuple[int, int] | None:
 
     `lstat`, so a path replaced by a symlink to somebody else's socket reads as
     replaced rather than as the target it points at.
+
+    **What makes the pair sound is that the daemon holds its listener open.**
+    An inode number is reusable the moment the last reference to it goes, so a
+    path unlinked and then re-created can legitimately come back with the number
+    it just had — which is not a theoretical hazard, it is what CI does and what
+    caught this module's first tests. The bound socket is different: `serve()`
+    keeps the listener inside `async with listener:` for the life of the
+    process, so the inode stays referenced while the daemon runs and cannot be
+    handed to the socket that replaces it. A caller comparing identities for a
+    path it does *not* hold open has no such guarantee and should not read this
+    as one.
     """
     try:
         info = os.lstat(path)

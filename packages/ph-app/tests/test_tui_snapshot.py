@@ -11,7 +11,9 @@ snapshot is stable: no timing, no token order, no session ids in the frame.
 
 from __future__ import annotations
 
+import getpass
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -194,8 +196,13 @@ def test_every_theme_renders(snap_compare: Any, theme: str) -> None:
 
 
 def test_the_full_app_shell(snap_compare: Any, make_tui_app: Callable[..., PHTuiApp]) -> None:
-    """Prompt, status bar and sidebar together — the chrome, once."""
-    app = make_tui_app(session_id="snapshot")
+    """Prompt, status bar and sidebar together — the chrome, once.
+
+    `project=` is pinned because the sidebar prints it: taken from `Path.cwd()`
+    this snapshot recorded the developer's own checkout and failed on every
+    other machine, CI included.
+    """
+    app = make_tui_app(session_id="snapshot", project=Path("/w/project"))
 
     async def mounted(pilot: Any) -> None:
         # The harness mounts in a worker so the shell paints first; the frame
@@ -204,3 +211,33 @@ def test_the_full_app_shell(snap_compare: Any, make_tui_app: Callable[..., PHTui
         await pilot.pause(0.1)
 
     assert snap_compare(app, terminal_size=(90, 24), run_before=mounted)
+
+
+def test_no_snapshot_records_this_machine() -> None:
+    """A snapshot that embeds the developer's paths is one only they can pass.
+
+    `test_the_full_app_shell` did: the sidebar prints `PHTuiApp.project`, which
+    is `Path.cwd()`, so the recorded frame said `~/Projects/pH` and CI — whose
+    checkout is `~/work/pH/pH` — failed on it and only on it. Nothing caught
+    that here, because here it was true.
+
+    So the check is for the *class*, not for that path: any home directory,
+    working directory or user name appearing in a recorded frame makes the
+    snapshot unportable, whatever produced it. A test that wants to render a
+    path pins a fixed one — `make_tui_app(project=Path("/w/project"))`.
+    """
+    directory = Path(__file__).parent / "__snapshots__"
+    machine = {
+        str(Path.home()): "$HOME",
+        str(Path.cwd()): "the working directory",
+        getpass.getuser(): "the user name",
+    }
+    offenders = [
+        f"{recorded.relative_to(directory)} records {what}"
+        for recorded in sorted(directory.rglob("*.raw"))
+        for value, what in machine.items()
+        # A one-character or otherwise trivial user name would match half the
+        # file by accident; only a value with something to it can be evidence.
+        if len(value) > 3 and value in recorded.read_text(encoding="utf-8")
+    ]
+    assert offenders == [], "\n".join(offenders)

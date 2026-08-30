@@ -20,6 +20,7 @@ not.
 
 from __future__ import annotations
 
+import os
 import sys
 from collections.abc import Callable
 from pathlib import Path
@@ -178,6 +179,15 @@ def test_socket_identity_tells_removed_apart_from_replaced(tmp_path: Path) -> No
     puts a *different* socket at the same path. An existence check calls the
     second one a recovery, when it is two supervisors believing they own this
     user's roots — I-5's hazard, arriving by a door P5-03 does not cover.
+
+    **The replacement is moved into place, not created there**, and that is a
+    correction rather than a flourish. The first version of this test unlinked
+    the path and made a new file at it, which assumes the kernel will not hand
+    the new file the inode the old one just released — and it does, immediately.
+    It passed here and failed on CI, where it was asserting on the allocator
+    rather than on `socket_identity`. Two files that exist at the same moment
+    cannot share an inode, so `os.replace` states the property the test is about
+    instead of hoping for it.
     """
     path = tmp_path / "daemon.sock"
     path.touch()
@@ -188,18 +198,25 @@ def test_socket_identity_tells_removed_apart_from_replaced(tmp_path: Path) -> No
     path.unlink()
     assert socket_identity(path) is None, "removed"
 
-    path.touch()
-    assert socket_identity(path) not in (None, bound), "replaced, and not mistaken for recovered"
+    successor = tmp_path / "second.sock"
+    successor.touch()
+    theirs = socket_identity(successor)
+    os.replace(successor, path)
+    assert socket_identity(path) == theirs
+    assert socket_identity(path) != bound, "replaced, and not mistaken for recovered"
 
 
 def test_socket_identity_does_not_follow_a_symlink_to_someone_elses(tmp_path: Path) -> None:
-    """A path swapped for a link to another daemon's socket reads as replaced."""
+    """`lstat`, so a path swapped for a link reads as the link, not its target.
+
+    Held against a symlink and its target that exist *together*, which is what
+    makes the two identities necessarily different — the same correction the
+    test above records.
+    """
     real = tmp_path / "real.sock"
     real.touch()
-    ours = tmp_path / "ours.sock"
-    ours.touch()
-    bound = socket_identity(ours)
+    link = tmp_path / "ours.sock"
+    link.symlink_to(real)
 
-    ours.unlink()
-    ours.symlink_to(real)
-    assert socket_identity(ours) not in (None, bound)
+    assert socket_identity(link) is not None
+    assert socket_identity(link) != socket_identity(real), "the link, not what it points at"
