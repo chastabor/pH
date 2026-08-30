@@ -39,7 +39,7 @@ from ..tools.presentation import simple_views
 from ..tools.registry import register_when_composed
 from ..wire import WireModel
 from ._names import require_slug, slug_pattern
-from ._registry import claim_key
+from ._registry import claim_entry, claim_key
 from ._restriction import NameFilter
 
 __all__ = [
@@ -164,7 +164,9 @@ class SkillService:
             raise ValueError(f"a skill description must be at most {DESCRIPTION_MAX} characters")
         if len(skill.hint) > HINT_MAX:
             raise ValueError(f"a skill hint must be at most {HINT_MAX} characters")
-        released = claim_key(scope or self.ctx, self._skills, skill.name, skill, label="skill")
+        released = claim_key(
+            self.ctx.owner_for(scope), self._skills, skill.name, skill, label="skill"
+        )
         self._changed()
 
         def release() -> None:
@@ -180,23 +182,22 @@ class SkillService:
         agent, which is a deployment-wide policy and almost never what a caller
         narrowing one child meant.
         """
-        owner = scope or self.ctx
-        key = owner.isolation
-        bucket = self._restrictions.setdefault(key, [])
-        bucket.append(restriction)
+        # Two questions, two answers (P6-12): the bucket is *which scope this
+        # narrows*, and must stay where the caller put it; the disposer is *when
+        # it lifts*, which is the row that asked. One value answering both is
+        # what this row found in five registries.
+        bucket = self._restrictions.setdefault(self.ctx.layer_for(scope).isolation, [])
+        released = claim_entry(
+            self.ctx.owner_for(scope), bucket, restriction, label="skill-restriction"
+        )
+
         self._changed()
 
         def release() -> None:
-            # By identity, never by `==`: a filter is a *value*, and two children
-            # narrowed to the same set compare equal — `list.remove` would have
-            # one child's disposer release the other's.
-            for index, held in enumerate(bucket):
-                if held is restriction:
-                    del bucket[index]
-                    break
+            released()
             self._changed()
 
-        return owner.add_disposer(release, label="skill-restriction")
+        return release
 
     def _changed(self) -> None:
         self._generation += 1

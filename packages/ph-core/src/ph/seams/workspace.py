@@ -491,7 +491,9 @@ class WorkspaceSeam:
         `list.remove` would have one row's disposer take the other's.
         """
         disposers = [
-            claim_entry(scope or self.ctx, self._provisioning, entry, label="workspace.provision")
+            claim_entry(
+                self.ctx.owner_for(scope), self._provisioning, entry, label="workspace.provision"
+            )
             for entry in entries
         ]
 
@@ -499,7 +501,7 @@ class WorkspaceSeam:
             for disposer in disposers:
                 disposer()
 
-        return (scope or self.ctx).add_disposer(release, label="workspace.provision")
+        return self.ctx.owner_for(scope).add_disposer(release, label="workspace.provision")
 
     def live(self) -> list[Workspace]:
         """Every workspace an agent currently holds.
@@ -517,7 +519,9 @@ class WorkspaceSeam:
         self, provider: WorkspaceProvider, *, scope: Context | None = None
     ) -> Disposer:
         """Claim the tier. One at a time; `shared` remains the fallback."""
-        return claim_slot(scope or self.ctx, self, "provider", provider, label="workspace.provider")
+        return claim_slot(
+            self.ctx.owner_for(scope), self, "provider", provider, label="workspace.provider"
+        )
 
     def effective_tier(self, *, child: bool) -> ContainmentTier:
         """What one role actually gets, provider and choice reconciled.
@@ -757,7 +761,7 @@ class WorkspaceSeam:
 
             return release
 
-        held.dispose = await (scope or self.ctx).effect(enter, label=f"workspace({agent_id})")
+        held.dispose = await self.ctx.owner_for(scope).effect(enter, label=f"workspace({agent_id})")
         return held
 
     def _log(

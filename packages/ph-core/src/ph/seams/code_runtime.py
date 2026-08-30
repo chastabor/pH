@@ -243,7 +243,9 @@ class CodeRuntimeSeam:
                 "log, which is the reason a persistent runtime was withheld (D17). "
                 "Set declares_kernel_snapshots = True once the provider emits them."
             )
-        return claim_slot(scope or self.ctx, self, "provider", provider, label="code_runtime")
+        return claim_slot(
+            self.ctx.owner_for(scope), self, "provider", provider, label="code_runtime"
+        )
 
     def register_sdk_renderer(
         self,
@@ -260,7 +262,11 @@ class CodeRuntimeSeam:
         different text would invalidate the cached prefix (A12).
         """
         return claim_key(
-            scope or self.ctx, self._sdk_renderers, language, renderer, label="sdk-renderer"
+            self.ctx.owner_for(scope),
+            self._sdk_renderers,
+            language,
+            renderer,
+            label="sdk-renderer",
         )
 
     def sdk_renderer(self, language: str) -> Callable[[Sequence[CodeBindingNamespace]], str] | None:

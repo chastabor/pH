@@ -235,7 +235,7 @@ class ApprovalService:
         mechanism, the waterfall, and this is only a discoverable name for it. The
         answerer receives `(request, next_)` and returns an `ApprovalOutcome`.
         """
-        return (scope or self.ctx).on("approval/request", answerer)
+        return self.ctx.owner_for(scope).on("approval/request", answerer)
 
     async def request(
         self,

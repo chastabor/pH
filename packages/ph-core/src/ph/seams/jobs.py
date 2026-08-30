@@ -116,7 +116,7 @@ class JobService:
 
             return abandon
 
-        job.release = await (scope or self.ctx).effect(enter, label=f"job({job.id})")
+        job.release = await self.ctx.owner_for(scope).effect(enter, label=f"job({job.id})")
         self.ctx.emit("job/started", job, contained=True)
 
         async def body() -> None:

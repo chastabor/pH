@@ -251,17 +251,37 @@ class ToolRuntime:
 
     def _claim(
         self,
-        owner: Context,
+        scope: Context | None,
         mutate: Callable[[_Layer], None],
         undo: Callable[[_Layer], Any],
         label: str,
     ) -> Disposer:
-        """Mutate the owner's layer and hand back the disposer that undoes it."""
-        key = owner.isolation
+        """Mutate a layer and hand back the disposer that undoes it.
+
+        **Two contexts, because the owner was answering two questions** (P6-12).
+        `owner.isolation` chose *which layer* a registration lands in — that is
+        tool visibility, B7's whole subject — while `owner.add_disposer` chose
+        *when it goes away*. One value did both because both were
+        `scope or self.ctx`, and they are not the same question: the lifetime is
+        now the activating row's, so a tool unwinds when its row unmounts, while
+        the layer stays exactly where it was so nothing about what an agent can
+        see changes. Conflating them was what made this row's fix look risky.
+
+        **Both are derived here, from `scope`, rather than passed in.** The first
+        version took the two contexts as separate arguments, and every one of the
+        six call sites wrote the same pair — which restates the relationship six
+        times and, worse, lets a seventh pair them wrongly and reintroduce the
+        defect with nothing to catch it. Deriving them from the one argument they
+        are both functions of is what makes "visibility is unchanged" true by
+        construction rather than by reading six call sites.
+        """
+        key = self.ctx.layer_for(scope).isolation
         layer = self._layer(key)
         mutate(layer)
         self._changed()
-        return owner.add_disposer(lambda: self._release(key, lambda: undo(layer)), label=label)
+        return self.ctx.owner_for(scope).add_disposer(
+            lambda: self._release(key, lambda: undo(layer)), label=label
+        )
 
     def register(self, definition: ToolDefinition, *, scope: Context | None = None) -> Disposer:
         """Register a tool globally, or on an agent's scope to shadow by name."""
@@ -293,8 +313,7 @@ class ToolRuntime:
         return self._register(definition, scope)
 
     def _register(self, definition: ToolDefinition, scope: Context | None) -> Disposer:
-        owner = scope or self.ctx
-        key = owner.isolation
+        key = self.ctx.layer_for(scope).isolation
 
         def add(layer: _Layer) -> None:
             if definition.name in layer.tools:
@@ -308,7 +327,7 @@ class ToolRuntime:
             layer.tools[definition.name] = definition
 
         return self._claim(
-            owner,
+            scope,
             add,
             lambda layer: layer.tools.pop(definition.name, None),
             f"tool({definition.name})",
@@ -317,7 +336,7 @@ class ToolRuntime:
     def restrict(self, restriction: ToolRestriction, *, scope: Context | None = None) -> Disposer:
         """Mask global tools for one scope. Restrictions intersect."""
         return self._claim(
-            scope or self.ctx,
+            scope,
             lambda layer: layer.restrictions.append(restriction),
             lambda layer: _discard(layer.restrictions, restriction),
             "tools.restrict",
@@ -326,7 +345,7 @@ class ToolRuntime:
     def guard(self, guard: ToolGuard, *, scope: Context | None = None) -> Disposer:
         """Register a monotonic deny-only guard. It runs last, and it is final."""
         return self._claim(
-            scope or self.ctx,
+            scope,
             lambda layer: layer.guards.append(guard),
             lambda layer: _discard(layer.guards, guard),
             "tools.guard",
@@ -339,7 +358,10 @@ class ToolRuntime:
             layer.mode = None
 
         return self._claim(
-            scope or self.ctx, lambda layer: setattr(layer, "mode", mode), clear, "tools.present_as"
+            scope,
+            lambda layer: setattr(layer, "mode", mode),
+            clear,
+            "tools.present_as",
         )
 
     def present_transport(
@@ -376,7 +398,7 @@ class ToolRuntime:
             if layer.transport is presentation:
                 layer.transport = None
 
-        return self._claim(target, add, clear, "tools.present_transport")
+        return self._claim(scope, add, clear, "tools.present_transport")
 
     def register_code_namespace(
         self, name: str, factory: CodeNamespaceFactory, *, scope: Context | None = None
@@ -407,7 +429,7 @@ class ToolRuntime:
             layer.code_namespaces[name] = factory
 
         return self._claim(
-            scope or self.ctx,
+            scope,
             add,
             lambda layer: layer.code_namespaces.pop(name, None),
             f"tools.code_namespace({name})",

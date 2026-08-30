@@ -42,7 +42,7 @@ from typing import Any, TypeAlias
 
 from ..cordis import Context, Disposer, plugin
 from ._names import require_slug
-from ._registry import claim_key
+from ._registry import claim_entry, claim_key
 
 __all__ = [
     "ScreenDefinition",
@@ -136,7 +136,7 @@ class TuiScreenRegistry:
         unload and leave its screen, its command and its key behind.
         """
         require_slug(screen.id, maximum=ID_MAX, kind="screen id")
-        owner = scope or self.ctx
+        owner = self.ctx.owner_for(scope)
         entry = _Entry(screen=screen, owner=owner)
         release = claim_key(owner, self._entries, screen.id, entry, label="screen")
         for front_end in self._front_ends:
@@ -151,16 +151,17 @@ class TuiScreenRegistry:
         commands pointing at it.
         """
         front_end = _FrontEnd(present=present)
-        self._front_ends.append(front_end)
+        released = claim_entry(
+            self.ctx.owner_for(scope), self._front_ends, front_end, label="tui-screens(front-end)"
+        )
         for entry in self._ordered():
             self._draw(front_end, entry)
 
         def detach() -> None:
-            if front_end in self._front_ends:
-                self._front_ends.remove(front_end)
+            released()
             front_end.undraw()
 
-        return (scope or self.ctx).add_disposer(detach, label="tui-screens(front-end)")
+        return detach
 
     def list(self) -> list[ScreenDefinition]:
         """Every screen, by `order` then `id` — the order a palette shows them."""

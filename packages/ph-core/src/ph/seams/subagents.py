@@ -366,7 +366,7 @@ class SubagentService:
     ) -> Disposer:
         """Claim one delegation strategy under `name`."""
         return claim_key(
-            scope or self.ctx, self._providers, name, provider, label="subagent-provider"
+            self.ctx.owner_for(scope), self._providers, name, provider, label="subagent-provider"
         )
 
     def provider_names(self) -> list[str]:

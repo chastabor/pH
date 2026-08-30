@@ -269,7 +269,7 @@ class FsService:
         wires them (`workspace-lifecycle`), and a deployment that mounts no such
         row keeps exactly today's behaviour.
         """
-        return claim_slot(scope or self.ctx, self, "_rebase", resolver, label="fs.rebase")
+        return claim_slot(self.ctx.owner_for(scope), self, "_rebase", resolver, label="fs.rebase")
 
     def root_for(self, agent: Any = None) -> Path:
         """This agent's root — its cwd, and what `bash` and `glob` run against.

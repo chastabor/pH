@@ -156,7 +156,7 @@ class SubprocessService:
         self, spec: SubprocessSpawnSpec, *, scope: Context | None = None
     ) -> SubprocessHandle:
         """Spawn a child owned by `scope`, terminated and reaped on disposal."""
-        owner = scope or self.ctx
+        owner = self.ctx.owner_for(scope)
         env = scrub_env() if spec.env is None else spec.env
         handle: dict[str, SubprocessHandle] = {}
 

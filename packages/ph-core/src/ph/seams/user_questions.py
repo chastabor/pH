@@ -50,7 +50,7 @@ class UserQuestionService:
         self, answerer: Callable[..., Any], *, scope: Context | None = None
     ) -> Disposer:
         """Sugar over `ctx.on("user-question/ask", answerer)`; one mechanism."""
-        return (scope or self.ctx).on("user-question/ask", answerer)
+        return self.ctx.owner_for(scope).on("user-question/ask", answerer)
 
     async def ask(self, question: UserQuestion) -> str | None:
         """Ask, and return the answer or `None` when nobody could answer."""

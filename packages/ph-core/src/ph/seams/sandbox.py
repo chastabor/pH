@@ -115,7 +115,9 @@ class SandboxSeam:
     def register_provider(
         self, provider: SandboxProvider, *, scope: Context | None = None
     ) -> Disposer:
-        return claim_slot(scope or self.ctx, self, "provider", provider, label="sandbox.provider")
+        return claim_slot(
+            self.ctx.owner_for(scope), self, "provider", provider, label="sandbox.provider"
+        )
 
     def resolve_mode(
         self, session: Session | None = None, *, explicit: SandboxMode | None = None

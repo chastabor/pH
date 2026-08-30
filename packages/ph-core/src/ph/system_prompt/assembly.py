@@ -24,6 +24,7 @@ from typing import Any, TypeAlias
 
 from ..cordis import Context, Disposer, events, maybe_await, plugin
 from ..llm.types import ContextSnapshotSection, ToolSchema
+from ..seams._registry import claim_entry
 
 __all__ = [
     "AssembleContext",
@@ -132,7 +133,14 @@ def join_context_sections(sections: list[ContextSnapshotSection]) -> str:
 
 @dataclass(slots=True)
 class _Registration:
-    owner: Context
+    visible_to: Context
+    """Which scope this contribution reaches — *not* who owns its lifetime.
+
+    Named for the question it answers since P6-12, which found the two fused
+    here and in four sibling registries. The lifetime is `Context.owner_for`'s
+    answer and is spent on the disposer; this is `layer_for`'s and is spent on
+    `reaches`. A field called `owner` that fed a visibility filter was the same
+    word doing two jobs that the row exists to separate."""
     value: Any
 
 
@@ -146,21 +154,38 @@ class SystemPromptService:
     _tools: list[_Registration] = field(default_factory=list)
     _variables: list[_Registration] = field(default_factory=list)
 
-    def _register(self, bucket: list[_Registration], owner: Context, value: Any) -> Disposer:
-        entry = _Registration(owner=owner, value=value)
-        bucket.append(entry)
+    def _register(self, bucket: list[_Registration], scope: Context | None, value: Any) -> Disposer:
+        """Contribute to a bucket, and hand back the disposer that withdraws it.
 
-        def off() -> None:
-            if entry in bucket:
-                bucket.remove(entry)
+        **Two contexts, because the owner was answering two questions** (P6-12).
+        `_Registration.owner` feeds `_visible`'s `reaches` — that is *who sees
+        this section* — while `add_disposer` decides *when it goes away*. Both
+        were `scope or self.ctx`, so a row's section outlived the row: I2 held
+        only where a caller remembered `scope=`.
 
-        return owner.add_disposer(off, label="system-prompt")
+        The visibility target is unchanged and the lifetime is now the
+        activating row's. For a globally mounted row the two agree anyway — an
+        activation scope inherits its parent's isolation, so a root row's
+        section reaches everything either way — and keeping them separate is
+        what makes that true by construction rather than by inspection.
+
+        Through `claim_entry` rather than a hand-rolled `bucket.remove`, and it
+        was **required rather than tidier**: `@dataclass(slots=True)` defaults to
+        `eq=True`, so `_Registration` compares by *value*, and two rows
+        contributing an equal section would have had one disposal take the
+        other's. An earlier draft of this docstring claimed the opposite — that
+        the old code compared by identity and was accidentally right — which is
+        exactly the mistake `_registry`'s own docstring was written to stop
+        someone making.
+        """
+        entry = _Registration(visible_to=self.ctx.layer_for(scope), value=value)
+        return claim_entry(self.ctx.owner_for(scope), bucket, entry, label="system-prompt")
 
     def section(self, section: PromptSection, *, scope: Context | None = None) -> Disposer:
-        return self._register(self._sections, scope or self.ctx, section)
+        return self._register(self._sections, scope, section)
 
     def context(self, context: PromptContext, *, scope: Context | None = None) -> Disposer:
-        return self._register(self._contexts, scope or self.ctx, context)
+        return self._register(self._contexts, scope, context)
 
     def tools(
         self, provider: Callable[[Context], list[ToolSchema]], *, scope: Context | None = None
@@ -171,19 +196,19 @@ class SystemPromptService:
         contains is a per-agent question: a restriction or a scoped
         registration changes the answer (B7).
         """
-        return self._register(self._tools, scope or self.ctx, provider)
+        return self._register(self._tools, scope, provider)
 
     def variable(
         self, name: str, provider: Callable[[], str], *, scope: Context | None = None
     ) -> Disposer:
-        return self._register(self._variables, scope or self.ctx, (name, provider))
+        return self._register(self._variables, scope, (name, provider))
 
     def _visible(self, bucket: list[_Registration], target: Context) -> list[Any]:
         # One visibility rule, shared with event dispatch: a global
         # registration reaches every agent, an agent-scoped one reaches that
         # agent alone. Ordering within a bucket stays registration order, which
         # the `order` field then sorts.
-        return [entry.value for entry in bucket if entry.owner.reaches(target)]
+        return [entry.value for entry in bucket if entry.visible_to.reaches(target)]
 
     async def assemble(self, request: AssembleContext | None = None) -> PromptAssembly:
         """Collect, order, interpolate, then run the assemble waterfall."""

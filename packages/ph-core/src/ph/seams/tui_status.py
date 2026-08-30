@@ -100,7 +100,7 @@ class TuiStatusRegistry:
         the footer after the row that reads it had unloaded.
         """
         require_slug(status_field.id, maximum=ID_MAX, kind="status field id")
-        owner = scope or self.ctx
+        owner = self.ctx.owner_for(scope)
         return claim_key(owner, self._fields, status_field.id, status_field, label="status-field")
 
     def readings(self, session: Session) -> list[StatusReading]:

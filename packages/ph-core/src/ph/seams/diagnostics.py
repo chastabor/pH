@@ -88,7 +88,7 @@ class DiagnosticsRegistry:
         the same warning for the same reason.
         """
         require_slug(diagnostic.id, maximum=ID_MAX, kind="diagnostic id")
-        owner = scope or self.ctx
+        owner = self.ctx.owner_for(scope)
         return claim_key(owner, self._sections, diagnostic.id, diagnostic, label="diagnostic")
 
     def report(self) -> list[tuple[str, list[tuple[str, str]]]]:

@@ -33,6 +33,7 @@ from ..cordis import Context, Disposer, events, maybe_await, plugin
 from ..paths import default_home_path, write_text_under
 from ..session import Session, SessionEvent, dumps, now_ms
 from ..wire import WireModel
+from ._registry import claim_entry
 
 __all__ = ["SessionTelemetry", "SessionTelemetryRecord", "apply"]
 
@@ -73,14 +74,7 @@ class SessionTelemetry:
         self, sink: Callable[[SessionTelemetryRecord], Any], *, scope: Context | None = None
     ) -> Disposer:
         """Register an exporter. It sees only post-redaction records."""
-        owner = scope or self.ctx
-        self._sinks.append(sink)
-
-        def release() -> None:
-            if sink in self._sinks:
-                self._sinks.remove(sink)
-
-        return owner.add_disposer(release, label="telemetry.sink")
+        return claim_entry(self.ctx.owner_for(scope), self._sinks, sink, label="telemetry.sink")
 
     async def record(self, record: SessionTelemetryRecord) -> None:
         """Redact, then fan out. A dropped record reaches no sink."""

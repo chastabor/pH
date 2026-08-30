@@ -34,7 +34,7 @@ from typing import Any, Literal, Protocol, TypeAlias, runtime_checkable
 
 from ..cordis import Context, Disposer, plugin
 from ..session import Session
-from ._registry import claim_slot
+from ._registry import claim_entry, claim_slot
 
 __all__ = [
     "CompactionEngine",
@@ -152,7 +152,7 @@ class CompactionSeam:
     # ------------------------------------------------------------ the engine --
 
     def register(self, engine: CompactionEngine, *, scope: Context | None = None) -> Disposer:
-        return claim_slot(scope or self.ctx, self, "engine", engine, label="compaction")
+        return claim_slot(self.ctx.owner_for(scope), self, "engine", engine, label="compaction")
 
     def require(self) -> CompactionEngine:
         if self.engine is None:
@@ -184,14 +184,20 @@ class CompactionSeam:
 
     def note(self, note: CompactionNote, *, scope: Context | None = None) -> Disposer:
         """Contribute a block to every summary prompt this context can reach."""
-        entry = _NoteRegistration(owner=scope or self.ctx, note=note)
-        self._notes.append(entry)
-
-        def off() -> None:
-            if entry in self._notes:
-                self._notes.remove(entry)
-
-        return entry.owner.add_disposer(off, label=f"compaction-note({note.name})")
+        # `owner` is what `notes()` filters with `reaches` — visibility, so it
+        # stays where the caller put it — while the disposer belongs to the row
+        # that registered (P6-12). Through `claim_entry` because
+        # `_NoteRegistration` is a frozen dataclass and therefore compares by
+        # *value*: the `self._notes.remove(entry)` this replaces would have had
+        # one row's disposal take another's equal entry, which is the defect
+        # `_registry` exists to name.
+        entry = _NoteRegistration(owner=self.ctx.layer_for(scope), note=note)
+        return claim_entry(
+            self.ctx.owner_for(scope),
+            self._notes,
+            entry,
+            label=f"compaction-note({note.name})",
+        )
 
     def notes(self, session: Session, *, scope: Context | None = None) -> list[str]:
         """The rendered blocks for one session, in `order` then registration order.

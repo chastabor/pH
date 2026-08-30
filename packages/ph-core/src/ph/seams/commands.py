@@ -54,7 +54,7 @@ class CommandRegistry:
 
     def register(self, definition: CommandDefinition, *, scope: Context | None = None) -> Disposer:
         return claim_key(
-            scope or self.ctx, self._commands, definition.name, definition, label="command"
+            self.ctx.owner_for(scope), self._commands, definition.name, definition, label="command"
         )
 
     def list(self) -> list[CommandDefinition]:

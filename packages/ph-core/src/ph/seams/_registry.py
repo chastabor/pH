@@ -1,4 +1,4 @@
-"""The one "release only if still mine" rule for seam registrations.
+"""Who owns a seam registration, and the one "release only if still mine" rule.
 
 Every seam lets a plugin claim a slot (the sandbox provider, the code runtime) or
 a key in a table (a command, a skill, a renderer) and hand back a disposer.
@@ -6,6 +6,14 @@ Written by hand six times, the release step drifted: some copies checked
 identity before removing, some did not. A disposer that removes whatever
 *currently* occupies the slot would tear down a successor registered after its
 own owner was replaced — so identity is checked here, once.
+
+**Who owns a registration is `Context.owner_for`, not here** (P6-12). It was
+briefly this module's, and it does not belong: this module is about *tables* —
+release only what is still mine — while ownership is about `Context` lifetimes
+and touches nothing else. Two of its three consumers (`ph.tools.registry`,
+`ph.system_prompt.assembly`) are not seams at all, so keeping it here made them
+reach into a sibling package's underscore module and left a latent import cycle
+one re-export away.
 
 @module ph.seams._registry
 """

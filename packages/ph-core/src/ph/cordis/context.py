@@ -41,6 +41,7 @@ import inspect
 import logging
 from collections.abc import Awaitable, Callable, Iterator, Sequence
 from contextlib import suppress
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any, TypeAlias
 
@@ -197,6 +198,10 @@ class ForkScope:
         await self._parent.reconcile()
 
 
+_ACTIVATING: ContextVar[Context | None] = ContextVar("ph.cordis.activating", default=None)
+"""The activation scope of the `apply` currently running. See `Context.current_scope`."""
+
+
 class Context:
     """One node of the plugin tree: services, listeners and effects."""
 
@@ -254,6 +259,109 @@ class Context:
         """The transparent scope a plugin's `apply` runs in."""
         owner = dependent.ctx
         return cls(owner, label=dependent.label, provide_to=owner._provide_to, module=owner._module)
+
+    def owner_for(self, scope: Context | None = None) -> Context:
+        """Whose lifetime a registration made *now* belongs to (I2, P6-12).
+
+        Called as `self.ctx.owner_for(scope)` from a seam, where `self.ctx` is
+        the seam's own context and is therefore the fallback rather than the
+        answer. Three cases, in order:
+
+        * **an explicit `scope=`** — the caller said so, and the only thing that
+          overrides the rest. It now means what it always read as, *"register on
+          someone else's lifetime"* (an agent's, so the registration shadows a
+          global one for that agent alone), instead of being a rule twenty
+          modules had to remember to get the *ordinary* case right;
+        * **the activation scope**, when a row's `apply` is what is running —
+          the scope cordis disposes when the row unmounts, so the registration
+          goes with it. This is the fix;
+        * **this context**, outside any activation: today's behaviour, kept so
+          the change is strictly additive for callers that are not rows at all
+          (a test standing a service up by hand, a mode wiring one directly).
+
+        **A disposed activation scope declines, and says so.** Contextvars
+        propagate into tasks spawned from `apply`, so a background task
+        registering after its row unmounted would otherwise hit
+        `add_disposer`'s `InactiveScopeError` where today it leaks quietly.
+        Raising is a behaviour change this row did not sign up for — but a
+        silent fallback would make the one path that still outlives its owner
+        both invisible and unmeasurable, so it warns. That is the only branch
+        here that fails open, and §5 rule 6 wants it visible where it happens.
+        """
+        if scope is not None:
+            return scope
+        activating = _ACTIVATING.get()
+        if activating is None:
+            return self
+        if activating.active:
+            return activating
+        log.warning(
+            "ph.cordis: %s registered after its activation scope %s was disposed; "
+            "the registration will outlive the row that made it (I2)",
+            self.path,
+            activating.path,
+        )
+        return self
+
+    def layer_for(self, scope: Context | None = None) -> Context:
+        """Which scope a registration is *visible to* — the other question (P6-12).
+
+        Separate from `owner_for` because they are different questions that had
+        the same answer, and the review of this row found the conflation in five
+        registries: a tool layer key, a prompt section's `reaches` target, a
+        skill restriction's bucket, a compaction note's `reaches` target, and an
+        fs screen's. Visibility is `scope or this context` — unchanged, and
+        deliberately *not* the activating row, because moving it would change
+        what an agent can see (B7) rather than when a registration goes away.
+
+        Spelled out so a call site says which question it is asking. A registry
+        that needs both writes `self.ctx.owner_for(scope)` and
+        `self.ctx.layer_for(scope)` side by side, and a reader can see that it
+        asked both rather than reusing one answer for two purposes.
+        """
+        return scope if scope is not None else self
+
+    @staticmethod
+    def current_scope() -> Context | None:
+        """The activation scope `apply` is running in, or `None` outside one (P6-12).
+
+        **The owner a seam registration should default to.** Cordis already
+        builds exactly the right scope in `_activation_scope` and hands it to
+        `apply` — it is the thing disposed when the row unmounts — but a seam
+        only ever saw `ctx`, and `ctx.commands.register(...)` gave the registry
+        no way to know who was calling. So every seam defaulted the owner to its
+        *own* context, and a registration made by a row became an effect of the
+        **seam**, outliving the row that made it: I2 held only where a caller
+        remembered `scope=`, which was 1 of 38 call sites in the tree.
+
+        A `ContextVar` rather than a parameter threaded through forty
+        signatures, because the answer is a property of *who is running*, not of
+        what they are asking for — and because the seam methods are the API
+        rows use, which cannot grow a mandatory argument without breaking every
+        one of them.
+
+        **It answers "which `apply` is on the stack", not "whose callback is
+        running", and the two come apart in one place.** The variable is live
+        for the whole dynamic extent of the activation `await`, so a listener
+        belonging to row B, dispatched from row A's `apply`, sees *A* — and a
+        registration B makes there unwinds when A unmounts. No shipped row emits
+        during `apply`, so this is latent rather than live, but it is one
+        `ctx.emit` away. The mirror gap is that a registration made *after*
+        `apply` returns — from a `profile/mounted` listener, a tool body, a turn
+        hook — sees `None` and lands on the seam, which is why
+        `register_when_composed` passes `scope=ctx` by hand.
+
+        Closing both means keying on the owner of the *callback* rather than the
+        activation: `Hook` already carries `ctx`, so dispatch could set this the
+        same way. That is a change to how every listener is invoked and wants
+        its own row (P6-25) rather than a line here.
+
+        It also propagates into tasks spawned from `apply`, which is the third
+        edge: a registration made from a background task after its scope was
+        disposed would raise. `Context.owner_for` declines a disposed scope and
+        warns instead.
+        """
+        return _ACTIVATING.get()
 
     # ------------------------------------------------------------- identity --
 
@@ -477,11 +585,19 @@ class Context:
                     scope = Context._activation_scope(dependent)
                     dependent.scope, dependent.active = scope, True
                     runtime.dirty = True
+                    # Set around the activation, and reset in `finally` rather
+                    # than left to the task ending: `reconcile` activates every
+                    # ready dependent in one loop on one task, so a token left
+                    # behind would make the next row's registrations land on the
+                    # previous row's scope (P6-12).
+                    token = _ACTIVATING.set(scope)
                     try:
                         await maybe_await(dependent.activate(scope))
                     except BaseException:
                         await maybe_await(dependent.deactivate())
                         raise
+                    finally:
+                        _ACTIVATING.reset(token)
                 elif not ready and dependent.active:
                     # The fork survives: re-providing the missing service
                     # reactivates it on a later reconcile.
