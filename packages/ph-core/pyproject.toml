@@ -11,6 +11,7 @@ requires-python = ">=3.12"
 license = "MIT"
 dependencies = [
     "anyio>=4.4",
+    "croniter>=3.0",
     "pydantic>=2.9",
     "pyyaml>=6.0",
 ]
@@ -39,6 +40,7 @@ fs-local = "ph.seams.fs:apply"
 fs-read-before-edit = "ph.seams.fs:read_before_edit"
 jobs-local = "ph.seams.jobs:apply"
 permission-presets = "ph.seams.permission_presets:apply"
+schedule = "ph.seams.schedule:apply"
 sandbox-policy = "ph.seams.sandbox:apply"
 settings-local = "ph.seams.settings:apply"
 shell-local = "ph.seams.shell:apply"

@@ -23,6 +23,7 @@ import anyio
 import pytest
 
 from ph.bundles import BASE, HEADLESS
+from ph.seams.schedule import Schedule
 from ph_app.daemon import DaemonClient, recovery, serve, server
 from ph_app.daemon import supervisor as supervisor_module
 from ph_app.daemon.supervisor import Supervisor
@@ -1152,3 +1153,109 @@ def test_every_type_this_package_writes_is_in_the_vocabulary() -> None:
     }
     undeclared = written - KNOWN_SESSION_EVENT_TYPES
     assert not undeclared, f"ph-app writes types ph-core would refuse at seed: {undeclared}"
+
+
+# --- P5-06: the scheduler ----------------------------------------------------
+#
+# The seam is tested in ph-core against a log; these are the two things only the
+# daemon can answer — that a due tick becomes a real turn, and that a root with
+# work scheduled is not released by P5-05 while it waits for it.
+
+
+async def test_a_due_schedule_starts_a_turn(tmp_path: Path) -> None:
+    """The tick delivers through `prompt`, so a scheduled turn is an ordinary one.
+
+    Same path a person's message takes, with a `schedule/tick` beside it saying
+    why it started — rather than a second way into the loop that would have its
+    own bugs and its own transcript shape.
+    """
+    async with running(tmp_path) as daemon:
+        supervisor = daemon.server.supervisor
+        client = await daemon.client()
+        await client.call("session/new", sessionId="cron")
+        root = supervisor.roots["cron"]
+
+        root.ctx.schedule.create(
+            root.session,
+            Schedule(id="nightly", kind="interval", spec="60000", prompt="do the thing"),
+        )
+        # Relative to creation: a schedule is anchored where it was made, so a
+        # clock starting at zero is decades before its own schedule exists.
+        made = root.ctx.schedule.states(root.session)["nightly"].created_at
+        assert await supervisor.tick(now=made + 1_000) == [], "fired before it was due"
+
+        assert await supervisor.tick(now=made + 90_000) == ["nightly"]
+        await _settled(client, "cron", events=1)
+
+        types = [event.type for event in root.session.events_from(0)]
+        assert types.count("schedule/tick") == 1
+        assert "assistant/message" in types, "the scheduled turn never ran"
+
+
+async def test_a_root_with_work_scheduled_is_not_released(tmp_path: Path) -> None:
+    """P5-05's fourth condition, which that row left open for this one.
+
+    A root that has said when it comes back is a root that is still wanted.
+    Releasing it would drop the only thing that knows the appointment — and
+    since passivation unwinds the `Context`, the schedule would stop being
+    watched while still sitting in the log claiming it fires at nine.
+    """
+    async with running(tmp_path) as daemon:
+        supervisor = daemon.server.supervisor
+        root = await supervisor.start("appointed")
+        assert await supervisor.sweep(after=0) == ["appointed"], "an empty root should release"
+
+        root = await supervisor.start("appointed")
+        root.ctx.schedule.create(
+            root.session, Schedule(id="s", kind="cron", spec="0 9 * * *", prompt="morning")
+        )
+        assert await supervisor.sweep(after=0) == [], "released a root with work scheduled"
+
+        root.ctx.schedule.cancel(root.session, "s")
+        assert await supervisor.sweep(after=0) == ["appointed"]
+
+
+async def test_a_heartbeat_records_that_something_is_still_watching(tmp_path: Path) -> None:
+    """Liveness for a schedule that fires monthly.
+
+    Without it such a root's log ends with a line a month old, which reads
+    exactly like a log nobody is writing any more. A record, not a keep-alive:
+    what keeps the root mounted is the schedule itself.
+    """
+    async with running(tmp_path) as daemon:
+        supervisor = daemon.server.supervisor
+        root = await supervisor.start("monthly")
+
+        await supervisor.heartbeat(now=1_000)
+        assert not [e for e in root.session.events_from(0) if e.type == "schedule/heartbeat"]
+
+        root.ctx.schedule.create(
+            root.session, Schedule(id="m", kind="cron", spec="0 0 1 * *", prompt="monthly")
+        )
+        await supervisor.heartbeat(now=2_000)
+        beats = [e for e in root.session.events_from(0) if e.type == "schedule/heartbeat"]
+        assert len(beats) == 1 and beats[0].data["live"] == 1
+
+
+async def test_one_root_with_a_broken_schedule_does_not_stop_the_others(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every root's schedules fire from one loop, so one of them must not end it."""
+    async with running(tmp_path) as daemon:
+        supervisor = daemon.server.supervisor
+        broken = await supervisor.start("broken")
+        working = await supervisor.start("working")
+        working.ctx.schedule.create(
+            working.session, Schedule(id="ok", kind="interval", spec="1000", prompt="hi")
+        )
+
+        original = type(broken.ctx.schedule).claim
+
+        def claim(self: Any, session: Any, *, now: int) -> Any:
+            if session.id == "broken":
+                raise RuntimeError("this schedule is unreadable")
+            return original(self, session, now=now)
+
+        monkeypatch.setattr(type(broken.ctx.schedule), "claim", claim)
+        made = working.ctx.schedule.states(working.session)["ok"].created_at
+        assert await supervisor.tick(now=made + 10_000) == ["ok"]

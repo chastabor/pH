@@ -465,6 +465,20 @@ class TuiEventAdapter:
             event,
         )
 
+    def _on_schedule_tick(self, event: SessionEvent, live: bool) -> None:
+        """A scheduled run started (P5-06).
+
+        The row that answers "why did this session wake at 3am". Without it a
+        transcript shows a turn nobody typed, which reads as the agent acting on
+        its own — and `late` is said out loud because a tick that coalesced
+        several missed fire times is a gap the reader can otherwise only infer
+        from the clock.
+        """
+        due, fired = int(event.data.get("dueAt", 0)), int(event.data.get("firedAt", 0))
+        late = (fired - due) // 1000
+        delay = f", {late}s late" if late >= 1 else ""
+        self._row("schedule", "notice", f"Scheduled run — {event.data.get('id', '')}{delay}", event)
+
     def _on_kernel_restored(self, event: SessionEvent, live: bool) -> None:
         """A resumed namespace, but only when something did not come back.
 
@@ -697,6 +711,7 @@ HANDLERS: Mapping[str, Handler] = {
     "supervisor/failed": TuiEventAdapter._on_supervisor_failed,
     "supervisor/recovered": TuiEventAdapter._on_supervisor_recovered,
     "supervisor/passivated": TuiEventAdapter._on_supervisor_passivated,
+    "schedule/tick": TuiEventAdapter._on_schedule_tick,
     "agent/inbox/spliced": TuiEventAdapter._on_agent_inbox_spliced,
     "todo/write": TuiEventAdapter._on_todo_write,
     "offload/spilled": TuiEventAdapter._on_offload_spilled,
@@ -720,6 +735,11 @@ can hold against the log's vocabulary rather than a naming convention."""
 
 RECORDLESS: frozenset[str] = frozenset(
     {
+        # Creating, cancelling and heartbeating a schedule are not events in the
+        # conversation — the *tick* is what a reader needs, and it has a row.
+        "schedule/created",
+        "schedule/cancelled",
+        "schedule/heartbeat",
         "request/header",
         "step/start",
         "step/end",

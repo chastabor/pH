@@ -152,6 +152,14 @@
 - id: subagents
   name: subagents
 
+# Work a root will do later (P5-06). The seam only: it records and folds, and
+# the thing that *drives* ticks is whatever is running long enough to notice
+# them — the daemon. A CLI run mounts this row and simply never fires anything,
+# which is correct: a schedule created in a one-shot run is still in the log for
+# the daemon to find.
+- id: schedule
+  name: schedule
+
 # Named kinds of child a deployment is willing to spawn (P4-13b) — a `reviewer`
 # is `skills: [code-review]`, written once. **A menu, never a grant**: a parent
 # selecting one still gets only what it holds itself, because a preset that

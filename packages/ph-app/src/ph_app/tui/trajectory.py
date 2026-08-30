@@ -372,6 +372,10 @@ HANDLERS: Mapping[str, Handler] = {
     "supervisor/failed": _on_harness_event,
     "supervisor/recovered": _on_harness_event,
     "supervisor/passivated": _on_harness_event,
+    "schedule/created": _on_harness_event,
+    "schedule/cancelled": _on_harness_event,
+    "schedule/tick": _on_harness_event,
+    "schedule/heartbeat": _on_harness_event,
     # A record, not `RECORDLESS`: an auditor reading a transcript needs to know
     # where somebody else's work ends and this run's begins, and that the turn
     # above the seam may have been closed by the repair rather than by the model.

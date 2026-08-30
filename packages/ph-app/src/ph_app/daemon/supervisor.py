@@ -620,6 +620,71 @@ class Supervisor:
                 await self._flush(root)
                 await anyio.sleep(state.delay)
 
+    def _live_schedules(self, root: Root) -> list[Any]:
+        """This root's schedules that could still fire, or an empty list.
+
+        The seam lookup and its `None` guard written once: three callers wanted
+        it — the tick, the heartbeat and the passivation predicate — and each
+        had its own copy of the name, the guard and the read.
+        """
+        schedule = root.ctx.get("schedule")
+        return [] if schedule is None else list(schedule.live(root.session))
+
+    async def tick(self, *, now: int | None = None) -> list[str]:
+        """Fire whatever is due on every mounted root (P5-06). Returns their ids.
+
+        **Claim then deliver, never the other way round.** `ScheduleService.claim`
+        appends `schedule/tick` before returning, so a crash between the two
+        costs a skipped run rather than a repeated one — and a repeated run of a
+        scheduled prompt bills twice and puts a turn in the transcript nobody
+        asked for. The delivery is `prompt`, which is the same path a person's
+        message takes, so a scheduled turn is an ordinary turn with a record
+        saying why it started.
+
+        One stamp for the whole pass, so two schedules due in the same second
+        agree about what "now" was.
+        """
+        stamp = now if now is not None else now_ms()
+        fired: list[str] = []
+        for root in list(self.roots.values()):
+            schedule = root.ctx.get("schedule")
+            if schedule is None:
+                continue
+            # The whole per-root body, not just the claim. The guard used to
+            # cover `claim` alone — which barely raises, since a bad expression
+            # logs and declines — while `prompt` and `_flush`, the two calls
+            # that genuinely fail, sat outside it. One bad root taking the pass
+            # down is what this is for.
+            try:
+                claimed = schedule.claim(root.session, now=stamp)
+                for entry in claimed:
+                    log.info("ph_app.daemon: root %s firing schedule %s", root.id, entry.id)
+                    await self.prompt(root.id, entry.prompt)
+                    fired.append(entry.id)
+                # Only when something was appended. The condition also read
+                # `or schedule.live(...)`, which folded the whole log a second
+                # time to decide to flush a buffer the first fold had just left
+                # empty — 24 ms a root at 500 000 events, every five seconds.
+                if claimed:
+                    await self._flush(root)
+            except Exception:
+                log.exception("ph_app.daemon: root %s failed its schedule tick", root.id)
+        return fired
+
+    async def heartbeat(self, *, now: int | None = None) -> None:
+        """Leave a liveness record on every root that has work scheduled.
+
+        A record, not a keep-alive: a schedule that fires monthly otherwise
+        leaves a log whose last line is a month old, which reads exactly like a
+        log nobody is writing any more.
+        """
+        stamp = now if now is not None else now_ms()
+        for root in list(self.roots.values()):
+            live = self._live_schedules(root)
+            if live:
+                root.ctx.schedule.heartbeat(root.session, now=stamp, live=len(live))
+                await self._flush(root)
+
     async def _release(self, root: Root) -> None:
         """Flush a root's log, then unwind everything it took.
 
@@ -743,10 +808,14 @@ class Supervisor:
           child's own events arriving at a root that no longer exists;
         * **it has been quiet long enough**, from the log.
 
-        Heartbeats and cron are the row's other two conditions and have nothing
-        to check yet — P5-06 owns both, and there is no scheduler to ask. Said
-        plainly here rather than left as an unexplained absence, and the shape
-        is one more clause when that row lands.
+        * **it has work scheduled** — a root with a live schedule is going to
+          be needed again, and releasing it would be releasing something that
+          has already said when it comes back (P5-06).
+
+        Heartbeats were the fourth condition and turn out not to be one: a
+        heartbeat is a *record* the scheduler leaves so an operator can tell
+        "waiting for Wednesday" from "died on Tuesday", not a claim on the
+        root's life. What keeps a scheduled root mounted is the schedule.
         """
         if root.status != "idle":
             return False
@@ -771,7 +840,12 @@ class Supervisor:
         # roots.
         subagents = root.ctx.get("subagents")
         roster = subagents.roster(root.session) if subagents is not None else {}
-        return not any(child_is_live(child) for child in roster.values())
+        if any(child_is_live(child) for child in roster.values()):
+            return False
+        # Last, and cached the same way: this one was inserted *above* the
+        # comment describing the cached fold, so the paragraph arguing against
+        # a bare whole-log walk sat directly on top of one.
+        return not self._live_schedules(root)
 
     async def sweep(self, *, after: float | None = None, now: int | None = None) -> list[str]:
         """Release every root that has been quiet long enough. Returns their ids.
@@ -834,6 +908,9 @@ class Supervisor:
             # The cached roster would outlive the root otherwise: the seam keys
             # its fold by session id and nothing else tells it this one is gone.
             subagents.forget_session(root.id)
+        schedule = root.ctx.get("schedule")
+        if schedule is not None:
+            schedule.forget_session(root.id)
         await root.wake.aclose()
         await self._release(root)
 

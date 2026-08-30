@@ -54,6 +54,15 @@ KNOWN_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         # way back says only that something was resumed, not that nothing had
         # gone wrong.
         "supervisor/passivated",
+        # Future work a root will do, and the claim that it is doing it (P5-06).
+        # `schedule/tick` is appended *before* delivery: a tick recorded and
+        # lost to a crash costs one skipped run, while a tick delivered and lost
+        # costs a repeated one — and repeating a scheduled prompt bills twice
+        # and confuses the transcript.
+        "schedule/created",
+        "schedule/cancelled",
+        "schedule/tick",
+        "schedule/heartbeat",
         "step/end",
         "step/start",
         "tool/call",
@@ -222,6 +231,13 @@ IGNORABLE_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         "supervisor/failed",
         "supervisor/recovered",
         "supervisor/passivated",
+        # Scheduler bookkeeping: a reader skipping these loses *why* a turn
+        # started at 3am, which is accounting rather than the conversation —
+        # the prompt the tick delivered is a `user/message` either way.
+        "schedule/created",
+        "schedule/cancelled",
+        "schedule/tick",
+        "schedule/heartbeat",
         "limits/exceeded",
         "limits/breaker-tripped",
         "workspace/acquired",

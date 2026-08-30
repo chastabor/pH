@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import logging
 import os
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -46,6 +46,23 @@ from .supervisor import Supervisor
 __all__ = ["DaemonServer", "serve"]
 
 log = logging.getLogger("ph_app.daemon")
+
+HEARTBEAT_EVERY = 5 * 60.0
+"""Seconds between liveness records for a root that has work scheduled.
+
+Not a keep-alive and not a health check: a record, so an operator reading a
+cron-driven trace can tell "waiting for Wednesday" from "died on Tuesday". A
+schedule that fires monthly otherwise leaves a log whose last line is a month
+old, which is indistinguishable from a log nobody is writing.
+
+Beside the other two cadences rather than in the seam, where it was: ph-core
+held a constant only this loop read."""
+
+TICK_EVERY = 5.0
+"""How often due schedules are checked. The floor on a schedule's resolution.
+
+Five seconds rather than the sweeper's sixty: this decides when work *starts*,
+and a minute of slack on "run at 09:00" is a minute somebody notices."""
 
 SWEEP_EVERY = 60.0
 """How often the passivation sweep runs. A coarse tick, not a second timeout."""
@@ -255,35 +272,30 @@ class DaemonServer:
             await _Connection(stream=stream, server=self).serve()
 
 
-async def _sweeper(supervisor: Supervisor, every: float, stop: anyio.Event) -> None:
-    """Release idle roots on a timer, until the daemon stops (P5-05).
+async def _every(
+    seconds: float, stop: anyio.Event, work: Callable[..., Awaitable[Any]], what: str
+) -> None:
+    """Run `work` on a fixed cadence until the daemon stops.
 
-    The interval is not the timeout: `after` decides eligibility from the log's
-    own clock, so a coarse sweep releases a root a little late rather than
-    letting the two numbers drift into one meaning. That also makes the sweep
-    cheap enough to be uninteresting — it reads a status, a set and a tail
-    event per root.
+    **One reading of `stop`, not three**: the timeout falls through to the work
+    and a set event returns, so the loop condition and a trailing guard cannot
+    disagree about what "stopped" means. That reasoning was written once and
+    then depended on twice — the sweeper and the ticker were the same seven
+    lines with different bodies — so any change to shutdown semantics needed
+    two edits and nothing would have noticed one of them being missed.
 
-    Bounded by the same `stop` the accept loop waits on, so shutting down does
-    not depend on a sleep elapsing.
+    A failing pass is logged and the cadence continues: work that raised would
+    otherwise take the task group with it, and with it every root, over a
+    housekeeping pass. That is the reasoning `_drive` contains a crash for.
     """
     while True:
-        # One reading of `stop`, not three: the timeout falls through to the
-        # sweep and a set event returns, so the loop condition and a trailing
-        # guard cannot disagree about what "stopped" means.
-        with anyio.move_on_after(every):
+        with anyio.move_on_after(seconds):
             await stop.wait()
             return
         try:
-            # Not logged again here: `passivate` already says which root went
-            # and how long it had been quiet. The ids come back so a test — and
-            # P5-10's `ph agents` — can ask without parsing a log line.
-            await supervisor.sweep()
+            await work()
         except Exception:
-            # A sweep that raised would take the task group with it — every
-            # root, over a housekeeping pass. One bad root must not be a dead
-            # daemon, which is the same reasoning `_drive` contains a crash for.
-            log.exception("ph_app.daemon: the passivation sweep failed")
+            log.exception("ph_app.daemon: %s failed", what)
 
 
 async def _clear_stale(path: Path) -> None:
@@ -313,6 +325,8 @@ async def serve(
     model: str = "fake-1",
     passivate_after: float | None = PASSIVATE_AFTER,
     sweep_every: float = SWEEP_EVERY,
+    tick_every: float = TICK_EVERY,
+    heartbeat_every: float = HEARTBEAT_EVERY,
     path: Path | None = None,
     ready: anyio.Event | None = None,
     started: Callable[[DaemonServer], None] | None = None,
@@ -343,8 +357,17 @@ async def serve(
             # it is theirs alone — the same reasoning `$PH_RUNTIME` is 0o700 for.
             os.chmod(socket_path, 0o600)
             server = DaemonServer(supervisor=supervisor, stop=anyio.Event())
+            # Three cadences, three tasks, one primitive. The heartbeat used to
+            # ride the ticker on a counter that only advanced when a tick
+            # *succeeded*, so a run of failing ticks starved the liveness record
+            # as a side effect of an unrelated failure.
             if passivate_after is not None:
-                tasks.start_soon(_sweeper, supervisor, sweep_every, server.stop)
+                tasks.start_soon(_every, sweep_every, server.stop, supervisor.sweep, "the sweep")
+            if tick_every > 0:
+                tasks.start_soon(_every, tick_every, server.stop, supervisor.tick, "the tick")
+                tasks.start_soon(
+                    _every, heartbeat_every, server.stop, supervisor.heartbeat, "the heartbeat"
+                )
             if started is not None:
                 # Handed out rather than reachable through the socket: a test
                 # whose subject is the supervisor's own concurrency has no wire

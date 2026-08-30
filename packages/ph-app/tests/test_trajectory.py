@@ -102,6 +102,13 @@ def test_the_auditor_renders_what_the_transcript_does_not() -> None:
         "compaction/summarized",
         "workspace/acquired",
         "workspace/disposed",
+        # P5-06: creating, cancelling and heartbeating a schedule are not
+        # conversation — the *tick* is, and it has a transcript row. An auditor
+        # asking "why did this wake at 3am, and was anything watching between
+        # runs" wants all four.
+        "schedule/created",
+        "schedule/cancelled",
+        "schedule/heartbeat",
         "workspace/provisioned",
         "workspace/checkpoint",
         # Who asked for a turn, and whether they had asked before: bookkeeping
