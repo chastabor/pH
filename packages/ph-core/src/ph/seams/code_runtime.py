@@ -30,7 +30,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol, TypeAlias, runtime_checkable
 
-from ..cordis import Context, Disposer, plugin
+from ..cordis import Context, Disposer, Running, plugin, running
 from ._registry import claim_key, claim_slot
 
 __all__ = [
@@ -225,6 +225,8 @@ class CodeRuntimeSeam:
 
     ctx: Context
     provider: CodeRuntime | None = None
+    provider_by: Running | None = None
+    """Who registered the runtime (P6-29). See `ph.seams.compaction`."""
     _sdk_renderers: dict[str, Callable[[Sequence[CodeBindingNamespace]], str]] = field(
         default_factory=dict
     )
@@ -244,7 +246,11 @@ class CodeRuntimeSeam:
                 "Set declares_kernel_snapshots = True once the provider emits them."
             )
         return claim_slot(
-            self.ctx.owner_for(scope), self, "provider", provider, label="code_runtime"
+            self.ctx.running_for(scope),
+            self,
+            "provider",
+            provider,
+            label="code_runtime",
         )
 
     def register_sdk_renderer(
@@ -278,7 +284,11 @@ class CodeRuntimeSeam:
         return self.provider
 
     async def run(self, request: CodeRunRequest) -> CodeRunResult:
-        return await self.require().run(request)
+        provider = self.require()
+        # As the row that registered the runtime (P6-29). The layer is the
+        # registration's, for the reason `CompactionSeam.register` states.
+        with running(self.provider_by):
+            return await provider.run(request)
 
 
 @plugin("code-runtime")

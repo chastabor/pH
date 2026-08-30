@@ -40,8 +40,8 @@ import asyncio
 import inspect
 import logging
 from collections.abc import Awaitable, Callable, Iterator, Sequence
-from contextlib import contextmanager, suppress
-from contextvars import ContextVar
+from contextlib import suppress
+from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from typing import Any, TypeAlias
 
@@ -128,7 +128,17 @@ def _invoke(hook: Hook, *args: Any) -> Any:
     this same function introduced — **172 ns**, run twice per listener, which
     made the awaitability question cost more than the ownership it was serving.
     """
-    token = _ACTIVATING.set(hook.ctx)
+    # Inline, and through the scope's memoized self-pair. Building a
+    # `Running` here costs **206 ns** — a frozen dataclass sets its fields
+    # through `object.__setattr__` — against **22 ns** for this load-and-branch,
+    # and it runs once per listener per chunk: 1.76 ms became 2.84 ms on the
+    # 2 000-emit bench below before the memo, which is the same 55% this
+    # function's inline binding exists to have avoided in the first place.
+    owner = hook.ctx
+    pair = owner._running_self
+    if pair is None:
+        pair = owner._running_self = Running(owner, owner)
+    token = _ACTIVATING.set(pair)
     try:
         result = hook.callback(*args)
         # `None` first, and it is most of the win. A listener that returns
@@ -242,14 +252,108 @@ class ForkScope:
         await self._parent.reconcile()
 
 
-_ACTIVATING: ContextVar[Context | None] = ContextVar("ph.cordis.activating", default=None)
-"""Whose code is running: an `apply`'s activation scope, or a listener's owner.
+@dataclass(frozen=True, slots=True)
+class Running:
+    """Who is running — as the *two* questions it has to answer (P6-29).
 
-See `Context.current_scope`, and `_invoke` for the listener half."""
+    Public because it is also **what a registry records at registration time**.
+    Every one of them invokes a row's body later — a tool, a command, a
+    compaction note, a prompt section, a status field, a diagnostic, a telemetry
+    sink, and each of the five single-slot providers — and to enter the right
+    binding then, they have to have kept both answers now. `Context.running_for`
+    hands them exactly this object, so "what registration recorded" and "what the
+    invoker binds" are one type rather than two fields a registry pairs up by
+    hand and can pair up wrongly.
+
+    P6-12 established that a registration answers two questions with one value,
+    and split the readers into `Context.owner_for` (whose lifetime) and
+    `Context.layer_for` (who may see it). It did not split what they read, and
+    for two rows it did not have to: an `apply` and a listener both run *as one
+    scope*, so the owner and the layer are the same object and one `Context` in
+    the var said both truthfully.
+
+    A body a **registry** invokes is the case where they come apart. A tool's
+    `execute` belongs to the row that registered the tool — that is whose code it
+    is, and I2 says a registration made from it unwinds with that row — while it
+    is visible to the *agent* it was invoked for, which is B7's answer and a
+    different scope entirely. P6-26 bound `execution.scope` for both, which made
+    containment right and quietly re-answered lifetime as "the agent": a tool
+    registered from a tool body outlived the row that registered the tool,
+    verified.
+
+    Two fields rather than a second `ContextVar` because they are one fact — *who
+    is running* — read two ways, and two variables can be set out of step. The
+    only way to bind one is `running()`, which takes both.
+
+    **What this makes possible is the rest of the rule.** `CompactionSeam.render`
+    and `SystemPromptService.assemble` each hold the target scope in a local and
+    invoke a row's body two lines later; they could not join P6-26 because the
+    target is a *layer* while the owner is still the registering row, and one
+    `Context` cannot say both. The same shape covers `StatusField.read`,
+    `Diagnostic.read` and a `claim_slot` provider, where there is no target at
+    all and both halves are simply what registration recorded — which is why "a
+    provider has no agent" stopped being an objection: nothing needs an agent for
+    the *owner* half.
+    """
+
+    owner: Context
+    """Whose lifetime a registration made now joins — `Context.owner_for`."""
+    layer: Context
+    """Which scope it is visible to — `Context.layer_for`."""
+
+    def add_disposer(self, dispose: Disposer, *, label: str = "") -> Disposer:
+        """Release when **either** scope ends — the pair's lifetime, not a half's.
+
+        Before P6-29 the two could not diverge, so "when does this go away" had
+        one answer and `Context.add_disposer` was the whole of it. Once a body a
+        registry invokes registers as its row *for* an agent, they are unrelated
+        branches and either can end first — and picking one is wrong in a
+        different direction each way. Owning it by the row alone leaves whatever
+        the layer keyed on a disposed scope: `ToolRuntime._layers` went 2 → 2
+        across an agent's disposal where it goes 2 → 1. Owning it by the agent
+        alone lets a registration outlive the row whose code made it, which is I2
+        verbatim. So it is neither: the registration is meaningful only while
+        both are alive.
+
+        **Here rather than in each registry**, because a registry keyed on the
+        layer has to ask this question and there is now more than one — the tools
+        registry keys `_layers` by `layer.isolation`, and `ph.seams.skills` keys
+        `_restrictions` the same way. A rule with two sites and one
+        implementation is the shape this whole row exists to delete. It lives on
+        `Running` and not on `Context` because `Context.add_disposer(..., also=)`
+        would ask one scope to know about a pair it does not hold; the pair is
+        the object that holds both.
+
+        The once-guard is `Context.add_disposer`'s: the releaser it returns flips
+        `_Effect.done` and drops the effect before calling through, so `finish`
+        calling the layer's releaser re-enters exactly one level and stops at a
+        guard that already exists. Whichever scope ends first removes the sibling
+        effect from the other, so nothing is left behind on the one that did not.
+        `claim_key`, `claim_entry` and `claim_slot` take `Context | Running`, so a
+        seam opts in by handing them the pair instead of `by.owner`.
+        """
+        drop_layer: Disposer | None = None
+
+        def finish() -> None:
+            if drop_layer is not None:
+                drop_layer()
+            dispose()
+
+        drop = self.owner.add_disposer(finish, label=label)
+        if self.layer is not self.owner:
+            drop_layer = self.layer.add_disposer(drop, label=f"{label}@visible")
+        return drop
 
 
-@contextmanager
-def running(scope: Context) -> Iterator[None]:
+_ACTIVATING: ContextVar[Running | None] = ContextVar("ph.cordis.activating", default=None)
+"""Whose code is running: an `apply`'s activation scope, a listener's owner, or
+the (row, target) pair a registry enters around a body it invokes.
+
+See `Context.current_owner` and `Context.current_layer`, and `_invoke` for the
+listener half."""
+
+
+class running:
     """Bind "who is running" for the duration of a block.
 
     Public since P6-26, because the fourth consumer is in another package's
@@ -258,19 +362,87 @@ def running(scope: Context) -> Iterator[None]:
     of `ph.cordis.context` to do it would be the seam layer depending on an
     underscore.
 
-    Used where the cost cannot matter. That was "once per plugin activation"
-    when `apply` was the only caller; it is now also once per tool call and once
-    per slash command, which measured **27.2 µs against 27.3 µs** over 500 calls
-    on a real profile — inside the run-to-run variance, on a ~27 µs framework
-    floor the tool has not started paying yet. The per-*listener* path is the one
-    that still spells the two calls inline, because `emit` fires per streamed
-    chunk; the measurement is recorded on `_invoke`.
+    **It takes the `Running` itself**, which is how every registry calls it: the
+    pair exists so a registry stops keeping two fields it can pair up wrongly,
+    and taking it apart into two positional arguments at nine call sites would
+    have handed that exact mistake back — `running(a.owner, b.layer)` is silently
+    valid. `layer=` beside a pair *overrides* the visibility half, which is the
+    one thing a caller legitimately knows better: `ph.seams.fs` binds the agent
+    whose path is being resolved rather than the scope the resolver registered on.
+
+    **`None` binds nothing**, for the empty half of an at-most-one slot. Five
+    seams hold a provider that may not be registered, and each was spelling
+    `running(by.owner, by.layer) if by is not None else nullcontext()` — the same
+    conditional five times, plus two private `_as_provider()` helpers that existed
+    only because the expression was too long to inline. The state is real, so it
+    belongs in the one place that knows what binding means.
+
+    **`layer` defaults to `owner`, which is the whole of the ordinary case.**
+    An `apply` and a listener each run as one scope, so `running(scope)` still
+    means what it always did and every existing call site is unchanged. Passing
+    the second argument is the registry case (P6-29): the body belongs to the row
+    that registered it and is visible to the target it was invoked for, and those
+    are two scopes. Spelled as one call with a default rather than two functions,
+    because a caller choosing between `running` and `running_as` is a caller who
+    can pick the wrong one — here the *shape of the call* says whether the two
+    questions have one answer, and the record it binds cannot be half-set.
+
+    **A class rather than a `@contextmanager`, and that is a measurement.** The
+    generator form costs a frame, a `StopIteration` and two `send`s: **709 ns**
+    per entry against **316 ns** for byte-identical branch logic. This stopped
+    being a once-per-activation helper in P6-26 and P6-29 — it is now entered
+    once per tool call, once per slash command, once per prompt row per
+    `assemble`, and once per telemetry sink per record, at twenty-one sites. In
+    situ against the pre-row build on base+headless, a **tool call is at parity:
+    26.67 µs against 26.74** — the cheaper form pays for the whole pair
+    mechanism. `_invoke` still spells the two calls inline for the same reason
+    one scale down: `emit` fires per streamed chunk, where even 316 ns is too
+    much.
+
+    **What it does not pay for is `assemble`, and that is worth stating**
+    (§5 rule 6). Prompt assembly enters this once per *contributing row*, so the
+    cost scales in the thing plugins add: **55.06 µs against 49.85** with the
+    nine rows base+headless contributes, ~1.2 µs per row beyond that. Once per
+    turn, against a model round-trip, so it is affordable — but a deployment with
+    forty prompt rows pays forty bindings, and the honest place to notice that is
+    here rather than in a profiler later.
+
+    **Single-use, like every other context manager built at its `with`.** The
+    token lives on the instance, so re-entering one object would lose the outer
+    token; all twenty-one call sites construct inline, which is the only shape
+    that makes sense for a binding named after the block it wraps.
     """
-    token = _ACTIVATING.set(scope)
-    try:
-        yield
-    finally:
-        _ACTIVATING.reset(token)
+
+    __slots__ = ("_pair", "_token")
+
+    def __init__(self, owner: Running | Context | None, layer: Context | None = None) -> None:
+        pair: Running | None
+        if owner is None:
+            pair = None
+        elif isinstance(owner, Running):
+            pair = owner if layer is None or layer is owner.layer else Running(owner.owner, layer)
+        elif layer is None or layer is owner:
+            # The coinciding case, which is every `apply` and every listener: the
+            # scope keeps one record rather than building one per entry. Cleared
+            # in `dispose`, because the pair holds `self` twice and a disposed
+            # context is meant to become collectable the moment its parent drops
+            # it.
+            pair = owner._running_self
+            if pair is None:
+                pair = owner._running_self = Running(owner, owner)
+        else:
+            pair = Running(owner, layer)
+        self._pair = pair
+        self._token: Token[Running | None] | None = None
+
+    def __enter__(self) -> None:
+        if self._pair is not None:
+            self._token = _ACTIVATING.set(self._pair)
+
+    def __exit__(self, *_exc: Any) -> None:
+        if self._token is not None:
+            _ACTIVATING.reset(self._token)
+            self._token = None
 
 
 async def _as_owner(scope: Context, awaitable: Any) -> Any:
@@ -282,7 +454,7 @@ async def _as_owner(scope: Context, awaitable: Any) -> Any:
     a binding around the *call* has already been reset. So the coroutine carried
     the emitter's binding and never the listener's, and both gaps this row exists
     to close survived verbatim for the most ordinary listener shape in the
-    harness: `current_scope()` read `None` inside the body, and anything it
+    harness: `current_owner()` read `None` inside the body, and anything it
     registered landed on the seam and outlived its row.
 
     Wrapping the awaitable moves the binding *inside* the body, where it is the
@@ -310,6 +482,7 @@ class Context:
         "_module",
         "_parent",
         "_provide_to",
+        "_running_self",
         "_runtime",
         "_services",
     )
@@ -325,6 +498,7 @@ class Context:
     _isolation: Context | None
     _runtime: _Runtime
     _provide_to: Context
+    _running_self: Running | None
 
     def __init__(
         self,
@@ -342,6 +516,7 @@ class Context:
         self._effects = []
         self._services = {}
         self._active = True
+        self._running_self = None
         self._runtime = parent._runtime if parent is not None else _Runtime()
         self._provide_to = provide_to if provide_to is not None else self
         # Fixed at construction, so `reaches()` is a lookup rather than a walk.
@@ -388,13 +563,14 @@ class Context:
         activating = _ACTIVATING.get()
         if activating is None:
             return self
-        if activating.active:
-            return activating
+        owner = activating.owner
+        if owner.active:
+            return owner
         log.warning(
             "ph.cordis: %s registered after its activation scope %s was disposed; "
             "the registration will outlive the row that made it (I2)",
             self.path,
-            activating.path,
+            owner.path,
         )
         return self
 
@@ -414,7 +590,7 @@ class Context:
         `self.ctx.layer_for(scope)` side by side, and a reader can see that it
         asked both rather than reusing one answer for two purposes.
 
-        **It follows `current_scope()` too, and the isolation rule is why that is
+        **It follows the running binding too, and the isolation rule is why that is
         safe** (P6-26). This deliberately did not, on the grounds that moving
         visibility would change what an agent can see — but the two cases the
         objection conflates are told apart by `isolation`, for free. A row's
@@ -442,11 +618,39 @@ class Context:
         if scope is not None:
             return scope
         activating = _ACTIVATING.get()
-        return activating if activating is not None and activating.active else self
+        if activating is None:
+            return self
+        layer = activating.layer
+        return layer if layer.active else self
+
+    def running_for(self, scope: Context | None = None) -> Running:
+        """Both answers at once, for a registry that has to *record* them (P6-29).
+
+        **Every site that needs both should ask once**, and the reason is the
+        warning: `owner_for` logs when the activation scope it would return has
+        already been disposed, and that branch is meant to be audible. Two calls
+        for one registration make it audible twice, which is how a reader learns
+        to skim it.
+
+        It matters most for a registry that will invoke the registered body
+        *later*, because that one must **keep** both until then. Two fields on
+        its own record is two things to hold in step, and the failure mode is
+        silent — `ph.seams.compaction` shipped a `_NoteRegistration.owner` that
+        held `layer_for`'s answer, the conflation this row is about wearing the
+        other question's name. One object cannot be half-updated, and `running()`
+        takes it whole so no call site has to take it apart again.
+        """
+        return Running(self.owner_for(scope), self.layer_for(scope))
 
     @staticmethod
-    def current_scope() -> Context | None:
-        """The activation scope `apply` is running in, or `None` outside one (P6-12).
+    def current_owner() -> Context | None:
+        """Whose *lifetime* the running code belongs to, or `None` (P6-12).
+
+        Was `current_scope`, and the rename is P6-29's point rather than tidying:
+        "the current scope" was one name for the two questions `owner_for` and
+        `layer_for` were split apart to keep separate, so the public reader was
+        still spelling the conflation the private readers had stopped making.
+        There are two now, named after the two they serve.
 
         **The owner a seam registration should default to.** Cordis already
         builds exactly the right scope in `_activation_scope` and hands it to
@@ -486,35 +690,60 @@ class Context:
         the headless profile, a stranger's row picked by what happens to be
         mounted.
 
-        **What still runs unbound**, and this list is meant to be exhaustive:
+        **What P6-29 finished**, once the binding could hold both answers rather
+        than one: the four row bodies the *other* registries invoke — a
+        compaction note's `text`, a prompt section's and a prompt context's, a
+        status field's `read`, a diagnostic's — plus the variable and tool
+        providers beside them, every telemetry sink, and all five single-slot
+        providers (`compaction`, `code_runtime`, `sandbox`, `workspace`, and
+        `fs`'s rebase resolver) — and `ToolDefinition.classify`, the last of the
+        definition's own bodies. "A provider has no agent" had been the reason to
+        defer most of those, and it was only ever an objection to the *layer*
+        half; the owner half needs no agent at all, so `claim_slot` records the
+        pair and the scheduler binds a classifier from the same view that
+        resolved the tool.
 
-        * a provider claimed through `claim_slot` and called later —
-          `llm/stream`'s adapter is the live one. A provider has no agent, only
-          the row that registered it, so binding it means `claim_*` retaining its
-          owner. That is a lifetime question rather than a containment one — a
-          provider is deployment-wide by construction — so a registration from a
-          provider body still lands on the seam unless it passes `scope=`;
-        * `ToolDefinition.classify`, alone among the definition's bodies, for the
-          reason stated on `ToolRuntime.execution_mode`: it runs in the scheduler
-          before an execution exists, and its scope is `Context | None`;
+        **What still runs unbound**, and this list is meant to be exhaustive —
+        `test_registration_ownership.py` enumerates the surface by introspection
+        and fails on anything not classified, so it is checked rather than
+        believed:
+
         * a `waterfall`'s `inner` — the *producer's* body, which nothing
           registered, so it inherits its caller's binding. `tools/execute`'s
           inner is the exception that binds itself, per the paragraph above;
-        * the row bodies **four other registries** invoke: `CompactionNote.text`,
-          `PromptSection.text` and the variable and tools providers beside it,
-          `StatusField.read`, `Diagnostic.read`. P6-26 did not reach these and
-          they are not a smaller version of the same fix — the first two already
-          hold the target scope in a local (`target` in `CompactionSeam.render`
-          and `SystemPromptService.assemble`), which is a *layer*, while the
-          owner is still the registering row. One `Context` cannot say both, and
-          that is the thing to decide before extending the rule rather than
-          after. The last two have no target at all.
+        * `CodeRuntimeSeam`'s SDK renderers, which the seam *hands out* rather
+          than invokes — `sdk_renderer(language)` returns the row's callable and
+          its caller calls it. Binding that means returning a wrapper instead of
+          the row's own function, which changes what a caller holds in order to
+          fix where it runs. A different shape from every entry above, and one to
+          decide on rather than to slip in;
+        * teardown callbacks — a disposer, a workspace release — which run *as*
+          a scope unwinds. Binding one would offer a lifetime to register on at
+          the moment that lifetime is ending, and `add_disposer` refuses an
+          inactive scope for the same reason.
 
         Contextvars propagate into tasks, so a coroutine spawned from a bound
         callback carries the binding; `Context.owner_for` declines a *disposed*
         scope and warns rather than raising.
         """
-        return _ACTIVATING.get()
+        activating = _ACTIVATING.get()
+        return activating.owner if activating is not None else None
+
+    @staticmethod
+    def current_layer() -> Context | None:
+        """Which scope the running code is *visible to*, or `None` (P6-29).
+
+        The other half of `current_owner` above, and equal to it for everything
+        cordis itself runs: an `apply` and a listener each run as one scope, so
+        both readers answer the same object and the distinction costs nothing to
+        carry. It is a registry-invoked body that separates them — a tool's
+        `execute` is the registering row's code (`current_owner`) run for one
+        agent (`current_layer`) — and `Context.layer_for` is where that answer is
+        actually consumed. This exists so a *test* can ask the question a body
+        can otherwise only ask by registering something and seeing where it went.
+        """
+        activating = _ACTIVATING.get()
+        return activating.layer if activating is not None else None
 
     # ------------------------------------------------------------- identity --
 
@@ -788,6 +1017,10 @@ class Context:
             except Exception:
                 log.exception("ph.cordis: effect %r failed to dispose", effect.label)
         self._services.clear()
+        # Breaks the `self -> Running -> self` cycle the memo makes, in the
+        # same breath as the parent/child one below: a context that has been
+        # disposed and dropped by its parent must not need a gc pass.
+        self._running_self = None
         parent = self._parent
         if parent is not None and self in parent._children:
             parent._children.remove(self)

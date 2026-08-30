@@ -9,7 +9,17 @@ scopes whose disposal unwinds every registration and every acquired artifact
 
 from __future__ import annotations
 
-from .context import Context, Disposer, ForkScope, Hook, Listener, is_bailed, maybe_await, running
+from .context import (
+    Context,
+    Disposer,
+    ForkScope,
+    Hook,
+    Listener,
+    Running,
+    is_bailed,
+    maybe_await,
+    running,
+)
 from .errors import (
     CordisError,
     EventModeError,
@@ -49,6 +59,7 @@ __all__ = [
     "LoaderError",
     "PluginSpec",
     "Row",
+    "Running",
     "ServiceConflictError",
     "ServiceNotFoundError",
     "UndeclaredEventError",

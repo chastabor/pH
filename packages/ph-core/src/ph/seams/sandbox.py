@@ -23,7 +23,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal, Protocol, TypeAlias, cast, get_args, runtime_checkable
 
-from ..cordis import Context, Disposer, plugin
+from ..cordis import Context, Disposer, Running, plugin, running
 from ..session import Session
 from ..tools.errors import FailureKind, HarnessError
 from ..wire import WireModel
@@ -111,12 +111,18 @@ class SandboxSeam:
     ctx: Context
     default_mode: SandboxMode = "read-only"
     provider: SandboxProvider | None = None
+    provider_by: Running | None = None
+    """Who registered the backend (P6-29). See `ph.seams.compaction`."""
 
     def register_provider(
         self, provider: SandboxProvider, *, scope: Context | None = None
     ) -> Disposer:
         return claim_slot(
-            self.ctx.owner_for(scope), self, "provider", provider, label="sandbox.provider"
+            self.ctx.running_for(scope),
+            self,
+            "provider",
+            provider,
+            label="sandbox.provider",
         )
 
     def resolve_mode(
@@ -162,7 +168,10 @@ class SandboxSeam:
                 "mount sandbox-local (P6-04) or run at the worktree tier, which "
                 "bounds relative writes only"
             )
-        confined = self.provider.confine(argv, policy)
+        # As the row that registered the provider (P6-29); the layer is the
+        # registration's, for the reason `CompactionSeam.register` states.
+        with running(self.provider_by):
+            confined = self.provider.confine(argv, policy)
         if not isinstance(confined, ConfinedArgv):  # pragma: no cover - provider bug
             raise SandboxError("sandbox provider did not return a ConfinedArgv")
         return confined

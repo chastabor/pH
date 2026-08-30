@@ -22,7 +22,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
 from typing import Any, TypeAlias
 
-from ..cordis import Context, Disposer, events, maybe_await, plugin
+from ..cordis import Context, Disposer, Running, events, maybe_await, plugin, running
 from ..llm.types import ContextSnapshotSection, ToolSchema
 from ..seams._registry import claim_entry
 
@@ -131,17 +131,20 @@ def join_context_sections(sections: list[ContextSnapshotSection]) -> str:
     return "\n\n".join(section.text for section in sections)
 
 
-@dataclass(slots=True)
+@dataclass(frozen=True, slots=True)
 class _Registration:
-    visible_to: Context
-    """Which scope this contribution reaches — *not* who owns its lifetime.
-
-    Named for the question it answers since P6-12, which found the two fused
-    here and in four sibling registries. The lifetime is `Context.owner_for`'s
-    answer and is spent on the disposer; this is `layer_for`'s and is spent on
-    `reaches`. A field called `owner` that fed a visibility filter was the same
-    word doing two jobs that the row exists to separate."""
     value: Any
+    by: Running
+    """Both answers, kept together (P6-29).
+
+    P6-12 found the two questions fused here and in four sibling registries, and
+    split them: `by.layer` is what `_visible`'s `reaches` filters on, `by.owner`
+    is what the disposer hangs from. This field held only the first, under the
+    name `visible_to`, which was honest but incomplete — the owner was resolved
+    and spent in the same expression and never kept, so when P6-29 came to bind
+    a section's body as the row that wrote it, the answer was gone. Keeping the
+    pair is what lets a contribution be *invoked* correctly rather than only
+    filtered and released correctly."""
 
 
 @dataclass(slots=True)
@@ -163,6 +166,13 @@ class SystemPromptService:
         were `scope or self.ctx`, so a row's section outlived the row: I2 held
         only where a caller remembered `scope=`.
 
+        **Both are kept now, not just spent** (P6-29). Four of this file's
+        buckets hold a *body* — a section's `text`, a context's, a variable's
+        provider, a tool provider — which `assemble` invokes later, and it ran
+        them unbound: anything they registered landed on the seam and outlived
+        the row. Binding needs the owner at invoke time, which means recording it
+        here rather than resolving it and dropping it.
+
         The visibility target is unchanged and the lifetime is now the
         activating row's. For a globally mounted row the two agree anyway — an
         activation scope inherits its parent's isolation, so a root row's
@@ -178,8 +188,9 @@ class SystemPromptService:
         exactly the mistake `_registry`'s own docstring was written to stop
         someone making.
         """
-        entry = _Registration(visible_to=self.ctx.layer_for(scope), value=value)
-        return claim_entry(self.ctx.owner_for(scope), bucket, entry, label="system-prompt")
+        by = self.ctx.running_for(scope)
+        entry = _Registration(value=value, by=by)
+        return claim_entry(by.owner, bucket, entry, label="system-prompt")
 
     def section(self, section: PromptSection, *, scope: Context | None = None) -> Disposer:
         return self._register(self._sections, scope, section)
@@ -203,12 +214,15 @@ class SystemPromptService:
     ) -> Disposer:
         return self._register(self._variables, scope, (name, provider))
 
-    def _visible(self, bucket: list[_Registration], target: Context) -> list[Any]:
+    def _visible(self, bucket: list[_Registration], target: Context) -> list[_Registration]:
         # One visibility rule, shared with event dispatch: a global
         # registration reaches every agent, an agent-scoped one reaches that
         # agent alone. Ordering within a bucket stays registration order, which
         # the `order` field then sorts.
-        return [entry.value for entry in bucket if entry.visible_to.reaches(target)]
+        #
+        # Returns the *registrations*, not their values: every consumer below
+        # invokes the value as a body, and needs `by.owner` to bind it (P6-29).
+        return [entry for entry in bucket if entry.by.layer.reaches(target)]
 
     async def assemble(self, request: AssembleContext | None = None) -> PromptAssembly:
         """Collect, order, interpolate, then run the assemble waterfall."""
@@ -219,44 +233,67 @@ class SystemPromptService:
         # to repeat the `request.scope or ctx` fallback.
         scoped = request if request.scope is target else replace(request, scope=target)
 
+        # **Every body below runs as the row that contributed it, for the scope
+        # being assembled** (P6-29). Four buckets, four bodies, and all four ran
+        # unbound: a variable provider, a section's `text`, a context's, a tool
+        # provider. They are the same category as a tool's `execute` — a row's
+        # code a registry invokes — and they are the four P6-26 could not reach
+        # while the binding held one `Context`, because `target` here is the
+        # *layer* and the owner is still whoever registered.
         variables: dict[str, str] = {}
-        for name, provider in self._visible(self._variables, target):
-            variables[name] = provider()
+        for entry in self._visible(self._variables, target):
+            name, provider = entry.value
+            with running(entry.by, target):
+                variables[name] = provider()
 
-        async def resolve(text: PromptText) -> str:
-            raw = await maybe_await(text(scoped)) if callable(text) else text
+        async def resolve(entry: _Registration) -> str:
+            # The registration, not two projections of it: `resolve(a.value.text,
+            # b.by.owner)` was silently valid, which is the mis-pairing the pair
+            # exists to prevent, reintroduced one function down (P6-29).
+            text: PromptText = entry.value.text
+            with running(entry.by, target):
+                raw = await maybe_await(text(scoped)) if callable(text) else text
+            # Interpolation is this seam's own work, not the row's, so it is
+            # deliberately outside the binding.
             return _VARIABLE.sub(lambda m: variables.get(m.group(1), m.group(0)), raw)
 
-        sections = sorted(self._visible(self._sections, target), key=lambda s: (s.order, s.name))
-        complete = next((s for s in sections if s.complete), None)
+        sections = sorted(
+            self._visible(self._sections, target),
+            key=lambda e: (e.value.order, e.value.name),
+        )
+        complete = next((e for e in sections if e.value.complete), None)
         # Empty means absent, decided here rather than in each renderer: a
         # section opts out per-assembly by returning "" — the only mechanism that
         # can answer a per-agent question, since a row registers once — and a
         # consumer enumerating section names should not see the ones that did.
         rendered: tuple[tuple[str, str], ...]
         if complete is not None:
-            rendered = ((complete.name, await resolve(complete.text)),)
+            rendered = ((complete.value.name, await resolve(complete)),)
         else:
             rendered = tuple(
                 [
-                    (section.name, body)
-                    for section in sections
-                    if (body := await resolve(section.text)).strip()
+                    (entry.value.name, body)
+                    for entry in sections
+                    if (body := await resolve(entry)).strip()
                 ]
             )
 
-        contexts = sorted(self._visible(self._contexts, target), key=lambda c: (c.order, c.name))
+        contexts = sorted(
+            self._visible(self._contexts, target),
+            key=lambda e: (e.value.order, e.value.name),
+        )
         materialized = tuple(
             [
-                ContextSnapshotSection(name=context.name, text=body)
-                for context in contexts
-                if (body := await resolve(context.text)).strip()
+                ContextSnapshotSection(name=entry.value.name, text=body)
+                for entry in contexts
+                if (body := await resolve(entry)).strip()
             ]
         )
 
         schemas: list[ToolSchema] = []
-        for provider in self._visible(self._tools, target):
-            schemas.extend(provider(target))
+        for entry in self._visible(self._tools, target):
+            with running(entry.by, target):
+                schemas.extend(entry.value(target))
 
         assembly = PromptAssembly(
             sections=rendered,

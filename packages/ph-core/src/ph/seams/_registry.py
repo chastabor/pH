@@ -7,6 +7,12 @@ identity before removing, some did not. A disposer that removes whatever
 *currently* occupies the slot would tear down a successor registered after its
 own owner was replaced — so identity is checked here, once.
 
+**A `Running` may be passed wherever a `Context` may** (P6-29). Both spell
+`add_disposer(release, label=)`, and the pair's releases on *either* of its two
+scopes — which is what a registry whose container is keyed by the visibility
+scope needs, and what one keyed only by the owner does not. Opting in is passing
+`by` rather than `by.owner`; nothing else changes.
+
 **Who owns a registration is `Context.owner_for`, not here** (P6-12). It was
 briefly this module's, and it does not belong: this module is about *tables* —
 release only what is still mine — while ownership is about `Context` lifetimes
@@ -22,13 +28,13 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..cordis import Context, Disposer
+from ..cordis import Context, Disposer, Running
 
 __all__ = ["claim_entry", "claim_key", "claim_slot"]
 
 
 def claim_key(
-    owner: Context, table: dict[str, Any], key: str, value: Any, *, label: str
+    owner: Context | Running, table: dict[str, Any], key: str, value: Any, *, label: str
 ) -> Disposer:
     """Put `value` under `key`; the disposer removes it only while it is still there."""
     if key in table:
@@ -42,7 +48,9 @@ def claim_key(
     return owner.add_disposer(release, label=f"{label}({key})")
 
 
-def claim_entry(owner: Context, entries: list[Any], value: Any, *, label: str) -> Disposer:
+def claim_entry(
+    owner: Context | Running, entries: list[Any], value: Any, *, label: str
+) -> Disposer:
     """Append `value`; the disposer removes **that object**, not one equal to it.
 
     `list.remove` compares with `==`, which is identity for the closures and
@@ -62,14 +70,40 @@ def claim_entry(owner: Context, entries: list[Any], value: Any, *, label: str) -
     return owner.add_disposer(release, label=label)
 
 
-def claim_slot(owner: Context, holder: Any, attribute: str, value: Any, *, label: str) -> Disposer:
-    """Set `holder.<attribute>`; the disposer clears it only while it still holds `value`."""
+def claim_slot(by: Running, holder: Any, attribute: str, value: Any, *, label: str) -> Disposer:
+    """Set `holder.<attribute>`; the disposer clears it only while it still holds `value`.
+
+    **Takes the pair rather than the owner** (P6-29), and holds it in
+    `<attribute>_by` for exactly as long as the slot itself. A provider is a body
+    the seam invokes *later* — every one of the five in this tree is — so to
+    enter the right binding then it has to have kept who registered it and where
+    that landed. Set and cleared with the slot in one claim, because the
+    alternative was five seams writing the same four lines around this call, and
+    five chances for the record to outlive the value it describes.
+
+    **The name is derived, not a parameter**, and that is the difference between
+    a rule and a reminder. All five sites spelled `f"{attribute}_by"`, so the
+    argument carried no information — and being optional, it made "forgot to
+    record" a silent state: `running(None)` binds nothing, and the P6-30 gate
+    classifies the *registration method*, which is present either way. Derived,
+    a sixth slot that omits the field fails at registration instead, because
+    every one of these holders is `slots=True` and `setattr` for an undeclared
+    name raises there and then.
+
+    That does not move the ownership decision here, which the module docstring
+    above is right to refuse: the caller still decides, through
+    `Context.running_for`, exactly as it decided through `owner_for` before.
+    This stores what it was told.
+    """
     if getattr(holder, attribute) is not None:
         raise RuntimeError(f"{label}: a provider is already registered")
+    record = f"{attribute}_by"
     setattr(holder, attribute, value)
+    setattr(holder, record, by)
 
     def release() -> None:
         if getattr(holder, attribute) is value:
             setattr(holder, attribute, None)
+            setattr(holder, record, None)
 
-    return owner.add_disposer(release, label=label)
+    return by.owner.add_disposer(release, label=label)

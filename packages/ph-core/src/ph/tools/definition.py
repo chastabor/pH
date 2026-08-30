@@ -29,7 +29,7 @@ from typing import Any, Literal, TypeAlias
 from pydantic import BaseModel, ConfigDict
 
 from ..cancel import CancelToken
-from ..cordis import Context
+from ..cordis import Context, Running
 from ..llm.types import ContentBlock, Message, TextBlock, ToolSchema
 from ..session import Session
 from .errors import (
@@ -255,6 +255,16 @@ class ToolRunContext:
     """The tool that will render this call's value. Carried on the run so the
     pipeline never has to look it up again — or lose it on a path that ends
     early."""
+    by: Running
+    """Who registered that tool, and where (P6-29). Carried for the reason the
+    definition is, which turned out to be the same reason twice.
+
+    Resolved once in `create_execution`, from the very view that produced
+    `definition` — so it cannot disagree with it, and cannot be absent while the
+    definition is present. Looking it up again per stage instead was reachable
+    and wrong: a tool that unregisters itself during its own `execute` is gone
+    from the rebuilt view by `finish`, and `finalize_content` then ran under a
+    fallback rather than as the row that wrote it. Verified before the fix."""
     _deferred: list[Message] = field(default_factory=list)
     _concluded: bool = False
 

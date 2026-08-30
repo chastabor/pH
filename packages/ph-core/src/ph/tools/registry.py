@@ -29,7 +29,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any, Literal
 
 from ..cancel import Cancelled, is_cancelled
-from ..cordis import Context, Disposer, events, plugin, running
+from ..cordis import Context, Disposer, Running, events, plugin, running
 from ..llm.types import ToolSchema, text_of
 from ..seams._restriction import NameFilter
 from ..seams.approval import Edited, Responded, denial_reason
@@ -144,6 +144,19 @@ class _Layer:
     """One scope's registry contribution."""
 
     tools: dict[str, ToolDefinition] = field(default_factory=dict)
+    by: dict[str, Running] = field(default_factory=dict)
+    """Who registered each tool, and which scope it landed on (P6-29).
+
+    Kept beside `tools` rather than on `ToolDefinition`, which is frozen row data
+    a plugin author builds and hands over — a `Context` on it would make the
+    value a registration record and let the same definition be registered twice
+    with one of them lying. Written and popped only by `_claim`, and only *after*
+    the mutation it describes has been accepted: a parallel dict is the one shape
+    the five sibling registries rejected in favour of a `_Registered(value, by)`
+    record, and this is the hazard they were avoiding. It survives here because
+    `_claim`'s `mutate`/`undo` closures are built before the pair is known, so
+    folding the pair into `tools` would mean threading it through all six call
+    sites to serve one."""
     restrictions: list[ToolRestriction] = field(default_factory=list)
     guards: list[ToolGuard] = field(default_factory=list)
     mode: PresentationMode | None = None
@@ -173,6 +186,13 @@ class _View:
     """One scope's resolved registry, from a single layer traversal."""
 
     visible: dict[str, ToolDefinition]
+    by: dict[str, Running]
+    """Who registered each visible tool, resolved by the same shadowing walk.
+
+    Beside `visible` rather than derived later because one traversal decides
+    both: the layer that *won* a name is the layer whose registration owns it,
+    and asking again afterwards would be a second walk free to disagree with the
+    first the moment shadowing changed."""
     mode: PresentationMode
     schemas: tuple[ToolSchema, ...]
     """The model-facing schemas, or empty under Code Mode — where the model is
@@ -255,45 +275,85 @@ class ToolRuntime:
         mutate: Callable[[_Layer], None],
         undo: Callable[[_Layer], Any],
         label: str,
+        *,
+        record: str = "",
     ) -> Disposer:
         """Mutate a layer and hand back the disposer that undoes it.
 
-        **Two contexts, because the owner was answering two questions** (P6-12).
-        `owner.isolation` chose *which layer* a registration lands in — that is
-        tool visibility, B7's whole subject — while `owner.add_disposer` chose
-        *when it goes away*. One value did both because both were
-        `scope or self.ctx`, and they are not the same question: the lifetime is
-        now the activating row's, so a tool unwinds when its row unmounts, while
-        the layer stayed exactly where it was so nothing about what an agent can
-        see changed. Conflating them was what made this row's fix look risky.
+                **Two contexts, because the owner was answering two questions** (P6-12).
+                `owner.isolation` chose *which layer* a registration lands in — that is
+                tool visibility, B7's whole subject — while `owner.add_disposer` chose
+                *when it goes away*. One value did both because both were
+                `scope or self.ctx`, and they are not the same question: the lifetime is
+                now the activating row's, so a tool unwinds when its row unmounts, while
+                the layer stayed exactly where it was so nothing about what an agent can
+                see changed. Conflating them was what made this row's fix look risky.
 
-        **The layer moved later, and only for the case that had to move**
-        (P6-26). `layer_for` follows "who is running" too now, so the two lines
-        below read one variable again — but they still ask different questions
-        of it, and `isolation` keeps the answers apart. An activation scope is
-        not isolated, so a row's tool still lands on the global layer and the
-        paragraph above is unchanged for it. An agent's scope *is* its own
-        isolation, so a tool registered from a body running for that agent
-        lands on that agent's layer — the one case "visibility is unchanged"
-        was wrong about, because it let a body inside a contained child install
-        a tool the whole deployment could see.
+                **The layer moved later, and only for the case that had to move**
+                (P6-26). `layer_for` follows "who is running" too now, so the two lines
+                below read one variable again — but they still ask different questions
+                of it, and `isolation` keeps the answers apart. An activation scope is
+                not isolated, so a row's tool still lands on the global layer and the
+                paragraph above is unchanged for it. An agent's scope *is* its own
+                isolation, so a tool registered from a body running for that agent
+                lands on that agent's layer — the one case "visibility is unchanged"
+                was wrong about, because it let a body inside a contained child install
+                a tool the whole deployment could see.
 
-        **Both are derived here, from `scope`, rather than passed in.** The first
-        version took the two contexts as separate arguments, and every one of the
-        six call sites wrote the same pair — which restates the relationship six
-        times and, worse, lets a seventh pair them wrongly and reintroduce the
-        defect with nothing to catch it. Deriving them from the one argument they
-        are both functions of is what makes the layering rule true by
-        construction rather than by reading six call sites — including the
-        P6-26 change above, which is one edit inside `layer_for` and not six.
+                **Both are derived here, from `scope`, rather than passed in.** The first
+                version took the two contexts as separate arguments, and every one of the
+                six call sites wrote the same pair — which restates the relationship six
+                times and, worse, lets a seventh pair them wrongly and reintroduce the
+                defect with nothing to catch it. Deriving them from the one argument they
+                are both functions of is what makes the layering rule true by
+                construction rather than by reading six call sites — including the
+                P6-26 change above, which is one edit inside `layer_for` and not six.
+
+                **The lifetime is the *intersection* of the two, not a choice between
+                them** (P6-29). Once a tool body registers as the row that wrote it and
+                for the agent that ran it, the two scopes are unrelated branches of the
+                tree and either can end first. Owning it by the row alone strands the
+                agent's `_Layer` in `self._layers` under a disposed key — measured: the
+                layer count goes 2 → 2 across an agent's disposal where it goes 2 → 1
+                today. Owning it by the agent alone is what P6-26 shipped, and it lets a
+                registration outlive the row whose code made it, which is I2 verbatim.
+                Neither is a defensible default, and the honest answer is that such a
+                registration is only meaningful while **both** are alive.
+
+        So the release goes on both scopes and the first to fire wins —
+                through `Running.add_disposer`, which is where that rule lives, because
+                `ph.seams.skills` keys `_restrictions` by the layer too and a rule with
+                two sites and one implementation is what this row exists to delete.
         """
-        key = self.ctx.layer_for(scope).isolation
+        by = self.ctx.running_for(scope)
+        key = by.layer.isolation
         layer = self._layer(key)
         mutate(layer)
+        if record:
+            # Only a registration this registry will later *invoke* needs the
+            # pair kept — a tool, not a guard or a restriction, which are called
+            # as policy rather than as the row's body. Here rather than in
+            # `_register` so it is written where the pair is derived: computing
+            # it twice would ask `owner_for` twice and warn twice for a disposed
+            # activation, which is the one branch that is meant to be audible.
+            # Named `record` after `claim_slot`'s parameter, which does the same
+            # job for the at-most-one shape — one idiom, one word.
+            #
+            # **After `mutate`, not before.** `_register`'s `add` refuses a
+            # duplicate name by raising, and writing the pair first meant a
+            # *rejected* registration overwrote the surviving one's — so the
+            # tool that stayed ran as the row whose registration had just been
+            # refused. Invisible until the next `_changed()` rebuilt the view
+            # from the corrupted cell, which is the worst kind of visible.
+            layer.by[record] = by
         self._changed()
-        return self.ctx.owner_for(scope).add_disposer(
-            lambda: self._release(key, lambda: undo(layer)), label=label
-        )
+
+        def finish() -> None:
+            if record:
+                layer.by.pop(record, None)
+            self._release(key, lambda: undo(layer))
+
+        return by.add_disposer(finish, label=label)
 
     def register(self, definition: ToolDefinition, *, scope: Context | None = None) -> Disposer:
         """Register a tool globally, or on an agent's scope to shadow by name."""
@@ -343,6 +403,7 @@ class ToolRuntime:
             add,
             lambda layer: layer.tools.pop(definition.name, None),
             f"tool({definition.name})",
+            record=definition.name,
         )
 
     def restrict(self, restriction: ToolRestriction, *, scope: Context | None = None) -> Disposer:
@@ -489,6 +550,7 @@ class ToolRuntime:
 
     def _build_view(self, target: Context) -> _View:
         visible: dict[str, ToolDefinition] = {}
+        by: dict[str, Running] = {}
         layers = list(self._chain(target))
         mode = next((layer.mode for layer in layers if layer.mode is not None), None)
         # Carried rather than re-sliced. `layers[:index]` allocated a list and a
@@ -528,6 +590,9 @@ class ToolRuntime:
                     # instrument containment may use.
                     continue
                 visible[name] = definition
+                registered = layer.by.get(name)
+                if registered is not None:
+                    by[name] = registered
             nearer.append(layer)
         resolved_mode = mode if mode is not None else self.default_mode
         presentation = next(
@@ -564,6 +629,7 @@ class ToolRuntime:
         )
         return _View(
             visible=visible,
+            by=by,
             mode=resolved_mode,
             schemas=schemas,
             transport_name=transport_name,
@@ -599,19 +665,24 @@ class ToolRuntime:
     def execution_mode(self, call: ToolExecutionInput) -> ExecutionMode:
         """The live overlap classification, re-read before every start.
 
-        **The one definition-owned body P6-26 leaves unbound**, and the only one
-        whose scope is `Context | None` rather than a resolved
-        `ToolExecution.scope`: this runs in the scheduler, before an execution
-        exists, and answers a question about the arguments alone. A classifier
-        that registered something would land wherever the scheduler was called
-        from. Stated rather than fixed, because binding it means deciding what
-        `scope=None` should mean here, which is `ToolExecutionInput`'s question
-        and P6-24's row.
+        **The last definition-owned body, bound like the other four** (P6-29).
+        P6-26 left this one out and said so here, on the grounds that binding it
+        meant deciding what `scope=None` should mean — but that was an objection
+        to the *layer* half only, and it is the same objection that had deferred
+        the five `claim_slot` providers. The owner half needs no target at all:
+        it is what registration recorded, and `view(call.scope).by` already
+        carries it because `self.get` one line up resolved through the same view.
+        So a classifier that registers something now unwinds with the row that
+        wrote it instead of landing wherever the scheduler happened to be called
+        from, which was the measured P6-26 defect in the one body still open to
+        it. When `call.scope` is `None` the pair keeps its own layer, which is
+        the honest answer until P6-24 makes the caller state one.
         """
         definition = self.get(call.name, scope=call.scope)
         if definition is None:
             return ExecutionMode(kind="exclusive")
-        return definition.classify(call.arguments)
+        with running(self.view(call.scope).by.get(call.name), call.scope):
+            return definition.classify(call.arguments)
 
     # --------------------------------------------------------------- pipeline --
 
@@ -665,7 +736,23 @@ class ToolRuntime:
                 f"call it from inside {view.transport_name} as `await tools.{call.name}(...)`",
             )
         execution = self._execution(call, freeze_json_value(call.arguments, frozen_input=True))
-        return ToolRunContext(execution=execution, definition=definition)
+        # **Who the tool's own code runs as, resolved here and carried** (P6-29).
+        # The two halves come from different places on purpose: the *owner* is
+        # what registration recorded, so a registration made from a tool body
+        # unwinds with the row that wrote the tool (I2); the *layer* is the live
+        # execution's scope at each stage, so what it registers is visible to the
+        # agent it ran for and to nobody else (B7). P6-26 used `execution.scope`
+        # for both, which was right about containment and let a tool registered
+        # from a tool body outlive the row that registered the tool.
+        #
+        # From the same `view` that just produced `definition`, which is the
+        # whole reason it is resolved here: one traversal fills `visible` and
+        # `by` together, so the pair cannot be absent while the definition is
+        # present. Asking again per stage was reachable and wrong — a tool that
+        # unregisters itself during its own `execute` is gone from the rebuilt
+        # view by `finish`.
+        by = view.by.get(call.name) or Running(execution.scope, execution.scope)
+        return ToolRunContext(execution=execution, definition=definition, by=by)
 
     async def prepare(self, call: ToolExecutionInput) -> PreparedCall:
         """Ordered pre-policy: pre-execute, approval, guards.
@@ -677,8 +764,11 @@ class ToolRuntime:
         try:
             run = self.create_execution(call)
         except Exception as error:
+            unresolved = self._execution(call, None)
             placeholder = ToolRunContext(
-                execution=self._execution(call, None), definition=_UNRESOLVED
+                execution=unresolved,
+                by=Running(unresolved.scope, unresolved.scope),
+                definition=_UNRESOLVED,
             )
             return PreparedCall(run=placeholder, result=_failure(error), needs_post=False)
 
@@ -792,7 +882,7 @@ class ToolRuntime:
                 # see — the last way to escape the ceiling P6-27 made
                 # structural. The execution already carries the right scope; it
                 # was simply never made current.
-                with running(dispatch_exec.scope):
+                with running(run.by, dispatch_exec.scope):
                     value = await definition.execute(dispatch_exec.arguments, run)
                     content = definition.render(dispatch_exec.arguments, value)
                     meta = (
@@ -862,7 +952,7 @@ class ToolRuntime:
             # Reached through a second waterfall, so without this it would run
             # bound to whichever `tools/post-execute` wrapper resolved last —
             # which is a stranger's row, chosen by the mounted profile.
-            with running(execution.scope):
+            with running(run.by, execution.scope):
                 changes["content"] = run.definition.render(execution.arguments, decision.value)
         elif decision.content is not None:
             changes["content"] = tuple(decision.content)
@@ -881,7 +971,7 @@ class ToolRuntime:
                 # The last definition-owned body, and the one that runs for
                 # failures too — so it is the likeliest of the five to register
                 # a follow-up, and the least acceptable one to leave ambient.
-                with running(run.scope):
+                with running(run.by, run.scope):
                     replacement = finalize(run.execution, result)
             except Exception:
                 log.exception("ph.tools: %s.finalize_content raised; content preserved", run.name)

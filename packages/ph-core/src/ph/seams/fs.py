@@ -48,7 +48,7 @@ from typing import Any, Literal
 
 import anyio
 
-from ..cordis import Context, Disposer, events, plugin
+from ..cordis import Context, Disposer, Running, events, plugin, running
 from ..session import Session
 from ..tools.errors import FailureKind, HarnessError
 from ..wire import WireModel
@@ -252,6 +252,8 @@ class FsService:
     """What the walk may show and where it may go. See `screen`."""
     _rebase: Callable[[Any], Path | None] | None = None
     """Where *this agent's* relative paths resolve. See `rebase`."""
+    _rebase_by: Running | None = None
+    """Who registered the resolver (P6-29). Set and cleared with it by `claim_slot`."""
 
     def rebase(
         self, resolver: Callable[[Any], Path | None], *, scope: Context | None = None
@@ -269,7 +271,13 @@ class FsService:
         wires them (`workspace-lifecycle`), and a deployment that mounts no such
         row keeps exactly today's behaviour.
         """
-        return claim_slot(self.ctx.owner_for(scope), self, "_rebase", resolver, label="fs.rebase")
+        return claim_slot(
+            self.ctx.running_for(scope),
+            self,
+            "_rebase",
+            resolver,
+            label="fs.rebase",
+        )
 
     def root_for(self, agent: Any = None) -> Path:
         """This agent's root — its cwd, and what `bash` and `glob` run against.
@@ -282,7 +290,13 @@ class FsService:
         if self._rebase is None or agent is None:
             return self.root
         try:
-            resolved = self._rebase(agent)
+            # As the row that registered the resolver, **for the agent being
+            # resolved** (P6-29). The one provider in the tree whose target is
+            # already in hand and already derived — `_scope_of` is this module's
+            # own — so this is the shape the other four take once P6-24 gives
+            # them a scope to read instead of an agent to guess from.
+            with running(self._rebase_by, _scope_of(agent)):
+                resolved = self._rebase(agent)
         except Exception:
             log.warning("ph.seams.fs: the root resolver failed; using %s", self.root, exc_info=True)
             return self.root

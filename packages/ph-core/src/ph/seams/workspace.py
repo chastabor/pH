@@ -55,7 +55,7 @@ from typing import Any, Literal, Protocol, TypeAlias, runtime_checkable
 import anyio
 from pydantic import Field
 
-from ..cordis import Context, Disposer, maybe_await, plugin, safe_yaml_load
+from ..cordis import Context, Disposer, Running, maybe_await, plugin, running, safe_yaml_load
 from ..paths import default_home_path
 from ..session import Session
 from ..wire import WireModel
@@ -448,6 +448,10 @@ class WorkspaceSeam:
     shared: SharedWorkspaceProvider
     scratch_root: Path
     provider: WorkspaceProvider | None = None
+    provider_by: Running | None = None
+    """Who registered the tier (P6-29). Entered around every call into the
+    provider; see `CompactionSeam.engine_by` for why the layer stays the
+    registration's."""
     _provisioning: list[ProvisionEntry] = field(default_factory=list)
     """Materials to put in a fresh workspace, in registration order (E14).
 
@@ -524,7 +528,11 @@ class WorkspaceSeam:
     ) -> Disposer:
         """Claim the tier. One at a time; `shared` remains the fallback."""
         return claim_slot(
-            self.ctx.owner_for(scope), self, "provider", provider, label="workspace.provider"
+            self.ctx.running_for(scope),
+            self,
+            "provider",
+            provider,
+            label="workspace.provider",
         )
 
     def effective_tier(self, *, child: bool) -> ContainmentTier:
@@ -622,13 +630,14 @@ class WorkspaceSeam:
         declined: DeclineReason | None = None
         if self.provider is not None and chosen != "advisory":
             try:
-                workspace = await self.provider.acquire(
-                    session_id=session_id,
-                    agent_id=agent_id,
-                    base=base,
-                    scratch=scratch,
-                    access=access,
-                )
+                with running(self.provider_by):
+                    workspace = await self.provider.acquire(
+                        session_id=session_id,
+                        agent_id=agent_id,
+                        base=base,
+                        scratch=scratch,
+                        access=access,
+                    )
             except WorkspaceDeclined as refusal:
                 # A decline that says why. Not an error path: half the
                 # directories a person runs pH in are not repositories.
@@ -833,7 +842,8 @@ class WorkspaceSeam:
 
         async def reclaim(record: WorkspaceRecord) -> None:
             try:
-                kept = await provider.reclaim(record)
+                with running(self.provider_by):
+                    kept = await provider.reclaim(record)
             except Exception:
                 log.warning("ph.seams.workspace: could not reclaim %s", record.root, exc_info=True)
                 return

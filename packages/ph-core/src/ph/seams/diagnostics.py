@@ -38,7 +38,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..cordis import Context, Disposer, plugin
+from ..cordis import Context, Disposer, Running, plugin, running
 from ._names import require_slug
 from ._registry import claim_key
 
@@ -72,12 +72,20 @@ class Diagnostic:
     order: int = 0
 
 
+@dataclass(frozen=True, slots=True)
+class _Registered:
+    """A section and who registered it (P6-29). See `ph.seams.tui_status`."""
+
+    diagnostic: Diagnostic
+    by: Running
+
+
 @dataclass(slots=True)
 class DiagnosticsRegistry:
     """The service published as `ctx.diagnostics`."""
 
     ctx: Context
-    _sections: dict[str, Diagnostic] = field(default_factory=dict)
+    _sections: dict[str, _Registered] = field(default_factory=dict)
 
     def register(self, diagnostic: Diagnostic, *, scope: Context | None = None) -> Disposer:
         """Contribute a section.
@@ -88,8 +96,10 @@ class DiagnosticsRegistry:
         else's* lifetime, which is what it now means and all it now means.
         """
         require_slug(diagnostic.id, maximum=ID_MAX, kind="diagnostic id")
-        owner = self.ctx.owner_for(scope)
-        return claim_key(owner, self._sections, diagnostic.id, diagnostic, label="diagnostic")
+        by = self.ctx.running_for(scope)
+        return claim_key(
+            by.owner, self._sections, diagnostic.id, _Registered(diagnostic, by), label="diagnostic"
+        )
 
     def report(self) -> list[tuple[str, list[tuple[str, str]]]]:
         """Every section that has something to say, in `order` then id order.
@@ -100,9 +110,17 @@ class DiagnosticsRegistry:
         acceptable moment to lose the other five.
         """
         report: list[tuple[str, list[tuple[str, str]]]] = []
-        for diagnostic in sorted(self._sections.values(), key=lambda one: (one.order, one.id)):
+        ordered = sorted(
+            self._sections.values(), key=lambda one: (one.diagnostic.order, one.diagnostic.id)
+        )
+        for entry in ordered:
+            diagnostic = entry.diagnostic
             try:
-                rows = list(diagnostic.read())
+                # As the row that contributed it (P6-29); no target, for the same
+                # reason `tui_status.readings` has none — `ph doctor` describes a
+                # deployment, not an agent.
+                with running(entry.by):
+                    rows = list(diagnostic.read())
             except Exception:
                 log.warning(
                     "ph.seams.diagnostics: section %r failed to read", diagnostic.id, exc_info=True

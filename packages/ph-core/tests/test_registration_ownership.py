@@ -26,17 +26,19 @@ it is exactly the property that was wrong.
 
 from __future__ import annotations
 
+import dataclasses
 import importlib
 import inspect
 import pkgutil
 import re
-from collections.abc import Callable
+import typing
+from collections.abc import Callable, Iterator
 from typing import Any, get_args
 
 import pytest
 
 import ph
-from ph.cordis import Context, events, plugin
+from ph.cordis import Context, events, plugin, running
 from ph.cordis.context import maybe_await
 from ph.cordis.events import DispatchMode
 
@@ -59,6 +61,28 @@ def _modules() -> list[Any]:
 _IMPORTED: list[Any] = []
 
 
+def _declared_classes() -> Iterator[Any]:
+    """Every class *defined* in the `ph` tree, once each.
+
+    The `cls.__module__ != module.__name__` test is what keeps every walk in this
+    file sound — without it an imported name is attributed to whichever module
+    re-exported it, and the same class is enumerated once per importer. It was
+    written out at each of the three walks below, in three slightly different
+    spellings, which is three chances for one to drift; it is written here.
+    """
+    for module in _modules():
+        for cls in vars(module).values():
+            if inspect.isclass(cls) and cls.__module__ == module.__name__:
+                yield cls
+
+
+def _declared_methods(cls: Any) -> Iterator[tuple[str, Any]]:
+    """The callables a class defines itself, dunders excluded."""
+    for name, member in vars(cls).items():
+        if not name.startswith("__") and callable(member):
+            yield name, member
+
+
 def _scoped_methods() -> set[str]:
     """Every `Class.method` taking a keyword-only `scope=`, found by walking the code.
 
@@ -75,32 +99,26 @@ def _scoped_methods() -> set[str]:
     `scope=`-taking registry under `ph/commands/` or `ph/agent/` would have
     joined without joining anything.
     """
-    modules = _modules()
     names: set[str] = set()
-    for module in modules:
-        for cls in vars(module).values():
-            if not inspect.isclass(cls) or cls.__module__ != module.__name__:
+    for cls in _declared_classes():
+        for method_name, method in _declared_methods(cls):
+            try:
+                signature = inspect.signature(method)
+            except (TypeError, ValueError):  # pragma: no cover - builtins
                 continue
-            for method_name, method in vars(cls).items():
-                if method_name.startswith("__") or not callable(method):
-                    continue
-                try:
-                    signature = inspect.signature(method)
-                except (TypeError, ValueError):  # pragma: no cover - builtins
-                    continue
-                parameter = signature.parameters.get("scope")
-                if parameter is None or parameter.kind is not inspect.Parameter.KEYWORD_ONLY:
-                    continue
-                if parameter.default is inspect.Parameter.empty:
-                    # `scope` with no default: the caller must say, so there is
-                    # no default to get wrong. `FsService.screen` is the one, and
-                    # it is required for P6-18's reason — its owner decides
-                    # *reach*, not just teardown, so a forgotten scope would
-                    # widen policy rather than merely delay cleanup. Partitioned
-                    # by introspection rather than named, so the next seam to
-                    # make the same call needs no edit here.
-                    continue
-                names.add(f"{cls.__name__}.{method_name}")
+            parameter = signature.parameters.get("scope")
+            if parameter is None or parameter.kind is not inspect.Parameter.KEYWORD_ONLY:
+                continue
+            if parameter.default is inspect.Parameter.empty:
+                # `scope` with no default: the caller must say, so there is no
+                # default to get wrong. `FsService.screen` is the one, and it is
+                # required for P6-18's reason — its owner decides *reach*, not
+                # just teardown, so a forgotten scope would widen policy rather
+                # than merely delay cleanup. Partitioned by introspection rather
+                # than named, so the next seam to make the same call needs no
+                # edit here.
+                continue
+            names.add(f"{cls.__name__}.{method_name}")
     return names
 
 
@@ -291,7 +309,7 @@ async def test_a_registration_outside_any_activation_still_lands_on_the_service(
 
     commands.register(_definition("bare"))
     assert len(commands.ctx._effects) == before + 1
-    assert Context.current_scope() is None, "no activation is in flight here"
+    assert Context.current_owner() is None, "no activation is in flight here"
 
 
 async def test_an_explicit_scope_still_wins(mount: Any) -> None:
@@ -390,8 +408,26 @@ def test_every_scoped_method_is_accounted_for() -> None:
     assert stale == set(), f"classified but no longer present: {sorted(stale)}"
 
 
-def _owner_resolution(name: str) -> str:
+#: The two spellings that resolve a lifetime owner. `running_for` is
+#: `owner_for` and `layer_for` in one call (P6-29), for a registry that has to
+#: *record* both because it will invoke the registered body later — so a method
+#: using it resolves an owner just as much as one calling `owner_for` directly.
+#: Listed rather than matched loosely: `owner_for` is a substring of nothing
+#: else here, and a third spelling should have to be added on purpose.
+OWNER_RESOLVERS = ("owner_for", "running_for")
+
+
+def _resolves_an_owner(name: str) -> bool:
+    return any(spelling in _source_of(name) for spelling in OWNER_RESOLVERS)
+
+
+def _source_of(name: str) -> str:
     """The source of a method plus the same-class helpers it delegates to.
+
+    Was `_owner_resolution`, which named one *use* of it — grep this for
+    `owner_for` and you have answered "does this resolve an owner". P6-30 added
+    two more uses (does this bind, does this claim a slot), so the name was
+    describing the first caller rather than the function.
 
     Followed transitively, because that is how far the tree actually goes:
     `ToolRuntime.register` → `_register` → `_claim`, and only the last of the
@@ -439,16 +475,14 @@ def test_the_classification_is_a_check_and_not_a_promise() -> None:
     was asserting a prose claim the diff falsified one file over.
     """
     missing = [
-        name
-        for name in sorted(set(RECIPES) | NOT_EXERCISED)
-        if "owner_for" not in _owner_resolution(name)
+        name for name in sorted(set(RECIPES) | NOT_EXERCISED) if not _resolves_an_owner(name)
     ]
     assert missing == [], (
         "these are classified as registrations but never resolve an owner — "
         f"they still default to the seam, which is the P6-12 defect: {missing}"
     )
 
-    confused = [name for name in sorted(NOT_A_LIFETIME) if "owner_for" in _owner_resolution(name)]
+    confused = [name for name in sorted(NOT_A_LIFETIME) if _resolves_an_owner(name)]
     assert confused == [], (
         "these are classified as visibility or dispatch targets but resolve a "
         f"lifetime owner — one of the two is wrong: {confused}"
@@ -550,7 +584,7 @@ async def test_a_registration_made_after_apply_returns_still_belongs_to_its_row(
     """Gap two: the dispatch that *leaks*, and the bigger half.
 
     A `profile/mounted` listener, a turn hook — anything *dispatched* after
-    `apply` has returned saw `current_scope() is None` and fell back to the seam,
+    `apply` has returned saw `current_owner() is None` and fell back to the seam,
     so the registration outlived its row exactly as it did before P6-12. That is
     why `register_when_composed` carried a hand-written `scope=ctx`: not because
     the call was unusual, but because it was the one place somebody had noticed.
@@ -637,13 +671,13 @@ async def test_every_dispatch_mode_runs_a_listener_as_its_own_scope(
         if shape == "sync":
 
             def listener(*args: Any) -> None:
-                seen.append(Context.current_scope())
+                seen.append(Context.current_owner())
 
             ctx.on(event, listener)
         else:
 
             async def listener(*args: Any) -> None:
-                seen.append(Context.current_scope())
+                seen.append(Context.current_owner())
 
             ctx.on(event, listener)
 
@@ -657,7 +691,7 @@ async def test_every_dispatch_mode_runs_a_listener_as_its_own_scope(
     await root.drain()
 
     assert seen == [activation], f"{mode}/{shape} did not run the listener as its own scope"
-    assert Context.current_scope() is None, f"{mode}/{shape} left the binding set"
+    assert Context.current_owner() is None, f"{mode}/{shape} left the binding set"
 
 
 def test_the_declared_modes_and_the_registry_agree() -> None:
@@ -737,22 +771,431 @@ async def test_a_row_registering_at_mount_still_lands_globally(mount: Any) -> No
     assert "p626_global" in ctx.tools.view(agent.ctx).visible, "a row's tool stopped being global"
 
 
-async def test_a_command_body_runs_as_the_agent_that_typed_it(mount: Any) -> None:
-    """The same gap one registry over.
+async def test_a_command_body_runs_as_its_row_for_the_agent_that_typed_it(mount: Any) -> None:
+    """The same gap one registry over, and both halves of the answer (P6-29).
 
-    `CommandRegistry.dispatch` hands the body `CommandContext(ctx=self.ctx, …)` —
+    `CommandRegistry.dispatch` handed the body `CommandContext(ctx=self.ctx, …)` —
     the *registry's* context, which is the `scope or self.ctx` shape P6-12 named
     — so a command that registered anything did it globally and permanently.
+
+    P6-26 bound the typing agent for both questions. That is right for
+    visibility and wrong for lifetime: whose code a command body is does not
+    depend on who typed the slash, exactly as `_invoke` binds a listener's own
+    scope rather than the emitter's. So the owner is the row that registered the
+    command and the layer is the agent — asserted separately here, because a
+    single assertion cannot tell the two apart and that is how P6-26 shipped
+    with one of them wrong.
     """
     from ph.testing import FAKE_OPTIONS
 
     ctx = await mount()
-    agent = ctx.agents.create(ctx.sessions.create("p626-cmd"), FAKE_OPTIONS)
-    seen: list[Context | None] = []
+    agent = ctx.agents.create(ctx.sessions.create("p629-cmd"), FAKE_OPTIONS)
+    seen: list[tuple[Context | None, Context | None]] = []
 
-    ctx.commands.register(
-        _definition("p626", run=lambda _arg, _run: seen.append(Context.current_scope()))
+    @plugin("p629-row", inject=["commands"])
+    async def row(scope: Context, _config: Any) -> None:
+        scope.commands.register(
+            _definition(
+                "p629",
+                run=lambda _arg, _run: seen.append(
+                    (Context.current_owner(), Context.current_layer())
+                ),
+            )
+        )
+
+    fork = ctx.plugin(row)
+    await ctx.reconcile()
+    await ctx.commands.dispatch("/p629", agent=agent)
+
+    assert seen == [(fork.ctx, agent.ctx)], (
+        "the command body must run as the row that registered it, for the agent that typed it"
     )
-    await ctx.commands.dispatch("/p626", agent=agent)
 
-    assert seen == [agent.ctx], "the command body ran as the registry, not as the agent"
+    # And with no agent there is still an answer, where P6-26 bound nothing.
+    seen.clear()
+    await ctx.commands.dispatch("/p629")
+    assert seen == [(fork.ctx, fork.ctx)], "a command dispatched without an agent ran as nobody"
+
+
+async def test_a_tool_body_registers_as_its_row_and_for_its_agent(mount: Any) -> None:
+    """P6-29's property, and the two ways one `Context` got it wrong.
+
+    A tool body is the registering row's code, run for one agent. Those are two
+    scopes on unrelated branches of the tree, and a single-valued binding has to
+    pick one:
+
+    * **the agent** is what P6-26 bound, and it makes a registration outlive the
+      row whose code made it — I2 verbatim, and asserted here by unmounting the
+      row while the agent lives;
+    * **the row** alone would strand the agent's `_Layer` under a disposed key,
+      because the disposer would hang off a scope the agent's teardown never
+      reaches. Measured before the fix: the layer count went 2 → 2 across the
+      agent's disposal where it goes 2 → 1 today.
+
+    So neither is the lifetime. The registration is meaningful only while
+    **both** are alive, and `ToolRuntime._claim` releases on whichever ends
+    first. Both orders are driven, because an intersection that only works one
+    way round is the failure this docstring exists to rule out.
+    """
+    from ph.testing import FAKE_OPTIONS, run_tool, simple_tool
+
+    for ends_first in ("the row", "the agent"):
+        ctx = await mount()
+        agent = ctx.agents.create(ctx.sessions.create("p629-tool"), FAKE_OPTIONS)
+        other = ctx.agents.create(ctx.sessions.create("p629-other"), FAKE_OPTIONS)
+
+        def smuggle(_args: Any, run: Any) -> str:
+            run.scope.tools.register(simple_tool("p629_made"))
+            return "done"
+
+        @plugin("p629-tool-row", inject=["tools"])
+        async def row(scope: Context, _config: Any) -> None:
+            scope.tools.register(simple_tool("p629_carrier", execute=smuggle))
+
+        fork = ctx.plugin(row)
+        await ctx.reconcile()
+        await run_tool(ctx, "p629_carrier", {}, agent=agent)
+
+        # B7: the layer is the agent it ran for, and nobody else.
+        assert "p629_made" in ctx.tools.view(agent.ctx).visible, "the agent lost what it made"
+        assert "p629_made" not in ctx.tools.view(other.ctx).visible, "it reached another agent"
+        assert "p629_made" not in ctx.tools.view(ctx).visible, "it reached the deployment"
+
+        layers = len(ctx.tools._layers)
+        if ends_first == "the row":
+            await fork.dispose()
+            assert "p629_made" not in ctx.tools.view(agent.ctx).visible, (
+                "a tool made by a tool body outlived the row that registered the tool (I2)"
+            )
+        else:
+            await agent.ctx.dispose()
+        assert len(ctx.tools._layers) == layers - 1, (
+            f"{ends_first} ended and the agent's layer was stranded under a dead key"
+        )
+
+
+async def test_a_prompt_provider_runs_as_its_row_for_the_scope_being_assembled(
+    mount: Any,
+) -> None:
+    """The two bodies the P6-30 walk cannot see, covered where it cannot reach.
+
+    `SystemPromptService` keeps its variable and tool providers in
+    `_Registration.value: Any`, so no annotation names them and `_row_bodies()`
+    does not find them — stated in that walk's docstring, and this is the test it
+    points at. Without it these two would be the only P6-29 bindings with neither
+    a static classification nor a behavioural assertion, which is exactly the
+    "table is a promise" failure the tables are built to avoid.
+
+    Both halves, as everywhere else: the owner is the row that contributed the
+    provider, the layer is the scope being assembled.
+    """
+    from ph.testing import FAKE_OPTIONS
+
+    ctx = await mount()
+    agent = ctx.agents.create(ctx.sessions.create("p629-prompt"), FAKE_OPTIONS)
+    seen: dict[str, tuple[Context | None, Context | None]] = {}
+
+    @plugin("p629-prompt-row", inject=["system_prompt"])
+    async def row(scope: Context, _config: Any) -> None:
+        def variable() -> str:
+            seen["variable"] = (Context.current_owner(), Context.current_layer())
+            return "v"
+
+        def tools(_target: Context) -> list[Any]:
+            seen["tools"] = (Context.current_owner(), Context.current_layer())
+            return []
+
+        scope.system_prompt.variable("p629", variable)
+        scope.system_prompt.tools(tools)
+
+    fork = ctx.plugin(row)
+    await ctx.reconcile()
+
+    from ph.system_prompt.assembly import AssembleContext
+
+    await ctx.system_prompt.assemble(AssembleContext(scope=agent.ctx))
+
+    assert seen["variable"] == (fork.ctx, agent.ctx), "the variable provider ran as the wrong scope"
+    assert seen["tools"] == (fork.ctx, agent.ctx), "the tools provider ran as the wrong scope"
+
+
+async def test_a_refused_registration_does_not_reassign_the_survivor(mount: Any) -> None:
+    """The pair is written only once the mutation it describes is accepted.
+
+    `_Layer.by` is a dict parallel to `_Layer.tools`, which is the shape the five
+    sibling registries rejected in favour of a `_Registered(value, by)` record.
+    It survives in the tools registry for a structural reason — `_claim`'s
+    `mutate`/`undo` closures are built before the pair is known — and this is the
+    hazard that buys: written *before* `mutate`, a registration that `add` then
+    **refused** for a duplicate name still overwrote the surviving tool's pair,
+    so the tool that stayed ran as the row whose registration had just been
+    rejected. Every body of it — `execute`, `render`, `presentation_meta`,
+    `finalize_content` — and once that row unmounted, `owner_for` warned and
+    anything they registered landed on the seam.
+
+    Invisible until the next `_changed()` rebuilt the view from the corrupted
+    cell, which is why it is asserted through a rebuild rather than through the
+    read straight after the refusal — that one is served by a stale cache and
+    passes either way.
+    """
+    from ph.testing import simple_tool
+
+    ctx = await mount()
+    first, second = ctx.scope("row-a"), ctx.scope("row-b")
+
+    with running(first, ctx):
+        ctx.tools.register(simple_tool("p629_dup"))
+    with pytest.raises(ValueError), running(second, ctx):
+        ctx.tools.register(simple_tool("p629_dup"))
+
+    # Force the rebuild the stale view was hiding behind.
+    with running(first, ctx):
+        ctx.tools.register(simple_tool("p629_other"))
+
+    assert ctx.tools.view(ctx).by["p629_dup"].owner is first, (
+        "a refused registration reassigned the surviving tool to the rejected row"
+    )
+
+
+# --- P6-30: the other surface — a body a registry *invokes* -------------------
+#
+# `_scoped_methods()` above walks methods that take a keyword-only `scope=`,
+# which is the right walk for P6-12's defect and blind to P6-26's. A body a
+# registry invokes is not a method with a `scope=` parameter — `ToolRuntime`'s
+# `dispatch` and `CommandRegistry.dispatch` are invisible to it, as is every
+# registry P6-29 reached. The proof that the gap mattered: P6-26 shipped with a
+# tool's `render` running bound to an unrelated row's activation scope, and every
+# test in this module was green.
+#
+# So there is a second walk, over the *values* rather than the methods: every
+# callable a row hands to a registry, and every single-slot provider. Each must
+# be classified, and a `BOUND` entry must name an invoker whose source actually
+# binds — the same source-text falsifiability the `owner_for` check above uses,
+# which is what keeps these tables from becoming a second thing to remember.
+
+
+def _row_bodies() -> set[str]:
+    """Every `Class.field` on a dataclass whose *resolved* type is a callable.
+
+    Resolved through `get_type_hints` rather than read off `field.type`, because
+    the annotation a reader sees is often an alias: `PromptSection.text` is
+    `PromptText`, which is `str | Callable[...]`, and a string match on the raw
+    annotation missed it along with `PromptContext.text` — the two bodies in the
+    registry whose conflated owner and layer are the reason P6-29 exists.
+
+    **What this cannot see, stated because the table would otherwise read as
+    exhaustive**: a body stored in an `Any`-typed container. The variable and
+    tool providers in `ph.system_prompt.assembly` go into `_Registration.value:
+    Any`, so no annotation names them; they are covered behaviourally instead, by
+    the assemble test below. A walk that could see them would have to run the
+    type checker, and a gate that needs mypy to be falsifiable is a gate that
+    fails for the wrong reasons.
+    """
+    names: set[str] = set()
+    for cls in _declared_classes():
+        if not dataclasses.is_dataclass(cls):
+            continue
+        try:
+            hints = typing.get_type_hints(cls)
+        except Exception:  # pragma: no cover - an unresolvable forward ref
+            hints = {}
+        for entry in dataclasses.fields(cls):
+            if "Callable" in str(hints.get(entry.name, entry.type)):
+                names.add(f"{cls.__name__}.{entry.name}")
+    return names
+
+
+def _provider_slots() -> set[str]:
+    """Every `Class.method` that claims a single-slot provider.
+
+    By source rather than by type, because a provider is an *object* satisfying a
+    protocol — `CompactionEngine`, `WorkspaceProvider` — and nothing about its
+    annotation says "a row wrote this and the seam calls it later". What does say
+    so is `claim_slot`, whose whole purpose is the at-most-one registration this
+    shape needs, and which is therefore the honest discriminator.
+
+    **A filter over `_scoped_methods()` rather than a fourth walk of its own.**
+    Every provider registration takes a `scope=`, so that set already contains
+    all five and re-walking the tree only re-derives it. It also inherits the
+    stronger source: `_source_of` follows same-class delegates, so a seam that
+    moved its `claim_slot` call into a private helper stays in the gate, where a
+    walk reading only the method's own body would have silently dropped it —
+    which is the one-hop failure `_source_of`'s own docstring records.
+    """
+    return {name for name in _scoped_methods() if "claim_slot(" in _source_of(name)}
+
+
+BOUND: dict[str, str] = {
+    # `Class.field` → the method that invokes it, whose source must bind.
+    #
+    # cordis itself, where the owner and the layer coincide and one scope says
+    # both — the case P6-12 and P6-25 were built for.
+    "Hook.callback": "_invoke",
+    "PluginSpec.apply": "Context.reconcile",
+    "_Dependent.activate": "Context.reconcile",
+    # The tools registry. All four of the definition's pipeline bodies, not one:
+    # P6-26 bound `execute` alone, and `render` and `presentation_meta` — the
+    # next two statements in the same closure — ran bound to whichever
+    # `tools/execute` wrapper had called the inner, measured on the headless
+    # profile as `plugin(session-checkpoint-policy)`.
+    "ToolDefinition.execute": "ToolRuntime.dispatch",
+    "ToolDefinition.finalize_content": "ToolRuntime.finish",
+    "ToolOutput.presentation_meta": "ToolRuntime.dispatch",
+    "ToolOutput.render": "ToolRuntime.dispatch",
+    "ToolDefinition.is_concurrency_safe": "ToolRuntime.execution_mode",
+    # The five registries P6-29 reached, once the binding could hold a pair.
+    "CommandDefinition.run": "CommandRegistry.dispatch",
+    "CompactionNote.text": "CompactionSeam.notes",
+    "Diagnostic.read": "DiagnosticsRegistry.report",
+    "PromptContext.text": "SystemPromptService.assemble",
+    "PromptSection.text": "SystemPromptService.assemble",
+    "StatusField.read": "TuiStatusRegistry.readings",
+    "_Sink.export": "SessionTelemetry.record",
+    # The single-slot providers, in the same table as the bodies rather than a
+    # second beside it: it is the same claim ("this runs inside a binding")
+    # checked the same way, and the two walks that find them differ only in
+    # where they look. Two dicts meant the parametrized check below had to
+    # prefix one set and strip the prefix back off — machinery that existed
+    # purely because there were two. The names cannot collide: `FsService.rebase`
+    # is the method, `FsService._rebase` the field it fills.
+    #
+    # P6-29 dissolved the objection that had kept all five unbound — "a provider
+    # has no agent" was only ever about the *layer* half, and the owner half
+    # needs no agent at all.
+    "CodeRuntimeSeam.register": "CodeRuntimeSeam.run",
+    "CompactionSeam.register": "CompactionSeam.compact_if_needed",
+    "FsService.rebase": "FsService.root_for",
+    "SandboxSeam.register_provider": "SandboxSeam.confine",
+    "WorkspaceSeam.register_provider": "WorkspaceSeam.acquire",
+    # The one provider slot whose target is already in hand — `ph.seams.fs` has
+    # `_scope_of` of its own — so a rebase resolver runs for the agent whose path
+    # is being resolved, where the other four take the registration's layer.
+    "FsService._rebase": "FsService.root_for",
+}
+"""Row bodies a registry invokes inside a binding, and where that binding is."""
+
+
+UNBOUND: dict[str, str] = {
+    # --- not a registry-held body at all -------------------------------------
+    "AgentRegistry.driver_factory": "builds the agent; runs before its scope exists",
+    "FakeAdapter.respond": "a test double's canned reply",
+    "StubCodeRuntime.programs": "a test double's canned programs",
+    "InboxNotifications.claimed": "a callback back into the caller that supplied it",
+    "InboxNotifications.discarded": "a callback back into the caller that supplied it",
+    "InboxNotifications.inserted": "a callback back into the caller that supplied it",
+    # --- teardown ------------------------------------------------------------
+    # A disposer runs *while* a scope is being unwound. Binding one would offer
+    # a lifetime to register on at the moment that lifetime is ending, which is
+    # the opposite of what I2 wants; `add_disposer` refuses an inactive scope
+    # for the same reason.
+    "Job.release": "teardown; runs as its scope unwinds",
+    "SubagentRun.dispose": "teardown; runs as its scope unwinds",
+    "Workspace.release": "teardown; runs as its scope unwinds",
+    "_Effect.dispose": "teardown; runs as its scope unwinds",
+    "_Held.dispose": "teardown; runs as its scope unwinds",
+    # --- policy and presentation, called for an answer rather than for effect --
+    # These are asked a question and expected to return one. None of them has a
+    # reason to register, and two of them run outside any pipeline at all.
+    "ToolDefinition.present_call": "TUI presentation, outside the pipeline",
+    "ToolDefinition.present_result": "TUI presentation, outside the pipeline",
+    "TransportPresentation.present_call": "TUI presentation, outside the pipeline",
+    "TransportPresentation.present_result": "TUI presentation, outside the pipeline",
+    "ScreenDefinition.build": "TUI presentation, outside the pipeline",
+    "_FrontEnd.drawn": "TUI presentation, outside the pipeline",
+    "_FrontEnd.present": "TUI presentation, outside the pipeline",
+    "_Layer.guards": "a monotonic policy answer, read on the deny path",
+    "_Screen.decide": "a policy answer; its own owner is what fs filters on",
+    # --- factories and transports --------------------------------------------
+    "_Layer.code_namespaces": "a factory, invoked to build bindings for a run",
+    "_View.code_namespaces": "the same factories, resolved",
+    "CodeBinding.dispatch": "re-enters ToolRuntime.execute, which binds (C1)",
+    "SubagentRun.result": "an accessor for the child's outcome, not the child's code",
+    # --- handed out rather than invoked --------------------------------------
+    # The seam returns the renderer and its caller calls it, so there is no
+    # invoke site here to bind. Binding it would mean `sdk_renderer()` returning
+    # a wrapper instead of the row's own callable, which changes what a caller
+    # holds in order to fix where it runs — a different shape from every entry
+    # above, and one to decide on rather than to slip in.
+    "CodeRuntimeSeam._sdk_renderers": "handed to the caller; this seam never invokes it",
+}
+"""Callables the walk finds that are *not* bound, and why each one is not."""
+
+
+def _invoker_source(name: str) -> str:
+    """The source of a named invoker, whether it is a method or a function."""
+    if "." in name:
+        return _source_of(name)
+    for module in _modules():
+        found = vars(module).get(name)
+        if callable(found) and getattr(found, "__module__", "") == module.__name__:
+            return inspect.getsource(found)
+    raise AssertionError(f"invoker {name} cannot be located")
+
+
+@pytest.mark.parametrize(
+    ("surface", "discovered"),
+    [("row body", _row_bodies()), ("provider slot", _provider_slots())],
+    ids=["row-bodies", "provider-slots"],
+)
+def test_every_invoked_body_is_accounted_for(surface: str, discovered: set[str]) -> None:
+    """A new callable on a registry's value fails until somebody decides.
+
+    The point of the walks. `_scoped_methods` above cannot see this surface at
+    all — a body is a *field*, not a method with a `scope=` — so before this the
+    only thing standing between a new `ToolDefinition` callback and running as
+    an unrelated row was that someone would think to check.
+
+    Parametrized over the two walks rather than written twice: they share the
+    tables, and only the noun naming what went unclassified differs.
+    """
+    unclassified = sorted(discovered - set(BOUND) - set(UNBOUND))
+    assert unclassified == [], (
+        f"each of these is a {surface} and nothing says whether it runs inside a "
+        f"binding: add it to BOUND or to UNBOUND: {unclassified}"
+    )
+
+
+def test_no_classification_outlives_what_it_classifies() -> None:
+    """The other direction, asked once against both walks.
+
+    Per-walk it cannot be asked at all — a provider slot is absent from
+    `_row_bodies()` by construction, so each walk alone would call every one of
+    the other's entries stale. Together they are the whole surface the tables
+    are allowed to describe.
+    """
+    stale = sorted((set(BOUND) | set(UNBOUND)) - _row_bodies() - _provider_slots())
+    assert stale == [], f"these are classified but no longer exist: {stale}"
+
+
+@pytest.mark.parametrize("name", sorted(BOUND))
+def test_a_bound_body_names_an_invoker_that_binds(name: str) -> None:
+    """`BOUND` is checked against the code, not trusted.
+
+    Without this the table is a promise: names under the claim "these run inside
+    a binding" that nothing verifies, and the cheapest way past the accounting
+    test above is to type one into the bound half. That is the same
+    unfalsifiable-gate shape this module's docstring criticises at P3-23 and
+    P3-24, and the same reason `test_the_classification_is_a_check_and_not_a_promise`
+    exists one surface over.
+
+    **It proves the invoker binds, not that it binds *this* body**, and that
+    bounds what the test is worth. `_invoker_source` concatenates a method with
+    the same-class helpers it calls, so a method holding several bindings still
+    reads as bound when one is deleted — `SystemPromptService.assemble` enters
+    four, and losing one leaves this green. Deleting the *only* binding in a
+    method does turn it red, which is the case that catches a whole invoker
+    regressing: `ToolRuntime.finish` → `ToolDefinition.finalize_content`, and
+    `SandboxSeam.confine` → its provider, both verified. The per-body guarantee
+    is the behavioural tests' job, and every binding here has one.
+    """
+    invoker = BOUND[name]
+    source = _invoker_source(invoker)
+    assert "running(" in source or "_ACTIVATING.set" in source, (
+        f"{name} is classified as bound, but its invoker {invoker} never enters a binding"
+    )
+
+
+def test_the_body_classifications_do_not_overlap() -> None:
+    """A name in both tables would be a decision made twice, differently."""
+    both = sorted(set(BOUND) & set(UNBOUND))
+    assert both == [], f"classified as both bound and unbound: {both}"

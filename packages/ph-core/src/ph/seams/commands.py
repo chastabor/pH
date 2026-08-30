@@ -13,11 +13,10 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from contextlib import nullcontext
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..cordis import Context, Disposer, maybe_await, plugin, running
+from ..cordis import Context, Disposer, Running, maybe_await, plugin, running
 from ..session import Session
 from ._registry import claim_key
 
@@ -46,23 +45,42 @@ class CommandContext:
     agent: Any = None
 
 
+@dataclass(frozen=True, slots=True)
+class _Registered:
+    """A command and who registered it (P6-29).
+
+    In the table rather than beside it, so `claim_key`'s identity-checked release
+    takes both away in one step and the two can never be popped out of step —
+    the failure a parallel `dict[str, Running]` would have made silent.
+    """
+
+    definition: CommandDefinition
+    by: Running
+
+
 @dataclass(slots=True)
 class CommandRegistry:
     """The service published as `ctx.commands`."""
 
     ctx: Context
-    _commands: dict[str, CommandDefinition] = field(default_factory=dict)
+    _commands: dict[str, _Registered] = field(default_factory=dict)
 
     def register(self, definition: CommandDefinition, *, scope: Context | None = None) -> Disposer:
+        by = self.ctx.running_for(scope)
         return claim_key(
-            self.ctx.owner_for(scope), self._commands, definition.name, definition, label="command"
+            by.owner,
+            self._commands,
+            definition.name,
+            _Registered(definition, by),
+            label="command",
         )
 
     def list(self) -> list[CommandDefinition]:
-        return [self._commands[name] for name in sorted(self._commands)]
+        return [self._commands[name].definition for name in sorted(self._commands)]
 
     def get(self, name: str) -> CommandDefinition | None:
-        return self._commands.get(name)
+        entry = self._commands.get(name)
+        return entry.definition if entry is not None else None
 
     async def dispatch(
         self, line: str, *, session: Session | None = None, agent: Any = None
@@ -73,35 +91,36 @@ class CommandRegistry:
         is something the user did, and the log is where they will look for it.
         """
         name, _, argument = line.lstrip("/").partition(" ")
-        definition = self._commands.get(name)
-        if definition is None:
+        entry = self._commands.get(name)
+        if entry is None:
             raise KeyError(f'unknown command "/{name}"')
+        definition = entry.definition
         if session is not None:
             session.append("command/run", {"name": name, "argument": argument.strip()})
         outcome = "ok"
         detail: str | None = None
         try:
-            # As the agent it was typed for, not as the registry (P6-26). The
-            # `ctx=self.ctx` handed to the body is the *registry's* — the same
-            # `scope or self.ctx` shape P6-12 named one table over — so a
-            # command that registered anything did it globally and forever.
+            # **As the row that registered it, for the agent that typed it**
+            # (P6-26, P6-29). The `ctx=self.ctx` handed to the body is the
+            # *registry's* — the same `scope or self.ctx` shape P6-12 named one
+            # table over — so a command that registered anything did it globally
+            # and forever.
             #
-            # **Nothing at all when there is no agent**, rather than the
-            # registry's own context. Binding `self.ctx` here would restate
-            # `owner_for`'s third branch and *delete its second*: a command
-            # dispatched from inside a row's `apply` or from a listener — both
-            # of which bind — would land on the seam instead of on that row.
-            # The fallback is already owned one layer down, so this adds only
-            # what that layer cannot know.
+            # The owner is the registering row, exactly as `_invoke` binds a
+            # listener's own scope rather than the emitter's, and for the same
+            # reason: whose code this is does not depend on who triggered it. So
+            # there is no longer a no-agent case to special-case — P6-26 bound
+            # nothing at all there, to avoid restating `owner_for`'s fallback and
+            # deleting its second branch. The recorded pair is a better answer
+            # than either, and it is available unconditionally.
             #
-            # The `getattr` is P6-24's idiom in a *policy* path now rather than
-            # a convenience one: `ph.seams.fs._scope_of` is the same six lines,
-            # and `ToolExecutionInput.scope` is what the tools side reads
-            # instead. Kept local until that row picks the home; it fails open,
-            # which is the second half of what P6-24 has to answer.
+            # Only the *layer* still comes from the agent, and only that half
+            # uses P6-24's `getattr` idiom. It fails open to the registration's
+            # own layer, which for every command in the tree is the global one —
+            # narrower than the seam, and stated here because a per-agent command
+            # would make this the line that decides who sees what it registers.
             scope = getattr(agent, "ctx", None)
-            bind = running(scope) if isinstance(scope, Context) else nullcontext()
-            with bind:
+            with running(entry.by, scope if isinstance(scope, Context) else None):
                 result = await maybe_await(
                     definition.run(
                         argument.strip(),

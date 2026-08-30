@@ -29,7 +29,7 @@ from typing import Any, Literal, TypeAlias
 
 import anyio
 
-from ..cordis import Context, Disposer, events, maybe_await, plugin
+from ..cordis import Context, Disposer, Running, events, maybe_await, plugin, running
 from ..paths import default_home_path, write_text_under
 from ..session import Session, SessionEvent, dumps, now_ms
 from ..wire import WireModel
@@ -60,12 +60,24 @@ class SessionTelemetryRecord(WireModel):
     body: str
 
 
+@dataclass(frozen=True, slots=True)
+class _Sink:
+    """An exporter and who registered it (P6-29).
+
+    A sink is a row's body this seam invokes, once per record — the same category
+    as a tool's `execute`, and it ran unbound, so an exporter that registered
+    anything landed it on the seam and outlived its row."""
+
+    export: Callable[[SessionTelemetryRecord], Any]
+    by: Running
+
+
 @dataclass(slots=True)
 class SessionTelemetry:
     """The service published as `ctx.session_telemetry`."""
 
     ctx: Context
-    _sinks: list[Callable[[SessionTelemetryRecord], Any]] = field(default_factory=list)
+    _sinks: list[_Sink] = field(default_factory=list)
     _last_chunked_step: dict[str, tuple[int, int]] = field(default_factory=dict)
     """Per session, the step whose first chunk already shipped. One entry per
     session rather than one per step, so it does not grow with the conversation."""
@@ -74,7 +86,8 @@ class SessionTelemetry:
         self, sink: Callable[[SessionTelemetryRecord], Any], *, scope: Context | None = None
     ) -> Disposer:
         """Register an exporter. It sees only post-redaction records."""
-        return claim_entry(self.ctx.owner_for(scope), self._sinks, sink, label="telemetry.sink")
+        by = self.ctx.running_for(scope)
+        return claim_entry(by.owner, self._sinks, _Sink(sink, by), label="telemetry.sink")
 
     async def record(self, record: SessionTelemetryRecord) -> None:
         """Redact, then fan out. A dropped record reaches no sink."""
@@ -87,7 +100,10 @@ class SessionTelemetry:
             return
         for sink in list(self._sinks):
             try:
-                await maybe_await(sink(redacted))
+                # No target: telemetry is deployment-wide, so both halves are
+                # what registration recorded.
+                with running(sink.by):
+                    await maybe_await(sink.export(redacted))
             except Exception:
                 log.exception("ph.seams.telemetry: a sink failed")
 

@@ -185,11 +185,19 @@ class SkillService:
         # Two questions, two answers (P6-12): the bucket is *which scope this
         # narrows*, and must stay where the caller put it; the disposer is *when
         # it lifts*, which is the row that asked. One value answering both is
-        # what this row found in five registries.
-        bucket = self._restrictions.setdefault(self.ctx.layer_for(scope).isolation, [])
-        released = claim_entry(
-            self.ctx.owner_for(scope), bucket, restriction, label="skill-restriction"
-        )
+        # what this row found in five registries. Asked as a pair (P6-29) rather
+        # than as two calls, so a disposed activation warns once rather than
+        # twice — `owner_for` is the half that logs.
+        # Through the *pair*, not `by.owner` (P6-29): the bucket is keyed by
+        # the layer's isolation, so a restriction registered by a body running
+        # for an agent would otherwise sit under that agent's key with its
+        # disposer on the row — and stay there until the next `_changed()`
+        # happened to sweep it. `Running.add_disposer` releases on whichever
+        # scope ends first, which is the same reason `ToolRuntime._claim` uses
+        # it for `_layers`.
+        by = self.ctx.running_for(scope)
+        bucket = self._restrictions.setdefault(by.layer.isolation, [])
+        released = claim_entry(by, bucket, restriction, label="skill-restriction")
 
         self._changed()
 

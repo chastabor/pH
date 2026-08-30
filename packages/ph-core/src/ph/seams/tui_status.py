@@ -32,7 +32,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Literal, TypeAlias
 
-from ..cordis import Context, Disposer, plugin
+from ..cordis import Context, Disposer, Running, plugin, running
 from ..session import Session
 from ._names import require_slug
 from ._registry import claim_key
@@ -85,12 +85,23 @@ class StatusField:
     order: int = 0
 
 
+@dataclass(frozen=True, slots=True)
+class _Registered:
+    """A field and who registered it (P6-29).
+
+    In the table rather than beside it, so `claim_key`'s identity-checked release
+    takes both away at once — the same reason `ph.seams.commands` holds one."""
+
+    status_field: StatusField
+    by: Running
+
+
 @dataclass(slots=True)
 class TuiStatusRegistry:
     """The service published as `ctx.tui_status`."""
 
     ctx: Context
-    _fields: dict[str, StatusField] = field(default_factory=dict)
+    _fields: dict[str, _Registered] = field(default_factory=dict)
 
     def register(self, status_field: StatusField, *, scope: Context | None = None) -> Disposer:
         """Contribute a field.
@@ -101,16 +112,35 @@ class TuiStatusRegistry:
         else's* lifetime, which is what it now means and all it now means.
         """
         require_slug(status_field.id, maximum=ID_MAX, kind="status field id")
-        owner = self.ctx.owner_for(scope)
-        return claim_key(owner, self._fields, status_field.id, status_field, label="status-field")
+        by = self.ctx.running_for(scope)
+        return claim_key(
+            by.owner,
+            self._fields,
+            status_field.id,
+            _Registered(status_field, by),
+            label="status-field",
+        )
 
     def readings(self, session: Session) -> list[StatusReading]:
-        """Every field that has something to say, in `order` then id order."""
-        ordered = sorted(self._fields.values(), key=lambda one: (one.order, one.id))
+        """Every field that has something to say, in `order` then id order.
+
+        **`read` runs as the row that contributed it** (P6-29). It is a row's
+        body this registry invokes — the same category as a tool's `execute` —
+        and it ran unbound, so a field that registered anything landed it on the
+        seam. There is no *target* here the way `compaction.notes` and
+        `system_prompt.assemble` have one: the footer is one line for one
+        session, not a per-agent view, so both halves are what registration
+        recorded and a reading is contained to wherever the field was declared.
+        """
+        ordered = sorted(
+            self._fields.values(), key=lambda one: (one.status_field.order, one.status_field.id)
+        )
         readings: list[StatusReading] = []
-        for status_field in ordered:
+        for entry in ordered:
+            status_field = entry.status_field
             try:
-                reading = status_field.read(session)
+                with running(entry.by):
+                    reading = status_field.read(session)
             except Exception:
                 log.warning(
                     "ph.seams.tui_status: field %r failed to read", status_field.id, exc_info=True

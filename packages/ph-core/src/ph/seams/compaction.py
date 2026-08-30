@@ -32,7 +32,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol, TypeAlias, runtime_checkable
 
-from ..cordis import Context, Disposer, plugin
+from ..cordis import Context, Disposer, Running, plugin, running
 from ..session import Session
 from ._registry import claim_entry, claim_slot
 
@@ -135,8 +135,16 @@ class CompactionNote:
 
 @dataclass(frozen=True, slots=True)
 class _NoteRegistration:
-    owner: Context
+    """A note and who registered it (P6-29).
+
+    This field was called `owner` and held `layer_for`'s answer — the visibility
+    scope `notes()` filters with — which is the P6-12 conflation surviving under
+    the other question's name in the one registry that had already split them.
+    A `Running` cannot be read as the wrong half: `by.layer` filters, `by.owner`
+    is what the note's body runs as."""
+
     note: CompactionNote
+    by: Running
 
 
 @dataclass(slots=True)
@@ -147,12 +155,29 @@ class CompactionSeam:
     engine: CompactionEngine | None = None
     """At most one. Two answers to "when and how is history replaced" is a
     contradiction, and a profile picks its backend."""
+    engine_by: Running | None = None
+    """Who registered the engine (P6-29). Set and cleared with it by `claim_slot`.
+
+    Entered around every call into the engine, so anything its body registers
+    unwinds with the row that registered the engine rather than with this seam.
+    The layer stays the registration's own — **not the agent being compacted**,
+    which both call sites have in hand — because reading it means a fourteenth
+    copy of P6-24's `getattr(agent, "ctx", None)`, and an engine is one
+    deployment-wide object rather than a per-agent one. `ph.seams.fs` is the one
+    provider whose target is already derived, and it passes it; when P6-24 lands
+    and hands this seam a scope, these are the lines that take it."""
     _notes: list[_NoteRegistration] = field(default_factory=list)
 
     # ------------------------------------------------------------ the engine --
 
     def register(self, engine: CompactionEngine, *, scope: Context | None = None) -> Disposer:
-        return claim_slot(self.ctx.owner_for(scope), self, "engine", engine, label="compaction")
+        return claim_slot(
+            self.ctx.running_for(scope),
+            self,
+            "engine",
+            engine,
+            label="compaction",
+        )
 
     def require(self) -> CompactionEngine:
         if self.engine is None:
@@ -170,7 +195,8 @@ class CompactionSeam:
         """
         if self.engine is None:
             return None
-        return await self.engine.compact_if_needed(agent, trigger)
+        with running(self.engine_by):
+            return await self.engine.compact_if_needed(agent, trigger)
 
     async def compact_now(self, agent: Any, *, instructions: str = "") -> CompactionResult | None:
         """An explicit request. Absent an engine this *is* an error.
@@ -178,22 +204,25 @@ class CompactionSeam:
         Unlike the automatic path: somebody asked for something the deployment
         cannot do, and silence would read as "nothing to compact".
         """
-        return await self.require().compact_now(agent, instructions=instructions)
+        engine = self.require()
+        with running(self.engine_by):
+            return await engine.compact_now(agent, instructions=instructions)
 
     # ------------------------------------------------------------- the notes --
 
     def note(self, note: CompactionNote, *, scope: Context | None = None) -> Disposer:
         """Contribute a block to every summary prompt this context can reach."""
-        # `owner` is what `notes()` filters with `reaches` — visibility, so it
-        # stays where the caller put it — while the disposer belongs to the row
-        # that registered (P6-12). Through `claim_entry` because
-        # `_NoteRegistration` is a frozen dataclass and therefore compares by
-        # *value*: the `self._notes.remove(entry)` this replaces would have had
-        # one row's disposal take another's equal entry, which is the defect
-        # `_registry` exists to name.
-        entry = _NoteRegistration(owner=self.ctx.layer_for(scope), note=note)
+        # Both questions, kept together (P6-29): `by.layer` is what `notes()`
+        # filters with `reaches`, `by.owner` is the disposer's scope and the one
+        # the body runs as. Through `claim_entry` because `_NoteRegistration` is
+        # a frozen dataclass and therefore compares by *value*: the
+        # `self._notes.remove(entry)` this replaces would have had one row's
+        # disposal take another's equal entry, which is the defect `_registry`
+        # exists to name.
+        by = self.ctx.running_for(scope)
+        entry = _NoteRegistration(note=note, by=by)
         return claim_entry(
-            self.ctx.owner_for(scope),
+            by.owner,
             self._notes,
             entry,
             label=f"compaction-note({note.name})",
@@ -210,10 +239,19 @@ class CompactionSeam:
         """
         target = scope or self.ctx
         rendered: list[str] = []
-        visible = [entry.note for entry in self._notes if entry.owner.reaches(target)]
-        for note in sorted(visible, key=lambda one: one.order):
+        visible = [entry for entry in self._notes if entry.by.layer.reaches(target)]
+        for entry in sorted(visible, key=lambda one: one.note.order):
+            note = entry.note
             try:
-                text = note.text(session)
+                # **As the row that registered it, for the scope being
+                # compacted** (P6-29). `text` is a row's body invoked by a
+                # registry — the same category as a tool's `execute` — and it ran
+                # unbound, so anything it registered landed on the seam and
+                # outlived its row. This is one of the four P6-26 could not reach
+                # while the binding held a single `Context`: the target here is a
+                # *layer* and the owner is still the registering row.
+                with running(entry.by, target):
+                    text = note.text(session)
             except Exception:
                 log.warning(
                     "ph.seams.compaction: note %r failed to render", note.name, exc_info=True
