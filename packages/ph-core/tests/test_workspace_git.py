@@ -21,7 +21,7 @@ import pytest
 
 from ph.seams.subprocess import SubprocessSpawnSpec, scrub_env
 from ph.seams.workspace import redirection_env
-from ph.seams.workspace_git import sanitize_ref
+from ph.seams.workspace_git import sanitize_ref, tree_hash
 from ph.testing import git, git_repo, needs_git
 
 pytestmark = [pytest.mark.anyio, needs_git]
@@ -521,3 +521,44 @@ async def test_no_tier_configured_is_not_a_decline(mount: Any, tmp_path: Path) -
 
     (event,) = [e for e in session.events if e.type == "workspace/acquired"]
     assert "declined" not in event.data
+
+
+async def test_the_tree_hash_changes_only_when_the_work_does(mount: Any, tmp_path: Path) -> None:
+    """P5-07's fingerprint, and P4-09's restore point, are one derivation.
+
+    A content address: two identical trees hash identically and any edit changes
+    it. That property is what lets a quality gate be skipped — a gate that
+    failed against this exact tree cannot have changed its mind — so it is
+    asserted here, where the git tier lives, rather than trusted from the seam
+    that consumes it.
+    """
+    ctx, base = await _tiered(mount, tmp_path)
+    workspace = await ctx.workspace.acquire(
+        session_id="s1", agent_id="a1", base=base, access="write"
+    )
+
+    first = await tree_hash(ctx, workspace)
+    assert first, "a worktree could not be fingerprinted"
+    assert await tree_hash(ctx, workspace) == first, "the hash moved with nothing changed"
+
+    (workspace.root / "new.txt").write_text("work\n", encoding="utf-8")
+    changed = await tree_hash(ctx, workspace)
+    assert changed and changed != first, "an edit did not change the fingerprint"
+
+    (workspace.root / "new.txt").unlink()
+    assert await tree_hash(ctx, workspace) == first, "undoing the edit did not restore the hash"
+
+
+async def test_a_workspace_with_no_checkout_has_no_fingerprint(mount: Any, tmp_path: Path) -> None:
+    """`shared` is the process's own directory, so there is nothing to hash.
+
+    `None` rather than a made-up value: an empty fingerprint that compared equal
+    to another empty one would let a gate answer from a run against somebody
+    else's tree.
+    """
+    ctx = await mount()
+    workspace = await ctx.workspace.acquire(
+        session_id="s1", agent_id="a1", base=tmp_path, access="write"
+    )
+    assert workspace.kind == "shared"
+    assert await tree_hash(ctx, workspace) is None

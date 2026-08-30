@@ -160,6 +160,15 @@
 - id: schedule
   name: schedule
 
+# An autonomous run's objective, budget and quality gates (P5-07). The seam
+# records and folds; `/autonomous` is the command that drives it — a command
+# and not a host handler, so the governed pipeline sees every step (C2).
+- id: goals
+  name: goals
+
+- id: autonomous
+  name: autonomous
+
 # Named kinds of child a deployment is willing to spawn (P4-13b) — a `reviewer`
 # is `skills: [code-review]`, written once. **A menu, never a grant**: a parent
 # selecting one still gets only what it holds itself, because a preset that

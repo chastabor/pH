@@ -109,6 +109,8 @@ def test_the_auditor_renders_what_the_transcript_does_not() -> None:
         "schedule/created",
         "schedule/cancelled",
         "schedule/heartbeat",
+        "goal/continued",
+        "goal/gate",
         "workspace/provisioned",
         "workspace/checkpoint",
         # Who asked for a turn, and whether they had asked before: bookkeeping

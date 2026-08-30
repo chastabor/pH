@@ -108,6 +108,8 @@ def _sample(model: type[BaseModel]) -> BaseModel | None:
         },
         "TextBlock": {"text": "hi"},
         "Schedule": {"id": "s1", "kind": "interval", "spec": "300000", "prompt": "go"},
+        "Goal": {"id": "g1", "objective": "make the tests pass"},
+        "Budget": {},
         "ReasoningBlock": {"text": "thinking"},
         "ToolResultBlock": {"toolCallId": "c1", "content": [TextBlock(text="out")]},
         "ToolCallBlock": {"id": "c1", "name": "read", "arguments": "{}"},

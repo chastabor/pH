@@ -63,6 +63,14 @@ KNOWN_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         "schedule/cancelled",
         "schedule/tick",
         "schedule/heartbeat",
+        # An autonomous run's objective, its spend, its quality gates and how it
+        # ended (P5-07). `goal/settled` names *which* budget stopped it, because
+        # "it stopped" and "it ran out of turns" are different things to whoever
+        # reads the trace, and only one of them suggests raising the budget.
+        "goal/set",
+        "goal/continued",
+        "goal/gate",
+        "goal/settled",
         "step/end",
         "step/start",
         "tool/call",
@@ -238,6 +246,10 @@ IGNORABLE_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         "schedule/cancelled",
         "schedule/tick",
         "schedule/heartbeat",
+        # Goal bookkeeping: a reader skipping these loses why the loop went
+        # round again, which is accounting — the turns themselves are all there.
+        "goal/continued",
+        "goal/gate",
         "limits/exceeded",
         "limits/breaker-tripped",
         "workspace/acquired",

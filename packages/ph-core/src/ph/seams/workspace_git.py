@@ -490,33 +490,22 @@ async def checkpoint(
     agent's work, so hashing it into every cell's tree would be both wrong and
     the most expensive thing here.
     """
-    if workspace.kind not in ("worktree", "worktree-ephemeral"):
-        return None
-    git_dir = await _git_dir(ctx, workspace.root)
-    if git_dir is None:
-        return None
-
-    index = await _checkpoint_index(git_dir)
-    environ = {"GIT_INDEX_FILE": str(index)}
-    pathspec = workspace.agent_work_pathspec()
-    code, _, err = await git(ctx, workspace.root, "add", "-A", "--", *pathspec, env=environ)
-    if code != 0:
-        log.warning("ph.seams.workspace_git: could not stage %s (%s)", workspace.root, err)
-        return None
-    code, out, err = await git(ctx, workspace.root, "write-tree", env=environ)
-    if code != 0:
-        log.warning("ph.seams.workspace_git: could not write a tree (%s)", err)
+    # Both guards live in `tree_hash`, which returns `None` for exactly these
+    # two conditions. Keeping copies here cost a *fifth* `git` spawn per code
+    # cell — `rev-parse --absolute-git-dir`, 1.3 ms — which is the waste
+    # `_cached_checkpoint`'s own docstring names: "one of four spawns spent
+    # learning a constant".
+    tree = await tree_hash(ctx, workspace)
+    if tree is None:
         return None
 
     # Write-ahead (A10): the event precedes the ref that keeps the tree alive, so
     # a crash in between leaves a checkpoint that is *unavailable* and says so,
     # never a ref nobody recorded. The event's own seq is the address `/revert`
     # takes, so nothing here predicts what `append` will assign.
-    event = session.append(
-        CHECKPOINT, {"agentId": agent_id, "tree": out.strip(), "callId": call_id}
-    )
+    event = session.append(CHECKPOINT, {"agentId": agent_id, "tree": tree, "callId": call_id})
     ref = ref_for(session.id, agent_id, event.seq)
-    code, _, err = await git(ctx, workspace.root, "update-ref", ref, out.strip())
+    code, _, err = await git(ctx, workspace.root, "update-ref", ref, tree)
     if code != 0:
         log.warning("ph.seams.workspace_git: could not write %s (%s)", ref, err)
     return ref
@@ -619,6 +608,39 @@ def checkpoints(session: Session) -> dict[int, dict[str, Any]]:
     same restore points a live one has, without anything having remembered them.
     """
     return {event.seq: dict(event.data) for event in session.events if event.type == CHECKPOINT}
+
+
+async def tree_hash(ctx: Context, workspace: Workspace) -> str | None:
+    """What this agent's work currently hashes to, or `None` if it cannot say.
+
+    `git add -A && git write-tree` against pH's own index, which is what makes
+    the capture invisible: branch history, the working tree and the agent's own
+    staging area are all untouched (P4-09). What comes back is a content
+    address — two identical trees hash identically, and any edit changes it.
+
+    Extracted because a second caller wanted the same answer for a different
+    reason: P4-09 stores it as a restore point, and P5-07 uses it as a
+    **fingerprint**, to decide that a quality gate which failed against this
+    exact tree does not need running again. One derivation, so a gate memo and
+    a checkpoint can never disagree about whether the work changed.
+    """
+    if workspace.kind not in ("worktree", "worktree-ephemeral"):
+        return None
+    git_dir = await _git_dir(ctx, workspace.root)
+    if git_dir is None:
+        return None
+    index = await _checkpoint_index(git_dir)
+    environ = {"GIT_INDEX_FILE": str(index)}
+    pathspec = workspace.agent_work_pathspec()
+    code, _, err = await git(ctx, workspace.root, "add", "-A", "--", *pathspec, env=environ)
+    if code != 0:
+        log.warning("ph.seams.workspace_git: could not stage %s (%s)", workspace.root, err)
+        return None
+    code, out, err = await git(ctx, workspace.root, "write-tree", env=environ)
+    if code != 0:
+        log.warning("ph.seams.workspace_git: could not write a tree (%s)", err)
+        return None
+    return out.strip()
 
 
 def latest_checkpoint(session: Session, agent_id: str) -> str:

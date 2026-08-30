@@ -479,6 +479,31 @@ class TuiEventAdapter:
         delay = f", {late}s late" if late >= 1 else ""
         self._row("schedule", "notice", f"Scheduled run — {event.data.get('id', '')}{delay}", event)
 
+    def _on_goal_set(self, event: SessionEvent, live: bool) -> None:
+        """An autonomous run started, and what will decide it."""
+        gates = event.data.get("gates") or ()
+        decides = f" — gates: {', '.join(str(gate) for gate in gates)}" if gates else ""
+        self._row(
+            "goal", "notice", f"Working toward: {event.data.get('objective', '')}{decides}", event
+        )
+
+    def _on_goal_settled(self, event: SessionEvent, live: bool) -> None:
+        """How the run ended, in the words that distinguish the three endings.
+
+        `budget_limited` is not `achieved`, and a row that blurred them would
+        report work the run did not do — which is the failure this whole layer
+        exists to make impossible.
+        """
+        outcome = str(event.data.get("outcome", ""))
+        detail = str(event.data.get("detail", "")).strip()
+        said = {
+            "achieved": "Goal achieved — every gate passed",
+            "budget_limited": "Stopped: out of budget, with gates still failing",
+            "abandoned": "Goal abandoned",
+        }.get(outcome, f"Goal settled: {outcome}")
+        text = f"{said}{f' ({detail})' if detail else ''}"
+        self._row("goal", "notice" if outcome == "achieved" else "error", text, event)
+
     def _on_kernel_restored(self, event: SessionEvent, live: bool) -> None:
         """A resumed namespace, but only when something did not come back.
 
@@ -712,6 +737,8 @@ HANDLERS: Mapping[str, Handler] = {
     "supervisor/recovered": TuiEventAdapter._on_supervisor_recovered,
     "supervisor/passivated": TuiEventAdapter._on_supervisor_passivated,
     "schedule/tick": TuiEventAdapter._on_schedule_tick,
+    "goal/set": TuiEventAdapter._on_goal_set,
+    "goal/settled": TuiEventAdapter._on_goal_settled,
     "agent/inbox/spliced": TuiEventAdapter._on_agent_inbox_spliced,
     "todo/write": TuiEventAdapter._on_todo_write,
     "offload/spilled": TuiEventAdapter._on_offload_spilled,
@@ -740,6 +767,11 @@ RECORDLESS: frozenset[str] = frozenset(
         "schedule/created",
         "schedule/cancelled",
         "schedule/heartbeat",
+        # The loop's own bookkeeping. `goal/set` and `goal/settled` are rows —
+        # they bracket the run — while a continuation and a gate result are
+        # accounting the transcript already shows as turns and tool output.
+        "goal/continued",
+        "goal/gate",
         "request/header",
         "step/start",
         "step/end",

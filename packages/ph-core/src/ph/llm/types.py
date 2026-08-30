@@ -352,6 +352,29 @@ class TokenUsage(WireModel):
     cache_write_tokens: int | None = None
     reasoning_tokens: int | None = None
 
+    @property
+    def total(self) -> int:
+        """Everything the provider billed for this call.
+
+        The four terms, in one place. `TokenMeter.baseline` and the TUI's
+        `_count_usage` each spell them out — the second's docstring saying "same
+        four terms as `TokenMeter.baseline`", which is a comment doing a type's
+        job — and P5-07's budget arrived as a third definition with only *two*,
+        so a cache-heavy run spent most of its input outside the budget while
+        the footer showed a larger number for the same word.
+
+        `reasoning_tokens` is deliberately out: providers that report it count
+        it inside `output_tokens`, so adding it bills the same tokens twice —
+        which is the mistake this model's own docstring warns about for cached
+        input.
+        """
+        return (
+            self.input_tokens
+            + self.output_tokens
+            + (self.cache_read_tokens or 0)
+            + (self.cache_write_tokens or 0)
+        )
+
 
 class LlmFailure(WireModel):
     """Serializable provider or transport failure facts.
