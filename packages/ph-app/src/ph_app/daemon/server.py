@@ -54,7 +54,7 @@ from ..protocol import (
 )
 from .framing import FramingError, read_frames, write_frame
 from .recovery import PASSIVATE_AFTER
-from .supervisor import Supervisor
+from .supervisor import NON_GUARANTEES, Supervisor
 
 __all__ = ["DaemonServer", "serve"]
 
@@ -428,11 +428,20 @@ class DaemonServer:
     def report(self) -> list[tuple[str, list[tuple[str, str]]]]:
         """The daemon's own diagnostic sections, in `report()`'s shape.
 
-        A list because there will be more than one: P5-12's non-guarantees are
-        the next, and a method that returned the single section it happens to
-        have today is one every later section has to change.
+        A list because there is already more than one, and P5-12's arrival is
+        what the shape was built for: `sections` reached the client through one
+        loop, so the isolation section cost a tuple entry here and nothing at
+        all on the other side.
         """
-        return [("socket lifetime", self.socket_lifetime().describe())]
+        return [
+            ("socket lifetime", self.socket_lifetime().describe()),
+            # The daemon's own non-guarantees (N5, I-2), printed by the command a
+            # person runs to ask what this daemon is. Rule 6 wants them beside
+            # where they would be assumed, and this reply *is* that place: it
+            # says "roots: 7" two rows up, which is the sentence that invites
+            # every assumption these rows correct.
+            ("isolation", list(NON_GUARANTEES)),
+        ]
 
     def socket_lifetime(self) -> RuntimeLifetime:
         """Whether *this* socket survives logout — asked of the path it bound.

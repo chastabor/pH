@@ -61,7 +61,7 @@ from .recovery import (
     recovery_of,
 )
 
-__all__ = ["Root", "ScheduleUnavailable", "SessionBusy", "Supervisor"]
+__all__ = ["NON_GUARANTEES", "Root", "ScheduleUnavailable", "SessionBusy", "Supervisor"]
 
 
 class ScheduleUnavailable(Refusal):
@@ -89,6 +89,68 @@ class SessionBusy(Refusal):
 
 log = logging.getLogger("ph_app.daemon")
 
+
+NON_GUARANTEES: tuple[tuple[str, str], ...] = (
+    (
+        "worker model",
+        "one anyio task per root, all in this process — not a process per root (Q7)",
+    ),
+    (
+        "per-root memory",
+        "not capped. A root that allocates without bound is killed by the OS as one "
+        "process, and every other root goes with it",
+    ),
+    (
+        "crash containment",
+        "per root, not per process. A root's own crash is caught, retried and given up "
+        "on in its log (P5-04); a segfault in a C extension, an OOM kill or a SIGKILL "
+        "ends every root at once, and SIGKILL runs no teardown at all (N7)",
+    ),
+    (
+        "CPU",
+        "shared. One root's CPU-bound work delays every other root's turn — only "
+        "ph-rlm's kernels run model code in child processes with limits of their own",
+    ),
+    (
+        "restart",
+        "not rolling. Stopping the daemon stops every root; the next daemon resumes one "
+        "from its log when a client asks for it",
+    ),
+    (
+        "after a restart",
+        "roots are not re-mounted, so a schedule does not fire until something touches "
+        "its root. The log keeps the appointment; nothing is watching it",
+    ),
+    (
+        "per user",
+        "one daemon per $PH_RUNTIME — a second on the same socket is refused rather "
+        "than merged (P5-01), and a second writer on one session log is refused by its "
+        "lease (I-5). Isolation *between users* is the operator's layer",
+    ),
+)
+"""What this supervisor does **not** promise, in the module that would imply it (N5).
+
+Rule 6: *state what is not enforced, next to where it would be assumed* — and a
+caveat only in the docs is a defect. What is assumed here is what "one daemon,
+many long-running agents" sounds like it means, and every row above is a place
+where it does not mean it. `ph doctor` and `ph agents doctor` print them
+verbatim, so the sentences a person reads and the sentences this file is
+responsible for keeping true are the same strings.
+
+**Two of them are corrections to earlier rows' own wording**, which is why they
+are here rather than in the phase note alone. §3's N5 says pH does not "contain
+crashes between roots"; P5-04 landed after that sentence and *does* contain a
+root's own crash — what stays uncontained is the process, which is a different
+and narrower claim, and a reader who took the broad one would over-provision
+against the wrong failure. And P5-06 argues that "a machine that reboots between
+Tuesday and Wednesday must not lose Wednesday's run" — true of the log, which
+keeps the schedule, and not true of the daemon, because `tick` iterates
+`self.roots` and nothing re-mounts a root at boot. The appointment survives; the
+thing that would keep it does not.
+
+Data, not prose, for the reason every diagnostic here is: a paragraph in a
+docstring cannot be printed, and a sentence nobody can print is one nobody
+checks."""
 
 COMMAND_ACCEPTED = "client/command"
 """The record that makes a mutating command idempotent (P5-02)."""

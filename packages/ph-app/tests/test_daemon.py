@@ -1377,8 +1377,15 @@ async def test_daemon_status_says_it_cannot_be_reached_and_what_would_fix_it(
         # One encoding, not three. The reply used to carry `survivesLogout` and
         # `linger` beside the rendered rows; nothing but this assertion read
         # them, and a second spelling of one fact is one that can disagree.
-        assert [one["title"] for one in healthy["sections"]] == ["socket lifetime"]
-        rows = {row["label"]: row["value"] for row in healthy["sections"][0]["rows"]}
+        #
+        # Selected by title rather than asserted as the whole list: the envelope
+        # is the *daemon's* sections, and P5-12 added a second one the moment
+        # after this row landed. A test that enumerates a list it does not own
+        # fails for other rows' correct changes.
+        lifetime_section = next(
+            one for one in healthy["sections"] if one["title"] == "socket lifetime"
+        )
+        rows = {row["label"]: row["value"] for row in lifetime_section["rows"]}
         assert rows["survives logout"].startswith("no —"), "reaped host, no lingering"
         assert "off for someone" in rows["linger"]
         assert rows["enable it"] == "loginctl enable-linger someone"

@@ -258,7 +258,19 @@ def doctor(profile: ProfileOption = DEFAULT_PROFILE) -> None:
     #
     # `roots=` so this and the table above describe one resolution rather than
     # two independent ones.
-    before_mount = [("daemon socket lifetime", lifetime(roots=roots).describe())]
+    # Imported here rather than at module scope: `ph_app.daemon.supervisor`
+    # pulls in the agent, the persistence layer and `filelock`, and `ph --print`
+    # has no daemon in it. `daemon()` below reaches for `serve` the same way.
+    from .daemon.supervisor import NON_GUARANTEES
+
+    before_mount = [
+        ("daemon socket lifetime", lifetime(roots=roots).describe()),
+        # N5, and the gate's "doctor prints the worker model". Here and not only
+        # in `ph agents doctor` because the two answer different questions: that
+        # one describes a daemon somebody already started, and this one is read
+        # by the person deciding whether to run six agents under one (I-2).
+        ("daemon isolation", list(NON_GUARANTEES)),
+    ]
     # What this install can actually compose — a bundle profile whose
     # distribution is missing is not offered (P3-20).
     console.print(f"[dim]profiles: {', '.join(available_profiles())}[/dim]")
