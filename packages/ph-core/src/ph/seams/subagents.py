@@ -29,7 +29,7 @@ failures as bugs.
 from __future__ import annotations
 
 import logging
-from collections.abc import Awaitable, Callable, Iterable, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any, Literal, Protocol, TypeAlias, runtime_checkable
 
@@ -46,6 +46,7 @@ from .skills import ORDER_SKILLS, SkillRestriction
 __all__ = [
     "ADMITTED",
     "DELETED",
+    "SETTLED_STATUSES",
     "STATUS",
     "USAGE",
     "Access",
@@ -62,6 +63,7 @@ __all__ = [
     "SubagentSpawnError",
     "SubagentStatus",
     "apply",
+    "child_is_live",
     "default_child_name",
     "downgrade_text",
     "family_reach",
@@ -93,6 +95,38 @@ Access: TypeAlias = Literal["read", "write"]
 """What a child asks of the parent's workspace. `read` is the default (E4)."""
 
 SubagentStatus: TypeAlias = Literal["queued", "running", "done", "error", "cancelled"]
+
+SETTLED_STATUSES: frozenset[str] = frozenset({"done", "error", "cancelled"})
+"""The statuses that mean a child has stopped. Beside the vocabulary it reads.
+
+Here rather than in the consumer, for the reason the four event names are here:
+the fold and every producer have to agree exactly. P5-05's sweeper wrote its own
+copy — `{"completed", "failed", "cancelled", "deleted"}` — and it was wrong in
+three of four members. `completed` and `failed` are names no producer emits (the
+writer says `done` and `error`), `deleted` is not a status at all, and the two
+that actually mean settled were missing. The effect was that a root which had
+ever run a child to completion could never be released: every settled child read
+as live, forever, which is most of what passivation exists to do.
+"""
+
+
+def child_is_live(row: Mapping[str, Any]) -> bool:
+    """Whether this roster row is still working.
+
+    Deletion is a tombstone rather than a status — `fold_subagent_event` sets
+    `deleted` and leaves `status` alone — so both have to be read, which is the
+    other half a hand-written copy got wrong.
+
+    An unrecognised status counts as **live**, deliberately: a caller that
+    releases a parent on the strength of this must fail towards keeping one
+    alive. Getting it backwards abandons a running child; getting it this way
+    costs memory until the child settles.
+    """
+    if row.get("deleted"):
+        return False
+    return str(row.get("status", "queued")) not in SETTLED_STATUSES
+
+
 """A child's lifecycle, as the parent's roster and the TUI panel see it.
 
 Lifecycle only. *Why* a child is live — woken to answer a question rather than

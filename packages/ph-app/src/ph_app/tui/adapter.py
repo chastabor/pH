@@ -448,6 +448,23 @@ class TuiEventAdapter:
         after = event.data.get("afterAttempts", "")
         self._row("recovered", "notice", f"Recovered after {after} attempts", event)
 
+    def _on_supervisor_passivated(self, event: SessionEvent, live: bool) -> None:
+        """This session was released for being idle (P5-05).
+
+        The row that stops a gap from reading as a crash. A transcript that
+        halts for three days and picks up again looks like a failure unless
+        something says the pause was deliberate — and the `session/resumed` on
+        the way back says only that something resumed, not that nothing was
+        wrong.
+        """
+        minutes = int(event.data.get("idleMs", 0)) // 60_000
+        self._row(
+            "passivated",
+            "notice",
+            f"Released after {minutes} minutes idle — it resumes on the next message",
+            event,
+        )
+
     def _on_kernel_restored(self, event: SessionEvent, live: bool) -> None:
         """A resumed namespace, but only when something did not come back.
 
@@ -679,6 +696,7 @@ HANDLERS: Mapping[str, Handler] = {
     "supervisor/retry": TuiEventAdapter._on_supervisor_retry,
     "supervisor/failed": TuiEventAdapter._on_supervisor_failed,
     "supervisor/recovered": TuiEventAdapter._on_supervisor_recovered,
+    "supervisor/passivated": TuiEventAdapter._on_supervisor_passivated,
     "agent/inbox/spliced": TuiEventAdapter._on_agent_inbox_spliced,
     "todo/write": TuiEventAdapter._on_todo_write,
     "offload/spilled": TuiEventAdapter._on_offload_spilled,

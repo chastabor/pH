@@ -41,14 +41,23 @@ from ph.agent.types import AgentOptions
 from ph.cordis import Context
 from ph.llm.types import create_user_message
 from ph.persistence import resume_session, resumption_of, session_path
+from ph.seams.subagents import child_is_live
 from ph.seams.workspace import workspace_of
 from ph.seams.workspace_git import latest_checkpoint, restore
-from ph.session import Session, SessionEvent
+from ph.session import Session, SessionEvent, now_ms
 from ph.tools.errors import error_message
 
 from ..protocol import Refusal, cursor_of
 from ..runtime import compose, mounted
-from .recovery import FAILED, RECOVERED, RETRY, Recovery, recovery_of
+from .recovery import (
+    FAILED,
+    PASSIVATE_AFTER,
+    PASSIVATED,
+    RECOVERED,
+    RETRY,
+    Recovery,
+    recovery_of,
+)
 
 __all__ = ["Root", "SessionBusy", "Supervisor"]
 
@@ -244,6 +253,29 @@ class Root:
         self.recovery = Recovery(attempts=0, failed=False)
         self.publish("session.status", {"sessionId": self.id, "status": self.status})
 
+    def idle_for(self, now: int) -> int:
+        """Milliseconds since anything happened in this session (P5-05).
+
+        From the log's own last event, so it means "nothing has happened" rather
+        than "no client called us", survives a restart, and cannot drift from
+        what the transcript shows. A log with no events yet is treated as busy:
+        a root that has just been created has not been idle for ninety minutes,
+        whatever the clock says.
+        """
+        last = self.session.last_event
+        return 0 if last is None else max(0, now - int(last.time))
+
+    def passivated(self, idle_ms: int) -> None:
+        """Say in the log that this root is being released, before releasing it.
+
+        Write-ahead, like every other record here: the append has to reach the
+        buffer before the flush that carries it, or the last thing the log says
+        is whatever the root was doing ninety minutes ago and the pause reads as
+        a crash.
+        """
+        self.session.append(PASSIVATED, {"idleMs": idle_ms})
+        self.publish("session.status", {"sessionId": self.id, "status": "passivated"})
+
     def give_up(self, reason: str, *, attempts: int) -> None:
         """Record that the ladder is spent, and tell whoever is watching.
 
@@ -280,6 +312,13 @@ class Supervisor:
     tasks: TaskGroup
     provider: str = "fake"
     model: str = "fake-1"
+    passivate_after: float | None = PASSIVATE_AFTER
+    """Seconds of quiet before a root is released, or `None` to keep them all.
+
+    A field beside `provider` and `model` because it is the same kind of thing —
+    per-daemon configuration — and because threading it through `serve`, the
+    sweeper task and two method signatures spelled one constant in eight places,
+    two of them positionally unchecked through `start_soon`."""
     roots: dict[str, Root] = field(default_factory=dict)
     _starting: anyio.Lock = field(default_factory=anyio.Lock)
     _parsed: Sequence[tuple[str, Any]] | None = None
@@ -581,6 +620,24 @@ class Supervisor:
                 await self._flush(root)
                 await anyio.sleep(state.delay)
 
+    async def _release(self, root: Root) -> None:
+        """Flush a root's log, then unwind everything it took.
+
+        One spelling, because there are two callers — `aclose` at shutdown and
+        `passivate` when a root goes quiet — and this pair has diverged here
+        before: `_flush` exists because `aclose`'s earlier copy skipped
+        `exits.aclose()` when the flush raised, leaving an unwritable root's
+        context undisposed. P5-05 reintroduced the same two-copies shape, down
+        to the identical warning string. Whatever joins root teardown next — a
+        lease, a reclaim, a cache eviction — now has one place to be added and
+        cannot land in only one of them.
+        """
+        await self._flush(root)
+        try:
+            await root.exits.aclose()
+        except Exception:
+            log.warning("ph_app.daemon: root %s did not unwind cleanly", root.id, exc_info=True)
+
     async def _flush(self, root: Root) -> None:
         """Get the ladder's own record to disk, or carry on without it.
 
@@ -668,6 +725,118 @@ class Supervisor:
     def describe(self) -> list[dict[str, Any]]:
         return [root.describe() for root in self.roots.values()]
 
+    def passivatable(self, root: Root, *, now: int, after: float) -> bool:
+        """Whether this root may be released (P5-05).
+
+        Every condition is a reason a root is still *wanted*, and each is read
+        from something that already exists rather than from a flag set beside
+        it:
+
+        * **it is doing something** — `status` covers `running`, and covers
+          `retrying`, which matters: a root in P5-04's backoff is idle between
+          attempts and releasing it there would passivate a root mid-ladder;
+        * **somebody is watching** — `subscribers`, which is the root's own
+          attachment set, so a client that attached and never detached keeps its
+          session alive by the same fact that makes it receive events;
+        * **it has live children** — folded from `subagent/*`, because a parent
+          released while a child is still running would be rehydrated by the
+          child's own events arriving at a root that no longer exists;
+        * **it has been quiet long enough**, from the log.
+
+        Heartbeats and cron are the row's other two conditions and have nothing
+        to check yet — P5-06 owns both, and there is no scheduler to ask. Said
+        plainly here rather than left as an unexplained absence, and the shape
+        is one more clause when that row lands.
+        """
+        if root.status != "idle":
+            return False
+        if root.subscribers:
+            return False
+        # **The quiet check before the fold**, which is not merely tidier. The
+        # root reaching this line is idle and unwatched — exactly the steady
+        # state the sweeper exists for — so a fold above it runs on every sweep
+        # of the whole ninety-minute window and is discarded eighty-nine times
+        # out of ninety. Measured over one idle window at 500 000 events across
+        # 50 roots: **60.9 s of event loop as written, 1.3 ms with this line
+        # first**, and `idle_for` costs 43 ns.
+        if root.idle_for(now) < after * 1000:
+            return False
+        # Through the seam's cached fold rather than the bare function:
+        # `SessionFoldCache` keys on `session.seq`, and an idle root's log does
+        # not grow, so every sweep after the first is a dict hit instead of a
+        # whole-log walk (0.09 µs against 13.5 ms at 500 000 events). That is
+        # what saves the root this returns `False` for — idle, unwatched, one
+        # unsettled child — which would otherwise re-fold every sixty seconds
+        # for the life of the daemon: 16 minutes of event loop a day at 50 such
+        # roots.
+        subagents = root.ctx.get("subagents")
+        roster = subagents.roster(root.session) if subagents is not None else {}
+        return not any(child_is_live(child) for child in roster.values())
+
+    async def sweep(self, *, after: float | None = None, now: int | None = None) -> list[str]:
+        """Release every root that has been quiet long enough. Returns their ids.
+
+        Returns rather than logs so a test — and P5-10's `ph agents` — can ask
+        what happened without parsing a log line, and so the caller decides
+        whether a sweep that released nothing is worth saying out loud.
+
+        Iterates a copy: passivation removes from `self.roots`.
+        """
+        stamp = now if now is not None else now_ms()
+        window = self.passivate_after if after is None else after
+        if window is None:
+            return []
+        released: list[str] = []
+        for root in list(self.roots.values()):
+            if self.passivatable(root, now=stamp, after=window):
+                await self.passivate(root, now=stamp)
+                released.append(root.id)
+        return released
+
+    async def passivate(self, root: Root, *, now: int) -> None:
+        """Release a root's process-side state, keeping its session on disk.
+
+        **Rehydration is already written**: `start()` resumes any root whose log
+        exists (P5-01), so waking one is the ordinary path rather than a second
+        mechanism — which is why this row is mostly a sweeper and a record, and
+        why the round-trip is a property rather than a feature.
+
+        Order matters and is the same order `aclose` uses: record, flush, then
+        unwind. Unwinding disposes the mounted `Context` and, with it, the
+        P5-03 lease on this session's log — so a passivated session is one
+        another process may legitimately open, which is the point rather than an
+        oversight.
+
+        The wake channel closes first so the root's task leaves its own loop
+        instead of being cancelled mid-turn, exactly as in `aclose`.
+        """
+        async with self._starting:
+            # The same lock `start` orders itself with, and for the mirror-image
+            # reason. Passivation removes the root from `self.roots` and *then*
+            # unwinds — so without this, a `start` arriving in between finds no
+            # root, tries to open the session, and is refused by the P5-03 lease
+            # the outgoing root has not released yet: `session_already_active`
+            # for a session nobody is using. `session/attach` made that
+            # reachable by waking a passivated root through `start`.
+            if self.roots.get(root.id) is not root:
+                return
+            await self._passivate(root, now=now)
+
+    async def _passivate(self, root: Root, *, now: int) -> None:
+        idle_ms = root.idle_for(now)
+        root.passivated(idle_ms)
+        log.info(
+            "ph_app.daemon: passivating root %s after %d minutes idle", root.id, idle_ms // 60_000
+        )
+        self.roots.pop(root.id, None)
+        subagents = root.ctx.get("subagents")
+        if subagents is not None:
+            # The cached roster would outlive the root otherwise: the seam keys
+            # its fold by session id and nothing else tells it this one is gone.
+            subagents.forget_session(root.id)
+        await root.wake.aclose()
+        await self._release(root)
+
     async def aclose(self) -> None:
         """Close every root's wake channel and unwind its context.
 
@@ -680,9 +849,5 @@ class Supervisor:
         for root in self.roots.values():
             await root.wake.aclose()
         for root in list(self.roots.values()):
-            await self._flush(root)
-            try:
-                await root.exits.aclose()
-            except Exception:
-                log.warning("ph_app.daemon: root %s did not unwind cleanly", root.id, exc_info=True)
+            await self._release(root)
         self.roots.clear()

@@ -286,3 +286,45 @@ def test_tui_is_an_accepted_mode() -> None:
     # The one-shot table is for modes that answer a prompt and exit; the TUI
     # has its own entry point because the prompt *is* the interface.
     assert "tui" not in _MODES
+
+
+def test_passivate_after_accepts_minutes_or_off() -> None:
+    """`--passivate-after` is minutes or `"off"`, and nothing else (P5-05).
+
+    Refused rather than defaulted when it is neither: a typo in a duration is a
+    daemon that silently keeps every root it ever started, and this is the one
+    process where that goes unnoticed for a week.
+    """
+    import typer
+
+    from ph_app.cli import _passivation
+
+    assert _passivation("90") == 90 * 60.0
+    assert _passivation("0.5") == 30.0
+    assert _passivation("off") is None
+    assert _passivation(" OFF ") is None
+
+    for bad in ("ninety", "", "-5", "0"):
+        with pytest.raises(typer.BadParameter):
+            _passivation(bad)
+
+
+def test_every_public_command_is_registered_and_nothing_private_leaked() -> None:
+    """The command table is a fact about the module, not about its source order.
+
+    P5-05 inserted a module-level helper directly beneath an `@app.command()`
+    decorator, which silently rebound it: `ph daemon` stopped existing (exit 2)
+    and a `-passivation` command appeared in `--help`. The whole suite stayed
+    green, because nothing anywhere asserted that a command is registered — the
+    CLI's commands were only ever invoked through `CliRunner`, which is a
+    different question from whether they are reachable.
+
+    Named explicitly rather than counted: a list that grows when a command is
+    added is a list that notices when one disappears.
+    """
+    from ph_app.cli import app
+
+    registered = {command.name or command.callback.__name__ for command in app.registered_commands}
+    assert {"daemon", "doctor"} <= registered, f"a command stopped being registered: {registered}"
+    private = {name for name in registered if name.startswith("_")}
+    assert not private, f"a helper was captured by an @app.command() decorator: {private}"

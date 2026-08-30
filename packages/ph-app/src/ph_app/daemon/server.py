@@ -40,11 +40,15 @@ from ..protocol import (
     resume_at,
 )
 from .framing import FramingError, read_frames, write_frame
+from .recovery import PASSIVATE_AFTER
 from .supervisor import Supervisor
 
 __all__ = ["DaemonServer", "serve"]
 
 log = logging.getLogger("ph_app.daemon")
+
+SWEEP_EVERY = 60.0
+"""How often the passivation sweep runs. A coarse tick, not a second timeout."""
 
 
 class UnknownMethod(Refusal):
@@ -156,7 +160,14 @@ class _Connection:
             )
             return root.describe()
         if method == "session/attach":
-            return self._attach(str(params["sessionId"]), params.get("cursor"))
+            # Through `start`, so attaching to a *passivated* root brings it
+            # back rather than reporting it gone (P5-05). `start` returns the
+            # live root untouched when there is one, and resumes from the log
+            # when there is not — the same path `session/prompt` takes, which is
+            # what keeps rehydration one mechanism instead of two.
+            return self._attach(
+                await supervisor.start(str(params["sessionId"])), params.get("cursor")
+            )
         if method == "session/detach":
             return self._detach(str(params["sessionId"]))
         if method == "session/snapshot":
@@ -175,7 +186,7 @@ class _Connection:
             raise NoSuchSession(f'no session "{session_id}"')
         return root
 
-    def _attach(self, session_id: str, cursor: Any) -> dict[str, Any]:
+    def _attach(self, root: Any, cursor: Any) -> dict[str, Any]:
         """Subscribe to what happens *next*, and say where that starts.
 
         **Attach does not replay.** The first draft streamed the whole gap here,
@@ -191,9 +202,11 @@ class _Connection:
         from its cursor up to that point. That also makes the 512 KiB-class
         bound apply to replay, which it never did before.
         """
-        root = self._root(session_id)
-        if session_id not in self.attached:
-            self.attached.add(session_id)
+        # The root, not an id to look up again: `start` has just returned it,
+        # and re-deriving it kept a `no_such_session` branch `start` had already
+        # made unreachable.
+        if root.id not in self.attached:
+            self.attached.add(root.id)
             root.subscribe(self.notify)
         return {
             **root.describe(),
@@ -242,6 +255,37 @@ class DaemonServer:
             await _Connection(stream=stream, server=self).serve()
 
 
+async def _sweeper(supervisor: Supervisor, every: float, stop: anyio.Event) -> None:
+    """Release idle roots on a timer, until the daemon stops (P5-05).
+
+    The interval is not the timeout: `after` decides eligibility from the log's
+    own clock, so a coarse sweep releases a root a little late rather than
+    letting the two numbers drift into one meaning. That also makes the sweep
+    cheap enough to be uninteresting — it reads a status, a set and a tail
+    event per root.
+
+    Bounded by the same `stop` the accept loop waits on, so shutting down does
+    not depend on a sleep elapsing.
+    """
+    while True:
+        # One reading of `stop`, not three: the timeout falls through to the
+        # sweep and a set event returns, so the loop condition and a trailing
+        # guard cannot disagree about what "stopped" means.
+        with anyio.move_on_after(every):
+            await stop.wait()
+            return
+        try:
+            # Not logged again here: `passivate` already says which root went
+            # and how long it had been quiet. The ids come back so a test — and
+            # P5-10's `ph agents` — can ask without parsing a log line.
+            await supervisor.sweep()
+        except Exception:
+            # A sweep that raised would take the task group with it — every
+            # root, over a housekeeping pass. One bad root must not be a dead
+            # daemon, which is the same reasoning `_drive` contains a crash for.
+            log.exception("ph_app.daemon: the passivation sweep failed")
+
+
 async def _clear_stale(path: Path) -> None:
     """Remove a socket nobody is listening on; refuse one somebody is.
 
@@ -267,6 +311,8 @@ async def serve(
     *,
     provider: str = "fake",
     model: str = "fake-1",
+    passivate_after: float | None = PASSIVATE_AFTER,
+    sweep_every: float = SWEEP_EVERY,
     path: Path | None = None,
     ready: anyio.Event | None = None,
     started: Callable[[DaemonServer], None] | None = None,
@@ -285,7 +331,11 @@ async def serve(
         # Optional with a "not serving" guard: a supervisor that cannot start a
         # root is a state that should not be representable.
         supervisor = Supervisor(
-            documents=list(documents), tasks=tasks, provider=provider, model=model
+            documents=list(documents),
+            tasks=tasks,
+            provider=provider,
+            model=model,
+            passivate_after=passivate_after,
         )
         try:
             listener = await anyio.create_unix_listener(socket_path)
@@ -293,6 +343,8 @@ async def serve(
             # it is theirs alone — the same reasoning `$PH_RUNTIME` is 0o700 for.
             os.chmod(socket_path, 0o600)
             server = DaemonServer(supervisor=supervisor, stop=anyio.Event())
+            if passivate_after is not None:
+                tasks.start_soon(_sweeper, supervisor, sweep_every, server.stop)
             if started is not None:
                 # Handed out rather than reachable through the socket: a test
                 # whose subject is the supervisor's own concurrency has no wire

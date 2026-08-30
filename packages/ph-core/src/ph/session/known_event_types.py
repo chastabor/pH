@@ -48,6 +48,12 @@ KNOWN_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         "supervisor/retry",
         "supervisor/failed",
         "supervisor/recovered",
+        # A root released for being idle (P5-05). Its own record because the
+        # alternative is an unexplained gap: a transcript that stops for three
+        # days and resumes reads as a crash, and the `session/resumed` on the
+        # way back says only that something was resumed, not that nothing had
+        # gone wrong.
+        "supervisor/passivated",
         "step/end",
         "step/start",
         "tool/call",
@@ -215,6 +221,7 @@ IGNORABLE_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         "supervisor/retry",
         "supervisor/failed",
         "supervisor/recovered",
+        "supervisor/passivated",
         "limits/exceeded",
         "limits/breaker-tripped",
         "workspace/acquired",

@@ -818,3 +818,33 @@ async def test_a_detaching_front_end_undoes_its_own_presentations() -> None:
     # nothing, which is why `add_disposer` hands back an idempotent release.
     await row.dispose()
     assert undrawn == ["audit"]
+
+
+def test_settled_statuses_are_drawn_from_the_declared_vocabulary() -> None:
+    """`SETTLED_STATUSES` is a subset of `SubagentStatus`, checked at runtime.
+
+    The declaration constrains *writers* — `_status(status: SubagentStatus)` is
+    type-checked, so no producer can emit a name that is not here. It cannot
+    constrain readers: the value goes through `SessionEvent.data`, which is
+    `Any` so a log written by another build can round-trip, and by the time a
+    consumer folds it back out there is nothing left for mypy to check. A
+    reader's `row.get("status") in {...}` type-checks against any strings at all,
+    which is how P5-05 shipped a settled-set of `{completed, failed, cancelled,
+    deleted}` — three names no producer writes — and pinned every parent that
+    had ever run a child.
+
+    `get_args` is the repo's answer to that asymmetry where it has been asked
+    before (`sandbox.py` checks `event.data.get("mode")` against
+    `get_args(SandboxMode)`); this is the same check one level up, on the subset
+    rather than the value.
+    """
+    from typing import get_args
+
+    from ph.seams.subagents import SETTLED_STATUSES, SubagentStatus
+
+    declared = set(get_args(SubagentStatus))
+    assert declared >= SETTLED_STATUSES, (
+        f"settled statuses no producer can write: {SETTLED_STATUSES - declared}"
+    )
+    # And the live side is non-empty, or the predicate would call everything settled.
+    assert declared - SETTLED_STATUSES

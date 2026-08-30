@@ -350,6 +350,18 @@ class Session:
             fold = self._latest[event_type] = _LatestFold(event_type, lambda event: event)
         return fold.read(self._log)
 
+    @property
+    def last_event(self) -> SessionEvent | None:
+        """The most recently appended event, or `None` for an empty log.
+
+        The unfiltered form of `last_event_of`, and the accessor a "when did
+        this session last do anything" question wants (P5-05's passivation
+        sweeper). `events[-1]` answers it too, at the cost of materialising a
+        snapshot of the entire log — 4 MB and 4.7 ms at 500 000 events — to read
+        one element, and the sweeper asks it of every root on every pass.
+        """
+        return self._log[-1] if self._log else None
+
     def last_event_of(self, *types: str) -> SessionEvent | None:
         """The most recent event of any of `types`. One type: prefer `latest()`."""
         for event in reversed(self._log):

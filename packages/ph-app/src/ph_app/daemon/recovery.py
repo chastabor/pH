@@ -146,3 +146,23 @@ def recovery_of(session: Session) -> Recovery:
         elif event.type == FAILED:
             failed = True
     return Recovery(attempts=attempts, failed=failed)
+
+
+PASSIVATED = "supervisor/passivated"
+"""A root was released for being idle (P5-05), with how long it had been."""
+
+PASSIVATE_AFTER = 90 * 60.0
+"""Seconds of quiet before a root is released. `None` turns the sweeper off.
+
+Ninety minutes because passivation is not a resource emergency — it is what
+keeps a daemon that has accumulated a month of sessions from holding a mounted
+profile, a kernel and a workspace for every one of them. Short enough that an
+abandoned root does not outlive the day; long enough that a person who stepped
+away from a session, or an agent between two scheduled runs, comes back to a
+root that never went anywhere.
+
+Measured from the log's own last event rather than from a timer, so it means
+"nothing has happened", survives a restart — a root rehydrated from a
+three-day-old log is immediately eligible, which is correct — and cannot drift
+from what the transcript shows.
+"""

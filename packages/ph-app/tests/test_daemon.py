@@ -50,7 +50,7 @@ class _Daemon:
 
 
 @asynccontextmanager
-async def running(tmp_path: Path, *, name: str = "") -> AsyncIterator[_Daemon]:
+async def running(tmp_path: Path, *, name: str = "", **options: Any) -> AsyncIterator[_Daemon]:
     """A daemon, started and accepting, torn down when the block ends.
 
     Waits on the `ready` event rather than for the socket file to appear: the
@@ -71,7 +71,13 @@ async def running(tmp_path: Path, *, name: str = "") -> AsyncIterator[_Daemon]:
         path = tmp_path / name / "daemon.sock"
         path.parent.mkdir(parents=True, exist_ok=True)
         started: list[Any] = []
-        tasks.start_soon(lambda: serve(PROFILE, path=path, ready=ready, started=started.append))
+        # `passivate_after=None` by default: the sweeper is a background timer,
+        # and a test that did not ask about passivation should not have one
+        # racing its assertions. P5-05's own tests opt in.
+        options.setdefault("passivate_after", None)
+        tasks.start_soon(
+            lambda: serve(PROFILE, path=path, ready=ready, started=started.append, **options)
+        )
         await ready.wait()
         try:
             yield _Daemon(path=path, tasks=tasks, server=started[0])
@@ -102,7 +108,13 @@ async def _settled(client: DaemonClient, root_id: str, *, events: int) -> dict[s
     with anyio.fail_after(10):
         while True:
             listed = await client.call("sessions/list")
-            row = next(one for one in listed["sessions"] if one["sessionId"] == root_id)
+            # A default rather than a bare `next()`: a root can legitimately
+            # leave the listing mid-poll now that P5-05 releases idle ones, and
+            # a `StopIteration` inside a coroutine surfaces as
+            # `RuntimeError: coroutine raised StopIteration` — naming neither
+            # the session nor the reason.
+            row = next((one for one in listed["sessions"] if one["sessionId"] == root_id), None)
+            assert row is not None, f'session "{root_id}" left the listing while settling'
             if row["status"] == "idle" and row["cursor"]["sequence"] >= events:
                 return row
             await anyio.sleep(0.01)
@@ -602,6 +614,16 @@ def _crash(patch: pytest.MonkeyPatch, root: Any, times: int) -> None:
     patch.setattr(driver, "run", run)
 
 
+def _on_disk(path: Path, marker: str) -> bool:
+    """Whether `marker` has reached this log yet, before the log exists.
+
+    A session's file appears on its first flush, so a wait that starts earlier
+    reads a path that is not there — `read_text` raises `FileNotFoundError`
+    rather than answering "not yet", which turns a poll into a crash.
+    """
+    return path.exists() and marker in path.read_text()
+
+
 async def _until(done: Callable[[], bool], *, what: str) -> None:
     """Poll until `done()`, or fail saying what was being waited for.
 
@@ -685,14 +707,26 @@ async def test_the_ladder_gives_up_after_its_last_attempt_and_reports(
         given_up = next(e for e in root.session.events_from(0) if e.type == recovery.FAILED)
         assert given_up.data["attempts"] == len(recovery.RETRY_DELAYS)
         assert "injected crash" in given_up.data["reason"]
-        assert {"failed"} <= {str(params.get("status", "")) for params in seen}
+        # Waited for, not sampled: `status` flips when `give_up` appends, while
+        # the notification is still crossing the outbox and the pump. Reading
+        # `seen` at that instant caught the client mid-delivery — `retrying` had
+        # landed and `failed` had not — about one run in four.
+        await _until(
+            lambda: "failed" in {str(params.get("status", "")) for params in seen},
+            what="the failed status to reach the client",
+        )
 
-        # **On disk already**, with the daemon still running and no shutdown
-        # sent. The give-up is the record that matters most and it was the one
+        # **On disk, with the daemon still running and no shutdown sent.** The
+        # give-up is the record that matters most and it was the one
         # write-through missed; a clean shutdown flushes it either way, which is
-        # exactly why asserting it here rather than after teardown is what
-        # actually pins the behaviour.
-        assert recovery.FAILED in (tmp_path / "sessions" / "doomed.jsonl").read_text()
+        # why asserting it here rather than after teardown is what pins the
+        # behaviour. Waited for rather than read once: `status` flips when the
+        # event is *appended*, and the flush that carries it to disk is the next
+        # await — so reading immediately raced the very ordering under test,
+        # about one run in six. With the flush deleted this waits out its
+        # timeout instead, which is still a failure.
+        written = tmp_path / "sessions" / "doomed.jsonl"
+        await _until(lambda: _on_disk(written, recovery.FAILED), what="the give-up to reach disk")
 
 
 async def test_a_root_resumed_mid_ladder_does_not_start_the_count_over(
@@ -716,7 +750,15 @@ async def test_a_root_resumed_mid_ladder_does_not_start_the_count_over(
             root = daemon.server.supervisor.roots["stubborn"]
             _crash(crash, root, 99)
             await client.prompt("stubborn", "hello")
-            await _until(lambda: root.status == "failed", what="the ladder to give up")
+            # Waited on *disk*, not on status: `status` flips when `give_up`
+            # appends, and this test is about what the next daemon can read
+            # back — so shutting down at the in-memory flip raced the flush that
+            # makes the claim true, and the resumed root came back `retrying`.
+            written = tmp_path / "sessions" / "stubborn.jsonl"
+            await _until(
+                lambda: _on_disk(written, recovery.FAILED),
+                what="the spent ladder to reach disk",
+            )
             await client.notify("shutdown")
 
     async with running(tmp_path, name="second") as daemon:
@@ -851,3 +893,262 @@ async def test_a_failing_flush_climbs_the_ladder_instead_of_retrying_forever(
         )
         assert types.count(recovery.FAILED) == 1
         assert types.count(recovery.RECOVERED) == 0
+
+
+# --- P5-05: passivation ------------------------------------------------------
+#
+# A daemon built to run for weeks accumulates roots, and each one holds a
+# mounted profile, a session, an agent and a workspace. Passivation releases the
+# process-side half and keeps the session on disk. Rehydration is not a second
+# mechanism: `start()` already resumes any root whose log exists (P5-01), which
+# is why the round-trip is a property here rather than a feature.
+
+
+async def test_an_idle_root_is_released_and_comes_back_with_its_history(
+    tmp_path: Path,
+) -> None:
+    """The gate: round-trip.
+
+    Released while nobody wants it, and the next message brings it back — with
+    what it already said still in the log, because the log is where it lived the
+    whole time.
+    """
+    async with running(tmp_path) as daemon:
+        supervisor = daemon.server.supervisor
+        client = await daemon.client()
+        await client.prompt("napper", "first")
+        settled = await _settled(client, "napper", events=1)
+        before = settled["cursor"]["sequence"]
+
+        assert await supervisor.sweep(after=0) == ["napper"]
+        assert "napper" not in supervisor.roots, "a passivated root is still mounted"
+
+        # The ordinary path wakes it: no rehydrate call, no second mechanism.
+        await client.prompt("napper", "second")
+        after = await _settled(client, "napper", events=before + 1)
+        assert after["cursor"]["sequence"] > before, "the rehydrated root lost its history"
+
+        history = [event["type"] for event in await _history(client, "napper")]
+        assert history.count("user/message") == 2, "the first turn did not survive the round-trip"
+        assert recovery.PASSIVATED in history, "the pause left no record"
+
+
+async def test_the_release_is_recorded_before_it_happens(tmp_path: Path) -> None:
+    """A gap nobody explained reads as a crash.
+
+    On disk, checked while the daemon is still running: the record is appended
+    and then flushed as part of releasing, so a reader opening this log finds
+    out why it stops rather than inferring a failure. The `session/resumed` on
+    the way back says only that something resumed, not that nothing was wrong.
+    """
+    async with running(tmp_path) as daemon:
+        client = await daemon.client()
+        await client.prompt("recorded", "hello")
+        await _settled(client, "recorded", events=1)
+        await daemon.server.supervisor.sweep(after=0)
+
+        assert _on_disk(tmp_path / "sessions" / "recorded.jsonl", recovery.PASSIVATED), (
+            "the record did not reach disk with the release"
+        )
+
+
+async def test_a_root_somebody_is_watching_is_not_released(tmp_path: Path) -> None:
+    """An attached client is a reason the root is still wanted.
+
+    From the root's own subscriber set — the same fact that makes it receive
+    events — so a client cannot be receiving a session that was released out
+    from under it.
+    """
+    async with running(tmp_path) as daemon:
+        client = await daemon.client()
+        await client.call("session/new", sessionId="watched")
+        await client.call("session/attach", sessionId="watched")
+        assert await daemon.server.supervisor.sweep(after=0) == []
+
+        await client.call("session/detach", sessionId="watched")
+        assert await daemon.server.supervisor.sweep(after=0) == ["watched"]
+
+
+async def test_a_root_that_has_not_been_quiet_long_enough_is_not_released(
+    tmp_path: Path,
+) -> None:
+    """The timeout is read from the log, not from a timer.
+
+    `now` is the log's own last event here, so nothing has been quiet for any
+    time at all — which is also what makes a root rehydrated from a three-day-old
+    log immediately eligible, correctly.
+    """
+    async with running(tmp_path) as daemon:
+        supervisor = daemon.server.supervisor
+        client = await daemon.client()
+        await client.prompt("busy", "hello")
+        await _settled(client, "busy", events=1)
+        root = supervisor.roots["busy"]
+
+        last = root.session.last_event
+        assert last is not None
+        assert await supervisor.sweep(after=60, now=int(last.time)) == []
+        assert await supervisor.sweep(after=60, now=int(last.time) + 61_000) == ["busy"]
+
+
+async def test_a_root_mid_ladder_is_not_released(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, short_ladder: None
+) -> None:
+    """`retrying` is not `idle`, and this is why `status` derives it.
+
+    A root in P5-04's backoff is doing nothing between attempts. Releasing it
+    there would passivate a root part-way up a ladder it had already recorded —
+    and the condition that catches it is the one the cleanup pass added when it
+    found `retrying` announced as a notification while `sessions/list` still
+    said `idle`.
+    """
+    async with running(tmp_path) as daemon:
+        supervisor = daemon.server.supervisor
+        client = await daemon.client()
+        await client.call("session/new", sessionId="climbing")
+        root = supervisor.roots["climbing"]
+        _crash(monkeypatch, root, 99)
+
+        await client.prompt("climbing", "hello")
+        await _until(lambda: root.recovery.attempts > 0, what="the ladder to start")
+        assert root.status == "retrying"
+        assert await supervisor.sweep(after=0) == [], "released a root mid-ladder"
+
+
+async def test_a_passivated_session_may_be_opened_by_another_process(
+    tmp_path: Path,
+) -> None:
+    """Releasing gives back the I-5 lease, which is the point rather than a leak.
+
+    A root holds its session's lease for as long as it is mounted (P5-03). If
+    passivation kept it, a released session would be one *no* process could
+    open — unopenable by the daemon that let it go and refused to everyone else.
+    """
+    async with (
+        running(tmp_path, name="a") as first,
+        running(tmp_path, name="b") as second,
+    ):
+        held = await first.client()
+        await held.call("session/new", sessionId="handed-over")
+
+        other = await second.client()
+        with pytest.raises(DaemonError) as refusal:
+            await other.call("session/new", sessionId="handed-over")
+        assert refusal.value.reason == "session_already_active"
+
+        await first.server.supervisor.sweep(after=0)
+        # Now it is nobody's, so the second daemon may have it.
+        assert (await other.call("session/new", sessionId="handed-over"))["sessionId"] == (
+            "handed-over"
+        )
+
+
+async def test_attaching_wakes_a_passivated_root(tmp_path: Path) -> None:
+    """A client attaching to a released session gets it back, not an error.
+
+    Through `start`, the same path `session/prompt` takes — so waking has one
+    mechanism. Without this, a session released while its watcher was away came
+    back as `no_such_session`, which reads as "gone" for something still on
+    disk.
+    """
+    async with running(tmp_path) as daemon:
+        client = await daemon.client()
+        await client.prompt("awaited", "hello")
+        await _settled(client, "awaited", events=1)
+        await daemon.server.supervisor.sweep(after=0)
+        assert "awaited" not in daemon.server.supervisor.roots
+
+        attached = await client.call("session/attach", sessionId="awaited")
+        assert attached["sessionId"] == "awaited"
+        assert "awaited" in daemon.server.supervisor.roots
+
+
+async def test_the_sweeper_actually_runs(tmp_path: Path) -> None:
+    """The timer, not just the predicate.
+
+    Everything above drives `sweep()` directly, which would pass just as well if
+    nothing ever called it — the shape of dead code that looks tested.
+    """
+    async with running(tmp_path, passivate_after=0.0, sweep_every=0.02) as daemon:
+        client = await daemon.client()
+        # Attached first, and that is the test's own setup rather than an
+        # accident: with `passivate_after=0` the sweeper is eligible to release
+        # this root the instant it is idle and unwatched, which is *during* the
+        # turn we are waiting on. Attaching is the same condition a real client
+        # relies on to keep a session it is using.
+        await client.call("session/new", sessionId="swept")
+        await client.call("session/attach", sessionId="swept")
+        await client.prompt("swept", "hello")
+        await _settled(client, "swept", events=1)
+        await client.call("session/detach", sessionId="swept")
+        await _until(
+            lambda: "swept" not in daemon.server.supervisor.roots,
+            what="the sweeper to release an idle root on its own",
+        )
+
+
+async def test_a_root_with_a_live_child_is_not_released(tmp_path: Path) -> None:
+    """A parent whose subagent is still working stays mounted.
+
+    Releasing it would be worse than wasteful: the child's `subagent/status`
+    events are appended to the *parent's* log, so a released parent gets
+    rehydrated by its own child's bookkeeping — a root that puts itself back
+    every time the sweeper lets it go.
+
+    Folded from `subagent/*` (P3-13) rather than tracked beside it, and asked of
+    the seam that owns the vocabulary — the first version of this test spelled
+    the settled statuses itself as `{"completed", "failed", "cancelled",
+    "deleted"}`, of which only one is a string any producer emits. The writer
+    says `done` and `error`; deletion is a tombstone that leaves `status` alone.
+    The effect was that a root which had ever run a child to completion could
+    never be released, and the test passed only because it appended the same
+    invented status the predicate was checking for.
+    """
+    async with running(tmp_path) as daemon:
+        supervisor = daemon.server.supervisor
+
+        for label, settle in (
+            ("finished", ("subagent/status", {"runId": "c", "status": "done"})),
+            ("errored", ("subagent/status", {"runId": "c", "status": "error"})),
+            ("cancelled", ("subagent/status", {"runId": "c", "status": "cancelled"})),
+            ("revoked", ("subagent/deleted", {"runId": "c", "reason": "revoked"})),
+        ):
+            root = await supervisor.start(label)
+            root.session.append("subagent/admitted", {"runId": "c"})
+            assert await supervisor.sweep(after=0) == [], f"{label}: released with a live child"
+
+            root.session.append(*settle)
+            assert await supervisor.sweep(after=0) == [label], f"{label}: child never settled"
+
+        # An unrecognised status keeps the parent alive rather than releasing one
+        # whose child may still be running.
+        root = await supervisor.start("unknown")
+        root.session.append("subagent/admitted", {"runId": "c"})
+        root.session.append("subagent/status", {"runId": "c", "status": "who-knows"})
+        assert await supervisor.sweep(after=0) == [], "an unknown status released the parent"
+
+
+def test_every_type_this_package_writes_is_in_the_vocabulary() -> None:
+    """The writer's half of the deal `known_event_types` records.
+
+    That module states it: *"a producer in another package … owes the same proof
+    through its own bundle's tests"*. ph-core pays it and ph-rlm pays it; ph-app
+    now appends five types and paid nothing, so a record written here and not
+    declared in ph-core would produce a log this build writes and then refuses to
+    seed — found by whoever resumes the session rather than by whoever added it.
+
+    Against the constants rather than a source scan, because that is how this
+    package appends: ph-rlm's regex over `append("…")` literals would match none
+    of these.
+    """
+    from ph.session.known_event_types import KNOWN_SESSION_EVENT_TYPES
+
+    written = {
+        supervisor_module.COMMAND_ACCEPTED,
+        recovery.RETRY,
+        recovery.FAILED,
+        recovery.RECOVERED,
+        recovery.PASSIVATED,
+    }
+    undeclared = written - KNOWN_SESSION_EVENT_TYPES
+    assert not undeclared, f"ph-app writes types ph-core would refuse at seed: {undeclared}"

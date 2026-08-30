@@ -403,3 +403,23 @@ def test_every_known_event_type_is_rendered_or_classified() -> None:
     """
     assert set(HANDLERS) & RECORDLESS == set()
     assert set(HANDLERS) | RECORDLESS == KNOWN_SESSION_EVENT_TYPES
+
+
+def test_every_declared_child_status_has_a_glyph() -> None:
+    """The TUI's status table is complete against the seam's vocabulary.
+
+    A second consumer-side enumeration of `SubagentStatus`, correct today and
+    checked by nothing — so a status added to the seam would render as a blank
+    cell in the subagent panel and nobody would find out from a test. This is
+    the same gate `KNOWN_SESSION_EVENT_TYPES` gets from both front ends, applied
+    to the other vocabulary that crosses the log as `Any`.
+    """
+    from typing import get_args
+
+    from ph.seams.subagents import SubagentStatus
+    from ph_app.tui.state import STATUS_GLYPHS
+
+    declared = set(get_args(SubagentStatus))
+    assert set(STATUS_GLYPHS) == declared, (
+        f"unglyphed: {declared - set(STATUS_GLYPHS)}; unknown: {set(STATUS_GLYPHS) - declared}"
+    )

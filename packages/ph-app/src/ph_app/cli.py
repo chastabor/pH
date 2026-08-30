@@ -36,6 +36,7 @@ from ph.cordis.events import events as event_registry
 from ph.paths import RuntimeDirError, resolve_roots
 
 from .attach import AttachmentUnavailable
+from .daemon.recovery import PASSIVATE_AFTER
 from .modes import run_json, run_print, run_rpc, run_transcript
 from .profiles import available_profiles, resolve_profile
 from .runtime import mounted
@@ -266,11 +267,47 @@ def doctor(profile: ProfileOption = DEFAULT_PROFILE) -> None:
         console.print(section)
 
 
+_DEFAULT_PASSIVATION = f"{PASSIVATE_AFTER / 60:g}"
+"""The flag's default, derived from the constant that justifies the number.
+
+It was spelled `"90"` here while `PASSIVATE_AFTER` said ninety minutes in
+seconds a module away — two literals in two units for one policy, where editing
+the documented one changed nothing for anyone running `ph daemon`, since the CLI
+always passes its own value.
+"""
+
+
+def _passivation(value: str) -> float | None:
+    """`"off"` or a number of minutes, as seconds (P5-05).
+
+    Refused rather than defaulted when it is neither: a typo in a duration is a
+    deployment that silently keeps every root it ever started, and the daemon is
+    the one process where that goes unnoticed for a week.
+    """
+    if value.strip().lower() == "off":
+        return None
+    try:
+        minutes = float(value)
+    except ValueError:
+        minutes = 0.0
+    if minutes <= 0:
+        # One message for one mistake: "not a number" and "not a positive
+        # number" are the same correction to the same flag.
+        raise typer.BadParameter(f'wants positive minutes or "off", not "{value}"')
+    return minutes * 60.0
+
+
 @app.command()
 def daemon(
     profile: ProfileOption = DEFAULT_PROFILE,
     provider: Annotated[str, typer.Option("--provider")] = "fake",
     model: Annotated[str, typer.Option("--model")] = "fake-1",
+    passivate_after: Annotated[
+        str,
+        typer.Option(
+            "--passivate-after", help='Minutes of quiet before a root is released, or "off".'
+        ),
+    ] = _DEFAULT_PASSIVATION,
 ) -> None:
     """Run the supervisor: roots that outlive the clients watching them (P5-01).
 
@@ -288,7 +325,16 @@ def daemon(
         # The path that was printed, not a second resolution of it: a message
         # naming one socket while the bind takes another is the kind of thing
         # someone debugs for an hour.
-        anyio.run(partial(serve, documents, provider=provider, model=model, path=socket_path))
+        anyio.run(
+            partial(
+                serve,
+                documents,
+                provider=provider,
+                model=model,
+                passivate_after=_passivation(passivate_after),
+                path=socket_path,
+            )
+        )
     except RuntimeError as error:
         err.print(f"[red]{error}[/red]")
         raise typer.Exit(code=1) from error
