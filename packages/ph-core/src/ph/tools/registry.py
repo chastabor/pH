@@ -29,7 +29,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any, Literal
 
 from ..cancel import Cancelled, is_cancelled
-from ..cordis import Context, Disposer, events, plugin
+from ..cordis import Context, Disposer, events, plugin, running
 from ..llm.types import ToolSchema, text_of
 from ..seams._restriction import NameFilter
 from ..seams.approval import Edited, Responded, denial_reason
@@ -264,16 +264,28 @@ class ToolRuntime:
         *when it goes away*. One value did both because both were
         `scope or self.ctx`, and they are not the same question: the lifetime is
         now the activating row's, so a tool unwinds when its row unmounts, while
-        the layer stays exactly where it was so nothing about what an agent can
-        see changes. Conflating them was what made this row's fix look risky.
+        the layer stayed exactly where it was so nothing about what an agent can
+        see changed. Conflating them was what made this row's fix look risky.
+
+        **The layer moved later, and only for the case that had to move**
+        (P6-26). `layer_for` follows "who is running" too now, so the two lines
+        below read one variable again — but they still ask different questions
+        of it, and `isolation` keeps the answers apart. An activation scope is
+        not isolated, so a row's tool still lands on the global layer and the
+        paragraph above is unchanged for it. An agent's scope *is* its own
+        isolation, so a tool registered from a body running for that agent
+        lands on that agent's layer — the one case "visibility is unchanged"
+        was wrong about, because it let a body inside a contained child install
+        a tool the whole deployment could see.
 
         **Both are derived here, from `scope`, rather than passed in.** The first
         version took the two contexts as separate arguments, and every one of the
         six call sites wrote the same pair — which restates the relationship six
         times and, worse, lets a seventh pair them wrongly and reintroduce the
         defect with nothing to catch it. Deriving them from the one argument they
-        are both functions of is what makes "visibility is unchanged" true by
-        construction rather than by reading six call sites.
+        are both functions of is what makes the layering rule true by
+        construction rather than by reading six call sites — including the
+        P6-26 change above, which is one edit inside `layer_for` and not six.
         """
         key = self.ctx.layer_for(scope).isolation
         layer = self._layer(key)
@@ -585,7 +597,17 @@ class ToolRuntime:
         return None
 
     def execution_mode(self, call: ToolExecutionInput) -> ExecutionMode:
-        """The live overlap classification, re-read before every start."""
+        """The live overlap classification, re-read before every start.
+
+        **The one definition-owned body P6-26 leaves unbound**, and the only one
+        whose scope is `Context | None` rather than a resolved
+        `ToolExecution.scope`: this runs in the scheduler, before an execution
+        exists, and answers a question about the arguments alone. A classifier
+        that registered something would land wherever the scheduler was called
+        from. Stated rather than fixed, because binding it means deciding what
+        `scope=None` should mean here, which is `ToolExecutionInput`'s question
+        and P6-24's row.
+        """
         definition = self.get(call.name, scope=call.scope)
         if definition is None:
             return ExecutionMode(kind="exclusive")
@@ -758,13 +780,26 @@ class ToolRuntime:
                 # A wrapper may have replaced the signal for its delegated
                 # lifetime; the body sees whatever reached it.
                 run.execution = dispatch_exec
-                value = await definition.execute(dispatch_exec.arguments, run)
-                content = definition.render(dispatch_exec.arguments, value)
-                meta = (
-                    None
-                    if dispatch_exec.parent is not None
-                    else definition.project_meta(dispatch_exec.arguments, value)
-                )
+                # **The definition's code runs as the agent it was invoked
+                # for** (P6-26), all three callbacks and not only `execute` —
+                # `render` and `project_meta` are the same row's code reached
+                # through the same registry, and a rule that covered one of the
+                # three is one the next reader has to reconstruct.
+                # Nothing bound it before: `owner_for` fell through to the seam,
+                # so a registration made here outlived the run, and `layer_for`
+                # fell through to the *global* layer, so a body inside a
+                # contained child installed a tool the whole deployment could
+                # see — the last way to escape the ceiling P6-27 made
+                # structural. The execution already carries the right scope; it
+                # was simply never made current.
+                with running(dispatch_exec.scope):
+                    value = await definition.execute(dispatch_exec.arguments, run)
+                    content = definition.render(dispatch_exec.arguments, value)
+                    meta = (
+                        None
+                        if dispatch_exec.parent is not None
+                        else definition.project_meta(dispatch_exec.arguments, value)
+                    )
                 return ToolExecutionResult(
                     is_error=False,
                     content=content,
@@ -823,7 +858,12 @@ class ToolRuntime:
         }
         if decision.has_value:
             changes["value"] = decision.value
-            changes["content"] = run.definition.render(execution.arguments, decision.value)
+            # As the agent, like `dispatch`'s call to the same callable (P6-26).
+            # Reached through a second waterfall, so without this it would run
+            # bound to whichever `tools/post-execute` wrapper resolved last —
+            # which is a stranger's row, chosen by the mounted profile.
+            with running(execution.scope):
+                changes["content"] = run.definition.render(execution.arguments, decision.value)
         elif decision.content is not None:
             changes["content"] = tuple(decision.content)
         return replace(result, **changes)
@@ -838,7 +878,11 @@ class ToolRuntime:
         finalize = run.definition.finalize_content
         if finalize is not None:
             try:
-                replacement = finalize(run.execution, result)
+                # The last definition-owned body, and the one that runs for
+                # failures too — so it is the likeliest of the five to register
+                # a follow-up, and the least acceptable one to leave ambient.
+                with running(run.scope):
+                    replacement = finalize(run.execution, result)
             except Exception:
                 log.exception("ph.tools: %s.finalize_content raised; content preserved", run.name)
                 replacement = None

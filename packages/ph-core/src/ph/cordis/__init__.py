@@ -9,7 +9,7 @@ scopes whose disposal unwinds every registration and every acquired artifact
 
 from __future__ import annotations
 
-from .context import Context, Disposer, ForkScope, Hook, Listener, is_bailed, maybe_await
+from .context import Context, Disposer, ForkScope, Hook, Listener, is_bailed, maybe_await, running
 from .errors import (
     CordisError,
     EventModeError,
@@ -61,5 +61,6 @@ __all__ = [
     "normalize_plugin",
     "plugin",
     "resolve_plugin",
+    "running",
     "safe_yaml_load",
 ]

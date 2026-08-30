@@ -13,10 +13,11 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..cordis import Context, Disposer, maybe_await, plugin
+from ..cordis import Context, Disposer, maybe_await, plugin, running
 from ..session import Session
 from ._registry import claim_key
 
@@ -80,11 +81,33 @@ class CommandRegistry:
         outcome = "ok"
         detail: str | None = None
         try:
-            result = await maybe_await(
-                definition.run(
-                    argument.strip(), CommandContext(ctx=self.ctx, session=session, agent=agent)
+            # As the agent it was typed for, not as the registry (P6-26). The
+            # `ctx=self.ctx` handed to the body is the *registry's* — the same
+            # `scope or self.ctx` shape P6-12 named one table over — so a
+            # command that registered anything did it globally and forever.
+            #
+            # **Nothing at all when there is no agent**, rather than the
+            # registry's own context. Binding `self.ctx` here would restate
+            # `owner_for`'s third branch and *delete its second*: a command
+            # dispatched from inside a row's `apply` or from a listener — both
+            # of which bind — would land on the seam instead of on that row.
+            # The fallback is already owned one layer down, so this adds only
+            # what that layer cannot know.
+            #
+            # The `getattr` is P6-24's idiom in a *policy* path now rather than
+            # a convenience one: `ph.seams.fs._scope_of` is the same six lines,
+            # and `ToolExecutionInput.scope` is what the tools side reads
+            # instead. Kept local until that row picks the home; it fails open,
+            # which is the second half of what P6-24 has to answer.
+            scope = getattr(agent, "ctx", None)
+            bind = running(scope) if isinstance(scope, Context) else nullcontext()
+            with bind:
+                result = await maybe_await(
+                    definition.run(
+                        argument.strip(),
+                        CommandContext(ctx=self.ctx, session=session, agent=agent),
+                    )
                 )
-            )
             detail = result if isinstance(result, str) else None
             return detail
         except Exception as error:

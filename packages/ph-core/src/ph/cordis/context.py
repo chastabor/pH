@@ -113,12 +113,12 @@ def _invoke(hook: Hook, *args: Any) -> Any:
     inside the binding below. Callers need no idea which kind they have, which is
     what lets `emit` spawn and `serial` await the same result.
 
-    **The binding is spelled inline rather than through `_running`**, and that is
+    **The binding is spelled inline rather than through `running`**, and that is
     a measurement rather than a preference: `@contextmanager` costs a generator,
     an `__enter__`, an `__exit__` and a `StopIteration`, and `emit` fires once
     per streamed chunk. Cross-process A/B on a 2 000-chunk turn, headless with
     two listeners: **8.2 ms** before this row, **14.3 ms** through a
-    `@contextmanager`, **10.5 ms** inline. `_running` keeps the
+    `@contextmanager`, **10.5 ms** inline. `running` keeps the
     once-per-activation path, where the difference is unmeasurable.
 
     An earlier draft of this paragraph priced the inline form at 120 ns per
@@ -249,12 +249,22 @@ See `Context.current_scope`, and `_invoke` for the listener half."""
 
 
 @contextmanager
-def _running(scope: Context) -> Iterator[None]:
+def running(scope: Context) -> Iterator[None]:
     """Bind "who is running" for the duration of a block.
 
-    Used where the cost cannot matter — once per plugin activation. The
-    per-listener path spells the same two calls inline, for the measurement
-    recorded on `_invoke`.
+    Public since P6-26, because the fourth consumer is in another package's
+    layer: a registry that invokes a body — a tool's `execute`, a command's
+    `run` — has to make that body's scope current, and reaching into a private
+    of `ph.cordis.context` to do it would be the seam layer depending on an
+    underscore.
+
+    Used where the cost cannot matter. That was "once per plugin activation"
+    when `apply` was the only caller; it is now also once per tool call and once
+    per slash command, which measured **27.2 µs against 27.3 µs** over 500 calls
+    on a real profile — inside the run-to-run variance, on a ~27 µs framework
+    floor the tool has not started paying yet. The per-*listener* path is the one
+    that still spells the two calls inline, because `emit` fires per streamed
+    chunk; the measurement is recorded on `_invoke`.
     """
     token = _ACTIVATING.set(scope)
     try:
@@ -279,11 +289,11 @@ async def _as_owner(scope: Context, awaitable: Any) -> Any:
     coroutine's own first act rather than something its creator did before
     handing it over.
     """
-    # Through `_running` rather than the inline pair `_invoke` uses: this is
+    # Through `running` rather than the inline pair `_invoke` uses: this is
     # already an extra coroutine frame around an `await`, so a generator's
     # `__enter__`/`__exit__` is noise beside a scheduler hop — and it leaves the
     # module with two spellings of the binding instead of three.
-    with _running(scope):
+    with running(scope):
         return await awaitable
 
 
@@ -403,8 +413,36 @@ class Context:
         that needs both writes `self.ctx.owner_for(scope)` and
         `self.ctx.layer_for(scope)` side by side, and a reader can see that it
         asked both rather than reusing one answer for two purposes.
+
+        **It follows `current_scope()` too, and the isolation rule is why that is
+        safe** (P6-26). This deliberately did not, on the grounds that moving
+        visibility would change what an agent can see — but the two cases the
+        objection conflates are told apart by `isolation`, for free. A row's
+        activation scope is *not* isolated, so it inherits the mount's isolation
+        and a root row's registration still lands on the global layer, unchanged.
+        An agent's scope *is* its own isolation, so a body running for an agent
+        lands on that agent's layer — which is the containment P6-27 made
+        structural and this was the last way to escape: a tool body inside a
+        contained child was installing **globally visible** tools.
+
+        **The disposed branch fails open, and deliberately does not warn.**
+        Falling back to `self` means the seam's own context, whose isolation is
+        `None` — the *global* layer — so a body that outlived the scope it ran
+        for registers something the whole deployment can see. That is the mirror
+        of `owner_for`'s fail-open, in B7's direction rather than I2's, and it is
+        reachable the same way: contextvars propagate into tasks, so one spawned
+        from a tool body and still running after its agent went away takes this
+        branch. Silent because it cannot happen alone — all five call sites ask
+        `owner_for` about the same `scope` a line or two later
+        (`tools/registry._claim`, `system_prompt/assembly.section`,
+        `seams/skills.restrict`, `seams/compaction.note`), and that is where it
+        is logged. Two lines for one registration makes the honest one easier to
+        miss.
         """
-        return scope if scope is not None else self
+        if scope is not None:
+            return scope
+        activating = _ACTIVATING.get()
+        return activating if activating is not None and activating.active else self
 
     @staticmethod
     def current_scope() -> Context | None:
@@ -438,12 +476,39 @@ class Context:
         `apply` returned saw `None` and fell back to the seam — outliving its row
         exactly as before the mechanism existed.
 
-        **What still runs unbound**, because nothing registered it as a listener:
-        a tool's `execute`, a command's `run`, a provider claimed through
-        `claim_slot`, and a `waterfall`'s `inner`. The first three are code a
-        registry owns and should arguably bind — P6-26 — and until it does, a
-        registration made from one of those bodies lands on the seam unless it
-        passes `scope=` by hand.
+        **What P6-26 bound**: every definition-owned body the *tools* registry
+        invokes — `execute`, `render`, `project_meta`, `finalize_content` — and a
+        command's `run`, each to the agent it runs *for*. Not one statement but
+        all of them, because they are one row's code reached through one
+        registry, and `render` proved what a partial rule costs: with only
+        `execute` wrapped it ran bound to *whichever `tools/execute` wrapper
+        called the inner* — measured as `plugin(session-checkpoint-policy)` on
+        the headless profile, a stranger's row picked by what happens to be
+        mounted.
+
+        **What still runs unbound**, and this list is meant to be exhaustive:
+
+        * a provider claimed through `claim_slot` and called later —
+          `llm/stream`'s adapter is the live one. A provider has no agent, only
+          the row that registered it, so binding it means `claim_*` retaining its
+          owner. That is a lifetime question rather than a containment one — a
+          provider is deployment-wide by construction — so a registration from a
+          provider body still lands on the seam unless it passes `scope=`;
+        * `ToolDefinition.classify`, alone among the definition's bodies, for the
+          reason stated on `ToolRuntime.execution_mode`: it runs in the scheduler
+          before an execution exists, and its scope is `Context | None`;
+        * a `waterfall`'s `inner` — the *producer's* body, which nothing
+          registered, so it inherits its caller's binding. `tools/execute`'s
+          inner is the exception that binds itself, per the paragraph above;
+        * the row bodies **four other registries** invoke: `CompactionNote.text`,
+          `PromptSection.text` and the variable and tools providers beside it,
+          `StatusField.read`, `Diagnostic.read`. P6-26 did not reach these and
+          they are not a smaller version of the same fix — the first two already
+          hold the target scope in a local (`target` in `CompactionSeam.render`
+          and `SystemPromptService.assemble`), which is a *layer*, while the
+          owner is still the registering row. One `Context` cannot say both, and
+          that is the thing to decide before extending the rule rather than
+          after. The last two have no target at all.
 
         Contextvars propagate into tasks, so a coroutine spawned from a bound
         callback carries the binding; `Context.owner_for` declines a *disposed*
@@ -684,7 +749,7 @@ class Context:
                     # every ready dependent in one loop on one task, so a token
                     # left behind would make the next row's registrations land on
                     # the previous row's scope (P6-12).
-                    with _running(scope):
+                    with running(scope):
                         try:
                             await maybe_await(dependent.activate(scope))
                         except BaseException:
@@ -878,8 +943,11 @@ class Context:
                 return await maybe_await(_invoke(hook, *state, next_))
             # `inner` is the *producer's* body rather than a listener — nothing
             # registered it, so it runs under whatever binding the caller of
-            # `waterfall` already had. See P6-26 for the bodies that a registry
-            # *does* own and that nothing binds yet.
+            # `waterfall` already had. That is still true after P6-26, which
+            # bound the bodies a *registry* owns: `tools/execute`'s inner is one
+            # of them and binds itself from the inside, before calling on. The
+            # other thirteen are a seam's own fallback, which is the row's code
+            # and wants the row's binding — exactly what it inherits here.
             return await maybe_await(inner(*state))
 
         return await next_()

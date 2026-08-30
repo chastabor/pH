@@ -181,6 +181,12 @@ def _guard(service: Any) -> Any:
     return service.guard(lambda _execution: None)
 
 
+def _tool(service: Any) -> Any:
+    from ph.testing import simple_tool
+
+    return service.register(simple_tool("p612_tool"))
+
+
 def _restrict(service: Any) -> Any:
     from ph.seams._restriction import NameFilter
 
@@ -210,6 +216,7 @@ RECIPES: dict[str, tuple[str, Callable[[Any], Any]]] = {
     "SystemPromptService.variable": ("system_prompt", _variable),
     "SystemPromptService.tools": ("system_prompt", _prompt_tools),
     "ToolRuntime.guard": ("tools", _guard),
+    "ToolRuntime.register": ("tools", _tool),
     "ToolRuntime.restrict": ("tools", _restrict),
     "ApprovalService.register_answerer": ("approval", _approval),
     "UserQuestionService.register_answerer": ("user_questions", _question),
@@ -346,7 +353,6 @@ NOT_EXERCISED: frozenset[str] = frozenset(
         "SystemPromptService.context",
         "ToolRuntime.present_as",
         "ToolRuntime.present_transport",
-        "ToolRuntime.register",
         "ToolRuntime.register_code_namespace",
         "ToolRuntime.register_transport",
         "TuiScreenRegistry.present_with",
@@ -492,11 +498,16 @@ per test — the shape `test_cordis_dispatch.py` already uses. Keyed off
 """
 
 
-def _definition(name: str) -> Any:
-    """The least a `CommandDefinition` needs, for tests that only watch it come and go."""
+def _definition(name: str, run: Any = None) -> Any:
+    """The least a `CommandDefinition` needs, for tests that only watch it come and go.
+
+    `run` for the one test that needs the body to *do* something — a second
+    inline `CommandDefinition` beside this would be the same four fields with
+    one changed, which is the difference a reader then has to go and find.
+    """
     from ph.seams.commands import CommandDefinition
 
-    return CommandDefinition(name=name, summary="s", run=lambda *a, **k: None)
+    return CommandDefinition(name=name, summary="s", run=run or (lambda *a, **k: None))
 
 
 async def test_a_listener_registers_on_its_own_scope_not_the_emitters(mount: Any) -> None:
@@ -544,13 +555,13 @@ async def test_a_registration_made_after_apply_returns_still_belongs_to_its_row(
     why `register_when_composed` carried a hand-written `scope=ctx`: not because
     the call was unusual, but because it was the one place somebody had noticed.
 
-    **A tool body is still not covered**, and an earlier draft of this docstring
-    said it was. `definition.execute` is invoked by the tools registry, not
-    dispatched as a listener, so nothing binds it — and the same holds for a
-    command's `run` and a provider claimed through `claim_slot`. Those are P6-26.
-    Naming them here rather than only in the plan, because this module is where a
-    reader comes to learn what the rule covers, and a gate that overstates its
-    reach is worse than one that admits a gap.
+    **A tool body and a command body joined in P6-26**, which binds each to the
+    agent it runs for. What is still not covered is a provider claimed through
+    `claim_slot` and called later: it has no agent, only the row that registered
+    it, so binding it is `claim_*` retaining its owner rather than the invoker
+    knowing a scope. Named here rather than only in the plan, because this module
+    is where a reader comes to learn what the rule covers, and a gate that
+    overstates its reach is worse than one that admits a gap.
     """
     event = PROBE["emit"]
     root = await mount()
@@ -660,3 +671,88 @@ def test_the_declared_modes_and_the_registry_agree() -> None:
     from ph.cordis.events import _MODES
 
     assert set(get_args(DispatchMode)) == set(_MODES)
+
+
+# --- P6-26: a registry-invoked body runs as the agent it was invoked for -----
+#
+# "Who is running" covered a plugin's `apply` (P6-12) and a listener's dispatch
+# (P6-25) — everything cordis invokes *as a listener*. It did not cover code a
+# **registry** invokes: a tool's `execute`, a command's `run`. Those fell through
+# to the seam for lifetime and, after P6-27 nested agents, to the *global* layer
+# for visibility — so a body inside a contained child installed a tool the whole
+# deployment could see, which was the last way to escape a ceiling P6-27 had just
+# made structural.
+
+
+async def test_a_tool_body_registers_inside_the_agent_it_runs_for(mount: Any) -> None:
+    """The containment half, and why this row carries B7 rather than only I2.
+
+    A tool body is ordinary Python that a row wrote and an agent invoked. Before
+    this it ran as nobody: `layer_for(None)` resolved to the registry's own
+    context, whose isolation is `None` — the global layer — so a registration
+    made here was visible to every agent in the deployment, including the ones
+    the caller had been narrowed away from.
+    """
+    from ph.testing import FAKE_OPTIONS, run_tool, simple_tool
+
+    ctx = await mount()
+    parent = ctx.agents.create(ctx.sessions.create("p626-parent"), FAKE_OPTIONS)
+    child = ctx.agents.create(ctx.sessions.create("p626-child"), FAKE_OPTIONS, parent=parent)
+
+    def smuggle(_args: Any, run: Any) -> str:
+        run.scope.tools.register(simple_tool("p626_smuggled"))
+        return "done"
+
+    ctx.tools.register(simple_tool("p626_smuggler", execute=smuggle))
+    await run_tool(ctx, "p626_smuggler", {}, agent=child)
+
+    assert "p626_smuggled" in ctx.tools.view(child.ctx).visible, "the child kept what it made"
+    assert "p626_smuggled" not in ctx.tools.view(parent.ctx).visible, "it escaped upward"
+    assert "p626_smuggled" not in ctx.tools.view(ctx).visible, "it reached the deployment"
+
+
+async def test_a_row_registering_at_mount_still_lands_globally(mount: Any) -> None:
+    """The half that must not have moved, and the reason it did not have to.
+
+    `layer_for` following "who is running" was held back on the grounds that
+    moving visibility would change what an agent can see. The two cases are told
+    apart by `isolation` for free: a row's activation scope is *not* isolated, so
+    it inherits the mount's — `None` at the root — and a row's registration
+    still lands on the global layer exactly as before. Only an *agent's* scope is
+    its own isolation, and only then does the answer change.
+    """
+    from ph.testing import FAKE_OPTIONS, simple_tool
+
+    ctx = await mount()
+    agent = ctx.agents.create(ctx.sessions.create("p626-plain"), FAKE_OPTIONS)
+
+    @plugin("p626-row", inject=["tools"])
+    async def row(scope: Context, _config: Any) -> None:
+        scope.tools.register(simple_tool("p626_global"))
+
+    ctx.plugin(row)
+    await ctx.reconcile()
+
+    assert "p626_global" in ctx.tools.view(ctx).visible
+    assert "p626_global" in ctx.tools.view(agent.ctx).visible, "a row's tool stopped being global"
+
+
+async def test_a_command_body_runs_as_the_agent_that_typed_it(mount: Any) -> None:
+    """The same gap one registry over.
+
+    `CommandRegistry.dispatch` hands the body `CommandContext(ctx=self.ctx, …)` —
+    the *registry's* context, which is the `scope or self.ctx` shape P6-12 named
+    — so a command that registered anything did it globally and permanently.
+    """
+    from ph.testing import FAKE_OPTIONS
+
+    ctx = await mount()
+    agent = ctx.agents.create(ctx.sessions.create("p626-cmd"), FAKE_OPTIONS)
+    seen: list[Context | None] = []
+
+    ctx.commands.register(
+        _definition("p626", run=lambda _arg, _run: seen.append(Context.current_scope()))
+    )
+    await ctx.commands.dispatch("/p626", agent=agent)
+
+    assert seen == [agent.ctx], "the command body ran as the registry, not as the agent"
