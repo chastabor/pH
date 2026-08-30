@@ -71,7 +71,14 @@ from ph.cordis import Context, plugin
 from ph.paths import is_under
 from ph.seams.approval import denial_reason
 from ph.seams.diagnostics import Diagnostic, contribute
-from ph.seams.fs import EditIntent, FsService, ReadIntent, WriteIntent, matches_glob
+from ph.seams.fs import (
+    EditIntent,
+    FsService,
+    ReadIntent,
+    WalkDecision,
+    WriteIntent,
+    matches_glob,
+)
 from ph.seams.sandbox import enforcement_of
 from ph.seams.workspace import workspace_of, writable_roots
 from ph.wire import WireModel
@@ -265,7 +272,21 @@ class FsPermissions:
 
     def decide(self, operation: Operation, path: Path, agent: Any = None) -> Rule | None:
         """The first rule that matches, or `None` for the default allow."""
-        candidates = self._spellings(path, agent)
+        posix = path.as_posix()
+        return self._decide_from(self._spellings(posix, agent), operation, posix, agent)
+
+    def _decide_from(
+        self, candidates: tuple[str, ...], operation: Operation, path: str, agent: Any
+    ) -> Rule | None:
+        """`decide` over spellings already computed, for a caller that has them.
+
+        The split exists for the walk. `screen` asks two questions about one
+        path — "does a rule name this" and "could a rule match inside it" — and
+        both need the spellings, so deriving them twice paid `_spellings` per
+        candidate on the hot path P4-06 measured and P6-17 rewrote. `decide`
+        keeps its `Path` signature, because the gate has a `Path` and one
+        `as_posix()` per gated read is not worth a second public shape.
+        """
         outside = None
         for rule in self.rules:
             if operation not in rule.operations:
@@ -274,7 +295,7 @@ class FsPermissions:
                 # Computed at most once per decision, and only if a scoped rule
                 # is actually reached: the common list has none.
                 if outside is None:
-                    outside = self._outside_workspace(path, agent)
+                    outside = self._outside_workspace(Path(path), agent)
                 if not outside:
                     continue
             if any(
@@ -285,6 +306,13 @@ class FsPermissions:
                 return rule
         return None
 
+    def _objection_to(
+        self, candidates: tuple[str, ...], operation: Operation, path: str, agent: Any
+    ) -> Rule | None:
+        """`objection` over spellings already computed. See `_decide_from`."""
+        rule = self._decide_from(candidates, operation, path, agent)
+        return rule if rule is not None and rule.mode != "allow" else None
+
     def objection(self, operation: Operation, path: Path, agent: Any = None) -> Rule | None:
         """The first rule that would *stop* this, or `None`.
 
@@ -293,8 +321,8 @@ class FsPermissions:
         three hand-written `rule is not None and rule.mode != "allow"` checks are
         three edit sites the day `Decision` grows a fourth member.
         """
-        rule = self.decide(operation, path, agent)
-        return rule if rule is not None and rule.mode != "allow" else None
+        posix = path.as_posix()
+        return self._objection_to(self._spellings(posix, agent), operation, posix, agent)
 
     def conceals(self, path: Path, agent: Any = None) -> bool:
         """Whether a listing must not reveal this path.
@@ -305,33 +333,132 @@ class FsPermissions:
         """
         return self.objection("read", path, agent) is not None
 
+    def screen(self, path: str, name: str, agent: Any, is_dir: bool) -> WalkDecision:
+        """What the walk may do with this path — the `ctx.fs.screen` contract (P6-19).
+
+        Two questions, not one. For a file it is `conceals`, unchanged. For a
+        **directory** it is the question `deletion_reason` already asks about a
+        recursive delete, and for the same reason: the rules describe paths that
+        do not exist yet, so "is anything in here concealed" cannot be answered
+        by matching the directory's own path. `deny secrets/**` does not match
+        `secrets` — `**` names what is *under* it — so a concealment check on
+        the directory says no, the walk descends, and the rule is then enforced
+        once per file inside a tree it should never have entered.
+
+        `_could_match_under` is that judgement and it already existed here; this
+        row gave it a second consumer, which is also what promoted it from a
+        delete-only helper. It rounds towards refusal, which for enumeration is
+        the same direction it rounds for deletes: a directory pruned because a
+        rule *might* conceal something inside costs a listing that omits paths a
+        person could have seen, while entering one costs the leak the rule was
+        written to prevent.
+        """
+        spellings = self._spellings(path, agent)
+        named = self._objection_to(spellings, "read", path, agent) is not None
+        if not is_dir:
+            return "skip" if named else "yield"
+        # The directory's *own* path first — a rule may name it outright — then
+        # the question only a directory raises. Two passes because they are two
+        # questions: matching the directory catches a mid-segment wildcard like
+        # `sec*ts`, whose literal head (`sec`) is not a path ancestor of
+        # `secrets` and which `_could_match_under` therefore misses.
+        if named:
+            return "prune"
+        return (
+            "prune"
+            if self._refuses_under(
+                spellings, "read", path, agent, honour_scope=True, require_head=True
+            )
+            else "yield"
+        )
+
+    def _refuses_under(
+        self,
+        spellings: tuple[str, ...],
+        operation: Operation,
+        path: str,
+        agent: Any,
+        *,
+        honour_scope: bool,
+        require_head: bool,
+    ) -> bool:
+        """Whether a non-allow rule could match *something inside* this directory.
+
+        The rules describe paths that do not exist yet — the tree is walked by
+        the operating system, not by this module — so a rule matching one file
+        inside a directory is a rule that applies to it without ever naming it.
+        `_could_match_under` is that judgement per pattern; this is the loop
+        around it, which `screen` and `deletion_reason` had a copy of each.
+        `objection` one method up exists for the same reason: two hand-written
+        rule loops are two edit sites the day `Rule` grows a field.
+
+        **`honour_scope` is the deliberate difference between the two callers**,
+        and it is a parameter rather than a comment in each copy so the
+        asymmetry is visible from both. Enumeration honours `outside-workspace`;
+        a recursive delete does not. A delete may only ever be wrong towards
+        refusal, so over-refusing there is the safe direction — while
+        enumeration over-refusing *hides files a person may see*.
+
+        **`require_head` is the second difference, and the same asymmetry.**
+        `_could_match_under` answers `True` for a pattern with no literal head,
+        because for a delete "could match anywhere" must round to refusal. For a
+        walk that same rounding refuses *everywhere*: `deny read **/.env` — the
+        idiomatic way to write that rule — has an empty head, so every
+        directory "could" hold a match and the walk prunes the whole tree.
+        Measured on this repository before the guard: 11 489 results down to 6.
+        The file such a rule names is still concealed on the way past; what a
+        leading wildcard cannot justify is refusing to *look*.
+        """
+        outside = None
+        for rule in self.rules:
+            if rule.mode == "allow" or operation not in rule.operations:
+                continue
+            if honour_scope and rule.scope == "outside-workspace":
+                # `decide`'s own guard. Load-bearing here in a way it is not for
+                # a file: a scoped rule written `paths: ["**"]` is precisely the
+                # rule written to *exempt* the workspace, and without this it
+                # would prune every directory in it.
+                if outside is None:
+                    # The one branch that still wants a `Path`, and it is rare
+                    # by construction: only a scoped rule reaches it.
+                    outside = self._outside_workspace(Path(path), agent)
+                if not outside:
+                    continue
+            if any(
+                (_has_head(pattern) or not require_head) and _could_match_under(pattern, directory)
+                for pattern in rule.paths
+                for directory in spellings
+            ):
+                return True
+        return False
+
     def deletion_reason(self, path: Path, *, recursive: bool, agent: Any = None) -> str | None:
         """Why this delete must not happen, or `None`.
 
         A non-recursive delete is an ordinary first-match question. A recursive
-        one is refused whenever a non-allow rule *could* match a descendant,
-        because the rules describe paths that do not exist yet — the tree is
-        walked by the operating system, not by this module, and a rule matching
-        one file inside it is a rule the delete would violate without ever
-        asking about that file.
+        one is refused whenever a non-allow rule *could* match a descendant —
+        `_refuses_under`, which `screen` shares and which records why the two
+        callers differ.
+
+        `honour_scope=False`: a rule scoped `outside-workspace` still refuses a
+        recursive delete of a directory inside it, because the delete would
+        reach paths outside as soon as the tree contains a symlink or the
+        workspace boundary moves. The enumeration side, which can be wrong in
+        the direction of hiding a person's own files, honours the scope.
         """
         if self.objection("write", path, agent) is not None:
             return DENIAL.format(operation="delete", path=path)
         if not recursive:
             return None
-        # Both spellings, for `decide`'s reason: a rule written `build/**` and a
-        # rule written `/w/build/**` are the same rule, and a check that knew
-        # only one of them would let the other kind of config through.
-        spellings = self._spellings(path, agent)
-        for candidate in self.rules:
-            if candidate.mode == "allow" or "write" not in candidate.operations:
-                continue
-            if any(
-                _could_match_under(pattern, directory)
-                for pattern in candidate.paths
-                for directory in spellings
-            ):
-                return RECURSIVE_DENIAL.format(path=path)
+        if self._refuses_under(
+            self._spellings(path.as_posix(), agent),
+            "write",
+            path.as_posix(),
+            agent,
+            honour_scope=False,
+            require_head=False,
+        ):
+            return RECURSIVE_DENIAL.format(path=path)
         return None
 
     def prompt(self, rule: Rule, operation: Operation, path: Path, agent: Any) -> str:
@@ -364,14 +491,18 @@ class FsPermissions:
             return False
         return not any(is_under(path, root) for root in writable_roots(workspace))
 
-    def _spellings(self, path: Path, agent: Any = None) -> tuple[str, ...]:
+    def _spellings(self, absolute: str, agent: Any = None) -> tuple[str, ...]:
         """Both ways to name this path: absolute, and relative to the workspace.
 
         A prefix strip rather than `Path.relative_to` — see `_prefix`. A path
         outside the workspace has no relative spelling, and an absolute rule is
         the only honest way to name one anyway.
+
+        Takes the posix **string**, not a `Path`, because that is what it
+        immediately made of one and what both callers already hold: `decide` has
+        a `Path` and spends one `as_posix()`, while `screen` is handed the string
+        by the walk (P6-17's finding, applied to the seam's own contract).
         """
-        absolute = path.as_posix()
         prefix = self._prefix(agent)
         if absolute.startswith(prefix):
             return (absolute, absolute[len(prefix) :])
@@ -389,6 +520,17 @@ def _prefix_of(root: Path) -> str:
     on a frozen dataclass is a public constructor argument nobody meant to add.
     """
     return f"{root.as_posix().rstrip('/')}/"
+
+
+def _has_head(pattern: str) -> bool:
+    """Whether `pattern` names anything literal before its first wildcard.
+
+    Separated from `_could_match_under` rather than folded into it because the
+    two callers want opposite answers for a headless pattern: a delete must
+    treat "could match anywhere" as a refusal, and a walk must not treat it as a
+    reason to enter nothing. See `_refuses_under`.
+    """
+    return bool(pattern.split("*", 1)[0].rstrip("/"))
 
 
 def _could_match_under(pattern: str, directory: str) -> bool:
@@ -446,7 +588,12 @@ async def apply(ctx: Context, config: Config) -> None:
     # would be a rule nobody meant to write.
     ctx.on("fs/write-intent", _gate(ctx, permissions, "write"))
     ctx.on("fs/edit-intent", _gate(ctx, permissions, "write"))
-    fs.hide(permissions.conceals, scope=ctx)
+    # `screen`, not the retired `hide`: this row can now refuse a *tree* rather
+    # than the same tree once per file in it (P6-19), and the `scope=` it has
+    # always passed finally does something on the enumeration side too — an
+    # agent-scoped mount screens its own agent's walks rather than everybody's
+    # (P6-18).
+    fs.screen(permissions.screen, scope=ctx)
 
 
 def _gate(ctx: Context, permissions: FsPermissions, operation: Operation) -> Any:

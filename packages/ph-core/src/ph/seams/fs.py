@@ -7,13 +7,22 @@ would be a reporter, not a gate — which is precisely the failure the feature m
 records in prime-agent's `edit` skill, where the diff is emitted **after** the
 file changed, so "there is no point at which anything can say no".
 
-**Enumeration is filtered, not gated** (`hide`). `glob` and `grep` visit
+**Enumeration is filtered, not gated** (`screen`). `glob` and `grep` visit
 thousands of candidates and a waterfall per candidate would be both slow and
 absurd — nobody approves nine hundred prompts — so a policy row registers a
-synchronous predicate and the walk simply never yields a concealed path. It runs
-*during* the walk rather than over the results, because `grep` reads the files
-it visits: post-filtering its matches would return no rows while having read
-every byte of the file the rule was protecting.
+synchronous screen and the walk never yields, or never enters, what it refuses.
+It runs *during* the walk rather than over the results, because `grep` reads the
+files it visits: post-filtering its matches would return no rows while having
+read every byte of the file the rule was protecting.
+
+**Filtered is not refused, and the two are separate questions on purpose.** A
+screen answers "may I be told this exists"; the intent waterfall answers "may I
+open it". A path a screen hides is still readable through `read` unless a rule
+also vetoes `fs/read-intent` — which is exactly right for `fs-local`'s ignore
+list, whose whole job is to keep `node_modules` out of a listing rather than to
+protect it, and which is why `permissions-fs` registers *both* a screen and a
+gate rather than deriving one from the other. A deployment reading `ignore:` as
+access control has misread it; a deployment writing a `deny` rule gets both.
 
 `fs/observed` records reads, which is what lets read-before-edit be a policy
 row rather than a hard-coded rule.
@@ -32,11 +41,10 @@ import logging
 import os
 import re
 from collections.abc import Callable, Iterator
-from contextlib import suppress
 from dataclasses import dataclass, field
-from functools import lru_cache, partial
+from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import anyio
 
@@ -44,7 +52,7 @@ from ..cordis import Context, Disposer, events, plugin
 from ..session import Session
 from ..tools.errors import FailureKind, HarnessError
 from ..wire import WireModel
-from ._registry import claim_slot
+from ._registry import claim_entry, claim_slot
 
 __all__ = [
     "EditIntent",
@@ -52,6 +60,8 @@ __all__ = [
     "FsService",
     "GrepMatch",
     "ReadIntent",
+    "WalkDecision",
+    "WalkScreen",
     "WriteIntent",
     "apply",
     "matches_glob",
@@ -102,6 +112,74 @@ class GrepMatch(WireModel):
     path: str
     line: int
     text: str
+
+
+WalkDecision = Literal["yield", "skip", "prune"]
+"""What a screen says about one path `glob`/`grep` considered.
+
+`yield` is "nothing to say"; `skip` drops this path from the results; `prune`
+additionally refuses to enter it, which only means anything for a directory. A
+closed `Literal` rather than two booleans so the consumers `match` exhaustively
+and a fourth answer fails to type-check at every site that has to handle it."""
+
+WalkScreen = Callable[[str, str, Any, bool], WalkDecision]
+"""`(path, name, agent, is_dir) -> WalkDecision`. See `FsService.screen`.
+
+**Strings, not a `Path`, and that is a measurement rather than a preference.**
+P6-17's whole finding was that the walk pays for `pathlib` — and a screen asked
+about a `Path` puts the cost straight back, because `_walk` holds the joined
+string already and would build one per candidate purely to hand it over. Every
+screen then converts it back: `fs-local`'s ignore list wants the bare name, and
+`permissions-fs` calls `as_posix()` inside `_spellings` on its first line.
+Measured over this repository, `Path` against `str`: **41.1 ms → 28.8 ms** with
+the ignore screen alone, and **112.6 ms → 62.8 ms** with three anchored rules
+mounted — the largest single win left after P6-17, and it is entirely the type.
+
+`path` is absolute and **posix-separated on every platform**, because that is
+what rule patterns and `matches_glob` are written in; `name` is the bare final
+component, so the common screen is a set lookup rather than a parse. A screen
+that genuinely needs a `Path` builds one on the branch that needs it, which for
+`permissions-fs` is the rare `outside-workspace` check."""
+
+WalkDecider = Callable[[str, str, bool], WalkDecision]
+"""A walk's screens, with its agent already bound. See `FsService._decider`."""
+
+
+@dataclass(frozen=True, slots=True)
+class _Screen:
+    """One registered screen and the scope that owns it.
+
+    The owner is the whole of P6-18's enumeration half: `hide` kept bare
+    callables, so `Context.reaches` had nothing to filter on and an agent-scoped
+    row concealed from every agent."""
+
+    decide: WalkScreen
+    owner: Context
+
+
+def _scope_of(agent: Any) -> Context | None:
+    """An agent's own scope, for the visibility rule — or `None` for no agent.
+
+    Duck-typed rather than importing the agent: `ph.seams.fs` sits below
+    `ph.agent_loop` and a seam that imported its consumer would invert the
+    layering the whole plugin model rests on. Every driver in the tree assigns
+    `self.ctx` in its constructor, and anything that does not simply falls back
+    to the service's own context — which is exactly today's behaviour.
+
+    **Deriving this at all is the wrong altitude, and P6-24 is the row.** The
+    pipeline already states the boundary: `ToolExecutionInput.scope` *is* "the
+    per-agent policy boundary", says in its own docstring that "the registry
+    must not guess it", and sits beside an `agent` field documented only as the
+    approval-routing target — two values, passed separately by `code_mode`
+    today. `fs_tools` hands this seam the second and leaves `run.scope` unused,
+    so `ctx.fs` and `ctx.tools` can resolve different boundaries for one call.
+    The fallback is also fail-*open*: an agent whose `.ctx` is absent lands on
+    the mount, which no agent-scoped screen reaches — the mirror of the bug
+    P6-18 fixed. Until that row lands, this is the honest approximation and the
+    caveat belongs here rather than only in the plan.
+    """
+    scope = getattr(agent, "ctx", None)
+    return scope if isinstance(scope, Context) else None
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,8 +248,8 @@ class FsService:
     get."""
     _observed: dict[Path, float] = field(default_factory=dict)
     """Last-read mtime per path — the state read-before-edit consults."""
-    _hidden: list[Callable[[Path, Any], bool]] = field(default_factory=list)
-    """Predicates that conceal a path from enumeration. See `hide`."""
+    _screens: list[_Screen] = field(default_factory=list)
+    """What the walk may show and where it may go. See `screen`."""
     _rebase: Callable[[Any], Path | None] | None = None
     """Where *this agent's* relative paths resolve. See `rebase`."""
 
@@ -223,56 +301,93 @@ class FsService:
 
     # ------------------------------------------------------------------ read --
 
-    def hide(
-        self, predicate: Callable[[Path, Any], bool], *, scope: Context | None = None
-    ) -> Disposer:
-        """Conceal matching paths from `glob` and `grep`.
+    def screen(self, decide: WalkScreen, *, scope: Context) -> Disposer:
+        """Decide what `glob` and `grep` may show, and where they may go (P6-19).
 
-        The enumeration half of a policy row, and deliberately *not* a waterfall:
-        a walk visits thousands of candidates, so asking a human about each one
-        is not a thing anyone would sit through, and awaiting a listener per file
-        would make a `grep` over a repository a different kind of operation. A
-        row that both hides and vetoes keeps the two consistent — this seam does
-        not try to derive one from the other, because they answer different
-        questions ("may I be told this exists" and "may I open it").
+        One contribution point over **any** path the walk considers, directories
+        included, answering `"yield" | "skip" | "prune"`. It replaces `hide`,
+        which could refuse a file and could not refuse a tree: `deny secrets/**`
+        concealed every file in `secrets/` while still entering the directory and
+        paying a predicate call per file, and `permissions-fs` had no way to say
+        "never go in there" even though `_walk` already knew how to prune. Two
+        ways to drop a path collapse into one — the built-in ignore list is
+        registered through this seam by `fs-local` like any other screen, which
+        is also what lets a deployment configure it and what gives the
+        `.gitignore` row somewhere to land instead of arriving as mechanism
+        three.
 
-        The predicate is asked about a path **and the agent walking**, because
-        the root a rule is written against is per-agent once a containment tier
-        is in force (D21): a rule written `secrets/**` names one directory in the
-        person's checkout and a different one in each agent's worktree, and a
-        predicate that could not tell them apart would answer for the wrong tree.
+        Deliberately *not* a waterfall, for the reason `hide` gave and which
+        still holds: a walk visits thousands of candidates, so asking a human
+        about each one is not a thing anyone would sit through, and awaiting a
+        listener per file would make `grep` over a repository a different kind of
+        operation. A row that both screens and vetoes keeps the two consistent;
+        this seam does not derive one from the other, because they answer
+        different questions ("may I be told this exists" and "may I open it").
 
-        **Pass `scope=ctx` from a row's `apply`**, so the predicate leaves with
-        the row rather than outliving it inside this long-lived service.
+        The screen is asked about a path, **the agent walking**, and whether the
+        path is a directory. The agent, because the root a rule is written
+        against is per-agent once a containment tier is in force (D21): a rule
+        written `secrets/**` names one directory in the person's checkout and a
+        different one in each agent's worktree, and a screen that could not tell
+        them apart would answer for the wrong tree.
+
+        **`scope` is required**, where every sibling registration in this package
+        defaults it to the service's own context. That default is harmless where
+        the owner is a *lifetime* handle — `rebase` two methods up still takes
+        it — but P6-18 made this same field the input to `Context.reaches`, so
+        omitting it would no longer mean "clean up with the mount", it would mean
+        **"screen every agent"**: the widest policy in the seam, chosen by
+        forgetting. `_decider` refuses to make that inference about the agent for
+        the same reason and says so; making it about the owner would be the same
+        mistake one field over, and it is the one P6-18 was written to fix.
+
+        Through `claim_entry`, which removes the entry it appended **by
+        identity**. `_Screen` is a frozen dataclass and so compares by value, and
+        `FsPermissions` is one too — so two mounts with equal rules registering
+        against one service would have had `list.remove` take the wrong one.
+        That is the defect `_registry`'s own docstring exists to name.
         """
-        hidden = self._hidden
-        hidden.append(predicate)
+        entry = _Screen(decide=decide, owner=scope)
+        return claim_entry(scope, self._screens, entry, label="fs.screen")
 
-        def release() -> None:
-            with suppress(ValueError):
-                hidden.remove(predicate)
+    def _decider(self, agent: Any) -> WalkDecider | None:
+        """This walk's screens, filtered and with its agent bound — or `None`.
 
-        return (scope or self.ctx).add_disposer(release, label="fs.hide")
+        Resolved **once per walk, not once per path**: the visibility filter is
+        fixed for the whole walk — the agent does not change halfway — so
+        `reaches` would otherwise be re-answered for every screen for every one
+        of eleven thousand candidates.
 
-    def concealed(self, path: Path, agent: Any) -> bool:
-        """Whether any registered predicate hides this path.
+        `None` when no screen reaches this agent, so `_walk` can skip the ask
+        entirely rather than call a predicate that always agrees. Note this is
+        **not** the ordinary case for a mounted profile: `fs-local` registers the
+        ignore screen on every mount, so the branch belongs to a hand-built
+        service — a test's, or a consumer that wants a raw walk.
 
-        A predicate that raises conceals: a policy row whose matcher broke must
-        not become an open door, which is the same fail-closed reading the
-        approval seam is built on.
-
-        `agent` is required rather than defaulted: a default would silently
-        answer for the *process* root, which is the exact bug per-agent roots
-        were introduced to fix, and the one caller always has one.
+        `agent` is required rather than defaulted at the call sites: a default
+        would silently answer for the *process* root, which is the exact bug
+        per-agent roots were introduced to fix.
         """
-        for predicate in self._hidden:
-            try:
-                if predicate(path, agent):
-                    return True
-            except Exception:
-                log.warning("ph.seams.fs: a hide predicate failed; concealing", exc_info=True)
-                return True
-        return False
+        target = _scope_of(agent) or self.ctx
+        screens = [entry for entry in self._screens if entry.owner.reaches(target)]
+        if not screens:
+            return None
+
+        def decide(path: str, name: str, is_dir: bool) -> WalkDecision:
+            strictest: WalkDecision = "yield"
+            for entry in screens:
+                try:
+                    said = entry.decide(path, name, agent, is_dir)
+                except Exception:
+                    log.warning("ph.seams.fs: a walk screen failed; refusing", exc_info=True)
+                    return "prune" if is_dir else "skip"
+                if said == "prune":
+                    return "prune"
+                if said == "skip":
+                    strictest = "skip"
+            return strictest
+
+        return decide
 
     async def read(
         self,
@@ -368,10 +483,27 @@ class FsService:
         return count if replace_all else 1
 
     async def _gate(self, event: str, intent: Any) -> None:
+        """Ask the policy rows about one intent, in the scope that owns it (P6-18).
+
+        `scope=` is the fix and it is one argument: the waterfall defaulted to
+        this *service's* context, which is the mount, so `collect` asked whether
+        each listener reached the root — and an agent-scoped listener on
+        `fs/read-intent` reaches only its own agent, so it never fired at all.
+        The sibling gate `ToolRuntime` built has passed `scope=execution.scope`
+        since it was written; this one is the same gate one seam over and did
+        not, which is why `permissions-fs` could be mounted per agent and asked
+        per process.
+
+        Nothing changes for a globally mounted row: a global registration
+        reaches everything, so the same listeners run in the same order.
+        """
+
         async def inner(_intent: Any) -> str | None:
             return None
 
-        reason = await self.ctx.waterfall(event, intent, inner=inner)
+        reason = await self.ctx.waterfall(
+            event, intent, inner=inner, scope=_scope_of(intent.agent) or self.ctx
+        )
         if reason is not None:
             raise FsDenied(str(reason))
 
@@ -386,10 +518,8 @@ class FsService:
         agent: Any = None,
     ) -> list[str]:
         base = self.resolve(root, agent=agent) if root is not None else self.root_for(agent)
-        hidden = partial(self.concealed, agent=agent)
-        return await anyio.to_thread.run_sync(
-            lambda: [str(path) for path in _walk(base, pattern, limit, hidden)]
-        )
+        decide = self._decider(agent)
+        return await anyio.to_thread.run_sync(lambda: list(_walk(base, pattern, limit, decide)))
 
     async def grep(
         self,
@@ -401,7 +531,7 @@ class FsService:
         agent: Any = None,
     ) -> list[GrepMatch]:
         base = self.resolve(root, agent=agent) if root is not None else self.root_for(agent)
-        hidden = partial(self.concealed, agent=agent)
+        decide = self._decider(agent)
         try:
             expression = re.compile(pattern)
         except re.error as error:
@@ -409,7 +539,8 @@ class FsService:
 
         def scan() -> list[GrepMatch]:
             matches: list[GrepMatch] = []
-            for candidate in _walk(base, glob, None, hidden):
+            for found in _walk(base, glob, None, decide):
+                candidate = Path(found)
                 if not _greppable(candidate):
                     continue
                 try:
@@ -418,7 +549,7 @@ class FsService:
                     continue
                 for number, line in enumerate(text.splitlines(), start=1):
                     if expression.search(line):
-                        matches.append(GrepMatch(path=str(candidate), line=number, text=line[:500]))
+                        matches.append(GrepMatch(path=found, line=number, text=line[:500]))
                         if len(matches) >= limit:
                             return matches
             return matches
@@ -426,40 +557,66 @@ class FsService:
         return await anyio.to_thread.run_sync(scan)
 
 
-_IGNORED_PARTS = frozenset(
-    {".git", "node_modules", "__pycache__", ".venv", ".mypy_cache", ".ruff_cache", "dist"}
-)
-
 GREP_MAX_BYTES = 2 * 1024 * 1024
 """Files above this are skipped by `grep`: a build artifact that happens to
 match `**/*` must not be read whole into memory line by line."""
 
 
-def _walk(
-    base: Path, pattern: str, limit: int | None, concealed: Callable[[Path], bool]
-) -> Iterator[Path]:
-    """Matching files under `base`, pruning ignored directories *before* descent.
+def _walk(base: Path, pattern: str, limit: int | None, decide: WalkDecider | None) -> Iterator[str]:
+    """Matching files under `base`, pruning refused directories *before* descent.
 
-    `Path.glob` would materialize `node_modules` in full and then let `_ignored`
-    discard it; pruning `dirs` in place means an ignored tree is never entered.
-    Directories and files are visited in sorted order so results are stable.
+    `Path.glob` would materialize `node_modules` in full and then discard it;
+    pruning `dirs` in place means a refused tree is never entered. Directories
+    and files are visited in sorted order so results are stable.
 
-    `concealed` is consulted here rather than over the results, because `grep`
-    reads every file this yields: filtering afterwards would hide the matches
-    and still have opened the file.
+    `decide` is consulted here rather than over the results, because `grep` reads
+    every file this yields: filtering afterwards would hide the matches and still
+    have opened the file. It is asked about directories too (P6-19), which is
+    what lets a policy row say "never go in there" rather than refusing the same
+    tree once per file inside it. **`None` means no screen reaches this walk** —
+    the ordinary case, and the whole reason it is spelled as an absence rather
+    than as a predicate that always agrees: it is what lets the loop below skip
+    building a `Path` per candidate for a policy question nobody asked.
+
+    Three findings, all P6-17, and together with P6-19's string screen contract
+    they are **414 ms → 32 ms** over this repository's 11 489 files:
+
+    * **The relative path is a slice, not a `Path.relative_to`.** That allocates
+      a `Path` per root segment and measured **23.5 µs per file, 62% of the
+      walk**, for a string that is already a prefix of what `os.walk` handed us.
+      The slice is 0.32 µs. `os.sep` is translated rather than assumed, because
+      `matches_glob` speaks posix and Windows does not, and the branch is hoisted
+      out of the loop since the answer is fixed for the process.
+    * **The join happens once.** `os.path.join(current, name)` was computed for
+      the slice and then thrown away, and `Path(current, name)` re-joined it.
+    * **`str` out, not `Path`.** `glob` returns `list[str]` and was paying
+      `Path.__str__` — which re-parses — for every one of them, having just
+      had the string. `grep` builds the `Path` for the files it actually opens,
+      where a construction is noise beside the read.
     """
+    root = os.fspath(base)
+    cut = len(root) + (0 if root.endswith(os.sep) else 1)
+    native = os.sep != "/"
+
+    def posix(path: str) -> str:
+        return path.replace(os.sep, "/") if native else path
+
     yielded = 0
     for current, dirs, files in os.walk(base):
-        dirs[:] = sorted(name for name in dirs if name not in _IGNORED_PARTS)
-        directory = Path(current)
+        dirs.sort()
+        if decide is not None:
+            dirs[:] = [
+                name
+                for name in dirs
+                if decide(posix(os.path.join(current, name)), name, True) != "prune"
+            ]
         for name in sorted(files):
-            path = directory / name
-            relative = path.relative_to(base).as_posix()
-            if not matches_glob(relative, pattern):
+            full = os.path.join(current, name)
+            if not matches_glob(posix(full[cut:]), pattern):
                 continue
-            if concealed(path):
+            if decide is not None and decide(posix(full), name, False) != "yield":
                 continue
-            yield path
+            yield full
             yielded += 1
             if limit is not None and yielded >= limit:
                 return
@@ -541,17 +698,72 @@ def _write_text(target: Path, content: str) -> None:
     target.write_text(content, encoding="utf-8")
 
 
+_IGNORED_PARTS: tuple[str, ...] = (
+    ".git",
+    "node_modules",
+    "__pycache__",
+    ".venv",
+    ".mypy_cache",
+    ".ruff_cache",
+    "dist",
+)
+"""Directory names `fs-local` prunes unless a deployment says otherwise.
+
+A **default**, not a rule (P6-19). It was a module-level `frozenset` consulted
+inline by `_walk`, which made it the second of two ways to drop a path and the
+only one nobody could configure — a repository with a `vendor/` or a `target/`
+had no way to say so, and the `.gitignore` row had nowhere to land. It is now
+`fs-local`'s `ignore` config, registered through `ctx.fs.screen` like any other
+policy, so the walk has no built-in knowledge of it at all."""
+
+
 class Config(WireModel):
     """Row config for the local filesystem provider."""
 
     root: str | None = None
+    ignore: list[str] | None = None
+    """Directory **names** `glob` and `grep` never enter. `None` keeps
+    `_IGNORED_PARTS`; `[]` turns pruning off entirely.
+
+    A bare final component, matched anywhere in the tree — `"dist"`, not
+    `"build/dist"`, which would silently never fire. A path pattern is a
+    `permissions-fs` rule's job, and unlike this one it also refuses to *read*
+    what it hides: this list keeps noise out of a listing and protects nothing.
+
+    Config rather than a constant (P6-19), and the distinction between `None` and
+    `[]` is the whole reason it is `list[str] | None`: a repository with a
+    `vendor/` or a `target/` had no way to add one, and a deployment that
+    genuinely wants to see inside `.git` had no way to say so — while a plain
+    `[]` default would have silently turned pruning off for every profile that
+    did not mention it."""
 
 
 @plugin("fs-local", config=Config)
 async def apply(ctx: Context, config: Config) -> None:
-    """Mount the local filesystem provider."""
+    """Mount the local filesystem provider, and its one built-in screen."""
     root = Path(config.root).expanduser() if config.root else Path.cwd()
-    ctx.provide("fs", FsService(ctx=ctx, root=root))
+    service = FsService(ctx=ctx, root=root)
+    ctx.provide("fs", service)
+    ignored = frozenset(_IGNORED_PARTS if config.ignore is None else config.ignore)
+    if not ignored:
+        return
+
+    def ignore(_path: str, name: str, _agent: Any, is_dir: bool) -> WalkDecision:
+        """The ignore list as an ordinary screen, not as a branch inside the walk.
+
+        Directories only: the constant was matched against directory names and
+        nothing else, and a file called `dist` was always visible. Registered
+        here rather than known to `_walk` so there is one mechanism for what the
+        walk skips — which is what lets a deployment reconfigure it above and
+        what gives the `.gitignore` row somewhere to land.
+
+        A set membership on the `name` the walk already had, which is what the
+        `str` half of the `WalkScreen` contract is for: reading `.name` off a
+        `Path` built for the purpose measured 70x this.
+        """
+        return "prune" if is_dir and name in ignored else "yield"
+
+    service.screen(ignore, scope=ctx)
 
 
 @plugin("fs-read-before-edit", inject=["fs"])

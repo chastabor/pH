@@ -253,6 +253,75 @@ async def test_a_concealed_path_is_absent_from_glob_and_grep(mount: Any, tmp_pat
     assert not any("hunter2" in match.text for match in matches)
 
 
+async def test_a_denied_tree_is_never_entered(mount: Any, tmp_path: Path) -> None:
+    """P6-19. `deny secrets/**` refuses the directory, not each file in it.
+
+    The glob is the reason this needed a second question rather than reusing
+    `conceals`: `**` names what is *under* `secrets`, so `secrets` itself does
+    not match its own rule — a concealment check on the directory says "nothing
+    to hide", the walk descends, and the rule is then enforced once per file in a
+    tree it should never have entered. `_could_match_under` is the judgement
+    `deletion_reason` already made for exactly this shape, and this row gave it
+    its second consumer.
+    """
+    (tmp_path / "secrets").mkdir()
+    for index in range(4):
+        (tmp_path / "secrets" / f"key{index}.env").write_text(f"TOKEN=hunter{index}\n")
+    (tmp_path / "app.py").write_text("TOKEN = 1\n")
+    ctx = await _mounted(mount, tmp_path, {"paths": ["secrets/**"], "mode": "deny"})
+
+    paths = await ctx.fs.glob("**/*")
+    assert any(path.endswith("app.py") for path in paths)
+    assert not any("secrets" in path for path in paths), "neither the tree nor its contents"
+
+    matches = await ctx.fs.grep("TOKEN")
+    assert [match.path for match in matches] == [str(tmp_path / "app.py")]
+    assert not any("hunter" in match.text for match in matches)
+
+
+async def test_a_tree_an_allow_rule_names_is_still_entered(mount: Any, tmp_path: Path) -> None:
+    """Pruning rounds towards refusal, but only for rules that refuse.
+
+    `_could_match_under` reasons from a pattern's literal head and cannot see
+    which files exist, so it necessarily over-refuses — the same direction it
+    over-refuses for a recursive delete, and for the same reason. What it must
+    not do is over-refuse on an `allow`, which would make a rule written to
+    *permit* something hide it instead.
+    """
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "readme.md").write_text("hello\n")
+    ctx = await _mounted(mount, tmp_path, {"paths": ["docs/**"], "mode": "allow"})
+
+    assert any(path.endswith("readme.md") for path in await ctx.fs.glob("**/*"))
+
+
+async def test_a_workspace_scoped_read_rule_does_not_prune_the_workspace(
+    mount: Any, tmp_path: Path
+) -> None:
+    """The over-refusal pruning could have introduced, and the guard against it.
+
+    `_could_match_under` reasons from a pattern's literal head, so a rule written
+    `paths: ["**"]` has an *empty* head and "could match" under every directory
+    in the tree. Scoped `outside-workspace` that is precisely the rule written to
+    exempt the workspace — so without `decide`'s own scope guard, one such rule
+    prunes the entire walk and the agent can enumerate nothing at all.
+    """
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "app.py").write_text("TOKEN = 1\n")
+    ctx = await _mounted(
+        mount,
+        tmp_path,
+        {
+            "operations": ["read"],
+            "paths": ["**"],
+            "scope": "outside-workspace",
+            "mode": "deny",
+        },
+    )
+
+    assert any(path.endswith("app.py") for path in await ctx.fs.glob("**/*"))
+
+
 async def test_interrupt_asks_and_the_answer_decides(mount: Any, tmp_path: Path) -> None:
     """`interrupt` is an approval, through the same seam `hitl` uses.
 
@@ -614,3 +683,33 @@ async def test_an_explicit_deny_beats_the_default(mount: Any, tmp_path: Path) ->
 
     assert result.is_error
     assert not (workspace.root / "secrets" / "key.pem").exists()
+
+
+async def test_a_leading_wildcard_hides_the_file_without_refusing_the_tree(
+    mount: Any, tmp_path: Path
+) -> None:
+    """The idiomatic deny, and the walk it must not shut down.
+
+    `_could_match_under` answers `True` for a pattern with no literal head,
+    because for a recursive *delete* "could match anywhere" has to round to
+    refusal. Applied to a walk that same rounding refuses everywhere: `deny
+    **/.env` — the way anyone would write it — made every directory a
+    candidate for pruning, and `glob("**/*")` over this repository went from
+    11 489 results to 6. The file the rule names is still concealed on the way
+    past; what a leading wildcard cannot justify is refusing to look.
+    """
+    for relative in ("src/a.py", "docs/b.md", "src/.env", "top.txt"):
+        target = tmp_path / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("x\n")
+    ctx = await _mounted(mount, tmp_path, {"paths": ["**/.env"], "mode": "deny"})
+
+    # Files only — `_walk` never yields a directory — so this is every file in
+    # the tree except the one the rule names.
+    found = sorted(path[len(str(tmp_path)) + 1 :] for path in await ctx.fs.glob("**/*"))
+    assert found == ["docs/b.md", "src/a.py", "top.txt"]
+
+    # And the delete side keeps the harder rounding, which is the reason the two
+    # callers of `_refuses_under` differ rather than an oversight.
+    policy = _policy(Rule(paths=["**/.env"], mode="deny"), root=str(tmp_path))
+    assert policy.deletion_reason(tmp_path / "src", recursive=True) is not None
