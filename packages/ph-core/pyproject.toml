@@ -13,6 +13,7 @@ dependencies = [
     "anyio>=4.4",
     "croniter>=3.0",
     "pydantic>=2.9",
+    "pyturso>=0.7",
     "pyyaml>=6.0",
 ]
 
@@ -72,6 +73,7 @@ tool-bash = "ph.tools.builtin.bash_tool:apply"
 subagent-task = "ph.tools.builtin.subagent_task:apply"
 # durability and resilience
 session-persistence-jsonl = "ph.persistence.jsonl:apply"
+session-persistence-turso = "ph.persistence.turso:apply"
 session-checkpoint-policy = "ph.persistence.checkpoint_policy:apply"
 llm-retry = "ph.llm.retry:apply"
 media-degrade = "ph.llm.media:apply"

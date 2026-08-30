@@ -15,7 +15,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ph.llm.types import text_of
-from ph.persistence import session_path
 
 from ..runtime import prompted
 
@@ -59,6 +58,8 @@ async def run_print(
         return PrintResult(
             session_id=session.id,
             text=text,
-            log_path=None if persistence is None else session_path(persistence.root, session.id),
+            # `locate`, so a backend with no per-session file reports none
+            # rather than a path nobody could open.
+            log_path=None if persistence is None else persistence.locate(session.id),
             events=len(session.events),
         )

@@ -38,7 +38,7 @@ import secrets
 from typing import Any
 
 from ..cordis import Context, plugin
-from ..llm.types import create_user_message
+from ..llm.types import PluginSource, create_user_message
 from ..seams.commands import CommandContext, CommandDefinition
 from ..seams.goals import Goal, GoalService, GoalState
 from ..seams.workspace import workspace_of
@@ -131,7 +131,16 @@ async def apply(ctx: Context, config: Config) -> None:
         agent.steer(
             create_user_message(
                 content=[{"type": "text", "text": _nudge(state, notes)}],
-                source={"kind": "user"},
+                # Tagged as this plugin's, not as the person's. Every other
+                # plugin→inbox message in the tree carries a `PluginSource`, and
+                # the TUI draws an untagged one as a **user** row — so without
+                # this the transcript attributes the harness's own steering to
+                # whoever is reading it.
+                source=PluginSource(
+                    plugin="ph.commands.autonomous",
+                    form="notice",
+                    summary="the goal's gates are still failing",
+                ).to_wire(),
             )
         )
 
@@ -179,7 +188,16 @@ async def apply(ctx: Context, config: Config) -> None:
 
 
 def _nudge(state: GoalState, notes: list[str]) -> str:
-    """What the agent is told when the gates disagree that it is finished."""
+    """What the agent is told when the gates disagree that it is finished.
+
+    **Deliberately not the todo list**, which P5-16 added and then removed. The
+    prompt layer already delivers it: `_project_context` composes a `todos`
+    section whenever the list changes, and `tool-todo` is its only producer — so
+    a nudge can only fire when the model already has the list in context, and
+    restating it here duplicated model-visible tokens on every continuation. The
+    premise that this is "the one moment the loop composes a message" was simply
+    false; the layer below composes the same one.
+    """
     said = "; ".join(notes) if notes else "no gates are defined"
     return (
         f'Not done yet — the goal is "{state.goal.objective}".\n'

@@ -29,11 +29,13 @@ from pathlib import Path
 from typing import Any
 
 import anyio
+from pydantic import ValidationError
 
 from ..cordis import Context, plugin
 from ..paths import resolve_roots
 from ..session import Session, SessionEvent, SessionHeader
 from ..session.json import dumps
+from .protocol import SessionPersistence, StoredSession, attach
 
 __all__ = [
     "JsonlSessionStore",
@@ -121,6 +123,55 @@ class JsonlSessionStore:
         buffer.header_written = True
         await anyio.to_thread.run_sync(_append_and_sync, buffer.path, records)
 
+    # ------------------------------------------------------------- reading --
+    #
+    # The four questions a consumer used to answer by reaching for `self.root`
+    # and rebuilding a filename. A backend with no per-session file answers all
+    # four; a backend with one answers them from the filesystem, as here.
+
+    def exists(self, session_id: str) -> bool:
+        return session_path(self.root, session_id).is_file()
+
+    def read(self, session_id: str) -> tuple[SessionHeader, list[SessionEvent]]:
+        return read_session(session_path(self.root, session_id))
+
+    def locate(self, session_id: str) -> Path | None:
+        """This backend writes files, so it can always say where."""
+        return session_path(self.root, session_id)
+
+    def stored(self, *, limit: int = 50) -> list[StoredSession]:
+        """What is on record, most recently touched first.
+
+        One `stat` per entry — the directory scan's own — and one short read for
+        the header, which is the first line. **No title**: deriving one means
+        scanning forward for a `user/message` and joining its content blocks,
+        and the join (`text_of_wire`) lives in the front end that wants it. The
+        TUI's picker keeps its richer summary; this is the part every backend
+        can answer, which is what the Protocol is for.
+        """
+        try:
+            with os.scandir(self.root) as entries:
+                found = [
+                    (entry, entry.stat())
+                    for entry in entries
+                    if entry.name.endswith(".jsonl") and entry.is_file()
+                ]
+        except OSError:
+            return []
+        found.sort(key=lambda pair: pair[1].st_mtime, reverse=True)
+        listed: list[StoredSession] = []
+        for entry, stat in found[:limit]:
+            header = _peek_header(Path(entry.path))
+            listed.append(
+                StoredSession(
+                    session_id=Path(entry.path).stem,
+                    modified=stat.st_mtime,
+                    cwd=(header.cwd or "") if header is not None else "",
+                    parent=header.parent_session if header is not None else None,
+                )
+            )
+        return listed
+
     def forget(self, session_id: str) -> None:
         self._buffers.pop(session_id, None)
 
@@ -170,6 +221,25 @@ def read_records(path: Path) -> Iterator[dict[str, Any]]:
                 yield record
 
 
+def _peek_header(path: Path) -> SessionHeader | None:
+    """The header line alone, without reading the log behind it.
+
+    A listing of fifty sessions must not parse fifty whole logs; the header is
+    the first line by construction. A header pH cannot validate is not one, so
+    this answers `None` rather than guessing.
+    """
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            first = handle.readline()
+    except OSError:
+        return None
+    try:
+        record = json.loads(first)
+        return SessionHeader.model_validate(record.get("header"))
+    except (json.JSONDecodeError, ValidationError, AttributeError):
+        return None
+
+
 def read_session(path: Path) -> tuple[SessionHeader, list[SessionEvent]]:
     """Read a stored session back, validating every envelope.
 
@@ -212,9 +282,10 @@ async def resume_session(ctx: Any, session_id: str) -> Any:
     from ..session import Session
     from .repair import interrupted_turn_closers
 
-    store = ctx.session_persistence
-    path = session_path(store.root, session_id)
-    header, events = read_session(path)
+    # Through the Protocol, not through this backend's filename: a store that
+    # keeps sessions in a database has no path to build, and `resume_session` is
+    # the one function every host calls to pick work back up.
+    header, events = ctx.session_persistence.read(session_id)
     closers = interrupted_turn_closers(events)
     session = ctx.sessions.adopt(Session(session_id, seed=[*events, *closers], header=header))
     # Recorded, not just returned. A resume is a fact about *provenance* — this
@@ -240,14 +311,8 @@ async def apply(ctx: Context, config: Any) -> None:
     """Mount the JSONL backend and wire it to the session firehose."""
     root_setting = config.get("root") if isinstance(config, dict) else None
     root = Path(root_setting) if root_setting else resolve_roots().sessions_dir()
-    store = JsonlSessionStore(ctx=ctx, root=root)
-    ctx.provide("session_persistence", store)
-
-    # Catch up: a row (re)activated after sessions already exist owes them the
-    # same buffering a freshly created one gets.
-    for session in ctx.sessions.list():
-        store.track(session)
-    ctx.on("session/created", store.track)
-    ctx.on("session/event", store.record)
-    ctx.on("session/flush", store.flush)
-    ctx.on("session/disposed", lambda session: store.forget(session.id))
+    # Annotated, so mypy checks this backend against the Protocol *with
+    # signatures* — which the runtime `isinstance` gate cannot: a
+    # `runtime_checkable` Protocol compares names only.
+    store: SessionPersistence = JsonlSessionStore(ctx=ctx, root=root)
+    attach(ctx, store)

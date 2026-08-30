@@ -444,10 +444,15 @@ class PHTuiApp(App[str | None]):
         front = self.front
         if front is None:
             return
-        # The store's own root: a profile may point persistence elsewhere, and
-        # a picker listing a directory the store never writes to lists nothing.
+        # Through `locate`, not `store.root`: that attribute is the JSONL
+        # backend's and reading it raised `AttributeError` on any other — a
+        # picker that crashes is not a deferral. A backend with no per-session
+        # file answers `None`, and the picker falls back to the default
+        # directory and lists nothing, which is honest until P5-14 moves it onto
+        # `stored()`.
         store = front.ctx.get("session_persistence")
-        directory = store.root if store is not None else self.home / "sessions"
+        located = store.locate(front.session.id) if store is not None else None
+        directory = located.parent if located is not None else self.home / "sessions"
         self._pick(
             "sessions",
             session_choices(directory, current=front.session.id),

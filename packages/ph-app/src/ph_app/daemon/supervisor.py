@@ -40,7 +40,7 @@ from filelock import FileLock, Timeout
 from ph.agent.types import AgentOptions
 from ph.cordis import Context
 from ph.llm.types import create_user_message
-from ph.persistence import resume_session, resumption_of, session_path
+from ph.persistence import resume_session, resumption_of
 from ph.seams.subagents import child_is_live
 from ph.seams.workspace import workspace_of
 from ph.seams.workspace_git import latest_checkpoint, restore
@@ -530,10 +530,26 @@ class Supervisor:
         # lease and none to resume — `path` stays `None` and both fall through
         # to the one `create` below.
         store = ctx.get("session_persistence")
-        path = session_path(store.root, root_id) if store is not None else None
+        # `locate` may honestly answer `None` — a backend with no per-session
+        # file has nothing to lease, and P5-03's lease must decline rather than
+        # invent a path, because a lock on a file nobody writes protects nothing
+        # while looking like it does. That backend brings its own concurrency
+        # story; this one is the filesystem's.
+        path = store.locate(root_id) if store is not None else None
         if path is not None:
             await self._lease(ctx, path, root_id)
-        if path is not None and path.is_file():
+        elif store is not None:
+            # Said out loud. A backend with no per-session file gets no I-5
+            # lease, and a *silent* skip is the shape that hides it: two daemons
+            # would open one session and nothing would refuse. The store owning
+            # its own claim — `claim(session_id)` on the Protocol rather than a
+            # path accessor — is the real answer and is its own row.
+            log.warning(
+                "ph_app.daemon: %s provides no lease path; I-5 is not enforced for %s",
+                type(store).__name__,
+                root_id,
+            )
+        if store is not None and store.exists(root_id):
             session: Session = await resume_session(ctx, root_id)
             resumed = resumption_of(session) or {}
             log.warning(
