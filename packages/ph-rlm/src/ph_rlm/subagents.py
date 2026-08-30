@@ -207,7 +207,9 @@ class RlmChildProvider:
             parent.options, provider=provider_name, model=model, reasoning_effort=effort
         )
         try:
-            child_agent = self.ctx.agents.create(child_session, options)
+            # `parent=` nests the child's scope inside its parent's (P6-27), so
+            # the ceiling is inherited rather than applied.
+            child_agent = self.ctx.agents.create(child_session, options, parent=parent)
         except Exception as error:
             self.ctx.sessions.dispose(child_session.id)
             raise SubagentSpawnError(f"the child agent could not be created: {error}") from error
@@ -353,7 +355,17 @@ class RlmChildProvider:
             log.debug("ph_rlm.subagents: %s has no live session to rehydrate", run_id)
             return False
         child.session = session
-        child.agent = self.ctx.agents.create(session, child.options)
+        # **Before anything is built.** The parent owns the drive job *and*, since
+        # P6-27, the scope the child nests in — so a missing parent is a refusal,
+        # not a degradation. This guard used to sit below `agents.create`, which
+        # meant a rehydration with no parent built an agent and a scope, failed
+        # below, and left both behind: an orphan under the registry root holding
+        # the deployment-wide ceiling that nothing would ever dispose.
+        parent = self.ctx.agents.get(child.run.parent_id)
+        if parent is None:
+            log.debug("ph_rlm.subagents: %s has no live parent to own its drive", run_id)
+            return False
+        child.agent = self.ctx.agents.create(session, child.options, parent=parent)
         # A fresh scope means a fresh ceiling: the filters applied at admission
         # were disposed with the scope that settled, so a rehydrated child would
         # otherwise come back holding the whole deployment (P4-13b).
@@ -363,10 +375,6 @@ class RlmChildProvider:
         # A fresh gate, which the awaiter already on the run reads at await time —
         # its closure holds the `_Child`, not the old Event.
         child.finished = anyio.Event()
-        parent = self.ctx.agents.get(child.run.parent_id)
-        if parent is None:
-            log.debug("ph_rlm.subagents: %s has no live parent to own its drive", run_id)
-            return False
         await self._attach(child, parent, cause="rehydrated")
         return True
 
@@ -564,7 +572,19 @@ class RlmChildProvider:
         return await self._release(parent_session, run_id, reason)
 
     async def _release(self, parent_session: Session, run_id: str, reason: str) -> bool:
-        """The one teardown path, whether the model asked or the parent unwound."""
+        """The one teardown path, whether the model asked or the parent unwound.
+
+        **On the parent-teardown path the child's scope is already gone** (P6-27).
+        `Context.dispose` unwinds `_children` before its own effects, and this
+        runs as one of those effects — so the child's scope, its worktree and its
+        kernel are released *before* this is called, where they used to be
+        released *by* it. Nothing here breaks on that: `cancel` touches only the
+        phase and the inbox, and disposing an inactive scope returns at once. But
+        it bounds what this path may do. The roster, the parent's log and the
+        tombstone are live; anything needing the *child's* scope — flushing its
+        session through its own services, snapshotting its workspace — is not,
+        and would work when the model calls `delete()` and fail here.
+        """
         child = self._children.pop(run_id, None)
         if child is None:
             return False

@@ -45,12 +45,18 @@ class StubSubagentProvider:
     """`False` leaves `result` unset — a provider whose children only reply by
     message, which a blocking caller must refuse rather than hang on."""
     root: Any = None
-    """A context to make child scopes under. Set it to exercise narrowing.
+    """A context to fall back to when a request names no parent. Set it to
+    exercise narrowing.
 
-    `ctx`, not the parent: `AgentRegistry.create` scopes every agent under the
-    *registry*, so a real child's scope is its parent's **sibling**. A stub that
-    nested one under the parent would inherit filters production does not, and
-    would pass a ceiling test that production fails."""
+    **The scope is made under `request.parent` when there is one**, because that
+    is what `AgentRegistry.create` does since P6-27 — a child's scope nests
+    inside its parent's, and the ceiling is inherited through the isolation
+    chain rather than applied. This field said the opposite until then, and
+    argued for it: *"a real child's scope is its parent's sibling; a stub that
+    nested one would pass a ceiling test that production fails."* True when it
+    was written, and exactly inverted by the row that nested them — which is why
+    the stub takes its shape from the production path now instead of restating
+    it in prose that nobody re-reads."""
     requests: list[SubagentRequest] = field(default_factory=list)
     """Every request this provider was handed, in order."""
 
@@ -70,7 +76,14 @@ class StubSubagentProvider:
             downgrade_reason=self.downgrade_reason,
         )
         if self.root is not None:
-            run.scope = self.root.scope(f"agent:{run.id}")
+            # `root` still decides *whether* there is a scope — a provider that
+            # hands back none is the fail-closed case `_enforce` refuses, and a
+            # test needs to be able to be one. What changed is *where*: under the
+            # request's parent when it has one, which is what
+            # `AgentRegistry.create` does since P6-27, so a stubbed child
+            # inherits the ceiling the same way a real one does.
+            owner = getattr(request.parent, "ctx", None) or self.root
+            run.scope = owner.scope(f"agent:{run.id}")
         if self.waitable:
             run.result = self._settle
         return run

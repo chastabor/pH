@@ -95,9 +95,10 @@ class TuiStatusRegistry:
     def register(self, status_field: StatusField, *, scope: Context | None = None) -> Disposer:
         """Contribute a field.
 
-        **Pass `scope=ctx` from a row's `apply`**, as with `tui_screens`: the
-        default owner is this service's context, which would leave the field in
-        the footer after the row that reads it had unloaded.
+        `scope=` is no longer needed for the ordinary case (P6-12, P6-25):
+        a registration made from a row's `apply` — or from a listener that row
+        wrote — already unwinds with the row. Pass it to register on *someone
+        else's* lifetime, which is what it now means and all it now means.
         """
         require_slug(status_field.id, maximum=ID_MAX, kind="status field id")
         owner = self.ctx.owner_for(scope)

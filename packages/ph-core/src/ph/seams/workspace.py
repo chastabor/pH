@@ -485,10 +485,14 @@ class WorkspaceSeam:
         them — the same argument that put `scratch` here. Nothing is provisioned
         into a `shared` workspace, whose root *is* the base.
 
-        Pass `scope=ctx` from a row's `apply`, so the entries leave with the row.
-        Removal is by identity (`claim_entry`), because a `ProvisionEntry` is a
-        *value*: two rows contributing `{source: .env}` compare equal, and
-        `list.remove` would have one row's disposer take the other's.
+        `scope=` is no longer needed for the ordinary case (P6-12, P6-25):
+        a registration made from a row's `apply` — or from a listener that row
+        wrote — already unwinds with the row. Pass it to register on *someone
+        else's* lifetime, which is what it now means and all it now means.
+
+        Through `claim_entry` because a `ProvisionEntry` is a **value**: two rows
+        contributing `{source: .env}` compare equal, and `list.remove` would have
+        one row's disposer take the other's.
         """
         disposers = [
             claim_entry(

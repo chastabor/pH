@@ -357,6 +357,13 @@ class GitWorktreeProvider:
         # `--force` even for the clean case: a tree measured clean a moment ago
         # can still hold an untracked file git would object to, and an ephemeral
         # tree is discarded *even if dirty*, which is the kind's whole promise.
+        #
+        # That promise is also why a settled subagent's evidence goes missing: a
+        # child admitted with `access="read"` gets `worktree-ephemeral`, so the
+        # child a parent most wants to inspect — one that failed, or was
+        # cancelled at `parent-teardown` — is exactly the one whose tree this
+        # removes. Retaining it deliberately, finding it across a family, and
+        # collecting it later is P6-28.
         code, _, err = await self._git(toplevel, "worktree", "remove", "--force", str(path))
         if code != 0:
             log.warning(

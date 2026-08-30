@@ -200,7 +200,22 @@ class SkillService:
         return release
 
     def _changed(self) -> None:
+        """Bump the generation **and drop the caches**, as `ToolRuntime` does.
+
+        Bumping alone made every entry stale without removing any, so `_reach`
+        and `_restrictions` grew an entry per scope ever seen and never shrank —
+        both keyed by `Context`, so a settled agent stayed reachable through its
+        own cache line. Since P6-27 a child's `_reach` key is `(child, parent,
+        None)` rather than `(child, None)`, which made a stale child entry pin
+        its parent's context too.
+        """
         self._generation += 1
+        self._reach.clear()
+        self._restrictions = {
+            scope: value
+            for scope, value in self._restrictions.items()
+            if scope is None or scope.active
+        }
 
     def reach(self, scope: Context | None = None) -> frozenset[str]:
         """Every skill name this scope may use. The one place filters compose."""

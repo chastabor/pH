@@ -40,7 +40,7 @@ import asyncio
 import inspect
 import logging
 from collections.abc import Awaitable, Callable, Iterator, Sequence
-from contextlib import suppress
+from contextlib import contextmanager, suppress
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any, TypeAlias
@@ -97,6 +97,50 @@ class Hook:
     callback: Listener
     prepend: bool = False
     global_: bool = False
+
+
+def _invoke(hook: Hook, *args: Any) -> Any:
+    """Call one listener as an effect of the scope that registered it (P6-25).
+
+    **The one place ownership is established for a dispatch**, and the reason it
+    is a function rather than a line in each loop: there are five dispatch modes,
+    and "remember to bind" written five times is the shape of rule this row
+    exists to stop relying on. A sixth mode cannot omit what it never writes.
+
+    Sync and async are one path here. A listener returning an awaitable gets it
+    back wrapped in `_as_owner`, so whoever awaits or spawns it receives a
+    coroutine that binds itself; a listener returning a value has already run
+    inside the binding below. Callers need no idea which kind they have, which is
+    what lets `emit` spawn and `serial` await the same result.
+
+    **The binding is spelled inline rather than through `_running`**, and that is
+    a measurement rather than a preference: `@contextmanager` costs a generator,
+    an `__enter__`, an `__exit__` and a `StopIteration`, and `emit` fires once
+    per streamed chunk. Cross-process A/B on a 2 000-chunk turn, headless with
+    two listeners: **8.2 ms** before this row, **14.3 ms** through a
+    `@contextmanager`, **10.5 ms** inline. `_running` keeps the
+    once-per-activation path, where the difference is unmeasurable.
+
+    An earlier draft of this paragraph priced the inline form at 120 ns per
+    listener and reported the row as free. Both were wrong, and the review that
+    caught it is the reason for the `None` branch below: that figure counted only the
+    `set`/`reset` pair (**93 ns** measured) and missed the `inspect.isawaitable`
+    this same function introduced — **172 ns**, run twice per listener, which
+    made the awaitability question cost more than the ownership it was serving.
+    """
+    token = _ACTIVATING.set(hook.ctx)
+    try:
+        result = hook.callback(*args)
+        # `None` first, and it is most of the win. A listener that returns
+        # nothing is the overwhelming case, `inspect.isawaitable` costs **172 ns**
+        # against **16 ns** for this identity check, and it runs a second time in
+        # `emit` on the value this just returned — so the awaitability question
+        # was costing more per listener than the binding it was added to serve.
+        if result is None:
+            return None
+        return _as_owner(hook.ctx, result) if inspect.isawaitable(result) else result
+    finally:
+        _ACTIVATING.reset(token)
 
 
 @dataclass(slots=True)
@@ -199,7 +243,48 @@ class ForkScope:
 
 
 _ACTIVATING: ContextVar[Context | None] = ContextVar("ph.cordis.activating", default=None)
-"""The activation scope of the `apply` currently running. See `Context.current_scope`."""
+"""Whose code is running: an `apply`'s activation scope, or a listener's owner.
+
+See `Context.current_scope`, and `_invoke` for the listener half."""
+
+
+@contextmanager
+def _running(scope: Context) -> Iterator[None]:
+    """Bind "who is running" for the duration of a block.
+
+    Used where the cost cannot matter — once per plugin activation. The
+    per-listener path spells the same two calls inline, for the measurement
+    recorded on `_invoke`.
+    """
+    token = _ACTIVATING.set(scope)
+    try:
+        yield
+    finally:
+        _ACTIVATING.reset(token)
+
+
+async def _as_owner(scope: Context, awaitable: Any) -> Any:
+    """Await something as an effect of `scope`, binding when the body *runs*.
+
+    The half of P6-25 its first version got backwards. An `async def` listener
+    called by `emit` only *builds* a coroutine — the body runs later, on a task
+    `_spawn` creates — and a task copies the context at creation, which is after
+    a binding around the *call* has already been reset. So the coroutine carried
+    the emitter's binding and never the listener's, and both gaps this row exists
+    to close survived verbatim for the most ordinary listener shape in the
+    harness: `current_scope()` read `None` inside the body, and anything it
+    registered landed on the seam and outlived its row.
+
+    Wrapping the awaitable moves the binding *inside* the body, where it is the
+    coroutine's own first act rather than something its creator did before
+    handing it over.
+    """
+    # Through `_running` rather than the inline pair `_invoke` uses: this is
+    # already an extra coroutine frame around an `await`, so a generator's
+    # `__enter__`/`__exit__` is noise beside a scheduler hop — and it leaves the
+    # module with two spellings of the binding instead of three.
+    with _running(scope):
+        return await awaitable
 
 
 class Context:
@@ -340,26 +425,29 @@ class Context:
         rows use, which cannot grow a mandatory argument without breaking every
         one of them.
 
-        **It answers "which `apply` is on the stack", not "whose callback is
-        running", and the two come apart in one place.** The variable is live
-        for the whole dynamic extent of the activation `await`, so a listener
-        belonging to row B, dispatched from row A's `apply`, sees *A* — and a
-        registration B makes there unwinds when A unmounts. No shipped row emits
-        during `apply`, so this is latent rather than live, but it is one
-        `ctx.emit` away. The mirror gap is that a registration made *after*
-        `apply` returns — from a `profile/mounted` listener, a tool body, a turn
-        hook — sees `None` and lands on the seam, which is why
-        `register_when_composed` passes `scope=ctx` by hand.
+        **It answers "whose code is running", across both ways cordis runs any**
+        (P6-25). An `apply` binds its activation scope; a dispatch binds the
+        scope that registered the listener. So a registration belongs to the row
+        that made it whether that row is being mounted, is handling an event
+        fired by another row, or is handling one fired long after every `apply`
+        returned.
 
-        Closing both means keying on the owner of the *callback* rather than the
-        activation: `Hook` already carries `ctx`, so dispatch could set this the
-        same way. That is a change to how every listener is invoked and wants
-        its own row (P6-25) rather than a line here.
+        It was briefly only the first of those, and the two gaps either side were
+        what P6-25 closed: a listener dispatched from another row's `apply` had
+        its registration attributed to the *emitting* row, and one made after
+        `apply` returned saw `None` and fell back to the seam — outliving its row
+        exactly as before the mechanism existed.
 
-        It also propagates into tasks spawned from `apply`, which is the third
-        edge: a registration made from a background task after its scope was
-        disposed would raise. `Context.owner_for` declines a disposed scope and
-        warns instead.
+        **What still runs unbound**, because nothing registered it as a listener:
+        a tool's `execute`, a command's `run`, a provider claimed through
+        `claim_slot`, and a `waterfall`'s `inner`. The first three are code a
+        registry owns and should arguably bind — P6-26 — and until it does, a
+        registration made from one of those bodies lands on the seam unless it
+        passes `scope=` by hand.
+
+        Contextvars propagate into tasks, so a coroutine spawned from a bound
+        callback carries the binding; `Context.owner_for` declines a *disposed*
+        scope and warns rather than raising.
         """
         return _ACTIVATING.get()
 
@@ -530,8 +618,14 @@ class Context:
         global one for that agent alone, and its listeners hear only that agent.
         """
         self._assert_active()
+        # `Context.__init__` appends to `self._children`, and `dispose` already
+        # cascades over those *before* its own effects — so an `add_disposer`
+        # here would be a second copy of the same teardown, and one `dispose`
+        # never releases: the effect stays on the parent with `done=False` for
+        # the parent's whole life, pinning every child that ever finished.
+        # Measured at 1.0 KB per settled child, unbounded, and since P6-27 the
+        # parent it pins is a live agent rather than the registry.
         child = Context(self, label=label, module=module or self._module, isolated=True)
-        self.add_disposer(child.dispose, label=f"scope({label})")
         return child
 
     def plugin(self, plugin: Any, config: Any = None) -> ForkScope:
@@ -585,19 +679,17 @@ class Context:
                     scope = Context._activation_scope(dependent)
                     dependent.scope, dependent.active = scope, True
                     runtime.dirty = True
-                    # Set around the activation, and reset in `finally` rather
-                    # than left to the task ending: `reconcile` activates every
-                    # ready dependent in one loop on one task, so a token left
-                    # behind would make the next row's registrations land on the
-                    # previous row's scope (P6-12).
-                    token = _ACTIVATING.set(scope)
-                    try:
-                        await maybe_await(dependent.activate(scope))
-                    except BaseException:
-                        await maybe_await(dependent.deactivate())
-                        raise
-                    finally:
-                        _ACTIVATING.reset(token)
+                    # Bound around the activation, and released on the way out
+                    # rather than left to the task ending: `reconcile` activates
+                    # every ready dependent in one loop on one task, so a token
+                    # left behind would make the next row's registrations land on
+                    # the previous row's scope (P6-12).
+                    with _running(scope):
+                        try:
+                            await maybe_await(dependent.activate(scope))
+                        except BaseException:
+                            await maybe_await(dependent.deactivate())
+                            raise
                 elif not ready and dependent.active:
                     # The fork survives: re-providing the missing service
                     # reactivates it on a later reconcile.
@@ -608,7 +700,13 @@ class Context:
         )
 
     async def dispose(self) -> None:
-        """Unwind this scope: children first, then own effects LIFO."""
+        """Unwind this scope: children first, then own effects LIFO.
+
+        The order is load-bearing for anything that registers an effect *about* a
+        child — a subagent's tombstone, a supervisor's bookkeeping — because
+        such an effect runs after that child's scope is already gone. See
+        `ph_rlm.subagents._release`, which is exactly that shape.
+        """
         if not self._active:
             return
         self._active = False
@@ -657,13 +755,29 @@ class Context:
 
         return self.add_disposer(off, label=f"on({event})")
 
-    def collect(self, event: str, *, scope: Context | None = None) -> list[Listener]:
-        """The listeners one dispatch would reach, in registration order."""
+    def _hooks(self, event: str, *, scope: Context | None = None) -> list[Hook]:
+        """The hook *records* one dispatch would reach, in registration order.
+
+        Records rather than bare callables, because a `Hook` carries the scope
+        that registered it and `_invoke` needs it: a listener runs as an effect
+        of the row that wrote it (P6-25).
+
+        It replaced a public `collect` that returned callables and had no callers
+        left once the five dispatch loops moved here — and keeping that would
+        have been worse than a dead method: hand-rolling `for cb in ctx.collect(e)`
+        is a dispatch with no binding, which is exactly the defect this row
+        closes, offered as the only public route.
+
+        **Deliberately a list, not a generator.** `bail` and `serial` return out
+        of the loop early, so a generator holding a binding across its `yield`
+        would be closed by the collector on some other task and release the token
+        in the wrong context.
+        """
         hooks = self._runtime.hooks.get(event)
         if not hooks:
             return []
         target = scope if scope is not None else self
-        return [hook.callback for hook in hooks if hook.global_ or hook.ctx.reaches(target)]
+        return [hook for hook in hooks if hook.global_ or hook.ctx.reaches(target)]
 
     def emit(
         self, event: str, *args: Any, scope: Context | None = None, contained: bool = False
@@ -677,22 +791,26 @@ class Context:
         and no listener may un-happen it.
         """
         event_registry.check(event, "emit")
-        for callback in self.collect(event, scope=scope):
+        for hook in self._hooks(event, scope=scope):
             try:
-                result = callback(*args)
+                result = _invoke(hook, *args)
             except Exception:
                 if not contained:
                     raise
                 log.exception("ph.cordis: %s listener failed", event)
                 continue
-            if inspect.isawaitable(result):
+            if result is not None and inspect.isawaitable(result):
+                # `None` first for `_invoke`'s reason: this is the second of the
+                # two awaitability checks per listener, on the per-chunk path.
+                # `_invoke` already wrapped it, so the task binds when the body
+                # runs rather than inheriting whatever was current at `_spawn`.
                 self._spawn(result, event)
 
     def bail(self, event: str, *args: Any, scope: Context | None = None) -> Any:
         """Dispatch synchronously until a listener returns a bail value."""
         event_registry.check(event, "bail")
-        for callback in self.collect(event, scope=scope):
-            result = callback(*args)
+        for hook in self._hooks(event, scope=scope):
+            result = _invoke(hook, *args)
             if is_bailed(result):
                 return result
         return None
@@ -700,8 +818,8 @@ class Context:
     async def serial(self, event: str, *args: Any, scope: Context | None = None) -> Any:
         """Await listeners in registration order until one bails."""
         event_registry.check(event, "serial")
-        for callback in self.collect(event, scope=scope):
-            result = await maybe_await(callback(*args))
+        for hook in self._hooks(event, scope=scope):
+            result = await maybe_await(_invoke(hook, *args))
             if is_bailed(result):
                 return result
         return None
@@ -713,20 +831,20 @@ class Context:
         raised together, which is `Promise.allSettled` + `AggregateError`.
         """
         event_registry.check(event, "parallel")
-        callbacks = self.collect(event, scope=scope)
-        if not callbacks:
+        hooks = self._hooks(event, scope=scope)
+        if not hooks:
             return
         failures: list[Exception] = []
 
-        async def run(callback: Listener) -> None:
+        async def run(hook: Hook) -> None:
             try:
-                await maybe_await(callback(*args))
+                await maybe_await(_invoke(hook, *args))
             except Exception as error:
                 failures.append(error)
 
         async with anyio.create_task_group() as group:
-            for callback in callbacks:
-                group.start_soon(run, callback)
+            for hook in hooks:
+                group.start_soon(run, hook)
         if failures:
             raise ExceptionGroup(f'listeners failed for "{event}"', failures)
 
@@ -746,7 +864,7 @@ class Context:
         rewrite that has to be explicit is a rewrite a reader can see.
         """
         event_registry.check(event, "waterfall")
-        callbacks = self.collect(event, scope=scope)
+        hooks = self._hooks(event, scope=scope)
         state: list[Any] = list(args)
         index = 0
 
@@ -754,10 +872,14 @@ class Context:
             nonlocal index
             if replacement:
                 state[:] = replacement
-            if index < len(callbacks):
-                callback = callbacks[index]
+            if index < len(hooks):
+                hook = hooks[index]
                 index += 1
-                return await maybe_await(callback(*state, next_))
+                return await maybe_await(_invoke(hook, *state, next_))
+            # `inner` is the *producer's* body rather than a listener — nothing
+            # registered it, so it runs under whatever binding the caller of
+            # `waterfall` already had. See P6-26 for the bodies that a registry
+            # *does* own and that nothing binds yet.
             return await maybe_await(inner(*state))
 
         return await next_()

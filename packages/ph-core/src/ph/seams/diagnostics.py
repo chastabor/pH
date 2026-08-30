@@ -82,10 +82,10 @@ class DiagnosticsRegistry:
     def register(self, diagnostic: Diagnostic, *, scope: Context | None = None) -> Disposer:
         """Contribute a section.
 
-        **Pass `scope=ctx` from a row's `apply`**: the default owner is this
-        service's context, which would leave the section in the report after the
-        row that answers it had unloaded — `tui_status` and `tui_screens` carry
-        the same warning for the same reason.
+        `scope=` is no longer needed for the ordinary case (P6-12, P6-25):
+        a registration made from a row's `apply` — or from a listener that row
+        wrote — already unwinds with the row. Pass it to register on *someone
+        else's* lifetime, which is what it now means and all it now means.
         """
         require_slug(diagnostic.id, maximum=ID_MAX, kind="diagnostic id")
         owner = self.ctx.owner_for(scope)

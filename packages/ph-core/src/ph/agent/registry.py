@@ -94,13 +94,51 @@ class AgentRegistry:
 
         return release
 
-    def create(self, session: Session, options: AgentOptions | None = None) -> Any:
+    def create(
+        self, session: Session, options: AgentOptions | None = None, *, parent: Any = None
+    ) -> Any:
+        """Build an agent and the scope it owns.
+
+        **`parent` puts the child's scope inside its parent's** (P6-27), which is
+        what makes containment structural instead of materialised. Every agent
+        used to hang off the *registry*, so a parent and its child were siblings
+        and `parent.ctx.reaches(child.ctx)` was `False` — the relationship that
+        `SessionHeader.parent_session` records, and that B7 is entirely about,
+        had no representation in the tree that answers questions about it. So
+        `ctx.subagents` rebuilt the ceiling by hand on every spawn, and
+        `grant_for`'s docstring had to explain that writing `None` out as an
+        explicit list "is not a nicety".
+
+        Nested, three things stop being remembered. Visibility inherits, because
+        `isolation_chain` now reaches the parent's layers and the existing
+        masking already walks it. Disposal cascades, because `Context.dispose`
+        already unwinds `_children` — the subagent provider's
+        `parent.ctx.effect(...)` was doing by hand what the tree does by shape.
+        And a parent can *reach* its child, which is what makes a supervisor able
+        to diagnose one.
+
+        Optional and defaulting to today's behaviour: a root agent has no parent,
+        and five of the seven call sites in the tree create one.
+        """
         if self.driver_factory is None:
             raise RuntimeError("no agent driver is registered; mount an agent-loop row")
-        scope = self.ctx.scope(f"agent:{session.id}")
+        owner = getattr(parent, "ctx", None)
+        base = owner if isinstance(owner, Context) else self.ctx
+        scope = base.scope(f"agent:{session.id}")
         agent = self.driver_factory(scope, session, options or AgentOptions())
         scope.provide("agent", agent)
         self._agents[agent.id] = agent
+        # **The roster entry is an effect of the scope it describes**, which it
+        # had to become the moment P6-27 nested agents: `dispose(agent_id)` used
+        # to be the only thing that popped `_agents`, and a parent's
+        # `Context.dispose` now tears a child's scope down without going through
+        # it. That left `agents.get(child)` handing back a live-looking handle
+        # over a dead context, `agents.list()` — "every live agent, for a sweep
+        # that must visit all of them" — including it, and `agent/disposed`
+        # never firing. Structural for the same reason the lifetime is: a second
+        # provider that nests without registering a teardown effect of its own
+        # cannot leak a handle it never had to remember.
+        scope.add_disposer(lambda: self._forget(agent), label=f"agents.entry({agent.id})")
         scope.emit("agent/created", agent)
         scope.emit("agent/session-start", agent, session)
         return agent
@@ -118,12 +156,26 @@ class AgentRegistry:
         """Every live agent, for a sweep that must visit all of them."""
         return list(self._agents.values())
 
+    def _forget(self, agent: Any) -> None:
+        """Drop the roster entry and announce it, once, whoever unwound the scope.
+
+        Both doors reach here: `dispose(agent_id)` below, and a parent scope
+        cascading into this one. `emit` before the pop is deliberate — a listener
+        asking `agents.get` about the agent it is being told about should still
+        find it — and the pop is idempotent, so the explicit path calling
+        `scope.dispose()` afterwards runs this a second time and does nothing.
+        """
+        if self._agents.pop(agent.id, None) is None:
+            return
+        agent.ctx.emit("agent/disposed", agent)
+
     async def dispose(self, agent_id: str) -> None:
-        agent = self._agents.pop(agent_id, None)
+        agent = self._agents.get(agent_id)
         if agent is None:
             return
         await agent.dispose()
-        agent.ctx.emit("agent/disposed", agent)
+        # `_forget` rides the scope's own teardown, so the announcement and the
+        # roster drop happen exactly once whichever way the scope goes.
         await agent.ctx.dispose()
 
 

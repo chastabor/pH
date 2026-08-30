@@ -495,10 +495,13 @@ class SubagentService:
         """Materialize what this child may reach, from a parent that still exists.
 
         `None` means "everything the parent holds" and is written out as that
-        explicit list, which is not a nicety: `AgentRegistry.create` scopes every
-        agent under the *registry*, so a child's scope is its parent's
-        **sibling** and a parent's filter does not reach it. Applying nothing
-        would hand the child of a narrowed parent the deployment-wide set.
+        explicit list. That used to be load-bearing for a reason P6-27 removed —
+        agents were siblings, so a parent's filter did not reach its child and
+        applying nothing handed the child of a narrowed parent the
+        deployment-wide set. The chain does that job now. What the list is for is
+        the ruling: **a child's capability is fixed at admission**, so this
+        records what the parent held *then* rather than deferring to what it
+        holds whenever the child is next asked. See `Grant`.
         """
         held_skills, held_tools = held if held is not None else self.held_by(request)
         named = request.skills
@@ -514,7 +517,11 @@ class SubagentService:
         )
 
     def _enforce(
-        self, grant: Grant, run: SubagentRun, held: tuple[tuple[str, ...], tuple[str, ...]]
+        self,
+        grant: Grant,
+        run: SubagentRun,
+        held: tuple[tuple[str, ...], tuple[str, ...]],
+        parent: Any = None,
     ) -> None:
         """Bound the child, or refuse the spawn if this provider cannot be bounded.
 
@@ -525,6 +532,22 @@ class SubagentService:
         that cannot deliver that is refused rather than silently ignored.
         """
         if run.scope is not None:
+            # **A provider's scope must be inside the parent's** (P6-27).
+            # Containment is the isolation chain now, so a scope built anywhere
+            # else silently opts out of it — and opts out *invisibly*, because
+            # the child still gets the admission grant and therefore still
+            # passes every ceiling assertion; all it loses is the inherited
+            # narrowing. Checked at the one place every delegation passes
+            # through, for `check_grant`'s reason: "a ceiling one provider forgot
+            # would not be one." A provider that predates nesting, or a future
+            # one that forgets `parent=`, fails here instead of at nothing.
+            owner = getattr(parent, "ctx", None)
+            if owner is not None and not owner.reaches(run.scope):
+                raise SubagentSpawnError(
+                    f'the "{run.owner or "subagent"}" provider built the child a scope outside '
+                    "its parent's, so the child would not inherit the parent's ceiling; a "
+                    "child's scope must be created with `agents.create(..., parent=…)`"
+                )
             run.grant = grant
             grant.apply(self.ctx, run.scope)
             return
@@ -546,7 +569,7 @@ class SubagentService:
         # knows which name the caller asked for, and `rehydrate` has to be able
         # to find its way back to the same provider.
         run.owner = name
-        self._enforce(grant, run, held)
+        self._enforce(grant, run, held, request.parent)
         self._runs[run.id] = run
         return run
 
@@ -681,15 +704,29 @@ async def apply(ctx: Context, config: Any) -> None:
 
 @dataclass(frozen=True, slots=True)
 class Grant:
-    """What one child may reach, resolved to names and independent of its parent.
+    """What one child may reach, resolved to names and fixed at admission.
 
-    **Materialized, and that is the point.** The parent may be gone by the time
-    this is applied — a settled child that is rehydrated gets a fresh scope long
-    after the agent that spawned it stopped existing — so a grant that still had
-    to ask "what does the parent hold" would silently fall back to the
-    deployment-wide set at exactly the moment nobody is watching. `_Child`
-    already keeps the child's *options* for this reason; the capability half
-    needs the same treatment.
+    **Materialized, and since P6-27 that is a *policy* rather than a workaround.**
+    It used to be both. Agents were siblings, so a child inherited nothing and a
+    grant had to write the parent's holdings out or the child would get the
+    deployment-wide set — and the docstring justified the snapshot on the
+    grounds that "the parent may be gone" by the time it was applied. Nesting
+    removed that reason: the ceiling is now the isolation chain, and a disposed
+    parent fires the effect that pops the child from `_children`, so an orphaned
+    rehydration is unreachable rather than unbounded.
+
+    What survives is the rule the snapshot also happened to enforce, now kept on
+    purpose: **a child's capability is fixed at the moment it is admitted.** A
+    parent that gains a tool afterwards does not widen a child already running —
+    the child was spawned for a job, with a ceiling its prompt and its brief were
+    written against, and silently growing that mid-flight would make "what could
+    this child do" unanswerable from the admission record. A parent that needs a
+    child with more spawns a *new* child, whose admission says so.
+
+    That is why the allow-list stays even though the chain would bound the child
+    anyway: the chain answers "no more than the parent **holds**", and this
+    answers "no more than the parent held **then**". Only the second is stable
+    enough to read a transcript against.
 
     `brief` is rendered here rather than read per assembly: it is the cached
     prompt prefix, and a `PromptSection` that hits the filesystem on every model
@@ -703,14 +740,22 @@ class Grant:
     def apply(self, ctx: Context, scope: Context) -> None:
         """Bound a child's scope to this grant.
 
-        **Narrowing is by restriction, never by registration.** `ctx.tools`
-        treats a scope's own registration as unmaskable — "a restriction filters
-        GLOBAL names only, so an agent's own registration cannot be masked out
-        from under it" — which makes registering on a child a way to hand it
-        something its parent cannot see. Filters only intersect, so they are the
-        only instrument a spawn is allowed to use. The Code Mode transport
-        survives either way, by construction: a child that cannot call anything
-        is not a narrower child, it is a broken one.
+        **Narrowing is by restriction, never by registration.** A scope's own
+        registration is unmaskable by its own filter — a filter reaches
+        everything *outside* the scope that wrote it and nothing inside — so
+        registering on a child is a way to hand it something its parent cannot
+        see, which is the opposite of a ceiling. Filters only intersect, so they
+        are the only instrument a spawn is allowed to use.
+
+        The premise was quoted from `_build_view`'s old rule, that "a restriction
+        filters GLOBAL names only". P6-27 replaced that — an *ancestor's*
+        registration is maskable now, and must be, or a child could never be
+        narrowed below a parent that registered on its own scope. The conclusion
+        is unchanged, because the half that carried it is the half that stayed:
+        a scope still cannot filter itself.
+
+        The Code Mode transport survives either way, by construction: a child
+        that cannot call anything is not a narrower child, it is a broken one.
         """
         skills = ctx.get("skills")
         if skills is not None:

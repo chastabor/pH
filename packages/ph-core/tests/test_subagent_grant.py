@@ -26,17 +26,18 @@ from typing import Any
 
 import pytest
 
+from ph.seams._restriction import NameFilter
 from ph.seams.skills import SkillRestriction
-from ph.seams.subagents import SubagentRequest, SubagentSpawnError
+from ph.seams.subagents import Grant, SubagentRequest, SubagentSpawnError
 from ph.system_prompt import render_prompt
 from ph.system_prompt.assembly import AssembleContext
-from ph.testing import FAKE_OPTIONS, StubSubagentProvider, run_tool, skill, write_skill
+from ph.testing import FAKE_OPTIONS, StubSubagentProvider, run_tool, simple_tool, skill, write_skill
 
 pytestmark = pytest.mark.anyio
 
 
-def _agent(ctx: Any) -> Any:
-    return ctx.agents.create(ctx.sessions.create("parent"), FAKE_OPTIONS)
+def _agent(ctx: Any, name: str = "parent", *, parent: Any = None) -> Any:
+    return ctx.agents.create(ctx.sessions.create(name), FAKE_OPTIONS, parent=parent)
 
 
 async def _spawn(ctx: Any, parent: Any, **request: Any) -> Any:
@@ -102,22 +103,26 @@ async def test_a_narrowed_parent_cannot_re_grant_what_it_lost(mount: Any) -> Non
         await _spawn(ctx, parent, skills=("deploy",))
 
 
-async def test_a_sibling_scope_does_not_inherit_the_parents_narrowing(mount: Any) -> None:
-    """The defect this row nearly shipped, pinned as its own test.
+async def test_a_child_never_holds_more_than_its_narrowed_parent(mount: Any) -> None:
+    """The ceiling, through the seam path, whichever way it is enforced.
 
-    `AgentRegistry.create` scopes every agent under the *registry*, so a child
-    agent's scope is the parent's **sibling**, not its descendant — a filter
-    owned by the parent reaches the parent alone. A spawn that named nothing and
-    therefore applied nothing would have handed the child the deployment-wide
-    set, which is wider than its narrowed parent: the one thing the ceiling
-    forbids. Inheritance is written out explicitly for this reason.
+    This asserted the *opposite structure* until P6-27 — `run.scope.isolation is
+    not parent.ctx.isolation, "the stub nested the child"` — because a child was
+    a sibling and inheritance had to be written out explicitly, so a stub that
+    nested one would have passed a ceiling test production failed. Nesting made
+    that guard assert the shape the row removed.
+
+    What it was *for* survives and is what stays: a spawn that names nothing must
+    not hand the child more than its narrowed parent holds. That is now true
+    twice over — the isolation chain bounds it, and the admission grant bounds it
+    — and this test does not care which, because a reader of a transcript does
+    not either.
     """
     ctx, parent = await _granted(mount, "review", "deploy")
     ctx.skills.restrict(SkillRestriction(allow=frozenset({"review"})), scope=parent.ctx)
 
     run = await _spawn(ctx, parent)
 
-    assert run.scope.isolation is not parent.ctx.isolation, "the stub nested the child"
     assert [one.name for one in ctx.skills.list(run.scope)] == ["review"]
 
 
@@ -362,3 +367,154 @@ async def test_a_child_without_the_tool_is_not_told_to_use_it(mount: Any, tmp_pa
 
     assert "**review**" in prompt, "the child can still reach the skill"
     assert "`skill` tool" not in prompt, "it was told to call a tool it does not have"
+
+
+# --- P6-27: containment from the tree, not from a materialised grant --------
+#
+# `AgentRegistry.create` used to scope every agent under the *registry*, so a
+# parent and its child were siblings and `parent.ctx.reaches(child.ctx)` was
+# `False`. The relationship `SessionHeader.parent_session` records, and that B7
+# is entirely about, had no representation in the tree that answers questions
+# about it — so `ctx.subagents` rebuilt the ceiling by hand on every spawn.
+# `parent=` nests the scope; these hold what that buys.
+
+
+def _agents(ctx: Any) -> tuple[Any, Any]:
+    """A parent and a child agent, created the way a spawn creates them.
+
+    Through `_agent`, so these carry `FAKE_OPTIONS` like every other agent in the
+    suite rather than a bare `AgentOptions()` — an unexplained second agent shape
+    in one file is a difference the next reader has to rule out.
+    """
+    parent = _agent(ctx, "p627-parent")
+    return parent, _agent(ctx, "p627-child", parent=parent)
+
+
+async def test_a_childs_scope_nests_inside_its_parents(mount: Any) -> None:
+    """The structural claim, and the two questions that follow from it.
+
+    `reaches` is the visibility rule shared by event dispatch and every scoped
+    registry, so a parent that reaches its child can *see* it — which is what
+    lets a supervisor diagnose one. And the child's isolation chain now carries
+    the parent, which is what the tool and skill registries walk.
+    """
+    ctx = await mount()
+    parent, child = _agents(ctx)
+
+    assert child.ctx.path.startswith(parent.ctx.path + "/")
+    assert parent.ctx.reaches(child.ctx), "a parent cannot reach the child it supervises"
+    assert not child.ctx.reaches(parent.ctx), "containment is one-way"
+
+    chain = list(child.ctx.isolation_chain())
+    assert parent.ctx in chain, "the parent is not on the chain the registries walk"
+
+
+async def test_a_child_inherits_its_parents_narrowing_with_no_grant_applied(
+    mount: Any,
+) -> None:
+    """The point of the row: the ceiling is the tree, not a list somebody wrote.
+
+    No `Grant`, no `check_grant`, no `apply` — the parent is narrowed and the
+    child is narrowed by consequence. Before nesting this returned the
+    deployment-wide set, which is what `grant_for`'s docstring means by "applying
+    nothing would hand the child of a narrowed parent the deployment-wide set".
+    """
+    ctx = await mount()
+    ctx.tools.register(simple_tool("p627_tool"))
+    parent, child = _agents(ctx)
+
+    assert "p627_tool" in ctx.tools.view(child.ctx).visible
+    ctx.tools.restrict(NameFilter(deny=("p627_tool",)), scope=parent.ctx)
+
+    assert "p627_tool" not in ctx.tools.view(parent.ctx).visible
+    assert "p627_tool" not in ctx.tools.view(child.ctx).visible, "the child outran its parent"
+
+
+async def test_a_child_can_be_narrowed_below_its_parent(mount: Any) -> None:
+    """The prerequisite this row needed, and why it was invisible before.
+
+    `_build_view` filtered **global** names only, so a restriction could never
+    take away a tool an *ancestor* had registered on its own scope. Latent while
+    agents were siblings — no child had an ancestor layer — and load-bearing the
+    moment they nest: a child would inherit its parent's scoped tools and be
+    unable to be narrowed out of them, so a grant could widen a child but never
+    bound it.
+    """
+    ctx = await mount()
+    parent, child = _agents(ctx)
+    ctx.tools.register(simple_tool("parent_scoped"), scope=parent.ctx)
+    assert "parent_scoped" in ctx.tools.view(child.ctx).visible, "it should inherit first"
+
+    ctx.tools.restrict(NameFilter(deny=("parent_scoped",)), scope=child.ctx)
+    assert "parent_scoped" not in ctx.tools.view(child.ctx).visible
+    assert "parent_scoped" in ctx.tools.view(parent.ctx).visible, "the parent kept its own"
+
+
+async def test_a_scope_still_owns_its_own_registration(mount: Any) -> None:
+    """The half of the old guard that was right, kept.
+
+    "An agent's own registration cannot be masked out from under it" — a filter
+    reaches everything *outside* the scope that wrote it and nothing inside, so
+    dropping the `key is None` condition had to preserve this and not merely
+    widen the filter.
+    """
+    ctx = await mount()
+    _parent, child = _agents(ctx)
+    ctx.tools.register(simple_tool("mine"), scope=child.ctx)
+    ctx.tools.restrict(NameFilter(deny=("mine",)), scope=child.ctx)
+
+    assert "mine" in ctx.tools.view(child.ctx).visible
+
+
+async def test_disposing_the_parent_disposes_the_childs_scope(mount: Any) -> None:
+    """Teardown follows the shape rather than a registered effect.
+
+    `Context.dispose` unwinds `_children` before its own effects, so a child goes
+    with its parent by construction. The subagent provider still registers
+    `parent.ctx.effect(...)` — it writes the tombstone and updates the roster,
+    which the scope teardown knows nothing about — but it is no longer what
+    *stops* the child, so a provider that forgot it could not orphan one.
+    """
+    ctx = await mount()
+    parent, child = _agents(ctx)
+    assert child.ctx.active
+
+    await ctx.agents.dispose(parent.id)
+    assert not child.ctx.active, "the child's scope outlived its parent's"
+
+
+async def test_a_childs_capability_is_fixed_at_admission(mount: Any) -> None:
+    """The ruling P6-27 settled, and the reason `Grant` survives nesting.
+
+    Nesting makes the *chain* bound a child — "no more than the parent holds" —
+    and that alone would let a parent widen a running child by registering
+    something new. The allow-list `Grant.apply` installs answers the narrower
+    question instead: **no more than the parent held at admission.**
+
+    Deliberate, not incidental. A child is spawned for a job, with a ceiling its
+    prompt and its brief were written against; growing that mid-flight would make
+    "what could this child do" unanswerable from the admission record, which is
+    the one durable account of the delegation. A parent that needs more spawns a
+    *new* child, whose admission says so.
+
+    Held here because it is now the only thing `Grant` is for. With the chain
+    doing the ceiling, a future reader could reasonably delete the allow-list as
+    redundant — this is what would stop them.
+    """
+    ctx = await mount()
+    ctx.tools.register(simple_tool("at_admission"))
+    parent, child = _agents(ctx)
+
+    # `names`, not a hand-rolled fold of `view().visible`: `held_by`'s docstring
+    # is about exactly this — "computing them three times in three spellings is
+    # how the three come to disagree about what 'holds' means".
+    held = tuple(ctx.tools.names(scope=parent.ctx))
+    Grant(skills=(), tools=held).apply(ctx, child.ctx)
+    assert "at_admission" in ctx.tools.view(child.ctx).visible
+
+    ctx.tools.register(simple_tool("after_admission"))
+    assert "after_admission" in ctx.tools.view(parent.ctx).visible, "the parent did gain it"
+    assert "after_admission" not in ctx.tools.view(child.ctx).visible, (
+        "a running child widened when its parent did — the ceiling must be the one "
+        "the admission recorded, not the one the parent happens to hold now"
+    )

@@ -126,7 +126,9 @@ async def test_an_ephemeral_tree_is_discarded_with_its_work(mount: Any, tmp_path
     """
     ctx, _session, parent, _workspace = await worktree_agent(mount, tmp_path)
     child_session = ctx.sessions.create("child")
-    child = ctx.agents.create(child_session, parent.options)
+    # `parent=`: a child's scope nests inside its parent's (P6-27), and this
+    # test is about a child's *rung*, so it must be shaped like a real one.
+    child = ctx.agents.create(child_session, parent.options, parent=parent)
     ephemeral = await ctx.workspace.acquire(
         session_id=child_session.id,
         agent_id=child.id,

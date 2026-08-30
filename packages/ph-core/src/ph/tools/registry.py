@@ -440,16 +440,24 @@ class ToolRuntime:
     def _presented_name(self, target: Context) -> str:
         """The transport's presented name, from the layer cells alone."""
         presentation = next(
-            (layer.transport for _key, layer in self._chain(target) if layer.transport is not None),
+            (layer.transport for layer in self._chain(target) if layer.transport is not None),
             None,
         )
         return presentation.name if presentation is not None else RUN_CODE
 
-    def _chain(self, target: Context) -> Iterator[tuple[Context | None, _Layer]]:
+    def _chain(self, target: Context) -> Iterator[_Layer]:
+        """This scope's layers, most-specific-first.
+
+        Layers alone: the key had one consumer, the `key is None` guard that
+        P6-27 deleted, and every remaining call site was unpacking it into a
+        throwaway — in two different spellings, which is how a reader comes to
+        wonder whether it once mattered. It is still `target.isolation_chain()`
+        for anything that needs it back.
+        """
         for key in target.isolation_chain():
             layer = self._layers.get(key)
             if layer is not None:
-                yield key, layer
+                yield layer
 
     def view(self, scope: Context | None = None) -> _View:
         """Resolve what one scope sees, most-specific-first.
@@ -470,21 +478,48 @@ class ToolRuntime:
     def _build_view(self, target: Context) -> _View:
         visible: dict[str, ToolDefinition] = {}
         layers = list(self._chain(target))
-        mode = next((layer.mode for _key, layer in layers if layer.mode is not None), None)
-        for index, (key, layer) in enumerate(layers):
+        mode = next((layer.mode for layer in layers if layer.mode is not None), None)
+        # Carried rather than re-sliced. `layers[:index]` allocated a list and a
+        # generator *per tool name per layer* to say "the strictly nearer
+        # scopes"; accumulating them says the same thing once, and says it in the
+        # shape the rule is stated in.
+        nearer: list[_Layer] = []
+        for layer in layers:
             for name, definition in layer.tools.items():
                 if name in visible:
                     # A nearer scope already answered this name; scoped
                     # registrations shadow globals rather than merging.
                     continue
-                if key is None and not all(outer.admits(name) for _k, outer in layers[:index]):
-                    # A restriction filters GLOBAL names only, so an agent's own
-                    # registration cannot be masked out from under it.
+                if not all(outer.admits(name) for outer in nearer):
+                    # **A restriction reaches everything *outside* the scope that
+                    # wrote it, and nothing inside** (P6-27). `nearer` excludes
+                    # this layer, so a layer is never filtered by its own
+                    # restriction — an agent's own registration cannot be masked
+                    # out from under it — while an ancestor's is, which is what
+                    # "a child holds a subset of its parent" means.
+                    #
+                    # This read `key is None and not all(...)`, filtering
+                    # **global** names only: the same answer for a flat tree,
+                    # where a chain is [self, global] and there is no ancestor to
+                    # inherit from, and the wrong one once agents nest — a child
+                    # inherited its parent's scoped tools and could not be
+                    # narrowed out of them, so a grant could widen a child but
+                    # never bound it.
+                    #
+                    # **"Inside" means this layer, not this subtree.** A tool
+                    # registered on a *descendant's* scope is not reachable by an
+                    # ancestor's filter either, so a grandchild can hold what its
+                    # granting parent cannot see. Deliberate, and the reason a
+                    # spawn may only ever `restrict`: see `Grant.apply`, which
+                    # states that registering on a child is a way to hand it
+                    # something its parent lacks, and is therefore not an
+                    # instrument containment may use.
                     continue
                 visible[name] = definition
+            nearer.append(layer)
         resolved_mode = mode if mode is not None else self.default_mode
         presentation = next(
-            (layer.transport for _key, layer in layers if layer.transport is not None), None
+            (layer.transport for layer in layers if layer.transport is not None), None
         )
         transport_name = RUN_CODE
         transport = visible.get(RUN_CODE)
@@ -506,7 +541,7 @@ class ToolRuntime:
             visible[presentation.name] = presentation.rename(transport)
             transport_name = presentation.name
         code_namespaces: dict[str, CodeNamespaceFactory] = {}
-        for _key, layer in layers:
+        for layer in layers:
             for name, factory in layer.code_namespaces.items():
                 if name not in code_namespaces:
                     code_namespaces[name] = factory
@@ -542,7 +577,7 @@ class ToolRuntime:
 
     def guard_reason(self, execution: ToolExecution) -> str | None:
         """The first monotonic denial from every layer this call can see."""
-        for _key, layer in self._chain(execution.scope):
+        for layer in self._chain(execution.scope):
             for guard in layer.guards:
                 reason = guard(execution)
                 if reason is not None:
@@ -884,7 +919,14 @@ def register_when_composed(ctx: Context, build: Callable[[], ToolDefinition | No
     def once() -> None:
         definition = build()
         if definition is not None and ctx.tools.get(definition.name) is None:
-            ctx.tools.register(definition, scope=ctx)
+            # No `scope=`. It carried a `scope=ctx` until P6-25, and that was
+            # the tell: a listener firing after `apply` had returned saw no
+            # activation, so the registration would have landed on the tool
+            # registry and outlived this row — and the only thing stopping it
+            # was that somebody remembered. Dispatch now runs a listener as an
+            # effect of the scope that registered it, so the ordinary call is
+            # the correct one here as everywhere else.
+            ctx.tools.register(definition)
 
     ctx.on("profile/mounted", once)
 

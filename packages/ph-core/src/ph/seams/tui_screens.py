@@ -130,10 +130,10 @@ class TuiScreenRegistry:
     def register(self, screen: ScreenDefinition, *, scope: Context | None = None) -> Disposer:
         """Contribute a screen.
 
-        **Pass `scope=ctx` from a row's `apply`.** The default is this service's
-        own context, which is the right owner for a screen the harness itself
-        contributes and the wrong one for a row's: without it the row could
-        unload and leave its screen, its command and its key behind.
+        `scope=` is no longer needed for the ordinary case (P6-12, P6-25):
+        a registration made from a row's `apply` — or from a listener that row
+        wrote — already unwinds with the row. Pass it to register on *someone
+        else's* lifetime, which is what it now means and all it now means.
         """
         require_slug(screen.id, maximum=ID_MAX, kind="screen id")
         owner = self.ctx.owner_for(scope)

@@ -31,12 +31,14 @@ import inspect
 import pkgutil
 import re
 from collections.abc import Callable
-from typing import Any
+from typing import Any, get_args
 
 import pytest
 
 import ph
-from ph.cordis import Context, plugin
+from ph.cordis import Context, events, plugin
+from ph.cordis.context import maybe_await
+from ph.cordis.events import DispatchMode
 
 pytestmark = pytest.mark.anyio
 
@@ -119,7 +121,7 @@ NOT_A_LIFETIME: dict[str, str] = {
     # rather than `ph.seams` plus two hand-written names — six methods that a
     # narrower walk had made invisible.
     "Context.bail": "which scope's listeners to dispatch to",
-    "Context.collect": "which scope's listeners to dispatch to",
+    "Context._hooks": "which scope's listeners to dispatch to",
     "Context.emit": "which scope's listeners to dispatch to",
     "Context.parallel": "which scope's listeners to dispatch to",
     "Context.serial": "which scope's listeners to dispatch to",
@@ -140,9 +142,7 @@ def _recipe(name: str, key: str) -> Callable[[Callable[[Any], Any]], Callable[[A
 
 
 def _command(service: Any) -> Any:
-    from ph.seams.commands import CommandDefinition
-
-    return service.register(CommandDefinition(name="p612", summary="s", run=lambda *a, **k: None))
+    return service.register(_definition("p612"))
 
 
 def _diagnostic(service: Any) -> Any:
@@ -282,9 +282,7 @@ async def test_a_registration_outside_any_activation_still_lands_on_the_service(
     commands = root.commands
     before = len(commands.ctx._effects)
 
-    from ph.seams.commands import CommandDefinition
-
-    commands.register(CommandDefinition(name="bare", summary="s", run=lambda *a, **k: None))
+    commands.register(_definition("bare"))
     assert len(commands.ctx._effects) == before + 1
     assert Context.current_scope() is None, "no activation is in flight here"
 
@@ -304,12 +302,7 @@ async def test_an_explicit_scope_still_wins(mount: Any) -> None:
 
     @plugin("p612-scoped", inject=["commands"])
     async def row(ctx: Context, _config: Any) -> None:
-        from ph.seams.commands import CommandDefinition
-
-        ctx.commands.register(
-            CommandDefinition(name="scoped", summary="s", run=lambda *a, **k: None),
-            scope=agent,
-        )
+        ctx.commands.register(_definition("scoped"), scope=agent)
 
     fork = root.plugin(row)
     await root.reconcile()
@@ -474,3 +467,196 @@ def test_the_three_classifications_do_not_overlap() -> None:
         }
         overlap = tables[left] & tables[right]
         assert overlap == set(), f"{left} and {right} both claim {sorted(overlap)}"
+
+
+# ------------------------- P6-25: a listener is an effect of who wrote it --
+#
+# P6-12 set `_ACTIVATING` around `apply`, which made the rule true for the
+# synchronous extent of a mount and left two gaps either side of it. Both were
+# reproduced before this was written: a listener dispatched from *another* row's
+# `apply` had its registration stolen when that row unmounted, and a
+# registration made *after* `apply` returned still landed on the seam and
+# outlived its row entirely. Dispatch now binds the scope that registered the
+# listener, so "who is running" has one answer across both.
+
+
+PROBE = {mode: f"probe/{mode}" for mode in get_args(DispatchMode)}
+for _mode, _event in PROBE.items():
+    events.declare(_event, _mode, owner="probe", doc="a P6-25 probe")
+"""One throwaway event per dispatch mode, declared once at import.
+
+`EventRegistry.declare` is idempotent for the same name *and* mode and raises
+only on a mode conflict, so the constraint is one event per mode rather than one
+per test — the shape `test_cordis_dispatch.py` already uses. Keyed off
+`DispatchMode` so a sixth member gets an event without anyone remembering.
+"""
+
+
+def _definition(name: str) -> Any:
+    """The least a `CommandDefinition` needs, for tests that only watch it come and go."""
+    from ph.seams.commands import CommandDefinition
+
+    return CommandDefinition(name=name, summary="s", run=lambda *a, **k: None)
+
+
+async def test_a_listener_registers_on_its_own_scope_not_the_emitters(mount: Any) -> None:
+    """Gap one: the dispatch that *steals*.
+
+    Row B writes a listener; row A emits during its own `apply`; B's listener
+    registers a command. Under P6-12 alone the command belonged to **A**,
+    because `_ACTIVATING` said "A is being applied" for the whole dynamic extent
+    of A's activation — so disposing A took B's registration with it. A narrower
+    failure than the leak it replaced, and a stranger one.
+    """
+    event = PROBE["emit"]
+    root = await mount()
+    commands = root.commands
+
+    @plugin("p625-b", inject=["commands"])
+    async def row_b(ctx: Context, _config: Any) -> None:
+        ctx.on(event, lambda: ctx.commands.register(_definition("from-b")))
+
+    @plugin("p625-a", inject=["commands"])
+    async def row_a(ctx: Context, _config: Any) -> None:
+        ctx.emit(event)
+
+    b = root.plugin(row_b)
+    await root.reconcile()
+    a = root.plugin(row_a)
+    await root.reconcile()
+    assert commands.get("from-b") is not None
+
+    await a.dispose()
+    assert commands.get("from-b") is not None, "the emitting row took the listener's registration"
+
+    await b.dispose()
+    assert commands.get("from-b") is None, "it did not unwind with the row that wrote it"
+
+
+async def test_a_registration_made_after_apply_returns_still_belongs_to_its_row(
+    mount: Any,
+) -> None:
+    """Gap two: the dispatch that *leaks*, and the bigger half.
+
+    A `profile/mounted` listener, a turn hook — anything *dispatched* after
+    `apply` has returned saw `current_scope() is None` and fell back to the seam,
+    so the registration outlived its row exactly as it did before P6-12. That is
+    why `register_when_composed` carried a hand-written `scope=ctx`: not because
+    the call was unusual, but because it was the one place somebody had noticed.
+
+    **A tool body is still not covered**, and an earlier draft of this docstring
+    said it was. `definition.execute` is invoked by the tools registry, not
+    dispatched as a listener, so nothing binds it — and the same holds for a
+    command's `run` and a provider claimed through `claim_slot`. Those are P6-26.
+    Naming them here rather than only in the plan, because this module is where a
+    reader comes to learn what the rule covers, and a gate that overstates its
+    reach is worse than one that admits a gap.
+    """
+    event = PROBE["emit"]
+    root = await mount()
+    commands = root.commands
+
+    @plugin("p625-late", inject=["commands"])
+    async def late(ctx: Context, _config: Any) -> None:
+        ctx.on(event, lambda: ctx.commands.register(_definition("deferred")))
+
+    fork = root.plugin(late)
+    await root.reconcile()
+    root.emit(event)
+    assert commands.get("deferred") is not None
+
+    await fork.dispose()
+    assert commands.get("deferred") is None, "a deferred registration outlived its row"
+
+
+async def test_register_when_composed_needs_no_explicit_scope(mount: Any) -> None:
+    """The gate's third clause, and the reason it is worth asserting.
+
+    That helper's `scope=ctx` was load-bearing and is now redundant. Removing it
+    is only safe if the ordinary call is correct — so this drives the real
+    helper on the real `profile/mounted` event rather than trusting the removal.
+    """
+    from ph.tools.registry import register_when_composed
+
+    root = await mount()
+    tools = root.tools
+
+    @plugin("p625-composed", inject=["tools"])
+    async def row(ctx: Context, _config: Any) -> None:
+        from ph.testing import simple_tool
+
+        register_when_composed(ctx, lambda: simple_tool("p625_tool"))
+
+    fork = root.plugin(row)
+    await root.reconcile()
+    await root.serial("profile/mounted")
+    assert tools.get("p625_tool") is not None
+
+    await fork.dispose()
+    assert tools.get("p625_tool") is None, "the tool outlived the row that built it"
+
+
+@pytest.mark.parametrize("mode", sorted(get_args(DispatchMode)))
+@pytest.mark.parametrize("shape", ["sync", "async"])
+async def test_every_dispatch_mode_runs_a_listener_as_its_own_scope(
+    mount: Any, mode: str, shape: str
+) -> None:
+    """Every mode, and **both listener shapes** — which is the axis that mattered.
+
+    Parametrised over `DispatchMode` itself rather than a copied list, so a sixth
+    member becomes a sixth case with no edit here, and dispatched through
+    `getattr(root, mode)` so a member with no dispatch loop raises rather than
+    falling into an `else`.
+
+    The `shape` axis is here because its absence hid a real defect for a whole
+    review cycle. Every listener in the first version was **synchronous**, and
+    `emit` bound around the *call* — which for an `async def` listener only
+    builds the coroutine. The body ran later on a task that had copied the
+    context after the binding was released, so it saw `None`, and both gaps this
+    row exists to close survived for the most ordinary listener shape in the
+    harness. A gate that only tests the easy shape is the gate that let it
+    through.
+    """
+    event = PROBE[mode]
+    root = await mount()
+    seen: list[Context | None] = []
+
+    @plugin(f"p625-{mode}-{shape}", inject=["commands"])
+    async def row(ctx: Context, _config: Any) -> None:
+        if shape == "sync":
+
+            def listener(*args: Any) -> None:
+                seen.append(Context.current_scope())
+
+            ctx.on(event, listener)
+        else:
+
+            async def listener(*args: Any) -> None:
+                seen.append(Context.current_scope())
+
+            ctx.on(event, listener)
+
+    fork = root.plugin(row)
+    await root.reconcile()
+    activation = fork.ctx
+
+    extra = {"inner": lambda *a: None} if mode == "waterfall" else {}
+    await maybe_await(getattr(root, mode)(event, **extra))
+    # `emit` schedules an async listener rather than awaiting it.
+    await root.drain()
+
+    assert seen == [activation], f"{mode}/{shape} did not run the listener as its own scope"
+    assert Context.current_scope() is None, f"{mode}/{shape} left the binding set"
+
+
+def test_the_declared_modes_and_the_registry_agree() -> None:
+    """`DispatchMode` and `events._MODES` are two spellings of one closed set.
+
+    Nothing held them against each other, so a mode added to one and not the
+    other would be accepted by `declare` and rejected by `check`, or the reverse.
+    The parametrization above reads the `Literal`, which makes this the one
+    remaining place the two could drift.
+    """
+    from ph.cordis.events import _MODES
+
+    assert set(get_args(DispatchMode)) == set(_MODES)
