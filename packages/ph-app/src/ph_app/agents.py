@@ -17,9 +17,13 @@ Those want different next steps, and a client that reported "connection refused"
 for both would send half its readers to the wrong one.
 
 **Nothing here re-derives what the daemon knows.** `doctor` reports the socket
-the daemon bound, the policy it was started with and the cadences it is running,
-all read back over the wire — a client that printed what *it* would have chosen
-would agree with a daemon started differently and say nothing at all.
+the daemon bound, the policy it was started with, the cadences it is running and
+whether that socket outlives a logout, all read back over the wire — a client
+that printed what *it* would have chosen would agree with a daemon started
+differently and say nothing at all. The one exception is the case the rule was
+never about: when the connect itself fails there is no daemon to ask, and
+whether the socket is *absent* or *reaped* decides which of two opposite next
+steps a person is given (P5-11).
 
 @module ph_app.agents
 """
@@ -38,13 +42,14 @@ import anyio
 import typer
 from rich.table import Table
 
+from ph.lingering import lifetime
 from ph.paths import RuntimeDirError, resolve_roots
 from ph.resources import GRACE_SECONDS
 
-from .console import console, fail
+from .console import console, fail, section
 from .daemon.client import DaemonClient
 from .protocol import DaemonError, DaemonGone
-from .wire import describe, message_of, obj, one_line, result_block, text_of_wire
+from .wire import describe, message_of, obj, one_line, result_block, seq, text_of_wire
 
 __all__ = ["agents_app"]
 
@@ -91,17 +96,46 @@ async def _connected[T](path: Path, work: Exchange[T]) -> T:
 def _unreachable(path: Path, error: OSError) -> str:
     """Why the connect failed, in the terms of the fix.
 
-    Two different situations arrive as the same class of `OSError`, and they
-    want opposite next steps: no socket means no daemon was ever started, and a
-    socket nothing answers on means one died and left its path behind — which
+    Three situations arrive as the same class of `OSError`, and they want
+    different next steps. No socket means no daemon was ever started. A socket
+    nothing answers on means one died and left its path behind — which
     `ph daemon` clears on its way up, so saying so saves the reader from
     deleting a file by hand.
+
+    The third is P5-11's, and it hides inside the first: on a host where
+    `$PH_RUNTIME` lives under `$XDG_RUNTIME_DIR` and this user is not lingering,
+    "no daemon socket" is also what a person sees after logging out and back in
+    — with a daemon **still running**, still holding every session lease it took
+    (I-5), and about to refuse the `ph daemon` this message would otherwise tell
+    them to start. Naming it costs one paragraph and one `stat`; not naming it
+    costs an afternoon on `session_already_active`.
     """
     if not path.exists():
-        return f"[red]no daemon socket at {path}[/red]\nstart one with [bold]ph daemon[/bold]"
+        return f"[red]no daemon socket at {path}[/red]\n{_missing_socket(path)}"
     return (
         f"[red]{path} exists but nothing is listening[/red] ({error})\n"
         "a daemon crashed and left its socket; [bold]ph daemon[/bold] clears it on start"
+    )
+
+
+def _missing_socket(path: Path) -> str:
+    """What to do about an absent socket — which depends on whether it was reaped.
+
+    The linger state is read on this side because there is nothing on the other
+    side to ask: the daemon that would have answered is precisely the one that
+    cannot be reached. That is the single exception to this module's rule of
+    never re-deriving what the daemon knows, and it is the case the rule was
+    never about.
+    """
+    life = lifetime(path)
+    if life.survives_logout is not False:
+        return "start one with [bold]ph daemon[/bold]"
+    return (
+        f"[yellow]{life.explanation}[/yellow]\n"
+        "if a daemon was running before you logged out it may still be running, "
+        "holding this user's session leases — check with "
+        f"[bold]pgrep -u {life.user} -f 'ph daemon'[/bold] before starting a second one\n"
+        f"[bold]{life.advice}[/bold] makes the next one outlive logout"
     )
 
 
@@ -206,20 +240,51 @@ def _summary(kind: str, event: Mapping[str, Any]) -> str:
     return describe(data)
 
 
-def _facts(title: str, rows: Iterable[tuple[str, str]]) -> Table:
-    """A borderless two-column table of label/value pairs.
+def _sections(reported: Any) -> list[tuple[str, list[tuple[str, str]]]]:
+    """`daemon/status`' report envelope back into what `console.section` draws.
 
-    Both `status` and `doctor` are "a title and a list of pairs", and had a
-    hand-rolled renderer each — already differing in style for no reason, which
-    is how the two commands would have come to lay their answers out
-    differently.
+    Two keys per row rather than a two-element array, for the reason
+    `Root.describe` gives about one name per fact: an array of pairs on the wire
+    is a shape whose meaning is positional, and positional meaning is what a
+    reader gets wrong.
+
+    Through `seq`, not `isinstance(…, list)`. That distinction is load-bearing
+    and `wire`'s docstring says why: a payload is a `list` off disk and a
+    **tuple** in memory, so a reader that tests for `list` works on resume and
+    silently sees nothing live — which for this section would be a socket
+    lifetime that renders as an empty table with no error at all.
     """
-    table = Table(show_header=False, title=title, title_justify="left")
-    table.add_column(style="bold")
-    table.add_column()
-    for label, value in rows:
-        table.add_row(label, value)
-    return table
+    return [
+        (
+            str(obj(one).get("title", "")),
+            [
+                (str(obj(row).get("label", "")), str(obj(row).get("value", "")))
+                for row in seq(obj(one).get("rows"))
+            ],
+        )
+        for one in seq(reported)
+    ]
+
+
+def _reachability(facts: Mapping[str, Any]) -> list[tuple[str, str]]:
+    """The row that only exists when the answer is bad (P5-11).
+
+    Absent while the daemon can be reached, which is `Diagnostic.read`'s rule
+    and the reason it is worth obeying here: a person who can read this table at
+    all just connected, so a permanent "reachable: yes" row would be a fact
+    proved by its own delivery — and the row that matters would be one more line
+    of a table nobody scans.
+
+    That it can ever be *seen* is the odd case and the useful one: the socket
+    went away, the daemon noticed, and this connection came in on a client that
+    was already attached — or through a path somebody restored by hand.
+    """
+    since = facts["unreachableSince"]
+    if since is None:
+        return []
+    return [
+        ("reachable", f"[red]no[/red] — the socket stopped being this daemon's at {_when(since)}")
+    ]
 
 
 def _line(event: Mapping[str, Any]) -> str:
@@ -565,7 +630,7 @@ def status(session: Annotated[str, SESSION_ARGUMENT]) -> None:
     cursor = obj(row.get("cursor"))
     schedules = row["schedules"]
     console.print(
-        _facts(
+        section(
             f"root {row['sessionId']}",
             (
                 ("status", str(row["status"])),
@@ -593,7 +658,7 @@ def doctor() -> None:
     facts = _ask(lambda client: client.call("daemon/status"))
     passivate = facts["passivateAfter"]
     console.print(
-        _facts(
+        section(
             "pH daemon",
             (
                 ("socket", facts["socket"]),
@@ -607,9 +672,15 @@ def doctor() -> None:
                 ("tick", _duration(facts["tickEvery"] * 1000)),
                 ("sweep", _duration(facts["sweepEvery"] * 1000)),
                 ("heartbeat", _duration(facts["heartbeatEvery"] * 1000)),
+                ("socket watch", _duration(facts["watchEvery"] * 1000)),
+                *_reachability(facts),
             ),
         )
     )
+    # A loop, because the envelope is a list: P5-12 adds the daemon's mounted
+    # diagnostics to it and this side needs no change to render them.
+    for title, rows in _sections(facts["sections"]):
+        console.print(section(title, rows))
 
 
 @agents_app.command()

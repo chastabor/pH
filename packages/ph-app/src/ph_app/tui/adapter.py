@@ -465,6 +465,27 @@ class TuiEventAdapter:
             event,
         )
 
+    def _on_supervisor_unreachable(self, event: SessionEvent, live: bool) -> None:
+        """The daemon lost its socket while this session was running (P5-11).
+
+        A row, and a row in the *conversation* rather than only in the auditor's
+        view, because of who reads it and when: this record is written when no
+        client can connect, so its reader is whoever opens the transcript
+        afterwards asking why nothing answered. The advice rides along — it is
+        one command, and a notice that named a problem without its fix would
+        send that reader to a search engine.
+        """
+        advice = str(event.data.get("advice") or "")
+        reason = str(event.data.get("reason") or "removed")
+        was = "was removed" if reason == "removed" else "was replaced by another daemon's"
+        self._row(
+            "unreachable",
+            "notice",
+            f"The daemon's socket {was} — this session kept running, but clients "
+            f"could not reach it{f'. Fix: {advice}' if advice else ''}",
+            event,
+        )
+
     def _on_schedule_tick(self, event: SessionEvent, live: bool) -> None:
         """A scheduled run started (P5-06).
 
@@ -736,6 +757,7 @@ HANDLERS: Mapping[str, Handler] = {
     "supervisor/failed": TuiEventAdapter._on_supervisor_failed,
     "supervisor/recovered": TuiEventAdapter._on_supervisor_recovered,
     "supervisor/passivated": TuiEventAdapter._on_supervisor_passivated,
+    "supervisor/unreachable": TuiEventAdapter._on_supervisor_unreachable,
     "schedule/tick": TuiEventAdapter._on_schedule_tick,
     "goal/set": TuiEventAdapter._on_goal_set,
     "goal/settled": TuiEventAdapter._on_goal_settled,

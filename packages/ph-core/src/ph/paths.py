@@ -67,6 +67,17 @@ class PathRoots:
     cache: Path
     runtime: Path
     runtime_tier: RuntimeTier
+    runtime_source: str = ""
+    """The environment variable the runtime tier came from, `""` for tier 3.
+
+    Carried beside the tier because it is decided at the same instant and by the
+    same `if`: `_resolve_runtime` picks a tier *because* it read a particular
+    variable, and a consumer that wanted to print which one had no way to ask.
+    P5-11 first answered that with a `{tier: variable}` table in its own module —
+    a second copy of this decision, one that had already drifted (it named
+    `LOCALAPPDATA` for a windows tier that falls back to `$XDG_CACHE_HOME` or
+    `~/.cache`) and that raised `KeyError` inside `ph doctor` for a tier added
+    here and not there. A field cannot be added without naming its source."""
 
     def sessions_dir(self) -> Path:
         return self.home / "sessions"
@@ -137,6 +148,18 @@ def _default_cache() -> Path:
     return Path.home() / ".cache" / "ph"
 
 
+def _cache_source() -> str:
+    """Which variable `_default_cache` will read, for the windows runtime tier.
+
+    Beside the function whose branches it names, so the two cannot disagree —
+    which they did while this lived in another module as a `{tier: variable}`
+    table that said `LOCALAPPDATA` for all three branches.
+    """
+    if sys.platform == "win32" and os.environ.get("LOCALAPPDATA"):
+        return "LOCALAPPDATA"
+    return "XDG_CACHE_HOME" if os.environ.get("XDG_CACHE_HOME") else ""
+
+
 def _check_private_dir(path: Path, *, require_mode: bool) -> None:
     """Assert a directory is ours: a real dir, our uid, 0700, not a symlink."""
     if path.is_symlink():
@@ -165,33 +188,41 @@ def _is_per_user_tmpdir(path: Path) -> bool:
     return info.st_uid == os.getuid() and stat.S_IMODE(info.st_mode) == 0o700
 
 
-def _resolve_runtime() -> tuple[Path, RuntimeTier]:
-    """Pick the runtime root and verify it if it already exists. Creates nothing."""
+def _resolve_runtime() -> tuple[Path, RuntimeTier, str]:
+    """Pick the runtime root, the tier, and the variable that named it.
+
+    Verifies what already exists; creates nothing. The third element is
+    `PathRoots.runtime_source` — returned from here rather than reconstructed by
+    a consumer, because this is the one place that knows which variable was read
+    and it knows it at the moment it reads it.
+    """
     override = _env_path("PH_RUNTIME")
     if override is not None:
-        return override, "override"
+        return override, "override", "PH_RUNTIME"
     if sys.platform == "win32":
         # A named pipe replaces the socket path on Windows; the journal still
-        # needs a per-boot directory, and LOCALAPPDATA\ph\runtime is the closest
-        # equivalent the platform offers.
-        return _default_cache() / "runtime", "windows"
+        # needs a per-boot directory, and the cache root's `runtime` is the
+        # closest equivalent the platform offers. The source is whichever
+        # variable `_default_cache` actually used, which is why it is asked
+        # rather than assumed to be `LOCALAPPDATA`.
+        return _default_cache() / "runtime", "windows", _cache_source()
     xdg = os.environ.get("XDG_RUNTIME_DIR")
     if xdg:
         # Tier 1: the kernel and logind own this directory's properties.
-        return Path(xdg) / "ph", "xdg-runtime"
+        return Path(xdg) / "ph", "xdg-runtime", "XDG_RUNTIME_DIR"
     tmpdir = os.environ.get("TMPDIR")
     if tmpdir and _is_per_user_tmpdir(Path(tmpdir)):
         path = Path(tmpdir) / "ph"
         if path.exists():
             _check_private_dir(path, require_mode=False)
-        return path, "tmpdir"
+        return path, "tmpdir", "TMPDIR"
     # Tier 3: a predictable name inside a world-writable directory. Every
     # property tiers 1 and 2 get for free has to be verified here.
     uid = os.getuid() if hasattr(os, "getuid") else 0
     path = Path("/tmp") / f"ph-{uid}"
     if path.exists():
         _check_private_dir(path, require_mode=True)
-    return path, "tmp-uid"
+    return path, "tmp-uid", ""
 
 
 def resolve_roots(*, create: bool = False) -> PathRoots:
@@ -200,12 +231,13 @@ def resolve_roots(*, create: bool = False) -> PathRoots:
     :raises RuntimeDirError: when the tier-3 `/tmp` fallback fails its check —
         pH refuses to start rather than adopt a directory it cannot vouch for.
     """
-    runtime, tier = _resolve_runtime()
+    runtime, tier, source = _resolve_runtime()
     roots = PathRoots(
         home=_env_path("PH_HOME") or _default_home(),
         cache=_env_path("PH_CACHE") or _default_cache(),
         runtime=runtime,
         runtime_tier=tier,
+        runtime_source=source,
     )
     return roots.ensure() if create else roots
 

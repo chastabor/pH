@@ -61,6 +61,56 @@ def anyio_backend() -> str:
     return "asyncio"
 
 
+ReapedHost = Callable[..., Path]
+
+
+@pytest.fixture
+def reaped_host(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> ReapedHost:
+    """`reaped_host(linger=…)` → a host whose `$XDG_RUNTIME_DIR` logind reaps.
+
+    Returns `$PH_RUNTIME`, which is placed *inside* `$XDG_RUNTIME_DIR` so that
+    removing that directory is what logout does rather than something like it.
+    `linger=False` is a user who does not linger, `True` one who does, and
+    `None` the third state — a host with no `/var/lib/systemd/linger` at all,
+    which must read as "unknown" and never as "off". `$PH_HOME` is untouched:
+    `_isolated_home` above owns it, and a second fixture setting the same
+    variable is how a rule comes to be half applied.
+
+    Here rather than in either package's tests because it is needed from both,
+    and `packages/ph-app/tests/daemon_helpers.py` is out of reach of the ph-core
+    suite. It is the same argument `_isolated_home` above makes at greater
+    length, and the same hazard: this patches a **module global**
+    (`ph.lingering.LINGER_DIR`), so a copy that got missed after a rename would
+    not fail — it would read the developer's or the CI box's real linger
+    directory and assert whatever that host happened to say. P5-11 landed with
+    five copies of these four lines; this is them stated once.
+    """
+
+    def make(*, linger: bool | None = False, user: str = "someone") -> Path:
+        from ph import lingering
+
+        # The runtime tier's inputs only. `$PH_HOME` is `_isolated_home`'s to
+        # own — clearing it here would undo the one pin no test may route
+        # around, and setting it would make one rule read as two.
+        for name in ("PH_RUNTIME", "XDG_RUNTIME_DIR", "TMPDIR"):
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setenv("USER", user)
+        runtime_dir = tmp_path / "xdg"
+        runtime = runtime_dir / "ph"
+        runtime.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setenv("XDG_RUNTIME_DIR", str(runtime_dir))
+        monkeypatch.setenv("PH_RUNTIME", str(runtime))
+        markers = tmp_path / "linger"
+        if linger is not None:
+            markers.mkdir(exist_ok=True)
+            if linger:
+                (markers / user).touch()
+        monkeypatch.setattr(lingering, "LINGER_DIR", markers)
+        return runtime
+
+    return make
+
+
 @pytest.fixture
 async def mount(tmp_path: Path) -> AsyncIterator[MountProfile]:
     """`await mount(*overlay_rows)` → a mounted root; disposed after the test.

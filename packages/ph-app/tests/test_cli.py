@@ -10,6 +10,7 @@ read without a converter.
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +22,11 @@ from ph_app.cli import app
 from ph_app.profiles import resolve_profile
 
 runner = CliRunner()
+
+ReapedHost = Callable[..., Path]
+"""The repo-root `reaped_host` fixture, spelled where it is read — structurally
+rather than by `from conftest import …`, which resolves to this package's own
+conftest rather than to the root one the fixture lives in."""
 
 
 def test_dump_config_shows_the_composed_rows() -> None:
@@ -77,6 +83,63 @@ def test_doctor_prints_three_roots(tmp_path: Path, monkeypatch: Any) -> None:
     assert result.exit_code == 0, result.output
     for name in ("PH_HOME", "PH_CACHE", "PH_RUNTIME"):
         assert name in result.stdout
+
+
+def test_doctor_says_whether_the_daemon_socket_survives_logout(
+    tmp_path: Path, reaped_host: ReapedHost
+) -> None:
+    """P5-11's static half, printed with the roots and before any mount.
+
+    It needs no profile, and a profile that refuses to start is exactly when a
+    person wants it — so it sits above the section that can fail rather than
+    inside it. Printed on a good host too: rule 6 says to state what is not
+    enforced next to where it would be assumed, and "`ph daemon` runs until I
+    stop it" is assumed by everyone who never sees a warning.
+    """
+    reaped_host()
+    markers = tmp_path / "linger"
+
+    reaped = runner.invoke(app, ["doctor"])
+    assert reaped.exit_code == 0, reaped.output
+    assert "daemon socket lifetime" in reaped.stdout
+    assert "logind removes" in reaped.stdout
+    assert "loginctl enable-linger someone" in reaped.stdout
+
+    (markers / "someone").touch()
+    lingering_host = runner.invoke(app, ["doctor"])
+    assert lingering_host.exit_code == 0, lingering_host.output
+    assert "daemon socket lifetime" in lingering_host.stdout
+    assert "loginctl" not in lingering_host.stdout, "nothing left to advise"
+
+
+def test_starting_a_daemon_that_will_not_outlive_logout_says_so_first(
+    tmp_path: Path, monkeypatch: Any, reaped_host: ReapedHost
+) -> None:
+    """The row's own wording: *names `enable-linger` when a daemon is configured
+    without it* — and this is the moment it is being configured.
+
+    Said here as well as in `ph doctor` because the two have different readers.
+    Doctor is run by somebody already debugging; this line is read by somebody
+    who is not, ten seconds before they close the terminal it was printed in.
+
+    The bind is made to fail on `AF_UNIX`'s 107-byte path limit so the command
+    returns instead of blocking — the same refusal `serve` names explicitly, and
+    the only way to observe a startup notice from a process whose next act is to
+    run forever.
+    """
+    reaped_host()
+    # Still inside `$XDG_RUNTIME_DIR`, so still reaped — just deep enough that
+    # the bind fails on the 107-byte limit instead of blocking forever.
+    monkeypatch.setenv("PH_RUNTIME", str(tmp_path / "xdg" / ("d" * 90) / ("e" * 90)))
+
+    result = runner.invoke(app, ["daemon", "--profile", "headless"])
+
+    assert result.exit_code == 1, result.output
+    assert "does not survive logout" in result.output
+    assert "loginctl enable-linger someone" in result.output
+    # Before the bind, not after it: a daemon that failed to start for an
+    # unrelated reason still told the person what would have happened if it had.
+    assert result.output.index("enable-linger") < result.output.index("cannot listen")
 
 
 def test_doctor_mounts_the_profile_and_prints_the_tier_table(

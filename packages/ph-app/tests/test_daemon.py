@@ -13,6 +13,8 @@ transport and a fake one would agree with whatever the code did.
 
 from __future__ import annotations
 
+import os
+import shutil
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -29,6 +31,14 @@ from ph_app.daemon.supervisor import Supervisor
 from ph_app.protocol import DaemonError
 
 pytestmark = pytest.mark.anyio
+
+ReapedHost = Callable[..., Path]
+"""The repo-root `reaped_host` fixture, spelled where it is read.
+
+Structurally rather than by `from conftest import …`: that name resolves to the
+*nearest* conftest on `sys.path`, which for this package is
+`packages/ph-app/tests/conftest.py` and not the root one the fixture lives in.
+"""
 
 
 async def _history(
@@ -1097,7 +1107,7 @@ def test_every_type_this_package_writes_is_in_the_vocabulary() -> None:
 
     That module states it: *"a producer in another package … owes the same proof
     through its own bundle's tests"*. ph-core pays it and ph-rlm pays it; ph-app
-    now appends five types and paid nothing, so a record written here and not
+    now appends six types and paid nothing, so a record written here and not
     declared in ph-core would produce a log this build writes and then refuses to
     seed — found by whoever resumes the session rather than by whoever added it.
 
@@ -1113,6 +1123,7 @@ def test_every_type_this_package_writes_is_in_the_vocabulary() -> None:
         recovery.FAILED,
         recovery.RECOVERED,
         recovery.PASSIVATED,
+        recovery.UNREACHABLE,
     }
     undeclared = written - KNOWN_SESSION_EVENT_TYPES
     assert not undeclared, f"ph-app writes types ph-core would refuse at seed: {undeclared}"
@@ -1222,3 +1233,180 @@ async def test_one_root_with_a_broken_schedule_does_not_stop_the_others(
         monkeypatch.setattr(type(broken.ctx.schedule), "claim", claim)
         made = working.ctx.schedule.states(working.session)["ok"].created_at
         assert await supervisor.tick(now=made + 10_000) == ["ok"]
+
+
+# --- P5-11: lingering detection (I-6) ----------------------------------------
+#
+# Gate: *simulated session end → clear diagnostic, not a silent failure.*
+#
+# The simulation is exact rather than metaphorical. The `reaped_host` fixture in
+# the repo-root conftest pins `$XDG_RUNTIME_DIR` at a directory these tests own
+# and puts `$PH_RUNTIME` inside it; the socket is bound there, and "the login
+# session ended" is that directory being removed — which is what logind does to
+# `/run/user/$UID` for a user who is not lingering. What must not happen after
+# that is *nothing*: the daemon keeps running with no door, and the only reader
+# left is whoever opens a transcript afterwards.
+
+
+def _notices(root: Any) -> list[Any]:
+    return [event for event in root.session.events_from(0) if event.type == recovery.UNREACHABLE]
+
+
+async def test_a_reaped_runtime_dir_reaches_every_root_as_a_record(
+    tmp_path: Path, reaped_host: ReapedHost
+) -> None:
+    """The gate. A session that ends takes the socket; the log says so, and why.
+
+    Every root, not the busy ones: what became unreachable is the daemon, and a
+    transcript that stops without a word is the same puzzle either way. The
+    record carries the advice because the reader who finds it is by then some
+    distance from the terminal that could have warned them.
+    """
+    socket = reaped_host() / "daemon.sock"
+    async with running(tmp_path, path=socket, watch_every=0.05) as daemon:
+        supervisor = daemon.server.supervisor
+        first = await supervisor.start("alpha")
+        second = await supervisor.start("beta")
+
+        # Logout, as logind performs it: the whole directory, not just the file.
+        shutil.rmtree(tmp_path / "xdg")
+        with anyio.fail_after(10):
+            while not (_notices(first) and _notices(second)):
+                await anyio.sleep(0.01)
+
+        said = _notices(first)[0].data
+        assert said["reason"] == "removed"
+        assert said["socket"] == str(socket)
+        assert said["linger"] == "off"
+        assert said["advice"] == "loginctl enable-linger someone"
+        # Which daemon, and which incident. Without these, "were these two
+        # sessions in the same outage" can only be answered by correlating clock
+        # times across every log and hoping the payloads happen to be equal.
+        assert said["pid"] == os.getpid()
+        assert _notices(second)[0].data["since"] == said["since"]
+        # Once, not once per watch pass: the transition is one-way, and a record
+        # appended every thirty seconds forever would bury the log it explains.
+        await anyio.sleep(0.2)
+        assert len(_notices(first)) == 1
+
+
+async def test_the_roots_keep_working_when_the_socket_goes(
+    tmp_path: Path, reaped_host: ReapedHost
+) -> None:
+    """Detection, not shutdown — P5-01's inversion holds through this too.
+
+    A root's task holds no reference to a connection, so losing the front door
+    is not losing the work. Ending an hour of in-flight turns over a socket
+    problem would be this row's own failure mode arriving from the other side.
+    """
+    socket = reaped_host() / "daemon.sock"
+    async with running(tmp_path, path=socket) as daemon:
+        supervisor = daemon.server.supervisor
+        root = await supervisor.start("working")
+        shutil.rmtree(tmp_path / "xdg")
+        assert await daemon.server.check_reachable() == "removed"
+
+        await supervisor.prompt("working", "still there?")
+
+        def answered() -> bool:
+            return any(event.type == "assistant/message" for event in root.session.events_from(0))
+
+        # Polled on the answer rather than on `status`, which reads `idle` in the
+        # window between the prompt being queued and the root's task waking: a
+        # wait on it would pass before the turn it is waiting for had started.
+        with anyio.fail_after(10):
+            while not answered():
+                await anyio.sleep(0.01)
+
+
+async def test_a_second_daemons_socket_is_not_mistaken_for_a_recovery(
+    tmp_path: Path, reaped_host: ReapedHost
+) -> None:
+    """The half an existence check gets wrong, and the worse half.
+
+    Log back in, run the `ph daemon` a client just recommended, and the path
+    exists and answers again — while the first daemon still holds every lease
+    the second one is about to be refused. That is I-5's hazard reached through
+    a door P5-03 does not watch, so the identity is a `(dev, inode)` pair.
+    """
+    socket = reaped_host() / "daemon.sock"
+    async with running(tmp_path, path=socket) as daemon:
+        await daemon.server.supervisor.start("held")
+        assert await daemon.server.check_reachable() == "", "its own socket, unchanged"
+
+        socket.unlink()
+        socket.touch()  # logind remade the directory; somebody remade the socket
+        assert await daemon.server.check_reachable() == "replaced"
+        assert _notices(daemon.server.supervisor.roots["held"])[0].data["reason"] == "replaced"
+
+
+async def test_the_record_is_on_disk_before_anyone_could_read_it(
+    tmp_path: Path, reaped_host: ReapedHost
+) -> None:
+    """Flushed, which is not the usual bar here and is the point.
+
+    Every other record survives a crash because the log is written on the way
+    out. This one is written exactly when the way out has stopped being
+    reliable: `ph agents shutdown` has no door to knock on, so the person's next
+    move is often `kill`, and an unflushed record explains nothing to anyone.
+    """
+    socket = reaped_host() / "daemon.sock"
+    async with running(tmp_path, path=socket) as daemon:
+        await daemon.server.supervisor.start("durable")
+        shutil.rmtree(tmp_path / "xdg")
+        await daemon.server.check_reachable()
+
+        stored = (tmp_path / "sessions" / "durable.jsonl").read_text(encoding="utf-8")
+        assert recovery.UNREACHABLE in stored
+
+
+async def test_daemon_status_says_it_cannot_be_reached_and_what_would_fix_it(
+    tmp_path: Path, reaped_host: ReapedHost
+) -> None:
+    """Reported from the running process, for the client that is already attached.
+
+    A connection accepted before the path went away outlives it, so there is a
+    reader for this — and after somebody restores the path by hand there are
+    more. The lifetime rows are the daemon's own, asked of the socket it bound
+    rather than of whatever `$PH_RUNTIME` derives now.
+    """
+    socket = reaped_host() / "daemon.sock"
+    async with running(tmp_path, path=socket) as daemon:
+        healthy = daemon.server.status()
+        assert healthy["unreachableSince"] is None
+        # One encoding, not three. The reply used to carry `survivesLogout` and
+        # `linger` beside the rendered rows; nothing but this assertion read
+        # them, and a second spelling of one fact is one that can disagree.
+        assert [one["title"] for one in healthy["sections"]] == ["socket lifetime"]
+        rows = {row["label"]: row["value"] for row in healthy["sections"][0]["rows"]}
+        assert rows["survives logout"].startswith("no —"), "reaped host, no lingering"
+        assert "off for someone" in rows["linger"]
+        assert rows["enable it"] == "loginctl enable-linger someone"
+
+        shutil.rmtree(tmp_path / "xdg")
+        await daemon.server.check_reachable()
+        assert isinstance(daemon.server.status()["unreachableSince"], int)
+
+
+async def test_a_hand_built_server_with_no_bound_socket_watches_nothing(
+    tmp_path: Path, reaped_host: ReapedHost
+) -> None:
+    """No identity means no moment to compare against, not "everything is gone".
+
+    `serve` captures the pair immediately after the bind, which is the one
+    instant at which "the socket at this path" and "the socket this daemon is
+    listening on" are the same file by construction. A `DaemonServer` built
+    without one — a test's, or a future caller's — has no transition to find,
+    and reporting one would be inventing evidence.
+    """
+    reaped_host()
+    async with anyio.create_task_group() as tasks:
+        built = server.DaemonServer(
+            supervisor=Supervisor(documents=PROFILE, tasks=tasks),
+            stop=anyio.Event(),
+            path=tmp_path / "nowhere.sock",
+        )
+        assert built.identity is None
+        assert await built.check_reachable() == ""
+        assert built.status()["unreachableSince"] is None
+        tasks.cancel_scope.cancel()

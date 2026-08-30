@@ -372,6 +372,7 @@ HANDLERS: Mapping[str, Handler] = {
     "supervisor/failed": _on_harness_event,
     "supervisor/recovered": _on_harness_event,
     "supervisor/passivated": _on_harness_event,
+    "supervisor/unreachable": _on_harness_event,
     "schedule/created": _on_harness_event,
     "schedule/cancelled": _on_harness_event,
     "schedule/tick": _on_harness_event,

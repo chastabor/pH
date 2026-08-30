@@ -12,6 +12,16 @@ so binding removes an unresponsive one first and refuses a responsive one — th
 second is another daemon, which is P5-03's lease to arbitrate rather than this
 row's to overwrite.
 
+The same sentence read the other way is P5-11: a path that stopped being *this*
+daemon's socket is a lie about this daemon. `$PH_RUNTIME` sits under
+`$XDG_RUNTIME_DIR`, which logind reaps at logout for a user who is not
+lingering, so the door can be removed while the process behind it keeps running
+— and every later client is told "no daemon socket" and to start one, which the
+leases the first is still holding will refuse. `watch` compares the socket's
+inode against the one bound here on a cadence, and says so in each root's own
+log, because by then the surfaces that could carry the news are exactly the ones
+that went away.
+
 @module ph_app.daemon.server
 """
 
@@ -27,6 +37,7 @@ from typing import Any
 import anyio
 from anyio.abc import ByteStream
 
+from ph.lingering import RuntimeLifetime, lifetime, socket_identity
 from ph.paths import resolve_roots
 from ph.resources import GRACE_SECONDS
 from ph.seams.schedule import Schedule
@@ -68,6 +79,17 @@ and a minute of slack on "run at 09:00" is a minute somebody notices."""
 
 SWEEP_EVERY = 60.0
 """How often the passivation sweep runs. A coarse tick, not a second timeout."""
+
+WATCH_EVERY = 30.0
+"""How often the daemon checks that the socket at its path is still its own (P5-11).
+
+The thing being watched changes at most once in the life of a process — a
+logout, a reboot's worth of directory — so this is not a poll on a hot fact. It
+is a bound on how long the log takes to say what happened, and thirty seconds
+means the record's timestamp still lines up with the logout a person is trying
+to correlate it with. Cheaper than the sweep it sits beside: one `lstat`, no
+roots walked.
+"""
 
 CAPABILITIES = ("roots", "attach", "cursors", "snapshots")
 """What this transport adds to the two both of them have.
@@ -339,11 +361,26 @@ class DaemonServer:
     tick_every: float = TICK_EVERY
     sweep_every: float = SWEEP_EVERY
     heartbeat_every: float = HEARTBEAT_EVERY
-    """The three cadences, named rather than a tuple: `serve` already threads
+    watch_every: float = WATCH_EVERY
+    """The four cadences, named rather than a tuple: `serve` already threads
     them past each other positionally into `start_soon`, and this is the one
     place they are read back by a person."""
     started: int = field(default_factory=now_ms)
     """When this daemon came up, for the uptime a status reply carries."""
+    identity: tuple[int, int] | None = None
+    """`(st_dev, st_ino)` of the socket at bind time — what `watch` compares against.
+
+    Captured by `serve` rather than read here, because "the socket I bound" is a
+    fact about a moment and this object outlives it: reading the path on first
+    use would adopt whatever is there by then, which is the exact substitution
+    the watch exists to catch."""
+    unreachable_since: int | None = None
+    """When the socket stopped being this daemon's, or `None` while it still is.
+
+    A latch, not a sample. The transition is one-way by construction — an
+    unlinked socket's inode does not come back, and a path re-created by anyone
+    else is somebody else's — so this is set once, announced once, and read
+    thereafter by `status` for whoever eventually gets to ask."""
 
     def status(self) -> dict[str, Any]:
         """What this daemon is, for `ph agents doctor`.
@@ -367,7 +404,110 @@ class DaemonServer:
             "tickEvery": self.tick_every,
             "sweepEvery": self.sweep_every,
             "heartbeatEvery": self.heartbeat_every,
+            "watchEvery": self.watch_every,
+            "unreachableSince": self.unreachable_since,
+            # `DiagnosticsRegistry.report()`'s shape verbatim — a list of
+            # sections, each a title and `(label, value)` rows — carrying one
+            # built-in section today (P5-11's socket lifetime) and nothing else.
+            # The first draft invented a `lifetime` key beside a `survivesLogout`
+            # and a `linger` scalar, which was the same fact on the wire at two
+            # altitudes with only the rendered one read: three encodings that can
+            # disagree, and a bespoke decoder on the client for the one that
+            # wins. This envelope is what P5-12 fills from the daemon's *mounted*
+            # registry with no client change, which is the migration P5-10 said
+            # these two rows were for.
+            "sections": [
+                {
+                    "title": title,
+                    "rows": [{"label": label, "value": value} for label, value in rows],
+                }
+                for title, rows in self.report()
+            ],
         }
+
+    def report(self) -> list[tuple[str, list[tuple[str, str]]]]:
+        """The daemon's own diagnostic sections, in `report()`'s shape.
+
+        A list because there will be more than one: P5-12's non-guarantees are
+        the next, and a method that returned the single section it happens to
+        have today is one every later section has to change.
+        """
+        return [("socket lifetime", self.socket_lifetime().describe())]
+
+    def socket_lifetime(self) -> RuntimeLifetime:
+        """Whether *this* socket survives logout — asked of the path it bound.
+
+        `serve()` takes an explicit path, so the socket a daemon is answering on
+        and the one `resolve_roots()` derives are not always the same file. A
+        daemon that reported the lifetime of a directory it is not using would
+        be the client-side re-derivation `daemon/status` exists to prevent,
+        moved inside the server.
+
+        Read per call rather than captured at start: lingering can be enabled
+        while a daemon runs, and a doctor that answered from a snapshot taken at
+        boot would keep telling a person to run the command they just ran.
+        """
+        return lifetime(self.path)
+
+    async def check_reachable(self) -> str:
+        """One watch pass: is the socket at our path still ours? (P5-11)
+
+        `""` when it is. Two shapes of no, and they want the same record but not
+        the same sentence: `removed` is logout reaping `$XDG_RUNTIME_DIR` out
+        from under a daemon that keeps running, and `replaced` is what happens
+        next — the person logs back in, `ph daemon` binds a *new* socket at the
+        same path, and two supervisors now believe they own this user's roots.
+        An existence check reads the second as a recovery, which is why the
+        identity is a `(dev, inode)` pair rather than a boolean.
+
+        One method rather than a pure `watch()` and an announcing wrapper: the
+        comparison had exactly one caller, and splitting it put the "already
+        latched" guard twenty lines from where the latch is set.
+
+        Deliberately not a shutdown. The roots keep working — their tasks hold
+        no reference to a connection, which is P5-01's whole inversion — and
+        ending an hour of in-flight work over a socket problem would be the
+        failure mode this row is written to prevent, arriving from the other
+        side.
+        """
+        if self.identity is None or self.unreachable_since is not None:
+            # Nothing to compare against (a caller that built this by hand), or
+            # already latched. Either way there is no transition to find, and the
+            # `lstat` below is skipped for the life of the process.
+            return ""
+        current = socket_identity(self.path)
+        if current == self.identity:
+            return ""
+        reason = "removed" if current is None else "replaced"
+        life = self.socket_lifetime()
+        self.unreachable_since = now_ms()
+        note = {
+            "reason": reason,
+            "socket": str(self.path),
+            # Which daemon, and which incident. Ten roots get ten records with
+            # ten `Session`-assigned timestamps, and without these the only way
+            # to ask "were these two sessions in the same incident" afterwards is
+            # to correlate on clock times and a payload that happens to be equal.
+            "pid": os.getpid(),
+            "since": self.unreachable_since,
+            "tier": life.tier,
+            "linger": life.linger,
+            "advice": life.advice,
+        }
+        # `error`, not `warning`: for a daemon started from a terminal this line
+        # is the only place the news lands at the moment it happens, and it is
+        # the difference between "the agents stopped answering" and a sentence
+        # naming the command that prevents it next time.
+        log.error(
+            "ph_app.daemon: %s is no longer this daemon's socket (%s) — "
+            "clients cannot reach %d root(s); %s",
+            self.path,
+            reason,
+            len(self.supervisor.roots),
+            life.advice or "the roots keep running",
+        )
+        await self.supervisor.announce_unreachable(note)
+        return reason
 
     async def _handle(self, stream: ByteStream) -> None:
         async with stream:
@@ -429,6 +569,7 @@ async def serve(
     sweep_every: float = SWEEP_EVERY,
     tick_every: float = TICK_EVERY,
     heartbeat_every: float = HEARTBEAT_EVERY,
+    watch_every: float = WATCH_EVERY,
     path: Path | None = None,
     ready: anyio.Event | None = None,
     started: Callable[[DaemonServer], None] | None = None,
@@ -475,8 +616,14 @@ async def serve(
                 tick_every=tick_every,
                 sweep_every=sweep_every,
                 heartbeat_every=heartbeat_every,
+                watch_every=watch_every,
+                # Taken here, immediately after the bind and before anything can
+                # have replaced it — the one moment at which "the socket at this
+                # path" and "the socket this daemon is listening on" are the
+                # same file by construction rather than by assumption (P5-11).
+                identity=socket_identity(socket_path),
             )
-            # Three cadences, three tasks, one primitive. The heartbeat used to
+            # Four cadences, four tasks, one primitive. The heartbeat used to
             # ride the ticker on a counter that only advanced when a tick
             # *succeeded*, so a run of failing ticks starved the liveness record
             # as a side effect of an unrelated failure.
@@ -486,6 +633,15 @@ async def serve(
                 tasks.start_soon(_every, tick_every, server.stop, supervisor.tick, "the tick")
                 tasks.start_soon(
                     _every, heartbeat_every, server.stop, supervisor.heartbeat, "the heartbeat"
+                )
+            if watch_every > 0:
+                # Its own cadence and its own `if`, not a rider on the tick: the
+                # heartbeat used to ride the ticker and starved whenever an
+                # unrelated tick failed, and a test that turns the scheduler off
+                # to keep a timer out of its assertions must not thereby turn
+                # off the thing that notices the daemon has no door.
+                tasks.start_soon(
+                    _every, watch_every, server.stop, server.check_reachable, "the socket watch"
                 )
             if started is not None:
                 # Handed out rather than reachable through the socket: a test

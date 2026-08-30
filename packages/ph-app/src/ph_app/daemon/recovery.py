@@ -51,7 +51,15 @@ from dataclasses import dataclass
 
 from ph.session import Session
 
-__all__ = ["FAILED", "RECOVERED", "RETRY", "RETRY_DELAYS", "Recovery", "recovery_of"]
+__all__ = [
+    "FAILED",
+    "RECOVERED",
+    "RETRY",
+    "RETRY_DELAYS",
+    "UNREACHABLE",
+    "Recovery",
+    "recovery_of",
+]
 
 RETRY = "supervisor/retry"
 """A crashed task is being run again — attempt, delay, and what was restored."""
@@ -150,6 +158,23 @@ def recovery_of(session: Session) -> Recovery:
 
 PASSIVATED = "supervisor/passivated"
 """A root was released for being idle (P5-05), with how long it had been."""
+
+UNREACHABLE = "supervisor/unreachable"
+"""The daemon lost the socket it was bound to, written into every live root (P5-11).
+
+Here beside the other three because this module is where the supervisor's
+records *about* a root live, and the shape is the same one `PASSIVATED` argued
+for: a fact the log has to carry because the alternative is an unexplained gap.
+The subject is the odd part — this is the supervisor's record about *itself*,
+fanned out to every root — and it has to be, because the surfaces that would
+otherwise carry it are exactly the ones that just went away. Nobody can connect
+to be told; nobody attached is guaranteed to still be there. What remains is
+each root's own transcript, which is where somebody eventually looks.
+
+Not a reason to stop. The roots keep working, which is P5-01's whole inversion —
+their tasks hold no reference to a connection — and killing them because the
+front door fell off would lose an hour of in-flight work to a socket problem.
+"""
 
 PASSIVATE_AFTER = 90 * 60.0
 """Seconds of quiet before a root is released. `None` turns the sweeper off.

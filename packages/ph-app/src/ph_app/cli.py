@@ -36,11 +36,12 @@ from rich.table import Table
 
 from ph.cordis import Loader, import_plugin_modules
 from ph.cordis.events import events as event_registry
+from ph.lingering import lifetime
 from ph.paths import RuntimeDirError, resolve_roots
 
 from .agents import agents_app
 from .attach import AttachmentUnavailable
-from .console import console, emit, err, fail
+from .console import console, emit, err, fail, section
 from .daemon.recovery import PASSIVATE_AFTER
 from .modes import run_json, run_print, run_rpc, run_transcript
 from .profiles import available_profiles, resolve_profile
@@ -237,6 +238,27 @@ def doctor(profile: ProfileOption = DEFAULT_PROFILE) -> None:
         table.add_row(name, value)
     console.print(table)
     console.print(f"[dim]platform: {sys.platform} · python {sys.version.split()[0]}[/dim]")
+    # The same subject as the roots table, one question further on: that table
+    # says where `$PH_RUNTIME` resolved, and this says whether what a daemon puts
+    # there is still there tomorrow (I-6, P5-11).
+    #
+    # **Not a `ctx.diagnostics` section**, which makes this command's one place
+    # with two mechanisms — deliberately. A contributed section is lost exactly
+    # when `doctor` bails with "profile does not mount", the case a person most
+    # wants it, and this probe needs no profile to answer. What the seam is still
+    # owed is the *shape*: a section is a title and a list of pairs, both halves
+    # produce `list[tuple[str, str]]`, and both render through `console.section`
+    # — so the next profile-free probe is an entry in this list rather than one
+    # more `console.print` in a command body.
+    #
+    # Listed even when the answer is "yes": rule 6 says to state what is not
+    # enforced next to where it would be assumed, and the assumption — that
+    # `ph daemon` means "until I stop it" — is made by every reader who never
+    # sees a warning.
+    #
+    # `roots=` so this and the table above describe one resolution rather than
+    # two independent ones.
+    before_mount = [("daemon socket lifetime", lifetime(roots=roots).describe())]
     # What this install can actually compose — a bundle profile whose
     # distribution is missing is not offered (P3-20).
     console.print(f"[dim]profiles: {', '.join(available_profiles())}[/dim]")
@@ -258,13 +280,8 @@ def doctor(profile: ProfileOption = DEFAULT_PROFILE) -> None:
         fail(f"[red]profile {profile!r} does not mount:[/red] {error}", cause=error)
 
     console.print(f"\n[bold]profile:[/bold] {profile}")
-    for title, rows in sections:
-        section = Table(title=title, show_header=False, title_justify="left")
-        section.add_column(style="bold")
-        section.add_column()
-        for label, value in rows:
-            section.add_row(label, value)
-        console.print(section)
+    for title, rows in before_mount + sections:
+        console.print(section(title, rows))
 
 
 _DEFAULT_PASSIVATION = f"{PASSIVATE_AFTER / 60:g}"
@@ -321,10 +338,20 @@ def daemon(
 
     documents = _documents(profile)
     try:
-        socket_path = resolve_roots().ensure().daemon_socket()
+        roots = resolve_roots(create=True)
     except RuntimeDirError as error:
         fail(f"[red]$PH_RUNTIME check failed:[/red] {error}", cause=error)
+    socket_path = roots.daemon_socket()
     err.print(f"[dim]listening on {socket_path}[/dim]")
+    # "names `enable-linger` when a daemon is configured without it" — the row's
+    # own wording, and this is the moment it is being configured. Said here as
+    # well as in `ph doctor` because the two have different readers: doctor is
+    # run by somebody already debugging, and this line is read by somebody who
+    # is not, ten seconds before closing the terminal it is printed in.
+    life = lifetime(socket_path, roots=roots)
+    if life.survives_logout is not True:
+        err.print(f"[yellow]this socket does not survive logout:[/yellow] {life.verdict()}")
+        err.print(f"[yellow]  {life.advice}[/yellow]")
     try:
         # The path that was printed, not a second resolution of it: a message
         # naming one socket while the bind takes another is the kind of thing

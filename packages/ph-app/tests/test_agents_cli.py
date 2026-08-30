@@ -14,7 +14,7 @@ serving on. That is not a test artefact: it is the shape a person's shell has.
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -30,6 +30,11 @@ from ph_app.wire import obj
 pytestmark = pytest.mark.anyio
 
 runner = CliRunner()
+
+ReapedHost = Callable[..., Path]
+"""The repo-root `reaped_host` fixture, spelled where it is read — structurally
+rather than by `from conftest import …`, which resolves to this package's own
+conftest rather than to the root one the fixture lives in."""
 
 
 @asynccontextmanager
@@ -358,6 +363,78 @@ async def test_a_socket_nobody_answers_is_told_apart_from_no_socket(
     assert result.exit_code == 1
     assert "nothing is listening" in result.output
     assert "ph daemon" in result.output
+
+
+# ------------------------------------------------- P5-11: lingering detection --
+#
+# The client half of I-6. "No daemon socket" and "your login session took the
+# socket with it" are the same `OSError` and the same absent path, and only one
+# of them is fixed by starting a daemon — the other has one still running,
+# holding every lease the new one will be refused (I-5).
+#
+# `reaped_host` is the repo-root fixture: `$PH_RUNTIME` inside an
+# `$XDG_RUNTIME_DIR` these tests own, with the linger marker directory
+# redirected — never read from the machine running the suite, which would assert
+# whatever that host happened to say.
+
+
+async def test_a_reaped_socket_is_not_reported_as_one_never_started(
+    reaped_host: ReapedHost,
+) -> None:
+    """The message that stops an afternoon on `session_already_active`.
+
+    A person who logged out and back in sees exactly what a person who never
+    ran `ph daemon` sees. Telling both of them to start one sends the first to a
+    refusal from a daemon that is still running and that they have been given no
+    reason to look for.
+    """
+    reaped_host()
+    result = await _ph("agents", "doctor")
+    assert result.exit_code == 1
+    assert "no daemon socket" in result.output
+    assert "logind removes" in result.output, "why it is absent"
+    assert "may still be running" in result.output, "and why not to just start another"
+    assert "loginctl enable-linger someone" in result.output
+
+
+async def test_an_ordinary_missing_socket_still_just_says_start_one(
+    tmp_path: Path, monkeypatch: Any, reaped_host: ReapedHost
+) -> None:
+    """The advice is conditional, which is what keeps it worth reading.
+
+    `$PH_RUNTIME` outside the reaped tree is the common case on a developer's
+    machine and on any host with lingering on; a paragraph about logind printed
+    there teaches readers to skip the paragraph.
+    """
+    reaped_host(linger=True)
+    result = await _ph("agents", "doctor")
+    assert result.exit_code == 1
+    assert "no daemon socket" in result.output
+    assert "ph daemon" in result.output
+    assert "loginctl" not in result.output
+
+
+async def test_doctor_prints_the_lifetime_the_daemon_reports(
+    tmp_path: Path, monkeypatch: Any, reaped_host: ReapedHost
+) -> None:
+    """Read back over the wire like every other row in that table.
+
+    The daemon asks about the socket *it* bound, so a client started from a
+    different environment is told what is in force rather than what it would
+    have chosen — the same reasoning the passivation policy is asserted for one
+    test above.
+    """
+    reaped_host()
+    async with _daemon(tmp_path, monkeypatch):
+        reported = await _ph("agents", "doctor")
+        assert reported.exit_code == 0, reported.output
+        assert "socket lifetime" in reported.output
+        assert "linger" in reported.output
+        assert "loginctl enable-linger someone" in reported.output
+        # Absent while it can be reached, which this invocation just proved by
+        # arriving: a permanent "reachable: yes" row is a fact delivered by its
+        # own delivery, and it would push the row that matters off the eye.
+        assert "reachable" not in reported.output
 
 
 # ------------------------------------------------------------------ registration --

@@ -54,6 +54,13 @@ KNOWN_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         # way back says only that something was resumed, not that nothing had
         # gone wrong.
         "supervisor/passivated",
+        # The daemon can no longer be reached, written into every root it is
+        # running (P5-11). Its reader is nobody who is connected: by the time
+        # this is appended the socket is gone, so a client can neither be
+        # notified nor connect to ask. The transcript is the surface that
+        # survives — a run that went quiet at 18:04 says here that its
+        # supervisor lost its socket at 18:04, and names the fix.
+        "supervisor/unreachable",
         # Future work a root will do, and the claim that it is doing it (P5-06).
         # `schedule/tick` is appended *before* delivery: a tick recorded and
         # lost to a crash costs one skipped run, while a tick delivered and lost
@@ -239,6 +246,7 @@ IGNORABLE_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         "supervisor/failed",
         "supervisor/recovered",
         "supervisor/passivated",
+        "supervisor/unreachable",
         # Scheduler bookkeeping: a reader skipping these loses *why* a turn
         # started at 3am, which is accounting rather than the conversation —
         # the prompt the tick delivered is a `user/message` either way.

@@ -56,6 +56,7 @@ from .recovery import (
     PASSIVATED,
     RECOVERED,
     RETRY,
+    UNREACHABLE,
     Recovery,
     recovery_of,
 )
@@ -288,6 +289,23 @@ class Root:
         """
         self.session.append(PASSIVATED, {"idleMs": idle_ms})
         self.publish("session.status", {"sessionId": self.id, "status": "passivated"})
+
+    def unreachable(self, note: dict[str, Any]) -> None:
+        """Record that the supervisor lost the socket it was bound to (P5-11).
+
+        An append and nothing else, where every other record here appends *and*
+        publishes. It reaches a watcher either way: `relay` observes this
+        session's own feed, so the `session.event` frame goes out on the same
+        append — and a client attached before the path went away is still on a
+        live stream, because the connection outlives the path it was accepted
+        through. A second `publish` here would send the same fact twice under
+        two names and grow the wire vocabulary to say nothing new.
+
+        Not a status change either. This root is doing exactly what it was
+        doing; what broke is the door. Reporting it as `failed` would put the
+        recovery ladder to work climbing over a socket.
+        """
+        self.session.append(UNREACHABLE, note)
 
     def give_up(self, reason: str, *, attempts: int) -> None:
         """Record that the ladder is spent, and tell whoever is watching.
@@ -778,6 +796,25 @@ class Supervisor:
             if live:
                 root.ctx.schedule.heartbeat(root.session, now=stamp, live=len(live))
                 await self._flush(root)
+
+    async def announce_unreachable(self, note: dict[str, Any]) -> None:
+        """Write the "nobody can reach me" record into every root, and flush it.
+
+        Flushed rather than left in the buffer, which is not the usual bar here:
+        every other record survives a crash because the log is written on the
+        way out, and this one is written precisely when the way out has stopped
+        being reliable. If the person's answer to an unreachable daemon is `kill`
+        — and it often is, because `ph agents shutdown` no longer has a door to
+        knock on — then an unflushed record is one that never explains anything
+        to anyone.
+
+        Every root, not the busy ones: what became unreachable is the daemon,
+        and a transcript that stops without a word is the same puzzle whether or
+        not the root was mid-turn when the socket went.
+        """
+        for root in list(self.roots.values()):
+            root.unreachable(note)
+            await self._flush(root)
 
     async def _release(self, root: Root) -> None:
         """Flush a root's log, then unwind everything it took.
