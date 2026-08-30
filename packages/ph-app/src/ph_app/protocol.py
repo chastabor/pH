@@ -28,7 +28,9 @@ from typing import Any
 __all__ = [
     "PROTOCOL_VERSION",
     "SNAPSHOT_EVENTS",
+    "DaemonError",
     "Dispatch",
+    "Refusal",
     "capabilities",
     "cursor_of",
     "notification",
@@ -60,6 +62,45 @@ the transport's `MAX_LINE` is the real protection against an oversized frame.
 
 Dispatch = Callable[[str, dict[str, Any]], Awaitable[Any]]
 """A server's method table: `(method, params) -> result`, raising to refuse."""
+
+
+class Refusal(Exception):
+    """A refusal that names itself, for a server to raise.
+
+    `code` is a class attribute here because these refusals are *kinds* — an
+    unknown method is one thing whatever the method was. An error that computes
+    its code per instance sets `self.code` instead, which is what `ph-core`'s
+    coded errors do (`HarnessError`, `SessionForkError`, `CompactionError`) and
+    what `respond` reads, so both shapes reach the wire through one path.
+
+    Declared rather than duck-typed, for the reason the seams give for their
+    provider Protocols: a probe finds whatever happens to be called `code`, and
+    an error whose attribute drifted would go out unnamed with nothing to say
+    so.
+    """
+
+    code = ""
+
+
+class DaemonError(RuntimeError):
+    """A refusal the server sent back, with its name where it had one.
+
+    The other end of `respond`'s `data.reason`. Without it a client that wanted
+    to tell `session_already_active` (I-5) from a mistyped method had to match
+    on the message text — which is a contract nobody wrote down and every
+    rewording breaks. `reason` is `""` when the server did not name one.
+    """
+
+    def __init__(self, message: str, reason: str = "") -> None:
+        super().__init__(message)
+        self.reason = reason
+
+    @classmethod
+    def of(cls, error: dict[str, Any]) -> DaemonError:
+        """Rebuild the refusal from an error frame."""
+        data = error.get("data")
+        reason = data.get("reason", "") if isinstance(data, dict) else ""
+        return cls(str(error.get("message", "the daemon refused")), str(reason))
 
 
 def capabilities(*names: str) -> dict[str, Any]:
@@ -137,5 +178,20 @@ async def respond(request_frame: dict[str, Any], dispatch: Dispatch) -> dict[str
     try:
         body: dict[str, Any] = {"result": await dispatch(method, params)}
     except Exception as error:
-        body = {"error": {"code": -32000, "message": str(error)}}
+        failure: dict[str, Any] = {"code": -32000, "message": str(error)}
+        # A refusal a client is expected to *branch* on carries a name rather
+        # than making the client match message text: `session_already_active`
+        # (I-5) is a thing to retry elsewhere, and telling it from a typo in a
+        # method name should not mean grepping prose. JSON-RPC's own code stays
+        # generic, because these are pH's vocabulary and not the transport's.
+        #
+        # Read off the *instance*, which is what already carries a code here —
+        # `HarnessError`, `SessionForkError` and friends all set `self.code` in
+        # `__init__`. The first draft read `type(error)`, so those four families
+        # were structurally invisible to it and a `SessionForkError` out of
+        # `sessions.create` reached the client unnamed on this very path.
+        reason = getattr(error, "code", "")
+        if isinstance(reason, str) and reason:
+            failure["data"] = {"reason": reason}
+        body = {"error": failure}
     return None if request_id is None else {"jsonrpc": "2.0", "id": request_id, **body}

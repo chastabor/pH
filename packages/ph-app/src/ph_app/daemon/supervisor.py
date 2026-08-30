@@ -35,6 +35,7 @@ from typing import Any
 import anyio
 from anyio.abc import TaskGroup
 from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
+from filelock import FileLock, Timeout
 
 from ph.agent.types import AgentOptions
 from ph.cordis import Context
@@ -42,10 +43,22 @@ from ph.llm.types import create_user_message
 from ph.persistence import resume_session, resumption_of, session_path
 from ph.session import Session, SessionEvent
 
-from ..protocol import cursor_of
+from ..protocol import Refusal, cursor_of
 from ..runtime import compose, mounted
 
-__all__ = ["Root", "Supervisor"]
+__all__ = ["Root", "SessionBusy", "Supervisor"]
+
+
+class SessionBusy(Refusal):
+    """Another process holds this session's lease (I-5).
+
+    Its own type so the wire can name it — the gate is that a concurrent open
+    comes back as `session_already_active` rather than as a generic failure a
+    client cannot branch on.
+    """
+
+    code = "session_already_active"
+
 
 log = logging.getLogger("ph_app.daemon")
 
@@ -191,9 +204,43 @@ class Supervisor:
     provider: str = "fake"
     model: str = "fake-1"
     roots: dict[str, Root] = field(default_factory=dict)
+    _starting: anyio.Lock = field(default_factory=anyio.Lock)
     _parsed: Sequence[tuple[str, Any]] | None = None
 
     async def start(self, root_id: str) -> Root:
+        """Take the lease for this root, then mount it (I-5).
+
+        Serialized per id, because the check-then-mount below spans two awaits:
+        two clients asking for the same new root at once both pass the
+        membership test, both mount a profile, and both reach for the same
+        session file — I-5's hazard stated exactly ("two writers on one JSONL").
+        The store's own uniqueness check does not save it: each root gets its
+        *own* `Context` and therefore its own `SessionStore`, so neither knows
+        about the other.
+
+        The lease would catch that pair too, but it would catch it as a
+        *refusal*, and a refusal is the wrong answer to the question these two
+        clients asked. Two clients naming one root want the same root; only a
+        second *process* is a conflict. So the ordering is here and the refusal
+        is there, and the second racer gets the root the first one built.
+
+        One lock rather than one per id, and a fast path that never reaches it.
+        `prompt` calls this on *every turn*, so a per-id table minted an
+        `anyio.Lock` per call to throw it away — 832 B and 0.65 µs each — and
+        retained an entry per id ever started, cleared nowhere, in the one
+        process built to run for weeks. A single lock costs a serialized mount
+        (~2 ms) between two *different* new roots, which happens at most once
+        per root, while the returning-client path now skips the lock's
+        checkpoint entirely. `_start` re-checks membership under it, which is
+        the ordinary double-checked build.
+        """
+        root = self.roots.get(root_id)
+        if root is not None:
+            return root
+        async with self._starting:
+            return await self._start(root_id)
+
+    async def _start(self, root_id: str) -> Root:
         """Mount a profile, create its agent, and give it its own task.
 
         Through `runtime.mounted`, which exists so "a mode cannot drift from the
@@ -214,55 +261,132 @@ class Supervisor:
             return self.roots[root_id]
         if self._parsed is None:
             self._parsed = compose(self.documents)
-        exits = AsyncExitStack()
-        run = await exits.enter_async_context(mounted(self.documents, parsed=self._parsed))
-        ctx = run.ctx
-        session = await self._session_for(ctx, root_id)
-        agent = ctx.agents.create(session, AgentOptions(provider=self.provider, model=self.model))
-        wake, waiting = anyio.create_memory_object_stream[None](max_buffer_size=WAKE_SLOTS)
-        root = Root(
-            id=root_id,
-            ctx=ctx,
-            session=session,
-            agent=agent,
-            wake=wake,
-            waiting=waiting,
-            exits=exits,
-        )
-        # What this session already did, read back from its own log — which is
-        # what makes a retry after a restart safe rather than a second turn.
-        root.commands.update(
-            str(event.data.get("command", ""))
-            for event in session.events_from(0)
-            if event.type == COMMAND_ACCEPTED
-        )
-        self.roots[root_id] = root
-
-        def relay(source: Session, event: SessionEvent) -> None:
-            # Nothing is built before there is somebody to send it to: this runs
-            # once per streamed chunk, and rendering a payload for zero watchers
-            # measured 6.6 µs an event — 13 ms of a 2 000-chunk turn, discarded.
-            if not root.subscribers:
-                return
-            root.publish(
-                "session.event",
-                # `thaw=False`: this payload's only destination is `dumps`,
-                # which handles the frozen forms, and thawing deep-copies the
-                # tree for nobody.
-                {"sessionId": root.id, "event": event.to_wire(thaw=False)},
+        async with AsyncExitStack() as exits:
+            run = await exits.enter_async_context(mounted(self.documents, parsed=self._parsed))
+            ctx = run.ctx
+            session = await self._session_for(ctx, root_id)
+            options = AgentOptions(provider=self.provider, model=self.model)
+            agent = ctx.agents.create(session, options)
+            wake, waiting = anyio.create_memory_object_stream[None](max_buffer_size=WAKE_SLOTS)
+            root = Root(
+                id=root_id,
+                ctx=ctx,
+                session=session,
+                agent=agent,
+                wake=wake,
+                waiting=waiting,
+                exits=exits,
             )
+            # What this session already did, read back from its own log — which is
+            # what makes a retry after a restart safe rather than a second turn.
+            root.commands.update(
+                str(event.data.get("command", ""))
+                for event in session.events_from(0)
+                if event.type == COMMAND_ACCEPTED
+            )
+            self.roots[root_id] = root
 
-        def announce(agent_: Any, status: str) -> None:
-            if agent_ is agent:
-                root.publish("session.status", {"sessionId": root.id, "status": status})
+            def relay(source: Session, event: SessionEvent) -> None:
+                # Nothing is built before there is somebody to send it to: this runs
+                # once per streamed chunk, and rendering a payload for zero watchers
+                # measured 6.6 µs an event — 13 ms of a 2 000-chunk turn, discarded.
+                if not root.subscribers:
+                    return
+                root.publish(
+                    "session.event",
+                    # `thaw=False`: this payload's only destination is `dumps`,
+                    # which handles the frozen forms, and thawing deep-copies the
+                    # tree for nobody.
+                    {"sessionId": root.id, "event": event.to_wire(thaw=False)},
+                )
 
-        # The session's own feed, not the store-wide `session/event` bus: a
-        # child agent's events belong to its own transcript, and subscribing
-        # here means never receiving them rather than receiving and discarding.
-        exits.callback(session.observe(relay))
-        ctx.on("agent/status", announce)
-        self.tasks.start_soon(self._run, root)
-        return root
+            def announce(agent_: Any, status: str) -> None:
+                if agent_ is agent:
+                    root.publish("session.status", {"sessionId": root.id, "status": status})
+
+            # The session's own feed, not the store-wide `session/event` bus: a
+            # child agent's events belong to its own transcript, and subscribing
+            # here means never receiving them rather than receiving and discarding.
+            exits.callback(session.observe(relay))
+            ctx.on("agent/status", announce)
+            self.tasks.start_soon(self._run, root)
+            # Ours now: the `async with` unwinds a stack that has been emptied,
+            # so a failure anywhere above disposes everything it entered and a
+            # success hands the whole stack to the root. The hand-rolled
+            # `except BaseException: aclose()` this replaces guarded only the
+            # three lines it wrapped — `agents.create`, the channel and the
+            # `session.observe` callback all sat outside it, and which side of
+            # that boundary a new line lands on was invisible.
+            root.exits = exits.pop_all()
+            return root
+
+    async def _lease(self, ctx: Context, path: Path, root_id: str) -> None:
+        """Claim one session log against every other writer (I-5).
+
+        The lock in `start` orders the racers *inside* this process; this is what
+        stops a second daemon from appending to a log this one is writing. Two
+        writers on one JSONL produce exactly the corruption P5-01 measured when
+        the daemon concatenated sessions onto each other: `seq` going backwards
+        mid-file, which breaks A1 and makes every fold double-count.
+
+        **Daemon against daemon, and no further.** The lease is taken here, so a
+        `ph -p --session x` run against a session a daemon holds still opens it
+        — the hazard belongs to `JsonlSessionStore`, which is the thing that
+        actually writes, and leasing there would cover every mode at once. I-5
+        names the second daemon and that is what this row gates; the CLI half is
+        left for the row that moves the lease down into the store rather than
+        claimed here by a docstring.
+
+        Taken beside the log rather than at a path of its own construction: the
+        store owns where sessions live, and a lease derived independently is one
+        `PH_HOME` change away from guarding a file nobody writes.
+
+        `timeout=0` — "somebody else holds it" is known immediately and is a
+        refusal, not something to wait out; blocking here would also stall the
+        event loop for every *other* root this supervisor is running.
+
+        Taken through `ctx.effect`, which is the repo's one mechanism for this
+        and names the case verbatim — *"every external artifact an agent takes —
+        a child process, a worktree, a temp path, a lock — is acquired through
+        here, so cleanup is structural rather than remembered (§4.9, I2)"*. The
+        first draft registered `lock.release` on a hand-held `AsyncExitStack`,
+        which made the lease the one artifact in the tree invisible to
+        `ctx.dispose()` and its labelled disposal log, and threaded the stack
+        down through `_session_for` to get there.
+
+        Acquired *inline*, not on a worker thread. Wrapping it in
+        `to_thread.run_sync` measured **+340 µs on a 1.9 ms root start — twice
+        the 166 µs the acquire itself costs** — because a real start is seconds
+        after the last one and pays a cold thread plus a cold selector wakeup
+        every time. At `timeout=0` the acquire is one `os.open` and a
+        non-blocking `flock`: it cannot wait, so there is no blocking to move
+        off the loop. Its neighbours settle it — `path.is_file()` two lines down
+        and `resume_session`'s whole-log read are both on the loop thread, so a
+        200 µs threshold is not one this function was holding.
+
+        `thread_local=False` is load-bearing, and its absence is silent.
+        filelock keeps its re-entrancy counter in a thread-local by default, so
+        a lease acquired on a worker thread and released from the event loop
+        finds a counter of zero and returns *having released nothing* — no
+        error, no warning, and a lock file held until the process dies. It cost
+        three tests, two of them P5-01's, all failing as "this session is
+        already active" against a daemon that had cleanly shut down. The lease
+        belongs to the process, not to whichever thread happened to take it.
+        """
+
+        def acquire() -> Callable[[], None]:
+            # No mkdir: filelock's own `ensure_directory_exists` is the same
+            # `parents=True, exist_ok=True` call on the same directory one
+            # statement later, and `JsonlSessionStore.track` makes a third. All
+            # three fired on every root start.
+            lock = FileLock(f"{path}.lock", timeout=0, thread_local=False)
+            try:
+                lock.acquire()
+            except Timeout as error:
+                raise SessionBusy(f'session "{root_id}" is already active') from error
+            return lock.release
+
+        await ctx.effect(acquire, label=f"session-lease({root_id})")
 
     async def _session_for(self, ctx: Context, root_id: str) -> Session:
         """The root's session — resumed from disk when there is one to resume.
@@ -283,8 +407,14 @@ class Supervisor:
         record is the `session/resumed` event `resume_session` appends — a cron
         job leaves the fact in the trace whether or not anyone reads stderr.
         """
+        # A profile with no persistence writes nothing, so it has no log to
+        # lease and none to resume — `path` stays `None` and both fall through
+        # to the one `create` below.
         store = ctx.get("session_persistence")
-        if store is not None and session_path(store.root, root_id).is_file():
+        path = session_path(store.root, root_id) if store is not None else None
+        if path is not None:
+            await self._lease(ctx, path, root_id)
+        if path is not None and path.is_file():
             session: Session = await resume_session(ctx, root_id)
             resumed = resumption_of(session) or {}
             log.warning(

@@ -613,6 +613,7 @@ name = "ph-app"
 version = "0.0.1"
 source = { editable = "packages/ph-app" }
 dependencies = [
+    { name = "filelock" },
     { name = "httpx" },
     { name = "ph-core" },
     { name = "rich" },
@@ -622,6 +623,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "filelock", specifier = ">=3.15" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "ph-core", editable = "packages/ph-core" },
     { name = "rich", specifier = ">=13.0" },

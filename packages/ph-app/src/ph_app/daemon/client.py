@@ -19,7 +19,7 @@ from typing import Any
 import anyio
 from anyio.abc import ByteStream
 
-from ..protocol import notification, request
+from ..protocol import DaemonError, notification, request
 from .framing import read_frames, write_frame
 
 __all__ = ["DaemonClient"]
@@ -98,7 +98,7 @@ class DaemonClient:
         await waiting.wait()
         frame = self._replies.pop(request_id, {})
         if "error" in frame:
-            raise RuntimeError(str(frame["error"].get("message", "the daemon refused")))
+            raise DaemonError.of(frame["error"])
         result: dict[str, Any] = frame.get("result") or {}
         return result
 

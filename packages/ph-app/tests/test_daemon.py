@@ -24,6 +24,8 @@ import pytest
 
 from ph.bundles import BASE, HEADLESS
 from ph_app.daemon import DaemonClient, serve, server
+from ph_app.daemon.supervisor import Supervisor
+from ph_app.protocol import DaemonError
 
 pytestmark = pytest.mark.anyio
 
@@ -36,6 +38,9 @@ class _Daemon:
 
     path: Path
     tasks: Any
+    server: Any = None
+    """The `DaemonServer` behind the socket, for the tests whose subject is the
+    supervisor itself rather than the wire."""
 
     async def client(self, on_notify: Any = None) -> DaemonClient:
         client = await DaemonClient.connect(self.path, on_notify)
@@ -44,7 +49,7 @@ class _Daemon:
 
 
 @asynccontextmanager
-async def running(tmp_path: Path) -> AsyncIterator[_Daemon]:
+async def running(tmp_path: Path, *, name: str = "") -> AsyncIterator[_Daemon]:
     """A daemon, started and accepting, torn down when the block ends.
 
     Waits on the `ready` event rather than for the socket file to appear: the
@@ -57,11 +62,18 @@ async def running(tmp_path: Path) -> AsyncIterator[_Daemon]:
     """
     async with anyio.create_task_group() as tasks:
         ready = anyio.Event()
-        path = tmp_path / "daemon.sock"
-        tasks.start_soon(lambda: serve(PROFILE, path=path, ready=ready))
+        # `name` is how a test runs *two* daemons over one `$PH_HOME` — the only
+        # way to reach P5-03's question, since `_clear_stale` makes one socket
+        # refuse a second listener before a lease could be asked for. A name
+        # rather than a path, so the socket layout stays this helper's business
+        # and standing up a second daemon changes one line rather than six.
+        path = tmp_path / name / "daemon.sock"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        started: list[Any] = []
+        tasks.start_soon(lambda: serve(PROFILE, path=path, ready=ready, started=started.append))
         await ready.wait()
         try:
-            yield _Daemon(path=path, tasks=tasks)
+            yield _Daemon(path=path, tasks=tasks, server=started[0])
         finally:
             tasks.cancel_scope.cancel()
 
@@ -405,3 +417,136 @@ async def test_the_client_makes_its_own_retries_safe(tmp_path: Path) -> None:
             "the replayed command ran a second turn"
         )
         await client.notify("shutdown")
+
+
+# --- P5-03: leases ----------------------------------------------------------
+#
+# I-5 names the hazard as "two writers on one JSONL" and the remedy in two
+# halves: an in-process lock per root, and a file lock on the canonical path
+# against a *second daemon*. They answer different questions, and the tests
+# below are paired to that split — inside one process, two clients naming one
+# root should get that root; across processes, the second should be refused.
+
+
+async def test_a_second_daemon_is_refused_the_same_session(tmp_path: Path) -> None:
+    """The gate: concurrent open → `session_already_active`.
+
+    Two supervisors over one `$PH_HOME`, which is what a person actually
+    produces — a daemon they forgot was running, plus a fresh one — and what
+    P5-01's `_clear_stale` explicitly deferred to this row. Without the lease
+    both append to the same file.
+    """
+    async with (
+        running(tmp_path, name="a") as first,
+        running(tmp_path, name="b") as second,
+    ):
+        held = await first.client()
+        await held.call("session/new", sessionId="shared")
+
+        intruder = await second.client()
+        with pytest.raises(DaemonError) as refusal:
+            await intruder.call("session/new", sessionId="shared")
+
+        # Named, not narrated: a client branches on this, and matching the
+        # message text would be a contract that every rewording breaks.
+        assert refusal.value.reason == "session_already_active"
+        # And the refusal is per session, not per daemon — the second
+        # supervisor is still a working supervisor.
+        assert await intruder.call("session/new", sessionId="its-own")
+
+
+async def test_the_lease_ends_with_the_daemon_that_held_it(tmp_path: Path) -> None:
+    """A lease is held for a root's life, not a session file's.
+
+    The failure this pins is the one that makes leases unusable in practice: a
+    lock left behind by a daemon that exited cleanly, so the session can never
+    be opened again and the fix is "delete a file you were never told about".
+    """
+    async with running(tmp_path, name="a") as first:
+        client = await first.client()
+        await client.call("session/new", sessionId="handover")
+        await client.notify("shutdown")
+
+    async with running(tmp_path, name="b") as second:
+        client = await second.client()
+        # Same id, same `$PH_HOME`, no refusal — and it resumes rather than
+        # starting over, which is the P5-01 behaviour the lease must not break.
+        assert (await client.call("session/new", sessionId="handover"))["sessionId"] == "handover"
+
+
+async def test_two_clients_naming_one_new_root_share_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Inside one process the answer is "here it is", not "it is taken".
+
+    `_start` checks `self.roots` and then awaits twice before it assigns, so two
+    clients arriving together both pass the membership test and both build a
+    root. The file lease would notice that pair — and would answer the wrong
+    question, refusing a client whose only mistake was arriving at the same
+    moment as another one asking for the same thing.
+
+    **The interleaving is forced, not hoped for.** The first version of this
+    test started two `session/new` calls concurrently and trusted the scheduler
+    to overlap them. It did, for one commit — until the lease stopped hopping to
+    a worker thread, which removed the suspension point that had been doing it,
+    and the test went on passing with the lock deleted. So the first caller is
+    now parked *inside* `_start`, past the membership check, and the second is
+    released only once it is there: without the lock the second must build a
+    second root, and there is no ordering left for luck to supply.
+    """
+    async with running(tmp_path) as daemon:
+        supervisor = daemon.server.supervisor
+        original = Supervisor._session_for
+        parked, release = anyio.Event(), anyio.Event()
+
+        # On the class: `Supervisor` is a `slots=True` dataclass, so an instance
+        # attribute cannot be shadowed.
+        async def hold(self: Supervisor, *args: Any, **kwargs: Any) -> Any:
+            if not parked.is_set():
+                parked.set()
+                await release.wait()
+            return await original(self, *args, **kwargs)
+
+        monkeypatch.setattr(Supervisor, "_session_for", hold)
+        roots: list[Any] = []
+
+        async with anyio.create_task_group() as both:
+
+            async def first() -> None:
+                roots.append(await supervisor.start("contested"))
+
+            async def second() -> None:
+                await parked.wait()
+                # The first caller is now past `roots` membership and inside
+                # the awaits. A second `start` here is the exact race — and
+                # releasing it *before* awaiting is safe, since `set()` cannot
+                # yield: the first task does not resume until this one blocks,
+                # which it does either on the lock or on its own mount.
+                release.set()
+                roots.append(await supervisor.start("contested"))
+
+            both.start_soon(first)
+            both.start_soon(second)
+
+        assert len(roots) == 2
+        assert roots[0] is roots[1], "the second caller built a second root on one log"
+        assert list(supervisor.roots) == ["contested"]
+
+
+async def test_a_refused_start_leaves_nothing_behind(tmp_path: Path) -> None:
+    """A start that fails registers no root and strands no mount.
+
+    `start` holds its `AsyncExitStack` by hand so a root can outlive the `async
+    with` that made it — which means a failure partway through is the one path
+    where `mounted`'s own `finally` does not run. The observable half is that
+    the id is not listed and can be opened later; the mount is checked by
+    disposing the supervisor, which would raise on a context it never took.
+    """
+    async with running(tmp_path, name="a") as first:
+        await (await first.client()).call("session/new", sessionId="taken")
+
+        async with running(tmp_path, name="b") as second:
+            intruder = await second.client()
+            with pytest.raises(DaemonError):
+                await intruder.call("session/new", sessionId="taken")
+            assert (await intruder.call("sessions/list"))["sessions"] == []

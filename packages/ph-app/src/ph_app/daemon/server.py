@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import logging
 import os
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -28,9 +28,11 @@ import anyio
 from anyio.abc import ByteStream
 
 from ph.paths import resolve_roots
+from ph.resources import GRACE_SECONDS
 
 from ..protocol import (
     SNAPSHOT_EVENTS,
+    Refusal,
     capabilities,
     cursor_of,
     notification,
@@ -43,6 +45,19 @@ from .supervisor import Supervisor
 __all__ = ["DaemonServer", "serve"]
 
 log = logging.getLogger("ph_app.daemon")
+
+
+class UnknownMethod(Refusal):
+    """This server does not serve that name."""
+
+    code = "unknown_method"
+
+
+class NoSuchSession(Refusal):
+    """No root is running under that id — which is not the same as it being
+    busy, and a client that wants to start one branches differently."""
+
+    code = "no_such_session"
 
 
 @dataclass(slots=True)
@@ -152,12 +167,12 @@ class _Connection:
             # losing the ability to write. "Stop" is not a question.
             self.server.stop.set()
             return {"ok": True}
-        raise ValueError(f'unknown method "{method}"')
+        raise UnknownMethod(f'unknown method "{method}"')
 
     def _root(self, session_id: str) -> Any:
         root = self.server.supervisor.roots.get(session_id)
         if root is None:
-            raise ValueError(f'no session "{session_id}"')
+            raise NoSuchSession(f'no session "{session_id}"')
         return root
 
     def _attach(self, session_id: str, cursor: Any) -> dict[str, Any]:
@@ -254,6 +269,7 @@ async def serve(
     model: str = "fake-1",
     path: Path | None = None,
     ready: anyio.Event | None = None,
+    started: Callable[[DaemonServer], None] | None = None,
 ) -> None:
     """Run the supervisor until `shutdown`.
 
@@ -277,13 +293,33 @@ async def serve(
             # it is theirs alone — the same reasoning `$PH_RUNTIME` is 0o700 for.
             os.chmod(socket_path, 0o600)
             server = DaemonServer(supervisor=supervisor, stop=anyio.Event())
+            if started is not None:
+                # Handed out rather than reachable through the socket: a test
+                # whose subject is the supervisor's own concurrency has no wire
+                # question to ask, and reaching it through a client would be
+                # testing the transport to get at something behind it.
+                started(server)
             async with listener:
                 tasks.start_soon(listener.serve, server._handle)
                 if ready is not None:
                     ready.set()
                 await server.stop.wait()
         finally:
-            await supervisor.aclose()
+            # Shielded, and bounded. `shutdown` is a notification — the caller
+            # does not wait for it — so a cancel from whoever started `serve()`
+            # routinely arrives *while* this is unwinding, and an unwinding cut
+            # short here loses everything teardown is for: sessions unflushed,
+            # worktrees unreclaimed (F6), and P5-03's leases never released, so
+            # the next daemon refuses a session whose holder is already gone.
+            # `move_on_after` rather than a bare shield, because a root that
+            # will not unwind must not become a process that will not exit.
+            # `GRACE_SECONDS` rather than a number of its own: it is the same
+            # budget `install_lifecycle` spends on `ctx.dispose()`, with the
+            # same `move_on_after(shield=True)`, and two constants for one
+            # tunable is how an inner budget silently becomes dead code (when
+            # it exceeds the outer one) or the only one that ever fires.
+            with anyio.move_on_after(GRACE_SECONDS, shield=True):
+                await supervisor.aclose()
             socket_path.unlink(missing_ok=True)
             # Last: the accept loop and any root task still in flight. Roots are
             # unwound above by their own channels closing, so this cancels a
