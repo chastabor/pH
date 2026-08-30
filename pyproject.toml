@@ -34,6 +34,9 @@ dev = [
     "types-PyYAML>=6.0",
     "types-croniter>=3.0",
     "pytest-textual-snapshot>=1.0",
+    # The extra itself, not its contents: pinning the OTel distributions here
+    # too would let CI green on a version `ph-core[otel]` does not allow.
+    "ph-core[otel]",
 ]
 
 # ---------------------------------------------------------------- tooling ----

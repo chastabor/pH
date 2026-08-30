@@ -17,6 +17,13 @@ dependencies = [
     "pyyaml>=6.0",
 ]
 
+# Exporting to a collector is opt-in; `session-telemetry-otel` refuses with a
+# message naming this extra rather than failing to import. Both distributions,
+# because the row needs the provider *and* a transport and refuses without
+# either — half of the extra is a sink that ships nowhere.
+[project.optional-dependencies]
+otel = ["opentelemetry-sdk>=1.27", "opentelemetry-exporter-otlp-proto-http>=1.27"]
+
 # The plugin discovery group. Reserved in Phase 0 (P0-01) so a third-party
 # wheel can mount a row by name from its first release onward.
 [project.entry-points."ph.plugins"]
@@ -72,6 +79,7 @@ tool-fs = "ph.tools.builtin.fs_tools:apply"
 tool-bash = "ph.tools.builtin.bash_tool:apply"
 subagent-task = "ph.tools.builtin.subagent_task:apply"
 # durability and resilience
+session-telemetry-otel = "ph.seams.telemetry_otel:apply"
 session-persistence-jsonl = "ph.persistence.jsonl:apply"
 session-persistence-turso = "ph.persistence.turso:apply"
 session-checkpoint-policy = "ph.persistence.checkpoint_policy:apply"
