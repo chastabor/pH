@@ -398,6 +398,56 @@ class TuiEventAdapter:
             text = f"Resumed an existing session — {events} earlier events."
         self._row("resumed", "notice", text, event)
 
+    def _on_supervisor_retry(self, event: SessionEvent, live: bool) -> None:
+        """This session's task crashed and is being run again (P5-04).
+
+        Worth a row for the reason `session/resumed` and `llm/retry` are: a
+        quiet recovery nobody is told about is indistinguishable from nothing
+        having happened — and the transcript is about to resume mid-thought,
+        which without this line reads as the agent losing its place.
+        """
+        # From the record, with no ladder length assumed: this may be
+        # rendering a log a different build wrote, and a resumed transcript
+        # should not be re-narrated with today's constants.
+        attempt, of = event.data.get("attempt", "?"), event.data.get("of", "?")
+        seconds = int(event.data.get("delayMs", 0)) / 1000
+        restored = " after restoring the tree" if event.data.get("restored") else ""
+        reason = str(event.data.get("reason", "")).strip()
+        detail = f": {reason}" if reason else ""
+        self._row(
+            "retry",
+            "notice",
+            f"This session hit a problem — retrying in {seconds:g}s{restored} "
+            f"(attempt {attempt} of {of}){detail}",
+            event,
+        )
+
+    def _on_supervisor_failed(self, event: SessionEvent, live: bool) -> None:
+        """The ladder is spent, and this session has stopped (P5-04).
+
+        The loudest row this adapter draws, because it is the one that means no
+        further work is coming. A root that stopped silently is one somebody
+        waits on indefinitely.
+        """
+        attempts = event.data.get("attempts", "several")
+        reason = str(event.data.get("reason", "")).strip() or "no reason recorded"
+        self._row(
+            "failed",
+            "error",
+            f"This session stopped after {attempts} failed attempts: {reason}",
+            event,
+        )
+
+    def _on_supervisor_recovered(self, event: SessionEvent, live: bool) -> None:
+        """A retry worked (P5-04).
+
+        The close of a story the retry row opened. Without it a reader is left
+        with "retrying…" as the last thing said about a session that has been
+        working fine ever since.
+        """
+        after = event.data.get("afterAttempts", "")
+        self._row("recovered", "notice", f"Recovered after {after} attempts", event)
+
     def _on_kernel_restored(self, event: SessionEvent, live: bool) -> None:
         """A resumed namespace, but only when something did not come back.
 
@@ -626,6 +676,9 @@ HANDLERS: Mapping[str, Handler] = {
     "command/done": TuiEventAdapter._on_command_done,
     "llm/retry": TuiEventAdapter._on_llm_retry,
     "session/resumed": TuiEventAdapter._on_session_resumed,
+    "supervisor/retry": TuiEventAdapter._on_supervisor_retry,
+    "supervisor/failed": TuiEventAdapter._on_supervisor_failed,
+    "supervisor/recovered": TuiEventAdapter._on_supervisor_recovered,
     "agent/inbox/spliced": TuiEventAdapter._on_agent_inbox_spliced,
     "todo/write": TuiEventAdapter._on_todo_write,
     "offload/spilled": TuiEventAdapter._on_offload_spilled,

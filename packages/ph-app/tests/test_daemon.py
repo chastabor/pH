@@ -13,7 +13,7 @@ transport and a fake one would agree with whatever the code did.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -23,7 +23,8 @@ import anyio
 import pytest
 
 from ph.bundles import BASE, HEADLESS
-from ph_app.daemon import DaemonClient, serve, server
+from ph_app.daemon import DaemonClient, recovery, serve, server
+from ph_app.daemon import supervisor as supervisor_module
 from ph_app.daemon.supervisor import Supervisor
 from ph_app.protocol import DaemonError
 
@@ -550,3 +551,303 @@ async def test_a_refused_start_leaves_nothing_behind(tmp_path: Path) -> None:
             with pytest.raises(DaemonError):
                 await intruder.call("session/new", sessionId="taken")
             assert (await intruder.call("sessions/list"))["sessions"] == []
+
+
+# --- P5-04: the retry ladder -------------------------------------------------
+#
+# The ladder answers the root's *task* crashing — a flush that cannot write, a
+# disposed context, a bug — where the work is still in the inbox and running
+# again is meaningful. A failed *turn* is deliberately not its business:
+# `llm-retry` has already retried what a model failure makes sense to retry, and
+# the failed turn claimed its message, so a second `run()` would produce an empty
+# turn that reports false success.
+
+
+@pytest.fixture
+def short_ladder(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The real ladder spends 6.25 s, which is not a thing to put in a suite.
+
+    Patched on the module rather than passed in, because `Recovery.total` and
+    `Recovery.delay` read the global when asked — which is why they are
+    properties and not values copied at import.
+    """
+    monkeypatch.setattr(recovery, "RETRY_DELAYS", (0.01, 0.01, 0.01))
+
+
+def _crash(patch: pytest.MonkeyPatch, root: Any, times: int) -> None:
+    """Make this root's task raise for its first `times` wakes.
+
+    At `run()`'s own boundary, which is where a *task* crash actually appears:
+    the driver contains everything inside a turn, so a failure injected further
+    in (a flush during the turn, a model error) is caught there and arrives as
+    `turn/end{error}` — not as a crash, and not this ladder's business.
+
+    Raising before `run()` claims anything also preserves the property the
+    ladder depends on: the work is still in the inbox, so running again is
+    meaningful rather than an empty turn reporting false success.
+
+    Patching and counting together, on the class — `Supervisor` and the driver
+    are both `slots=True`, so an instance attribute cannot be shadowed, and
+    every call site was writing `type(root.agent)` twice to say one thing.
+    """
+    driver, original, remaining = type(root.agent), type(root.agent).run, times
+
+    async def run(self: Any) -> None:
+        nonlocal remaining
+        if remaining > 0:
+            remaining -= 1
+            raise RuntimeError("injected crash")
+        await original(self)
+
+    patch.setattr(driver, "run", run)
+
+
+async def _until(done: Callable[[], bool], *, what: str) -> None:
+    """Poll until `done()`, or fail saying what was being waited for.
+
+    `prompt` returns as soon as the message is *logged* — the turn has not
+    started, let alone crashed — so a wait written as "while it still looks
+    fine" exits on its first check and asserts against an empty log.
+    """
+    try:
+        with anyio.fail_after(10):
+            while not done():
+                await anyio.sleep(0.01)
+    except TimeoutError:
+        # `fail_after` raises a bare `TimeoutError`, so without this the `what=`
+        # every call site passes reached no message at all.
+        pytest.fail(f"timed out waiting for {what}")
+
+
+async def test_an_injected_crash_is_retried_and_the_root_recovers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, short_ladder: None
+) -> None:
+    """The gate's first half: an injected crash recovers.
+
+    One crash, then the world works again. The root must come back and finish
+    the turn — the message is still in its inbox, which is precisely why this
+    failure is worth retrying and a failed turn is not.
+    """
+    async with running(tmp_path) as daemon:
+        client = await daemon.client()
+        await client.call("session/new", sessionId="recovers")
+        root = daemon.server.supervisor.roots["recovers"]
+        _crash(monkeypatch, root, 1)
+
+        await client.prompt("recovers", "hello")
+        # Waiting on the *answer*, not on "idle": a root is idle throughout the
+        # ladder's own backoff, so a wait for idle exits during the sleep and
+        # asserts against a log the retry has not written to yet.
+        await _until(
+            lambda: any(e.type == "assistant/message" for e in root.session.events_from(0)),
+            what="the retried task to finish its turn",
+        )
+
+        await _until(
+            lambda: root.recovery.attempts == 0, what="the ladder to clear after recovering"
+        )
+        types = [event.type for event in root.session.events_from(0)]
+        assert types.count(recovery.RETRY) == 1
+        assert recovery.FAILED not in types, "a root that recovered was reported failed"
+        # The marker that clears the count, and the only thing that may: a
+        # ladder resettable by its own retry does not terminate.
+        assert types.count(recovery.RECOVERED) == 1
+        assert root.status == "idle"
+        assert "assistant/message" in types, "the retried task never finished its turn"
+        assert root.status == "idle"
+
+
+async def test_the_ladder_gives_up_after_its_last_attempt_and_reports(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, short_ladder: None
+) -> None:
+    """The gate's second half: the third failure reports.
+
+    A ladder that never gave up would be worse than none — a permanently broken
+    root would retry forever while reporting itself busy. So the count is
+    bounded, the give-up is *recorded*, and the status a client reads changes.
+    """
+    seen: list[dict[str, Any]] = []
+    async with running(tmp_path) as daemon:
+        client = await daemon.client(lambda method, params: seen.append(params))
+        await client.call("session/new", sessionId="doomed")
+        await client.call("session/attach", sessionId="doomed")
+        root = daemon.server.supervisor.roots["doomed"]
+        _crash(monkeypatch, root, 99)
+
+        await client.prompt("doomed", "hello")
+        await _until(lambda: root.status == "failed", what="the ladder to give up")
+
+        types = [event.type for event in root.session.events_from(0)]
+        assert types.count(recovery.RETRY) == len(recovery.RETRY_DELAYS)
+        assert types.count(recovery.FAILED) == 1
+        # Recorded, not merely announced: an unattended run leaves the fact in
+        # its own trace whether or not a client was ever attached.
+        given_up = next(e for e in root.session.events_from(0) if e.type == recovery.FAILED)
+        assert given_up.data["attempts"] == len(recovery.RETRY_DELAYS)
+        assert "injected crash" in given_up.data["reason"]
+        assert {"failed"} <= {str(params.get("status", "")) for params in seen}
+
+        # **On disk already**, with the daemon still running and no shutdown
+        # sent. The give-up is the record that matters most and it was the one
+        # write-through missed; a clean shutdown flushes it either way, which is
+        # exactly why asserting it here rather than after teardown is what
+        # actually pins the behaviour.
+        assert recovery.FAILED in (tmp_path / "sessions" / "doomed.jsonl").read_text()
+
+
+async def test_a_root_resumed_mid_ladder_does_not_start_the_count_over(
+    tmp_path: Path, short_ladder: None
+) -> None:
+    """Why the ladder's state is folded and not remembered.
+
+    A supervisor keeping the attempt count in memory would come back from every
+    crash with a fresh ladder, so a root failing for a permanent reason would
+    retry forever — three attempts per daemon lifetime, with nothing in the log
+    to show it had ever been tried.
+    """
+    # Its own patch context, deliberately. `monkeypatch.undo()` would revert
+    # every patch on the shared fixture — including the autouse `_isolated_home`
+    # — so the second daemon would resume from the developer's real `~/.ph`.
+    # This test did precisely that and wrote a session there.
+    with pytest.MonkeyPatch.context() as crash:
+        async with running(tmp_path, name="first") as daemon:
+            client = await daemon.client()
+            await client.call("session/new", sessionId="stubborn")
+            root = daemon.server.supervisor.roots["stubborn"]
+            _crash(crash, root, 99)
+            await client.prompt("stubborn", "hello")
+            await _until(lambda: root.status == "failed", what="the ladder to give up")
+            await client.notify("shutdown")
+
+    async with running(tmp_path, name="second") as daemon:
+        client = await daemon.client()
+        await client.call("session/new", sessionId="stubborn")
+        root = daemon.server.supervisor.roots["stubborn"]
+        # Read straight off the resumed log, nothing carried in memory between
+        # the two daemons.
+        assert root.status == "failed"
+        state = recovery.recovery_of(root.session)
+        assert state.attempts == len(recovery.RETRY_DELAYS)
+        assert state.spent
+
+
+async def test_one_root_crashing_does_not_take_the_daemon_down(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, short_ladder: None
+) -> None:
+    """The failure a supervisor exists to prevent.
+
+    A root's task runs in the supervisor's task group, so anything raising out
+    of it cancels the group — every *other* root with it, plus the listener.
+    This kills one root outright and asserts the blast radius is exactly that.
+    """
+    async with running(tmp_path) as daemon:
+        client = await daemon.client()
+        await client.prompt("bystander", "hello")
+        await _settled(client, "bystander", events=1)
+
+        await client.call("session/new", sessionId="casualty")
+        casualty = daemon.server.supervisor.roots["casualty"]
+        _crash(monkeypatch, casualty, 99)
+        await client.prompt("casualty", "hello")
+        await _until(lambda: casualty.status == "failed", what="the doomed root to give up")
+        monkeypatch.undo()
+
+        # The daemon still answers, the bystander is still there, and it works.
+        listed = await client.call("sessions/list")
+        assert "bystander" in {row["sessionId"] for row in listed["sessions"]}
+        await client.prompt("bystander", "still here?")
+        await _settled(client, "bystander", events=2)
+
+
+async def test_the_tree_is_restored_from_the_latest_checkpoint_before_a_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A retry starts from a restore point, not from a half-mutated tree.
+
+    A retry run against whatever the crashed attempt left behind would be a
+    different attempt from the one that failed — the model would see edits from
+    a run nobody kept — and a ladder that compounds its own damage is worse than
+    no ladder. `workspace/checkpoint` is P4-09's record and already a fold, so
+    the *latest* one is the tree to go back to.
+
+    Driven directly rather than through a worktree-tier daemon: what this pins
+    is the selection and the best-effort contract, and standing up a real git
+    worktree would test P4-09's capture again instead.
+    """
+    async with running(tmp_path) as daemon:
+        supervisor = daemon.server.supervisor
+        root = await supervisor.start("restores")
+        root.session.append("workspace/checkpoint", {"agentId": root.agent.id, "tree": "older"})
+        root.session.append("workspace/checkpoint", {"agentId": root.agent.id, "tree": "newest"})
+
+        asked: list[str] = []
+
+        async def fake_restore(ctx: Any, workspace: Any, tree: str) -> tuple[str, ...]:
+            asked.append(tree)
+            return ()
+
+        monkeypatch.setattr(supervisor_module, "restore", fake_restore)
+        monkeypatch.setattr(type(root.ctx.workspace), "of", lambda self, agent_id: object())
+
+        assert await supervisor._restore(root) is True
+        assert asked == ["newest"], "the retry went back to a stale restore point"
+
+        # Best-effort: a restore that fails must not cost the retry, and must
+        # not claim a rollback that did not happen.
+        async def angry_restore(ctx: Any, workspace: Any, tree: str) -> tuple[str, ...]:
+            raise RuntimeError("git said no")
+
+        monkeypatch.setattr(supervisor_module, "restore", angry_restore)
+        assert await supervisor._restore(root) is False
+
+
+async def test_a_root_with_no_workspace_restores_nothing_and_says_so(
+    tmp_path: Path,
+) -> None:
+    """The ordinary case: an advisory-tier root has no worktree to put back.
+
+    `restored: false` in the record, rather than silence — a transcript that
+    implied a rollback nobody performed would misread the attempt that follows.
+    """
+    async with running(tmp_path) as daemon:
+        supervisor = daemon.server.supervisor
+        root = await supervisor.start("advisory")
+        assert await supervisor._restore(root) is False
+
+
+async def test_a_failing_flush_climbs_the_ladder_instead_of_retrying_forever(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, short_ladder: None
+) -> None:
+    """The shape that made the ladder unbounded, and the one nothing tested.
+
+    Every other test here injects at `run()`'s entry, so no turn is ever
+    completed. A *persistently failing flush* is different in the one way that
+    matters: `run()` succeeds first and writes a `turn/end`. The first version
+    of the fold reset the count on any `turn/end`, and the retry manufactures
+    one — a re-entered `run()` finds an empty inbox and appends
+    `turn/start` + `turn/end{completed}` before the same flush fails again — so
+    the ladder cleared the bound that was supposed to stop it. Measured at **165
+    retries in two seconds, no give-up, the fold pinned at one attempt, and the
+    root reporting "idle"**, growing the log by three events an iteration.
+
+    Only `supervisor/recovered` resets the count now, and nothing but success
+    writes it.
+    """
+    async with running(tmp_path) as daemon:
+        client = await daemon.client()
+        await client.call("session/new", sessionId="unflushable")
+        root = daemon.server.supervisor.roots["unflushable"]
+
+        async def broken(self: Any, session: Any) -> None:
+            raise RuntimeError("flush is broken")
+
+        monkeypatch.setattr(type(root.ctx.sessions), "flush", broken)
+        await client.prompt("unflushable", "hello")
+        await _until(lambda: root.status == "failed", what="the ladder to give up")
+
+        types = [event.type for event in root.session.events_from(0)]
+        assert types.count(recovery.RETRY) == len(recovery.RETRY_DELAYS), (
+            "the ladder did not terminate — its own retry cleared the count"
+        )
+        assert types.count(recovery.FAILED) == 1
+        assert types.count(recovery.RECOVERED) == 0

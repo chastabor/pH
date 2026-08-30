@@ -12,7 +12,7 @@ took a root of their own and remembered to dispose it were each re-deriving
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -25,7 +25,7 @@ MountProfile = Callable[..., Awaitable[Context]]
 
 
 @pytest.fixture(autouse=True)
-def _isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def _isolated_home(tmp_path: Path) -> Iterator[None]:
     """Every test gets its own `$PH_HOME`, whether or not it asked.
 
     Autouse because the opt-in version did not hold. `mount` pinned it and
@@ -39,8 +39,21 @@ def _isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     sessions. Each earlier one was fixed where it happened. This is the rule
     stated once, in the one place no test can route around — a test that
     genuinely needs another home sets it after this runs and wins.
+
+    **Not through the shared `monkeypatch`, which is how it got routed around
+    anyway.** That fixture is one function-scoped instance shared by every other
+    fixture and the test itself, so a test calling `monkeypatch.undo()` — to
+    drop a patch of its *own*, entirely reasonably — reverts this one too, and
+    everything after that line runs against the developer's real home. P5-04's
+    resume test did exactly that and wrote a session into `~/.ph/sessions/`,
+    which is the fifth appearance of this class and the second in this fixture.
+    A private `MonkeyPatch` of its own is out of reach of anything a test does
+    to its patches, and still restores the variable the way every other env pin
+    in this suite does.
     """
-    monkeypatch.setenv("PH_HOME", str(tmp_path))
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setenv("PH_HOME", str(tmp_path))
+        yield
 
 
 @pytest.fixture
@@ -49,13 +62,16 @@ def anyio_backend() -> str:
 
 
 @pytest.fixture
-async def mount(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[MountProfile]:
+async def mount(tmp_path: Path) -> AsyncIterator[MountProfile]:
     """`await mount(*overlay_rows)` → a mounted root; disposed after the test.
 
-    Sessions persist under `tmp_path` unless an overlay says otherwise, so no
-    test writes into the developer's real `$PH_HOME`.
+    Sessions persist under `tmp_path` unless an overlay says otherwise, because
+    `_isolated_home` pins `$PH_HOME` for every test. This fixture used to pin it
+    too — the same variable to the same value — which made one rule read as
+    three, two of them through the `monkeypatch` route `_isolated_home` was
+    rewritten to stop trusting. A change there would have been silently half
+    applied.
     """
-    monkeypatch.setenv("PH_HOME", str(tmp_path))
     roots: list[Context] = []
 
     async def _mount(*overlay_rows: dict[str, Any], profile: Any = None) -> Context:

@@ -13,13 +13,16 @@ from ph_app.tui.app import PHTuiApp
 
 
 @pytest.fixture
-def make_tui_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Callable[..., PHTuiApp]:
+def make_tui_app(tmp_path: Path) -> Callable[..., PHTuiApp]:
     """`make_tui_app(**overrides)` → a TUI over the headless profile, homed in `tmp_path`.
 
     Trusted by default: the trust prompt is a startup gate, so every test that
     is *not* about it would otherwise open a modal before the app exists.
+
+    `$PH_HOME` comes from the root conftest's autouse `_isolated_home`; the copy
+    that used to be here set the same variable to the same value and made one
+    rule read as three.
     """
-    monkeypatch.setenv("PH_HOME", str(tmp_path))
 
     def make(*, trusted: bool = True, profile: str = "headless", **overrides: Any) -> PHTuiApp:
         options: dict[str, Any] = {

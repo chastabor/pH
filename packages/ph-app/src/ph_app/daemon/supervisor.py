@@ -28,7 +28,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable, Sequence
 from contextlib import AsyncExitStack, suppress
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -41,10 +41,14 @@ from ph.agent.types import AgentOptions
 from ph.cordis import Context
 from ph.llm.types import create_user_message
 from ph.persistence import resume_session, resumption_of, session_path
+from ph.seams.workspace import workspace_of
+from ph.seams.workspace_git import latest_checkpoint, restore
 from ph.session import Session, SessionEvent
+from ph.tools.errors import error_message
 
 from ..protocol import Refusal, cursor_of
 from ..runtime import compose, mounted
+from .recovery import FAILED, RECOVERED, RETRY, Recovery, recovery_of
 
 __all__ = ["Root", "SessionBusy", "Supervisor"]
 
@@ -61,6 +65,7 @@ class SessionBusy(Refusal):
 
 
 log = logging.getLogger("ph_app.daemon")
+
 
 COMMAND_ACCEPTED = "client/command"
 """The record that makes a mutating command idempotent (P5-02)."""
@@ -99,6 +104,13 @@ class Root:
     """
     waiting: MemoryObjectReceiveStream[None]
     exits: AsyncExitStack
+    recovery: Recovery = field(default_factory=lambda: Recovery(attempts=0, failed=False))
+    """The retry ladder's state (P5-04), folded from the log when this root
+    starts and maintained by `retry`/`give_up`/`recovered` from there.
+
+    Held rather than re-folded, for the measurement `accepted` records below: a
+    whole-log scan per read is 4.9 ms at 200 000 events, and `status` is read
+    for every root on every `sessions/list`."""
     commands: set[str] = field(default_factory=set)
     """Commands already run, folded from this session's own log.
 
@@ -142,7 +154,22 @@ class Root:
         own `await` would be true only at that call boundary, and a steer, a
         cancel or an inbox wake between turns would move one and not the other.
         """
-        return str(self.agent.status)
+        live = str(self.agent.status)
+        # `retrying` is derived here too, not only published. Announcing it as a
+        # notification while `sessions/list` still said "idle" gave a client
+        # attaching mid-backoff two answers to one question — the drift this
+        # property derives rather than copies in order to avoid.
+        # The agent is authoritative whenever it has work in hand. It is only
+        # *between* turns that "idle" is ambiguous — a root that exhausted the
+        # ladder is idle in exactly the same way as one waiting for a prompt,
+        # and P5-01 made this property derive rather than copy precisely so the
+        # answer could not drift; so the second reading is derived too, from the
+        # log, rather than from a flag set beside this class's own `await`.
+        if live != "idle":
+            return live
+        if self.recovery.failed:
+            return "failed"
+        return "retrying" if self.recovery.attempts else live
 
     @property
     def generation(self) -> str:
@@ -179,6 +206,56 @@ class Root:
         """Record a command in the log and in the fold that reads it back."""
         self.session.append(COMMAND_ACCEPTED, {"command": command})
         self.commands.add(command)
+
+    def retry(self, *, reason: str, restored: bool) -> None:
+        """Record that a failed turn is being run again (P5-04).
+
+        Written *before* the attempt, not after it: a daemon that died during
+        the retry must come back knowing the attempt was made, or it resumes
+        with a shorter ladder than it had actually spent. The same write-ahead
+        ordering A10 applies to blobs and `remember` applies to commands.
+        """
+        self.session.append(
+            RETRY,
+            {
+                "attempt": self.recovery.attempts + 1,
+                "of": self.recovery.total,
+                "delayMs": int(self.recovery.delay * 1000),
+                "reason": reason,
+                # Said out loud, because "false" is the ordinary case for an
+                # advisory-tier root and a transcript that implied a rollback
+                # nobody performed would misread the attempt that follows.
+                "restored": restored,
+            },
+        )
+        self.recovery = replace(self.recovery, attempts=self.recovery.attempts + 1)
+        self.publish("session.status", {"sessionId": self.id, "status": "retrying"})
+
+    def recovered(self) -> None:
+        """A retry worked, so the ladder clears — and says so in the log.
+
+        Recorded rather than simply forgotten, because forgetting is not durable:
+        a root that recovered, then had the daemon restart, would otherwise fold
+        its old `supervisor/retry` records back and resume with a ladder it had
+        already climbed out of. It is also the *only* thing that resets the
+        count, which is what keeps a failing retry from clearing its own bound.
+        """
+        self.session.append(RECOVERED, {"afterAttempts": self.recovery.attempts})
+        self.recovery = Recovery(attempts=0, failed=False)
+        self.publish("session.status", {"sessionId": self.id, "status": self.status})
+
+    def give_up(self, reason: str, *, attempts: int) -> None:
+        """Record that the ladder is spent, and tell whoever is watching.
+
+        In the log first. A root that stopped working is exactly the fact an
+        unattended run needs to leave behind — a cron-started agent reports it
+        in its own trace whether or not a client was ever attached — and
+        `Root.status` reads it straight back rather than keeping a copy.
+        """
+        self.session.append(FAILED, {"attempts": attempts, "reason": reason})
+        self.recovery = replace(self.recovery, failed=True)
+        self.publish("session.status", {"sessionId": self.id, "status": "failed"})
+        log.error("ph_app.daemon: root %s failed after %d attempts — %s", self.id, attempts, reason)
 
     def describe(self) -> dict[str, Any]:
         """What a client is told about this root.
@@ -277,8 +354,11 @@ class Supervisor:
                 waiting=waiting,
                 exits=exits,
             )
-            # What this session already did, read back from its own log — which is
-            # what makes a retry after a restart safe rather than a second turn.
+            # Both folds are read back from this session's own log, once, here:
+            # what it already did (so a retry after a restart is not a second
+            # turn) and how far up the retry ladder it got (so a root resumed
+            # mid-ladder does not start the count over and retry forever).
+            root.recovery = recovery_of(session)
             root.commands.update(
                 str(event.data.get("command", ""))
                 for event in session.events_from(0)
@@ -437,13 +517,119 @@ class Supervisor:
         A wake that arrives while the agent is already running is dropped on
         purpose: `run()` drains the inbox until it is empty, so the turn already
         in flight will pick the new message up, and calling it twice raises.
+
+        Crashes and their ladder belong to `_drive`, which this calls once per
+        wake — so nothing raising out of a root can cancel the supervisor's task
+        group and take every *other* root down with it.
         """
         async with root.waiting:
             async for _ in root.waiting:
                 if root.agent.status != "idle":
                     continue
+                await self._drive(root)
+
+    async def _drive(self, root: Root) -> None:
+        """One wake, and the ladder if the root's task crashes (P5-04).
+
+        **One root's crash is not the daemon's.** This runs in the supervisor's
+        task group, so anything raising out of here cancels the group and takes
+        every *other* root down with it — the failure a supervisor exists to
+        prevent. `run()` contains its own turn failures, so what reaches this
+        boundary is the unanticipated kind: a flush that cannot write, a
+        disposed context, a bug.
+
+        Those are worth retrying because the work is still in the inbox — the
+        crash happened around the turn rather than inside it — which is exactly
+        what a *turn* failure is not: that one already claimed its message, so
+        running again would produce an empty turn reporting false success. See
+        `recovery` for why that distinction decides the whole row.
+
+        The delay is spent before the retry, not after the failure, so a root
+        that gives up does so immediately rather than sleeping first.
+        """
+        while True:
+            try:
                 await root.agent.run()
                 await root.ctx.sessions.flush(root.session)
+                if root.recovery.attempts:
+                    # Only after a ladder was actually climbed, so an ordinary
+                    # turn writes nothing. This is what clears the count, and it
+                    # has to be a record only success can write.
+                    root.recovered()
+                    await self._flush(root)
+                return
+            except (anyio.get_cancelled_exc_class(), anyio.ClosedResourceError):
+                # Teardown, not failure. Recording a give-up here would write to
+                # a session that is being disposed and would libel a root that
+                # was only ever asked to stop.
+                raise
+            except Exception as error:
+                log.exception("ph_app.daemon: root %s crashed outside a turn", root.id)
+                state = root.recovery
+                if state.spent:
+                    root.give_up(error_message(error), attempts=state.attempts)
+                    # Flushed, like the retries before it. This is the record
+                    # that matters most and it was the one write-through missed:
+                    # a daemon stopping right after giving up left the give-up
+                    # in a buffer, so the next daemon resumed the log, saw no
+                    # `agent/failed`, and reported the root idle — a ladder that
+                    # forgets it was spent is one that starts over forever.
+                    await self._flush(root)
+                    return
+                restored = await self._restore(root)
+                root.retry(reason=error_message(error), restored=restored)
+                await self._flush(root)
+                await anyio.sleep(state.delay)
+
+    async def _flush(self, root: Root) -> None:
+        """Get the ladder's own record to disk, or carry on without it.
+
+        The crash being retried may well *be* a failing flush, and a ladder that
+        raised while recording that it was retrying would turn one broken root
+        into a task that dies with no account of why. `aclose` wants the same
+        thing for the same reason — and had its own copy, which additionally
+        skipped `exits.aclose()` when the flush raised, so one root's unwritable
+        log left its context undisposed.
+        """
+        try:
+            await root.ctx.sessions.flush(root.session)
+        except Exception:
+            log.warning("ph_app.daemon: root %s could not flush its retry", root.id, exc_info=True)
+
+    async def _restore(self, root: Root) -> bool:
+        """Put the root's tree back to its last restore point, if it has one.
+
+        A retry that ran against a half-mutated tree would be a different turn
+        from the one that failed — the model would see edits from an attempt
+        nobody kept, and a ladder that compounds its own damage is worse than no
+        ladder. `workspace/checkpoint` is P4-09's record and already a fold, so
+        this asks the log rather than remembering anything.
+
+        Best-effort by construction: an advisory-tier root has no worktree and
+        nothing to restore, and a restore that fails must not cost the retry. In
+        both cases the attempt goes ahead against the tree as it stands, and the
+        `agent/retry` record says `restored: false` so the transcript does not
+        imply a rollback that did not happen.
+        """
+        # `workspace_of`, not `ctx.workspace.of`: this runs inside `_drive`'s
+        # `except`, and `ctx.workspace` *raises* on a profile that layers no
+        # workspace row — so the raw lookup would escape the handler whose whole
+        # job is keeping the task group alive. The helper is fail-soft, and is
+        # the one spelling of this question the rest of the tree uses.
+        workspace = workspace_of(root.ctx, root.agent)
+        if workspace is None:
+            return False
+        tree = latest_checkpoint(root.session, root.agent.id)
+        if not tree:
+            return False
+        try:
+            await restore(root.ctx, workspace, tree)
+        except Exception:
+            log.warning(
+                "ph_app.daemon: root %s could not be restored to %s", root.id, tree, exc_info=True
+            )
+            return False
+        return True
 
     async def prompt(self, root_id: str, text: str, *, command: str = "") -> Root:
         """Splice a turn into the agent's inbox and wake its task.
@@ -494,8 +680,8 @@ class Supervisor:
         for root in self.roots.values():
             await root.wake.aclose()
         for root in list(self.roots.values()):
+            await self._flush(root)
             try:
-                await root.ctx.sessions.flush(root.session)
                 await root.exits.aclose()
             except Exception:
                 log.warning("ph_app.daemon: root %s did not unwind cleanly", root.id, exc_info=True)

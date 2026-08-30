@@ -33,6 +33,21 @@ KNOWN_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         # A mutating command a protocol client asked for, recorded so asking
         # twice is safe across a restart (P5-02). Not a slash `command/*`.
         "client/command",
+        # The supervisor's retry ladder (P5-04): a crashed root task being run
+        # again, the ladder giving up, and a retry that worked. In the log
+        # rather than in supervisor memory, because "this root tried three times
+        # and stopped" must survive the process that decided it — and a root
+        # resumed mid-ladder that forgot would start the count over and retry
+        # forever.
+        #
+        # `supervisor/*` and not `agent/*`: `ph.agent` owns that namespace (its
+        # registry declares `agent/status`, `agent/error` and `agent/inbox/*`
+        # with `owner="ph.agent"`), and these are the supervisor's records
+        # *about* an agent rather than the agent's own. `agent/failed` also sat
+        # one letter from `agent/error`, which means something else entirely.
+        "supervisor/retry",
+        "supervisor/failed",
+        "supervisor/recovered",
         "step/end",
         "step/start",
         "tool/call",
@@ -190,6 +205,16 @@ IGNORABLE_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         # Protocol bookkeeping a reader can skip without misreading anything
         # else: the turn it deduplicated is in the log either way.
         "client/command",
+        # Supervisor bookkeeping (P5-04), ignorable on the same terms as
+        # `limits/*`: a reader skipping these loses the *account* of why a root
+        # paused, gave up or came back — which is accounting, not the
+        # conversation, and derives no message. Listed so a build without the
+        # ladder can still seed a log a P5-04 daemon touched, rather than
+        # hard-refusing a whole session over two records carrying no
+        # conversational content.
+        "supervisor/retry",
+        "supervisor/failed",
+        "supervisor/recovered",
         "limits/exceeded",
         "limits/breaker-tripped",
         "workspace/acquired",

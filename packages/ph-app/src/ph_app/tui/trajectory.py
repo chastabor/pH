@@ -364,6 +364,13 @@ HANDLERS: Mapping[str, Handler] = {
     "command/done": _on_harness_event,
     "fs/observed": _on_harness_event,
     "llm/retry": _on_harness_event,
+    # Records, never `RECORDLESS`: a reader that skipped these would find a
+    # transcript resuming mid-thought with no account of why, and a session that
+    # stopped working would look like one that simply went quiet. For an
+    # unattended run that is the whole point of reading the trace.
+    "supervisor/retry": _on_harness_event,
+    "supervisor/failed": _on_harness_event,
+    "supervisor/recovered": _on_harness_event,
     # A record, not `RECORDLESS`: an auditor reading a transcript needs to know
     # where somebody else's work ends and this run's begins, and that the turn
     # above the seam may have been closed by the repair rather than by the model.
