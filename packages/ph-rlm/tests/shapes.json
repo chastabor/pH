@@ -1,0 +1,44 @@
+[
+  {
+    "name": "before-compaction.jsonl",
+    "record_types": {
+      "compaction": 2,
+      "message": 990,
+      "model_change": 5,
+      "session": 1,
+      "thinking_level_change": 5
+    },
+    "roles": {
+      "assistant": 484,
+      "bashExecution": 3,
+      "toolResult": 448,
+      "user": 55
+    },
+    "tool_calls": {
+      "bash": 206,
+      "edit": 125,
+      "read": 107,
+      "write": 16
+    }
+  },
+  {
+    "name": "large-session.jsonl",
+    "record_types": {
+      "message": 914,
+      "model_change": 1,
+      "session": 1,
+      "thinking_level_change": 103
+    },
+    "roles": {
+      "assistant": 453,
+      "toolResult": 373,
+      "user": 88
+    },
+    "tool_calls": {
+      "bash": 192,
+      "edit": 146,
+      "read": 50,
+      "write": 3
+    }
+  }
+]

@@ -23,7 +23,14 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-from fixture_replay import TrajectoryShape, available_fixtures, read_shape
+from fixture_replay import (
+    SHAPES_FILE,
+    TrajectoryShape,
+    available_fixtures,
+    read_shape,
+    recorded_shapes,
+    to_wire,
+)
 
 from ph_app.profiles import resolve_profile
 from ph_rlm.presentation import IPYTHON
@@ -34,13 +41,22 @@ FIXTURE_PATHS = available_fixtures()
 needs_fixtures = pytest.mark.skipif(
     not FIXTURE_PATHS, reason="sources/prime-agent is a vendored checkout, not part of this repo"
 )
+"""For the **one** test that needs the raw corpus: the one asserting the
+committed reduction still describes it. Everything else reads `shapes.json` and
+therefore runs on a clean clone."""
 
 
 @pytest.fixture(scope="module")
 def shapes() -> dict[str, TrajectoryShape]:
-    """Both trajectories, reduced once. 3.3 MB of JSONL is not worth re-parsing
-    per test."""
-    return {shape.name: shape for shape in map(read_shape, FIXTURE_PATHS)}
+    """Both trajectories, from the committed reduction.
+
+    Read from `shapes.json` rather than re-derived, which is what makes this
+    module a guard rather than a developer-local aid: `sources/` has no tracked
+    files, so every assertion here used to skip on every runner and P3-23's
+    claim was enforced nowhere. 780 bytes of our own derivation buys it back
+    without redistributing 1.5 MB of another project's fixtures.
+    """
+    return {shape.name: shape for shape in recorded_shapes()}
 
 
 # ------------------------------------------------------- the vocabulary --
@@ -77,7 +93,6 @@ out, so a person running `ls` today does it outside the session and the log does
 not know. A missing feature, not a porting error."""
 
 
-@needs_fixtures
 def test_every_record_type_has_a_home_here(shapes: dict[str, TrajectoryShape]) -> None:
     """The report's central claim, held against the fixtures that back it."""
     seen = {kind for shape in shapes.values() for kind in shape.record_types}
@@ -88,7 +103,6 @@ def test_every_record_type_has_a_home_here(shapes: dict[str, TrajectoryShape]) -
     assert set(RECORD_TYPES) - seen == set(), "the table maps types no fixture carries"
 
 
-@needs_fixtures
 def test_every_role_is_mapped_or_named_as_a_gap(shapes: dict[str, TrajectoryShape]) -> None:
     """The one genuine capability gap, isolated rather than described.
 
@@ -104,7 +118,6 @@ def test_every_role_is_mapped_or_named_as_a_gap(shapes: dict[str, TrajectoryShap
 # --------------------------------------------------------- the surface --
 
 
-@needs_fixtures
 def test_the_fixtures_are_the_coding_agent_not_the_rlm(shapes: dict[str, TrajectoryShape]) -> None:
     """The first finding, and the one that frames the rest.
 
@@ -121,7 +134,6 @@ def test_the_fixtures_are_the_coding_agent_not_the_rlm(shapes: dict[str, Traject
         assert not any(name.startswith("rlm") for name in shape.tool_calls)
 
 
-@needs_fixtures
 async def test_every_tool_the_fixtures_called_exists_under_the_rlm_profile(
     shipped_profile: Any, shapes: dict[str, TrajectoryShape]
 ) -> None:
@@ -140,7 +152,6 @@ async def test_every_tool_the_fixtures_called_exists_under_the_rlm_profile(
     assert missing == set(), f"prime-agent called tools pH does not offer: {sorted(missing)}"
 
 
-@needs_fixtures
 def test_the_fixtures_carry_the_compaction_case(shapes: dict[str, TrajectoryShape]) -> None:
     """One fixture is named for it, and compaction is the surface operation the
     port models differently (`surface_op: replace`, I4) — so it is worth knowing
@@ -149,3 +160,42 @@ def test_the_fixtures_carry_the_compaction_case(shapes: dict[str, TrajectoryShap
     if before is None:
         pytest.skip("only some fixtures are vendored here")
     assert before.record_types.get("compaction", 0) >= 1
+
+
+# ------------------------------------------- the corpus, where it exists --
+
+
+@needs_fixtures
+def test_the_committed_reduction_still_describes_the_corpus() -> None:
+    """The one test that reads the raw JSONL, and the one that makes the rest honest.
+
+    Everything above asserts against `shapes.json`, so everything above is only
+    worth having if that file still says what the fixtures say. Re-derived here
+    and compared **byte for byte against the serialiser**, not field by field: a
+    hand-written comparison would be a second encoding of the same reduction and
+    would drift from `to_wire` the first time either changed.
+
+    Skipped on a clean clone, which is the trade this split makes on purpose —
+    the guard on pH's surface runs everywhere, and the guard on the *input to*
+    that guard runs wherever the input exists. Regenerate with
+    `python -m fixture_replay` from this directory when a fixture changes.
+    """
+    derived = to_wire([read_shape(path) for path in FIXTURE_PATHS])
+    committed = SHAPES_FILE.read_text(encoding="utf-8")
+    assert derived == committed, (
+        f"{SHAPES_FILE.name} no longer matches the fixtures under "
+        f"{FIXTURE_PATHS[0].parent} — regenerate with `python -m fixture_replay`"
+    )
+
+
+def test_the_reduction_covers_every_fixture_the_reader_knows() -> None:
+    """The committed file names all of them, so a fixture cannot go unreduced.
+
+    Without this, dropping an entry from `shapes.json` would quietly narrow
+    every assertion above to whatever remained, and the corpus test would still
+    pass on a machine that had also lost the fixture. Runs everywhere, because
+    it is a claim about the committed file rather than about the corpus.
+    """
+    from fixture_replay import FIXTURES
+
+    assert [shape.name for shape in recorded_shapes()] == list(FIXTURES)
