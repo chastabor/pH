@@ -180,14 +180,21 @@ def test_socket_identity_tells_removed_apart_from_replaced(tmp_path: Path) -> No
     second one a recovery, when it is two supervisors believing they own this
     user's roots — I-5's hazard, arriving by a door P5-03 does not cover.
 
-    **The replacement is moved into place, not created there**, and that is a
-    correction rather than a flourish. The first version of this test unlinked
-    the path and made a new file at it, which assumes the kernel will not hand
-    the new file the inode the old one just released — and it does, immediately.
-    It passed here and failed on CI, where it was asserting on the allocator
-    rather than on `socket_identity`. Two files that exist at the same moment
-    cannot share an inode, so `os.replace` states the property the test is about
-    instead of hoping for it.
+    **The successor is created while the original is still there.** This test
+    got the ordering wrong twice, and both times the mistake was the same one:
+    an inode number is free for reuse the instant its last name goes, and ext4
+    hands it straight back. Creating the replacement *after* the unlink —
+    whether at the same path or at another one moved into place — lets it
+    inherit the very number under test, so the assertion compares a value with
+    itself. It cannot fail on ZFS, which is what this repository is developed on
+    and which issues object ids monotonically; it fails every time on ext4,
+    which is what CI runs.
+
+    Two names that exist at the same moment cannot share an inode, because that
+    is what a hard link is and `touch` does not make one. So the coexistence is
+    the guarantee, and it is **asserted rather than assumed** below — a premise
+    this test has now been wrong about twice should fail where it is stated, not
+    three lines later where it is used.
     """
     path = tmp_path / "daemon.sock"
     path.touch()
@@ -195,12 +202,14 @@ def test_socket_identity_tells_removed_apart_from_replaced(tmp_path: Path) -> No
     assert bound is not None
     assert socket_identity(path) == bound, "unchanged between two reads"
 
-    path.unlink()
-    assert socket_identity(path) is None, "removed"
-
     successor = tmp_path / "second.sock"
     successor.touch()
     theirs = socket_identity(successor)
+    assert theirs != bound, "two files that coexist cannot share an inode"
+
+    path.unlink()
+    assert socket_identity(path) is None, "removed"
+
     os.replace(successor, path)
     assert socket_identity(path) == theirs
     assert socket_identity(path) != bound, "replaced, and not mistaken for recovered"
