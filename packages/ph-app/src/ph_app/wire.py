@@ -1,16 +1,22 @@
 """Reading the log's plain JSON without a model in the way.
 
-Every reader in the TUI — the transcript adapter, the session lister — sees
-payloads in one of two shapes: **frozen**, when the event is in memory (a
-`MappingProxyType` over tuples), or **plain**, when it was persisted and read
-back (`dict`s over `list`s). The helpers here accept both, and the distinction
-is load-bearing: a reader that tested for `dict` would work on resume and
-silently see nothing live. Phase 1 hit the same trap with `run_code` arguments.
+Every reader of a stored or streamed log — the TUI's transcript adapter and
+session lister, `ph agents attach` — sees payloads in one of two shapes:
+**frozen**, when the event is in memory (a `MappingProxyType` over tuples), or
+**plain**, when it was persisted and read back (`dict`s over `list`s). The
+helpers here accept both, and the distinction is load-bearing: a reader that
+tested for `dict` would work on resume and silently see nothing live. Phase 1
+hit the same trap with `run_code` arguments.
 
 Absence is normal too. The log is JSON, every field is optional to a reader, and
 a missing one must cost a row rather than the transcript.
 
-@module ph_app.tui.wire
+**In `ph_app`, not `ph_app.tui`, since P5-10.** `ph_app.tui.__init__` imports
+the Textual app, so a module under it cannot be read from without paying 278 ms
+of terminal framework — which a headless `ph agents attach` should never do to
+render a line of a log it just received.
+
+@module ph_app.wire
 """
 
 from __future__ import annotations
@@ -19,6 +25,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import Any
 
 __all__ = [
+    "describe",
     "first",
     "index_at_or_before",
     "matches_terms",
@@ -26,6 +33,7 @@ __all__ = [
     "message_of",
     "obj",
     "one_line",
+    "result_block",
     "seq",
     "source_of",
     "text_of_wire",
@@ -83,6 +91,36 @@ def message_of(event: Any) -> Mapping[str, Any]:
     """
     payload = obj(getattr(event, "data", event))
     return obj(payload.get("message")) if "message" in payload else payload
+
+
+def result_block(message: Any) -> Mapping[str, Any]:
+    """The `tool_result` block inside a tool-result message, or an empty one.
+
+    One block carries both the visible text and the error flag, and it sits one
+    level deeper than it looks: the text is `message.content[0].content`, not
+    `message.content`. Three readers already agreed on that hop and a fourth —
+    `ph agents attach` — skipped it, so `text_of_wire` selected `type: "text"`
+    against blocks of `type: "tool-result"` and every tool result followed from
+    a terminal rendered blank. `message_of`'s docstring already names this class
+    of mistake: getting it wrong is silent, so the knowledge lives here.
+    """
+    return first(obj(message).get("content"))
+
+
+def describe(data: Any) -> str:
+    """A one-line `key=value` account of a payload, or `""` when it has none.
+
+    Deliberately generic, which is the whole point: a type this build has no
+    phrase for still gets a readable line, because a view that silently hid an
+    event it did not recognize would be exactly the omission A11 forbids. The
+    auditor's projection has read payloads this way since P3-24; a second reader
+    outside the TUI is what moved it here.
+
+    Read frozen: this builds one truncated line, and deep-copying the payload to
+    iterate its top level was a second full copy of the same tree.
+    """
+    payload = obj(data)
+    return one_line(", ".join(f"{key}={value}" for key, value in payload.items() if value != ""))
 
 
 def source_of(message: Any) -> tuple[str, str, str]:

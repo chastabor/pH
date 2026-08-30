@@ -13,77 +13,22 @@ transport and a fake one would agree with whatever the code did.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Callable
-from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 import anyio
 import pytest
+from daemon_helpers import PROFILE, running
 
-from ph.bundles import BASE, HEADLESS
 from ph.seams.schedule import Schedule
 from ph_app.daemon import DaemonClient, recovery, serve, server
 from ph_app.daemon import supervisor as supervisor_module
+from ph_app.daemon.server import DaemonUnavailable
 from ph_app.daemon.supervisor import Supervisor
 from ph_app.protocol import DaemonError
 
 pytestmark = pytest.mark.anyio
-
-PROFILE = [BASE, HEADLESS]
-
-
-@dataclass(slots=True)
-class _Daemon:
-    """A running supervisor and the socket it answers on."""
-
-    path: Path
-    tasks: Any
-    server: Any = None
-    """The `DaemonServer` behind the socket, for the tests whose subject is the
-    supervisor itself rather than the wire."""
-
-    async def client(self, on_notify: Any = None) -> DaemonClient:
-        client = await DaemonClient.connect(self.path, on_notify)
-        self.tasks.start_soon(client.pump)
-        return client
-
-
-@asynccontextmanager
-async def running(tmp_path: Path, *, name: str = "", **options: Any) -> AsyncIterator[_Daemon]:
-    """A daemon, started and accepting, torn down when the block ends.
-
-    Waits on the `ready` event rather than for the socket file to appear: the
-    path exists before `serve()` is listening, which is exactly the window a
-    poll would land in and the flake a test like this otherwise ships with.
-
-    Teardown is `shutdown` through the socket — the same path a person uses, so
-    every test exercises it — with a cancel behind it only for the tests that
-    fail before they get there.
-    """
-    async with anyio.create_task_group() as tasks:
-        ready = anyio.Event()
-        # `name` is how a test runs *two* daemons over one `$PH_HOME` — the only
-        # way to reach P5-03's question, since `_clear_stale` makes one socket
-        # refuse a second listener before a lease could be asked for. A name
-        # rather than a path, so the socket layout stays this helper's business
-        # and standing up a second daemon changes one line rather than six.
-        path = tmp_path / name / "daemon.sock"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        started: list[Any] = []
-        # `passivate_after=None` by default: the sweeper is a background timer,
-        # and a test that did not ask about passivation should not have one
-        # racing its assertions. P5-05's own tests opt in.
-        options.setdefault("passivate_after", None)
-        tasks.start_soon(
-            lambda: serve(PROFILE, path=path, ready=ready, started=started.append, **options)
-        )
-        await ready.wait()
-        try:
-            yield _Daemon(path=path, tasks=tasks, server=started[0])
-        finally:
-            tasks.cancel_scope.cancel()
 
 
 async def _history(
@@ -213,13 +158,31 @@ async def test_two_roots_are_two_deployments(tmp_path: Path) -> None:
         await client.notify("shutdown")
 
 
+async def test_a_socket_the_kernel_will_not_bind_is_the_same_refusal(tmp_path: Path) -> None:
+    """The other way a daemon cannot start, and it used to be a traceback.
+
+    `AF_UNIX` paths are capped at 107 bytes, so a deep `$PH_RUNTIME` fails at
+    `bind` — which happened *inside* `serve`'s task group, arrived wrapped in an
+    `ExceptionGroup` no `except` clause could see, and reached the person as a
+    full traceback. Binding is a precondition and now sits with the stale-socket
+    check, ahead of the group, under the same named refusal.
+    """
+    deep = tmp_path.joinpath(*["directory"] * 16)
+    deep.mkdir(parents=True)
+    with pytest.raises(DaemonUnavailable, match="cannot listen on"):
+        await serve(PROFILE, path=deep / "daemon.sock")
+
+
 async def test_a_second_daemon_refuses_a_live_socket(tmp_path: Path) -> None:
     """Two supervisors both believing they own this user's roots is I-5's
     question, and taking the socket would answer it wrongly and silently. The
     refusal is this row's; the lease that arbitrates properly is P5-03."""
     async with running(tmp_path) as daemon:
-        with pytest.raises(RuntimeError, match="already listening"):
+        with pytest.raises(DaemonUnavailable, match="already listening") as refusal:
             await serve(PROFILE, path=daemon.path)
+        # Named, because the CLI catches a type: `(RuntimeError, OSError)` is
+        # two builtins wide enough to swallow a `typer.Exit`.
+        assert refusal.value.code == "daemon_unavailable"
 
         client = await daemon.client()
         await client.notify("shutdown")

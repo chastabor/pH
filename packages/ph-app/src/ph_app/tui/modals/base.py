@@ -26,7 +26,7 @@ from textual.content import Content
 from textual.screen import ModalScreen
 from textual.widgets import Button, Input, ListItem, ListView, Static
 
-from ..wire import matches_terms
+from ...wire import matches_terms
 
 __all__ = ["Action", "Choice", "ChoicePicker", "ConfirmModal", "PhModal"]
 

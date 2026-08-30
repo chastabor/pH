@@ -41,6 +41,7 @@ from ph.agent.types import AgentOptions
 from ph.cordis import Context
 from ph.llm.types import create_user_message
 from ph.persistence import resume_session, resumption_of
+from ph.seams.schedule import Schedule, state_to_wire
 from ph.seams.subagents import child_is_live
 from ph.seams.workspace import workspace_of
 from ph.seams.workspace_git import latest_checkpoint, restore
@@ -59,7 +60,19 @@ from .recovery import (
     recovery_of,
 )
 
-__all__ = ["Root", "SessionBusy", "Supervisor"]
+__all__ = ["Root", "ScheduleUnavailable", "SessionBusy", "Supervisor"]
+
+
+class ScheduleUnavailable(Refusal):
+    """This root's profile did not mount the `schedule` seam (P5-06).
+
+    Its own type for `SessionBusy`'s reason: "there is nothing to schedule
+    against here" is a fact about the profile a client can act on — mount the
+    row, or stop asking — and a generic failure would have it guessing whether
+    the schedule was rejected or the id was wrong.
+    """
+
+    code = "schedule_unavailable"
 
 
 class SessionBusy(Refusal):
@@ -301,6 +314,22 @@ class Root:
             "status": self.status,
             "watchers": len(self.subscribers),
             "cursor": cursor_of(self.session),
+        }
+
+    def detail(self) -> dict[str, Any]:
+        """`describe`, plus what a client asking about *one* root wants.
+
+        Here rather than assembled at the wire edge, which is where the two
+        recovery fields were read from: a root's client-facing projection split
+        across two files is how `sessions/list` and `session/status` come to use
+        different names for the same object. `status` already collapses the
+        ladder to `"retrying"` or `"failed"`, and this is where the rungs behind
+        that answer are — so a new one is added once.
+        """
+        return {
+            **self.describe(),
+            "attempts": self.recovery.attempts,
+            "failed": self.recovery.failed,
         }
 
 
@@ -635,6 +664,55 @@ class Supervisor:
                 root.retry(reason=error_message(error), restored=restored)
                 await self._flush(root)
                 await anyio.sleep(state.delay)
+
+    def _schedule_seam(self, root: Root) -> Any:
+        """This root's schedule seam, or a refusal naming why there is none.
+
+        The read `_live_schedules` does quietly — a `None` seam means "no
+        schedules", which is the right answer for a *tick* — is the wrong answer
+        for a person who just asked to create one: they would get a silent
+        success and a schedule that never fires.
+        """
+        seam = root.ctx.get("schedule")
+        if seam is None:
+            raise ScheduleUnavailable(f'root "{root.id}" has no schedule seam mounted')
+        return seam
+
+    async def schedule(self, root_id: str, entry: Schedule) -> Schedule:
+        """Record a schedule on a root, bringing it up if it is not running.
+
+        Through `start`, like `prompt` and `session/attach`, and for a sharper
+        reason than either: `tick` only fires schedules on *mounted* roots, so
+        scheduling against a passivated one and leaving it passivated would
+        write a schedule that can never come due. A root with a live schedule is
+        also one `passivatable` refuses to release, so bringing it up is what
+        keeps it up.
+
+        Flushed before returning, for `tick`'s reason: a schedule that exists
+        only in a buffer is one a daemon restart silently forgets, and the whole
+        point of recording it is that nobody has to remember.
+        """
+        root = await self.start(root_id)
+        created: Schedule = self._schedule_seam(root).create(root.session, entry)
+        await self._flush(root)
+        return created
+
+    async def unschedule(self, root_id: str, schedule_id: str) -> bool:
+        """Cancel a schedule. `False` when this log never knew that id."""
+        root = await self.start(root_id)
+        cancelled: bool = self._schedule_seam(root).cancel(root.session, schedule_id)
+        if cancelled:
+            await self._flush(root)
+        return cancelled
+
+    def scheduled(self, root: Root) -> list[dict[str, Any]]:
+        """What is still going to fire on this root, and when.
+
+        One stamp for the whole listing, so two schedules read in the same call
+        agree about when "now" was — the same rule `tick` states for a pass.
+        """
+        stamp = now_ms()
+        return [state_to_wire(state, now=stamp) for state in self._live_schedules(root)]
 
     def _live_schedules(self, root: Root) -> list[Any]:
         """This root's schedules that could still fire, or an empty list.

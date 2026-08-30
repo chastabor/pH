@@ -34,7 +34,7 @@ from typing import Any, Literal, TypeAlias
 from ph.session import Session, SessionEvent, fork_boundaries, is_replacement_surface_event
 from ph.session.request_header import parse_request_header
 
-from .wire import first, message_of, obj, one_line, source_of, text_of_wire
+from ..wire import describe, message_of, obj, one_line, result_block, source_of, text_of_wire
 
 __all__ = [
     "HANDLERS",
@@ -251,7 +251,7 @@ class _Builder:
 
     def on_tool_result(self, event: SessionEvent) -> None:
         message = obj(event.data.get("message"))
-        result = first(message.get("content"))
+        result = result_block(message)
         _kind, call_id, _form = source_of(message)
         text = _text(result.get("content"))
         self.add(
@@ -452,13 +452,9 @@ def build_trajectory(session: Session) -> list[TrajectoryRecord]:
 def _describe(event: SessionEvent) -> str:
     """A one-line account of a harness event, from its own payload.
 
-    Deliberately generic: a type this build does not have a phrase for still
-    gets a readable row, because an auditor's view that hid an event it did not
-    recognize would be exactly the silent omission A11 forbids.
+    The generic reading itself now lives in `ph_app.wire`, because `ph agents
+    attach` needs the same fallback for the same reason and cannot import
+    anything under `ph_app.tui` without paying for Textual. What stays here is
+    the type name, which is this view's answer for a payload with nothing in it.
     """
-    data = obj(event.data)
-    if not data:
-        return event.type
-    # Read frozen: this builds one truncated line, and deep-copying the payload
-    # to iterate its top level was the second full copy of the same tree.
-    return one_line(", ".join(f"{key}={value}" for key, value in data.items() if value != ""))
+    return describe(event.data) or event.type

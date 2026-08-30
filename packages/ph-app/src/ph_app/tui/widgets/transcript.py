@@ -35,8 +35,8 @@ from textual.widgets.markdown import MarkdownStream
 
 from ph.text import count_of
 
+from ...wire import index_at_or_before
 from ..state import ChatItem, ToolCard
-from ..wire import index_at_or_before
 
 __all__ = [
     "CodeCellWidget",

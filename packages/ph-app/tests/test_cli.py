@@ -38,6 +38,27 @@ def test_dump_config_shows_the_composed_rows() -> None:
     assert fake["layer"].endswith("headless.yaml")
 
 
+def test_machine_readable_output_stays_parseable_under_force_color(monkeypatch: Any) -> None:
+    """`--dump-config` and `ph events --json` are documents, not prose.
+
+    Rich decides colour from the environment, and `FORCE_COLOR` is set by CI
+    images and by plenty of shells — so both commands were emitting ANSI escapes
+    into their own machine-readable output, and `yaml.safe_load` refused it with
+    "unacceptable character #x001b". A person piping `ph --dump-config` into a
+    parser got that, not a diagnosis.
+    """
+    monkeypatch.setenv("FORCE_COLOR", "3")
+    dumped = runner.invoke(app, ["--dump-config", "--profile", "headless"])
+    assert dumped.exit_code == 0, dumped.output
+    assert "\x1b" not in dumped.stdout
+    assert yaml.safe_load(dumped.stdout)
+
+    matrix = runner.invoke(app, ["events", "--json"])
+    assert matrix.exit_code == 0, matrix.output
+    assert "\x1b" not in matrix.stdout
+    assert json.loads(matrix.stdout)
+
+
 def test_unknown_profile_is_refused() -> None:
     result = runner.invoke(app, ["--dump-config", "--profile", "nonesuch"])
     assert result.exit_code == 2

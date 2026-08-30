@@ -13,6 +13,10 @@ only mode that takes no `--print`, because the prompt is the interface.
 three resolved path roots, and `ph events` the producer/consumer matrix
 generated from the declaration registry rather than hand-maintained.
 
+`ph daemon` runs the supervisor and `ph agents` is the client that talks to it —
+the two halves of Phase 5, and the only pair here where the thing you are
+addressing is a process rather than this one.
+
 @module ph_app.cli
 """
 
@@ -28,14 +32,15 @@ from typing import Annotated, Any, Literal, TypeAlias
 import anyio
 import typer
 import yaml
-from rich.console import Console
 from rich.table import Table
 
 from ph.cordis import Loader, import_plugin_modules
 from ph.cordis.events import events as event_registry
 from ph.paths import RuntimeDirError, resolve_roots
 
+from .agents import agents_app
 from .attach import AttachmentUnavailable
+from .console import console, emit, err, fail
 from .daemon.recovery import PASSIVATE_AFTER
 from .modes import run_json, run_print, run_rpc, run_transcript
 from .profiles import available_profiles, resolve_profile
@@ -50,8 +55,11 @@ app = typer.Typer(
     no_args_is_help=False,
     invoke_without_command=True,
 )
-console = Console()
-err = Console(stderr=True)
+# The client half of the daemon, as its own group (P5-10). A sub-app rather
+# than seven top-level commands, because every one of them means the same thing
+# — "ask the supervisor" — and a person who has not started one should find that
+# out from one place.
+app.add_typer(agents_app, name="agents")
 
 DEFAULT_PROFILE = "headless"
 
@@ -72,8 +80,7 @@ def _documents(profile: str) -> list[Path]:
     try:
         return resolve_profile(profile)
     except ValueError as error:
-        err.print(f"[red]{error}[/red]")
-        raise typer.Exit(code=2) from error
+        fail(f"[red]{error}[/red]", code=2, cause=error)
 
 
 OutputMode = Literal["text", "json", "transcript", "rpc", "tui", "trajectory"]
@@ -129,9 +136,7 @@ def default(
 
     if dump_config:
         loader = Loader.from_paths(documents)
-        console.print(
-            yaml.safe_dump(loader.dump(), sort_keys=False, default_flow_style=False).rstrip()
-        )
+        emit(yaml.safe_dump(loader.dump(), sort_keys=False, default_flow_style=False).rstrip())
         return
 
     if mode == "trajectory":
@@ -139,15 +144,13 @@ def default(
         # nothing — no agent, no provider, no answerers — because the logs worth
         # auditing are the ones nobody can reopen (P3-25).
         if session_id is None:
-            err.print("[red]--mode trajectory needs --session <id|path>[/red]")
-            raise typer.Exit(code=2)
+            fail("[red]--mode trajectory needs --session <id|path>[/red]", code=2)
         from .tui.trajectory_app import run_trajectory
 
         try:
             anyio.run(partial(run_trajectory, session_id))
         except (OSError, ValueError) as error:
-            err.print(f"[red]{error}[/red]")
-            raise typer.Exit(code=2) from error
+            fail(f"[red]{error}[/red]", code=2, cause=error)
         return
 
     if mode == "rpc":
@@ -191,8 +194,7 @@ def default(
         # A file that cannot be read fails the *command*: `prompted` ingests
         # before the agent exists, so nothing was logged and there is no partial
         # turn to explain.
-        err.print(f"[red]{error}[/red]")
-        raise typer.Exit(code=2) from error
+        fail(f"[red]{error}[/red]", code=2, cause=error)
 
     if mode == "json":
         # Already written, event by event, as each committed.
@@ -227,8 +229,7 @@ def doctor(profile: ProfileOption = DEFAULT_PROFILE) -> None:
     try:
         roots = resolve_roots()
     except RuntimeDirError as error:
-        err.print(f"[red]$PH_RUNTIME check failed:[/red] {error}")
-        raise typer.Exit(code=1) from error
+        fail(f"[red]$PH_RUNTIME check failed:[/red] {error}", cause=error)
     table = Table(title="pH path roots", show_header=True, header_style="bold")
     table.add_column("root")
     table.add_column("resolved")
@@ -254,8 +255,7 @@ def doctor(profile: ProfileOption = DEFAULT_PROFILE) -> None:
         # host with no sandbox backend is exactly that (E8) — and a person who
         # ran the command *because* the process will not start is owed the
         # sentence rather than a traceback. The exit code says it failed.
-        err.print(f"[red]profile {profile!r} does not mount:[/red] {error}")
-        raise typer.Exit(code=1) from error
+        fail(f"[red]profile {profile!r} does not mount:[/red] {error}", cause=error)
 
     console.print(f"\n[bold]profile:[/bold] {profile}")
     for title, rows in sections:
@@ -317,9 +317,13 @@ def daemon(
     live one is refused rather than stolen.
     """
     from .daemon import serve
+    from .daemon.server import DaemonUnavailable
 
     documents = _documents(profile)
-    socket_path = resolve_roots().ensure().daemon_socket()
+    try:
+        socket_path = resolve_roots().ensure().daemon_socket()
+    except RuntimeDirError as error:
+        fail(f"[red]$PH_RUNTIME check failed:[/red] {error}", cause=error)
     err.print(f"[dim]listening on {socket_path}[/dim]")
     try:
         # The path that was printed, not a second resolution of it: a message
@@ -335,9 +339,12 @@ def daemon(
                 path=socket_path,
             )
         )
-    except RuntimeError as error:
-        err.print(f"[red]{error}[/red]")
-        raise typer.Exit(code=1) from error
+    except DaemonUnavailable as error:
+        # One named type rather than `(RuntimeError, OSError)`, which is two
+        # builtins wide enough to swallow a `typer.Exit` — it subclasses
+        # `RuntimeError`, and the comment in `doctor` above records this file
+        # having been bitten by that already.
+        fail(f"[red]{error}[/red]", cause=error)
 
 
 @app.command()
@@ -352,7 +359,7 @@ def events(as_json: Annotated[bool, typer.Option("--json", help="Emit JSON.")] =
     import_plugin_modules()
     matrix = event_registry.matrix()
     if as_json:
-        console.print_json(json.dumps(matrix))
+        emit(json.dumps(matrix, indent=2))
         return
     table = Table(show_header=True, header_style="bold")
     table.add_column("event")

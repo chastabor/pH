@@ -29,8 +29,8 @@ from textual.content import Content
 from textual.timer import Timer
 from textual.widgets import DataTable, Input, Static
 
+from ...wire import index_at_or_before, matches_terms
 from ..trajectory import TrajectoryRecord
-from ..wire import index_at_or_before, matches_terms
 
 __all__ = ["FORK_MARK", "TrajectoryPanel", "matches", "search_index"]
 

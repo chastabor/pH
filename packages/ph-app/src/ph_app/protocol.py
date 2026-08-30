@@ -29,6 +29,7 @@ __all__ = [
     "PROTOCOL_VERSION",
     "SNAPSHOT_EVENTS",
     "DaemonError",
+    "DaemonGone",
     "Dispatch",
     "Refusal",
     "capabilities",
@@ -101,6 +102,21 @@ class DaemonError(RuntimeError):
         data = error.get("data")
         reason = data.get("reason", "") if isinstance(data, dict) else ""
         return cls(str(error.get("message", "the daemon refused")), str(reason))
+
+
+class DaemonGone(DaemonError):
+    """The connection ended without an answer. Nobody refused anything.
+
+    A subclass, so a caller that only wants "the call did not succeed" still
+    catches `DaemonError` — and a distinct type, because the two are opposite
+    diagnoses and a client renders them differently. Reported as a refusal, the
+    message read "the daemon refused: the daemon closed the connection", which
+    is precisely the confusion `ph agents`' absent-socket / stale-socket split
+    exists to prevent.
+    """
+
+    def __init__(self, message: str = "the daemon closed the connection") -> None:
+        super().__init__(message, "connection_closed")
 
 
 def capabilities(*names: str) -> dict[str, Any]:

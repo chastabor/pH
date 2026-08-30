@@ -29,6 +29,8 @@ from anyio.abc import ByteStream
 
 from ph.paths import resolve_roots
 from ph.resources import GRACE_SECONDS
+from ph.seams.schedule import Schedule
+from ph.session import now_ms
 
 from ..protocol import (
     SNAPSHOT_EVENTS,
@@ -66,6 +68,29 @@ and a minute of slack on "run at 09:00" is a minute somebody notices."""
 
 SWEEP_EVERY = 60.0
 """How often the passivation sweep runs. A coarse tick, not a second timeout."""
+
+CAPABILITIES = ("roots", "attach", "cursors", "snapshots")
+"""What this transport adds to the two both of them have.
+
+A constant because two callers say it now — `initialize`, and the `daemon/status`
+a client runs when it wants to know what it is talking to — and a capability
+block that disagreed with itself depending on which method you asked would be
+worse than having none.
+"""
+
+
+class DaemonUnavailable(Refusal):
+    """This daemon cannot take its socket, and the reason is worth a sentence.
+
+    One type over both startup preconditions — a socket another daemon is
+    listening on, and one the kernel will not bind (a `$PH_RUNTIME` past
+    `AF_UNIX`'s 107-byte path limit, a directory this user cannot write). The
+    CLI caught `(RuntimeError, OSError)` for them, which is two builtins wide
+    enough to swallow a `typer.Exit` — `typer.Exit` subclasses `RuntimeError`,
+    and `cli.py` already carries a comment about being bitten by exactly that.
+    """
+
+    code = "daemon_unavailable"
 
 
 class UnknownMethod(Refusal):
@@ -160,7 +185,7 @@ class _Connection:
         """
         supervisor = self.server.supervisor
         if method in ("initialize", "daemon/hello"):
-            return capabilities("roots", "attach", "cursors", "snapshots")
+            return capabilities(*CAPABILITIES)
         if method == "sessions/list":
             return {"sessions": supervisor.describe()}
         if method == "session/new":
@@ -185,10 +210,36 @@ class _Connection:
             return self._attach(
                 await supervisor.start(str(params["sessionId"])), params.get("cursor")
             )
+        if method == "session/status":
+            return self._status(str(params["sessionId"]))
         if method == "session/detach":
             return self._detach(str(params["sessionId"]))
         if method == "session/snapshot":
             return self._snapshot(str(params["sessionId"]), params.get("cursor"))
+        # The schedule seam over the wire (P5-06, P5-10). Create and cancel go
+        # through the supervisor rather than the seam directly: both need the
+        # root mounted and the append flushed, and a schedule that lives only in
+        # a buffer is one a restart forgets.
+        if method == "schedule/create":
+            created = await supervisor.schedule(
+                str(params["sessionId"]),
+                Schedule(
+                    id=str(params["scheduleId"]),
+                    kind=params["kind"],
+                    spec=str(params["spec"]),
+                    prompt=str(params["prompt"]),
+                ),
+            )
+            return created.to_wire()
+        if method == "schedule/cancel":
+            session_id, schedule_id = str(params["sessionId"]), str(params["scheduleId"])
+            cancelled = await supervisor.unschedule(session_id, schedule_id)
+            return {"sessionId": session_id, "scheduleId": schedule_id, "cancelled": cancelled}
+        if method == "schedule/list":
+            root = self._root(str(params["sessionId"]))
+            return {"sessionId": root.id, "schedules": supervisor.scheduled(root)}
+        if method == "daemon/status":
+            return self.server.status()
         if method == "shutdown":
             # Actually stops it, and takes no id by contract: a client awaiting
             # a reply would be waiting on a frame the daemon is concurrently
@@ -248,6 +299,18 @@ class _Connection:
             "more": start + len(events) < root.session.seq,
         }
 
+    def _status(self, session_id: str) -> dict[str, Any]:
+        """One root in detail — what `sessions/list` says, and why it says it.
+
+        The listing carries what a table needs for every root; this carries what
+        a person asks about *one*. The retry ladder is the reason it exists:
+        `status` collapses to `"retrying"` or `"failed"`, and the two questions
+        that follow — how many attempts, and what is still going to fire — have
+        no other way to be asked.
+        """
+        root = self._root(session_id)
+        return {**root.detail(), "schedules": self.server.supervisor.scheduled(root)}
+
     def _detach(self, session_id: str) -> dict[str, Any]:
         was_attached = session_id in self.attached
         self.attached.discard(session_id)
@@ -266,6 +329,45 @@ class DaemonServer:
 
     supervisor: Supervisor
     stop: anyio.Event
+    path: Path
+    """The socket this is answering on, so `daemon/status` can say so.
+
+    A client resolves the same path to connect, but "which socket am I actually
+    talking to" is the first question anyone debugging two daemons asks, and an
+    answer derived a second time on the client side would agree with the server
+    by assumption rather than by evidence."""
+    tick_every: float = TICK_EVERY
+    sweep_every: float = SWEEP_EVERY
+    heartbeat_every: float = HEARTBEAT_EVERY
+    """The three cadences, named rather than a tuple: `serve` already threads
+    them past each other positionally into `start_soon`, and this is the one
+    place they are read back by a person."""
+    started: int = field(default_factory=now_ms)
+    """When this daemon came up, for the uptime a status reply carries."""
+
+    def status(self) -> dict[str, Any]:
+        """What this daemon is, for `ph agents doctor`.
+
+        Everything here is read from the running process rather than re-derived
+        by the client: the socket it bound, the policy it was started with, the
+        cadences it is actually running. A doctor that reported what the *client*
+        would have chosen would agree with a daemon started differently and say
+        nothing at all.
+        """
+        supervisor = self.supervisor
+        return {
+            **capabilities(*CAPABILITIES),
+            "pid": os.getpid(),
+            "socket": str(self.path),
+            "uptimeMs": now_ms() - self.started,
+            "roots": len(supervisor.roots),
+            "provider": supervisor.provider,
+            "model": supervisor.model,
+            "passivateAfter": supervisor.passivate_after,
+            "tickEvery": self.tick_every,
+            "sweepEvery": self.sweep_every,
+            "heartbeatEvery": self.heartbeat_every,
+        }
 
     async def _handle(self, stream: ByteStream) -> None:
         async with stream:
@@ -315,7 +417,7 @@ async def _clear_stale(path: Path) -> None:
         path.unlink(missing_ok=True)
         return
     await stream.aclose()
-    raise RuntimeError(f"a daemon is already listening on {path}")
+    raise DaemonUnavailable(f"a daemon is already listening on {path}")
 
 
 async def serve(
@@ -340,6 +442,20 @@ async def serve(
     """
     socket_path = path or resolve_roots().ensure().daemon_socket()
     await _clear_stale(socket_path)
+    # Bound *before* the task group, beside the stale check it belongs with:
+    # binding is a precondition, and a precondition that fails inside a group
+    # comes back wrapped in an `ExceptionGroup` that `ph daemon`'s `except`
+    # cannot see. A `$PH_RUNTIME` deep enough to exceed `AF_UNIX`'s 107-byte
+    # path limit printed a full traceback for exactly that reason. Nothing has
+    # been built yet at this point, so there is nothing for the teardown below
+    # to have cleaned up either.
+    try:
+        listener = await anyio.create_unix_listener(socket_path)
+        # The socket carries every command this user's agents will take, so it
+        # is theirs alone — the same reasoning `$PH_RUNTIME` is 0o700 for.
+        os.chmod(socket_path, 0o600)
+    except OSError as error:
+        raise DaemonUnavailable(f"cannot listen on {socket_path}: {error}") from error
     async with anyio.create_task_group() as tasks:
         # Built inside the group so `tasks` is a required field rather than an
         # Optional with a "not serving" guard: a supervisor that cannot start a
@@ -352,11 +468,14 @@ async def serve(
             passivate_after=passivate_after,
         )
         try:
-            listener = await anyio.create_unix_listener(socket_path)
-            # The socket carries every command this user's agents will take, so
-            # it is theirs alone — the same reasoning `$PH_RUNTIME` is 0o700 for.
-            os.chmod(socket_path, 0o600)
-            server = DaemonServer(supervisor=supervisor, stop=anyio.Event())
+            server = DaemonServer(
+                supervisor=supervisor,
+                stop=anyio.Event(),
+                path=socket_path,
+                tick_every=tick_every,
+                sweep_every=sweep_every,
+                heartbeat_every=heartbeat_every,
+            )
             # Three cadences, three tasks, one primitive. The heartbeat used to
             # ride the ticker on a counter that only advanced when a tick
             # *succeeded*, so a run of failing ticks starved the liveness record

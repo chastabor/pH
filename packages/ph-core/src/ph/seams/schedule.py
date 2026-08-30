@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any, Literal, TypeAlias
 
 from ..cordis import Context, plugin
@@ -53,7 +54,9 @@ __all__ = [
     "ScheduleState",
     "apply",
     "due_at",
+    "next_at",
     "schedules",
+    "state_to_wire",
 ]
 
 log = logging.getLogger("ph.seams.schedule")
@@ -192,6 +195,98 @@ def due_at(state: ScheduleState, *, now: int) -> int | None:
     return _last_cron_before(schedule.spec, after=anchor, now=now)
 
 
+def state_to_wire(state: ScheduleState, *, now: int) -> dict[str, Any]:
+    """One schedule as a client is told about it — the fold's own projection.
+
+    Here rather than in the daemon that first needed it, for the reason
+    `cursor_of` gives for not living on the daemon's `Root`: this is a fact
+    about a *schedule*, and every transport serves the same one. `schedule` is a
+    `base.yaml` row, so a stdio session has schedules too, and the moment a
+    second front end lists them (P5-14, P5-15) `createdAt`/`lastTick`/`nextAt`
+    would be spelled twice with nothing able to see them disagree. The sibling
+    seam already settled the shape: `subagent_roster` returns the wire-shaped
+    fold from here, not from its caller.
+
+    `nextAt` is computed rather than stored, because it is derived from the
+    anchor and the spec and a second carrier is a second answer (A11). `None`
+    means nothing further — a `once` that has fired, or a cron whose expression
+    no longer yields.
+    """
+    return {
+        **state.schedule.to_wire(),
+        "createdAt": state.created_at,
+        "lastTick": state.last_tick,
+        "nextAt": next_at(state, now=now),
+    }
+
+
+def next_at(state: ScheduleState, *, now: int) -> int | None:
+    """When this schedule will next fire, or `None` if it never will again.
+
+    The forward-looking twin of `due_at`, and deliberately a second function
+    rather than a sign on the first: `due_at` answers "should this fire *now*,
+    and for which missed moment", which is what the tick needs and the opposite
+    of what a person reading `ph agents schedule` wants. One function answering
+    both would have every caller branching on which question it got back.
+
+    An overdue schedule answers with the moment it is overdue *for*, not with a
+    later one: the next tick claims exactly that, and reporting a time an hour
+    out for work about to run in five seconds is the small lie a listing exists
+    to prevent.
+    """
+    if state.cancelled:
+        return None
+    overdue = due_at(state, now=now)
+    if overdue is not None:
+        return overdue
+    schedule = state.schedule
+    if schedule.kind == "once":
+        # Not `due_at`'s `None`, which conflates "already fired" with "not yet":
+        # a `once` that has never ticked still has a future, and it is its spec.
+        return None if state.last_tick is not None else _int(schedule.spec)
+    if schedule.kind == "interval":
+        every = _int(schedule.spec)
+        return None if every is None or every <= 0 else state.anchor + every
+    return _next_cron_after(schedule.spec, now=now)
+
+
+def _next_cron_after(spec: str, *, now: int) -> int | None:
+    """The first cron moment after `now`, or `None` if the expression is unusable.
+
+    Lazy `croniter` for `_last_cron_before`'s measured reason, and the same
+    refusal shape: an expression nobody can parse is logged and declines, so a
+    listing loses one row rather than the command.
+    """
+    from croniter import croniter
+
+    try:
+        moment: datetime = croniter(spec, _local(now)).get_next(datetime)
+    except (ValueError, KeyError) as error:
+        log.warning("ph.seams.schedule: unusable cron %r (%s)", spec, error)
+        return None
+    return int(moment.timestamp() * 1000)
+
+
+def _local(moment: int) -> datetime:
+    """An epoch-ms instant as this machine's naive wall-clock time.
+
+    **Cron expressions are local, which croniter only does if you ask in
+    datetimes.** Handed a float it works in UTC, handed a naive datetime it
+    works in the machine's zone — the same expression meaning two different
+    things depending on the argument type, which is an accident of the library
+    rather than a decision. `0 9 * * *` was firing at 09:00 UTC, so a person on
+    US Central who wrote "nine in the morning" got four in the morning, and
+    nothing said so; `ph agents schedule` printing the next fire time is what
+    made it visible.
+
+    Local, because that is what every crontab a person has ever written means
+    and there is nowhere on this wire to say otherwise. The cost is the one
+    every local cron has: an hour that repeats or does not exist at a DST
+    boundary resolves by `datetime.timestamp()`'s rule rather than by ours.
+    """
+    return datetime.fromtimestamp(moment / 1000)
+
+
 def _last_cron_before(spec: str, *, after: int, now: int) -> int | None:
     """The newest cron moment in `(after, now]`, or `None`.
 
@@ -218,10 +313,11 @@ def _last_cron_before(spec: str, *, after: int, now: int) -> int | None:
         # cron boundary — the schedule then fires a tick late, every time. The
         # walk this replaced included that moment, so the offset keeps the two
         # equivalent.
-        moment = int(croniter(spec, (now + 1) / 1000).get_prev(float) * 1000)
+        found: datetime = croniter(spec, _local(now + 1)).get_prev(datetime)
     except (ValueError, KeyError) as error:
         log.warning("ph.seams.schedule: unusable cron %r (%s)", spec, error)
         return None
+    moment = int(found.timestamp() * 1000)
     return moment if moment > after else None
 
 
@@ -270,8 +366,17 @@ class ScheduleService:
         return schedule
 
     def cancel(self, session: Session, schedule_id: str) -> bool:
-        """Record a cancellation. `False` if this log never knew that id."""
-        if schedule_id not in self.states(session):
+        """Record a cancellation. `False` when there was nothing to cancel.
+
+        Nothing to cancel covers both an id this log never knew *and* one it
+        already cancelled — the fold keeps cancelled schedules visible
+        (`subagent_roster`'s reason), so the second case would otherwise report
+        success and append a redundant `schedule/cancelled` on every retry. To a
+        person running `ph agents schedule --cancel` twice, "cancelled" the
+        second time is a claim about work that was already stopped.
+        """
+        state = self.states(session).get(schedule_id)
+        if state is None or state.cancelled:
             return False
         session.append(CANCELLED, {"id": schedule_id})
         return True

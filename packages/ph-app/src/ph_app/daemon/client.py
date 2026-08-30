@@ -19,7 +19,7 @@ from typing import Any
 import anyio
 from anyio.abc import ByteStream
 
-from ..protocol import DaemonError, notification, request
+from ..protocol import DaemonError, DaemonGone, notification, request
 from .framing import read_frames, write_frame
 
 __all__ = ["DaemonClient"]
@@ -36,6 +36,18 @@ class DaemonClient:
     id: str = field(default_factory=lambda: f"client-{secrets.token_hex(6)}")
     """This connection's identity, for idempotence. Minted rather than asked
     for: a caller that had to supply one would supply the same one twice."""
+    closed: anyio.Event = field(default_factory=anyio.Event)
+    """Set when the pump stops, whichever end ended it.
+
+    "The daemon went away" is a thing a client has to be able to *wait for*,
+    not only notice: `ph agents shutdown` sends a notification by contract —
+    no id, so no reply — and the only honest confirmation that it landed is
+    the connection the daemon closes on its way out. Polling for the socket
+    file to vanish would answer a different question a beat later.
+
+    Constructed here rather than in `connect` because every construction path
+    is already inside a running event loop, which `anyio.Event()` requires.
+    """
     _commands: int = 0
     _next_id: int = 0
     _replies: dict[int, dict[str, Any]] = field(default_factory=dict)
@@ -57,6 +69,19 @@ class DaemonClient:
             await self._pump()
         except (anyio.ClosedResourceError, anyio.BrokenResourceError, anyio.EndOfStream):
             return
+        finally:
+            # In `finally`, so a caller waiting on `closed` is woken by a
+            # cancellation and a crash as well as by an orderly end. A wait that
+            # only completes on the happy path is a hang wearing a timeout.
+            self.closed.set()
+            # And everyone waiting on a reply that is now never coming. Nothing
+            # else can wake them: the event a `call` waits on is set by the pump
+            # reading its frame, so a connection that ends mid-request left every
+            # in-flight caller parked forever — `ph agents attach` detaching from
+            # a daemon that just shut down hit exactly that.
+            for waiting in self._events.values():
+                waiting.set()
+            self._events.clear()
 
     async def _pump(self) -> None:
         async for frame in read_frames(self.stream):
@@ -97,6 +122,12 @@ class DaemonClient:
         await write_frame(self.stream, request(request_id, method, params))
         await waiting.wait()
         frame = self._replies.pop(request_id, {})
+        if not frame:
+            # Woken by the pump ending rather than by an answer. Named, rather
+            # than the empty `{}` this used to return, which every caller then
+            # read as a successful reply with no fields in it — and named as a
+            # *disconnection*, because no server said no.
+            raise DaemonGone
         if "error" in frame:
             raise DaemonError.of(frame["error"])
         result: dict[str, Any] = frame.get("result") or {}

@@ -46,8 +46,8 @@ from ph.session.request_header import parse_request_context
 from ph.text import count_of
 from ph.tools import ToolResult, ToolResultView, parse_arguments
 
+from ..wire import media_labels, obj, one_line, result_block, seq, text_of_wire
 from .state import ChatItem, ItemRole, ToolCard, TuiState
-from .wire import first, media_labels, obj, one_line, seq, text_of_wire
 
 __all__ = ["HANDLERS", "RECORDLESS", "TuiEventAdapter"]
 
@@ -256,7 +256,7 @@ class TuiEventAdapter:
         call_id = str(obj(message.get("source")).get("callId"))
         # One `tool_result` block carries both the text and the error flag; read
         # it once rather than indexing the content twice.
-        result = first(message.get("content"))
+        result = result_block(message)
         body = text_of_wire(result.get("content"))
         card = self.state.card(call_id)
         if card is None:

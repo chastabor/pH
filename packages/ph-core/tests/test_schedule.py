@@ -7,6 +7,12 @@ hours passing.
 
 from __future__ import annotations
 
+import os
+import time
+from collections.abc import Iterator
+from contextlib import contextmanager
+from datetime import UTC, datetime
+
 import pytest
 
 from ph.seams.schedule import (
@@ -15,12 +21,34 @@ from ph.seams.schedule import (
     Schedule,
     ScheduleService,
     due_at,
+    next_at,
     schedules,
 )
 from ph.session import Session, now_ms
 
 MINUTE = 60_000
 HOUR = 60 * MINUTE
+
+
+@contextmanager
+def _in_timezone(name: str) -> Iterator[None]:
+    """Run a block as if this machine were somewhere else.
+
+    `time.tzset()` rather than `$TZ` alone: `datetime.fromtimestamp` reads the C
+    library's cached zone, not the environment, so setting the variable without
+    the reset changes nothing and the test passes for no reason.
+    """
+    previous = os.environ.get("TZ")
+    os.environ["TZ"] = name
+    time.tzset()
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = previous
+        time.tzset()
 
 
 def _sched(kind: str, spec: str) -> tuple[Session, ScheduleService, int]:
@@ -178,6 +206,34 @@ def test_a_cancelled_schedule_stops_firing_and_stays_visible() -> None:
     assert [event.type for event in session.events_from(0)].count(CANCELLED) == 1
 
     assert service.cancel(session, "never-existed") is False
+    # And cancelling twice is not a second cancellation: the fold keeps a
+    # cancelled schedule visible, so a membership test alone would report
+    # success and append a redundant record on every retry.
+    before = session.seq
+    assert service.cancel(session, "s1") is False
+    assert session.seq == before
+
+
+def test_a_cron_hour_is_the_hour_on_this_machine_s_clock() -> None:
+    """`0 9 * * *` is nine in the morning where the person who wrote it is.
+
+    croniter reads a *float* start time as UTC and a naive *datetime* as local,
+    so the same expression meant two different things depending on which the
+    caller happened to pass — and this seam passed floats. `0 9 * * *` fired at
+    09:00 UTC, which is four in the morning on US Central, with nothing on the
+    wire or in the listing to say so.
+
+    Pinned under a fixed zone rather than the machine's, because on a UTC
+    builder the two readings agree and the test would pass either way.
+    """
+    with _in_timezone("America/Chicago"):
+        session, service, made = _sched("cron", "0 9 * * *")
+        state = service.states(session)["s1"]
+        moment = next_at(state, now=made)
+        assert moment is not None
+        local = datetime.fromtimestamp(moment / 1000)
+        assert local.hour == 9, f"fired at {local}, not nine in the morning"
+        assert datetime.fromtimestamp(moment / 1000, UTC).hour != 9, "read as UTC"
 
 
 def test_an_unusable_cron_declines_rather_than_raising() -> None:

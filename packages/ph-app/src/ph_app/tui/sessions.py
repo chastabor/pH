@@ -23,7 +23,7 @@ from pydantic import ValidationError
 from ph.persistence.jsonl import HEADER_LINE_TYPE
 from ph.session import SessionHeader
 
-from .wire import obj, text_of_wire
+from ..wire import obj, text_of_wire
 
 __all__ = ["SessionSummary", "session_summaries"]
 
