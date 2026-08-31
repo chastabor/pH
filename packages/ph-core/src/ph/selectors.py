@@ -177,7 +177,7 @@ def parse_all(patterns: Iterable[str], *, vocabulary: Scheme) -> list[Selector]:
     conclude there are none.
     """
     selectors = [parse(pattern, scheme=vocabulary) for pattern in patterns]
-    foreign = []
+    foreign = [one for one in selectors if one.scheme != vocabulary]
     if foreign:
         raise SelectorError(
             f"{', '.join(str(one) for one in foreign)}: this view does not serve that "
