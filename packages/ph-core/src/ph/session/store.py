@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Literal
 
-from ..cordis import Context, events, plugin
+from ..cordis import Context, Disposer, events, plugin
 from .events import SessionEvent, now_ms
 from .session import Session, SessionHeader
 
@@ -77,7 +77,14 @@ def new_session_id() -> str:
 @dataclass(slots=True)
 class _Entry:
     session: Session
-    unobserve: Any
+    unobserve: Disposer
+    """The observer's teardown, as the type it already is.
+
+    It was `Any`, which is the one annotation that names nothing — so
+    `test_registration_ownership.py`'s walk over row-supplied callables could
+    not see it and nothing forced anyone to say whether it runs inside a
+    binding. `Session.observe` returns `Callable[[], None]`; naming it puts it
+    in front of the gate, which files it as teardown."""
 
 
 @dataclass(slots=True)

@@ -877,14 +877,17 @@ async def test_a_tool_body_registers_as_its_row_and_for_its_agent(mount: Any) ->
 async def test_a_prompt_provider_runs_as_its_row_for_the_scope_being_assembled(
     mount: Any,
 ) -> None:
-    """The two bodies the P6-30 walk cannot see, covered where it cannot reach.
+    """Two of the four bindings `assemble` enters, proved one at a time.
 
-    `SystemPromptService` keeps its variable and tool providers in
-    `_Registration.value: Any`, so no annotation names them and `_row_bodies()`
-    does not find them — stated in that walk's docstring, and this is the test it
-    points at. Without it these two would be the only P6-29 bindings with neither
-    a static classification nor a behavioural assertion, which is exactly the
-    "table is a promise" failure the tables are built to avoid.
+    This existed because `_row_bodies()` could not see either provider — they sat
+    in an `Any`-typed bucket — so behaviour was the only thing holding them.
+    Parameterising `_Registration[T]` closed that, and both are in `BOUND` now.
+    The test does not become redundant, because what the table proves is weaker
+    than it reads: `test_a_bound_body_names_an_invoker_that_binds` says so in its
+    own docstring — `SystemPromptService.assemble` enters four bindings, so
+    deleting one leaves the static check green. This is the per-body guarantee
+    for two of those four, and it is the reason the disclaimer over there can be
+    honest rather than an excuse.
 
     Both halves, as everywhere else: the owner is the row that contributed the
     provider, the layer is the scope being assembled.
@@ -983,13 +986,28 @@ def _row_bodies() -> set[str]:
     annotation missed it along with `PromptContext.text` — the two bodies in the
     registry whose conflated owner and layer are the reason P6-29 exists.
 
-    **What this cannot see, stated because the table would otherwise read as
-    exhaustive**: a body stored in an `Any`-typed container. The variable and
-    tool providers in `ph.system_prompt.assembly` go into `_Registration.value:
-    Any`, so no annotation names them; they are covered behaviourally instead, by
-    the assemble test below. A walk that could see them would have to run the
-    type checker, and a gate that needs mypy to be falsifiable is a gate that
-    fails for the wrong reasons.
+    **What it can see is anything reachable by the word `Callable`**, at any
+    depth of an annotation: a field that *is* one (`ToolDefinition.execute`), a
+    field whose type is a dataclass that has one (`_Registered.definition`, since
+    `CommandDefinition.run` is enumerated in its own right), and a container
+    parameterised by one (`list[_Registration[ToolsProvider]]`). That last case
+    is why `SystemPromptService._tools` and `._variables` are in the tables:
+    those two contributions have no class of their own — a bare callable and a
+    tuple — so the bucket was the only place their type could be named, and
+    `_Registration` had been `Any` until it took a parameter. `_sections` and
+    `_contexts` stay invisible *as buckets* and need not be visible: their bodies
+    are found directly, as `PromptSection.text` and `PromptContext.text`.
+
+    **What it cannot see is a body behind a nominal type**, and that is not a
+    gap in the annotation but in this walk's premise. A provider is an object
+    satisfying a Protocol, so `AdapterHandle.adapter: LlmAdapter` names its type
+    exactly and mentions no callable anywhere. An earlier version of this
+    paragraph claimed the opposite — that a container hides only what it is
+    parameterised *by*, and that `Any` is the one parameterisation naming nothing
+    — which was a tidy rule and false: two live registries were unbound and
+    invisible to every walk here at the moment it was written. `_provider_fields`
+    below is the answer, and it discriminates on the Protocol rather than on how
+    the registration happened to be spelled.
     """
     names: set[str] = set()
     for cls in _declared_classes():
@@ -1005,24 +1023,39 @@ def _row_bodies() -> set[str]:
     return names
 
 
-def _provider_slots() -> set[str]:
-    """Every `Class.method` that claims a single-slot provider.
+def _provider_fields() -> set[str]:
+    """Every `Class.field` whose type is a **Protocol** the tree declares.
 
-    By source rather than by type, because a provider is an *object* satisfying a
-    protocol — `CompactionEngine`, `WorkspaceProvider` — and nothing about its
-    annotation says "a row wrote this and the seam calls it later". What does say
-    so is `claim_slot`, whose whole purpose is the at-most-one registration this
-    shape needs, and which is therefore the honest discriminator.
+    The other half of the surface, and the half `_row_bodies` is structurally
+    blind to: a provider is an *object satisfying a Protocol* — `LlmAdapter`,
+    `SubagentProvider`, `CompactionEngine` — so the annotation names a class and
+    never the word `Callable`, however precisely it is written.
 
-    **A filter over `_scoped_methods()` rather than a fourth walk of its own.**
-    Every provider registration takes a `scope=`, so that set already contains
-    all five and re-walking the tree only re-derives it. It also inherits the
-    stronger source: `_source_of` follows same-class delegates, so a seam that
-    moved its `claim_slot` call into a private helper stays in the gate, where a
-    walk reading only the method's own body would have silently dropped it —
-    which is the one-hop failure `_source_of`'s own docstring records.
+    **Was a source match on `claim_slot(`, and that was one token too narrow.**
+    It described how five providers happened to be *registered* rather than what
+    they are, so it saw exactly the seams using the at-most-one helper and missed
+    the two that do not: `SubagentService` claims named providers through
+    `claim_key` because "run a child" has genuinely different answers in one
+    deployment, and `LlmRuntime.register_adapter` builds its handle by hand and
+    takes no `scope=` at all. Both invoked a row's body unbound, and both were
+    invisible to every walk in this module — which is how they survived P6-29.
+    The type is the honest discriminator because it is the thing that is true of
+    a provider no matter how it got there.
     """
-    return {name for name in _scoped_methods() if "claim_slot(" in _source_of(name)}
+    names: set[str] = set()
+    for cls in _declared_classes():
+        if not dataclasses.is_dataclass(cls):
+            continue
+        try:
+            hints = typing.get_type_hints(cls)
+        except Exception:  # pragma: no cover - an unresolvable forward ref
+            hints = {}
+        for entry in dataclasses.fields(cls):
+            hint = hints.get(entry.name)
+            for part in typing.get_args(hint) or (hint,):
+                if inspect.isclass(part) and getattr(part, "_is_protocol", False):
+                    names.add(f"{cls.__name__}.{entry.name}")
+    return names
 
 
 BOUND: dict[str, str] = {
@@ -1049,6 +1082,11 @@ BOUND: dict[str, str] = {
     "Diagnostic.read": "DiagnosticsRegistry.report",
     "PromptContext.text": "SystemPromptService.assemble",
     "PromptSection.text": "SystemPromptService.assemble",
+    # The two buckets whose element type *is* the body, visible since
+    # `_Registration` grew its parameter — before that they were `Any` and this
+    # walk could not name them at all.
+    "SystemPromptService._tools": "SystemPromptService.assemble",
+    "SystemPromptService._variables": "SystemPromptService.assemble",
     "StatusField.read": "TuiStatusRegistry.readings",
     "_Sink.export": "SessionTelemetry.record",
     # The single-slot providers, in the same table as the bodies rather than a
@@ -1062,11 +1100,12 @@ BOUND: dict[str, str] = {
     # P6-29 dissolved the objection that had kept all five unbound — "a provider
     # has no agent" was only ever about the *layer* half, and the owner half
     # needs no agent at all.
-    "CodeRuntimeSeam.register": "CodeRuntimeSeam.run",
-    "CompactionSeam.register": "CompactionSeam.compact_if_needed",
-    "FsService.rebase": "FsService.root_for",
-    "SandboxSeam.register_provider": "SandboxSeam.confine",
-    "WorkspaceSeam.register_provider": "WorkspaceSeam.acquire",
+    "AdapterHandle.adapter": "LlmRuntime.stream",
+    "CodeRuntimeSeam.provider": "CodeRuntimeSeam.run",
+    "CompactionSeam.engine": "CompactionSeam.compact_if_needed",
+    "SandboxSeam.provider": "SandboxSeam.confine",
+    "WorkspaceSeam.provider": "WorkspaceSeam.acquire",
+    "_Registered.provider": "SubagentService.start",
     # The one provider slot whose target is already in hand — `ph.seams.fs` has
     # `_scope_of` of its own — so a rebase resolver runs for the agent whose path
     # is being resolved, where the other four take the registration's layer.
@@ -1083,6 +1122,7 @@ UNBOUND: dict[str, str] = {
     "InboxNotifications.claimed": "a callback back into the caller that supplied it",
     "InboxNotifications.discarded": "a callback back into the caller that supplied it",
     "InboxNotifications.inserted": "a callback back into the caller that supplied it",
+    "_Entry.unobserve": "teardown; runs as its scope unwinds",
     # --- teardown ------------------------------------------------------------
     # A disposer runs *while* a scope is being unwound. Binding one would offer
     # a lifetime to register on at the moment that lifetime is ending, which is
@@ -1134,7 +1174,7 @@ def _invoker_source(name: str) -> str:
 
 @pytest.mark.parametrize(
     ("surface", "discovered"),
-    [("row body", _row_bodies()), ("provider slot", _provider_slots())],
+    [("row body", _row_bodies()), ("provider field", _provider_fields())],
     ids=["row-bodies", "provider-slots"],
 )
 def test_every_invoked_body_is_accounted_for(surface: str, discovered: set[str]) -> None:
@@ -1163,7 +1203,7 @@ def test_no_classification_outlives_what_it_classifies() -> None:
     the other's entries stale. Together they are the whole surface the tables
     are allowed to describe.
     """
-    stale = sorted((set(BOUND) | set(UNBOUND)) - _row_bodies() - _provider_slots())
+    stale = sorted((set(BOUND) | set(UNBOUND)) - _row_bodies() - _provider_fields())
     assert stale == [], f"these are classified but no longer exist: {stale}"
 
 

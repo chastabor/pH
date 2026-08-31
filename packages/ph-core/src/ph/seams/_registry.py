@@ -33,10 +33,17 @@ from ..cordis import Context, Disposer, Running
 __all__ = ["claim_entry", "claim_key", "claim_slot"]
 
 
-def claim_key(
-    owner: Context | Running, table: dict[str, Any], key: str, value: Any, *, label: str
+def claim_key[T](
+    owner: Context | Running, table: dict[str, T], key: str, value: T, *, label: str
 ) -> Disposer:
-    """Put `value` under `key`; the disposer removes it only while it is still there."""
+    """Put `value` under `key`; the disposer removes it only while it is still there.
+
+    Parameterised so the value and the table it lands in have to agree. `Any`
+    here was the last hop of a chain that is otherwise checked end to end: a
+    registry threads its element type through its own bucket and its `_register`,
+    and then handed both to a helper that would take either from anywhere. Free
+    at every call site, because `T` is inferred from the table.
+    """
     if key in table:
         raise ValueError(f"{label}: {key!r} is already registered")
     table[key] = value
@@ -48,10 +55,11 @@ def claim_key(
     return owner.add_disposer(release, label=f"{label}({key})")
 
 
-def claim_entry(
-    owner: Context | Running, entries: list[Any], value: Any, *, label: str
-) -> Disposer:
+def claim_entry[T](owner: Context | Running, entries: list[T], value: T, *, label: str) -> Disposer:
     """Append `value`; the disposer removes **that object**, not one equal to it.
+
+    Parameterised for the reason `claim_key` above is: the type a registry took
+    care to thread through its bucket stopped being checked at this boundary.
 
     `list.remove` compares with `==`, which is identity for the closures and
     objects the other contribution lists in this package hold — so those got the

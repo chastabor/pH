@@ -35,7 +35,7 @@ from typing import Any, Literal, Protocol, TypeAlias, runtime_checkable
 
 from pydantic import Field
 
-from ..cordis import Context, Disposer, plugin
+from ..cordis import Context, Disposer, Running, plugin, running
 from ..session import Session, SessionFoldCache
 from ..system_prompt.assembly import PromptSection
 from ..tools.registry import ToolRestriction
@@ -339,6 +339,22 @@ class SubagentProvider(Protocol):
     async def start(self, request: SubagentRequest) -> SubagentRun: ...
 
 
+@dataclass(frozen=True, slots=True)
+class _Registered:
+    """A delegation provider and who registered it (P6-29).
+
+    The sixth of these, and one of the two that survived P6-29 unbound: a
+    provider is an *object satisfying a Protocol*, so `dict[str, SubagentProvider]`
+    names no callable for `_row_bodies` to find, and this claims its slot with
+    `claim_key` rather than `claim_slot`, so the source match that used to stand
+    in for "is this a provider" did not look here either. `_provider_fields`
+    discriminates on the Protocol now, which is true of a provider however it was
+    registered."""
+
+    provider: SubagentProvider
+    by: Running
+
+
 @dataclass(slots=True)
 class SubagentService:
     """The service published as `ctx.subagents`.
@@ -349,7 +365,7 @@ class SubagentService:
     """
 
     ctx: Context
-    _providers: dict[str, SubagentProvider] = field(default_factory=dict)
+    _providers: dict[str, _Registered] = field(default_factory=dict)
     _runs: dict[str, SubagentRun] = field(default_factory=dict)
     _rosters: SessionFoldCache[dict[str, dict[str, Any]]] = field(
         default_factory=lambda: SessionFoldCache(subagent_roster)
@@ -365,8 +381,9 @@ class SubagentService:
         self, name: str, provider: SubagentProvider, *, scope: Context | None = None
     ) -> Disposer:
         """Claim one delegation strategy under `name`."""
+        by = self.ctx.running_for(scope)
         return claim_key(
-            self.ctx.owner_for(scope), self._providers, name, provider, label="subagent-provider"
+            by.owner, self._providers, name, _Registered(provider, by), label="subagent-provider"
         )
 
     def provider_names(self) -> list[str]:
@@ -405,14 +422,14 @@ class SubagentService:
             )
         return None
 
-    def require(self, name: str) -> SubagentProvider:
-        provider = self._providers.get(name)
-        if provider is None:
+    def require(self, name: str) -> _Registered:
+        entry = self._providers.get(name)
+        if entry is None:
             offered = ", ".join(self.provider_names()) or "none"
             raise SubagentSpawnError(
                 f'no subagent provider named "{name}" is registered (registered: {offered})'
             )
-        return provider
+        return entry
 
     def held_by(self, request: SubagentRequest) -> tuple[tuple[str, ...], tuple[str, ...]]:
         """What the parent holds, in the two registries a grant covers.
@@ -564,7 +581,17 @@ class SubagentService:
         held = self.held_by(request)
         self.check_grant(request, held)
         grant = self.grant_for(request, held)
-        run = await self.require(name).start(request)
+        entry = self.require(name)
+        # As the row that registered the provider (P6-29). A provider's `start`
+        # is row code this registry invokes — the same category as a tool's
+        # `execute` — and it ran unbound, so anything it registered landed on the
+        # seam and outlived its row. The layer is the registration's own, for the
+        # reason `CompactionSeam.engine_by` states: the target is in hand here
+        # (`request.parent`) but reading it means another copy of P6-24's
+        # `getattr(agent, "ctx", None)`, and the child's own containment is
+        # `Grant`'s subject rather than this binding's.
+        with running(entry.by):
+            run = await entry.provider.start(request)
         # Stamped here rather than trusted from the provider: the service is what
         # knows which name the caller asked for, and `rehydrate` has to be able
         # to find its way back to the same provider.
@@ -626,10 +653,11 @@ class SubagentService:
         run = self._runs.get(run_id)
         if run is None:
             return False
-        provider = self._providers.get(run.owner)
-        if not isinstance(provider, RehydratableProvider):
+        entry = self._providers.get(run.owner)
+        if entry is None or not isinstance(entry.provider, RehydratableProvider):
             return False
-        return bool(await provider.rehydrate(run_id))
+        with running(entry.by):
+            return bool(await entry.provider.rehydrate(run_id))
 
     def forget(self, run_id: str) -> SubagentRun | None:
         """Drop a run from the live table. The log keeps the tombstone."""

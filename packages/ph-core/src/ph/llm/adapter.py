@@ -19,7 +19,7 @@ from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
-from ..cordis import Context, events, plugin
+from ..cordis import Context, Running, events, plugin, running
 from .types import Finish, FinishReason, GenerateOptions, LlmFailure
 
 __all__ = ["AdapterHandle", "LlmAdapter", "LlmError", "LlmRuntime", "ResolvedModel", "apply"]
@@ -91,6 +91,16 @@ class AdapterHandle:
     """One adapter registration, and the routes it claims."""
 
     adapter: LlmAdapter
+    by: Running
+    """Who registered it (P6-29). An adapter's `stream` is row code this registry
+    invokes, and it ran unbound — the same category as a tool's `execute`.
+
+    Missed by P6-29 because both P6-30 walks look for a `Callable`: an adapter is
+    an *object satisfying a Protocol*, so `AdapterHandle.adapter: LlmAdapter`
+    names none, and this registers without a `claim_*` helper at all. Resolved
+    from the ambient binding rather than a `scope=`, because `register_adapter`
+    has never taken one — a row calling it from its own `apply` is the only
+    caller shape there is, and that is exactly what `running_for(None)` reads."""
     providers: tuple[str, ...]
     _runtime: LlmRuntime
     _disposed: bool = False
@@ -117,7 +127,12 @@ class LlmRuntime:
         The caller's scope owns the handle's `dispose`, so unloading the plugin
         unregisters the routes.
         """
-        handle = AdapterHandle(adapter=adapter, providers=tuple(providers), _runtime=self)
+        handle = AdapterHandle(
+            adapter=adapter,
+            by=self.ctx.running_for(),
+            providers=tuple(providers),
+            _runtime=self,
+        )
         self._registrations.append(handle)
         self._reindex()
         return handle
@@ -132,28 +147,40 @@ class LlmRuntime:
         return sorted(self._routes)
 
     def adapter_for(self, provider: str) -> LlmAdapter:
+        return self._route(provider).adapter
+
+    def _route(self, provider: str) -> AdapterHandle:
+        """The whole registration, for the two paths that call into the adapter.
+
+        `adapter_for` stays the public spelling — one out-of-package caller reads
+        it — and the binding needs what it discards, which is who registered the
+        thing it returns.
+        """
         handle = self._routes.get(provider)
         if handle is None:
             raise LlmError(f'no adapter is registered for provider "{provider}"', "NO_ADAPTER")
-        return handle.adapter
+        return handle
 
     def resolve_model(self, provider: str, model: str) -> ResolvedModel:
         """Ask the owning adapter what it knows about one exact route."""
         try:
-            adapter = self.adapter_for(provider)
+            handle = self._route(provider)
         except LlmError:
             return ResolvedModel()
-        resolver: Callable[..., Any] | None = getattr(adapter, "resolve_model", None)
+        resolver: Callable[..., Any] | None = getattr(handle.adapter, "resolve_model", None)
         if resolver is None:
             return ResolvedModel()
-        resolved = resolver(provider, model)
+        with running(handle.by):
+            resolved = resolver(provider, model)
         return resolved if isinstance(resolved, ResolvedModel) else ResolvedModel()
 
     async def stream(self, options: GenerateOptions) -> AsyncIterator[Any]:
         """Dispatch one request through the `llm/stream` waterfall."""
 
         async def inner(request: GenerateOptions) -> AsyncIterator[Any]:
-            return _normalized(self.adapter_for(request.provider).stream(request), request)
+            handle = self._route(request.provider)
+            with running(handle.by):
+                return _normalized(handle.adapter.stream(request), request)
 
         result = await self.ctx.waterfall("llm/stream", options, inner=inner)
         return result  # type: ignore[no-any-return]

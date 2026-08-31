@@ -33,6 +33,7 @@ __all__ = [
     "PromptSection",
     "PromptText",
     "SystemPromptService",
+    "ToolsProvider",
     "apply",
     "join_context_sections",
     "render_context_sections",
@@ -131,9 +132,39 @@ def join_context_sections(sections: list[ContextSnapshotSection]) -> str:
     return "\n\n".join(section.text for section in sections)
 
 
+ToolsProvider: TypeAlias = "Callable[[Context], list[ToolSchema]]"
+"""What `SystemPromptService.tools` contributes. Named so the bucket holding it
+can say so — an unnamed `Callable[...]` inside a `list[_Registration[...]]` is
+the point at which a reader stops reading the type."""
+
+_Variable: TypeAlias = "tuple[str, Callable[[], str]]"
+"""What `SystemPromptService.variable` contributes: the name and its provider,
+paired at registration so the bucket holds one thing per registration.
+
+Underscored, unlike `ToolsProvider` beside it, because nothing outside this
+module names it — `variable(name, provider)` takes the two apart and only the
+bucket ever sees them paired. A `PromptSection | PromptContext` union got no
+alias at all for the same reason one step further: it had a single use site and
+reads in place."""
+
+
 @dataclass(frozen=True, slots=True)
-class _Registration:
-    value: Any
+class _Registration[T]:
+    value: T
+    """The contribution itself.
+
+    **Parameterised rather than `Any`** — the buckets below are four different
+    kinds and this is the one type standing in for all of them, so `Any` meant
+    `assemble`'s `entry.value.order`, `.name`, `.text` and `.complete` all
+    type-checked as nothing. It cost nothing while `_visible` returned the bare
+    values and the loops read `section.name`, because that was `Any` too; it
+    started costing when P6-29 made the *registration* the unit every consumer
+    handles, which is exactly when the field became load-bearing at four call
+    sites instead of zero.
+
+    Frozen, so the parameter infers covariant and `_Registration[PromptSection]`
+    satisfies the `_Registration[PromptSection | PromptContext]` that `resolve`
+    takes."""
     by: Running
     """Both answers, kept together (P6-29).
 
@@ -152,12 +183,14 @@ class SystemPromptService:
     """The service published as `ctx.system_prompt`."""
 
     ctx: Context
-    _sections: list[_Registration] = field(default_factory=list)
-    _contexts: list[_Registration] = field(default_factory=list)
-    _tools: list[_Registration] = field(default_factory=list)
-    _variables: list[_Registration] = field(default_factory=list)
+    _sections: list[_Registration[PromptSection]] = field(default_factory=list)
+    _contexts: list[_Registration[PromptContext]] = field(default_factory=list)
+    _tools: list[_Registration[ToolsProvider]] = field(default_factory=list)
+    _variables: list[_Registration[_Variable]] = field(default_factory=list)
 
-    def _register(self, bucket: list[_Registration], scope: Context | None, value: Any) -> Disposer:
+    def _register[T](
+        self, bucket: list[_Registration[T]], scope: Context | None, value: T
+    ) -> Disposer:
         """Contribute to a bucket, and hand back the disposer that withdraws it.
 
         **Two contexts, because the owner was answering two questions** (P6-12).
@@ -198,9 +231,7 @@ class SystemPromptService:
     def context(self, context: PromptContext, *, scope: Context | None = None) -> Disposer:
         return self._register(self._contexts, scope, context)
 
-    def tools(
-        self, provider: Callable[[Context], list[ToolSchema]], *, scope: Context | None = None
-    ) -> Disposer:
+    def tools(self, provider: ToolsProvider, *, scope: Context | None = None) -> Disposer:
         """Contribute tool schemas.
 
         The provider receives the *target* scope, because what a tool set
@@ -214,7 +245,9 @@ class SystemPromptService:
     ) -> Disposer:
         return self._register(self._variables, scope, (name, provider))
 
-    def _visible(self, bucket: list[_Registration], target: Context) -> list[_Registration]:
+    def _visible[T](
+        self, bucket: list[_Registration[T]], target: Context
+    ) -> list[_Registration[T]]:
         # One visibility rule, shared with event dispatch: a global
         # registration reaches every agent, an agent-scoped one reaches that
         # agent alone. Ordering within a bucket stays registration order, which
@@ -241,12 +274,12 @@ class SystemPromptService:
         # while the binding held one `Context`, because `target` here is the
         # *layer* and the owner is still whoever registered.
         variables: dict[str, str] = {}
-        for entry in self._visible(self._variables, target):
-            name, provider = entry.value
-            with running(entry.by, target):
-                variables[name] = provider()
+        for variable in self._visible(self._variables, target):
+            name, read = variable.value
+            with running(variable.by, target):
+                variables[name] = read()
 
-        async def resolve(entry: _Registration) -> str:
+        async def resolve(entry: _Registration[PromptSection | PromptContext]) -> str:
             # The registration, not two projections of it: `resolve(a.value.text,
             # b.by.owner)` was silently valid, which is the mis-pairing the pair
             # exists to prevent, reintroduced one function down (P6-29).
@@ -259,9 +292,9 @@ class SystemPromptService:
 
         sections = sorted(
             self._visible(self._sections, target),
-            key=lambda e: (e.value.order, e.value.name),
+            key=lambda one: (one.value.order, one.value.name),
         )
-        complete = next((e for e in sections if e.value.complete), None)
+        complete = next((one for one in sections if one.value.complete), None)
         # Empty means absent, decided here rather than in each renderer: a
         # section opts out per-assembly by returning "" — the only mechanism that
         # can answer a per-agent question, since a row registers once — and a
@@ -272,28 +305,28 @@ class SystemPromptService:
         else:
             rendered = tuple(
                 [
-                    (entry.value.name, body)
-                    for entry in sections
-                    if (body := await resolve(entry)).strip()
+                    (section.value.name, body)
+                    for section in sections
+                    if (body := await resolve(section)).strip()
                 ]
             )
 
         contexts = sorted(
             self._visible(self._contexts, target),
-            key=lambda e: (e.value.order, e.value.name),
+            key=lambda one: (one.value.order, one.value.name),
         )
         materialized = tuple(
             [
-                ContextSnapshotSection(name=entry.value.name, text=body)
-                for entry in contexts
-                if (body := await resolve(entry)).strip()
+                ContextSnapshotSection(name=context.value.name, text=body)
+                for context in contexts
+                if (body := await resolve(context)).strip()
             ]
         )
 
         schemas: list[ToolSchema] = []
-        for entry in self._visible(self._tools, target):
-            with running(entry.by, target):
-                schemas.extend(entry.value(target))
+        for provider in self._visible(self._tools, target):
+            with running(provider.by, target):
+                schemas.extend(provider.value(target))
 
         assembly = PromptAssembly(
             sections=rendered,
