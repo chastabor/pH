@@ -26,6 +26,7 @@ from unittest.mock import patch
 
 import pytest
 
+from ph.cordis import DEPLOYMENT
 from ph.paths import write_text_under
 from ph.system_prompt.assembly import AssembleContext
 from ph.system_prompt.memory import (
@@ -109,7 +110,7 @@ async def test_the_row_contributes_a_context_not_a_section(mount: Any, tmp_path:
     _write(tmp_path / "AGENTS.md", "Prefer explicit code.")
     ctx = await mount()
 
-    assembly = await ctx.system_prompt.assemble()
+    assembly = await ctx.system_prompt.assemble(AssembleContext(scope=DEPLOYMENT))
 
     assert "Prefer explicit code." in await _assembled(ctx)
     assert not any("Prefer explicit code." in text for _, text in assembly.sections)

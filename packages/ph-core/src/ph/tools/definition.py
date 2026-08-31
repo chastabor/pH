@@ -201,7 +201,8 @@ class ToolExecutionInput:
     `scope` selects which guards, restrictions and presentation apply — the
     per-agent policy boundary — and `session` is where the call is recorded.
     Both are stated by the caller (the loop knows its agent's shape; the
-    registry must not guess it) and default to the global context and no log.
+    registry must not guess it). `session` defaults to no log; `scope` has no
+    default at all since P6-32 — see the field below.
     """
 
     call_id: str

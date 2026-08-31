@@ -32,7 +32,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol, TypeAlias, runtime_checkable
 
-from ..cordis import Context, Disposer, Running, plugin, running
+from ..cordis import Boundary, Context, Disposer, Running, boundary_of, plugin, running
 from ..session import Session
 from ._registry import claim_entry, claim_slot
 
@@ -230,21 +230,34 @@ class CompactionSeam:
             label=f"compaction-note({note.name})",
         )
 
-    def notes(self, session: Session, *, scope: Context | None = None) -> list[str]:
+    def notes(self, session: Session, *, scope: Boundary) -> list[str]:
         """The rendered blocks for one session, in `order` then registration order.
 
         Scope-filtered by the same rule as event dispatch and every other scoped
         registry: a global registration reaches every agent, an agent-scoped one
-        reaches that agent alone (B7). A note that raises is dropped with its
+        reaches that agent alone (B7).
+
+        **The boundary is stated** (P6-32), and this reader is the one that shows
+        which way the axis runs. It resolved `scope or self.ctx`, and for a
+        registry that bears *restrictions* the mount is the widest answer — that
+        is the fail-open the row is named for. This registry bears none: `notes`
+        filters on `reaches` alone, so the mount is the **smallest** set, and the
+        old default could never over-include. It could only drop an agent's own
+        note from that agent's summary — silent-*narrow*, which the row rejects
+        for the same reason in the other direction ("degrades a model quietly
+        rather than erroring, and nobody notices").
+
+        So the test for a new registry is not "can I name the harm" but **does
+        this reader bear restrictions**: if it does, an unstated boundary widens;
+        if it filters on `reaches` alone, it under-includes. Either way a policy
+        reader takes a boundary. See `Deployment`, which states the axis from the
+        other side — widest along the restriction axis only.
+
+        A note that raises is dropped with its
         traceback rather than taking the compaction down — a summary without one
         block is worth more than an uncompacted session.
         """
-        # `scope or self.ctx` is P6-32's staged remainder, stated here per §5
-        # rule 6: this reader still resolves an unstated boundary to the mount.
-        # Low stakes relative to the converted seams — notes *narrow* what a
-        # summary says, they grant nothing — but the conversion is named in
-        # the row, not judged unnecessary.
-        target = scope or self.ctx
+        target = boundary_of(scope, self.ctx)
         rendered: list[str] = []
         visible = [entry for entry in self._notes if entry.by.layer.reaches(target)]
         for entry in sorted(visible, key=lambda one: one.note.order):

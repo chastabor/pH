@@ -22,7 +22,17 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
 from typing import Any, TypeAlias
 
-from ..cordis import Context, Disposer, Running, events, maybe_await, plugin, running
+from ..cordis import (
+    Boundary,
+    Context,
+    Disposer,
+    Running,
+    boundary_of,
+    events,
+    maybe_await,
+    plugin,
+    running,
+)
 from ..llm.types import ContextSnapshotSection, ToolSchema
 from ..seams._registry import claim_entry
 
@@ -96,7 +106,22 @@ class PromptContext:
 class AssembleContext:
     """What assembly is being run for."""
 
-    scope: Context | None = None
+    scope: Boundary
+    """The boundary this prompt is assembled for — **required since P6-32**.
+
+    It was `Context | None = None`, and `assemble` resolved that as
+    `request.scope or self.ctx` — the mount, which every section reaches. So an
+    unstated boundary did not assemble an empty prompt, it assembled the widest
+    one, and `AssembleContext()` with no arguments was the shortest way to ask
+    for it — as was `assemble()`, which is why the request is required too.
+    `DEPLOYMENT` is how a caller means that on purpose.
+
+    Ahead of `agent` and without a default, matching `ReadIntent`. `assemble`
+    takes the request the same way — **required** — because a defaulted request
+    would rebuild the deleted mechanism one frame up: a caller that states
+    nothing would still get the widest boundary, just spelled `assemble()`. The
+    first version of this row did exactly that, justified by a `ph doctor` caller
+    that does not exist; the only zero-argument callers were three tests."""
     agent: Any = None
 
 
@@ -257,16 +282,12 @@ class SystemPromptService:
         # invokes the value as a body, and needs `by.owner` to bind it (P6-29).
         return [entry for entry in bucket if entry.by.layer.reaches(target)]
 
-    async def assemble(self, request: AssembleContext | None = None) -> PromptAssembly:
+    async def assemble(self, request: AssembleContext) -> PromptAssembly:
         """Collect, order, interpolate, then run the assemble waterfall."""
-        request = request or AssembleContext()
-        # `request.scope or self.ctx` is P6-32's staged remainder, stated here
-        # per §5 rule 6: an unstated boundary still assembles the mount's
-        # prompt. The row names this conversion; it is deferred, not exempt.
-        target = request.scope or self.ctx
-        # The request a provider is handed always names the scope being
-        # assembled, even when the caller left it implicit — so no provider has
-        # to repeat the `request.scope or ctx` fallback.
+        target = boundary_of(request.scope, self.ctx)
+        # A provider is always handed a resolved `Context`, never `DEPLOYMENT` —
+        # that narrowing happens once, here, so no provider repeats it and
+        # `PromptText`'s documented `scope.get("agent")` shape holds.
         scoped = request if request.scope is target else replace(request, scope=target)
 
         # **Every body below runs as the row that contributed it, for the scope

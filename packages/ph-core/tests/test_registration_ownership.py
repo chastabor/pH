@@ -52,16 +52,63 @@ pytestmark = pytest.mark.anyio
 
 
 def _modules() -> list[Any]:
-    """Every public module in the `ph` tree, imported once."""
+    """Every public module in the `ph` tree, imported once.
+
+    **A module that fails to import is recorded, not just skipped.** Every walk
+    in this file is built on this list, so a module that drops out drops out of
+    all of them *silently* — and each of those walks is a gate whose whole claim
+    is that it cannot be passed by omission. Caught while trying to falsify the
+    P6-32 field check: two attempts to plant a defect produced an import error
+    instead, the module vanished, and the gate went green both times. A check
+    that a broken module can defeat is one an author can defeat by accident.
+
+    The skip itself stays, because an optional extra genuinely may not be
+    installed — that is what `SKIPPED_IMPORTS` is for, and
+    `test_no_module_is_skipped_for_a_bad_reason` decides which reasons are
+    allowed.
+    """
     if not _IMPORTED:
         for found in pkgutil.walk_packages(ph.__path__, prefix="ph."):
             if any(part.startswith("_") for part in found.name.split(".")[1:]):
                 continue
             try:
                 _IMPORTED.append(importlib.import_module(found.name))
-            except Exception:  # pragma: no cover - an optional extra is not installed
-                continue
+            except Exception as error:  # pragma: no cover - an extra is not installed
+                SKIPPED_IMPORTS.append((found.name, error))
     return _IMPORTED
+
+
+SKIPPED_IMPORTS: list[tuple[str, BaseException]] = []
+"""Modules `_modules` could not import, and why. See `_modules`."""
+
+
+def test_no_module_is_skipped_for_a_bad_reason() -> None:
+    """A walk that silently loses a module is a gate that can be passed by omission.
+
+    Every enumeration here — `_scoped_methods`, `_row_bodies`, `_provider_fields`,
+    `_declared_classes` — reads `_modules()`. A module that raises on import is
+    absent from all of them and nothing says so, which is exactly how a planted
+    defect can look like a pass.
+
+    The one legitimate reason is an optional extra: `ph-core[otel]` is not always
+    installed, and a `ModuleNotFoundError` naming something *outside* the `ph`
+    tree is that case. Anything else — a `SyntaxError`, a `NameError` from an
+    identifier someone forgot to import, a circular import — is a broken module,
+    and it must fail here rather than quietly shrink the surface every other test
+    in this file measures.
+    """
+    _modules()
+    wrong = [
+        f"{name}: {type(error).__name__}: {error}"
+        for name, error in SKIPPED_IMPORTS
+        if not (
+            isinstance(error, ModuleNotFoundError) and not str(error.name or "").startswith("ph")
+        )
+    ]
+    assert wrong == [], (
+        "these modules were dropped from every walk in this file for a reason that "
+        f"is not a missing optional extra: {wrong}"
+    )
 
 
 _IMPORTED: list[Any] = []
@@ -166,12 +213,15 @@ def test_a_boundary_parameter_never_has_a_default() -> None:
     it were local.
 
     `Boundary` is `Context | Deployment` and has no `None` member, so the type
-    says which question is being asked. What stops the regression is the missing
-    *default*: a caller that states nothing fails mypy where it holds a typed
-    reference, and raises `TypeError` at mount where it reaches the seam through
-    `ctx.<seam>` — which is `Any`, so mypy cannot see it. This asserts the
-    property the two layers rest on, over whatever has been converted so far, so
-    a seam joining the migration is covered the moment it does.
+    says which question is being asked, and this checks **both** shapes one
+    arrives in: a reader's parameter, and a caller-built payload's field.
+
+    What stops the regression is the missing *default*: a caller that states
+    nothing fails mypy where it holds a typed reference, and raises
+    `TypeError` where it reaches the seam through `ctx.<seam>` — which is
+    `Any`, so mypy cannot see it. This asserts the property the two layers
+    rest on, over whatever has been converted so far, so a seam joining the
+    migration is covered the moment it does.
     """
     offenders = [
         name
@@ -179,6 +229,27 @@ def test_a_boundary_parameter_never_has_a_default() -> None:
         if "Boundary" in str(parameter.annotation)
         and parameter.default is not inspect.Parameter.empty
     ]
+    # Payload fields too. A caller-built request carries the boundary for two
+    # seams — `ToolExecutionInput.scope` and `AssembleContext.scope` — and this
+    # walk reads *parameters named `scope`*, so it could see neither. That is the
+    # half of the surface where the regression is cheapest to make: a field
+    # regains a default with one keystroke and no call site changes.
+    for cls in _declared_classes():
+        if not dataclasses.is_dataclass(cls):
+            continue
+        try:
+            hints = typing.get_type_hints(cls)
+        except Exception:  # pragma: no cover - an unresolvable forward ref
+            hints = {}
+        offenders += [
+            f"{cls.__name__}.{entry.name}"
+            for entry in dataclasses.fields(cls)
+            if "Boundary" in str(hints.get(entry.name, entry.type))
+            and (
+                entry.default is not dataclasses.MISSING
+                or entry.default_factory is not dataclasses.MISSING
+            )
+        ]
     assert offenders == [], (
         "a `Boundary` parameter with a default reintroduces the thing P6-32 deleted — "
         f"the caller that says nothing gets the widest answer: {sorted(offenders)}"
@@ -191,7 +262,6 @@ NOT_A_LIFETIME: dict[str, str] = {
     # would change what a caller sees or who hears an event, which is B7's
     # subject and not this row's. Asserted, not just declared: the static check
     # below requires each of these to be free of `owner_for`.
-    "CompactionSeam.notes": "visibility — which notes this scope may read",
     "CommandRegistry.dispatch": "the boundary the command body runs for",
     # Work run *in* a scope, forwarding to whatever owns the artifact.
     "ShellService.run": "the scope the command runs for",

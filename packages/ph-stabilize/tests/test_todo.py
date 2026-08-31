@@ -231,7 +231,7 @@ async def test_the_reminder_text_reaches_the_prompt_verbatim(mount: Any) -> None
     claim.
     """
     ctx = await mount(ENABLED, profile=PROFILE)
-    text = render_prompt(await ctx.system_prompt.assemble(AssembleContext()))
+    text = render_prompt(await ctx.system_prompt.assemble(AssembleContext(scope=DEPLOYMENT)))
 
     assert WRITE_TODOS_SYSTEM_PROMPT in text
     # The four sentences the port plan names, so the gate is tied to the plan

@@ -17,6 +17,7 @@ from typing import Any
 import pytest
 from runtime_helpers import run_cell
 
+from ph.cordis import DEPLOYMENT
 from ph.llm.types import text_of
 from ph.session import IGNORABLE_SESSION_EVENT_TYPES, SurfaceIntent
 from ph.session.events import SurfaceReplace
@@ -332,7 +333,7 @@ async def test_the_note_is_registered_on_the_compaction_seam(
     ctx, session, agent = await mounted_runtime(session_id="wired")
     await run_cell(ctx, "answer = 42", agent=agent, session=session)
 
-    assert any("`answer`" in note for note in ctx.compaction.notes(session))
+    assert any("`answer`" in note for note in ctx.compaction.notes(session, scope=DEPLOYMENT))
 
 
 async def test_the_namespace_outlives_a_compaction_of_the_conversation(

@@ -88,7 +88,7 @@ from typing import Any
 from ph.agent.types import PreStepDecision, RequestErrorAction, RequestFailure
 from ph.agent_loop import AgentCancelled
 from ph.cancel import Cancelled
-from ph.cordis import Context, plugin
+from ph.cordis import DEPLOYMENT, Context, plugin
 from ph.llm import BlockAssembler
 from ph.llm.types import (
     CONTEXT_WINDOW_EXCEEDED,
@@ -1076,7 +1076,13 @@ class SummarizeEngine:
 
     def _extras(self, session: Session, agent: Any, instructions: str) -> str:
         """The blocks pH adds to upstream's instruction: state notes and focus."""
-        notes = self.ctx.compaction.notes(session, scope=getattr(agent, "ctx", None) or self.ctx)
+        # The agent's own boundary, or the deployment — spelled, because
+        # `or self.ctx` is the widening and P6-32 buys nothing if the call
+        # site keeps computing it under another name. Deriving the *scope*
+        # from an agent is the shape that row blesses; defaulting the
+        # *widest* one is the shape it deletes.
+        own = getattr(agent, "ctx", None)
+        notes = self.ctx.compaction.notes(session, scope=own if own is not None else DEPLOYMENT)
         blocks = [NOTES_PROMPT.format(notes="\n\n".join(notes))] if notes else []
         if instructions.strip():
             blocks.append(FOCUS_PROMPT.format(instructions=instructions.strip()))

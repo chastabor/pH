@@ -376,11 +376,17 @@ class ToolRuntime:
         # every mount O(N^2) in throwaway schema construction.
         #
         # `scope or self.ctx` survives here and in `present_transport`, stated
-        # per §5 rule 6: these are *reads embedded in registration methods*, and
-        # registration's `scope=None` means "the activating row" through
-        # `owner_for`/`layer_for` — P6-12's mechanism, deferred by P6-32 as a
-        # different question. Converting the read alone would make one method's
-        # `None` mean two things.
+        # per §5 rule 6 — and the honest reason is not that converting the read
+        # would make one `None` mean two things. It already does: this line
+        # resolves the *mount*, while `_register` two lines down resolves
+        # `layer_for(scope)`, which since P6-26 is the running body's layer. So
+        # the reserved-name check and the registration it guards can disagree,
+        # and the check takes the wider view — a tool body registering under
+        # `running(...)` can occupy the transport name C6 says is unshadowable.
+        # Latent (every `ctx.tools.register` in the tree is a row's `apply`), and
+        # the fix is not to convert this half: both halves are asking
+        # `layer_for`'s question, so the *pair* converts together or neither
+        # does. P6-12's mechanism owns that, and P6-32 defers to it.
         if definition.name == self._presented_name(scope or self.ctx):
             raise ValueError(
                 f'"{definition.name}" is how this profile presents the Code Mode transport '

@@ -306,7 +306,9 @@ called without answering the question, and mypy is what asks — at build time,
 against every call site, rather than a runtime rule that only fires on the paths
 a test happens to drive.
 
-**A *registration* takes a `Context`, never this.** `ctx.fs`'s `screen`,
+**A *registration* takes a `Context`, never this**, and so do the two
+dispatch-time resolvers — `Context.owner_for` and `Context.layer_for` — which
+read the running binding rather than a stated value. `ctx.fs`'s `screen`,
 `ToolRuntime`'s `register`/`restrict`/`guard`/`present_as` and every `claim_*`
 call hand their scope to `add_disposer` and to `reaches` — it is what the
 registration is an *effect of* and what it is visible *to*, P6-12's two
@@ -626,6 +628,17 @@ class Context:
           the change is strictly additive for callers that are not rows at all
           (a test standing a service up by hand, a mode wiring one directly).
 
+        **This does not take a `Boundary`, and P6-32 settled that deliberately**
+        rather than leaving it unconverted. That row deletes a `None` which
+        resolves *wider* than any stated value. `None` here resolves through
+        `_ACTIVATING` to whoever is running — the row, verified — which is the
+        **narrowest** correct answer and the whole of P6-12. It is not "give me
+        everything", it is "I am not registering on someone else's behalf".
+
+        The third branch does fall back to the seam, and that is a widening in
+        I2's sense — but it is the one P6-12 diagnosed and it warns where it
+        happens (below). See `Boundary`.
+
         **A disposed activation scope declines, and says so.** Contextvars
         propagate into tasks spawned from `apply`, so a background task
         registering after its row unmounted would otherwise hit
@@ -653,6 +666,20 @@ class Context:
 
     def layer_for(self, scope: Context | None = None) -> Context:
         """Which scope a registration is *visible to* — the other question (P6-12).
+
+        **This does not take a `Boundary` either, and for `owner_for`'s reason
+        rather than its own** (P6-32). That one is a lifetime question, so
+        `DEPLOYMENT` is obviously not an answer; this one is a *visibility*
+        question whose result feeds `reaches`, which is exactly the shape a
+        boundary has — so the lifetime argument does not transfer and the
+        exemption needs its own.
+
+        It is that both are **dispatch-time resolvers**: they read `_ACTIVATING`
+        to answer "who is running", where a `Boundary` parameter is a caller
+        *stating* something. `None` here means "ask the binding", and inside a
+        row it resolves to that row — the narrowest answer, verified. A caller
+        with a boundary to state passes `scope=`; there is no third thing
+        `DEPLOYMENT` could mean.
 
         Separate from `owner_for` because they are different questions that had
         the same answer, and the review of this row found the conflation in five

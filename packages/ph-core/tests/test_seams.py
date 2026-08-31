@@ -15,7 +15,7 @@ from typing import Any
 import anyio
 import pytest
 
-from ph.cordis import Context
+from ph.cordis import DEPLOYMENT, Context
 from ph.seams._names import SLUG_CHARACTERS
 from ph.seams.approval import ApprovalRequest, ApprovalService, Edited, pending_approvals
 from ph.seams.code_runtime import (
@@ -358,7 +358,7 @@ async def test_notes_render_in_order_and_an_empty_one_contributes_nothing() -> N
     seam.note(CompactionNote(name="first", text=lambda _s: "A", order=1))
     seam.note(CompactionNote(name="quiet", text=lambda _s: ""))
 
-    assert seam.notes(session) == ["A", "B"]
+    assert seam.notes(session, scope=DEPLOYMENT) == ["A", "B"]
 
 
 async def test_a_note_that_raises_is_dropped_rather_than_taking_the_compaction_down() -> None:
@@ -372,7 +372,7 @@ async def test_a_note_that_raises_is_dropped_rather_than_taking_the_compaction_d
     seam.note(CompactionNote(name="broken", text=explode))
     seam.note(CompactionNote(name="fine", text=lambda _s: "still here"))
 
-    assert seam.notes(session) == ["still here"]
+    assert seam.notes(session, scope=DEPLOYMENT) == ["still here"]
 
 
 async def test_a_note_registered_for_one_agent_does_not_reach_another() -> None:
