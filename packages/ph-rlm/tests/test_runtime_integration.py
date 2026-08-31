@@ -20,7 +20,6 @@ from typing import Any
 import pytest
 from runtime_helpers import run_cell
 
-from ph.system_prompt.assembly import AssembleContext
 from ph.testing import FAKE_OPTIONS, StubWorkspaceProvider, run_tool, simple_tool
 from ph.tools.registry import RUN_CODE
 
@@ -133,7 +132,7 @@ async def test_the_sdk_section_lists_the_bindings(mounted_runtime: Mounted) -> N
     """
     ctx, _session, agent = await mounted_runtime(snapshots=False)
     ctx.tools.register(simple_tool("ping", lambda _args, _run: "pong"))
-    assembly = await ctx.system_prompt.assemble(AssembleContext(scope=agent.ctx, agent=agent))
+    assembly = await ctx.system_prompt.assemble(agent.ctx, agent=agent)
     text = "\n".join(body for _name, body in assembly.sections)
     assert "tools.ping" in text
     # And the rule that only the transport may be called directly (C6's prompt half).

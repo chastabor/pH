@@ -1120,9 +1120,7 @@ async def test_a_prompt_provider_runs_as_its_row_for_the_scope_being_assembled(
     fork = ctx.plugin(row)
     await ctx.reconcile()
 
-    from ph.system_prompt.assembly import AssembleContext
-
-    await ctx.system_prompt.assemble(AssembleContext(scope=agent.ctx))
+    await ctx.system_prompt.assemble(agent.ctx)
 
     assert seen["variable"] == (fork.ctx, agent.ctx), "the variable provider ran as the wrong scope"
     assert seen["tools"] == (fork.ctx, agent.ctx), "the tools provider ran as the wrong scope"

@@ -54,7 +54,7 @@ async def _assembled(ctx: Any, agent: Any = None) -> str:
     Filtered by name rather than using `join_context_sections`, because what is
     under test is *this* row's contribution and a profile contributes others.
     """
-    assembly = await ctx.system_prompt.assemble(AssembleContext(scope=ctx, agent=agent))
+    assembly = await ctx.system_prompt.assemble(ctx, agent=agent)
     return "\n\n".join(section.text for section in assembly.contexts if section.name == "memory")
 
 
@@ -110,7 +110,7 @@ async def test_the_row_contributes_a_context_not_a_section(mount: Any, tmp_path:
     _write(tmp_path / "AGENTS.md", "Prefer explicit code.")
     ctx = await mount()
 
-    assembly = await ctx.system_prompt.assemble(AssembleContext(scope=DEPLOYMENT))
+    assembly = await ctx.system_prompt.assemble(DEPLOYMENT)
 
     assert "Prefer explicit code." in await _assembled(ctx)
     assert not any("Prefer explicit code." in text for _, text in assembly.sections)

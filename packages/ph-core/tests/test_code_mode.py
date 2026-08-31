@@ -20,7 +20,7 @@ import pytest
 
 from ph.cordis import DEPLOYMENT, Context
 from ph.seams.code_runtime import CodeBindingNamespace
-from ph.system_prompt.assembly import AssembleContext, render_prompt
+from ph.system_prompt.assembly import render_prompt
 from ph.testing import FAKE_OPTIONS, raising, run_tool, simple_tool
 from ph.tools import Deny, ToolExecutionInput, text_content
 from ph.tools.code_mode import ToolCallError, governed_binding
@@ -218,9 +218,9 @@ async def test_the_sdk_section_lists_the_bindings_and_the_code_only_rule(mount: 
     agent = ctx.agents.create(session, FAKE_OPTIONS)
     ctx.tools.present_as("code", scope=agent.ctx)
 
-    from ph.system_prompt.assembly import AssembleContext, render_prompt
+    from ph.system_prompt.assembly import render_prompt
 
-    assembly = await ctx.system_prompt.assemble(AssembleContext(scope=agent.ctx, agent=agent))
+    assembly = await ctx.system_prompt.assemble(agent.ctx, agent=agent)
     prompt = render_prompt(assembly)
     assert "async def tools.touch(" in prompt
     assert f"only\n`{RUN_CODE}` is callable" in prompt or RUN_CODE in prompt
@@ -381,7 +381,7 @@ async def test_the_presented_name_is_not_bound_into_its_own_namespace(mount: Any
     session = ctx.sessions.create("s-bindings")
     agent = ctx.agents.create(session, FAKE_OPTIONS)
 
-    assembly = await ctx.system_prompt.assemble(AssembleContext(scope=agent.ctx, agent=agent))
+    assembly = await ctx.system_prompt.assemble(agent.ctx, agent=agent)
     text = render_prompt(assembly)
     assert "tools.touch" in text
     assert "tools.ipython" not in text
@@ -480,7 +480,7 @@ async def test_the_sdk_block_describes_the_contributed_namespace(mount: Any) -> 
     session = ctx.sessions.create("s-sdk")
     agent = ctx.agents.create(session, FAKE_OPTIONS)
 
-    assembly = await ctx.system_prompt.assemble(AssembleContext(scope=agent.ctx, agent=agent))
+    assembly = await ctx.system_prompt.assemble(agent.ctx, agent=agent)
     text = render_prompt(assembly)
     assert "tools.touch" in text
     assert "rlm.run" in text
@@ -532,7 +532,7 @@ async def test_a_namespace_owns_the_tools_it_presents(mount: Any) -> None:
     session = ctx.sessions.create("s-owns")
     agent = ctx.agents.create(session, FAKE_OPTIONS)
 
-    assembly = await ctx.system_prompt.assemble(AssembleContext(scope=agent.ctx, agent=agent))
+    assembly = await ctx.system_prompt.assemble(agent.ctx, agent=agent)
     text = render_prompt(assembly)
     assert "rlm.run" in text
     assert "tools.spawn_child" not in text

@@ -77,7 +77,6 @@ from ..llm.types import (
 from ..session import Session, SurfaceIntent
 from ..session.request_header import EpochHeader, RequestContext, canonical_header, header_equals
 from ..system_prompt.assembly import (
-    AssembleContext,
     PromptAssembly,
     join_context_sections,
     render_context_sections,
@@ -252,9 +251,7 @@ class ReactLoopAgent:
     async def _pre_step(self, target: InboxTarget, turn: int, step: int) -> _PreparedStep:
         self._throw_if_cancelled()
         claimed = self.inbox.claim(target, turn)
-        assembly = await self.ctx.system_prompt.assemble(
-            AssembleContext(scope=self.ctx, agent=self)
-        )
+        assembly = await self.ctx.system_prompt.assemble(self.ctx, agent=self)
         self._throw_if_cancelled()
         context_message = self._project_context(assembly)
         messages = (*claimed, context_message) if context_message is not None else tuple(claimed)

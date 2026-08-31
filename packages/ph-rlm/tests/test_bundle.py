@@ -20,7 +20,7 @@ from runtime_helpers import dispatch_names, run_ipython_cell
 
 from ph.bundles import BASE, HEADLESS
 from ph.cordis import Context, Loader
-from ph.system_prompt.assembly import AssembleContext, render_prompt
+from ph.system_prompt.assembly import render_prompt
 from ph.testing import report_section
 from ph.tools.registry import RUN_CODE
 from ph_rlm import BUNDLE
@@ -125,7 +125,7 @@ async def test_the_shipped_sdk_block_lists_the_four_namespaces(shipped_profile: 
     the run asks, so this is also the assertion that a cell can reach every one.
     """
     ctx, _session, agent = await shipped_profile()
-    assembly = await ctx.system_prompt.assemble(AssembleContext(scope=agent.ctx, agent=agent))
+    assembly = await ctx.system_prompt.assemble(agent.ctx, agent=agent)
     text = render_prompt(assembly)
 
     assert "tools.read" in text or "tools.write" in text

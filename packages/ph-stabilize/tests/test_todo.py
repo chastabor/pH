@@ -25,7 +25,6 @@ from ph.llm.types import ToolCallBlock
 from ph.session import Session
 from ph.session.known_event_types import KNOWN_SESSION_EVENT_TYPES
 from ph.system_prompt.assembly import (
-    AssembleContext,
     join_context_sections,
     render_context_sections,
     render_prompt,
@@ -231,7 +230,7 @@ async def test_the_reminder_text_reaches_the_prompt_verbatim(mount: Any) -> None
     claim.
     """
     ctx = await mount(ENABLED, profile=PROFILE)
-    text = render_prompt(await ctx.system_prompt.assemble(AssembleContext(scope=DEPLOYMENT)))
+    text = render_prompt(await ctx.system_prompt.assemble(DEPLOYMENT))
 
     assert WRITE_TODOS_SYSTEM_PROMPT in text
     # The four sentences the port plan names, so the gate is tied to the plan
@@ -256,7 +255,7 @@ async def test_the_list_rides_the_context_and_not_the_cached_prefix(mount: Any) 
     agent = StubAgent(ctx, session)
 
     async def assembled() -> Any:
-        return await ctx.system_prompt.assemble(AssembleContext(scope=agent.ctx, agent=agent))
+        return await ctx.system_prompt.assemble(agent.ctx, agent=agent)
 
     before = await assembled()
     await _run(ctx, session, _call("c1", _todos(("survey", "in_progress"))))

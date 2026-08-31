@@ -30,7 +30,6 @@ from ph.seams._restriction import NameFilter
 from ph.seams.skills import SkillRestriction
 from ph.seams.subagents import Grant, SubagentRequest, SubagentSpawnError
 from ph.system_prompt import render_prompt
-from ph.system_prompt.assembly import AssembleContext
 from ph.testing import FAKE_OPTIONS, StubSubagentProvider, run_tool, simple_tool, skill, write_skill
 
 pytestmark = pytest.mark.anyio
@@ -205,7 +204,7 @@ async def test_a_named_skill_is_in_the_childs_prompt(mount: Any, tmp_path: Path)
     )
 
     run = await _spawn(ctx, parent, skills=("review",))
-    prompt = render_prompt(await ctx.system_prompt.assemble(AssembleContext(scope=run.scope)))
+    prompt = render_prompt(await ctx.system_prompt.assemble(run.scope))
 
     assert "Read the diff. Say what is wrong." in prompt
     assert "not background reading" in prompt
@@ -222,7 +221,7 @@ async def test_an_unnamed_skill_stays_out_of_the_prompt(mount: Any, tmp_path: Pa
     )
 
     run = await _spawn(ctx, parent, skills=("review",))
-    prompt = render_prompt(await ctx.system_prompt.assemble(AssembleContext(scope=run.scope)))
+    prompt = render_prompt(await ctx.system_prompt.assemble(run.scope))
 
     assert "Read the diff carefully." in prompt
     assert "Push the button twice." not in prompt
@@ -250,7 +249,7 @@ async def test_the_brief_is_read_once_not_per_assembly(mount: Any, tmp_path: Pat
     Path.open = counted  # type: ignore[method-assign]
     try:
         for _ in range(3):
-            await ctx.system_prompt.assemble(AssembleContext(scope=run.scope))
+            await ctx.system_prompt.assemble(run.scope)
     finally:
         Path.open = original  # type: ignore[method-assign]
 
@@ -363,7 +362,7 @@ async def test_a_child_without_the_tool_is_not_told_to_use_it(mount: Any, tmp_pa
     )
     run = await _spawn(ctx, parent, tools=("read",))
 
-    prompt = render_prompt(await ctx.system_prompt.assemble(AssembleContext(scope=run.scope)))
+    prompt = render_prompt(await ctx.system_prompt.assemble(run.scope))
 
     assert "**review**" in prompt, "the child can still reach the skill"
     assert "`skill` tool" not in prompt, "it was told to call a tool it does not have"

@@ -21,7 +21,6 @@ import pytest
 from runtime_helpers import dispatch_names, run_ipython_cell, settled_dispatches
 
 from ph.system_prompt import render_prompt
-from ph.system_prompt.assembly import AssembleContext
 from ph.tools import Accept
 from ph_rlm.context_loader import LOADED, Corpus, Document, render_manifest
 
@@ -270,7 +269,7 @@ async def test_an_unreadable_source_is_reported_not_hidden(
 
 
 async def _assemble(ctx: Any, agent: Any) -> str:
-    assembly = await ctx.system_prompt.assemble(AssembleContext(scope=agent.ctx, agent=agent))
+    assembly = await ctx.system_prompt.assemble(agent.ctx, agent=agent)
     return render_prompt(assembly)
 
 
@@ -290,7 +289,7 @@ async def test_the_corpus_is_in_the_cached_prefix(loaded: Loaded) -> None:
     """A `section`, not a `context()`: resolved once at mount, so the text is
     fixed for the session and belongs in the stable prefix (A12)."""
     ctx, _session, agent = await loaded()
-    assembly = await ctx.system_prompt.assemble(AssembleContext(scope=agent.ctx, agent=agent))
+    assembly = await ctx.system_prompt.assemble(agent.ctx, agent=agent)
 
     assert "# Loaded context" in render_prompt(assembly)
 

@@ -28,7 +28,6 @@ from ph.system_prompt import (
     render_context_sections,
     render_prompt,
 )
-from ph.system_prompt.assembly import AssembleContext
 from ph_rlm.harness import (
     GLOBAL_LOG_NAME,
     PROJECTION_NAME,
@@ -565,7 +564,7 @@ async def test_the_harness_reaches_the_model_as_a_snapshot(harnessed: Harnessed)
         session=session,
         agent=agent,
     )
-    assembly = await ctx.system_prompt.assemble(AssembleContext(scope=agent.ctx, agent=agent))
+    assembly = await ctx.system_prompt.assemble(agent.ctx, agent=agent)
     snapshot = join_context_sections(render_context_sections(assembly))
 
     assert "# Continual Harness State" in snapshot

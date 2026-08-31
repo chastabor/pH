@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from typing import Any, TypeAlias
 
 from ..cordis import (
@@ -106,22 +106,20 @@ class PromptContext:
 class AssembleContext:
     """What assembly is being run for."""
 
-    scope: Boundary
-    """The boundary this prompt is assembled for — **required since P6-32**.
+    scope: Context
+    """The **resolved** boundary this prompt is being assembled for.
 
-    It was `Context | None = None`, and `assemble` resolved that as
-    `request.scope or self.ctx` — the mount, which every section reaches. So an
-    unstated boundary did not assemble an empty prompt, it assembled the widest
-    one, and `AssembleContext()` with no arguments was the shortest way to ask
-    for it — as was `assemble()`, which is why the request is required too.
-    `DEPLOYMENT` is how a caller means that on purpose.
+    A `Context`, never a `Boundary` — this payload is what a *provider* receives,
+    not what a caller states. `assemble` takes the `Boundary` and narrows it
+    once, so a provider is handed a real scope and `PromptText`'s documented
+    `scope.get("agent")` shape type-checks. Typed `Boundary` it did not: mypy
+    reported `Item "Deployment" … has no attribute "get"` against the very
+    pattern that alias's own docstring holds up as the thing a provider writes.
 
-    Ahead of `agent` and without a default, matching `ReadIntent`. `assemble`
-    takes the request the same way — **required** — because a defaulted request
-    would rebuild the deleted mechanism one frame up: a caller that states
-    nothing would still get the widest boundary, just spelled `assemble()`. The
-    first version of this row did exactly that, justified by a `ph doctor` caller
-    that does not exist; the only zero-argument callers were three tests."""
+    The same split the tools pipeline makes, and for the same reason:
+    `ToolExecutionInput.scope` is a `Boundary` because a caller builds it;
+    `ToolExecution.scope` is a `Context` because the pipeline hands it on. Input
+    states, downstream carries."""
     agent: Any = None
 
 
@@ -282,13 +280,23 @@ class SystemPromptService:
         # invokes the value as a body, and needs `by.owner` to bind it (P6-29).
         return [entry for entry in bucket if entry.by.layer.reaches(target)]
 
-    async def assemble(self, request: AssembleContext) -> PromptAssembly:
-        """Collect, order, interpolate, then run the assemble waterfall."""
-        target = boundary_of(request.scope, self.ctx)
-        # A provider is always handed a resolved `Context`, never `DEPLOYMENT` —
-        # that narrowing happens once, here, so no provider repeats it and
-        # `PromptText`'s documented `scope.get("agent")` shape holds.
-        scoped = request if request.scope is target else replace(request, scope=target)
+    async def assemble(self, scope: Boundary, *, agent: Any = None) -> PromptAssembly:
+        """Collect, order, interpolate, then run the assemble waterfall.
+
+        **The boundary is a parameter and the payload is built here** — the one
+        narrowing point, as `ToolRuntime._execution` is for a tool call. Callers
+        used to construct the `AssembleContext` themselves and hand it in, which
+        made one object play both roles: the thing a caller states (a `Boundary`,
+        possibly `DEPLOYMENT`) and the thing a provider reads (a real `Context`).
+
+        That cost more than a type. The waterfall was handed the *caller's*
+        request while providers were handed a narrowed copy, so a
+        `system-prompt/assemble` listener and a `PromptSection.text` could see
+        two different scopes for one assembly. There is one object now, and it is
+        the narrowed one.
+        """
+        request = AssembleContext(scope=boundary_of(scope, self.ctx), agent=agent)
+        target = request.scope
 
         # **Every body below runs as the row that contributed it, for the scope
         # being assembled** (P6-29). Four buckets, four bodies, and all four ran
@@ -309,7 +317,7 @@ class SystemPromptService:
             # exists to prevent, reintroduced one function down (P6-29).
             text: PromptText = entry.value.text
             with running(entry.by, target):
-                raw = await maybe_await(text(scoped)) if callable(text) else text
+                raw = await maybe_await(text(request)) if callable(text) else text
             # Interpolation is this seam's own work, not the row's, so it is
             # deliberately outside the binding.
             return _VARIABLE.sub(lambda m: variables.get(m.group(1), m.group(0)), raw)

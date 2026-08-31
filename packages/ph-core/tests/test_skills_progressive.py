@@ -30,7 +30,7 @@ from ph.seams.skills import (
     discover_skills,
     render_catalog,
 )
-from ph.system_prompt import AssembleContext, render_prompt
+from ph.system_prompt import render_prompt
 from ph.testing import FAKE_OPTIONS, run_tool, skill, write_skill
 
 pytestmark = pytest.mark.anyio
@@ -120,7 +120,7 @@ async def test_the_catalog_reaches_the_prompt_without_the_bodies(
     write_skill(tmp_path, "note-taking", body="Step one: open a file. Step two: write in it.")
     ctx = await mount(row(tmp_path))
 
-    prompt = render_prompt(await ctx.system_prompt.assemble(AssembleContext(scope=DEPLOYMENT)))
+    prompt = render_prompt(await ctx.system_prompt.assemble(DEPLOYMENT))
 
     assert "**note-taking** — search the web for a query" in prompt
     assert "Step one" not in prompt, "a skill body reached the prompt"
@@ -160,7 +160,7 @@ async def test_the_catalog_covers_skills_another_row_registered(mount: Any, tmp_
         Skill(name="deploy", description="ship the thing", hint="Callable as `await deploy(...)`.")
     )
 
-    prompt = render_prompt(await ctx.system_prompt.assemble(AssembleContext(scope=DEPLOYMENT)))
+    prompt = render_prompt(await ctx.system_prompt.assemble(DEPLOYMENT))
 
     assert "**deploy** — ship the thing Callable as `await deploy(...)`." in prompt
 

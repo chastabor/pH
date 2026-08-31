@@ -25,7 +25,6 @@ from runtime_helpers import run_ipython_cell
 from ph.cordis import DEPLOYMENT
 from ph.seams.skills import discover_skills
 from ph.system_prompt import render_prompt
-from ph.system_prompt.assembly import AssembleContext
 from ph.testing import FAKE_OPTIONS
 from ph.testing import write_skill as write_skill_md
 from ph_rlm.skills import python_half
@@ -139,7 +138,7 @@ async def test_the_catalog_reaches_the_prompt_without_the_bodies(
     ctx = await mount(HOST_RUNTIME_ROW, row([tmp_path]))
     session = ctx.sessions.create("skills")
     agent = ctx.agents.create(session, FAKE_OPTIONS)
-    assembly = await ctx.system_prompt.assemble(AssembleContext(scope=agent.ctx, agent=agent))
+    assembly = await ctx.system_prompt.assemble(agent.ctx, agent=agent)
     prompt = render_prompt(assembly)
 
     # One catalog, `skills-progressive`'s, with this row's hint attached to the

@@ -15,7 +15,7 @@ import pytest
 from conftest import BINDINGS_ROW, PROVIDER_ROW
 from runtime_helpers import run_cell
 
-from ph.system_prompt.assembly import AssembleContext, render_prompt
+from ph.system_prompt.assembly import render_prompt
 from ph.tools import Deny
 from ph.tools.registry import ToolRestriction
 from ph_rlm.bindings import DELETE_TOOL, LIST_TOOL, NAMESPACE, RUN_TOOL
@@ -51,7 +51,7 @@ async def _cell(ctx: Any, program: str, *, agent: Any, session: Any, call_id: st
 async def test_the_namespace_appears_in_the_sdk_block(delegating_runtime: Mounted) -> None:
     """One SDK route per capability: the namespaced form, not the tool name."""
     ctx, _session, agent = await delegating_runtime()
-    assembly = await ctx.system_prompt.assemble(AssembleContext(scope=agent.ctx, agent=agent))
+    assembly = await ctx.system_prompt.assemble(agent.ctx, agent=agent)
     text = render_prompt(assembly)
 
     assert f"{NAMESPACE}.run" in text
@@ -69,7 +69,7 @@ async def test_a_restricted_tool_leaves_the_sdk_block(delegating_runtime: Mounte
     ctx, _session, agent = await delegating_runtime()
     ctx.tools.restrict(ToolRestriction(deny=frozenset({DELETE_TOOL})), scope=agent.ctx)
 
-    assembly = await ctx.system_prompt.assemble(AssembleContext(scope=agent.ctx, agent=agent))
+    assembly = await ctx.system_prompt.assemble(agent.ctx, agent=agent)
     text = render_prompt(assembly)
     assert f"{NAMESPACE}.run" in text
     assert f"{NAMESPACE}.delete_subagent" not in text

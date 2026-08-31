@@ -18,7 +18,6 @@ from conftest import BINDINGS_ROW, DOCTRINE_ROW, PROVIDER_ROW
 
 from ph.seams.subagents import SubagentRequest
 from ph.system_prompt import join_context_sections, render_context_sections, render_prompt
-from ph.system_prompt.assembly import AssembleContext
 from ph_rlm.presentation import IPYTHON
 from ph_rlm.prompt import CHILD_DOCTRINE, DELEGATION, DOCTRINE, WORKSPACE_LINE
 from ph_rlm.subagents import PROVIDER_NAME, RLM_MAX_DEPTH
@@ -55,7 +54,7 @@ def prompted(mounted_runtime: Mounted) -> Callable[..., Any]:
 
 
 async def _assemble(ctx: Any, agent: Any) -> Any:
-    return await ctx.system_prompt.assemble(AssembleContext(scope=agent.ctx, agent=agent))
+    return await ctx.system_prompt.assemble(agent.ctx, agent=agent)
 
 
 async def _prompt(ctx: Any, agent: Any) -> str:
