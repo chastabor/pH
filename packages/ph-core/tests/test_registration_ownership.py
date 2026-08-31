@@ -118,12 +118,18 @@ def _scoped_methods() -> set[str]:
             #
             # P6-32 turns that one seam's judgement into the rule: a policy
             # reader takes `scope: Boundary` with no default, so `ToolRuntime`'s
-            # `get`/`names`/`schemas` and `SkillService`'s readers leave this
-            # walk as they convert. They lose nothing by leaving — a parameter
-            # that *must* be passed cannot default to the widest answer, which
-            # is the only thing this walk was classifying them for, and
-            # `test_a_boundary_parameter_never_has_a_default` holds them now.
-            # Partitioned by introspection rather than named, so neither list
+            # `get`/`names`/`schemas`, `SkillService`'s readers and the five on
+            # `ctx.fs` leave this walk as they convert.
+            #
+            # **They do not leave unwatched, and an earlier version of this
+            # comment said they lost nothing — which was true of the default
+            # question and false of the other one.** Leaving drops a method out
+            # of `NOT_A_LIFETIME` too, and that table is held by
+            # `test_the_classification_is_a_check_and_not_a_promise` — the check
+            # that caught a real misfiling on its first run. So that test asserts
+            # the same property directly over `Boundary` parameters, and
+            # `test_a_boundary_parameter_never_has_a_default` covers the default
+            # half. Partitioned by introspection rather than named, so no list
             # needs an edit when a seam moves.
             continue
         names.add(name)
@@ -186,15 +192,6 @@ NOT_A_LIFETIME: dict[str, str] = {
     # subject and not this row's. Asserted, not just declared: the static check
     # below requires each of these to be free of `owner_for`.
     "CompactionSeam.notes": "visibility — which notes this scope may read",
-    # P6-24. `scope=` on `ctx.fs` names the *policy boundary* a call is judged
-    # in — which screens and which intent listeners apply — and is stated by the
-    # caller from `ToolExecutionInput.scope`, exactly as `ctx.tools` reads it.
-    # Nothing here registers, so nothing here owns a lifetime.
-    "FsService.edit": "the boundary this call is judged in",
-    "FsService.glob": "the boundary this call is judged in",
-    "FsService.grep": "the boundary this call is judged in",
-    "FsService.read": "the boundary this call is judged in",
-    "FsService.write": "the boundary this call is judged in",
     "CommandRegistry.dispatch": "the boundary the command body runs for",
     # Work run *in* a scope, forwarding to whatever owns the artifact.
     "ShellService.run": "the scope the command runs for",
@@ -603,6 +600,26 @@ def test_the_classification_is_a_check_and_not_a_promise() -> None:
     assert confused == [], (
         "these are classified as visibility or dispatch targets but resolve a "
         f"lifetime owner — one of the two is wrong: {confused}"
+    )
+
+    # The same check for the readers that *left* this table (P6-32). Converting
+    # `scope` to a `Boundary` with no default drops a method out of
+    # `_scoped_methods` — that walk skips no-default parameters — and the five fs
+    # readers, `SkillService`'s and `ToolRuntime`'s went with it. The comment
+    # there says they "lose nothing by leaving", which is true of the *default*
+    # question and false of this one: leaving took them out of the falsifiability
+    # check too, and this check is the one that caught a real misfiling on its
+    # first run (`SkillService.restrict` routing through `owner_for` while filed
+    # not-a-lifetime). A `Boundary` names a boundary to answer *for*, never a
+    # lifetime to own, so the same assertion holds and needs no table.
+    widened = sorted(
+        name
+        for name, parameter in _scope_parameters()
+        if "Boundary" in str(parameter.annotation) and _resolves_an_owner(name)
+    )
+    assert widened == [], (
+        "these take a `Boundary` — a scope to answer for — but resolve a lifetime "
+        f"owner, which is the other question entirely: {widened}"
     )
 
 

@@ -304,7 +304,16 @@ Boundary: TypeAlias = "Context | Deployment"
 Deliberately **not** `| None`. A reader whose parameter has no default cannot be
 called without answering the question, and mypy is what asks — at build time,
 against every call site, rather than a runtime rule that only fires on the paths
-a test happens to drive."""
+a test happens to drive.
+
+**A *registration* takes a `Context`, never this.** `ctx.fs`'s `screen`,
+`ToolRuntime`'s `register`/`restrict`/`guard`/`present_as` and every `claim_*`
+call hand their scope to `add_disposer` and to `reaches` — it is what the
+registration is an *effect of* and what it is visible *to*, P6-12's two
+questions. `DEPLOYMENT` is neither: there is nothing for it to unwind with. So a
+mechanical `Context | None → Boundary` sweep must stop at the readers, and the
+registration methods P6-32 defers are deferred to P6-12's mechanism rather than
+merely unconverted."""
 
 
 def boundary_of(scope: Boundary, mount: Context) -> Context:

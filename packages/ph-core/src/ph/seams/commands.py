@@ -114,8 +114,12 @@ class CommandRegistry:
 
         **This fallback is not the fail-open one `ctx.fs` had.** There, an
         unreadable `agent.ctx` fell back to the *mount*, which no agent-scoped
-        registration reaches, so a scoped policy row silently applied to nobody —
-        and `FsService._boundary` raises rather than widen. Here the fallback is
+        registration reaches, so a scoped policy row silently applied to nobody.
+        P6-24 answered that by refusing; P6-32 then deleted the derivation
+        outright, so `ctx.fs` requires a stated `Boundary` and has no fallback at
+        all. `SubagentService._delegating_boundary` is the surviving refuser, for
+        the reason its docstring gives: its handle arrives on a caller-built
+        payload, so the broken case stays reachable. Here the fallback is
         the *registration's own layer*, which is where a dispatch with no agent
         lands anyway and is exactly as wide as the command already was. Nothing
         is widened by failing to read an agent, so nothing is worth refusing a

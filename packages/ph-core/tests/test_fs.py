@@ -15,13 +15,12 @@ from typing import Any
 
 import pytest
 
-from ph.cordis import Context
+from ph.cordis import DEPLOYMENT, Context
 from ph.seams.fs import (
     Config as FsConfig,
 )
 from ph.seams.fs import (
     EditIntent,
-    FsBoundaryError,
     FsDenied,
     FsService,
     WalkDecision,
@@ -78,7 +77,7 @@ async def test_write_intent_fires_before_the_write_and_a_veto_prevents_it(
 
     root.on("fs/write-intent", deny)
     with pytest.raises(FsDenied, match="not allowed"):
-        await fs.write("guarded.txt", "content")
+        await fs.write("guarded.txt", "content", scope=DEPLOYMENT)
     assert observed == [False]
     assert not target.exists()
 
@@ -87,7 +86,7 @@ async def test_an_allowed_write_reaches_disk_and_announces_itself(tmp_path: Path
     root, fs = _fs(tmp_path)
     changed: list[Path] = []
     root.on("fs/changed", lambda path: changed.append(path))
-    written = await fs.write("notes/deep.txt", "hello")
+    written = await fs.write("notes/deep.txt", "hello", scope=DEPLOYMENT)
     assert written.read_text() == "hello"
     assert changed == [written]
 
@@ -96,7 +95,7 @@ async def test_reads_record_an_observation(tmp_path: Path) -> None:
     _root, fs = _fs(tmp_path)
     (tmp_path / "a.txt").write_text("one\ntwo\nthree\n")
     session = Session("s")
-    window = await fs.read("a.txt", session=session)
+    window = await fs.read("a.txt", session=session, scope=DEPLOYMENT)
     assert window.total_lines == 3
     assert [event.type for event in session.events] == ["fs/observed"]
     assert fs.observed_mtime("a.txt") is not None
@@ -105,7 +104,7 @@ async def test_reads_record_an_observation(tmp_path: Path) -> None:
 async def test_a_read_window_says_how_to_get_the_next_one(tmp_path: Path) -> None:
     _root, fs = _fs(tmp_path)
     (tmp_path / "long.txt").write_text("\n".join(str(n) for n in range(100)))
-    window = await fs.read("long.txt", offset=10, limit=5)
+    window = await fs.read("long.txt", offset=10, limit=5, scope=DEPLOYMENT)
     assert window.text.splitlines() == ["10", "11", "12", "13", "14"]
     assert window.truncated
     assert window.offset == 10
@@ -116,8 +115,8 @@ async def test_edit_requires_a_unique_match_unless_told_otherwise(tmp_path: Path
     target = tmp_path / "dup.txt"
     target.write_text("x\nx\n")
     with pytest.raises(ValueError, match="2 occurrences"):
-        await fs.edit("dup.txt", "x", "y")
-    assert await fs.edit("dup.txt", "x", "y", replace_all=True) == 2
+        await fs.edit("dup.txt", "x", "y", scope=DEPLOYMENT)
+    assert await fs.edit("dup.txt", "x", "y", replace_all=True, scope=DEPLOYMENT) == 2
     assert target.read_text() == "y\ny\n"
 
 
@@ -125,7 +124,7 @@ async def test_editing_absent_text_is_an_error(tmp_path: Path) -> None:
     _root, fs = _fs(tmp_path)
     (tmp_path / "a.txt").write_text("hello")
     with pytest.raises(ValueError, match="no occurrence"):
-        await fs.edit("a.txt", "goodbye", "hi")
+        await fs.edit("a.txt", "goodbye", "hi", scope=DEPLOYMENT)
 
 
 async def test_read_before_edit_refuses_an_unread_file(tmp_path: Path) -> None:
@@ -134,10 +133,10 @@ async def test_read_before_edit_refuses_an_unread_file(tmp_path: Path) -> None:
     await read_before_edit(root, None)
 
     with pytest.raises(FsDenied, match=r"read .* before editing"):
-        await fs.edit("a.txt", "hello", "goodbye")
+        await fs.edit("a.txt", "hello", "goodbye", scope=DEPLOYMENT)
 
-    await fs.read("a.txt")
-    assert await fs.edit("a.txt", "hello", "goodbye") == 1
+    await fs.read("a.txt", scope=DEPLOYMENT)
+    assert await fs.edit("a.txt", "hello", "goodbye", scope=DEPLOYMENT) == 1
 
 
 async def test_read_before_edit_refuses_a_file_that_changed_underneath(
@@ -147,7 +146,7 @@ async def test_read_before_edit_refuses_a_file_that_changed_underneath(
     target = tmp_path / "a.txt"
     target.write_text("hello")
     await read_before_edit(root, None)
-    await fs.read("a.txt")
+    await fs.read("a.txt", scope=DEPLOYMENT)
 
     import os
     import time
@@ -157,7 +156,7 @@ async def test_read_before_edit_refuses_a_file_that_changed_underneath(
     os.utime(target, (target.stat().st_atime, target.stat().st_mtime + 10))
 
     with pytest.raises(FsDenied, match="changed on disk"):
-        await fs.edit("a.txt", "changed", "x")
+        await fs.edit("a.txt", "changed", "x", scope=DEPLOYMENT)
 
 
 async def test_edit_intent_sees_the_replacement_before_it_lands(tmp_path: Path) -> None:
@@ -172,7 +171,7 @@ async def test_edit_intent_sees_the_replacement_before_it_lands(tmp_path: Path) 
         return await next_()
 
     root.on("fs/edit-intent", observe)
-    await fs.edit("a.txt", "before", "after")
+    await fs.edit("a.txt", "before", "after", scope=DEPLOYMENT)
     assert seen[0].new_text == "after"
     assert target.read_text() == "after"
 
@@ -185,10 +184,10 @@ async def test_glob_and_grep_skip_the_usual_noise(tmp_path: Path) -> None:
     (tmp_path / "node_modules").mkdir()
     (tmp_path / "node_modules" / "skip.py").write_text("TARGET = 2\n")
 
-    found = await fs.glob("**/*.py")
+    found = await fs.glob("**/*.py", scope=DEPLOYMENT)
     assert [Path(path).name for path in found] == ["keep.py"]
 
-    matches = await fs.grep("TARGET")
+    matches = await fs.grep("TARGET", scope=DEPLOYMENT)
     assert [match.path for match in matches] == [str(tmp_path / "src" / "keep.py")]
     assert matches[0].line == 2
 
@@ -198,7 +197,7 @@ async def test_an_invalid_regular_expression_is_reported_not_raised_raw(
 ) -> None:
     _root, fs = _fs(tmp_path)
     with pytest.raises(ValueError, match="invalid regular expression"):
-        await fs.grep("(unclosed")
+        await fs.grep("(unclosed", scope=DEPLOYMENT)
 
 
 async def test_relative_paths_resolve_against_the_root(tmp_path: Path) -> None:
@@ -228,11 +227,12 @@ async def test_the_ignore_list_is_deployment_config_not_a_module_constant(
         (tmp_path / name / "f.py").write_text("x = 1\n")
 
     added = await _mounted(tmp_path, ignore=["vendor"])
-    assert [Path(p).parent.name for p in await added.glob("**/*.py")] == ["node_modules"]
+    shown = await added.glob("**/*.py", scope=DEPLOYMENT)
+    assert [Path(p).parent.name for p in shown] == ["node_modules"]
 
     # `[]` is not `None`: one turns pruning off, the other keeps the default.
     off = await _mounted(tmp_path, ignore=[])
-    assert sorted(Path(p).parent.name for p in await off.glob("**/*.py")) == [
+    assert sorted(Path(p).parent.name for p in await off.glob("**/*.py", scope=DEPLOYMENT)) == [
         "node_modules",
         "vendor",
     ]
@@ -262,7 +262,7 @@ async def test_a_screen_can_refuse_a_tree_not_just_the_files_in_it(
         return "prune" if is_dir and name == "secrets" else "yield"
 
     fs.screen(screen, scope=root)
-    assert [Path(p).name for p in await fs.glob("**/*.txt")] == ["open.txt"]
+    assert [Path(p).name for p in await fs.glob("**/*.txt", scope=DEPLOYMENT)] == ["open.txt"]
     # Asked once about the directory, and never about the five files inside it —
     # which is the difference between refusing a tree and refusing a tree's
     # contents one at a time.
@@ -288,7 +288,7 @@ async def test_a_screen_that_raises_refuses_at_the_widest_setting(tmp_path: Path
         raise RuntimeError("this matcher is broken")
 
     fs.screen(broken, scope=root)
-    assert await fs.glob("**/*.txt") == []
+    assert await fs.glob("**/*.txt", scope=DEPLOYMENT) == []
 
 
 async def test_a_screen_only_sees_the_agents_its_scope_reaches(tmp_path: Path) -> None:
@@ -306,9 +306,11 @@ async def test_a_screen_only_sees_the_agents_its_scope_reaches(tmp_path: Path) -
 
     fs.screen(lambda _p, _n, _a, is_dir: "yield" if is_dir else "skip", scope=mine)
 
-    assert await fs.glob("**/*.txt", agent=StubAgent(mine)) == []
-    assert len(await fs.glob("**/*.txt", agent=StubAgent(theirs))) == 1, "not this agent's rule"
-    assert len(await fs.glob("**/*.txt")) == 1, "nor the process's"
+    assert await fs.glob("**/*.txt", agent=StubAgent(mine), scope=mine) == []
+    assert len(await fs.glob("**/*.txt", agent=StubAgent(theirs), scope=theirs)) == 1, (
+        "not this agent's rule"
+    )
+    assert len(await fs.glob("**/*.txt", scope=DEPLOYMENT)) == 1, "nor the process's"
 
 
 async def test_an_agent_scoped_gate_is_asked_about_that_agents_reads(
@@ -331,9 +333,9 @@ async def test_an_agent_scoped_gate_is_asked_about_that_agents_reads(
     mine.on("fs/read-intent", deny)
 
     with pytest.raises(FsDenied, match="may not read"):
-        await fs.read("a.txt", agent=StubAgent(mine))
+        await fs.read("a.txt", agent=StubAgent(mine), scope=mine)
     # And nobody else's, which is the property the scope buys.
-    assert await fs.read("a.txt") is not None
+    assert await fs.read("a.txt", scope=DEPLOYMENT) is not None
 
 
 async def test_a_global_row_still_reaches_every_agent(tmp_path: Path) -> None:
@@ -351,11 +353,12 @@ async def test_a_global_row_still_reaches_every_agent(tmp_path: Path) -> None:
         return "nobody may read"
 
     root.on("fs/read-intent", deny)
+    stranger = root.scope("agent")
 
     with pytest.raises(FsDenied, match="nobody"):
-        await fs.read("a.txt", agent=StubAgent(root.scope("agent")))
+        await fs.read("a.txt", agent=StubAgent(stranger), scope=stranger)
     with pytest.raises(FsDenied, match="nobody"):
-        await fs.read("a.txt")
+        await fs.read("a.txt", scope=DEPLOYMENT)
 
 
 async def test_the_walk_yields_the_same_paths_a_relative_to_walk_did(tmp_path: Path) -> None:
@@ -382,7 +385,7 @@ async def test_the_walk_yields_the_same_paths_a_relative_to_walk_did(tmp_path: P
 
     _root, fs = _fs(tmp_path)
     for pattern in ("**/*", "**/*.py", "*.py", "pkg/**/*.py", "pkg*/*.py"):
-        found = await fs.glob(pattern)
+        found = await fs.glob(pattern, scope=DEPLOYMENT)
         expected = sorted(
             str(path)
             for path in tmp_path.glob(pattern)
@@ -425,17 +428,24 @@ async def test_one_call_resolves_one_boundary(tmp_path: Path) -> None:
     )
 
 
-async def test_an_unreadable_agent_scope_refuses_instead_of_widening(tmp_path: Path) -> None:
-    """The fail-open half, in the direction P6-18 exists to prevent.
+async def test_an_fs_reader_cannot_be_called_without_a_boundary(tmp_path: Path) -> None:
+    """The fail-open half, now closed by construction rather than by refusing.
 
-    An `agent` whose `.ctx` is absent used to fall back to the *mount*, which no
-    agent-scoped registration reaches — so a policy row that scoped itself to one
-    agent screened nobody and said nothing. There is no narrower default to pick
-    instead, so the boundary is refused: a caller error, not a policy outcome,
-    which is why it is `FsBoundaryError` and not `FsDenied`.
+    An `agent` whose `.ctx` was absent used to fall back to the *mount*, which no
+    agent-scoped registration reaches — so a policy row scoped to one agent
+    screened nobody and said nothing, in the direction P6-18 exists to prevent.
+    P6-24 answered that by *refusing* the derivation with `FsBoundaryError`.
 
-    The three cases that are *not* errors are pinned beside it, because the value
-    of refusing is entirely in not refusing the others.
+    P6-32 removed the derivation instead, and the refusal went with it: `scope`
+    is a required `Boundary`, so there is no unreadable agent to fall back from
+    and no branch to fail open in. What is asserted here is the property that
+    replaced it — saying nothing is not a way to get an answer — and the two
+    boundaries that *are* sayable still answer, because a rule that refuses
+    everything is not the one this row wants.
+
+    `agent` stays beside `scope` and is orthogonal to it: it keys the *physical*
+    workspace root (D21) and routes approvals, never the policy boundary. A
+    handle too broken to name a scope no longer matters, which is the point.
     """
     (tmp_path / "a.txt").write_text("a")
     root, fs = _fs(tmp_path)
@@ -444,13 +454,16 @@ async def test_an_unreadable_agent_scope_refuses_instead_of_widening(tmp_path: P
     class NoCtx:
         """An agent-shaped object that never assigned `self.ctx`."""
 
-    with pytest.raises(FsBoundaryError):
-        await fs.glob("**/*.txt", agent=NoCtx())
+    # Through `root.fs`, which `Context.__getattr__` types as `Any` — the exact
+    # path the row's runtime layer exists for, and the one mypy cannot see. The
+    # typed handle would need a `# type: ignore` to say the same thing less well.
+    with pytest.raises(TypeError, match="missing 1 required keyword-only argument"):
+        await root.fs.glob("**/*.txt")
 
-    assert len(await fs.glob("**/*.txt")) == 1, "a caller with no agent is not asking about one"
-    assert len(await fs.glob("**/*.txt", agent=StubAgent(agent))) == 1, "a usable agent still works"
+    assert len(await fs.glob("**/*.txt", scope=DEPLOYMENT)) == 1, "the deployment, asked for"
+    assert len(await fs.glob("**/*.txt", scope=agent)) == 1, "an agent's own boundary"
     assert len(await fs.glob("**/*.txt", agent=NoCtx(), scope=agent)) == 1, (
-        "a stated boundary answers the question, whatever the agent looks like"
+        "a stated boundary answers the question, whatever the agent handle looks like"
     )
 
 

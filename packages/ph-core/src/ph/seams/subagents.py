@@ -474,8 +474,7 @@ class SubagentService:
     def _delegating_boundary(self, request: SubagentRequest) -> Context:
         """The boundary a spawn's ceiling is computed in — stated, not guessed (P6-31).
 
-        `FsService._boundary`'s rule, on the path that needed it most. Four cases,
-        and the third is the one that was wrong:
+        Four cases, and the third is the one that was wrong:
 
         * **a stated `request.scope`** wins, as it does everywhere else;
         * **no scope and no parent** is the mount — a spawn with no parent is a
@@ -505,15 +504,21 @@ class SubagentService:
         Either way the registry never guesses; this method is where the guess
         used to happen and is now refused.
 
-        **The four-case rule now exists twice** — here and `FsService._boundary`
-        — differing in the no-handle default (a root delegation gets the mount;
-        fs's agentless probe does too) and in the refusal, which is each seam's
-        own coded error and is load-bearing for its tests. Two is below the
-        threshold for a cordis helper, and the staged P6-32 conversions take no
-        agent handle at all, so the count is not growing. If a *third* resolver
-        of this shape appears, hoist the rule — the property worth centralising
-        is the case order, because "a stated scope wins before any handle is
-        consulted" is the security half.
+        **This is the last four-case resolver in production.** `ctx.fs` had the
+        other one; P6-32 deleted it rather than converting it, because requiring
+        a stated `Boundary` makes the case it refused — a handle too broken to
+        name a scope, with nothing stated beside it — unrepresentable. That
+        cannot happen here: `SubagentRequest` is a payload a caller builds, so
+        the handle arrives whether or not a boundary does, and the refusal has
+        somewhere to fire.
+
+        One more of this shape exists outside production — `ph.testing`'s
+        `boundary_for`, same four cases in the same order — and the difference is
+        the argument against hoisting yet: its refusal is a bare `TypeError`
+        where this one is a coded `SubagentSpawnError` that spawn tests match on.
+        The case *order* is the half worth centralising if a third production
+        resolver ever appears, because "a stated scope wins before any handle is
+        consulted" is the security property; the refusal is per-seam and stays.
         """
         if request.scope is not None:
             return request.scope

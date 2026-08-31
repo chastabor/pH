@@ -32,6 +32,7 @@ from stabilize_helpers import (
     scoped_agent,
 )
 
+from ph.cordis import DEPLOYMENT
 from ph.llm.types import ToolCallBlock
 from ph.seams.fs import FsDenied
 from ph.testing import (
@@ -206,7 +207,7 @@ async def test_a_denied_read_never_opens_the_file(mount: Any, tmp_path: Path) ->
     ctx = await _mounted(mount, tmp_path, {"paths": ["*.env"], "mode": "deny"})
 
     with pytest.raises(FsDenied) as refused:
-        await ctx.fs.read("secret.env")
+        await ctx.fs.read("secret.env", scope=DEPLOYMENT)
     assert "denied by permissions-fs" in str(refused.value)
 
 
@@ -223,14 +224,14 @@ async def test_a_denied_write_and_edit_are_both_refused(mount: Any, tmp_path: Pa
     )
 
     with pytest.raises(FsDenied):
-        await ctx.fs.write("vendor/lib.py", "x = 2\n")
+        await ctx.fs.write("vendor/lib.py", "x = 2\n", scope=DEPLOYMENT)
     with pytest.raises(FsDenied):
-        await ctx.fs.edit("vendor/lib.py", "x = 1", "x = 2")
+        await ctx.fs.edit("vendor/lib.py", "x = 1", "x = 2", scope=DEPLOYMENT)
     # And nothing changed on disk, which is the only assertion that proves the
     # gate ran before the write rather than after it.
     assert (tmp_path / "vendor" / "lib.py").read_text(encoding="utf-8") == "x = 1\n"
     # The read the rule did not mention is still allowed.
-    assert "x = 1" in (await ctx.fs.read("vendor/lib.py")).text
+    assert "x = 1" in (await ctx.fs.read("vendor/lib.py", scope=DEPLOYMENT)).text
 
 
 async def test_a_concealed_path_is_absent_from_glob_and_grep(mount: Any, tmp_path: Path) -> None:
@@ -244,11 +245,11 @@ async def test_a_concealed_path_is_absent_from_glob_and_grep(mount: Any, tmp_pat
     (tmp_path / "secret.env").write_text("TOKEN=hunter2\n", encoding="utf-8")
     ctx = await _mounted(mount, tmp_path, {"paths": ["*.env"], "mode": "deny"})
 
-    paths = await ctx.fs.glob("**/*")
+    paths = await ctx.fs.glob("**/*", scope=DEPLOYMENT)
     assert any(path.endswith("app.py") for path in paths)
     assert not any(path.endswith("secret.env") for path in paths)
 
-    matches = await ctx.fs.grep("TOKEN")
+    matches = await ctx.fs.grep("TOKEN", scope=DEPLOYMENT)
     assert [match.path for match in matches] == [str(tmp_path / "app.py")]
     assert not any("hunter2" in match.text for match in matches)
 
@@ -270,11 +271,11 @@ async def test_a_denied_tree_is_never_entered(mount: Any, tmp_path: Path) -> Non
     (tmp_path / "app.py").write_text("TOKEN = 1\n")
     ctx = await _mounted(mount, tmp_path, {"paths": ["secrets/**"], "mode": "deny"})
 
-    paths = await ctx.fs.glob("**/*")
+    paths = await ctx.fs.glob("**/*", scope=DEPLOYMENT)
     assert any(path.endswith("app.py") for path in paths)
     assert not any("secrets" in path for path in paths), "neither the tree nor its contents"
 
-    matches = await ctx.fs.grep("TOKEN")
+    matches = await ctx.fs.grep("TOKEN", scope=DEPLOYMENT)
     assert [match.path for match in matches] == [str(tmp_path / "app.py")]
     assert not any("hunter" in match.text for match in matches)
 
@@ -292,7 +293,7 @@ async def test_a_tree_an_allow_rule_names_is_still_entered(mount: Any, tmp_path:
     (tmp_path / "docs" / "readme.md").write_text("hello\n")
     ctx = await _mounted(mount, tmp_path, {"paths": ["docs/**"], "mode": "allow"})
 
-    assert any(path.endswith("readme.md") for path in await ctx.fs.glob("**/*"))
+    assert any(path.endswith("readme.md") for path in await ctx.fs.glob("**/*", scope=DEPLOYMENT))
 
 
 async def test_a_workspace_scoped_read_rule_does_not_prune_the_workspace(
@@ -319,7 +320,7 @@ async def test_a_workspace_scoped_read_rule_does_not_prune_the_workspace(
         },
     )
 
-    assert any(path.endswith("app.py") for path in await ctx.fs.glob("**/*"))
+    assert any(path.endswith("app.py") for path in await ctx.fs.glob("**/*", scope=DEPLOYMENT))
 
 
 async def test_interrupt_asks_and_the_answer_decides(mount: Any, tmp_path: Path) -> None:
@@ -334,10 +335,10 @@ async def test_interrupt_asks_and_the_answer_decides(mount: Any, tmp_path: Path)
     answers: list[str] = ["allowed-once"]
     answer_approvals(ctx, lambda: answers[0])
 
-    assert "hello" in (await ctx.fs.read("notes.md", agent=agent)).text
+    assert "hello" in (await ctx.fs.read("notes.md", agent=agent, scope=DEPLOYMENT)).text
     answers[0] = "rejected"
     with pytest.raises(FsDenied) as refused:
-        await ctx.fs.read("notes.md", agent=agent)
+        await ctx.fs.read("notes.md", agent=agent, scope=DEPLOYMENT)
     # The seam's own sentence, so a model can tell a human's "no" from a missing
     # channel — only one of the two is worth re-planning around.
     assert "the user rejected" in str(refused.value)
@@ -352,7 +353,7 @@ async def test_interrupt_without_an_answerer_denies(mount: Any, tmp_path: Path) 
     agent = StubAgent(ctx, ctx.sessions.create("unanswered"))
 
     with pytest.raises(FsDenied) as refused:
-        await ctx.fs.read("notes.md", agent=agent)
+        await ctx.fs.read("notes.md", agent=agent, scope=DEPLOYMENT)
     assert "no approval channel" in str(refused.value)
 
 
@@ -374,7 +375,7 @@ async def test_an_agentless_interrupt_denies_rather_than_prompting(
     answer_approvals(ctx, lambda: asked.append("prompted") or "allowed-once")
 
     with pytest.raises(FsDenied):
-        await ctx.fs.read("notes.md")
+        await ctx.fs.read("notes.md", scope=DEPLOYMENT)
     assert asked == [], "a human was prompted with nowhere to record the answer"
 
 
@@ -391,7 +392,7 @@ async def test_a_rule_may_carry_its_own_words_for_the_prompt(mount: Any, tmp_pat
     answer_approvals(ctx, lambda: "rejected")
 
     with pytest.raises(FsDenied):
-        await ctx.fs.read("notes.md", agent=agent)
+        await ctx.fs.read("notes.md", agent=agent, scope=DEPLOYMENT)
     (asked,) = events_of(agent.session, "approval/asked")
     assert asked.data["reason"] == "shared team notes"
 
@@ -403,8 +404,8 @@ async def test_nothing_is_restricted_by_default(mount: Any, tmp_path: Path) -> N
     (tmp_path / "secret.env").write_text("TOKEN=1\n", encoding="utf-8")
     ctx = await mount(row("fs", root=str(tmp_path)), profile=PROFILE)
 
-    assert "TOKEN" in (await ctx.fs.read("secret.env")).text
-    assert await ctx.fs.glob("**/*.env")
+    assert "TOKEN" in (await ctx.fs.read("secret.env", scope=DEPLOYMENT)).text
+    assert await ctx.fs.glob("**/*.env", scope=DEPLOYMENT)
 
 
 async def test_a_tool_call_is_covered_without_the_row_naming_the_tool(
@@ -451,8 +452,8 @@ async def test_an_empty_rule_set_attaches_nothing(mount: Any, tmp_path: Path) ->
     ctx = await _mounted(mount, tmp_path)
 
     assert ctx.fs_permissions.rules == ()
-    assert "TOKEN" in (await ctx.fs.read("secret.env")).text
-    assert await ctx.fs.glob("**/*.env")
+    assert "TOKEN" in (await ctx.fs.read("secret.env", scope=DEPLOYMENT)).text
+    assert await ctx.fs.glob("**/*.env", scope=DEPLOYMENT)
 
 
 # ------------------------------------------------------------------- reach --
@@ -706,7 +707,9 @@ async def test_a_leading_wildcard_hides_the_file_without_refusing_the_tree(
 
     # Files only — `_walk` never yields a directory — so this is every file in
     # the tree except the one the rule names.
-    found = sorted(path[len(str(tmp_path)) + 1 :] for path in await ctx.fs.glob("**/*"))
+    found = sorted(
+        path[len(str(tmp_path)) + 1 :] for path in await ctx.fs.glob("**/*", scope=DEPLOYMENT)
+    )
     assert found == ["docs/b.md", "src/a.py", "top.txt"]
 
     # And the delete side keeps the harder rounding, which is the reason the two
