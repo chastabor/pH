@@ -22,6 +22,7 @@ from typing import Any, TextIO
 import anyio
 
 from ph.agent.types import AgentOptions
+from ph.cordis import DEPLOYMENT
 from ph.session import Session, SessionEvent, dumps
 
 from ..protocol import capabilities, notification, respond
@@ -67,7 +68,10 @@ class RpcServer:
             session = self.ctx.sessions.require(params["sessionId"])
             return {"events": [event.to_wire() for event in session.events]}
         if method == "tools/list":
-            return {"tools": [schema.to_wire() for schema in self.ctx.tools.schemas()]}
+            # `DEPLOYMENT` (P6-32): RPC mode advertises what the deployment
+            # offers, before any agent exists to narrow it.
+            schemas = self.ctx.tools.schemas(scope=DEPLOYMENT)
+            return {"tools": [schema.to_wire() for schema in schemas]}
         if method == "shutdown":
             return {"ok": True}
         raise ValueError(f'unknown method "{method}"')

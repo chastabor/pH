@@ -18,7 +18,7 @@ from typing import Any
 import pytest
 
 from ph.llm.types import create_user_message
-from ph.testing import StubAgent, raising, simple_tool, tool_runtime
+from ph.testing import StubAgent, boundary_for, raising, simple_tool, tool_runtime
 from ph.tools import (
     Accept,
     Allow,
@@ -47,7 +47,9 @@ def _call(name: str = "echo", *, agent: Any = None, **arguments: Any) -> ToolExe
         name=name,
         arguments=arguments,
         agent=agent,
-        scope=getattr(agent, "ctx", None),
+        # One resolver, shared with `run_tool` — a second spelling here drifted
+        # once already (a truthiness guard where the helper checks the type).
+        scope=boundary_for(None, agent),
     )
 
 

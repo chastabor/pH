@@ -29,16 +29,22 @@ from __future__ import annotations
 import dataclasses
 import importlib
 import inspect
+import io
 import pkgutil
 import re
+import textwrap
+import token
+import tokenize
 import typing
 from collections.abc import Callable, Iterator
+from functools import cache
+from itertools import accumulate
 from typing import Any, get_args
 
 import pytest
 
 import ph
-from ph.cordis import Context, events, plugin, running
+from ph.cordis import DEPLOYMENT, Context, events, plugin, running
 from ph.cordis.context import maybe_await
 from ph.cordis.events import DispatchMode
 
@@ -100,6 +106,38 @@ def _scoped_methods() -> set[str]:
     joined without joining anything.
     """
     names: set[str] = set()
+    for name, parameter in _scope_parameters():
+        if parameter.kind is not inspect.Parameter.KEYWORD_ONLY:
+            continue
+        if parameter.default is inspect.Parameter.empty:
+            # `scope` with no default: the caller must say, so there is no
+            # default to get wrong. `FsService.screen` was the first, required
+            # for P6-18's reason — its owner decides *reach*, not just teardown,
+            # so a forgotten scope would widen policy rather than merely delay
+            # cleanup.
+            #
+            # P6-32 turns that one seam's judgement into the rule: a policy
+            # reader takes `scope: Boundary` with no default, so `ToolRuntime`'s
+            # `get`/`names`/`schemas` and `SkillService`'s readers leave this
+            # walk as they convert. They lose nothing by leaving — a parameter
+            # that *must* be passed cannot default to the widest answer, which
+            # is the only thing this walk was classifying them for, and
+            # `test_a_boundary_parameter_never_has_a_default` holds them now.
+            # Partitioned by introspection rather than named, so neither list
+            # needs an edit when a seam moves.
+            continue
+        names.add(name)
+    return names
+
+
+def _scope_parameters() -> Iterator[tuple[str, inspect.Parameter]]:
+    """Every `("Class.method", parameter)` whose signature takes `scope`.
+
+    The iteration half of `_scoped_methods`, split out when the P6-32 gate
+    became its second consumer — this file's own `_declared_classes` docstring
+    says what a walk written out twice costs, and this was becoming the fourth
+    copy of the signature loop. Each caller keeps only its filter.
+    """
     for cls in _declared_classes():
         for method_name, method in _declared_methods(cls):
             try:
@@ -107,19 +145,38 @@ def _scoped_methods() -> set[str]:
             except (TypeError, ValueError):  # pragma: no cover - builtins
                 continue
             parameter = signature.parameters.get("scope")
-            if parameter is None or parameter.kind is not inspect.Parameter.KEYWORD_ONLY:
-                continue
-            if parameter.default is inspect.Parameter.empty:
-                # `scope` with no default: the caller must say, so there is no
-                # default to get wrong. `FsService.screen` is the one, and it is
-                # required for P6-18's reason — its owner decides *reach*, not
-                # just teardown, so a forgotten scope would widen policy rather
-                # than merely delay cleanup. Partitioned by introspection rather
-                # than named, so the next seam to make the same call needs no
-                # edit here.
-                continue
-            names.add(f"{cls.__name__}.{method_name}")
-    return names
+            if parameter is not None:
+                yield f"{cls.__name__}.{method_name}", parameter
+
+
+def test_a_boundary_parameter_never_has_a_default() -> None:
+    """P6-32's durable half: "everything" cannot become the convenient answer again.
+
+    `scope: Context | None = None` conflated *"I did not state a boundary"* with
+    *"I mean the deployment"*, so every reader had to pick a default for the
+    ambiguous case and the convenient one was `scope or self.ctx` — the mount,
+    the widest boundary there is. That single default is one root cause wearing
+    four faces (P6-12, P6-24, and twice in P6-31), each found and fixed as though
+    it were local.
+
+    `Boundary` is `Context | Deployment` and has no `None` member, so the type
+    says which question is being asked. What stops the regression is the missing
+    *default*: a caller that states nothing fails mypy where it holds a typed
+    reference, and raises `TypeError` at mount where it reaches the seam through
+    `ctx.<seam>` — which is `Any`, so mypy cannot see it. This asserts the
+    property the two layers rest on, over whatever has been converted so far, so
+    a seam joining the migration is covered the moment it does.
+    """
+    offenders = [
+        name
+        for name, parameter in _scope_parameters()
+        if "Boundary" in str(parameter.annotation)
+        and parameter.default is not inspect.Parameter.empty
+    ]
+    assert offenders == [], (
+        "a `Boundary` parameter with a default reintroduces the thing P6-32 deleted — "
+        f"the caller that says nothing gets the widest answer: {sorted(offenders)}"
+    )
 
 
 NOT_A_LIFETIME: dict[str, str] = {
@@ -129,9 +186,16 @@ NOT_A_LIFETIME: dict[str, str] = {
     # subject and not this row's. Asserted, not just declared: the static check
     # below requires each of these to be free of `owner_for`.
     "CompactionSeam.notes": "visibility — which notes this scope may read",
-    "ToolRuntime.get": "a lookup in this scope's view",
-    "ToolRuntime.names": "a lookup in this scope's view",
-    "ToolRuntime.schemas": "a lookup in this scope's view",
+    # P6-24. `scope=` on `ctx.fs` names the *policy boundary* a call is judged
+    # in — which screens and which intent listeners apply — and is stated by the
+    # caller from `ToolExecutionInput.scope`, exactly as `ctx.tools` reads it.
+    # Nothing here registers, so nothing here owns a lifetime.
+    "FsService.edit": "the boundary this call is judged in",
+    "FsService.glob": "the boundary this call is judged in",
+    "FsService.grep": "the boundary this call is judged in",
+    "FsService.read": "the boundary this call is judged in",
+    "FsService.write": "the boundary this call is judged in",
+    "CommandRegistry.dispatch": "the boundary the command body runs for",
     # Work run *in* a scope, forwarding to whatever owns the artifact.
     "ShellService.run": "the scope the command runs for",
     "SubprocessService.run": "the scope the child runs for",
@@ -421,8 +485,56 @@ def _resolves_an_owner(name: str) -> bool:
     return any(spelling in _source_of(name) for spelling in OWNER_RESOLVERS)
 
 
+def _code_of(source: str) -> str:
+    """One method's source with its prose removed — comments and strings.
+
+    Every check in this module asks whether a method *does* something by looking
+    for a token in its source, and this file's own subject is a codebase whose
+    house style is long argumentative docstrings that name mechanisms constantly.
+    Those two collide: `CommandRegistry.dispatch` explains in a comment why it no
+    longer restates `owner_for`'s fallback, and the classification check read
+    that as a call and accused the method of resolving a lifetime. A prose
+    mention is the *opposite* of a call — it is usually there to say the method
+    deliberately does not do the thing.
+
+    Tokenising rather than regexing, because "is this token inside a string" is
+    exactly what a tokeniser knows and a regex has to guess. Docstrings come out
+    as `STRING` tokens and go with the comments; an unparseable fragment is
+    returned as-is rather than dropped, since a false *positive* here is a
+    misfiled name and a false negative is a hole.
+    """
+    dedented = textwrap.dedent(source)
+    try:
+        pieces = list(tokenize.generate_tokens(io.StringIO(dedented).readline))
+    except (tokenize.TokenError, IndentationError, SyntaxError):  # pragma: no cover
+        return source
+    # Blanked **in place and to the same shape**, never filtered out. Joining the
+    # surviving tokens instead turned `running(` into `running (` and silently
+    # broke every check in this module that matches a call by its bracket. Every
+    # character becomes a space except a newline, which stays one — so offsets,
+    # line numbers and every adjacency outside the blanked span are preserved,
+    # which is also what lets the spans be applied in any order.
+    starts = list(accumulate((len(one) for one in dedented.splitlines(True)), initial=0))
+    out = list(dedented)
+    for piece in pieces:
+        if piece.type not in (token.COMMENT, token.STRING):
+            continue
+        begin = starts[piece.start[0] - 1] + piece.start[1]
+        finish = starts[piece.end[0] - 1] + piece.end[1]
+        out[begin:finish] = (one if one == "\n" else " " for one in out[begin:finish])
+    return "".join(out)
+
+
+@cache
 def _source_of(name: str) -> str:
-    """The source of a method plus the same-class helpers it delegates to.
+    """The code of a method plus the same-class helpers it delegates to.
+
+    Memoised: 115 calls over 65 distinct names in one run of this module, and the
+    repeats predate the prose-blanking — `SystemPromptService.assemble` is asked
+    for four times, `CommandRegistry.dispatch` three. Deterministic within a
+    session, keyed by a plain string, over modules imported once. Worth ~20 ms of
+    the module's 0.65 s, most of which is `_code_of` tokenising the same bodies
+    again.
 
     Was `_owner_resolution`, which named one *use* of it — grep this for
     `owner_for` and you have answered "does this resolve an owner". P6-30 added
@@ -452,9 +564,14 @@ def _source_of(name: str) -> str:
             member = vars(cls).get(current)
             if member is None or not callable(member):
                 continue
-            body = inspect.getsource(member)
-            source += body
-            pending.extend(re.findall(r"self\.(_\w+)\(", body))
+            code = _code_of(inspect.getsource(member))
+            source += code
+            # The *code*, not the raw source: a docstring writing `self._helper(`
+            # would otherwise pull an unrelated method in, which is the same
+            # thing `_code_of` was written to stop one line up. Latent today —
+            # nothing in the tree spells a `self._x(` call in prose — and there
+            # is no reason to derive one thing two ways while it stays that way.
+            pending.extend(re.findall(r"self\.(_\w+)\(", code))
         return source
     raise AssertionError(f"{name} was discovered but cannot be located")
 
@@ -635,10 +752,12 @@ async def test_register_when_composed_needs_no_explicit_scope(mount: Any) -> Non
     fork = root.plugin(row)
     await root.reconcile()
     await root.serial("profile/mounted")
-    assert tools.get("p625_tool") is not None
+    assert tools.get("p625_tool", scope=DEPLOYMENT) is not None
 
     await fork.dispose()
-    assert tools.get("p625_tool") is None, "the tool outlived the row that built it"
+    assert tools.get("p625_tool", scope=DEPLOYMENT) is None, (
+        "the tool outlived the row that built it"
+    )
 
 
 @pytest.mark.parametrize("mode", sorted(get_args(DispatchMode)))
@@ -1168,7 +1287,7 @@ def _invoker_source(name: str) -> str:
     for module in _modules():
         found = vars(module).get(name)
         if callable(found) and getattr(found, "__module__", "") == module.__name__:
-            return inspect.getsource(found)
+            return _code_of(inspect.getsource(found))
     raise AssertionError(f"invoker {name} cannot be located")
 
 
@@ -1239,3 +1358,36 @@ def test_the_body_classifications_do_not_overlap() -> None:
     """A name in both tables would be a decision made twice, differently."""
     both = sorted(set(BOUND) & set(UNBOUND))
     assert both == [], f"classified as both bound and unbound: {both}"
+
+
+async def test_a_command_body_is_told_the_boundary_the_caller_stated(mount: Any) -> None:
+    """P6-24's commands half: the boundary reaches the body, not just the binding.
+
+    `dispatch` gained `scope=` and spent it on the ambient binding, and stopped
+    there — so a body asking a *scoped* question still had only `agent` and
+    re-derived one, a frame below a caller that had just stated it.
+    `ph.commands.revert` is the live case: it reads the tool table to decide what
+    a revert covers, and its own docstring notes that getting that wrong "ran in
+    the *unsafe* direction".
+
+    Asserted through `CommandContext.scope`, because that is the value a body
+    actually holds. The agent's own scope is deliberately different from the
+    stated one here — that divergence is the whole subject, and the fallback
+    would pass if the two were the same.
+    """
+    from ph.testing import FAKE_OPTIONS
+
+    ctx = await mount()
+    agent = ctx.agents.create(ctx.sessions.create("p624-cmd"), FAKE_OPTIONS)
+    stated = ctx.scope("the-stated-boundary")
+    seen: list[Context] = []
+
+    ctx.commands.register(
+        _definition("p624", run=lambda _arg, invocation: seen.append(invocation.scope))
+    )
+    await ctx.commands.dispatch("/p624", scope=stated, agent=agent)
+    assert seen == [stated], "the body was handed the agent's scope, not the stated one"
+
+    seen.clear()
+    await ctx.commands.dispatch("/p624", agent=agent)
+    assert seen == [agent.ctx], "with no stated scope the agent is still the fallback"

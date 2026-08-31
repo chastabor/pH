@@ -164,8 +164,10 @@ class CompactionSeam:
     which both call sites have in hand — because reading it means a fourteenth
     copy of P6-24's `getattr(agent, "ctx", None)`, and an engine is one
     deployment-wide object rather than a per-agent one. `ph.seams.fs` is the one
-    provider whose target is already derived, and it passes it; when P6-24 lands
-    and hands this seam a scope, these are the lines that take it."""
+    provider whose target is already derived, and it passes it. P6-24 did not
+    change that: it fixed the boundary a *policy* call is judged in, and an engine
+    is invoked on a lifetime question rather than a policy one. If this seam is
+    ever handed a scope, these are the lines that take it."""
     _notes: list[_NoteRegistration] = field(default_factory=list)
 
     # ------------------------------------------------------------ the engine --
@@ -237,6 +239,11 @@ class CompactionSeam:
         traceback rather than taking the compaction down — a summary without one
         block is worth more than an uncompacted session.
         """
+        # `scope or self.ctx` is P6-32's staged remainder, stated here per §5
+        # rule 6: this reader still resolves an unstated boundary to the mount.
+        # Low stakes relative to the converted seams — notes *narrow* what a
+        # summary says, they grant nothing — but the conversion is named in
+        # the row, not judged unnecessary.
         target = scope or self.ctx
         rendered: list[str] = []
         visible = [entry for entry in self._notes if entry.by.layer.reaches(target)]

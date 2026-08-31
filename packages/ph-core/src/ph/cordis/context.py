@@ -253,6 +253,74 @@ class ForkScope:
 
 
 @dataclass(frozen=True, slots=True)
+class Deployment:
+    """Everything this deployment holds — the widest boundary, said out loud.
+
+    **"Widest" along the restriction axis only, and that is worth being exact
+    about**: a reader given `DEPLOYMENT` resolves the *mount's* isolation chain,
+    which no restriction narrows — but an **agent-scoped registration is not on
+    it**. `view(DEPLOYMENT)` does not see a tool registered on one agent's scope,
+    verified; it is the view `scope=None` always read, named. A caller asking
+    "is this available to *anyone*" (an audit, a collision check across agents)
+    is asking a per-layer question this sentinel does not answer, and making
+    `boundary_of` iterate layers to answer it would turn a boundary into a
+    search.
+
+    **The point is that it has a name** (P6-32). A policy reader takes a scope to
+    answer for, and `scope: Context | None = None` made two different things one
+    spelling: *"I did not state a boundary"*, which is an absence of information,
+    and *"I mean the deployment"*, which is a legitimate answer that `ph doctor`,
+    the prompt catalog and a root spawn all need. With one spelling every reader
+    has to pick a default for the ambiguous case, and the convenient default is
+    `scope or self.ctx` — the mount, which is the widest boundary there is.
+
+    That default is one root cause wearing four faces, each found and fixed
+    separately as though it were local: `owner_for(None)` falling through to the
+    seam so a registration outlived its row (P6-12); `_scope_of(agent)` returning
+    `None` so an agent-scoped screen applied to nobody (P6-24); `held_by`'s
+    `None` reaching `reach`/`names` as the *unrestricted* set, so an unreadable
+    parent handed a child everything the deployment holds (P6-31); and
+    `_enforce` skipping its containment check on the same `None`.
+
+    So "everything" gets a name and the default comes off. `DEPLOYMENT` is
+    greppable — "who asked for the widest boundary" is one search — where passing
+    the mount `Context` explicitly would not be, since `ctx` is in scope
+    everywhere and reaches for itself.
+
+    **Not `None` meaning "nothing", which was the other candidate.** That trades a
+    silent-wide failure for a silent-narrow one: an empty tool set or an empty
+    prompt degrades a model quietly rather than erroring, and nobody notices. The
+    half that does the work is removing the *default*, so a call site that states
+    no boundary fails mypy rather than any runtime rule.
+    """
+
+
+DEPLOYMENT = Deployment()
+"""The one instance. There is nothing to construct and nothing to configure."""
+
+Boundary: TypeAlias = "Context | Deployment"
+"""What a policy reader takes: a scope, or `DEPLOYMENT` for all of them.
+
+Deliberately **not** `| None`. A reader whose parameter has no default cannot be
+called without answering the question, and mypy is what asks — at build time,
+against every call site, rather than a runtime rule that only fires on the paths
+a test happens to drive."""
+
+
+def boundary_of(scope: Boundary, mount: Context) -> Context:
+    """Resolve a stated boundary to the scope that answers it.
+
+    One narrowing site rather than one per seam, and mypy is the reason it has to
+    be: `scope is DEPLOYMENT` reads as the obvious spelling and does **not**
+    narrow the union — identity against a value is not a type guard — so every
+    seam writing it by hand would either repeat an `isinstance` or reach for a
+    cast. Written once, the union is discharged here and a reader gets a
+    `Context`.
+    """
+    return mount if isinstance(scope, Deployment) else scope
+
+
+@dataclass(frozen=True, slots=True)
 class Running:
     """Who is running — as the *two* questions it has to answer (P6-29).
 

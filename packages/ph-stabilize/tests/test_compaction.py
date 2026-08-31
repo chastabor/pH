@@ -28,7 +28,7 @@ from stabilize_helpers import PROFILE, break_spill
 
 from ph.agent.types import AgentOptions
 from ph.cancel import Cancelled
-from ph.cordis import Context
+from ph.cordis import DEPLOYMENT, Context
 from ph.llm.types import (
     CONTEXT_WINDOW_EXCEEDED,
     BlockEnd,
@@ -498,8 +498,10 @@ async def test_only_a_tool_that_declares_it_has_arguments_elided(mount: Any) -> 
     keeps working — which a hardcoded name list in this package could not.
     """
     ctx = await mount(profile=PROFILE)
-    assert ctx.tools.get("write").arguments_disposable
-    assert not ctx.tools.get("read").arguments_disposable, "reading is not a payload"
+    assert ctx.tools.get("write", scope=DEPLOYMENT).arguments_disposable
+    assert not ctx.tools.get("read", scope=DEPLOYMENT).arguments_disposable, (
+        "reading is not a payload"
+    )
 
 
 async def test_a_long_call_argument_is_elided_from_what_the_model_sees(mount: Any) -> None:

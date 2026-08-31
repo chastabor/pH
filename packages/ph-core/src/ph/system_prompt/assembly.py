@@ -260,6 +260,9 @@ class SystemPromptService:
     async def assemble(self, request: AssembleContext | None = None) -> PromptAssembly:
         """Collect, order, interpolate, then run the assemble waterfall."""
         request = request or AssembleContext()
+        # `request.scope or self.ctx` is P6-32's staged remainder, stated here
+        # per §5 rule 6: an unstated boundary still assembles the mount's
+        # prompt. The row names this conversion; it is deferred, not exempt.
         target = request.scope or self.ctx
         # The request a provider is handed always names the scope being
         # assembled, even when the caller left it implicit — so no provider has

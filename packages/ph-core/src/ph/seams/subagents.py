@@ -178,6 +178,23 @@ class SubagentRequest:
 
     prompt: str
     parent: Any
+    scope: Context | None = None
+    """The boundary this delegation is made **from** (P6-31).
+
+    Not the child's — that does not exist yet when the ceiling is computed, and
+    when it does it is `SubagentRun.scope`, which `_enforce` checks is inside
+    this one. Two values with a containment relation, which is what P6-27 made
+    structural.
+
+    The same value and the same argument as `ToolExecutionInput.scope`: the
+    caller states the boundary, the seam does not guess it. A tool body that
+    spawns already holds it as `run.scope`, non-optional, beside the
+    `parent=run.agent` it was passing — the shape `ctx.fs` had before P6-24. The
+    history of which callers sat unread belongs to `_delegating_boundary` and the
+    plan row, not to a field enumeration that a third spawner would falsify.
+
+    Optional, and `_delegating_boundary` resolves it, because a `SubagentRequest`
+    is built by callers and by providers rather than only inside this seam."""
     name: str | None = None
     """A stable label for the roster. Defaulted by the provider when omitted."""
     provider: str | None = None
@@ -431,21 +448,85 @@ class SubagentService:
             )
         return entry
 
-    def held_by(self, request: SubagentRequest) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    def held_by(
+        self, request: SubagentRequest, boundary: Context | None = None
+    ) -> tuple[tuple[str, ...], tuple[str, ...]]:
         """What the parent holds, in the two registries a grant covers.
 
         One reader for both halves of the ceiling — the refusal, the
         materialization and the "did this narrow anything" check all need the
         same two sets, and computing them three times in three spellings is how
         the three come to disagree about what "holds" means.
+
+        `boundary` is threaded for the same reason `held` is on `check_grant`
+        and `grant_for`: `start` needs the resolution three times (the ceiling,
+        the brief, the containment check), and passing the one answer down makes
+        the three agree by construction rather than by re-derivation.
         """
-        parent_scope = getattr(request.parent, "ctx", None)
+        parent_scope = boundary if boundary is not None else self._delegating_boundary(request)
         skills = self.ctx.get("skills")
         tools = self.ctx.get("tools")
         return (
             tuple(sorted(skills.reach(parent_scope))) if skills is not None else (),
             tuple(tools.names(scope=parent_scope)) if tools is not None else (),
         )
+
+    def _delegating_boundary(self, request: SubagentRequest) -> Context:
+        """The boundary a spawn's ceiling is computed in — stated, not guessed (P6-31).
+
+        `FsService._boundary`'s rule, on the path that needed it most. Four cases,
+        and the third is the one that was wrong:
+
+        * **a stated `request.scope`** wins, as it does everywhere else;
+        * **no scope and no parent** is the mount — a spawn with no parent is a
+          root delegation, and the deployment-wide set is what it legitimately
+          holds;
+        * **a parent whose `.ctx` cannot be read** now refuses. It used to yield
+          `None`, and `None` is not "no ceiling" here — `SkillService.reach` and
+          `ToolRuntime.names` both resolve it to the *mount*, which is the
+          **unrestricted** set. So an unreadable parent did not narrow a child,
+          it handed it everything the deployment holds, and `_enforce` then
+          skipped its containment check for the same reason. Reproduced before
+          the fix: a parent denied one tool produced a 7-tool ceiling where its
+          own was 6.
+
+          That is fail-open on the one path whose own docstring names the stake —
+          *"a spawn that could widen would make delegation the privilege
+          escalation I7 exists to prevent"* — so it is refused rather than
+          defaulted, and there is no narrower default to pick anyway;
+        * **a parent with a usable `.ctx`** is that scope, which is what every
+          caller got before and still gets.
+
+        Resolved here, at the entry, by the code that knows a parent was meant —
+        not in the downstream registries. `SkillService.reach` briefly kept a
+        `scope or self.ctx` fallback for this row's benefit; P6-32 then removed
+        it the other way, by signature: `reach` now *requires* a `Boundary`, and
+        the callers who legitimately mean the deployment spell `DEPLOYMENT`.
+        Either way the registry never guesses; this method is where the guess
+        used to happen and is now refused.
+
+        **The four-case rule now exists twice** — here and `FsService._boundary`
+        — differing in the no-handle default (a root delegation gets the mount;
+        fs's agentless probe does too) and in the refusal, which is each seam's
+        own coded error and is load-bearing for its tests. Two is below the
+        threshold for a cordis helper, and the staged P6-32 conversions take no
+        agent handle at all, so the count is not growing. If a *third* resolver
+        of this shape appears, hoist the rule — the property worth centralising
+        is the case order, because "a stated scope wins before any handle is
+        consulted" is the security half.
+        """
+        if request.scope is not None:
+            return request.scope
+        if request.parent is None:
+            return self.ctx
+        scope = getattr(request.parent, "ctx", None)
+        if not isinstance(scope, Context):
+            raise SubagentSpawnError(
+                f"{type(request.parent).__name__} was passed as `parent` but exposes no "
+                "`ctx: Context`, so the ceiling this child inherits is unknowable; pass "
+                "`scope=` beside it (P6-31)"
+            )
+        return scope
 
     def check_grant(
         self, request: SubagentRequest, held: tuple[tuple[str, ...], tuple[str, ...]] | None = None
@@ -507,7 +588,11 @@ class SubagentService:
         )
 
     def grant_for(
-        self, request: SubagentRequest, held: tuple[tuple[str, ...], tuple[str, ...]] | None = None
+        self,
+        request: SubagentRequest,
+        held: tuple[tuple[str, ...], tuple[str, ...]] | None = None,
+        *,
+        boundary: Context | None = None,
     ) -> Grant:
         """Materialize what this child may reach, from a parent that still exists.
 
@@ -520,17 +605,14 @@ class SubagentService:
         records what the parent held *then* rather than deferring to what it
         holds whenever the child is next asked. See `Grant`.
         """
-        held_skills, held_tools = held if held is not None else self.held_by(request)
+        held_skills, held_tools = held if held is not None else self.held_by(request, boundary)
         named = request.skills
         skills = self.ctx.get("skills")
+        target = boundary if boundary is not None else self._delegating_boundary(request)
         return Grant(
             skills=named if named is not None else held_skills,
             tools=request.tools if request.tools is not None else held_tools,
-            brief=(
-                _brief_text(skills, named, getattr(request.parent, "ctx", None))
-                if named and skills is not None
-                else ""
-            ),
+            brief=(_brief_text(skills, named, target) if named and skills is not None else ""),
         )
 
     def _enforce(
@@ -538,7 +620,7 @@ class SubagentService:
         grant: Grant,
         run: SubagentRun,
         held: tuple[tuple[str, ...], tuple[str, ...]],
-        parent: Any = None,
+        boundary: Context,
     ) -> None:
         """Bound the child, or refuse the spawn if this provider cannot be bounded.
 
@@ -547,6 +629,14 @@ class SubagentService:
         something. So a deployment where nothing is restricted keeps working
         with any provider, and the moment a spawn means to narrow, a provider
         that cannot deliver that is refused rather than silently ignored.
+
+        **The containment check no longer has an off switch** (P6-31). It read
+        `owner = getattr(parent, "ctx", None)` and skipped itself when that came
+        back `None` — so the two failures lined up: the same unreadable parent
+        that produced an unrestricted ceiling also turned off the check that
+        would have noticed the child was not inside it. `boundary` is resolved
+        by `_delegating_boundary`, which refuses rather than yielding `None`, so
+        by here it is always a `Context` and the check always runs.
         """
         if run.scope is not None:
             # **A provider's scope must be inside the parent's** (P6-27).
@@ -558,8 +648,7 @@ class SubagentService:
             # through, for `check_grant`'s reason: "a ceiling one provider forgot
             # would not be one." A provider that predates nesting, or a future
             # one that forgets `parent=`, fails here instead of at nothing.
-            owner = getattr(parent, "ctx", None)
-            if owner is not None and not owner.reaches(run.scope):
+            if not boundary.reaches(run.scope):
                 raise SubagentSpawnError(
                     f'the "{run.owner or "subagent"}" provider built the child a scope outside '
                     "its parent's, so the child would not inherit the parent's ceiling; a "
@@ -578,9 +667,14 @@ class SubagentService:
     async def start(self, name: str, request: SubagentRequest) -> SubagentRun:
         """Admit a child and return its handle. Does not wait for an answer."""
         request = self.resolve_preset(request)
-        held = self.held_by(request)
+        # Once, then threaded — the ceiling, the brief and the containment
+        # check must be answers to the *same* boundary, and one resolution
+        # makes that true by construction (the `held` argument one line down
+        # exists for the identical reason).
+        boundary = self._delegating_boundary(request)
+        held = self.held_by(request, boundary)
         self.check_grant(request, held)
-        grant = self.grant_for(request, held)
+        grant = self.grant_for(request, held, boundary=boundary)
         entry = self.require(name)
         # As the row that registered the provider (P6-29). A provider's `start`
         # is row code this registry invokes — the same category as a tool's
@@ -596,7 +690,7 @@ class SubagentService:
         # knows which name the caller asked for, and `rehydrate` has to be able
         # to find its way back to the same provider.
         run.owner = name
-        self._enforce(grant, run, held, request.parent)
+        self._enforce(grant, run, held, boundary)
         self._runs[run.id] = run
         return run
 
@@ -799,7 +893,7 @@ class Grant:
             )
 
 
-def _brief_text(skills: Any, named: Sequence[str], scope: Context | None) -> str:
+def _brief_text(skills: Any, named: Sequence[str], scope: Context) -> str:
     """The named skills' instructions, read once.
 
     **A named skill is direction, not a lookup.** G9 keeps bodies out of the

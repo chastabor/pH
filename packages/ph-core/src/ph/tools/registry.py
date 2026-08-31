@@ -29,7 +29,17 @@ from dataclasses import dataclass, field, replace
 from typing import Any, Literal
 
 from ..cancel import Cancelled, is_cancelled
-from ..cordis import Context, Disposer, Running, events, plugin, running
+from ..cordis import (
+    DEPLOYMENT,
+    Boundary,
+    Context,
+    Disposer,
+    Running,
+    boundary_of,
+    events,
+    plugin,
+    running,
+)
 from ..llm.types import ToolSchema, text_of
 from ..seams._restriction import NameFilter
 from ..seams.approval import Edited, Responded, denial_reason
@@ -364,6 +374,13 @@ class ToolRuntime:
         # A chain walk over the layer cells, not `view()`: registration
         # invalidates the view cache one line later, so building one here made
         # every mount O(N^2) in throwaway schema construction.
+        #
+        # `scope or self.ctx` survives here and in `present_transport`, stated
+        # per §5 rule 6: these are *reads embedded in registration methods*, and
+        # registration's `scope=None` means "the activating row" through
+        # `owner_for`/`layer_for` — P6-12's mechanism, deferred by P6-32 as a
+        # different question. Converting the read alone would make one method's
+        # `None` mean two things.
         if definition.name == self._presented_name(scope or self.ctx):
             raise ValueError(
                 f'"{definition.name}" is how this profile presents the Code Mode transport '
@@ -445,7 +462,8 @@ class ToolRuntime:
         Refused when the name is already a visible tool: the whole point of the
         reservation is that a model told to call this name reaches the transport,
         and a silent shadow either way would defeat it. The mirror check lives in
-        `register`, so the two orders fail the same way.
+        `register`, so the two orders fail the same way — and `register`'s
+        comment is where `scope or self.ctx` surviving in both is argued.
         """
         target = scope or self.ctx
         occupant = self.view(target).visible.get(presentation.name)
@@ -532,14 +550,26 @@ class ToolRuntime:
             if layer is not None:
                 yield layer
 
-    def view(self, scope: Context | None = None) -> _View:
-        """Resolve what one scope sees, most-specific-first.
+    def view(self, scope: Boundary) -> _View:
+        """Resolve what one boundary sees, most-specific-first.
 
         Memoized per isolation chain until the next registry change. The view is
         read several times per tool call and per prompt assembly, and changes
         only when a row registers or disposes something.
+
+        **Stated, with no default** (P6-32). This resolved `scope or self.ctx`,
+        and `self.ctx` is the mount — whose isolation is `None`, the *global*
+        layer — so an unstated boundary was not "no tools", it was every tool the
+        deployment holds. `ToolRuntime.names(scope=None)` reaching that is half of
+        what handed a child the unrestricted ceiling in P6-31.
+
+        `DEPLOYMENT` says the wide thing deliberately, which is what lets the
+        default come off: the callers who mean it — RPC mode advertising the
+        deployment's schemas, `register_when_composed`'s name-collision check —
+        still get it, and a caller that says nothing now fails rather than being
+        handed the widest answer.
         """
-        target = scope or self.ctx
+        target = boundary_of(scope, self.ctx)
         cache_key = tuple(target.isolation_chain())
         cached = self._views.get(cache_key)
         if cached is not None and cached[0] == self._generation:
@@ -636,16 +666,16 @@ class ToolRuntime:
             code_namespaces=code_namespaces,
         )
 
-    def mode_for(self, scope: Context | None = None) -> PresentationMode:
+    def mode_for(self, scope: Boundary) -> PresentationMode:
         return self.view(scope).mode
 
-    def get(self, name: str, *, scope: Context | None = None) -> ToolDefinition | None:
+    def get(self, name: str, *, scope: Boundary) -> ToolDefinition | None:
         return self.view(scope).visible.get(name)
 
-    def names(self, *, scope: Context | None = None) -> list[str]:
+    def names(self, *, scope: Boundary) -> list[str]:
         return sorted(self.view(scope).visible)
 
-    def schemas(self, *, scope: Context | None = None) -> list[ToolSchema]:
+    def schemas(self, *, scope: Boundary) -> list[ToolSchema]:
         """The model-facing schemas for one scope.
 
         Whitelists name/description/parameters, so no internal field — a
@@ -670,18 +700,25 @@ class ToolRuntime:
         meant deciding what `scope=None` should mean — but that was an objection
         to the *layer* half only, and it is the same objection that had deferred
         the five `claim_slot` providers. The owner half needs no target at all:
-        it is what registration recorded, and `view(call.scope).by` already
-        carries it because `self.get` one line up resolved through the same view.
-        So a classifier that registers something now unwinds with the row that
-        wrote it instead of landing wherever the scheduler happened to be called
-        from, which was the measured P6-26 defect in the one body still open to
-        it. When `call.scope` is `None` the pair keeps its own layer, which is
-        the honest answer until P6-24 makes the caller state one.
+        it is what registration recorded, and the view carries it beside the
+        definition. So a classifier that registers something now unwinds with
+        the row that wrote it instead of landing wherever the scheduler happened
+        to be called from, which was the measured P6-26 defect in the one body
+        still open to it.
+
+        The layer bound around the call is `boundary_of(call.scope, ...)` — for
+        `DEPLOYMENT` that is the mount, and the equivalence is worth stating
+        because it is load-bearing: only globally registered tools are visible
+        under `DEPLOYMENT`, and a global registration's own layer *is* the
+        mount's, so binding the mount here is binding the pair's recorded layer
+        for every tool this branch can reach. `call.scope` itself can no longer
+        be `None`; `ToolExecutionInput.scope` became required in P6-32.
         """
-        definition = self.get(call.name, scope=call.scope)
+        view = self.view(call.scope)
+        definition = view.visible.get(call.name)
         if definition is None:
             return ExecutionMode(kind="exclusive")
-        with running(self.view(call.scope).by.get(call.name), call.scope):
+        with running(view.by.get(call.name), boundary_of(call.scope, self.ctx)):
             return definition.classify(call.arguments)
 
     # --------------------------------------------------------------- pipeline --
@@ -703,7 +740,12 @@ class ToolRuntime:
             name=call.name,
             arguments=arguments,
             token=object(),
-            scope=call.scope or self.ctx,
+            # The one narrowing point onto the pipeline's *persistent record*:
+            # `ToolExecution.scope` is non-optional, so every stage downstream
+            # reads a `Context` (P6-32). `execution_mode` narrows the same field
+            # once more, transiently, because the scheduler classifies calls
+            # that have no execution yet.
+            scope=boundary_of(call.scope, self.ctx),
             session=call.session,
             agent=call.agent,
             parent=call.parent,
@@ -1052,7 +1094,13 @@ def register_when_composed(ctx: Context, build: Callable[[], ToolDefinition | No
 
     def once() -> None:
         definition = build()
-        if definition is not None and ctx.tools.get(definition.name) is None:
+        # `DEPLOYMENT` is the mount's chain — the view `scope=None` always
+        # read, named (P6-32). It is NOT a union over agents: a tool registered
+        # on one agent's scope is invisible here, verified, so this checks
+        # "already claimed at the deployment layer" and nothing more. That is
+        # the check this always made; a true is-it-taken-*anywhere* audit is a
+        # per-layer question no single boundary answers.
+        if definition is not None and ctx.tools.get(definition.name, scope=DEPLOYMENT) is None:
             # No `scope=`. It carried a `scope=ctx` until P6-25, and that was
             # the tell: a listener firing after `apply` had returned saw no
             # activation, so the registration would have landed on the tool

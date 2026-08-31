@@ -20,7 +20,7 @@ from typing import Any
 import pytest
 from stabilize_helpers import PROFILE, run_tool_calls
 
-from ph.cordis import Context, Loader
+from ph.cordis import DEPLOYMENT, Context, Loader
 from ph.llm.types import ToolCallBlock
 from ph.session import Session
 from ph.session.known_event_types import KNOWN_SESSION_EVENT_TYPES
@@ -115,10 +115,10 @@ async def test_the_row_is_opt_in(mount: Any) -> None:
     *other* stabilization row would make the comment beside it a lie.
     """
     without = await mount(profile=PROFILE)
-    assert without.tools.get(TOOL_NAME) is None
+    assert without.tools.get(TOOL_NAME, scope=DEPLOYMENT) is None
 
     enabled = await mount(ENABLED, profile=PROFILE)
-    assert enabled.tools.get(TOOL_NAME) is not None
+    assert enabled.tools.get(TOOL_NAME, scope=DEPLOYMENT) is not None
 
 
 # ------------------------------------------------------------------ the list --

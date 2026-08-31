@@ -120,7 +120,7 @@ class HarnessSession:
         something the person decided.
         """
         shown: str | None = await self.ctx.commands.dispatch(
-            line, session=self.session, agent=self.agent
+            line, scope=self.agent.ctx, session=self.session, agent=self.agent
         )
         return shown
 

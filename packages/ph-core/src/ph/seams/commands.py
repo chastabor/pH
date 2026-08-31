@@ -42,6 +42,16 @@ class CommandContext:
 
     ctx: Context
     session: Session | None
+    scope: Context
+    """The boundary this dispatch was told to run in (P6-24).
+
+    `dispatch` resolved it and spent it on the binding, and stopped there — so a
+    body that asked a *scoped* question had only `agent` and re-derived one, one
+    frame below a caller that had just stated it. `ph.commands.revert` is the
+    live case: it reads the tool table to decide what a revert covers, which is a
+    policy read, and its own docstring notes that getting it wrong "ran in the
+    *unsafe* direction". The boundary is stated at the top of the dispatch; there
+    is no reason for the bottom to guess."""
     agent: Any = None
 
 
@@ -83,12 +93,33 @@ class CommandRegistry:
         return entry.definition if entry is not None else None
 
     async def dispatch(
-        self, line: str, *, session: Session | None = None, agent: Any = None
+        self,
+        line: str,
+        *,
+        scope: Context | None = None,
+        session: Session | None = None,
+        agent: Any = None,
     ) -> str | None:
         """Run one `/name argument` line. Returns the text to show the human.
 
         Both halves are recorded even when the body fails: a command that broke
         is something the user did, and the log is where they will look for it.
+
+        **`scope=` is the boundary the body runs for** (P6-24), mirroring
+        `ToolExecutionInput.scope` on the tools side. It had no such channel, so
+        the binding below had to derive one from `agent` — the value documented
+        as the approval-routing target, not the policy boundary — which is the
+        guess this row exists to delete. The two differ for a subagent whose
+        driver holds a child ctx.
+
+        **This fallback is not the fail-open one `ctx.fs` had.** There, an
+        unreadable `agent.ctx` fell back to the *mount*, which no agent-scoped
+        registration reaches, so a scoped policy row silently applied to nobody —
+        and `FsService._boundary` raises rather than widen. Here the fallback is
+        the *registration's own layer*, which is where a dispatch with no agent
+        lands anyway and is exactly as wide as the command already was. Nothing
+        is widened by failing to read an agent, so nothing is worth refusing a
+        human's slash command over.
         """
         name, _, argument = line.lstrip("/").partition(" ")
         entry = self._commands.get(name)
@@ -119,12 +150,21 @@ class CommandRegistry:
             # own layer, which for every command in the tree is the global one —
             # narrower than the seam, and stated here because a per-agent command
             # would make this the line that decides who sees what it registers.
-            scope = getattr(agent, "ctx", None)
-            with running(entry.by, scope if isinstance(scope, Context) else None):
+            stated = scope if scope is not None else getattr(agent, "ctx", None)
+            # Resolved once: `None` past this line means "no boundary was
+            # readable", and the two consumers below spell their own fallbacks
+            # (bind nothing; hand the body the registration's layer).
+            resolved = stated if isinstance(stated, Context) else None
+            with running(entry.by, resolved):
                 result = await maybe_await(
                     definition.run(
                         argument.strip(),
-                        CommandContext(ctx=self.ctx, session=session, agent=agent),
+                        CommandContext(
+                            ctx=self.ctx,
+                            session=session,
+                            scope=resolved if resolved is not None else entry.by.layer,
+                            agent=agent,
+                        ),
                     )
                 )
             detail = result if isinstance(result, str) else None

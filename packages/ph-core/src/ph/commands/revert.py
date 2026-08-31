@@ -85,7 +85,7 @@ async def apply(ctx: Context, _config: Any) -> None:
         lines = [f"restored the workspace to the state before call {call_id or '?'}"]
         if removed:
             lines.append(f"removed {len(removed)} file(s) the run created")
-        lines.extend(_not_undone(ctx, invocation.agent, session, call_id))
+        lines.extend(_not_undone(ctx, invocation.scope, session, call_id))
         return "\n".join(lines)
 
     ctx.commands.register(
@@ -109,7 +109,7 @@ def _listing(points: dict[int, dict[str, Any]]) -> str:
     return "\n".join(["seq    agent            run", *rows])
 
 
-def _not_undone(ctx: Context, agent: Any, session: Session, call_id: str) -> list[str]:
+def _not_undone(ctx: Context, scope: Context, session: Session, call_id: str) -> list[str]:
     """The run's dispatches a tree restore does not cover, in the order they ran.
 
     Asked of each tool's own declaration, so a deployment that renamed `bash` or
@@ -119,7 +119,9 @@ def _not_undone(ctx: Context, agent: Any, session: Session, call_id: str) -> lis
     """
     if not call_id:
         return []
-    scope = getattr(agent, "ctx", None)
+    # Stated by the dispatch, not derived from the approval-routing target
+    # (P6-24). This is a policy read — which tools a revert covers — so the
+    # boundary has to be the one the caller named.
     outside = [
         (str(event.data.get("name", "?")), event.data.get("arguments"))
         for event in session.events

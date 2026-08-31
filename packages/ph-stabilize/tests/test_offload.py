@@ -19,6 +19,7 @@ import pytest
 from stabilize_helpers import PROFILE, blob, break_spill
 
 from ph.cancel import CancelToken
+from ph.cordis import DEPLOYMENT
 from ph.llm.types import ToolCallBlock, text_of
 from ph.session import Session, derive_event_message
 from ph.session.known_event_types import (
@@ -181,8 +182,8 @@ async def test_exactly_the_paging_tools_declare_that_they_self_limit(mount: Any)
     this file would notice.
     """
     ctx = await mount(profile=PROFILE)
-    registered = {schema.name for schema in ctx.tools.schemas()}
-    declared = {name for name in registered if ctx.tools.get(name).self_limits}
+    registered = {schema.name for schema in ctx.tools.schemas(scope=DEPLOYMENT)}
+    declared = {name for name in registered if ctx.tools.get(name, scope=DEPLOYMENT).self_limits}
 
     assert declared == {"read", "write", "edit", "glob", "grep"}
     assert "bash" in registered and "bash" not in declared, (

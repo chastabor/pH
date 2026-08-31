@@ -29,7 +29,7 @@ from typing import Any, Literal, TypeAlias
 from pydantic import BaseModel, ConfigDict
 
 from ..cancel import CancelToken
-from ..cordis import Context, Running
+from ..cordis import Boundary, Context, Running
 from ..llm.types import ContentBlock, Message, TextBlock, ToolSchema
 from ..session import Session
 from .errors import (
@@ -207,7 +207,19 @@ class ToolExecutionInput:
     call_id: str
     name: str
     arguments: Any
-    scope: Context | None = None
+    scope: Boundary
+    """The per-agent policy boundary — **required since P6-32**.
+
+    The field this docstring already described correctly and could not enforce:
+    *"stated by the caller (the loop knows its agent's shape; the registry must
+    not guess it)"*. It defaulted to `None`, which `_execution` resolved as
+    `call.scope or self.ctx` — the mount, whose isolation is the *global* layer —
+    so a caller that stated nothing did not get "no tools", it got every tool the
+    deployment holds, and the registry guessed after all.
+
+    `DEPLOYMENT` is how a caller means that on purpose. With both spellings
+    available the default comes off, and the sentence above becomes true rather
+    than aspirational."""
     session: Session | None = None
     agent: Any = None
     """The agent to route an approval prompt to, when there is one."""

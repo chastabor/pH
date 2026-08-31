@@ -21,10 +21,17 @@ from typing import Any
 
 import pytest
 
+from ph.cordis import DEPLOYMENT
 from ph.llm.types import text_of
-from ph.seams.skills import MAX_SKILL_BYTES, Skill, discover_skills, render_catalog
+from ph.seams.skills import (
+    MAX_SKILL_BYTES,
+    Skill,
+    SkillRestriction,
+    discover_skills,
+    render_catalog,
+)
 from ph.system_prompt import render_prompt
-from ph.testing import FAKE_OPTIONS, run_tool, write_skill
+from ph.testing import FAKE_OPTIONS, run_tool, skill, write_skill
 
 pytestmark = pytest.mark.anyio
 
@@ -164,7 +171,7 @@ async def test_no_skills_means_no_tool(mount: Any) -> None:
     check is at `profile/mounted`, so a skill installed by *any* row counts."""
     ctx = await mount(row())
 
-    assert ctx.tools.get("skill") is None
+    assert ctx.tools.get("skill", scope=DEPLOYMENT) is None
 
 
 async def test_no_paths_scans_nothing(mount: Any) -> None:
@@ -174,4 +181,30 @@ async def test_no_paths_scans_nothing(mount: Any) -> None:
     purpose (I7)."""
     ctx = await mount()
 
-    assert ctx.skills.list() == []
+    assert ctx.skills.list(DEPLOYMENT) == []
+
+
+async def test_the_deployment_wide_answer_has_to_be_asked_for(mount: Any) -> None:
+    """P6-32's behavioural half, on the seam P6-31 named and left.
+
+    `reach` resolved `scope or self.ctx`, and `self.ctx` is the mount — the
+    *unrestricted* set. So an unstated boundary was not "no skills", it was all
+    of them, and P6-31 could not simply make it refuse: the prompt catalog and
+    the "did this deployment install anything" check at mount both legitimately
+    mean the deployment, and with one spelling they had no way to say so.
+
+    Both answers still exist. What changed is that each is now spelled, and the
+    one that widens is the one you have to type.
+    """
+    ctx = await mount()
+    ctx.skills.register(skill("wide"))
+    ctx.skills.register(skill("narrow"))
+    agent = ctx.agents.create(ctx.sessions.create("p632"), FAKE_OPTIONS)
+    ctx.skills.restrict(SkillRestriction(deny=("wide",)), scope=agent.ctx)
+
+    assert [one.name for one in ctx.skills.list(DEPLOYMENT)] == ["narrow", "wide"]
+    assert [one.name for one in ctx.skills.list(agent.ctx)] == ["narrow"], "the narrowing was lost"
+
+    # And saying nothing is no longer a way to get the wide answer by accident.
+    with pytest.raises(TypeError, match="missing 1 required positional argument"):
+        ctx.skills.list()

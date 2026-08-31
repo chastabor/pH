@@ -23,6 +23,7 @@ from typing import Any
 
 import pytest
 
+from ph.cordis import DEPLOYMENT
 from ph.llm.types import text_of
 from ph.testing import FAKE_OPTIONS, StubSubagentProvider, run_tool
 
@@ -59,7 +60,7 @@ async def test_no_provider_means_no_tool(mount: Any) -> None:
     deployment can perform it."""
     ctx = await mount(ROW)
 
-    assert ctx.tools.get("task") is None
+    assert ctx.tools.get("task", scope=DEPLOYMENT) is None
 
 
 async def test_a_provider_layered_anywhere_still_gets_the_tool(mount: Any) -> None:
@@ -68,7 +69,7 @@ async def test_a_provider_layered_anywhere_still_gets_the_tool(mount: Any) -> No
     silently lose delegation, and nothing would report it."""
     ctx = await _mounted(mount, ("stub", StubSubagentProvider()))
 
-    assert ctx.tools.get("task") is not None
+    assert ctx.tools.get("task", scope=DEPLOYMENT) is not None
 
 
 async def test_the_answer_comes_back_as_the_result(mount: Any) -> None:
@@ -142,7 +143,7 @@ async def test_two_providers_and_no_choice_stands_the_row_down(mount: Any) -> No
     entitled to make it."""
     ctx = await _mounted(mount, ("stub", StubSubagentProvider()), ("other", StubSubagentProvider()))
 
-    assert ctx.tools.get("task") is None
+    assert ctx.tools.get("task", scope=DEPLOYMENT) is None
 
 
 async def test_a_named_provider_settles_the_ambiguity(mount: Any) -> None:

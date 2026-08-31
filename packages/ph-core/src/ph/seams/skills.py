@@ -32,7 +32,16 @@ from typing import Any
 import anyio
 from pydantic import Field
 
-from ..cordis import Context, Disposer, LoaderError, plugin, safe_yaml_load
+from ..cordis import (
+    DEPLOYMENT,
+    Boundary,
+    Context,
+    Disposer,
+    LoaderError,
+    boundary_of,
+    plugin,
+    safe_yaml_load,
+)
 from ..system_prompt.assembly import ORDER_TOOL_GUIDANCE, AssembleContext, PromptSection
 from ..tools.definition import ToolModel, ToolOutput, ToolRunContext, define_tool, text_content
 from ..tools.presentation import simple_views
@@ -225,9 +234,19 @@ class SkillService:
             if scope is None or scope.active
         }
 
-    def reach(self, scope: Context | None = None) -> frozenset[str]:
-        """Every skill name this scope may use. The one place filters compose."""
-        target = scope or self.ctx
+    def reach(self, scope: Boundary) -> frozenset[str]:
+        """Every skill name this boundary may use. The one place filters compose.
+
+        **Stated, with no default** (P6-32). This resolved `scope or self.ctx`,
+        and `self.ctx` is the mount — the *unrestricted* set — so an unstated
+        boundary was not "no skills", it was all of them. P6-31 left that
+        deliberately, because with `Context | None` there was no way for the
+        callers who legitimately mean the deployment (the prompt catalog, a
+        `ph doctor` probe) to say so, and making the seam refuse would have
+        refused them too. `DEPLOYMENT` is that way, so the ambiguity is gone and
+        the default can come off: a caller that states nothing now fails mypy.
+        """
+        target = boundary_of(scope, self.ctx)
         chain = tuple(target.isolation_chain())
         cached = self._reach.get(chain)
         if cached is not None and cached[0] == self._generation:
@@ -240,19 +259,19 @@ class SkillService:
         self._reach[chain] = (self._generation, names)
         return names
 
-    def admits(self, name: str, scope: Context | None = None) -> bool:
+    def admits(self, name: str, scope: Boundary) -> bool:
         """Whether `scope` may reach this skill at all."""
         return name in self.reach(scope)
 
-    def list(self, scope: Context | None = None) -> list[Skill]:
-        """What this scope may use, sorted. The catalog and every gate read this."""
+    def list(self, scope: Boundary) -> list[Skill]:
+        """What this boundary may use, sorted. The catalog and every gate read this."""
         reachable = self.reach(scope)
         return [self._skills[name] for name in sorted(reachable)]
 
-    def get(self, name: str, scope: Context | None = None) -> Skill | None:
+    def get(self, name: str, scope: Boundary) -> Skill | None:
         return self._skills.get(name) if self.admits(name, scope) else None
 
-    def body(self, name: str, scope: Context | None = None) -> str | None:
+    def body(self, name: str, scope: Boundary) -> str | None:
         """The skill's full text, read only when asked for (G9).
 
         Capped again here rather than trusting discovery: a file is validated
@@ -437,9 +456,13 @@ async def progressive(ctx: Context, config: Config) -> None:
     )
 
     async def read_body(args: SkillArgs, run: ToolRunContext) -> Any:
-        # The *agent's* scope, so a narrowed child is refused a skill it can see
-        # named nowhere — the catalog and the gate answer the same question.
-        scope = getattr(run.agent, "ctx", None)
+        # The *stated* boundary, so a narrowed child is refused a skill it can
+        # see named nowhere — the catalog and the gate answer the same question,
+        # and until P6-24 they answered it in two: the catalog above reads
+        # `request.scope` while this read `getattr(run.agent, "ctx", None)`, the
+        # approval-routing target. `run.scope` is a non-optional `Context` and
+        # was sitting two lines away, which is the shape `fs_tools` had.
+        scope = run.scope
         skill = ctx.skills.get(args.name, scope)
         body = ctx.skills.body(args.name, scope)
         if skill is None or body is None:
@@ -457,7 +480,11 @@ async def progressive(ctx: Context, config: Config) -> None:
         installed no skills is a prompt-sized advertisement for a capability
         that is not there.
         """
-        if not ctx.skills.list():
+        # `DEPLOYMENT`, and it is the right answer rather than the convenient one
+        # (P6-32): the question is whether this *deployment* installed any skills
+        # at all, asked once at mount to decide whether the tool exists. It is
+        # not a per-agent question and there is no agent yet to ask it for.
+        if not ctx.skills.list(DEPLOYMENT):
             return None
         return define_tool(
             "skill",

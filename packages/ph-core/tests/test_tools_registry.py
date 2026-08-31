@@ -14,6 +14,7 @@ from typing import Any
 
 import pytest
 
+from ph.cordis import DEPLOYMENT
 from ph.testing import raising, simple_tool, tool_runtime
 from ph.tools import RUN_CODE, ToolExecutionInput, ToolRestriction, define_tool
 from ph.tools.definition import ToolOutput, text_content
@@ -25,7 +26,7 @@ async def test_a_global_tool_is_visible_everywhere() -> None:
     root, tools = tool_runtime()
     tools.register(simple_tool("read"))
     agent = root.scope("agent:a")
-    assert tools.names() == ["read"]
+    assert tools.names(scope=DEPLOYMENT) == ["read"]
     assert tools.names(scope=agent) == ["read"]
 
 
@@ -40,7 +41,7 @@ async def test_a_scoped_registration_shadows_the_global_by_name() -> None:
     assert tools.get("read", scope=agent) is scoped
     assert tools.get("read", scope=other) is not scoped
     # The global is untouched: shadowing is one-directional.
-    assert tools.get("read") is not scoped
+    assert tools.get("read", scope=DEPLOYMENT) is not scoped
 
 
 async def test_registering_the_same_name_twice_in_one_scope_is_refused() -> None:
@@ -60,7 +61,7 @@ async def test_a_restriction_hides_a_global_from_one_scope_only() -> None:
 
     assert tools.names(scope=agent) == ["read"]
     assert tools.names(scope=other) == ["read", "write"]
-    assert tools.names() == ["read", "write"]
+    assert tools.names(scope=DEPLOYMENT) == ["read", "write"]
 
 
 async def test_restrictions_intersect() -> None:
@@ -86,9 +87,9 @@ async def test_a_restriction_cannot_mask_a_scoped_registration() -> None:
 async def test_disposing_a_registration_removes_the_tool() -> None:
     _root, tools = tool_runtime()
     release = tools.register(simple_tool("read"))
-    assert tools.names() == ["read"]
+    assert tools.names(scope=DEPLOYMENT) == ["read"]
     release()
-    assert tools.names() == []
+    assert tools.names(scope=DEPLOYMENT) == []
 
 
 async def test_the_view_is_cached_until_the_registry_changes() -> None:
@@ -129,7 +130,7 @@ async def test_schemas_expose_only_the_model_facing_fields() -> None:
             is_concurrency_safe=True,
         )
     )
-    (schema,) = tools.schemas()
+    (schema,) = tools.schemas(scope=DEPLOYMENT)
     # A timeout budget and a concurrency classifier are internal; sending either
     # to the model would be leaking harness policy into the prompt.
     assert set(schema.to_wire()) == {"name", "description", "parameters"}
@@ -149,12 +150,12 @@ async def test_register_transport_takes_the_ordinary_path() -> None:
     changes: list[int] = []
     root.on("tools/change", lambda: changes.append(1))
     release = tools.register_transport(simple_tool(RUN_CODE))
-    assert RUN_CODE in tools.names()
+    assert RUN_CODE in tools.names(scope=DEPLOYMENT)
     # Same registration path as every tool: schema consumers hear about it, and
     # disposal removes it.
     assert changes == [1]
     release()
-    assert RUN_CODE not in tools.names()
+    assert RUN_CODE not in tools.names(scope=DEPLOYMENT)
 
 
 async def test_presentation_is_per_agent_and_shadows_the_default() -> None:
@@ -185,7 +186,9 @@ async def test_concurrency_classification_defaults_to_exclusive() -> None:
     tools.register(simple_tool("broken", safe=raising(RuntimeError("classifier"))))
 
     def mode(name: str) -> str:
-        return tools.execution_mode(ToolExecutionInput(call_id="c", name=name, arguments={})).kind
+        return tools.execution_mode(
+            ToolExecutionInput(call_id="c", name=name, arguments={}, scope=DEPLOYMENT)
+        ).kind
 
     assert mode("read") == "parallel"
     # Omission and a raising classifier are both exclusive: a tool that has not

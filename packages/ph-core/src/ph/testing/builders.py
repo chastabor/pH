@@ -15,7 +15,7 @@ from collections.abc import Callable
 from typing import Any
 
 from ..agent.types import AgentOptions
-from ..cordis import Context
+from ..cordis import DEPLOYMENT, Boundary, Context
 from ..llm.types import ContextForm, PluginSource
 from ..session import Session
 from ..tools.definition import ToolDefinition, ToolOutput, define_tool, text_content
@@ -65,12 +65,43 @@ def simple_tool(
     )
 
 
+def boundary_for(scope: Boundary | None, agent: Any) -> Boundary:
+    """What a test meant, when it did not say (P6-32).
+
+    The agent's own scope, which is what a test almost always means; `DEPLOYMENT`
+    for no agent at all, because a call with no agent is not narrowed by
+    anything. Stated here rather than defaulted in the seam, which is the whole
+    of that row: the helper knows what its caller meant, the registry does not.
+
+    **An agent whose `ctx` cannot be read refuses, exactly as production does.**
+    The first version resolved it to `DEPLOYMENT`, which reintroduced the deleted
+    defect one layer up: a policy test whose stub forgot its `ctx` would silently
+    exercise the unrestricted view, and a visibility assertion would pass
+    vacuously — silent-wide, scoped to precisely the population most likely to
+    write it. A test that means the wide view spells `DEPLOYMENT`, which is the
+    row's own principle: the answer that widens is the one you type.
+    """
+    if scope is not None:
+        return scope
+    if agent is None:
+        return DEPLOYMENT
+    own = getattr(agent, "ctx", None)
+    if not isinstance(own, Context):
+        raise TypeError(
+            f"{type(agent).__name__} was passed to run_tool as `agent` but exposes no "
+            "`ctx: Context`; pass `scope=` beside it (or `scope=DEPLOYMENT` for the "
+            "deployment-wide view, on purpose)"
+        )
+    return own
+
+
 async def run_tool(
     ctx: Any,
     name: str,
     arguments: Any = None,
     *,
     agent: Any,
+    scope: Boundary | None = None,
     session: Any = None,
     call_id: str = "call-1",
 ) -> Any:
@@ -80,6 +111,15 @@ async def run_tool(
     `agent=` — was written out at nine call sites across six files, which is
     nine places for a test to accidentally pass a different scope than the one
     whose policy it meant to exercise.
+
+    `scope=` is spellable **separately** from `agent=` because they are two
+    values, and P6-24 is about the case where they differ — a Code Mode
+    sub-dispatch, a subagent whose driver holds a child ctx. Without it this
+    helper could not construct the divergence it exists to let a test assert.
+
+    Its `None` is the *helper's* "you did not say", resolved by `boundary_for`
+    below, and not the seam's — that one P6-32 deleted, because a seam given no
+    boundary used to answer with the widest one it had.
     """
     from ..tools.definition import ToolExecutionInput
 
@@ -88,7 +128,7 @@ async def run_tool(
             call_id=call_id,
             name=name,
             arguments={} if arguments is None else arguments,
-            scope=getattr(agent, "ctx", None),
+            scope=boundary_for(scope, agent),
             session=session,
             agent=agent,
         )

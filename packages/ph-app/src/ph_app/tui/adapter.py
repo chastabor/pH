@@ -34,6 +34,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
+from ph.cordis import DEPLOYMENT
 from ph.seams.subagents import downgrade_text, fold_subagent_event
 from ph.session import (
     Session,
@@ -287,10 +288,29 @@ class TuiEventAdapter:
         card.details = dict(view.meta or {})
 
     def _definition(self, name: str) -> Any:
+        """The definition behind a card, for presentation only.
+
+        `DEPLOYMENT` and not an agent's scope (P6-32): this renders a call the
+        *log* already recorded, and `tool/call` events carry no agent — so
+        "which agent's presentation" is unanswerable from what the log holds,
+        and the deployment view is the best available answer rather than a
+        convenient one. Asking in one agent's boundary would drop every other
+        agent's cards.
+
+        **Best available, not exact, in two ways** (§5 rule 6): a name that was
+        agent-*shadowed* at execution time renders here under the global
+        definition — a wrong card, not a blank one — and an agent-*scoped* tool
+        renders with no definition at all, because `DEPLOYMENT` is the mount's
+        chain, not a union over agents. Both are presentation-only, and both
+        have the same real fix: record the executing agent on `tool/call`,
+        which is a log-schema row, not a boundary choice here.
+
+        Nothing is gated on the answer; it supplies a title and a renderer.
+        """
         if self.tools is None:
             return None
         try:
-            return self.tools.get(name)
+            return self.tools.get(name, scope=DEPLOYMENT)
         except Exception:
             return None
 

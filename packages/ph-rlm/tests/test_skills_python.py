@@ -22,6 +22,7 @@ import pytest
 from conftest import HOST_RUNTIME_ROW
 from runtime_helpers import run_ipython_cell
 
+from ph.cordis import DEPLOYMENT
 from ph.seams.skills import discover_skills
 from ph.system_prompt import render_prompt
 from ph.system_prompt.assembly import AssembleContext
@@ -117,10 +118,13 @@ async def test_the_row_registers_the_catalog_and_feeds_the_runtime(
     write_skill(tmp_path, "note-taking")
     ctx = await mount(HOST_RUNTIME_ROW, row([tmp_path]))
 
-    assert [skill.name for skill in ctx.skills.list()] == ["acme-websearch", "note-taking"]
-    assert ctx.skills.get("acme-websearch").source == "rlm-skills-python"
+    assert [skill.name for skill in ctx.skills.list(DEPLOYMENT)] == [
+        "acme-websearch",
+        "note-taking",
+    ]
+    assert ctx.skills.get("acme-websearch", DEPLOYMENT).source == "rlm-skills-python"
     # The body stays on disk until something asks for it (G9).
-    assert "Instructions here." in ctx.skills.body("acme-websearch")
+    assert "Instructions here." in ctx.skills.body("acme-websearch", DEPLOYMENT)
 
     runtime = ctx.python_runtime
     assert runtime.skills == (str(tmp_path / "acme-websearch"),)
@@ -147,7 +151,7 @@ async def test_the_catalog_reaches_the_prompt_without_the_bodies(
 
 async def test_no_paths_means_no_row(mount: Any) -> None:
     ctx = await mount(HOST_RUNTIME_ROW, {"id": "rlm-skills-python", "name": "rlm-skills-python"})
-    assert ctx.skills.list() == []
+    assert ctx.skills.list(DEPLOYMENT) == []
     assert ctx.python_runtime.skill_modules == ()
 
 

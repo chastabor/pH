@@ -21,6 +21,7 @@ from ph.seams.fs import (
 )
 from ph.seams.fs import (
     EditIntent,
+    FsBoundaryError,
     FsDenied,
     FsService,
     WalkDecision,
@@ -30,7 +31,7 @@ from ph.seams.fs import (
     read_before_edit,
 )
 from ph.session import Session
-from ph.testing import StubAgent
+from ph.testing import FAKE_OPTIONS, StubAgent, run_tool
 
 pytestmark = pytest.mark.anyio
 
@@ -388,3 +389,116 @@ async def test_the_walk_yields_the_same_paths_a_relative_to_walk_did(tmp_path: P
             if path.is_file() and matches_glob(path.relative_to(tmp_path).as_posix(), pattern)
         )
         assert sorted(found) == expected, pattern
+
+
+# --- P6-24: the boundary is stated, not guessed ------------------------------
+
+
+async def test_one_call_resolves_one_boundary(tmp_path: Path) -> None:
+    """P6-24's gate. A tool call states its boundary; both seams must read it.
+
+    `ToolExecutionInput.scope` *is* "the per-agent policy boundary … stated by
+    the caller", and beside it `agent` is documented as one thing only — the
+    approval-routing target. `ctx.tools` has always read the first. This seam
+    read the second and derived the first from it, so one call could be judged
+    in two different boundaries the moment they differ: a Code Mode sub-dispatch,
+    or a subagent whose driver holds a child ctx.
+
+    Driven here the way it actually diverges — a screen registered on the scope
+    the call *states*, and an agent whose own scope is somewhere else. Before the
+    fix the screen did not apply, because `ctx.fs` was answering for the agent.
+    """
+    (tmp_path / "secret.txt").write_text("s")
+    (tmp_path / "plain.txt").write_text("p")
+    root, fs = _fs(tmp_path)
+    stated = root.scope("the-stated-boundary")
+    elsewhere = root.scope("the-agents-own-scope")
+
+    def screen(_path: str, name: str, _agent: Any, is_dir: bool) -> WalkDecision:
+        return "yield" if is_dir or name != "secret.txt" else "skip"
+
+    fs.screen(screen, scope=stated)
+
+    shown = await fs.glob("**/*.txt", agent=StubAgent(elsewhere), scope=stated)
+    assert [Path(one).name for one in shown] == ["plain.txt"], (
+        "the screen on the stated boundary did not apply — `ctx.fs` answered for the agent"
+    )
+
+
+async def test_an_unreadable_agent_scope_refuses_instead_of_widening(tmp_path: Path) -> None:
+    """The fail-open half, in the direction P6-18 exists to prevent.
+
+    An `agent` whose `.ctx` is absent used to fall back to the *mount*, which no
+    agent-scoped registration reaches — so a policy row that scoped itself to one
+    agent screened nobody and said nothing. There is no narrower default to pick
+    instead, so the boundary is refused: a caller error, not a policy outcome,
+    which is why it is `FsBoundaryError` and not `FsDenied`.
+
+    The three cases that are *not* errors are pinned beside it, because the value
+    of refusing is entirely in not refusing the others.
+    """
+    (tmp_path / "a.txt").write_text("a")
+    root, fs = _fs(tmp_path)
+    agent = root.scope("agent")
+
+    class NoCtx:
+        """An agent-shaped object that never assigned `self.ctx`."""
+
+    with pytest.raises(FsBoundaryError):
+        await fs.glob("**/*.txt", agent=NoCtx())
+
+    assert len(await fs.glob("**/*.txt")) == 1, "a caller with no agent is not asking about one"
+    assert len(await fs.glob("**/*.txt", agent=StubAgent(agent))) == 1, "a usable agent still works"
+    assert len(await fs.glob("**/*.txt", agent=NoCtx(), scope=agent)) == 1, (
+        "a stated boundary answers the question, whatever the agent looks like"
+    )
+
+
+async def test_a_tool_call_is_judged_in_the_scope_the_caller_states(
+    mount: Any,
+) -> None:
+    """The same divergence one layer up, driven through the real pipeline.
+
+    `test_one_call_resolves_one_boundary` above calls `ctx.fs` directly, which
+    proves the seam. This proves the wiring: `fs_tools` has to *hand* the seam
+    `run.scope` rather than `run.agent`, and until P6-24 it passed only the
+    second while `run.scope` sat unused two lines away. Driven through
+    `ctx.tools.execute`, so a later refactor of `fs_tools` cannot quietly go back
+    to deriving the boundary and still pass.
+
+    `run_tool`'s `scope=` exists for exactly this: it defaulted to the agent's own
+    ctx, so a test could not state a boundary that differs from it — which is the
+    only shape in which the bug is visible.
+
+    **Driven over a real parent and child rather than an invented pair of
+    scopes**, because that is the divergence the row names — "a subagent whose
+    driver holds a child ctx" — and it only exists because P6-27 nested agents.
+    The screen is registered on the **child**, which a parent-scoped call must
+    not see: `reaches` runs down the tree, so a child's rule does not reach its
+    parent, and the three rows below are only distinguishable if the seam honours
+    the *stated* boundary. Against the pre-row build the third one leaks.
+    """
+    ctx = await mount()
+    root = ctx.get("fs").root
+    (root / "secret.txt").write_text("s")
+    (root / "plain.txt").write_text("p")
+
+    parent = ctx.agents.create(ctx.sessions.create("p624-parent"), FAKE_OPTIONS)
+    child = ctx.agents.create(ctx.sessions.create("p624-child"), FAKE_OPTIONS, parent=parent)
+
+    def screen(_path: str, name: str, _agent: Any, is_dir: bool) -> WalkDecision:
+        return "yield" if is_dir or name != "secret.txt" else "skip"
+
+    ctx.fs.screen(screen, scope=child.ctx)
+
+    async def shown(scope: Context, agent: Any) -> list[str]:
+        found = await run_tool(ctx, "glob", {"pattern": "*.txt"}, agent=agent, scope=scope)
+        return sorted(Path(one).name for one in found.value["paths"])
+
+    assert await shown(parent.ctx, parent) == ["plain.txt", "secret.txt"], (
+        "a child's screen reached its parent — `reaches` runs down the tree, not up"
+    )
+    assert await shown(child.ctx, child) == ["plain.txt"], "the child's own rule did not apply"
+    assert await shown(child.ctx, parent) == ["plain.txt"], (
+        "fs_tools handed the seam the agent, not the boundary the caller stated"
+    )

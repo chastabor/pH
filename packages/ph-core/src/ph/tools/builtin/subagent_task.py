@@ -136,6 +136,9 @@ async def apply(ctx: Context, config: Config) -> None:
                 SubagentRequest(
                     prompt=args.prompt,
                     parent=run.agent,
+                    # The boundary the ceiling is computed in, stated rather than
+                    # derived from the routing target (P6-31, P6-24).
+                    scope=run.scope,
                     name=args.name,
                     access=args.access,
                     preset=args.preset,

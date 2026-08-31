@@ -518,3 +518,73 @@ async def test_a_childs_capability_is_fixed_at_admission(mount: Any) -> None:
         "a running child widened when its parent did — the ceiling must be the one "
         "the admission recorded, not the one the parent happens to hold now"
     )
+
+
+# --- P6-31: the ceiling is computed in the boundary the caller stated ---------
+
+
+async def test_a_spawn_computes_its_ceiling_in_the_stated_boundary(mount: Any) -> None:
+    """P6-31's first half, and the shape `fs_tools` had before P6-24.
+
+    `held_by` derived the ceiling's boundary from `request.parent` — the field
+    documented as the handle the *provider* needs, not as a policy boundary —
+    while both tool bodies that spawn had `run.scope`, a non-optional `Context`,
+    sitting two lines from `parent=run.agent`. When the two differ the ceiling is
+    computed in one boundary and enforced in another.
+
+    Driven with a narrowed *scope* whose agent is not narrowed: before the fix
+    the ceiling came from the agent and kept the denied tool, so the child was
+    granted something the stated boundary does not hold.
+    """
+    ctx = await mount()
+    ctx.tools.register(simple_tool("wide_open"))
+    parent = _agent(ctx, "p631-parent")
+    stated = ctx.scope("the-delegating-boundary")
+    ctx.tools.restrict(NameFilter(deny=("wide_open",)), scope=stated)
+
+    _, held = ctx.subagents.held_by(SubagentRequest(prompt="go", parent=parent, scope=stated))
+    assert "wide_open" not in held, (
+        "the ceiling was computed from the agent, not the boundary the caller stated"
+    )
+    _, from_agent = ctx.subagents.held_by(SubagentRequest(prompt="go", parent=parent))
+    assert "wide_open" in from_agent, "the un-narrowed agent is the control for that"
+
+
+async def test_an_unreadable_parent_refuses_instead_of_granting_everything(
+    mount: Any,
+) -> None:
+    """P6-31's second half: `None` was not "no ceiling", it was the widest one.
+
+    `getattr(parent, "ctx", None)` returning `None` flowed into
+    `SkillService.reach` and `ToolRuntime.names`, both of which resolve a missing
+    scope to the **mount** — the unrestricted set. So an unreadable parent did
+    not fail to narrow a child, it handed the child everything the deployment
+    holds. And `_enforce` skipped its containment check on the same `None`, so
+    the one assertion that would have noticed was off for the same reason.
+
+    Fail-open on the path whose own docstring says *"a spawn that could widen
+    would make delegation the privilege escalation I7 exists to prevent"*.
+    """
+    ctx = await mount()
+    ctx.tools.register(simple_tool("wide_open"))
+    parent = _agent(ctx, "p631-narrowed")
+    ctx.tools.restrict(NameFilter(deny=("wide_open",)), scope=parent.ctx)
+
+    class NoCtx:
+        """A parent-shaped handle that never assigned `self.ctx`."""
+
+        id = "broken"
+
+    with pytest.raises(SubagentSpawnError, match="ceiling this child inherits is unknowable"):
+        ctx.subagents.held_by(SubagentRequest(prompt="go", parent=NoCtx()))
+
+    # The three that must keep working, because refusing is only worth it if it
+    # refuses nothing else.
+    _, narrowed = ctx.subagents.held_by(SubagentRequest(prompt="go", parent=parent))
+    assert "wide_open" not in narrowed, "a readable parent still narrows"
+    _, stated = ctx.subagents.held_by(
+        SubagentRequest(prompt="go", parent=NoCtx(), scope=parent.ctx)
+    )
+    assert "wide_open" not in stated, "a stated boundary answers whatever the parent looks like"
+    _, rootless = ctx.subagents.held_by(SubagentRequest(prompt="go", parent=None))
+    assert "wide_open" in rootless, "a spawn with no parent is a root delegation"

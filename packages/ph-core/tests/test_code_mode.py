@@ -18,7 +18,7 @@ from typing import Any
 
 import pytest
 
-from ph.cordis import Context
+from ph.cordis import DEPLOYMENT, Context
 from ph.seams.code_runtime import CodeBindingNamespace
 from ph.system_prompt.assembly import AssembleContext, render_prompt
 from ph.testing import FAKE_OPTIONS, raising, run_tool, simple_tool
@@ -230,7 +230,7 @@ async def test_the_sdk_section_lists_the_bindings_and_the_code_only_rule(mount: 
 
 async def test_the_transport_name_cannot_be_shadowed(mount: Any) -> None:
     ctx = await _code_ctx(mount)
-    assert ctx.tools.get(RUN_CODE) is not None
+    assert ctx.tools.get(RUN_CODE, scope=DEPLOYMENT) is not None
     with pytest.raises(ValueError, match="reserved"):
         ctx.tools.register(_recorder(RUN_CODE, []))
 
@@ -325,13 +325,14 @@ async def test_a_profile_can_present_the_transport_under_its_own_name(mount: Any
     ctx = await _code_ctx(mount)
     ctx.tools.present_transport(_as_ipython())
 
-    view = ctx.tools.view()
+    view = ctx.tools.view(DEPLOYMENT)
     assert view.transport_name == "ipython"
     # Renamed, not duplicated: two callables would be exactly the ambiguity the
     # reservation exists to prevent.
-    assert ctx.tools.get("ipython") is not None
-    assert ctx.tools.get(RUN_CODE) is None
-    assert ctx.tools.get("ipython").description == "Python cells."
+    ipython = ctx.tools.get("ipython", scope=DEPLOYMENT)
+    assert ipython is not None
+    assert ctx.tools.get(RUN_CODE, scope=DEPLOYMENT) is None
+    assert ipython.description == "Python cells."
 
 
 async def test_the_presented_name_is_what_the_model_may_call(mount: Any) -> None:
@@ -421,10 +422,10 @@ async def test_a_scoped_presentation_cannot_be_occupied_from_a_parent_scope(moun
 async def test_disposing_the_presentation_restores_the_reserved_name(mount: Any) -> None:
     ctx = await _code_ctx(mount)
     dispose = ctx.tools.present_transport(_as_ipython())
-    assert ctx.tools.view().transport_name == "ipython"
+    assert ctx.tools.view(DEPLOYMENT).transport_name == "ipython"
     dispose()
-    assert ctx.tools.view().transport_name == RUN_CODE
-    assert ctx.tools.get(RUN_CODE) is not None
+    assert ctx.tools.view(DEPLOYMENT).transport_name == RUN_CODE
+    assert ctx.tools.get(RUN_CODE, scope=DEPLOYMENT) is not None
 
 
 # ------------------------------------------------------- binding namespaces --

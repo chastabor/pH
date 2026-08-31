@@ -27,7 +27,7 @@ from typing import Any
 
 import pytest
 
-from ph.cordis import Loader
+from ph.cordis import DEPLOYMENT, Loader
 from ph.testing import FAKE_OPTIONS, run_tool
 from ph_app.profiles import available_profiles, resolve_profile
 
@@ -106,7 +106,7 @@ async def test_the_profile_boots_and_runs_a_turn(mount: Any) -> None:
     assert [event.type for event in session.events].count("turn/start") == 1
     # A live tool, not just composed config: `tool-todo` is the row that ships
     # disabled, so its tool existing is the flip having actually taken effect.
-    assert ctx.tools.get("write_todos") is not None
+    assert ctx.tools.get("write_todos", scope=DEPLOYMENT) is not None
     # And both bundles' postures survived meeting each other.
     assert ctx.fs_permissions.rules, "the stabilize write scope is not in force"
     assert ctx.containment.for_role(child=True) == "worktree"
@@ -129,7 +129,9 @@ async def test_the_human_gate_fires_on_the_renamed_transport(mount: Any) -> None
         lambda request, next_: asked.append(request.tool_name) or "rejected"  # type: ignore[func-returns-value]
     )
 
-    assert ctx.tools.view().transport_name == "ipython", "the premise of this test changed"
+    assert ctx.tools.view(DEPLOYMENT).transport_name == "ipython", (
+        "the premise of this test changed"
+    )
     await run_tool(ctx, "ipython", {"code": "import subprocess"}, agent=agent, session=session)
 
     assert asked, "the gate never fired: the rule is keyed to a name nothing presents"

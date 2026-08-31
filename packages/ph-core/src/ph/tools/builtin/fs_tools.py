@@ -150,6 +150,7 @@ async def apply(ctx: Context, config: Any) -> None:
             offset=args.offset,
             limit=args.limit,
             agent=run.agent,
+            scope=run.scope,
             session=run.session,
         )
         return window.model_dump()
@@ -157,7 +158,9 @@ async def apply(ctx: Context, config: Any) -> None:
     async def write(args: WriteArgs, run: ToolRunContext) -> Any:
         target = fs.resolve(args.path, agent=run.agent)
         existed = target.exists()
-        await fs.write(args.path, args.content, agent=run.agent, session=run.session)
+        await fs.write(
+            args.path, args.content, agent=run.agent, scope=run.scope, session=run.session
+        )
         return {
             "path": str(target),
             "bytes": len(args.content.encode("utf-8")),
@@ -171,17 +174,25 @@ async def apply(ctx: Context, config: Any) -> None:
             args.new_text,
             replace_all=args.replace_all,
             agent=run.agent,
+            scope=run.scope,
             session=run.session,
         )
         return {"path": str(fs.resolve(args.path, agent=run.agent)), "replacements": count}
 
     async def glob_tool(args: GlobArgs, run: ToolRunContext) -> Any:
-        paths = await fs.glob(args.pattern, root=args.path, limit=GLOB_LIMIT, agent=run.agent)
+        paths = await fs.glob(
+            args.pattern, root=args.path, limit=GLOB_LIMIT, agent=run.agent, scope=run.scope
+        )
         return {"paths": paths, "truncated": len(paths) >= GLOB_LIMIT}
 
     async def grep_tool(args: GrepArgs, run: ToolRunContext) -> Any:
         matches = await fs.grep(
-            args.pattern, root=args.path, glob=args.glob, limit=GREP_LIMIT, agent=run.agent
+            args.pattern,
+            root=args.path,
+            glob=args.glob,
+            limit=GREP_LIMIT,
+            agent=run.agent,
+            scope=run.scope,
         )
         return {
             "matches": [match.model_dump() for match in matches],

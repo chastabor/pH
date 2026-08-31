@@ -157,26 +157,56 @@ class _Screen:
     owner: Context
 
 
+class FsBoundaryError(HarnessError):
+    """An agent was handed to `ctx.fs` and its policy boundary cannot be read.
+
+    Separate from `FsDenied`, which is policy refusing a call. This is a caller
+    error: something passed an `agent` whose `.ctx` is not a `Context` and no
+    `scope=` beside it, so the boundary the call should be judged in is
+    unknowable. See `FsService._boundary` for why that is raised rather than
+    defaulted.
+
+    **A `HarnessError`, for the reason `FsDenied` gives below and for the same
+    reason twice.** This is raised inside `read`/`write`/`edit`/`glob`/`grep`,
+    which `fs_tools` calls, so it travels the tool path: `error_info` returns
+    `None` for anything that is not a `HarnessError`, so as a bare
+    `RuntimeError` it reached the session and the model as a *codeless* generic
+    failure — unmatchable by a row that wanted to notice callers getting this
+    wrong, and indistinguishable from the tool body crashing.
+
+    It keeps `HarnessError`'s default `failure_kind = "failed"`, and that is what
+    preserves the distinction this class exists for: a caller error is not a
+    policy outcome, so it must not arrive as the `denied` that `FsDenied`
+    declares."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message, "FS_BOUNDARY")
+
+
 def _scope_of(agent: Any) -> Context | None:
-    """An agent's own scope, for the visibility rule — or `None` for no agent.
+    """An agent's own scope — or `None`, which the two callers read differently.
 
     Duck-typed rather than importing the agent: `ph.seams.fs` sits below
-    `ph.agent_loop` and a seam that imported its consumer would invert the
+    `ph.agent_loop`, and a seam that imported its consumer would invert the
     layering the whole plugin model rests on. Every driver in the tree assigns
-    `self.ctx` in its constructor, and anything that does not simply falls back
-    to the service's own context — which is exactly today's behaviour.
+    `self.ctx` in its constructor.
 
-    **Deriving this at all is the wrong altitude, and P6-24 is the row.** The
-    pipeline already states the boundary: `ToolExecutionInput.scope` *is* "the
-    per-agent policy boundary", says in its own docstring that "the registry
-    must not guess it", and sits beside an `agent` field documented only as the
-    approval-routing target — two values, passed separately by `code_mode`
-    today. `fs_tools` hands this seam the second and leaves `run.scope` unused,
-    so `ctx.fs` and `ctx.tools` can resolve different boundaries for one call.
-    The fallback is also fail-*open*: an agent whose `.ctx` is absent lands on
-    the mount, which no agent-scoped screen reaches — the mirror of the bug
-    P6-18 fixed. Until that row lands, this is the honest approximation and the
-    caveat belongs here rather than only in the plan.
+    **What `None` means is the caller's to decide, and they do not agree** — so
+    this returns the fact and nothing else:
+
+    * `_boundary` (the policy boundary, P6-24) **refuses** it. There, `None` means
+      an agent was supplied and the boundary it names cannot be read, and the old
+      fallback was the mount — which no agent-scoped registration reaches, so a
+      policy row scoped to one agent silently screened nobody. That was the
+      mirror of the bug P6-18 fixed, and it is reproduced in `test_fs.py`;
+    * `root_for` (the workspace root, D21) **absorbs** it, as the `layer` half of
+      `running(self._rebase_by, _scope_of(agent))`. `None` there means "no layer
+      to override with", so the pair keeps the resolver's own — a fallback with
+      nothing wider to widen to, which is why it is silent.
+
+    An earlier version of this docstring said `None` "no longer means anything on
+    its own", which was true of `_boundary` and false of the caller three
+    paragraphs above it.
     """
     scope = getattr(agent, "ctx", None)
     return scope if isinstance(scope, Context) else None
@@ -190,9 +220,26 @@ class ReadIntent:
     one has somewhere to route the prompt — a permission rule that could only
     ever refuse a read would be a narrower thing than the one that gates writes,
     for no reason anybody chose.
+
+    **`scope` is the other shared field, and it is the boundary this intent was
+    judged in** (P6-24) — stated here for all three, the way `agent` above is,
+    rather than pasted onto each. Required, and ahead of `agent` so it cannot be
+    defaulted: there is no honest fallback for "which boundary is this" once an
+    agent is in play, which is the whole of that row — the old one was the mount,
+    and no agent-scoped row reaches it. `FsService._boundary` resolves it once,
+    at the public method, from what the caller stated.
+
+    On the payload rather than passed to `_gate`, and that is a **forward
+    commitment rather than a present need**: no listener in the tree reads it
+    today — `ph_stabilize/permissions_fs` reads `.agent` four times, correctly,
+    because approval routing and `roots(agent)` are agent questions. What it buys
+    is that the frozen payload records which boundary it was judged in, so a
+    listener that ever wants to answer differently per scope can, and so the gate
+    cannot be handed a different boundary than the one the screen used.
     """
 
     path: Path
+    scope: Context
     agent: Any = None
 
 
@@ -203,6 +250,7 @@ class WriteIntent:
     path: Path
     content: str
     creating: bool
+    scope: Context
     agent: Any = None
 
 
@@ -214,6 +262,7 @@ class EditIntent:
     old_text: str
     new_text: str
     replace_all: bool
+    scope: Context
     agent: Any = None
 
 
@@ -293,8 +342,11 @@ class FsService:
             # As the row that registered the resolver, **for the agent being
             # resolved** (P6-29). The one provider in the tree whose target is
             # already in hand and already derived — `_scope_of` is this module's
-            # own — so this is the shape the other four take once P6-24 gives
-            # them a scope to read instead of an agent to guess from.
+            # own — so this is the shape the other four would take if they were
+            # handed a scope instead of an agent. P6-24 did not reach them: it
+            # fixed the *policy* boundary, and a provider slot is a lifetime
+            # question, so `CompactionSeam.engine_by` and its three siblings
+            # still bind the registration's own layer and say so there.
             with running(self._rebase_by, _scope_of(agent)):
                 resolved = self._rebase(agent)
         except Exception:
@@ -364,7 +416,51 @@ class FsService:
         entry = _Screen(decide=decide, owner=scope)
         return claim_entry(scope, self._screens, entry, label="fs.screen")
 
-    def _decider(self, agent: Any) -> WalkDecider | None:
+    def _boundary(self, scope: Context | None, agent: Any) -> Context:
+        """The policy boundary one call is judged in — **stated, not guessed** (P6-24).
+
+        `ToolExecutionInput.scope` already carries this and says so in its own
+        docstring: *"the per-agent policy boundary … stated by the caller (the
+        loop knows its agent's shape; the registry must not guess it)"*. Beside
+        it sits `agent`, documented as one thing only — the approval-routing
+        target. They are two values, and `code_mode` has always passed them
+        separately. This seam took the second and derived the first, so one tool
+        call could be judged in two different boundaries: `ctx.tools` honouring
+        the stated scope while `ctx.fs` resolved the agent's own. Reproduced
+        before the fix — a screen registered on the scope the call *stated* did
+        not apply to that call.
+
+        Four cases, and the third is the one that changed:
+
+        * **a stated `scope=`** wins outright. It is what the caller knows and
+          what every other policy surface on the call already uses;
+        * **no scope and no agent** is the mount. A caller with neither is not
+          asking about an agent at all — `ph doctor`, a bare CLI probe, a test
+          reading a file — and the deployment-wide boundary is the honest answer;
+        * **an agent whose `.ctx` cannot be read** now raises. It used to fall
+          back to the mount, which no agent-scoped registration reaches, so a row
+          that scoped itself to one agent screened *nobody* and said nothing —
+          fail-open, in the direction P6-18 exists to prevent. There is no
+          narrower default available to pick instead, and a boundary that cannot
+          be resolved is a caller error rather than a policy outcome, so it is
+          `FsBoundaryError` and not `FsDenied`;
+        * **an agent with a usable `.ctx`** is that scope, which is what every
+          caller got before this row and still gets.
+        """
+        if scope is not None:
+            return scope
+        if agent is None:
+            return self.ctx
+        resolved = _scope_of(agent)
+        if resolved is None:
+            raise FsBoundaryError(
+                f"{type(agent).__name__} was passed as `agent` but exposes no `ctx: Context`, "
+                "so the policy boundary for this call is unknowable; pass `scope=` beside it "
+                "(P6-24)"
+            )
+        return resolved
+
+    def _decider(self, agent: Any, *, scope: Context | None) -> WalkDecider | None:
         """This walk's screens, filtered and with its agent bound — or `None`.
 
         Resolved **once per walk, not once per path**: the visibility filter is
@@ -382,7 +478,7 @@ class FsService:
         would silently answer for the *process* root, which is the exact bug
         per-agent roots were introduced to fix.
         """
-        target = _scope_of(agent) or self.ctx
+        target = self._boundary(scope, agent)
         screens = [entry for entry in self._screens if entry.owner.reaches(target)]
         if not screens:
             return None
@@ -410,11 +506,15 @@ class FsService:
         offset: int = 0,
         limit: int | None = 2_000,
         agent: Any = None,
+        scope: Context | None = None,
         session: Session | None = None,
     ) -> FileSlice:
         """Read a line window, after `fs/read-intent` allows it."""
         target = self.resolve(path, agent=agent)
-        await self._gate("fs/read-intent", ReadIntent(path=target, agent=agent))
+        await self._gate(
+            "fs/read-intent",
+            ReadIntent(path=target, agent=agent, scope=self._boundary(scope, agent)),
+        )
         text = await anyio.to_thread.run_sync(
             lambda: target.read_text(encoding="utf-8", errors="replace")
         )
@@ -444,12 +544,22 @@ class FsService:
     # ----------------------------------------------------------------- write --
 
     async def write(
-        self, path: str | Path, content: str, *, agent: Any = None, session: Session | None = None
+        self,
+        path: str | Path,
+        content: str,
+        *,
+        agent: Any = None,
+        scope: Context | None = None,
+        session: Session | None = None,
     ) -> Path:
         """Write a whole file, after `fs/write-intent` allows it."""
         target = self.resolve(path, agent=agent)
         intent = WriteIntent(
-            path=target, content=content, creating=not target.exists(), agent=agent
+            path=target,
+            content=content,
+            creating=not target.exists(),
+            agent=agent,
+            scope=self._boundary(scope, agent),
         )
         await self._gate("fs/write-intent", intent)
         await anyio.to_thread.run_sync(_write_text, target, content)
@@ -465,6 +575,7 @@ class FsService:
         *,
         replace_all: bool = False,
         agent: Any = None,
+        scope: Context | None = None,
         session: Session | None = None,
     ) -> int:
         """Replace text in place, after `fs/edit-intent` allows it.
@@ -479,6 +590,7 @@ class FsService:
             new_text=new_text,
             replace_all=replace_all,
             agent=agent,
+            scope=self._boundary(scope, agent),
         )
         await self._gate("fs/edit-intent", intent)
         original = await anyio.to_thread.run_sync(lambda: target.read_text(encoding="utf-8"))
@@ -515,9 +627,12 @@ class FsService:
         async def inner(_intent: Any) -> str | None:
             return None
 
-        reason = await self.ctx.waterfall(
-            event, intent, inner=inner, scope=_scope_of(intent.agent) or self.ctx
-        )
+        # The boundary the intent was *judged in*, carried on the intent itself
+        # rather than re-derived here (P6-24). `_boundary` resolved it once, at
+        # the public method, from what the caller stated — so the payload a
+        # listener receives says which boundary it is being asked about, and this
+        # gate cannot answer a different question than the screen did.
+        reason = await self.ctx.waterfall(event, intent, inner=inner, scope=intent.scope)
         if reason is not None:
             raise FsDenied(str(reason))
 
@@ -530,9 +645,10 @@ class FsService:
         root: str | Path | None = None,
         limit: int = 1_000,
         agent: Any = None,
+        scope: Context | None = None,
     ) -> list[str]:
         base = self.resolve(root, agent=agent) if root is not None else self.root_for(agent)
-        decide = self._decider(agent)
+        decide = self._decider(agent, scope=scope)
         return await anyio.to_thread.run_sync(lambda: list(_walk(base, pattern, limit, decide)))
 
     async def grep(
@@ -543,9 +659,10 @@ class FsService:
         glob: str = "**/*",
         limit: int = 200,
         agent: Any = None,
+        scope: Context | None = None,
     ) -> list[GrepMatch]:
         base = self.resolve(root, agent=agent) if root is not None else self.root_for(agent)
-        decide = self._decider(agent)
+        decide = self._decider(agent, scope=scope)
         try:
             expression = re.compile(pattern)
         except re.error as error:

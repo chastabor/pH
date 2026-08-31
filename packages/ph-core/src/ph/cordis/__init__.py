@@ -10,12 +10,16 @@ scopes whose disposal unwinds every registration and every acquired artifact
 from __future__ import annotations
 
 from .context import (
+    DEPLOYMENT,
+    Boundary,
     Context,
+    Deployment,
     Disposer,
     ForkScope,
     Hook,
     Listener,
     Running,
+    boundary_of,
     is_bailed,
     maybe_await,
     running,
@@ -43,9 +47,12 @@ from .loader import (
 from .plugin import PluginSpec, normalize_plugin, plugin
 
 __all__ = [
+    "DEPLOYMENT",
     "ENTRY_POINT_GROUP",
+    "Boundary",
     "Context",
     "CordisError",
+    "Deployment",
     "DispatchMode",
     "Disposer",
     "EventDeclaration",
@@ -63,6 +70,7 @@ __all__ = [
     "ServiceConflictError",
     "ServiceNotFoundError",
     "UndeclaredEventError",
+    "boundary_of",
     "compose_rows",
     "events",
     "import_plugin_modules",
