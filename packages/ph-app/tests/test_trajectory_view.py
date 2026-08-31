@@ -323,6 +323,36 @@ def test_a_type_term_selects_a_namespace_and_free_text_still_works() -> None:
     assert both and all(record.type.startswith("tool/") for record in both)
 
 
+def test_several_type_terms_union_rather_than_intersect() -> None:
+    """Two namespaces mean *either*, matching `--type` on the command line.
+
+    A record cannot be in two namespaces at once, so intersecting them would
+    always answer empty — which is what the first version did, and what nothing
+    here noticed: the mutation that restores the intersection was the one case in
+    twenty-one that no test caught. Free text still ANDs, and the type half is
+    ANDed with it; only the type terms among themselves are a union.
+    """
+    records = build_trajectory(_log(Session("union")))
+    picked = [
+        record
+        for record in records
+        if Query.compile("type:tool type:user").matches(record, search_index(record))
+    ]
+
+    roots = {record.type.split("/")[0] for record in picked}
+    assert roots == {"tool", "user"}, "either namespace, not both at once"
+    assert len(picked) > 1, "an intersection would have answered with nothing"
+
+    # Still ANDed with free text: `src` is in the tool call's arguments and not
+    # in the user message, so the union narrows to one.
+    narrowed = [
+        record
+        for record in records
+        if Query.compile("type:tool type:user src").matches(record, search_index(record))
+    ]
+    assert [record.type for record in narrowed] == ["tool/call"]
+
+
 def test_a_half_typed_or_foreign_type_term_matches_nothing_rather_than_raising() -> None:
     """This runs per keystroke: `type:w` on the way to `type:workspace` must not
     throw. The refusal that explains itself belongs on a command line, where the
