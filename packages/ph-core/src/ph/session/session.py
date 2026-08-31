@@ -28,6 +28,7 @@ from typing import Any, Literal
 from pydantic import NonNegativeInt, field_validator
 
 from ..llm.types import Message
+from ..selectors import matches_any, parse_all
 from ..wire import WireModel
 from .derive import derive_event_message, derive_transcript
 from .events import SESSION_FORMAT_VERSION, SessionEvent, SurfaceIntent, now_ms
@@ -384,6 +385,27 @@ class Session:
         one element, and the sweeper asks it of every root on every pass.
         """
         return self._log[-1] if self._log else None
+
+    def select(self, *patterns: str) -> tuple[SessionEvent, ...]:
+        """Every event under one or more namespace selectors, in log order (P6-33).
+
+        `session.select("workspace")` is all five `workspace/*` types;
+        `session.select("workspace/acquired")` is the one. The vocabulary is
+        `log`, so a bare pattern needs no prefix and `bus:tools` is refused rather
+        than answered emptily — a person asking a session log about bus events has
+        the wrong surface, and an empty result would read as "there are none".
+
+        **Namespace-aware where `last_event_of` is exact.** That one takes whole
+        type names and answers with the newest; this takes prefixes and answers
+        with all of them. Both stay, because "the current sandbox mode" and "every
+        workspace record" are different questions and the second should not be
+        spelled as a list of five literals a new type would silently fall out of.
+
+        No patterns returns the whole log — the caller asked for no filter, which
+        is what an unfiltered read is.
+        """
+        selectors = parse_all(patterns, vocabulary="log")
+        return tuple(event for event in self._log if matches_any(event.type, selectors))
 
     def last_event_of(self, *types: str) -> SessionEvent | None:
         """The most recent event of any of `types`. One type: prefer `latest()`."""

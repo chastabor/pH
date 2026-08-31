@@ -131,6 +131,18 @@ class TrajectoryRecord:
     kind: RecordKind
     source_seq: int
     """The event this record projects — the join with the transcript."""
+    type: str = ""
+    """The session-log type this projects, verbatim — `workspace/acquired`, not
+    `event` (P6-33).
+
+    `kind` is the *view's* eight-value vocabulary and is what a row is coloured
+    and grouped by; this is the log's own 63-type one, and the two are not
+    interchangeable: forty-odd harness types share the single kind `event`, so a
+    reader wanting "just the retained worktrees" cannot ask for it in `kind`.
+    Carried on the record rather than re-derived from `source_seq`, because this
+    view folds a stored log with nothing mounted — the filter must not need the
+    log back to answer.
+    """
     title: str = ""
     """What the row is called — the table's own column, so an `event` reads as
     "turn end" rather than as the type that produced it."""
@@ -446,8 +458,17 @@ def build_trajectory(session: Session) -> list[TrajectoryRecord]:
             elif event.type == "assistant/chunk" and builder._first_chunk is None:
                 builder._first_chunk = event.time
             continue
+        before = len(builder.records)
         handler(builder, event)
-        builder.records[-1].fork_point = event.seq in boundaries
+        # **The records this handler added**, which is not always exactly one:
+        # `on_request_header` returns without adding when the payload will not
+        # parse. `records[-1]` therefore stamped a *previous, unrelated* record —
+        # with this event's fork status and, on a log whose first record-producing
+        # event was that one, with an `IndexError`. A slice is correct for zero,
+        # one and many, which is what the handler table actually contains.
+        for record in builder.records[before:]:
+            record.type = event.type
+            record.fork_point = event.seq in boundaries
     return builder.records
 
 

@@ -36,6 +36,7 @@ __all__ = [
     "result_block",
     "seq",
     "source_of",
+    "split_terms",
     "text_of_wire",
 ]
 
@@ -134,6 +135,24 @@ def source_of(message: Any) -> tuple[str, str, str]:
     kind = str(source.get("kind") or "")
     name = str(source.get("plugin") or source.get("model") or source.get("callId") or "")
     return kind, name, str(source.get("form") or "")
+
+
+def split_terms(query: str, prefix: str) -> tuple[list[str], str]:
+    """Split a query into `prefix`-tagged terms and the free text that is left.
+
+    Here rather than in the one widget that needs it, because `matches_terms`
+    below claims to be "one definition of what filtering means" and a caller that
+    re-lexes the query before handing it over quietly makes that false: a quoted
+    phrase or a `-negation` rule added there would be split apart by the caller's
+    own splitter before it ever arrived. One tokenizer, and the picker gets the
+    tagged form for free the day it wants it.
+
+    Case-folded once, here, because `matches_terms` folds too and a tag compared
+    against an unfolded term would miss `Type:workspace`.
+    """
+    terms = query.lower().split()
+    tagged = [term.removeprefix(prefix) for term in terms if term.startswith(prefix)]
+    return tagged, " ".join(term for term in terms if not term.startswith(prefix))
 
 
 def matches_terms(haystack: str, query: str) -> bool:

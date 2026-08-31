@@ -38,10 +38,11 @@ from ph.cordis import Loader, import_plugin_modules
 from ph.cordis.events import events as event_registry
 from ph.lingering import lifetime
 from ph.paths import RuntimeDirError, resolve_roots
+from ph.selectors import matches_any, unknown_namespaces
 
 from .agents import agents_app
 from .attach import AttachmentUnavailable
-from .console import console, emit, err, fail, section
+from .console import TypeOption, console, emit, err, fail, section, selectors_or_exit
 from .daemon.recovery import PASSIVATE_AFTER
 from .modes import run_json, run_print, run_rpc, run_transcript
 from .profiles import (
@@ -377,7 +378,10 @@ def daemon(
 
 
 @app.command()
-def events(as_json: Annotated[bool, typer.Option("--json", help="Emit JSON.")] = False) -> None:
+def events(
+    as_json: Annotated[bool, typer.Option("--json", help="Emit JSON.")] = False,
+    type_: TypeOption = [],  # noqa: B006 - typer builds the list per invocation
+) -> None:
     """Print the event producer/consumer matrix.
 
     Generated from the declaration registry, so it cannot drift from the code
@@ -386,7 +390,18 @@ def events(as_json: Annotated[bool, typer.Option("--json", help="Emit JSON.")] =
     wheels included.
     """
     import_plugin_modules()
-    matrix = event_registry.matrix()
+    # The bus vocabulary, so a bare `tools` needs no prefix — and `log:workspace`
+    # is refused rather than answered emptily, because this registry holds no
+    # session-log types and the two share six roots (P6-33).
+    selectors = selectors_or_exit(type_, vocabulary="bus")
+    matrix = [row for row in event_registry.matrix() if matches_any(row["name"], selectors)]
+    if selectors and not matrix:
+        # A namespace nothing occupies is a typo far more often than it is an
+        # empty one, and this registry knows every name it holds — so it can say
+        # which it was rather than printing an empty table.
+        unknown = unknown_namespaces(selectors, event_registry.names())
+        detail = f": {', '.join(unknown)}" if unknown else ""
+        fail(f"[red]no declared event matches{detail}[/red]", code=2)
     if as_json:
         emit(json.dumps(matrix, indent=2))
         return

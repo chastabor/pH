@@ -27,7 +27,7 @@ from ph.session import Session, SurfaceIntent
 from ph.testing import assistant_payload, user_payload
 from ph_app.tui.trajectory import build_trajectory
 from ph_app.tui.trajectory_app import TrajectoryApp, load_records
-from ph_app.tui.widgets.trajectory import FORK_MARK, matches, search_index
+from ph_app.tui.widgets.trajectory import FORK_MARK, Query, search_index
 
 pytestmark = pytest.mark.anyio
 
@@ -117,10 +117,10 @@ def test_search_finds_a_tool_call_by_name_and_by_argument() -> None:
     (tool,) = [record for record in records if record.kind == "tool"]
     index = search_index(tool)
 
-    assert matches(index, "read")
-    assert matches(index, "src/a.py")
-    assert matches(index, "read src/a.py"), "every term must appear, not any"
-    assert not matches(index, "write")
+    assert Query.compile("read").matches(tool, index)
+    assert Query.compile("src/a.py").matches(tool, index)
+    assert Query.compile("read src/a.py").matches(tool, index), "every term, not any"
+    assert not Query.compile("write").matches(tool, index)
 
 
 def test_search_covers_the_source_not_only_the_text() -> None:
@@ -129,7 +129,7 @@ def test_search_covers_the_source_not_only_the_text() -> None:
     records = build_trajectory(_log(Session("sources")))
     (message,) = [record for record in records if record.kind == "message"]
 
-    assert matches(search_index(message), "model")
+    assert Query.compile("model").matches(message, search_index(message))
 
 
 # --------------------------------------------------------------- fork --
@@ -284,3 +284,82 @@ async def test_the_fork_mark_reaches_the_table(mount: Any) -> None:
 
     assert marked and all(cell.startswith(FORK_MARK) for cell in marked)
     assert not any(cell.startswith(FORK_MARK) for cell in unmarked)
+
+
+# ------------------------------------------------------- P6-33: type filter --
+
+
+def test_every_record_carries_the_log_type_it_came_from() -> None:
+    """`kind` is the view's eight-value vocabulary; `type` is the log's 63-value
+    one, and forty-odd harness types share the single kind `event`. A reader
+    wanting "just the retained worktrees" can only ask in `type`."""
+    records = build_trajectory(_log(Session("typed")))
+
+    assert all(record.type for record in records), "a record with no type cannot be filtered"
+    by_kind = {record.kind for record in records}
+    by_type = {record.type for record in records}
+    assert len(by_type) >= len(by_kind), "the log vocabulary is the finer of the two"
+
+
+def test_a_type_term_selects_a_namespace_and_free_text_still_works() -> None:
+    """Two predicates because there are two questions: "mentions read" is a
+    substring search; "is a tool record" is a namespace, and asking for one by
+    substring is how `tool` comes to select `tools/`."""
+    records = build_trajectory(_log(Session("filter")))
+    picked = [
+        record
+        for record in records
+        if Query.compile("type:tool").matches(record, search_index(record))
+    ]
+
+    assert picked, "the fixture has tool records"
+    assert all(record.type.startswith("tool/") for record in picked)
+    # Free text is unchanged, and the two compose.
+    both = [
+        record
+        for record in records
+        if Query.compile("type:tool read").matches(record, search_index(record))
+    ]
+    assert both and all(record.type.startswith("tool/") for record in both)
+
+
+def test_a_half_typed_or_foreign_type_term_matches_nothing_rather_than_raising() -> None:
+    """This runs per keystroke: `type:w` on the way to `type:workspace` must not
+    throw. The refusal that explains itself belongs on a command line, where the
+    input is complete."""
+    records = build_trajectory(_log(Session("typing")))
+    record = records[0]
+    index = search_index(record)
+
+    assert Query.compile("type:").matches(record, index) is False, "incomplete, not a raise"
+    assert Query.compile("type:bus:tools").matches(record, index) is False, "wrong vocabulary"
+    # A compiled query is reusable across every record — that is the point.
+    compiled = Query.compile("type:turn")
+    assert [r.type for r in records if compiled.matches(r, search_index(r))]
+
+
+def test_a_handler_that_adds_nothing_does_not_stamp_a_previous_record() -> None:
+    """`on_request_header` returns without adding when the payload will not parse.
+
+    The fold used to write `records[-1].fork_point` unconditionally, so that
+    event's fork status landed on an unrelated earlier record — and would have
+    raised `IndexError` had it been the first record-producing event. The fix is
+    a slice of what the handler actually added, which is correct for zero, one
+    and many.
+    """
+    session = Session("broken-header")
+    session.append("turn/start", {"turn": 1})
+    # A `request/header` whose payload `parse_request_header` refuses.
+    session.append("request/header", {"header": {"nonsense": True}, "reason": "initial"})
+    records = build_trajectory(session)
+
+    assert [record.type for record in records] == ["turn/start"], "the bad header made no record"
+    assert records[0].type == "turn/start", "and did not restamp the turn record"
+
+
+def test_a_leading_unparsable_header_does_not_crash_the_fold() -> None:
+    """The `IndexError` case: nothing has been added yet when the handler bails."""
+    session = Session("header-first")
+    session.append("request/header", {"header": {"nonsense": True}, "reason": "initial"})
+
+    assert build_trajectory(session) == []

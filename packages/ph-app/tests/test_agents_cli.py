@@ -576,6 +576,50 @@ async def test_a_follow_leaves_out_the_keystroke_log_unless_asked(
         assert "assistant/chunk" in everything.output
 
 
+async def test_a_follow_filters_to_a_namespace_and_drills_into_one(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """P6-33 through the follower: `--type` selects, and a namespace is not a
+    substring. `log:turn` must bring turn boundaries and nothing else."""
+    async with _daemon(tmp_path, monkeypatch):
+        await _ph("agents", "send", "picky", "hello")
+
+        turns = await _ph("agents", "attach", "picky", "--until-idle", "--type", "turn")
+        assert turns.exit_code == 0, turns.output
+        assert "turn/start" in turns.output and "turn/end" in turns.output
+        assert "assistant/message" not in turns.output, "a namespace is not everything"
+
+        one = await _ph("agents", "attach", "picky", "--until-idle", "--type", "turn/end")
+        assert one.exit_code == 0, one.output
+        assert "turn/end" in one.output and "turn/start" not in one.output
+
+
+async def test_a_named_namespace_overrides_the_per_delta_hush(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """Naming a namespace is a stronger signal than the default quiet.
+
+    `assistant/chunk` is hidden without `--all` because its text arrives again in
+    the message that closes the turn. But somebody who typed
+    `--type assistant/chunk` asked for exactly that, and making them add `--all`
+    on top would answer a question they did not ask.
+    """
+    async with _daemon(tmp_path, monkeypatch):
+        await _ph("agents", "send", "loud", "hello")
+        result = await _ph("agents", "attach", "loud", "--until-idle", "--type", "assistant/chunk")
+        assert result.exit_code == 0, result.output
+        assert "assistant/chunk" in result.output, "asked for by name, and still hidden"
+
+
+async def test_a_follow_refuses_the_other_vocabulary(tmp_path: Path, monkeypatch: Any) -> None:
+    """`bus:tools` follows nothing — this is a session log. Refused rather than
+    answered with an empty stream, which would read as a quiet session."""
+    async with _daemon(tmp_path, monkeypatch):
+        result = await _ph("agents", "attach", "wrong", "--type", "bus:tools")
+        assert result.exit_code == 2, result.output
+        assert "does not serve" in result.output
+
+
 async def test_an_unnamed_failure_surfaces_as_itself_not_as_a_group(
     tmp_path: Path, monkeypatch: Any
 ) -> None:

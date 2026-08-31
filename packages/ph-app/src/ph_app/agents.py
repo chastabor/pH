@@ -31,7 +31,7 @@ steps a person is given (P5-11).
 from __future__ import annotations
 
 import secrets
-from collections.abc import Awaitable, Callable, Iterable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from functools import partial
@@ -45,8 +45,9 @@ from rich.table import Table
 from ph.lingering import lifetime
 from ph.paths import RuntimeDirError, resolve_roots
 from ph.resources import GRACE_SECONDS
+from ph.selectors import Selector, matches_any
 
-from .console import console, fail, section
+from .console import TypeOption, console, fail, section, selectors_or_exit
 from .daemon.client import DaemonClient
 from .protocol import DaemonError, DaemonGone
 from .wire import describe, message_of, obj, one_line, result_block, seq, text_of_wire
@@ -340,6 +341,8 @@ class _Follow:
     session_id: str
     until_idle: bool = False
     everything: bool = False
+    selectors: Sequence[Selector] = ()
+    """Namespace selectors from `--type`; empty means no filter (P6-33)."""
     done: anyio.Event = field(default_factory=anyio.Event)
     seen: int = 0
     pending: list[tuple[str, dict[str, Any]]] | None = field(default_factory=list)
@@ -380,7 +383,7 @@ class _Follow:
         makes catching up on a long log bearable; it is also why this takes a
         sequence rather than an event.
         """
-        lines = [_line(event) for event in events if self.everything or _shown(event)]
+        lines = [_line(event) for event in events if self._shows(event)]
         if lines:
             # `soft_wrap`, for the reason a machine-readable dump does not go
             # through a console at all: a follower's lines are records, and
@@ -388,9 +391,27 @@ class _Follow:
             # half-matches.
             console.print("\n".join(lines), soft_wrap=True)
 
+    def _shows(self, event: Mapping[str, Any]) -> bool:
+        """Whether this follower prints one event.
 
-def _shown(event: Mapping[str, Any]) -> bool:
-    return str(event.get("type", "")) not in NOISE
+        **A `--type` selector replaces the per-delta hush rather than stacking on
+        it.** `NOISE` exists because a turn is mostly `assistant/chunk`, whose
+        content arrives again in the `assistant/message` that closes it — so the
+        default is to hide it. Naming a namespace is a stronger signal than that
+        default: somebody who typed `--type assistant` asked for the assistant
+        traffic, and hiding most of it would answer a question they did not ask.
+        So `--all` stops being necessary once `--type` is given, rather than
+        being required on top of it.
+
+        Said as two branches rather than one disjunction, and the type read once:
+        the earlier form computed `event["type"]` here and again in a second
+        predicate, and recomputed `bool(self.selectors)` — a value fixed at
+        construction — on every frame of a replayed history.
+        """
+        kind = str(event.get("type", ""))
+        if self.selectors:
+            return matches_any(kind, self.selectors)
+        return self.everything or kind not in NOISE
 
 
 async def _catch_up(client: DaemonClient, session_id: str, follow: _Follow, cursor: Any) -> int:
@@ -487,6 +508,7 @@ def attach(
     everything: Annotated[
         bool, typer.Option("--all", help="Include streamed chunks and other per-delta events.")
     ] = False,
+    type_: TypeOption = [],  # noqa: B006 - typer builds the list per invocation
 ) -> None:
     """Follow a root's log: its history, then everything as it happens.
 
@@ -501,8 +523,17 @@ def attach(
     a person came to read.
     """
 
+    # The session-log vocabulary: a bare `workspace` needs no prefix, and
+    # `bus:tools` is refused rather than silently matching nothing (P6-33).
+    selectors = selectors_or_exit(type_, vocabulary="log")
+
     async def work(client: DaemonClient) -> None:
-        follow = _Follow(session_id=session, until_idle=until_idle, everything=everything)
+        follow = _Follow(
+            session_id=session,
+            until_idle=until_idle,
+            everything=everything,
+            selectors=selectors,
+        )
         client.on_notify = follow
         # Subscribed *before* the history is read, so nothing that happens in
         # between is lost; `_Follow` holds those frames until the pages are done.

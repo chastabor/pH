@@ -397,3 +397,40 @@ def test_every_public_command_is_registered_and_nothing_private_leaked() -> None
     assert {"daemon", "doctor"} <= registered, f"a command stopped being registered: {registered}"
     private = {name for name in registered if name.startswith("_")}
     assert not private, f"a helper was captured by an @app.command() decorator: {private}"
+
+
+# ------------------------------------------------ P6-33: `ph events --type` --
+
+
+def test_events_filters_to_a_namespace_and_drills_into_one() -> None:
+    """The bus half of the selector, through the command that prints it."""
+    listed = runner.invoke(app, ["events", "--type", "tools", "--json"])
+    assert listed.exit_code == 0, listed.output
+    names = [row["name"] for row in json.loads(listed.stdout)]
+    assert names and all(name.startswith("tools/") for name in names)
+
+    one = runner.invoke(app, ["events", "--type", "tools/execute", "--json"])
+    assert [row["name"] for row in json.loads(one.stdout)] == ["tools/execute"]
+
+
+def test_events_does_not_answer_with_the_session_logs_near_miss() -> None:
+    """`tool` is a *session-log* namespace; this registry holds `tools/*`. The two
+    differ by one letter, which is exactly what a substring filter gets wrong —
+    so the honest answer is "nothing here", not four `tool/*` rows."""
+    result = runner.invoke(app, ["events", "--type", "tool"])
+    assert result.exit_code == 2
+    assert "no declared event matches" in result.output
+
+
+def test_events_refuses_the_other_vocabulary_rather_than_answering_emptily() -> None:
+    """A person asking a bus registry for log types has the wrong surface, and an
+    empty table would let them conclude the namespace is quiet."""
+    result = runner.invoke(app, ["events", "--type", "log:workspace"])
+    assert result.exit_code == 2
+    assert "does not serve" in result.output
+
+
+def test_events_unfiltered_is_unchanged() -> None:
+    """No `--type` is no filter — the default must not have become a query."""
+    everything = json.loads(runner.invoke(app, ["events", "--json"]).stdout)
+    assert len(everything) > 20

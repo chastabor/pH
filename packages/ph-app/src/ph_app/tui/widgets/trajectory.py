@@ -21,6 +21,7 @@ standalone entry point and the chat, over the same records:
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 from textual.app import ComposeResult
@@ -29,10 +30,12 @@ from textual.content import Content
 from textual.timer import Timer
 from textual.widgets import DataTable, Input, Static
 
-from ...wire import index_at_or_before, matches_terms
+from ph.selectors import Selector, SelectorError, matches_any, parse_all
+
+from ...wire import index_at_or_before, matches_terms, split_terms
 from ..trajectory import TrajectoryRecord
 
-__all__ = ["FORK_MARK", "TrajectoryPanel", "matches", "search_index"]
+__all__ = ["FORK_MARK", "TYPE_TERM", "Query", "TrajectoryPanel", "search_index"]
 
 FILTER_DEBOUNCE = 0.15
 """Seconds a keystroke waits before the table rebuilds."""
@@ -53,16 +56,71 @@ def search_index(record: TrajectoryRecord) -> str:
     # `title` is absent deliberately: it is the table's own column and, for
     # every message and tool record, the same text as the source label — one
     # string indexed twice buys nothing and doubles the term.
+    #
+    # `type` is absent for the opposite reason: it is matched *precisely*, by
+    # `type:` below, not by substring. Folding it in here would make `tool` catch
+    # `tools/`-shaped prose and would let a namespace be selected by accident.
     return " ".join((record.kind, record.summary, record.detail, record.source.label())).lower()
 
 
-def matches(index: str, query: str) -> bool:
-    """`matches_terms`, named for this call site.
+TYPE_TERM = "type:"
+"""The one query prefix that means "not free text".
 
-    No ranking, on purpose: an auditor filters to a handful and reads them,
-    rather than being handed someone's guess at relevance. The predicate itself
-    is the TUI's one definition of filtering, shared with the choice picker."""
-    return matches_terms(index, query)
+Spelled once and interpolated into the placeholder below, so the syntax a person
+is offered and the syntax the predicate implements cannot drift.
+"""
+
+
+@dataclass(frozen=True, slots=True)
+class Query:
+    """A filter query, tokenized and parsed **once per rebuild**.
+
+    Compiled here rather than inside the per-record predicate, which is where it
+    started and where it cost the most: `refresh_rows` calls the predicate once
+    per record, so parsing inside it re-lexed the query and re-parsed every
+    selector for every row on every keystroke — and made the *plain free-text*
+    path, the common one, 2.5x more expensive than before `type:` existed,
+    because the tag scan ran whether or not anyone had typed a tag. A malformed
+    term also constructed and raised a `SelectorError` per record, thousands of
+    exceptions caught and dropped.
+
+    `bad` is how a malformed or foreign `type:` term reaches the caller without
+    an exception per row. It matches nothing, because this compiles while a
+    person is still typing — `type:w` on the way to `type:workspace` must not
+    throw. The refusal that explains itself belongs on a command line, where the
+    input is complete.
+    """
+
+    selectors: tuple[Selector, ...] = ()
+    free: str = ""
+    bad: bool = False
+
+    @classmethod
+    def compile(cls, query: str) -> Query:
+        tagged, free = split_terms(query, TYPE_TERM)
+        try:
+            return cls(selectors=tuple(parse_all(tagged, vocabulary="log")), free=free)
+        except SelectorError:
+            return cls(bad=True)
+
+    def matches(self, record: TrajectoryRecord, index: str) -> bool:
+        """Free text over everything a row shows, `type:` over its namespace.
+
+        Two predicates because there are two questions. *"Which records mention
+        `retry`"* is a substring search — `matches_terms`, the TUI's one
+        definition of filtering, shared with the choice picker. *"Which records
+        are `workspace/*`"* is not: asking for a namespace by substring is how
+        `tool` comes to select `tools/` (P6-33).
+
+        Several `type:` terms are a **union**, matching `--type` on the command
+        line: `type:workspace type:turn` is either, not both, since a record
+        cannot be in two namespaces and intersecting would always be empty. The
+        type half is then ANDed with the free text, which is what a second term
+        has always meant here.
+        """
+        if self.bad:
+            return False
+        return matches_any(record.type, self.selectors) and matches_terms(index, self.free)
 
 
 class TrajectoryPanel(Vertical):
@@ -90,7 +148,7 @@ class TrajectoryPanel(Vertical):
         self._pending: Timer | None = None
 
     def compose(self) -> ComposeResult:
-        yield Input(placeholder="filter records…", id="trajectory-filter")
+        yield Input(placeholder=f"filter records… or {TYPE_TERM}workspace", id="trajectory-filter")
         with Horizontal(id="trajectory-body"):
             yield DataTable(id="trajectory-table", cursor_type="row", zebra_stripes=True)
             with VerticalScroll(id="trajectory-details"):
@@ -135,10 +193,11 @@ class TrajectoryPanel(Vertical):
         table = self._table
         if table is None:
             return
+        compiled = Query.compile(query) if query else None
         self.visible_records = [
             record
             for record, index in zip(self.records, self._index, strict=True)
-            if not query or matches(index, query)
+            if compiled is None or compiled.matches(record, index)
         ]
         table.clear()
         for record in self.visible_records:
