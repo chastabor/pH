@@ -66,7 +66,7 @@ from ph.seams.subagents import (
     SubagentStatus,
     default_child_name,
 )
-from ph.seams.workspace import project_access
+from ph.seams.workspace import discards_writes, project_access, workspace_survivors
 from ph.session import Session, derive_event_message
 from ph.session.json import thaw_json
 from ph.wire import WireModel
@@ -432,6 +432,13 @@ class RlmChildProvider:
             self._status(
                 child, "done", answerPreview=answer[: self.config.answer_preview_chars] or None
             )
+            # The other half of retain-by-default (P6-28): a child that finished
+            # is a child whose checkout is not evidence of anything, so the mark
+            # taken at acquire is withdrawn and `worktree-ephemeral` keeps its
+            # promise for the case it was written for. Before `_quiesce` in the
+            # `finally` below, which disposes the scope that holds the workspace
+            # — after it there is nothing left to unmark.
+            self._withdraw(child)
             # Silence is indistinguishable from a hang from the parent's side,
             # so a child that never sent a message is announced. A child that
             # *did* reply needs no notice — the reply is the notice.
@@ -448,7 +455,7 @@ class RlmChildProvider:
             self._status(child, "error", detail=message)
             self._inject(
                 parent_session,
-                f"[rlm child {run.name} ({run.id}) failed: {message}]",
+                f"[rlm child {run.name} ({run.id}) failed: {message}{self._evidence(child)}]",
                 f"{run.name} failed",
             )
             log.debug("ph_rlm.subagents: child %s failed", run.id, exc_info=True)
@@ -459,6 +466,46 @@ class RlmChildProvider:
             # of it). Keeping it for the host's lifetime leaked one CPython — and
             # the child's whole namespace — per delegation.
             await self._quiesce(child)
+
+    def _evidence(self, child: _Child) -> str:
+        """Where the failed child's tree is, for the message that says it failed.
+
+        **The row's motivating case, answered where the parent is looking**
+        (P6-28). Retention keeps the checkout; this is what stops it being
+        evidence nobody can find. A child's workspace events are in the *child's*
+        log, so a parent told only "it failed" is left diagnosing from a
+        transcript — which is the sentence the row opens with.
+
+        Read from the log rather than from the seam, and that is not incidental:
+        this runs on the way to `_quiesce`, and the same sentence has to be true
+        on a path where the scope is already gone. The fold answers from events
+        that are already written.
+
+        Silent when there is nothing to say — no tier, a `shared` workspace, a
+        child whose tree was discarded. A notice that named a directory for every
+        failure would be naming ones that are not there.
+        """
+        if child.session is None:
+            return ""
+        kept = [one for one in workspace_survivors(child.session) if one.outcome == "retained"]
+        return f" Its workspace is kept at {kept[0].root}." if kept else ""
+
+    def _withdraw(self, child: _Child) -> None:
+        """Take back the mark this child's tree got at acquire (P6-28).
+
+        Only ever the withdrawal, which is why it takes no reason: the marking
+        half runs in `_workspace`, where the seam and the kind are already in
+        hand. A shared helper with a `reason` parameter that one caller always
+        passed `""` was two spellings of one operation.
+
+        `get`, not attribute access, and tolerant of an agent that never took a
+        workspace: this runs on a settle path, and a profile with no workspace
+        row or a child whose tier declined are both ordinary. The seam answers
+        `False` rather than raising for exactly this caller.
+        """
+        seam = self.ctx.get("workspace")
+        if seam is not None and child.agent is not None:
+            seam.retain(child.agent.id, "")
 
     async def _quiesce(self, child: _Child) -> None:
         """Drop everything a settled child no longer needs.
@@ -560,6 +607,25 @@ class RlmChildProvider:
             # checkout with everything else it took (I2).
             scope=child_agent.ctx,
         )
+        if discards_writes(workspace.kind):
+            # **Retained from the moment the tree exists** (P6-28), because the
+            # window to mark it closes with the child's scope and the outcomes
+            # that most need the evidence are the ones that close it first: on
+            # the `parent-teardown` path the worktree is released *before*
+            # `_release` runs, which that method's own docstring states. So this
+            # cannot be "retain when it fails" — there is nowhere to put that —
+            # and it has to be "retain unless it succeeds", cleared in `_drive`.
+            #
+            # Only for the kind that discards. Every other kind already keeps a
+            # dirty tree for review, and a committed branch survives release
+            # regardless, so retaining those would grow the pile without saving
+            # anything from it.
+            #
+            # The pile this creates is bounded by `ph workspaces gc`, which is
+            # not a note about future work: this policy was held back until that
+            # command existed, because inverting `worktree-ephemeral`'s promise
+            # with no collector is a worse trade than the lost evidence it fixes.
+            seam.retain(child_agent.id, "the child has not settled cleanly")
         return project_access(workspace.kind), None
 
     async def delete(self, parent_session: Session, run_id: str, *, reason: str = "user") -> bool:

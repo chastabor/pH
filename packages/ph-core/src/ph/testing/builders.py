@@ -12,11 +12,19 @@ the fake-provider options. Each was being re-declared per test module.
 from __future__ import annotations
 
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 from ..agent.types import AgentOptions
 from ..cordis import DEPLOYMENT, Boundary, Context
 from ..llm.types import ContextForm, PluginSource
+from ..seams.workspace import (
+    ACQUIRED,
+    DISPOSED,
+    RETAINED,
+    SharedWorkspaceProvider,
+    WorkspaceSeam,
+)
 from ..session import Session
 from ..tools.definition import ToolDefinition, ToolOutput, define_tool, text_content
 from ..tools.registry import ToolRuntime
@@ -32,6 +40,11 @@ __all__ = [
     "tool_result_payload",
     "tool_runtime",
     "user_payload",
+    "workspace_acquired",
+    "workspace_disposed",
+    "workspace_log",
+    "workspace_retained",
+    "workspace_seam",
 ]
 
 FAKE_OPTIONS = AgentOptions(provider="fake", model="fake-1")
@@ -258,3 +271,53 @@ def tool_result_payload(
             "source": {"kind": "tool", "callId": call_id},
         },
     }
+
+
+def workspace_seam(scratch_root: Path) -> WorkspaceSeam:
+    """A bare `ctx.workspace` on its own root context, with no tier registered.
+
+    `tool_runtime()` above is the same shape for the same reason: two test
+    modules had written this four-line constructor byte-identically, across
+    twenty call sites, and a seam whose construction drifts is one where two
+    suites disagree about what a default workspace is.
+
+    No provider, deliberately — a test that wants a tier registers one, and
+    `SharedWorkspaceProvider` is what the seam falls back to either way.
+    """
+    return WorkspaceSeam(ctx=Context(), shared=SharedWorkspaceProvider(), scratch_root=scratch_root)
+
+
+def workspace_acquired(
+    agent_id: str, root: str, *, kind: str = "worktree", ref: str = "ph/s/a"
+) -> tuple[str, dict[str, Any]]:
+    """The opening half of the durable workspace pair (P4-14, P6-28)."""
+    return (ACQUIRED, {"agentId": agent_id, "kind": kind, "root": root, "ref": ref})
+
+
+def workspace_retained(agent_id: str, reason: str) -> tuple[str, dict[str, Any]]:
+    """A tree marked as evidence; an empty `reason` withdraws the mark."""
+    return (RETAINED, {"agentId": agent_id, "retained": reason})
+
+
+def workspace_disposed(agent_id: str, **extra: Any) -> tuple[str, dict[str, Any]]:
+    """The closing half — `kept=`, `retained=`, `reconciled=` as the test needs."""
+    return (DISPOSED, {"agentId": agent_id, **extra})
+
+
+def workspace_log(*events: tuple[str, dict[str, Any]], session_id: str = "s") -> Session:
+    """A session built from hand-written events, for testing a fold.
+
+    **Here rather than in each test module**, and it took two modules writing
+    these four builders before the reason showed: `test_workspace_reconcile` and
+    `test_workspace_retention` fold the *same* events through the *same*
+    function, so a fixture that drifts between them is how two suites come to
+    disagree about the payload shape one producer writes.
+
+    Through `ACQUIRED`/`DISPOSED`/`RETAINED` rather than the literals, for the
+    reason those constants already give for themselves: "a literal spelled at
+    five sites is five chances not to", and a test file is a site.
+    """
+    session = Session(session_id)
+    for kind, data in events:
+        session.append(kind, data)
+    return session

@@ -71,14 +71,7 @@ def test_unknown_profile_is_refused() -> None:
     assert "unknown profile" in result.output
 
 
-def _roots(tmp_path: Path, monkeypatch: Any) -> None:
-    monkeypatch.setenv("PH_HOME", str(tmp_path / "home"))
-    monkeypatch.setenv("PH_CACHE", str(tmp_path / "cache"))
-    monkeypatch.setenv("PH_RUNTIME", str(tmp_path / "run"))
-
-
-def test_doctor_prints_three_roots(tmp_path: Path, monkeypatch: Any) -> None:
-    _roots(tmp_path, monkeypatch)
+def test_doctor_prints_three_roots(roots: Path) -> None:
     result = runner.invoke(app, ["doctor"])
     assert result.exit_code == 0, result.output
     for name in ("PH_HOME", "PH_CACHE", "PH_RUNTIME"):
@@ -142,13 +135,10 @@ def test_starting_a_daemon_that_will_not_outlive_logout_says_so_first(
     assert result.output.index("enable-linger") < result.output.index("cannot listen")
 
 
-def test_doctor_mounts_the_profile_and_prints_the_tier_table(
-    tmp_path: Path, monkeypatch: Any
-) -> None:
+def test_doctor_mounts_the_profile_and_prints_the_tier_table(roots: Path) -> None:
     """P4-12's own gate. Doctor answered from `resolve_roots()` alone until this
     row, so it could say where the log would go and nothing about what the
     process would be — and every question worth running it for is a row's."""
-    _roots(tmp_path, monkeypatch)
 
     result = runner.invoke(app, ["doctor", "--profile", "headless"])
 
@@ -160,7 +150,7 @@ def test_doctor_mounts_the_profile_and_prints_the_tier_table(
 
 
 def test_a_row_contributes_a_reading_without_ph_app_importing_it(
-    tmp_path: Path, monkeypatch: Any
+    tmp_path: Path, roots: Path
 ) -> None:
     """The other half of the gate: `permissions-fs` lives in ph-stabilize, which
     this package must never import (P3-20's rule, and the reason the reading is
@@ -170,7 +160,6 @@ def test_a_row_contributes_a_reading_without_ph_app_importing_it(
     a *wider* reach than one that wrote a deny list, and E9's sentence is most
     worth printing exactly there.
     """
-    _roots(tmp_path, monkeypatch)
     profile = tmp_path / "reach.yaml"
     profile.write_text(
         yaml.safe_dump(
@@ -189,11 +178,10 @@ def test_a_row_contributes_a_reading_without_ph_app_importing_it(
     assert "not covered" in result.stdout
 
 
-def test_doctor_reports_a_profile_that_refuses_to_start(tmp_path: Path, monkeypatch: Any) -> None:
+def test_doctor_reports_a_profile_that_refuses_to_start(tmp_path: Path, roots: Path) -> None:
     """E8's refusal reaches the person as a sentence, not a traceback: doctor is
     what someone runs *because* the process will not start, and the exit code
     still says it failed."""
-    _roots(tmp_path, monkeypatch)
     profile = tmp_path / "strict.yaml"
     profile.write_text(
         yaml.safe_dump(
@@ -213,9 +201,7 @@ def test_doctor_reports_a_profile_that_refuses_to_start(tmp_path: Path, monkeypa
     assert "no sandbox backend is mounted" in result.output
 
 
-def test_doctor_refuses_an_unknown_profile_with_the_same_code(
-    tmp_path: Path, monkeypatch: Any
-) -> None:
+def test_doctor_refuses_an_unknown_profile_with_the_same_code(roots: Path) -> None:
     """Exit 2, as `--dump-config` gives, not the exit 1 a mount failure gives.
 
     Worth pinning because `typer.Exit` subclasses `RuntimeError`: resolved
@@ -223,7 +209,6 @@ def test_doctor_refuses_an_unknown_profile_with_the_same_code(
     "does not mount" under the wrong code, having already printed the right
     sentence.
     """
-    _roots(tmp_path, monkeypatch)
 
     result = runner.invoke(app, ["doctor", "--profile", "nonesuch"])
 

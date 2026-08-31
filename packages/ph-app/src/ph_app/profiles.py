@@ -11,12 +11,25 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TypeAlias
+from typing import Annotated, TypeAlias
+
+import typer
 
 from ph.bundles import BASE, HEADLESS, resolve_bundle
 from ph.paths import resolve_roots
 
-__all__ = ["PROFILES", "PROFILE_DIR", "Bundle", "available_profiles", "resolve_profile"]
+from .console import fail
+
+__all__ = [
+    "DEFAULT_PROFILE",
+    "PROFILES",
+    "PROFILE_DIR",
+    "Bundle",
+    "ProfileOption",
+    "available_profiles",
+    "documents_or_exit",
+    "resolve_profile",
+]
 
 PROFILE_DIR = Path(__file__).parent / "profiles"
 
@@ -117,3 +130,32 @@ def resolve_profile(name: str) -> list[Path]:
     if overlay.exists():
         layers.append(overlay)
     return layers
+
+
+DEFAULT_PROFILE = "headless"
+
+ProfileOption: TypeAlias = Annotated[
+    str, typer.Option("--profile", help="Profile name or path to a .yaml.")
+]
+"""Declared once, so two commands cannot come to disagree about what `--profile`
+means — or, as nearly happened here, about what an unknown one costs.
+
+**Here rather than in `cli.py`**, which is where it started: `cli.py` imports the
+sub-apps, so a sub-app that wanted the alias had to import back into it — and
+`ph workspaces gc` did exactly that, reaching for a private `_documents` across
+the cycle. This module already owns what a profile *is*; the flag that names one
+belongs beside it. `console.py` was carved out for the same reason and states it.
+"""
+
+
+def documents_or_exit(profile: str) -> list[Path]:
+    """The profile's documents, or exit 2 saying which names exist.
+
+    The refusal is the command's, not the resolver's: `resolve_profile` raises a
+    `ValueError` that already names the available profiles, and every caller
+    wants that sentence on stderr under the same exit code.
+    """
+    try:
+        return resolve_profile(profile)
+    except ValueError as error:
+        fail(f"[red]{error}[/red]", code=2, cause=error)

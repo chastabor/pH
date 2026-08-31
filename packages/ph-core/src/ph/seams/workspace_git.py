@@ -69,6 +69,7 @@ from .workspace import (
     WorkspaceAccess,
     WorkspaceDeclined,
     WorkspaceRecord,
+    discards_writes,
     redirection_env,
     workspace_of,
 )
@@ -191,8 +192,15 @@ class GitWorktreeProvider:
             repo_writable=True,
             ref=ref,
             env=redirection_env(scratch),
+            # `workspace.retained`, read at teardown rather than captured here:
+            # whether this tree is evidence is decided by how the agent *ended*,
+            # which nobody knows at acquire time (P6-28).
             release=lambda workspace: self._release(
-                toplevel, path, ref, discard=ephemeral, pathspec=workspace.agent_work_pathspec()
+                toplevel,
+                path,
+                ref,
+                discard=ephemeral and not workspace.retained,
+                pathspec=workspace.agent_work_pathspec(),
             ),
         )
 
@@ -215,6 +223,20 @@ class GitWorktreeProvider:
         and every file counts as the agent's work — which errs toward keeping,
         where the cost is disk rather than the work. A `worktree-ephemeral`
         record is discarded exactly as its own release would have discarded it.
+
+        **A retention is an exception to `discard`, exactly as it is at release**
+        (P6-28). This had a rule of its own for one round — a reason meant return
+        "kept" and touch nothing — and two rules for one word is how a tree gets
+        deleted by whichever path happened to reach it first: an orderly release
+        kept a retained tree only if it was dirty, while a reconciliation kept it
+        either way. `Workspace.retained`'s own docstring settles which is
+        canonical, so the special case is gone and the reason folds into
+        `discard` here as it does there.
+
+        A clean retained tree is therefore removed on both paths, and it loses
+        nothing: what a child committed lives on its **branch**, which `-d`
+        declines to delete for precisely this reason. What retention buys is the
+        *uncommitted* work an ephemeral tree would otherwise have thrown away.
         """
         if record.ref is None or not record.root.exists():
             # git pruned it, or a person removed it. Nothing to reclaim, and the
@@ -227,7 +249,7 @@ class GitWorktreeProvider:
             toplevel,
             record.root,
             record.ref,
-            discard=record.kind == "worktree-ephemeral",
+            discard=discards_writes(record.kind) and not record.reason,
             pathspec=(),
         )
 
@@ -358,12 +380,14 @@ class GitWorktreeProvider:
         # can still hold an untracked file git would object to, and an ephemeral
         # tree is discarded *even if dirty*, which is the kind's whole promise.
         #
-        # That promise is also why a settled subagent's evidence goes missing: a
+        # That promise is also why a settled subagent's evidence went missing: a
         # child admitted with `access="read"` gets `worktree-ephemeral`, so the
         # child a parent most wants to inspect — one that failed, or was
-        # cancelled at `parent-teardown` — is exactly the one whose tree this
-        # removes. Retaining it deliberately, finding it across a family, and
-        # collecting it later is P6-28.
+        # cancelled at `parent-teardown` — was exactly the one whose tree this
+        # removed. `Workspace.retained` is the exception, and it is an exception
+        # to `discard` rather than to this branch: a retained ephemeral tree
+        # takes the same keep-if-dirty path a `worktree` does, so retention
+        # buys evidence and not an unconditional checkout (P6-28).
         code, _, err = await self._git(toplevel, "worktree", "remove", "--force", str(path))
         if code != 0:
             log.warning(

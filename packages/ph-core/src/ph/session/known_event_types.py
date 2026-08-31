@@ -107,6 +107,11 @@ KNOWN_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         # which only works if both halves are in the vocabulary.
         "workspace/acquired",
         "workspace/disposed",
+        # A tree marked as evidence, written when the mark is made rather than
+        # only on the closing half (P6-28). A retention is decided because a run
+        # went wrong, and the most complete way for one to go wrong writes no
+        # `disposed` at all — so the mark has to be durable before that.
+        "workspace/retained",
         # Materials that did not reach a fresh workspace (E14). Appended only
         # when something failed — a silent success is the ordinary case, and one
         # event per agent saying "nothing went wrong" is noise in a log whose
@@ -262,6 +267,7 @@ IGNORABLE_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         "limits/breaker-tripped",
         "workspace/acquired",
         "workspace/disposed",
+        "workspace/retained",
         "workspace/provisioned",
     }
 )

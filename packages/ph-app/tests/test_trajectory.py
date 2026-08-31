@@ -102,6 +102,11 @@ def test_the_auditor_renders_what_the_transcript_does_not() -> None:
         "compaction/summarized",
         "workspace/acquired",
         "workspace/disposed",
+        # P6-28: why a tree survived is the auditor's question exactly — a
+        # transcript that ends in a failure says nothing about the checkout the
+        # failure left behind, and the reason is the only thing that separates
+        # evidence somebody kept from a directory nobody meant to leave.
+        "workspace/retained",
         # P5-06: creating, cancelling and heartbeating a schedule are not
         # conversation — the *tick* is, and it has a transcript row. An auditor
         # asking "why did this wake at 3am, and was anything watching between

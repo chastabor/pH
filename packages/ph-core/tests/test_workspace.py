@@ -28,23 +28,15 @@ from typing import Any
 
 import pytest
 
-from ph.cordis import Context
 from ph.seams.workspace import (
     ContainmentTier,
-    SharedWorkspaceProvider,
     Workspace,
     WorkspaceKind,
-    WorkspaceSeam,
 )
 from ph.session import Session
+from ph.testing import workspace_seam
 
 pytestmark = pytest.mark.anyio
-
-
-def _seam(tmp_path: Path) -> WorkspaceSeam:
-    return WorkspaceSeam(
-        ctx=Context(), shared=SharedWorkspaceProvider(), scratch_root=tmp_path / "scratch"
-    )
 
 
 class _Provider:
@@ -95,7 +87,7 @@ async def test_the_shared_provider_hands_back_the_directory_it_was_given(
 ) -> None:
     """Today's behaviour, at zero cost — which is what lets the seam live in
     `ph-base` without changing what any profile does."""
-    seam = _seam(tmp_path)
+    seam = workspace_seam(tmp_path / "scratch")
     base = tmp_path / "repo"
     base.mkdir()
 
@@ -115,7 +107,7 @@ async def test_scratch_exists_and_lives_outside_the_workspace(tmp_path: Path) ->
     Outside `root` on purpose: it survives disposal as a session artifact, so a
     child whose worktree is thrown away still leaves behind what it produced.
     """
-    seam = _seam(tmp_path)
+    seam = workspace_seam(tmp_path / "scratch")
     base = tmp_path / "repo"
     base.mkdir()
 
@@ -138,7 +130,7 @@ async def test_a_read_request_is_answered_honestly_rather_than_flattered(
     Nothing here enforces anything, so reporting `False` would be a lie a caller
     would then act on — the exact failure `repo_writable` exists to prevent.
     """
-    seam = _seam(tmp_path)
+    seam = workspace_seam(tmp_path / "scratch")
     (tmp_path / "repo").mkdir()
 
     workspace = await seam.acquire(
@@ -162,7 +154,7 @@ async def test_a_provider_that_declines_falls_back_rather_than_failing(
     not start" is the wrong trade. The kind reported is `shared`, which is what
     tells an operator the tier is not in force.
     """
-    seam = _seam(tmp_path)
+    seam = workspace_seam(tmp_path / "scratch")
     seam.register_provider(_Provider(answer=None))
     (tmp_path / "repo").mkdir()
 
@@ -174,7 +166,7 @@ async def test_a_provider_that_declines_falls_back_rather_than_failing(
 async def test_a_provider_that_raises_falls_back_too(tmp_path: Path) -> None:
     """A tier that broke is a tier that is not in force, and the difference
     between declining and crashing is the provider's problem, not the agent's."""
-    seam = _seam(tmp_path)
+    seam = workspace_seam(tmp_path / "scratch")
     seam.register_provider(_Provider(raises=True))
     (tmp_path / "repo").mkdir()
 
@@ -186,7 +178,7 @@ async def test_a_provider_that_raises_falls_back_too(tmp_path: Path) -> None:
 async def test_the_provider_gets_the_whole_request(tmp_path: Path) -> None:
     """`access` reaches the tier, because it is the tier that decides what kind
     a read request resolves to."""
-    seam = _seam(tmp_path)
+    seam = workspace_seam(tmp_path / "scratch")
     provider = _Provider(answer=_worktree(tmp_path, kind="worktree-ephemeral"))
     seam.register_provider(provider)
 
@@ -207,7 +199,7 @@ async def test_the_effective_tier_is_reported_not_the_configured_one(tmp_path: P
     """What `ph doctor` has to print. Configured-vs-effective is the whole
     distinction: a `worktree` row over a non-repository declines on every
     acquire, and a doctor reading config would report containment nobody has."""
-    seam = _seam(tmp_path)
+    seam = workspace_seam(tmp_path / "scratch")
     assert seam.effective_tier(child=False) == "advisory"
 
     seam.register_provider(_Provider(answer=None))
@@ -224,7 +216,7 @@ async def test_acquire_and_dispose_bracket_each_other_in_the_log(tmp_path: Path)
     pair only reconciles if one place owns both — a provider that forgot the
     second would leave every workspace looking leaked.
     """
-    seam = _seam(tmp_path)
+    seam = workspace_seam(tmp_path / "scratch")
     session = Session("s1")
     (tmp_path / "repo").mkdir()
 
@@ -251,7 +243,7 @@ async def test_disposal_runs_the_providers_teardown_and_forgets_the_agent(
         released.append("released")
         return True
 
-    seam = _seam(tmp_path)
+    seam = workspace_seam(tmp_path / "scratch")
     seam.register_provider(_Provider(answer=_worktree(tmp_path, release=release)))
 
     await seam.acquire(session_id="s1", agent_id="a1", base=tmp_path)
@@ -281,7 +273,7 @@ async def test_disposing_the_owning_scope_releases_the_workspace(tmp_path: Path)
         released.append("released")
         return True
 
-    seam = _seam(tmp_path)
+    seam = workspace_seam(tmp_path / "scratch")
     seam.register_provider(_Provider(answer=_worktree(tmp_path, release=release)))
     session = Session("s1")
     agent_scope = seam.ctx.scope("agent")
@@ -312,7 +304,7 @@ async def test_a_discarded_workspace_says_so(tmp_path: Path) -> None:
     async def release(_workspace: Workspace) -> bool:
         return False
 
-    seam = _seam(tmp_path)
+    seam = workspace_seam(tmp_path / "scratch")
     session = Session("s1")
     seam.register_provider(
         _Provider(answer=_worktree(tmp_path, kind="worktree-ephemeral", release=release))
@@ -333,7 +325,7 @@ async def test_a_broken_teardown_still_forgets_the_agent(tmp_path: Path) -> None
     async def release(_workspace: Workspace) -> bool:
         raise RuntimeError("worktree is locked")
 
-    seam = _seam(tmp_path)
+    seam = workspace_seam(tmp_path / "scratch")
     seam.register_provider(_Provider(answer=_worktree(tmp_path, release=release)))
     await seam.acquire(session_id="s1", agent_id="a1", base=tmp_path)
 
@@ -351,7 +343,7 @@ async def test_re_acquiring_does_not_let_the_old_handle_evict_the_new_one(
     An unconditional removal would leave `of()` answering `None` for a live
     workspace, which the prompt line and `ph doctor` would then repeat.
     """
-    seam = _seam(tmp_path)
+    seam = workspace_seam(tmp_path / "scratch")
     first_scope = seam.ctx.scope("first")
 
     await seam.acquire(session_id="s1", agent_id="a1", base=tmp_path, scope=first_scope)
@@ -364,7 +356,7 @@ async def test_re_acquiring_does_not_let_the_old_handle_evict_the_new_one(
 async def test_a_ref_rides_both_halves_when_the_kind_has_one(tmp_path: Path) -> None:
     """So a reader can say which branch a turn ran against without inspecting
     the repository — which is the point of the events being durable."""
-    seam = _seam(tmp_path)
+    seam = workspace_seam(tmp_path / "scratch")
     session = Session("s1")
     seam.register_provider(_Provider(answer=_worktree(tmp_path, ref="ph/s1/a1")))
 
@@ -390,7 +382,7 @@ async def test_acquiring_without_a_session_records_nothing_and_still_works(
         released.append("released")
         return True
 
-    seam = _seam(tmp_path)
+    seam = workspace_seam(tmp_path / "scratch")
     seam.register_provider(_Provider(answer=_worktree(tmp_path, release=release)))
 
     await seam.acquire(session_id="s1", agent_id="a1", base=tmp_path)

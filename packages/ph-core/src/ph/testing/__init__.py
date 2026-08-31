@@ -14,6 +14,11 @@ from .builders import (
     tool_result_payload,
     tool_runtime,
     user_payload,
+    workspace_acquired,
+    workspace_disposed,
+    workspace_log,
+    workspace_retained,
+    workspace_seam,
 )
 from .diagnostics import report_section
 from .fake_adapter import FakeAdapter, text_script
@@ -53,6 +58,11 @@ __all__ = [
     "tool_result_payload",
     "tool_runtime",
     "user_payload",
+    "workspace_acquired",
+    "workspace_disposed",
+    "workspace_log",
+    "workspace_retained",
+    "workspace_seam",
     "worktree_agent",
     "write_skill",
 ]

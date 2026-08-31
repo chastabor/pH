@@ -47,7 +47,7 @@ somewhere the container can reach — but never has to invent the layout.
 from __future__ import annotations
 
 import logging
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal, Protocol, TypeAlias, runtime_checkable
@@ -63,10 +63,13 @@ from . import workspace_provision
 from ._registry import claim_entry, claim_slot
 from .diagnostics import Diagnostic, contribute
 from .sandbox import SandboxPolicy
+from .subagents import descendants
 from .workspace_provision import ProvisionEntry, ProvisionReport
 
 __all__ = [
     "PROJECT_PROVISION_FILE",
+    "CollectVerdict",
+    "Collectable",
     "ContainmentTier",
     "DeclineReason",
     "LifecycleConfig",
@@ -76,18 +79,23 @@ __all__ = [
     "WorkspaceAccess",
     "WorkspaceDeclined",
     "WorkspaceKind",
+    "WorkspaceOutcome",
     "WorkspaceProvider",
     "WorkspaceRecord",
     "WorkspaceSeam",
     "apply",
+    "discards_writes",
     "discover_provisioning",
+    "family_survivors",
     "fresh_root",
     "lifecycle",
     "project_access",
     "redirection_env",
+    "stored_survivors",
     "workspace_leaks",
     "workspace_of",
     "workspace_policy",
+    "workspace_survivors",
     "writable_roots",
 ]
 
@@ -155,6 +163,27 @@ def fresh_root(kind: WorkspaceKind) -> bool:
         case "shared":
             return False
         case "worktree" | "worktree-ephemeral" | "readonly-scratch":
+            return True
+
+
+def discards_writes(kind: WorkspaceKind) -> bool:
+    """Whether release throws the agent's writes away, dirty tree and all (P6-28).
+
+    The predicate the retention policy keys on, and the reason it is a function
+    here rather than a `== "worktree-ephemeral"` in the bundle that asks. Every
+    other kind either keeps a dirty tree for review or never had writes of its
+    own; this one discards, because reaching nobody is its entire promise. So it
+    is the only kind whose *evidence* can be lost by an ordinary release, which
+    makes it the only kind a policy has any business retaining by default.
+
+    Exhaustive for `project_access`'s reason two functions up: a kind added in
+    this module should fail to type-check here rather than silently classify as
+    "keeps things", which is the direction that quietly loses evidence.
+    """
+    match kind:
+        case "shared" | "worktree" | "readonly-scratch":
+            return False
+        case "worktree-ephemeral":
             return True
 
 
@@ -296,6 +325,28 @@ class Workspace:
     `.env` is missing is the *agent* about to wonder why the tests fail — it is
     read straight onto the workspace prompt line. Empty is the ordinary case,
     including "this profile provisions nothing"."""
+    retained: str = ""
+    """Why this tree must survive disposal, or `""` to let policy decide (P6-28).
+
+    **The evidence problem, and why it is a field rather than an argument.** A
+    child admitted with `access="read"` gets `worktree-ephemeral`, which P4-08
+    discards *even if dirty* — that is the kind's whole promise. So the child a
+    parent most wants to inspect, one that failed or was cancelled at
+    `parent-teardown`, is exactly the one whose tree is gone, and the parent is
+    left diagnosing from a transcript.
+
+    It cannot be settled at acquire time: nobody knows then how the child will
+    end. And it cannot be an argument to `release`, because that runs as a *scope
+    disposer* — it fires on unwind and is told nothing about why. So it is late
+    state on the workspace, set by whoever learns the outcome before the scope
+    goes, and read by the teardown policy — which is exactly the shape `release`'s
+    docstring below already argues for taking the whole workspace rather than one
+    field of it.
+
+    A **reason**, not a flag, and that is what makes the fold able to tell three
+    things apart that all leave a tree on disk: a deliberate keep says why here,
+    a dirty-tree keep is `kept` with no reason, and a leak has no `disposed`
+    event at all."""
     release: Callable[[Workspace], Awaitable[bool]] | None = None
     """The provider's teardown, returning whether anything was **kept**.
 
@@ -591,7 +642,47 @@ class WorkspaceSeam:
             if workspace.ref:
                 detail += f" on {workspace.ref}"
             rows.append((f"agent {agent_id}", detail))
+        rows.append(("retained trees", self._retained_summary()))
         return rows
+
+    def _retained_summary(self) -> str:
+        """How many trees are being kept as evidence, across stored sessions.
+
+        **The row that makes the pile visible, and the reason the retention
+        policy is allowed to exist** (P6-28). Retention buys a parent the
+        evidence of a child that failed; what it sells is an unbounded set of
+        checkouts nobody can see. The per-agent rows above cannot show it —
+        `doctor` mounts a profile with no agents, so `_held` is empty and every
+        retained tree is by definition one nobody holds any more.
+
+        Printed **even when the answer is none**, on rule 6: the assumption a
+        reader makes in the absence of a row is that nothing is accumulating,
+        and that is exactly the assumption this row exists to check.
+
+        Bounded by whatever `stored()` lists rather than by walking every log
+        ever written — a diagnostic that reads a thousand transcripts to print
+        one number is one people stop running. That makes this a floor, not a
+        census, and it says so.
+
+        Broad `except`, for `doctor`'s own reason one package over: a profile
+        that cannot answer one question must still answer the rest, and a
+        half-written log is a thing this command is *for*.
+        """
+        store = self.ctx.get("session_persistence")
+        if store is None:
+            return "unknown — no session store is mounted"
+        survivors, touched = stored_survivors(store)
+        found = [record for record in survivors if record.outcome == "retained"]
+        if not found:
+            return f"none, across the {len(touched)} most recent session(s)"
+        sessions = len({record.session_id for record in found})
+        # Two lines rather than one long one: this renders into a two-column
+        # table beside labels like "scratch root", and a sentence that wraps in
+        # an 80-column terminal is one whose second half reads as a stray.
+        return (
+            f"{len(found)} across {sessions} of the {len(touched)} most recent session(s)\n"
+            "collect them with `ph workspaces gc`"
+        )
 
     async def acquire(
         self,
@@ -811,8 +902,56 @@ class WorkspaceSeam:
                 {"agentId": agent_id, "failed": list(workspace.provision_failures)},
             )
 
+    def retain(self, agent_id: str, reason: str) -> bool:
+        """Keep this agent's tree past disposal, and say why (P6-28).
+
+        Called by whoever learns how an agent ended — `ph_rlm`'s subagent
+        provider does it when a child settles badly or is cancelled at
+        `parent-teardown` — at any point before the scope unwinds. The teardown
+        policy reads `Workspace.retained` and skips the discard.
+
+        **Per outcome, not per spawn**, and the alternative is worth stating
+        because the row offered both. A `retain` on the spawn request is
+        knowable at admission and would match P6-27's "capability is fixed at
+        admission" — but it does not solve the case that motivates this: a parent
+        cannot know at spawn time that a child will fail, so it would have to
+        retain *every* child's tree to be sure of getting the one that mattered.
+        That trades a lost checkout for an unbounded pile of them, which is the
+        failure this row must not buy.
+
+        **An empty `reason` clears the mark**, and it is the same call because it
+        is the same decision revisited. The shipped policy is retain-*by-default*
+        for the kind that discards — the mark has to exist from the moment the
+        tree does, since the outcome that most needs it is the one where nothing
+        gets to run afterwards — so a clean settle is a caller saying "never
+        mind", and that has to be as durable as the mark it withdraws. A separate
+        `unretain` would be a second event type for the same field.
+
+        Returns whether anything was marked — `False` for an agent holding no
+        workspace, so a caller that retains speculatively (the common shape: a
+        settle path that does not know whether this tier hands out trees) needs
+        no `hasattr` probe and no exception.
+        """
+        held = self._held.get(agent_id)
+        if held is None:
+            return False
+        held.workspace = replace(held.workspace, retained=reason)
+        if held.session is not None:
+            # Durable at the moment of marking, not only on the closing half —
+            # see `RETAINED`. The run that gets retained is a run that went
+            # wrong, and the worst way for one to go wrong writes no `disposed`.
+            held.session.append(
+                RETAINED, pair_payload(agent_id, held.workspace.ref, retained=reason)
+            )
+        return True
+
     def _payload(self, workspace: Workspace, agent_id: str, **extra: Any) -> dict[str, Any]:
-        return pair_payload(agent_id, workspace.ref, **extra)
+        payload = pair_payload(agent_id, workspace.ref, **extra)
+        # The reason rides the closing half, because that is the half a fold
+        # reads to tell a deliberate keep from a dirty-tree keep (P6-28).
+        if workspace.retained:
+            payload["retained"] = workspace.retained
+        return payload
 
     async def reconcile(self, session: Session) -> None:
         """Close the pairs a crash left open in this session's log (F6).
@@ -830,22 +969,13 @@ class WorkspaceSeam:
         is the one way this could destroy the work it exists to protect.
         """
         leaks = [one for one in workspace_leaks(session) if one.agent_id not in self._held]
-        if not leaks:
-            return
-        provider = self.provider
-        if not isinstance(provider, ReclaimingProvider):
-            log.warning(
-                "ph.seams.workspace: no mounted tier can reclaim %s",
-                ", ".join(str(one.root) for one in leaks),
-            )
+        provider = self._reclaimer(leaks, "reclaim")
+        if provider is None:
             return
 
         async def reclaim(record: WorkspaceRecord) -> None:
-            try:
-                with running(self.provider_by):
-                    kept = await provider.reclaim(record)
-            except Exception:
-                log.warning("ph.seams.workspace: could not reclaim %s", record.root, exc_info=True)
+            kept = await self._reclaim(provider, record, "reclaim")
+            if kept is None:
                 return
             # The pair closes either way: a leak reported and left open is one
             # reported at every future open, and a record nobody can act on
@@ -861,32 +991,268 @@ class WorkspaceSeam:
             for record in leaks:
                 group.start_soon(reclaim, record)
 
+    def collectable(
+        self,
+        survivors: Iterable[WorkspaceRecord],
+        *,
+        older_than: float,
+        now: float,
+        touched: Mapping[str, float],
+    ) -> list[Collectable]:
+        """Which retained trees may be removed, and why the others may not.
+
+        **Only `retained` trees, and that boundary is the whole safety argument.**
+        A `kept` tree is a dirty checkout the disposal policy left for a person to
+        inspect and merge — that is their work, and `/workspaces remove` is the
+        deliberate way to end it. A `leaked` tree belongs to `reconcile`, which
+        is the only thing that can tell "the process died" from "the process is
+        running". What this row created, and therefore all it may collect, is the
+        pile of evidence a *policy* retained without anybody asking for it one
+        tree at a time.
+
+        Three refusals, in the order they are cheap to test:
+
+        `open` — an unclosed pair is a live process or a crash, and either way
+        this is not the mechanism that settles it. Included in `survivors` so a
+        parent's enumeration can show it; never collected.
+
+        `held` — this process holds the tree. Matched by **root path** for
+        `live()`'s reason: `sanitize_ref` is lossy, so an id that does not
+        sanitize to itself would read as unheld and lose the refusal that
+        protects it.
+
+        A second, id-keyed "and the caller says this session is live" was drafted
+        beside it and removed unused: nothing wires a live-session set in, and an
+        unexercised branch inside the one function here that may delete a
+        directory is worse than the gap it was reaching for. What actually
+        protects a tree another process is working in is the `open` test above —
+        that process has not written its closing event.
+
+        `recent` — inside the age bound, dated from `touched`. A session id that
+        is *absent* from `touched` is refused as `recent` rather than collected,
+        because "I could not date this" and "this is old" are different answers
+        and only one of them may delete a checkout. That direction is deliberate
+        and is the same one `revert`'s `_covered` takes.
+
+        The age is the **log's** last write, not the tree's own mtime, and the
+        trade is worth naming: a person who spends an afternoon reading a
+        retained tree without editing it bumps neither, so no clock here can
+        detect interest. The log at least dates the run that produced the
+        evidence, which is the fact the bound is actually about.
+        """
+        rows: list[Collectable] = []
+        held = {workspace.root for workspace in self.live()}
+        for record in survivors:
+            if record.outcome != "retained" or not record.closed:
+                continue
+            age = now - touched.get(record.session_id, now)
+            if record.root in held:
+                verdict: CollectVerdict = "held"
+            elif not record.root.exists():
+                verdict = "gone"
+            elif age < older_than:
+                verdict = "recent"
+            else:
+                verdict = "collect"
+            rows.append(Collectable(record=record, verdict=verdict, age=age))
+        return rows
+
+    async def collect(self, rows: Iterable[Collectable]) -> list[WorkspaceRecord]:
+        """Remove the trees `collectable` cleared, and answer with what went.
+
+        **Retention is revoked, not overridden**, and that is the property worth
+        stating: this hands the record back to `reclaim` with its reason cleared,
+        so what runs is the disposal policy that would have run at release time
+        had nobody retained the tree. A `worktree-ephemeral` is discarded — its
+        writes reached nobody by construction, and the stay of execution has
+        expired. A plain `worktree` takes the keep-dirty path, so an agent's
+        uncommitted work survives its own garbage collector. Nothing here can
+        destroy more than an ordinary disposal would have, which is what lets an
+        age bound be a *default* rather than a decision.
+
+        Sequential, unlike `reconcile`'s fan-out. That one races a second crash;
+        this is a person watching a command they typed, where a failure halfway
+        through a fan-out is a report they cannot act on. Ordinary runs collect a
+        handful of trees.
+
+        Nothing is appended. The pair is already closed — this is the tidy-up
+        *after* an ending that was recorded — and a third event per tree would be
+        vocabulary earned by nothing: `reclaim` answers `False` for a directory
+        that is not there, so re-running is a no-op whether or not the log says
+        so.
+        """
+        wanted = [row.record for row in rows if row.verdict == "collect"]
+        provider = self._reclaimer(wanted, "collect")
+        if provider is None:
+            return []
+        removed: list[WorkspaceRecord] = []
+        for record in wanted:
+            # Revoked, not overridden: `reason=""` is what makes `reclaim` run
+            # the disposal policy it would have run had nobody retained the tree.
+            if await self._reclaim(provider, replace(record, reason=""), "collect") is False:
+                removed.append(record)
+        return removed
+
+    def _reclaimer(
+        self, records: Sequence[WorkspaceRecord], verb: str
+    ) -> ReclaimingProvider | None:
+        """The mounted tier, or `None` having said which trees nobody can end.
+
+        Once per batch rather than once per record, which is why it takes the
+        list: a profile with no reclaiming tier owes one sentence naming what it
+        cannot touch, not one per directory.
+
+        The refusal is the point, and it is sharper than "we have no provider":
+        removing a directory on the strength of a record written by a
+        configuration we are not running is the one way either caller could
+        destroy the work it exists to protect.
+        """
+        provider = self.provider
+        if isinstance(provider, ReclaimingProvider):
+            return provider
+        if records:
+            log.warning(
+                "ph.seams.workspace: no mounted tier can %s %s",
+                verb,
+                ", ".join(str(one.root) for one in records),
+            )
+        return None
+
+    async def _reclaim(
+        self, provider: ReclaimingProvider, record: WorkspaceRecord, verb: str
+    ) -> bool | None:
+        """One call into a tier's teardown: whether it **kept**, or `None` if it raised.
+
+        The two callers had this written out twice — the `running` binding, the
+        containment, the log line — and they are the same three decisions in both
+        places. A tri-state answer rather than an exception, because neither
+        caller may abort its batch: `reconcile` would leave the rest of a crash's
+        pairs open, and `collect` would stop collecting at the first tree git is
+        unhappy about.
+
+        `verb` reaches the log only. It is what tells an operator whether a
+        warning came from a reconciliation at session open or from a `gc` they
+        typed, which is the difference between "this happened to you" and "this
+        happened because you asked".
+        """
+        try:
+            with running(self.provider_by):
+                return await provider.reclaim(record)
+        except Exception:
+            log.warning("ph.seams.workspace: could not %s %s", verb, record.root, exc_info=True)
+            return None
+
+
+WorkspaceOutcome: TypeAlias = Literal["leaked", "kept", "retained"]
+"""Why a tree is still on disk — the three things `git worktree list` reports
+identically (P6-28).
+
+`leaked` is an `acquired` the log never saw closed: a process that died holding
+the tree, and the only one of the three that nobody decided. `kept` is the
+disposal policy keeping a dirty tree for review. `retained` is somebody naming a
+reason to keep it, which is the one this vocabulary was added for — and it wins
+over the other two, because a tree that was *asked for* is asked for whether or
+not the process that held it exited cleanly.
+"""
+
 
 @dataclass(frozen=True, slots=True)
 class WorkspaceRecord:
-    """One `workspace/acquired` the log never saw closed.
+    """One tree a session left on disk, and why.
 
     What survives a crash, and only that: the log's own fields. Not a
     `Workspace` — `scratch`, `env` and the `release` closure are process state
     that died with the process, and a value that carried empty versions of them
     would invite a caller to use them.
+
+    Was "one `acquired` the log never saw closed" until P6-28, which is the same
+    value with one of the three outcomes rather than the only one anybody had a
+    name for. `workspace_leaks` still answers that question, as a filter over
+    this — a second fold is how two readers come to disagree about whether a
+    directory is a leftover or a leak (A11).
     """
 
     agent_id: str
     kind: WorkspaceKind
     root: Path
     ref: str | None = None
+    reason: str = ""
+    """Why it was retained; empty for the other two outcomes."""
+    closed: bool = False
+    """Whether the durable pair reconciled — a separate fact from `reason`, and
+    it took a wrong version of this fold to see why.
+
+    A retention is marked *while the agent is live*, so a process that then dies
+    leaves a record that is both retained and unclosed. Folding that into one
+    axis forced a choice between two wrong answers: call it leaked and
+    reconciliation discards the evidence it was told to keep, or call it retained
+    and reconciliation never closes the pair, so the tree is re-reported at every
+    open forever. It is both things, so it says both.
+    """
+    session_id: str = ""
+    """Whose log this came from.
+
+    Not derivable from `agent_id`: a root agent's id is its session's, but the
+    seam takes `session_id` and `agent_id` as separate arguments and the shipped
+    lifecycle passes `agent.session.id` and `agent.id`. A cross-session reader
+    — the family fold, the collector — needs to get back to the log, and
+    inferring it from a sanitised directory name is the lossy round-trip
+    `/workspaces` already refuses to make.
+    """
+
+    @property
+    def outcome(self) -> WorkspaceOutcome:
+        """Which of the three this is — **derived from the two facts, never stored**.
+
+        It was a third field, set by hand beside `reason` and `closed` at every
+        construction site, and it had already gone stale in the one place that
+        mattered: `collect` revokes a retention by clearing `reason`, and a record
+        still carrying `outcome="retained"` reported itself retained after the
+        decision had been withdrawn. A third name for what two fields already say
+        is a third chance to disagree with them.
+
+        The defaulting argument survives the move intact. A record built by hand
+        — a test, a backend reconstructing one — still says "nobody decided
+        this", but now because it names no reason and closed nothing rather than
+        by asserting a decision that was never made.
+        """
+        if self.reason:
+            return "retained"
+        return "kept" if self.closed else "leaked"
 
 
-def workspace_leaks(session: Session) -> list[WorkspaceRecord]:
-    """Workspaces this session took and never released (F6).
+CollectVerdict: TypeAlias = Literal["collect", "held", "recent", "gone"]
+"""What the collector decided about one retained tree, and every one of them is
+a sentence a person reads — `held` and `recent` are refusals they may want to
+argue with, `gone` is a tree somebody already removed by hand."""
 
-    **The pair is the only thing that can tell a leak from a keep.** Both leave a
+
+@dataclass(frozen=True, slots=True)
+class Collectable:
+    """One retained tree, with the collector's verdict and how old it is.
+
+    A verdict per record rather than a filtered list, because the refusals are
+    the useful half of the output: "nothing to collect" and "three trees, all
+    still held by live sessions" are very different answers to `ph workspaces gc`
+    and a list of survivors cannot tell them apart.
+    """
+
+    record: WorkspaceRecord
+    verdict: CollectVerdict
+    age: float
+    """Seconds since the owning session's log was last written."""
+
+
+def workspace_survivors(session: Session) -> list[WorkspaceRecord]:
+    """Every tree this session left on disk, and which of three reasons put it there.
+
+    **The log is the only thing that can tell the three apart.** They all leave a
     worktree on disk and `git worktree list` reports them identically, so
     `/workspaces` cannot distinguish them — but a `disposed` with `kept: true` is
-    the disposal policy deciding to keep work for review, while no `disposed` at
-    all is a process that died holding the tree. One is a feature and the other
-    is the leak F6 exists to close, and only the log knows which.
+    the disposal policy keeping work for review, a `retained` names somebody's
+    reason for wanting it, and no `disposed` at all is a process that died
+    holding the tree. Two are features and the third is the leak F6 exists to
+    close, and only the log knows which.
 
     Folded rather than tracked, for `subagent_roster`'s reason one seam over: the
     answer has to be computable from a log that is being read off disk, by a
@@ -895,28 +1261,56 @@ def workspace_leaks(session: Session) -> list[WorkspaceRecord]:
     **From `seed_length`, not from the beginning** — `Inbox` reads its own log
     the same way and for the same reason. A fork *seeds* the child with the
     parent's transcript, so a fold over the whole log reports the parent's
-    still-held worktrees as the child's leaks: reconciliation would then remove a
-    tree an agent is actively working in, which is worse than the leak it is
-    fixing. What a session inherited is not what it acquired.
+    still-held worktrees as the child's: reconciliation would then remove a tree
+    an agent is actively working in, which is worse than the leak it is fixing.
+    What a session inherited is not what it acquired.
 
-    Only kinds with a fresh root can leak a directory — a `shared` workspace's
-    root *is* the base, so an unclosed pair there records a crash and no stray.
+    Only kinds with a fresh root can leave a directory behind — a `shared`
+    workspace's root *is* the base, so an unclosed pair there records a crash and
+    no stray.
+
+    **Closed records are a list and open ones are a dict**, which is not an
+    accident of style. Re-acquire after release is ordinary, so among *open*
+    records the last one per agent is the live one and earlier ones are already
+    accounted for; but each closed record is a distinct directory that was
+    really left behind, and keying those by agent would hide every tree but the
+    last for an agent that took three.
     """
     open_records: dict[str, WorkspaceRecord] = {}
+    closed: list[WorkspaceRecord] = []
     for event in session.events[session.header.seed_length or 0 :]:
         # The type test first: a long log is mostly `assistant/chunk`, and
         # reading `agentId` off every one of them to discover it is absent costs
         # a mapping get and a string per event.
-        if event.type not in (ACQUIRED, DISPOSED):
+        if event.type not in _SURVIVOR_TYPES:
             continue
         data = event.data
         agent_id = str(data.get("agentId") or "")
         if not agent_id:
             continue
+        if event.type == RETAINED:
+            # Marked while the agent was live, so the record is already open —
+            # unless this session only ever *seeded* the acquire, in which case
+            # there is nothing here to mark and nothing on disk we may claim.
+            marked = open_records.get(agent_id)
+            if marked is not None:
+                # An empty reason is a withdrawal, and it returns the record to
+                # the outcome an open acquire has by default. Reading it as a
+                # retention with a blank reason would make a clean settle the
+                # thing that pins a tree forever.
+                open_records[agent_id] = replace(marked, reason=str(data.get("retained") or ""))
+            continue
         if event.type == DISPOSED:
-            # Re-acquire after release is ordinary, so the *last* unclosed
-            # acquire is the live one — a dict keyed by agent, not a list.
-            open_records.pop(agent_id, None)
+            record = open_records.pop(agent_id, None)
+            if record is None:
+                continue
+            # A reason wins over `kept`, and over a `kept: false` too: the
+            # closing half repeats it precisely so an orderly release says it,
+            # and a policy that discarded a tree it had been asked to keep would
+            # have written `kept: false` about a directory that is still there.
+            reason = str(data.get("retained") or record.reason)
+            if reason or data.get("kept"):
+                closed.append(replace(record, closed=True, reason=reason))
             continue
         kind: WorkspaceKind = data.get("kind", "shared")
         if not fresh_root(kind):
@@ -927,8 +1321,137 @@ def workspace_leaks(session: Session) -> list[WorkspaceRecord]:
             kind=kind,
             root=Path(str(data.get("root", ""))),
             ref=str(ref) if ref else None,
+            session_id=session.id,
         )
-    return list(open_records.values())
+    return [*open_records.values(), *closed]
+
+
+def workspace_leaks(session: Session) -> list[WorkspaceRecord]:
+    """Workspaces this session took and never released (F6).
+
+    A filter over `workspace_survivors` rather than a fold of its own. The two
+    questions differ by one predicate and share every rule that is easy to get
+    wrong — the seed offset, the fresh-root test, which acquire is the live one
+    — so a second implementation is the "two projections of one fold that
+    disagree" A11 forbids, and here it would disagree about whether a directory
+    may be deleted.
+
+    The predicate is **`closed`, not `outcome == "leaked"`**, and the difference
+    is a tree somebody retained before the process died. That is a survivor with
+    a reason *and* an open pair; reconciliation still owes it the closing event,
+    and it is `reclaim`'s job — not this one's — to know that a reason means
+    leave the directory alone.
+    """
+    return [one for one in workspace_survivors(session) if not one.closed]
+
+
+def stored_survivors(
+    store: Any, *, limit: int = 50, family: str = ""
+) -> tuple[list[WorkspaceRecord], dict[str, float]]:
+    """Every tree the *store* can still account for, and when each log was written.
+
+    The deployment-wide half of the fold, where `family_survivors` is the
+    per-parent one. Both consumers of this — `ph doctor`'s count and the
+    collector — need the same two things and would otherwise each grow their own
+    loop over `stored()`; the second copy is where a listing limit and a
+    tolerance rule quietly diverge.
+
+    **A session that will not read is skipped, not fatal**, and the direction is
+    the safe one in both consumers: an unreadable log contributes no records, so
+    doctor under-counts and the collector removes nothing, which is what you want
+    from a half-written file. It is logged, because a store that cannot read most
+    of what it listed is a real problem wearing a small number.
+
+    `store.read` returns the stored envelopes and the durable header; seeding a
+    `Session` with them is what gives the fold `seed_length`, and paying the
+    surface validation is deliberate — it is the same acceptance a resume makes,
+    so this cannot count a tree in a log the harness would refuse to reopen.
+
+    `family` narrows the answer to one agent and its descendants — the parent's
+    question rather than the deployment's, answered through `descendants` so this
+    and `family_survivors` cannot come to disagree about who counts as family.
+    It is applied to the **listing**, before anything is read: `StoredSession`
+    already carries `parent` (both backends fill it from the same one-line header
+    peek they were already paying for), and descent needs nothing else. Reading
+    all fifty logs to keep three was ~94% of the parse wasted on sessions that
+    were never candidates.
+
+    `touched` is **not** narrowed with it: the caller is reporting how much of the
+    store it looked at, and a denominator that shrank with the filter would say a
+    family's trees came from every session on disk.
+
+    **Folded and discarded one at a time**, rather than accumulating `Session`
+    objects and folding at the end. A stored log is seeded through the same
+    surface validation a resume makes — which is what stops this counting a tree
+    in a log the harness would refuse to reopen — and holding fifty of them at
+    once measured hundreds of megabytes to produce a list of a few records. The
+    fold reads three event types and keeps nothing else; the session it read them
+    from is garbage the moment it has.
+
+    `limit` is whatever `stored()` will show. That makes the answer a **floor**
+    rather than a census, which both callers state in their own words rather
+    than implying a total nobody computed.
+    """
+    survivors: list[WorkspaceRecord] = []
+    touched: dict[str, float] = {}
+    try:
+        listed = store.stored(limit=limit)
+    except Exception:
+        log.warning("ph.seams.workspace: could not list stored sessions", exc_info=True)
+        return [], {}
+    for entry in listed:
+        touched[entry.session_id] = entry.modified
+    wanted = (
+        set(touched)
+        if not family
+        else set(descendants(((one.session_id, one.parent) for one in listed), family))
+    )
+    for entry in listed:
+        if entry.session_id not in wanted:
+            continue
+        try:
+            header, events = store.read(entry.session_id)
+            survivors.extend(workspace_survivors(Session(entry.session_id, events, header)))
+        except Exception:
+            log.warning(
+                "ph.seams.workspace: could not read session %s", entry.session_id, exc_info=True
+            )
+    return survivors, touched
+
+
+def family_survivors(sessions: Sequence[Session], agent_id: str) -> list[WorkspaceRecord]:
+    """What one agent and everything beneath it left on disk (P6-28).
+
+    **The fold a parent cannot do from its own log.** `workspace_survivors`
+    answers for one session, and a child's workspace events are in the *child's*
+    log — so a parent asking "what did my children leave" was reduced to opening
+    each transcript by hand and knowing which fields to read. The link was
+    already there: a child's session names its parent in its own header, and the
+    parent's `subagent/admitted` carries the child's session id, so this is a
+    walk over state that exists rather than an index to maintain.
+
+    Ordered **parent-first, then by descent**, because that is the order a person
+    reads the answer in: what the agent I asked about left, then what it
+    delegated. `descendants` is breadth-first and this preserves it.
+
+    Sessions are passed in, not fetched, for `reachable_family`'s reason — the
+    caller has already decided which logs it is allowed to open, and a function
+    that reached for a store would be making that decision on a policy it cannot
+    see. The collector hands it every stored session; a parent hands it its own
+    family.
+
+    A session named by `agent_id` that is not in `sessions` yields nothing rather
+    than raising: the collector reads what a backend chose to list, and a
+    truncated listing is an ordinary answer, not an error.
+    """
+    by_id = {session.id: session for session in sessions}
+    lineage = [(session.id, session.header.parent_session) for session in sessions]
+    return [
+        record
+        for one in descendants(lineage, agent_id)
+        if (session := by_id.get(one)) is not None
+        for record in workspace_survivors(session)
+    ]
 
 
 def pair_payload(agent_id: str, ref: str | None, **extra: Any) -> dict[str, Any]:
@@ -950,6 +1473,25 @@ ACQUIRED = "workspace/acquired"
 DISPOSED = "workspace/disposed"
 """The durable pair, named once. The fold below and both producers have to agree
 on these exactly, and a literal spelled at five sites is five chances not to."""
+
+RETAINED = "workspace/retained"
+"""A tree marked as evidence, recorded the moment it is marked (P6-28).
+
+**Not part of the pair, and the reason is the crash.** The reason also rides the
+closing half, which is enough for an orderly release — but the decision it
+records is made *because a run went wrong*, and the most complete way for a run
+to go wrong is for the process to die. That path writes no `disposed` at all, so
+a retention held only in memory would be lost by exactly the failure it exists to
+survive, and reconciliation would then discard the tree it was told to keep.
+Appended when the mark is set, so the fold can answer for a leak too.
+
+Ignorable: an older build that skips it reads a keep as an ordinary keep, which
+is what a keep was before this row.
+"""
+
+_SURVIVOR_TYPES = frozenset({ACQUIRED, DISPOSED, RETAINED})
+"""Hoisted out of the fold: it is tested once per event in the hot loop, and a
+set literal rebuilt per call is the cost `subagent_roster` hoists for too."""
 
 PROJECT_PROVISION_FILE = ".ph-workspace.yml"
 """Where a repository states what its worktrees need (E14).

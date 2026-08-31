@@ -65,6 +65,7 @@ __all__ = [
     "apply",
     "child_is_live",
     "default_child_name",
+    "descendants",
     "downgrade_text",
     "family_reach",
     "fold_subagent_event",
@@ -1008,6 +1009,55 @@ def reachable_family(sessions: Iterable[Session], agent_id: str) -> dict[str, Fa
         else:
             reach[other] = "sibling"
     return reach
+
+
+def descendants(lineage: Iterable[tuple[str, str | None]], agent_id: str) -> list[str]:
+    """`agent_id` and everything spawned beneath it, transitively (P6-28).
+
+    **Not `reachable_family`, and the difference is the point.** That answers
+    "who may this agent *address*" — the C7 nuclear family, which includes
+    siblings and the parent — and it is the right rule for a message. This
+    answers "whose leftovers are mine to account for", and the two must not be
+    the same set: a sibling's worktree is not this agent's to enumerate, still
+    less to collect, and borrowing the messaging rule here would widen a
+    filesystem question with an answer computed for a different one. That is the
+    shape of privilege escalation I7 names, arrived at by reuse rather than by
+    intent.
+
+    Transitive where `reachable_family` is one hop, and for the same reason read
+    the other way: a grandchild that failed is evidence its grandparent is the
+    only live party left to look at, because the child that spawned it settled
+    too. The row's own case — a parent diagnosing from a transcript — does not
+    stop at one generation.
+
+    An agent's id is its session's id, so the links are `parent_session` and
+    nothing needs a side index. **`(id, parent)` pairs rather than `Session`
+    objects**, which is what lets the collector answer this from a *listing*:
+    `StoredSession` already carries both, filled from the one-line header peek
+    the backend was paying anyway, so a family can be narrowed before a single
+    log is read rather than after all of them are. A caller holding sessions
+    spells the pair at the call site, which is one comprehension.
+
+    Breadth-first from `agent_id`, and cycle-safe by construction: `seen` is
+    tested before descent, so a log claiming its own ancestor as a child — a
+    corrupted or hand-edited header — costs a wasted lookup rather than a hang.
+    """
+    children: dict[str, list[str]] = {}
+    known = set()
+    for session_id, parent in lineage:
+        known.add(session_id)
+        if parent:
+            children.setdefault(parent, []).append(session_id)
+    if agent_id not in known:
+        return []
+    found = [agent_id]
+    seen = {agent_id}
+    for current in found:
+        for child in children.get(current, ()):
+            if child not in seen:
+                seen.add(child)
+                found.append(child)
+    return found
 
 
 def roster_name(sessions: Iterable[Session], agent_id: str) -> str:

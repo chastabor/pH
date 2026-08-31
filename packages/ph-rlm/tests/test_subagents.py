@@ -21,6 +21,7 @@ from ph.seams.subagents import (
     family_reach,
     subagent_roster,
 )
+from ph.seams.workspace import workspace_survivors
 from ph.testing import FAKE_OPTIONS, StubWorkspaceProvider, skill
 from ph_rlm.subagents import PROVIDER_NAME, TASK_PREFIX, delegation_depth
 
@@ -542,3 +543,159 @@ async def test_a_rehydrated_child_is_narrowed_again(delegating: Mounted) -> None
     assert [one.name for one in ctx.skills.list(run.scope)] == ["review"], (
         "a rehydrated child came back holding more than its parent granted"
     )
+
+
+# --------------------------------------------------- P6-28: the evidence policy --
+
+
+async def _tiered_child(
+    ctx: Any, parent: Any, tmp_path: Path, prompt: str, *, access: str = "read"
+) -> Any:
+    """A child under a tier that hands out worktrees, `read` by default.
+
+    `access` is a parameter rather than a second copy of the setup: the write
+    case differs from the read case in exactly that word, and the two had already
+    drifted apart on `mkdir(exist_ok=)` and on whether the provider was given a
+    root.
+    """
+    parent_root = tmp_path / "parent-tree"
+    parent_root.mkdir(exist_ok=True)
+    await ctx.workspace.acquire(session_id="parent", agent_id=parent.id, base=parent_root)
+    ctx.workspace.register_provider(StubWorkspaceProvider(root=tmp_path / "trees"))
+    return await _spawn(ctx, parent, prompt, access=access)
+
+
+def _marks(ctx: Any, run: Any) -> list[str]:
+    session = ctx.sessions.get(run.session_id)
+    return [
+        str(event.data.get("retained", ""))
+        for event in session.events
+        if event.type == "workspace/retained"
+    ]
+
+
+async def test_a_child_is_retained_from_the_moment_its_tree_exists(
+    delegating: Mounted, tmp_path: Path
+) -> None:
+    """Retain-by-default, and why it cannot be retain-on-failure (P6-28).
+
+    The window to mark a workspace closes with the child's scope, and the
+    outcomes that most need the evidence are the ones that close it first: on the
+    `parent-teardown` path the worktree is released *before* `_release` runs,
+    which that method's own docstring states in its own terms. So there is
+    nowhere to put "retain when it fails" — the mark has to exist from the moment
+    the tree does, and a clean finish withdraws it.
+    """
+    ctx, _session, parent = await delegating()
+    run = await _tiered_child(ctx, parent, tmp_path, "get cancelled")
+
+    assert _marks(ctx, run) == ["the child has not settled cleanly"]
+    (record,) = workspace_survivors(ctx.sessions.get(run.session_id))
+    assert record.outcome == "retained"
+
+
+async def test_a_clean_child_leaves_nothing_behind(delegating: Mounted, tmp_path: Path) -> None:
+    """The other half, and the one that keeps the kind's promise.
+
+    Without the withdrawal, retain-by-default would invert `worktree-ephemeral`
+    for *every* outcome rather than for the ones that produce evidence — which
+    is the trade the row forbids, since it buys a checkout per delegation and
+    saves nothing anyone will read.
+    """
+    ctx, _session, parent = await delegating()
+    run = await _tiered_child(ctx, parent, tmp_path, "finish and go")
+    await ctx.drain()
+
+    assert _marks(ctx, run) == ["the child has not settled cleanly", ""]
+    # The *closing* half is what the disposal policy reads, and the reason is
+    # gone from it. Asserted rather than `outcome`, because this tier is a stub
+    # with no `release` and so keeps every tree — under the real `worktree`
+    # provider this checkout is discarded and there is no survivor at all, which
+    # is precisely the promise the withdrawal restores.
+    (record,) = workspace_survivors(ctx.sessions.get(run.session_id))
+    assert record.outcome != "retained", "a successful child's checkout is not evidence"
+    assert record.reason == ""
+
+
+async def test_a_cancelled_child_keeps_its_evidence(delegating: Mounted, tmp_path: Path) -> None:
+    """The case the row was written for, through the path that cannot mark.
+
+    `parent-teardown` disposes the child's scope before the settle handler runs,
+    so the retention this asserts is one nothing on that path could have set. It
+    is there because it was taken at acquire and never withdrawn.
+    """
+    ctx, _session, parent = await delegating()
+    run = await _tiered_child(ctx, parent, tmp_path, "outlive me")
+    child_session = ctx.sessions.get(run.session_id)
+
+    await ctx.agents.dispose(parent.id)
+
+    (record,) = workspace_survivors(child_session)
+    assert record.outcome == "retained"
+    assert record.reason == "the child has not settled cleanly"
+    assert record.closed is True, "the pair still closed; only the discard was skipped"
+
+
+async def test_a_write_child_is_not_retained(delegating: Mounted, tmp_path: Path) -> None:
+    """Only the kind that discards, because only that kind can lose evidence.
+
+    An ordinary `worktree` already keeps a dirty tree for review and a committed
+    branch survives release regardless, so retaining those would grow the pile
+    without saving anything from it.
+    """
+    ctx, _session, parent = await delegating()
+
+    run = await _tiered_child(ctx, parent, tmp_path, "write some code", access="write")
+
+    assert _marks(ctx, run) == []
+
+
+async def test_a_failed_child_tells_its_parent_where_the_tree_is(
+    delegating: Mounted, tmp_path: Path
+) -> None:
+    """Retention keeps the checkout; this is what stops it being evidence nobody
+    can find.
+
+    A child's workspace events are in the *child's* log, so a parent told only
+    "it failed" is left diagnosing from a transcript — the sentence the row opens
+    with. Read from the log rather than from the seam, so the same notice is
+    true on a path where the child's scope has already gone.
+    """
+    ctx, session, parent = await delegating()
+    run = await _tiered_child(ctx, parent, tmp_path, "fail please")
+    child = ctx.agents.get(run.session_id)
+    root = ctx.workspace.of(child.id).root
+    _breaks(child)
+    await ctx.drain()
+
+    (told,) = _notices(session)
+    assert "failed" in told
+    assert str(root) in told, "the parent was left to find the evidence itself"
+
+
+def _breaks(agent: Any) -> None:
+    """Make this agent's next run raise, which is what `_drive` catches."""
+
+    async def broken() -> None:
+        raise RuntimeError("the child broke")
+
+    agent.run = broken
+
+
+async def test_a_child_with_no_tree_is_announced_without_naming_one(
+    delegating: Mounted,
+) -> None:
+    """Silence rather than a fabricated path.
+
+    A profile with no tier, a `shared` workspace, a child whose tree really was
+    discarded — a notice that named a directory for every failure would be
+    naming ones that are not there.
+    """
+    ctx, session, parent = await delegating()
+    run = await _spawn(ctx, parent, "fail with no workspace")
+    _breaks(ctx.agents.get(run.session_id))
+    await ctx.drain()
+
+    (told,) = _notices(session)
+    assert "failed" in told
+    assert "workspace is kept" not in told

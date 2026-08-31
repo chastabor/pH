@@ -26,26 +26,23 @@ import pytest
 
 from ph.seams.workspace import workspace_leaks
 from ph.session import Session
-from ph.testing import WORKTREE_ROWS, git, needs_git, worktree_agent
+from ph.testing import (
+    WORKTREE_ROWS,
+    git,
+    needs_git,
+    worktree_agent,
+)
+from ph.testing import (
+    workspace_acquired as _acquired,
+)
+from ph.testing import (
+    workspace_disposed as _disposed,
+)
+from ph.testing import (
+    workspace_log as _log,
+)
 
 pytestmark = pytest.mark.anyio
-
-
-def _log(*events: tuple[str, dict[str, Any]]) -> Session:
-    session = Session("s")
-    for kind, data in events:
-        session.append(kind, data)
-    return session
-
-
-def _acquired(
-    agent: str, root: str, kind: str = "worktree", ref: str = "ph/s/a"
-) -> tuple[str, dict[str, Any]]:
-    return ("workspace/acquired", {"agentId": agent, "kind": kind, "root": root, "ref": ref})
-
-
-def _disposed(agent: str, kept: bool = True) -> tuple[str, dict[str, Any]]:
-    return ("workspace/disposed", {"agentId": agent, "kept": kept})
 
 
 async def _reopen(mount: Any, base: Path, session: Session) -> tuple[Any, Session]:

@@ -822,6 +822,7 @@ RECORDLESS: frozenset[str] = frozenset(
         "fs/observed",
         "workspace/acquired",
         "workspace/disposed",
+        "workspace/retained",
         "workspace/provisioned",
         "workspace/checkpoint",
         "session/end-seed",

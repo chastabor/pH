@@ -44,8 +44,14 @@ from .attach import AttachmentUnavailable
 from .console import console, emit, err, fail, section
 from .daemon.recovery import PASSIVATE_AFTER
 from .modes import run_json, run_print, run_rpc, run_transcript
-from .profiles import available_profiles, resolve_profile
+from .profiles import (
+    DEFAULT_PROFILE,
+    ProfileOption,
+    available_profiles,
+    documents_or_exit,
+)
 from .runtime import mounted
+from .workspaces import workspaces_app
 
 __all__ = ["app", "main"]
 
@@ -61,28 +67,12 @@ app = typer.Typer(
 # — "ask the supervisor" — and a person who has not started one should find that
 # out from one place.
 app.add_typer(agents_app, name="agents")
-
-DEFAULT_PROFILE = "headless"
-
-ProfileOption: TypeAlias = Annotated[
-    str, typer.Option("--profile", help="Profile name or path to a .yaml.")
-]
-"""Declared once, so two commands cannot come to disagree about what `--profile`
-means — or, as nearly happened here, about what an unknown one costs."""
-
-
-def _documents(profile: str) -> list[Path]:
-    """The profile's documents, or exit 2 saying which names exist.
-
-    The refusal is the command's, not the resolver's: `resolve_profile` raises a
-    `ValueError` that already names the available profiles, and every caller
-    wants that sentence on stderr under the same exit code.
-    """
-    try:
-        return resolve_profile(profile)
-    except ValueError as error:
-        fail(f"[red]{error}[/red]", code=2, cause=error)
-
+# The cross-session half of `/workspaces` (P6-28). A group of its own rather than
+# a verb on the slash command, because the question it answers spans every
+# session on disk while `/workspaces` answers for the one a person is in — and
+# because collecting checkouts is not something a model should be able to ask
+# for by emitting text.
+app.add_typer(workspaces_app, name="workspaces")
 
 OutputMode = Literal["text", "json", "transcript", "rpc", "tui", "trajectory"]
 
@@ -133,7 +123,7 @@ def default(
     """Run a prompt, or dump the composed configuration."""
     if ctx.invoked_subcommand is not None:
         return
-    documents = _documents(profile)
+    documents = documents_or_exit(profile)
 
     if dump_config:
         loader = Loader.from_paths(documents)
@@ -278,7 +268,7 @@ def doctor(profile: ProfileOption = DEFAULT_PROFILE) -> None:
     # Resolved *outside* the catch below, and it matters: `typer.Exit` subclasses
     # `RuntimeError`, so an unknown profile raised inside it would be caught,
     # reported as "does not mount", and re-raised with the wrong exit code.
-    documents = _documents(profile)
+    documents = documents_or_exit(profile)
     try:
         sections = anyio.run(partial(_report, documents))
     except typer.Exit:
@@ -348,7 +338,7 @@ def daemon(
     from .daemon import serve
     from .daemon.server import DaemonUnavailable
 
-    documents = _documents(profile)
+    documents = documents_or_exit(profile)
     try:
         roots = resolve_roots(create=True)
     except RuntimeDirError as error:

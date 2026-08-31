@@ -20,7 +20,7 @@ from typing import Any
 import pytest
 
 from ph.seams.subprocess import SubprocessSpawnSpec, scrub_env
-from ph.seams.workspace import redirection_env
+from ph.seams.workspace import redirection_env, workspace_survivors
 from ph.seams.workspace_git import sanitize_ref, tree_hash
 from ph.testing import git, git_repo, needs_git
 
@@ -562,3 +562,161 @@ async def test_a_workspace_with_no_checkout_has_no_fingerprint(mount: Any, tmp_p
     )
     assert workspace.kind == "shared"
     assert await tree_hash(ctx, workspace) is None
+
+
+# --- P6-28: a settled child's tree is the evidence ---------------------------
+
+
+async def test_a_retained_ephemeral_tree_survives_the_kind_that_discards_it(
+    mount: Any, tmp_path: Path
+) -> None:
+    """P6-28's mechanism, against the promise it makes an exception to.
+
+    `worktree-ephemeral` discards even when dirty — the test directly above pins
+    that, and it is why a child that *failed* leaves its parent diagnosing from a
+    transcript. `Workspace.retained` is the exception, and it is an exception to
+    `discard`, not to the whole policy: a retained tree takes the same
+    keep-if-dirty path an ordinary `worktree` does, so retention buys evidence
+    rather than an unconditional checkout.
+
+    The reason rides `workspace/disposed`, which is what lets a fold tell three
+    things apart that all leave a directory on disk: a deliberate keep says why,
+    a dirty-tree keep is `kept` with no reason, and a leak has no closing event.
+    """
+    ctx, base = await _tiered(mount, tmp_path)
+    session = ctx.sessions.create("s1")
+
+    workspace = await ctx.workspace.acquire(
+        session_id="s1", agent_id="a1", base=base, access="read", session=session
+    )
+    (workspace.root / "evidence.txt").write_text("what the child was doing\n", encoding="utf-8")
+
+    assert ctx.workspace.retain("a1", "error") is True
+    await ctx.workspace.dispose("a1")
+
+    assert workspace.root.exists(), "the tree a parent needs to inspect was removed anyway"
+    assert (workspace.root / "evidence.txt").exists()
+    closed = [one for one in session.events if one.type == "workspace/disposed"]
+    assert [one.data.get("retained") for one in closed] == ["error"]
+    assert [one.data.get("kept") for one in closed] == [True]
+
+
+async def test_retention_is_refused_once_the_scope_is_gone(mount: Any, tmp_path: Path) -> None:
+    """The window, stated because the teardown path is outside it (§5 rule 6).
+
+    `retain` marks a *held* workspace, and a workspace is held only while the
+    scope that acquired it is alive. On `ph_rlm`'s `parent-teardown` path the
+    child's scope is already gone by the time the provider learns the child was
+    cancelled — `Context.dispose` unwinds `_children` before its own effects, so
+    the tree is released *before* the settle handler runs.
+
+    So a policy that retains the evidence of a cancelled child cannot call this
+    from that handler; it has to mark while the child is live. `False` rather
+    than a raise, because the ordinary caller is a settle path that does not know
+    whether this tier hands out trees at all.
+    """
+    ctx, base = await _tiered(mount, tmp_path)
+    await ctx.workspace.acquire(session_id="s1", agent_id="a1", base=base, access="read")
+
+    assert ctx.workspace.retain("a1", "error") is True, "a live agent can be marked"
+    await ctx.workspace.dispose("a1")
+    assert ctx.workspace.retain("a1", "too late") is False, "the window closes with the scope"
+    assert ctx.workspace.retain("never-existed", "probe") is False
+
+
+async def test_the_mark_is_written_the_moment_it_is_made(mount: Any, tmp_path: Path) -> None:
+    """Why retention is its own event rather than only a field on the closing half.
+
+    The decision is made *because* a run went wrong, and the most complete way
+    for one to go wrong is for the process to die — which writes no `disposed` at
+    all. A mark held only in memory would be lost by exactly the failure it
+    exists to survive, and reconciliation would then discard the tree it had been
+    told to keep.
+
+    The withdrawal is the same event with an empty reason, because it is the same
+    decision revisited: the shipped policy marks at acquire, so a clean settle is
+    a caller saying "never mind" and that has to be as durable as the mark.
+    """
+    ctx, base = await _tiered(mount, tmp_path)
+    session = ctx.sessions.create("s1")
+    await ctx.workspace.acquire(
+        session_id="s1", agent_id="a1", base=base, access="read", session=session
+    )
+
+    ctx.workspace.retain("a1", "the child was cancelled")
+    marks = [one.data.get("retained") for one in session.events if one.type == "workspace/retained"]
+    assert marks == ["the child was cancelled"]
+    (open_record,) = workspace_survivors(session)
+    assert (open_record.outcome, open_record.closed) == ("retained", False), (
+        "a crash here leaves a record that is both retained and unclosed"
+    )
+
+    ctx.workspace.retain("a1", "")
+    assert workspace_survivors(session)[0].outcome == "leaked", "the withdrawal is durable too"
+
+
+async def test_reconciliation_honours_a_retention_the_way_release_does(
+    mount: Any, tmp_path: Path
+) -> None:
+    """One rule for one word, across both paths that can end a tree.
+
+    This had a rule of its own for one round — a reason meant "touch nothing" —
+    while an orderly release treated it as an exception to `discard` and so kept
+    a retained tree only when it was **dirty**. Two rules for one word is how a
+    tree gets deleted by whichever path happened to reach it first, so the
+    special case is gone and a reason folds into `discard` here as it does there.
+
+    The dirty tree below is the evidence, and it survives a crash exactly as it
+    survives a clean shutdown. What a child *committed* needs no retention: it is
+    on the branch, which `-d` declines to delete.
+    """
+    ctx, base = await _tiered(mount, tmp_path)
+    session = ctx.sessions.create("s1")
+    workspace = await ctx.workspace.acquire(
+        session_id="s1", agent_id="a1", base=base, access="read", session=session
+    )
+    (workspace.root / "evidence.txt").write_text("what the child was doing\n", encoding="utf-8")
+    ctx.workspace.retain("a1", "the child was cancelled")
+    (record,) = workspace_survivors(session)
+
+    assert await ctx.workspace.provider.reclaim(record) is True
+    assert (workspace.root / "evidence.txt").exists(), "the crash path discarded the evidence"
+
+
+async def test_the_collector_revokes_the_retention_rather_than_overriding_it(
+    mount: Any, tmp_path: Path
+) -> None:
+    """The property that lets the age bound be a default rather than a decision.
+
+    `collect` hands the record back to `reclaim` with its reason cleared, so what
+    runs is the disposal policy that would have run at release time had nobody
+    retained the tree. An ephemeral checkout is discarded — its writes reached
+    nobody by construction and the stay of execution has expired — while an
+    ordinary `worktree` takes the keep-dirty path, so an agent's uncommitted work
+    survives its own garbage collector. Nothing here can destroy more than an
+    ordinary release would have.
+    """
+    ctx, base = await _tiered(mount, tmp_path)
+    session = ctx.sessions.create("s1")
+    ephemeral = await ctx.workspace.acquire(
+        session_id="s1", agent_id="gone", base=base, access="read", session=session
+    )
+    ordinary = await ctx.workspace.acquire(
+        session_id="s1", agent_id="dirty", base=base, access="write", session=session
+    )
+    for agent_id, workspace in (("gone", ephemeral), ("dirty", ordinary)):
+        (workspace.root / "work.txt").write_text("uncommitted\n", encoding="utf-8")
+        ctx.workspace.retain(agent_id, "the child was cancelled")
+        await ctx.workspace.dispose(agent_id)
+
+    rows = ctx.workspace.collectable(
+        workspace_survivors(session), older_than=1.0, now=1e9, touched={"s1": 0.0}
+    )
+    assert sorted(one.verdict for one in rows) == ["collect", "collect"]
+    removed = await ctx.workspace.collect(rows)
+
+    assert [one.agent_id for one in removed] == ["gone"]
+    assert not ephemeral.root.exists(), "the expired stay of execution did not run out"
+    assert (ordinary.root / "work.txt").exists(), (
+        "the collector destroyed work an ordinary release would have kept"
+    )
