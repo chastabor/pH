@@ -147,6 +147,108 @@ async def test_appends_after_a_flush_are_added_not_rewritten(
     assert [event.type for event in events] == ["turn/start", "turn/end"]
 
 
+async def test_a_resume_writes_what_it_synthesized_on_top_of_what_it_read(
+    store: SessionPersistence,
+) -> None:
+    """A session resumes **repeatedly**, and each reopen leaves the log contiguous.
+
+    The test the suite was missing, and the shape of the bug it missed. A resume
+    seeds the stored events, then adds two things nobody wrote: the repair
+    closers, and the `session/end-seed` the constructor appends. Both are in the
+    log before the store is ever asked to track it — so a backend that inferred
+    "the file exists, therefore its contents are what I have" dropped them and
+    wrote only what came afterwards. That leaves a hole in the seq space, and
+    `_readmit` refuses a hole, so the *second* resume raised.
+
+    **Twice, because once passes either way.** The gap is created by the first
+    resume and only detected by the second, which is precisely why every test
+    that touched this stopped one step short — including the one below named for
+    resuming, which reads a stored log back but never reopens it.
+
+    Both backends, because they disagreed here and the Protocol is the only
+    thing that makes them answer alike: `TursoSessionStore` upserts by `seq` and
+    queues its whole log, so it was always correct; `JsonlSessionStore` appends
+    and has to be told what it already holds.
+    """
+    session = _session(store)
+    _append(store, session, "turn/start", {"turn": 1})
+    _append(store, session, "turn/end", {"turn": 1, "reason": {"kind": "completed"}})
+    await store.flush(session)
+
+    for reopen in (1, 2, 3):
+        # A reopen is a new *process*, and `forget` is what process death does to
+        # a backend's memory. Without it `track` early-returns on the buffer the
+        # fixture's store still holds, and the test reproduces the bug in its own
+        # harness rather than exercising the code.
+        store.forget("s1")
+        header, events = store.read("s1")
+        assert [event.seq for event in events] == list(range(len(events))), (
+            f"reopen {reopen}: the stored seq space has a hole, so nothing can seed from it"
+        )
+        # What `resume_session` does, without a mounted profile: seed from the
+        # store, let the constructor mark the boundary, then record the reopen.
+        revived = Session("s1", seed=list(events), header=header)
+        revived.durable_length = len(events)
+        store.track(revived)
+        store.record(revived, revived.append("session/resumed", {"events": len(events)}))
+        await store.flush(revived)
+
+    _, events = store.read("s1")
+    assert [event.seq for event in events] == list(range(len(events)))
+    assert [event.type for event in events] == [
+        "turn/start",
+        "turn/end",
+        # One boundary marker and one record per reopen. Two events, not one:
+        # `session/resumed` always lands after the marker, so the constructor's
+        # "a seed already ending in one is not re-marked" guard cannot fire.
+        "session/end-seed",
+        "session/resumed",
+        "session/end-seed",
+        "session/resumed",
+        "session/end-seed",
+        "session/resumed",
+    ]
+
+
+async def test_a_repaired_tail_is_written_not_only_repaired(
+    store: SessionPersistence,
+) -> None:
+    """The closers reach the store, so the repair is durable.
+
+    `interrupted_turn_closers` synthesizes them on the seed rather than after
+    publication, which is what makes a resumed session provider-valid on the
+    first read. But synthesizing is not storing: a backend that dropped them
+    left an unclosed turn on disk forever, so every future resume re-repaired
+    the same tail and any reader that does *not* repair — anything reading the
+    stored log directly — saw a turn with an unresolved tool call.
+    """
+    from ph.persistence.repair import interrupted_turn_closers
+
+    session = _session(store)
+    _append(store, session, "turn/start", {"turn": 1})
+    _append(store, session, "step/start", {"turn": 1, "step": 1})
+    _append(store, session, "tool/call", {"turn": 1, "step": 1, "callId": "c1", "name": "read"})
+    await store.flush(session)
+    crashed_at = session.events[-1].time
+
+    store.forget("s1")  # a new process; see the reopen loop above
+    header, events = store.read("s1")
+    closers = interrupted_turn_closers(events)
+    assert closers, "the fixture is not a crashed log"
+    revived = Session("s1", seed=[*events, *closers], header=header)
+    revived.durable_length = len(events)
+    store.track(revived)
+    await store.flush(revived)
+
+    _, stored = store.read("s1")
+    assert not interrupted_turn_closers(stored), "the repair did not survive the flush"
+    # Backdated, which is what distinguishes writing the closers from
+    # re-appending them: repair stamps the last real event's time, never `now()`.
+    written = {event.type: event.time for event in stored}
+    assert written["turn/end"] == crashed_at
+    assert written["step/end"] == crashed_at
+
+
 async def test_a_flush_with_nothing_pending_is_a_no_op(store: SessionPersistence) -> None:
     """Called on every checkpoint barrier, so it must be free when idle."""
     session = _session(store)

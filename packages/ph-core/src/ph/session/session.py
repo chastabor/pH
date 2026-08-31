@@ -133,6 +133,7 @@ class Session:
         "_observers",
         "_publishing",
         "_surface",
+        "durable_length",
         "first_live_seq",
         "header",
     )
@@ -168,6 +169,28 @@ class Session:
                     raise ValueError(f"invalid seed event at index {index}: {error}") from error
                 self._log.append(event)
 
+        self.durable_length = 0
+        """How many leading events a **store already holds**; 0 unless set.
+
+        Set by whoever seeded this session *from* storage — `resume_session` is
+        the only caller — and read by a backend that appends rather than
+        upserts, so it can tell what it still owes from what is already written.
+
+        **Not `first_live_seq`, and the difference is a defect that shipped.** A
+        resume seeds the stored events *plus* the repair closers
+        `interrupted_turn_closers` synthesized, and the constructor then appends
+        `session/end-seed` on top. Those are in the log and have never been
+        written. A backend that treated everything present at `track` time as
+        durable dropped them and wrote only what arrived afterwards through
+        `record`, leaving a **gap in the seq space** — and `_readmit` refuses a
+        gap, so the session resumed exactly once and then could not be opened
+        again. Measured: a daemon root survived two lifetimes.
+
+        A plain attribute rather than a header field because it describes *this
+        process's* relationship to *one* store, not the session. `seed_length`
+        next door is the durable fork boundary and travels with the log;
+        this is neither durable nor a property of the log.
+        """
         self.first_live_seq = len(self._log)
         """The first seq appended IN THIS PROCESS.
 

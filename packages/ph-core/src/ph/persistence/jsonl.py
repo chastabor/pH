@@ -84,18 +84,37 @@ class JsonlSessionStore:
     _buffers: dict[str, _Buffer] = field(default_factory=dict)
 
     def track(self, session: Session) -> None:
-        """Start buffering a session; its existing log is queued for the first flush.
+        """Start buffering a session; whatever it holds that we do not is owed.
 
-        The seed of a forked or resumed session is already in the log, so it is
-        written on the first flush like any other event.
+        **The queue is `events[durable_length:]`, not "everything if the file is
+        new".** This backend appends, so it must write each event exactly once —
+        and the question is not whether the *file* exists but how much of *this
+        log* is in it. `Session.durable_length` is that number, stated by
+        whoever seeded from storage.
+
+        The earlier gate — `if not path.exists(): queue everything` — encoded a
+        premise that is true of two cases and false of the third. A fresh
+        session has an empty log, so it queues nothing either way. A fork writes
+        a new file, so its whole seed is owed. But a **resume** re-opens an
+        existing file with a log that already contains the repair closers and
+        `session/end-seed` — present at `track` time, never written — so the
+        gate discarded exactly the events that were owed. The result was a gap in
+        the seq space, `_readmit` refusing the next seed, and a session that
+        could be resumed once. `TursoSessionStore` was unaffected because it
+        upserts by `seq` and so queues its whole log unconditionally; the two
+        backends disagreed about a Protocol-level guarantee, and this one was
+        wrong.
+
+        One rule now covers all three: write what the log has and the store does
+        not. `header_written` stays, narrowed to the one thing it was ever about
+        — whether the header line is owed.
         """
         if session.id in self._buffers:
             return
         self.root.mkdir(parents=True, exist_ok=True)
         path = session_path(self.root, session.id)
         buffer = _Buffer(path=path, header_written=path.exists())
-        if not buffer.header_written:
-            buffer.pending.extend(session.events)
+        buffer.pending.extend(session.events[session.durable_length :])
         self._buffers[session.id] = buffer
 
     def record(self, session: Session, event: SessionEvent) -> None:
@@ -287,7 +306,15 @@ async def resume_session(ctx: Any, session_id: str) -> Any:
     # the one function every host calls to pick work back up.
     header, events = ctx.session_persistence.read(session_id)
     closers = interrupted_turn_closers(events)
-    session = ctx.sessions.adopt(Session(session_id, seed=[*events, *closers], header=header))
+    revived = Session(session_id, seed=[*events, *closers], header=header)
+    # **What the store already holds is `events`, and nothing else.** The closers
+    # are synthesized here and the constructor appends `session/end-seed` on top;
+    # both are in the log and neither has been written. A backend that inferred
+    # durability from "the file exists" dropped them and left a gap in the seq
+    # space, which `_readmit` refuses — so the session resumed once and never
+    # again. Said here because this is the only place that knows the difference.
+    revived.durable_length = len(events)
+    session = ctx.sessions.adopt(revived)
     # Recorded, not just returned. A resume is a fact about *provenance* — this
     # process picked up work somebody else started — and it is not derivable
     # from anything else in the log: a session that was reopened and one that

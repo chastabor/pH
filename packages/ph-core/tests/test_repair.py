@@ -189,3 +189,49 @@ async def test_resume_repairs_a_crashed_log_on_load(mount, tmp_path) -> None:
         "session/resumed",
     ]
     assert revived.events[-1].data["interrupted"] is True, "a crashed tail was not reported"
+
+
+@pytest.mark.anyio
+async def test_a_session_can_be_resumed_more_than_once(mount, tmp_path) -> None:
+    """The seam's wiring: `resume_session` tells the store what it already holds.
+
+    A resume adds two events nobody wrote — the repair closers and the
+    `session/end-seed` the constructor appends — and a backend that appends has
+    no way to know they are owed. `resume_session` is the only place that knows,
+    because it is the only place holding both the events it read and the log it
+    built from them, so it states the boundary with `durable_length`.
+
+    **Twice, because once passes either way.** The first resume creates the gap;
+    only the second is refused by `_readmit`. Measured before this landed: a
+    daemon root, which resumes on every start and every wake from passivation,
+    survived exactly two lifetimes and then could not be started at all.
+
+    The parity suite holds the backend half of this (both stores write what they
+    are owed). This is the half that cannot live there: it exercises the real
+    `resume_session`, and the parity tests set the boundary themselves.
+    """
+    from ph.persistence import resume_session
+
+    ctx = await mount({"id": "session-persistence", "config": {"root": str(tmp_path / "sessions")}})
+    session = ctx.sessions.create("reopened")
+    session.append("turn/start", {"turn": 1})
+    session.append("step/start", {"turn": 1, "step": 1})
+    session.append("assistant/message", _assistant_with_call("c1"), SurfaceIntent("append", ()))
+    await ctx.sessions.flush(session)
+    ctx.sessions.dispose("reopened")
+
+    store = ctx.session_persistence
+    for reopen in (1, 2, 3):
+        revived = await resume_session(ctx, "reopened")
+        assert revived.durable_length > 0, f"reopen {reopen}: nothing was declared durable"
+        await ctx.sessions.flush(revived)
+        _, stored = store.read("reopened")
+        assert [event.seq for event in stored] == list(range(len(stored))), (
+            f"reopen {reopen} left a hole in the seq space; the next resume would be refused"
+        )
+        ctx.sessions.dispose("reopened")
+
+    # The repair became durable on the way through, so the stored log no longer
+    # reads as crashed — and a later reopen is a clean one.
+    _, stored = store.read("reopened")
+    assert not interrupted_turn_closers(stored), "the repair never reached the store"
