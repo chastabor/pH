@@ -881,9 +881,7 @@ class SummarizeEngine:
             session.append(
                 "assistant/message",
                 payload,
-                SurfaceIntent(
-                    surface_op=SurfaceReplace(start=seq, end=seq), source_event_seqs=(seq,)
-                ),
+                SurfaceIntent(surface_op=SurfaceReplace(replaces=(seq,)), source_event_seqs=(seq,)),
             )
             rewritten.append(seq)
             saved += savings
@@ -1013,7 +1011,7 @@ class SummarizeEngine:
             "tool/result",
             payload,
             SurfaceIntent(
-                surface_op=SurfaceReplace(start=event.seq, end=event.seq),
+                surface_op=SurfaceReplace(replaces=(event.seq,)),
                 source_event_seqs=(event.seq,),
             ),
         )
@@ -1239,7 +1237,10 @@ class SummarizeEngine:
                 ),
             ).to_wire(),
             SurfaceIntent(
-                surface_op=SurfaceReplace(start=plan.shadowed_seqs[0], end=plan.shadowed_seqs[-1]),
+                # The set it already has, passed through — where the range
+                # forced it to collapse the list to its two ends and let the fold
+                # re-derive what sat between them.
+                surface_op=SurfaceReplace(replaces=plan.shadowed_seqs),
                 source_event_seqs=plan.shadowed_seqs,
             ),
         )

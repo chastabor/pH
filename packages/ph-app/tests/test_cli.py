@@ -18,6 +18,7 @@ import pytest
 import yaml
 from typer.testing import CliRunner
 
+from ph.testing import stored_log
 from ph_app.cli import app
 from ph_app.profiles import resolve_profile
 
@@ -234,7 +235,7 @@ def test_print_mode_answers_and_writes_a_readable_log(tmp_path: Path, monkeypatc
     assert result.exit_code == 0, result.output
     assert "ok" in result.stdout
 
-    path = tmp_path / "sessions" / "demo.jsonl"
+    path = stored_log(tmp_path / "sessions", "demo")
     records = [json.loads(line) for line in path.read_text().splitlines()]
     assert records[0]["type"] == "session/header"
     assert records[0]["header"]["version"] == 0

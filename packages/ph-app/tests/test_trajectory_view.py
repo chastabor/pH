@@ -23,9 +23,8 @@ from tui_helpers import until
 
 from ph.cordis import Context
 from ph.persistence import LineageError, read_session
-from ph.persistence.jsonl import session_path
 from ph.session import Session, SurfaceIntent
-from ph.testing import assistant_payload, user_payload, write_reference_fork
+from ph.testing import assistant_payload, stored_log, user_payload, write_reference_fork
 from ph_app.tui.trajectory import build_trajectory
 from ph_app.tui.trajectory_app import TrajectoryApp, load_records
 from ph_app.tui.widgets.trajectory import FORK_MARK, Query, search_index
@@ -51,7 +50,7 @@ async def _stored(ctx: Context, session_id: str = "audit") -> Path:
     """Write a real log to disk through the persistence row."""
     session = _log(ctx.sessions.create(session_id))
     await ctx.sessions.flush(session)
-    return session_path(ctx.session_persistence.root, session.id)
+    return stored_log(ctx.session_persistence.root, session.id)
 
 
 # ----------------------------------------------------- nothing mounted --
@@ -163,7 +162,9 @@ async def test_a_reference_forked_child_renders_its_inherited_history(
     """The child holds two events and the view shows the whole conversation."""
     ctx = await mount({"id": "session-persistence", "config": {"root": str(tmp_path / "s")}})
     parent_path = await _stored(ctx, "base")
-    root = parent_path.parent
+    # The **sessions root**, not the log's own directory: a log now sits one
+    # level down, inside its family.
+    root = Path(ctx.session_persistence.root)
     _, parent_events = read_session(parent_path)
     boundary = next(event.seq for event in reversed(parent_events) if event.type == "turn/end")
 

@@ -361,7 +361,7 @@ async def test_the_namespace_outlives_a_compaction_of_the_conversation(
             form="compaction",
             summary="history summarized",
         ),
-        SurfaceIntent(SurfaceReplace(start=nodes[0], end=nodes[-1]), nodes),
+        SurfaceIntent(SurfaceReplace(replaces=tuple(nodes)), nodes),
     )
 
     result = await run_cell(ctx, "print(sum(frame))", agent=agent, session=session, call_id="c2")

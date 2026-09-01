@@ -134,7 +134,7 @@ def _sample(model: type[BaseModel]) -> BaseModel | None:
             "tools": [ToolSchema(name="read", description="d", parameters={})],
         },
         "RequestContext": {"provider": "fake", "model": "fake-1", "contextWindow": 8},
-        "SurfaceReplace": {"start": 1, "end": 2},
+        "SurfaceReplace": {"replaces": [1, 2]},
         "UserQuestion": {"question": "which?"},
         "ToolCallView": {"title": "read"},
         "ToolResultView": {"title": "read"},

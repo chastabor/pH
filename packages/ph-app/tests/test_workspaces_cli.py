@@ -38,8 +38,16 @@ def _log(
     is the *provenance* — these logs were not written by the process that reads
     them, which is the only state the collector ever meets.
     """
-    path = session_path(sessions, session_id)
-    header = SessionHeader(id=session_id, created_at=1, parent_session=parent or None)
+    header = SessionHeader(
+        id=session_id,
+        created_at=1,
+        parent_session=parent or None,
+        # A child shares its parent's lineage; these parents are all roots, whose
+        # family is their own id.
+        family=parent or session_id,
+    )
+    path = session_path(sessions, session_id, header.family)
+    path.parent.mkdir(parents=True, exist_ok=True)
     session = Session(session_id, header=header)
     for kind, data in events:
         session.append(kind, data)

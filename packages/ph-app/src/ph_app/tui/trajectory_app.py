@@ -27,7 +27,7 @@ from textual.binding import Binding, BindingType
 
 from ph.paths import resolve_roots
 from ph.persistence import materialise, read_session, repaired
-from ph.persistence.jsonl import session_path
+from ph.persistence.jsonl import family_log, locate_session
 from ph.session import Session, SessionEvent, SessionHeader
 
 from .config import TuiSettings, load_tui_settings
@@ -61,7 +61,7 @@ def load_records(
         base = root or (
             roots.sessions_dir() if roots is not None else Path(home or ".") / "sessions"
         )
-        path = session_path(base, target)
+        path = locate_session(base, target) or family_log(base / target, target)
     if not path.is_file():
         raise FileNotFoundError(f"no session log at {path}")
     header, events = _lineage_of(path)
@@ -97,12 +97,14 @@ def _lineage_of(path: Path) -> tuple[SessionHeader, list[SessionEvent]]:
     """
     header, events = read_session(path)
 
-    def read_one(session_id: str) -> tuple[SessionHeader, list[SessionEvent]]:
+    def read_one(
+        session_id: str, upto: int | None = None, family: str | None = None
+    ) -> tuple[SessionHeader, list[SessionEvent]]:
         # The target is already read, and it is the only one whose *filename* is
         # known; everything above it is addressed the way the store addresses it.
         if session_id == header.id:
             return header, events
-        return read_session(session_path(path.parent, session_id))
+        return read_session(family_log(path.parent, session_id), upto=upto)
 
     return materialise(read_one, header.id)
 

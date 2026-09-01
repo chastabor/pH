@@ -13,7 +13,7 @@ import pytest
 
 from ph.seams.approval import ApprovalRequest
 from ph.seams.user_questions import UserQuestion
-from ph.testing import StubAgent
+from ph.testing import StubAgent, stored_log
 from ph_app.profiles import resolve_profile
 from ph_app.tui.frontend import open_harness
 
@@ -85,6 +85,6 @@ async def test_close_flushes_the_log(tmp_path: Path, monkeypatch: pytest.MonkeyP
     )
     await front.submit("hello")
     await front.close()
-    store = tmp_path / "sessions" / "s.jsonl"
+    store = stored_log(tmp_path / "sessions", "s")
     assert store.exists()
     assert "turn/end" in store.read_text()

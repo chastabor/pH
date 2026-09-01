@@ -20,7 +20,7 @@ import time as _time
 from dataclasses import dataclass, replace
 from typing import Annotated, Any, Literal, TypeAlias
 
-from pydantic import Field, StrictInt
+from pydantic import Field, StrictInt, field_validator
 
 from ..wire import WireDataclass, WireModel
 from .json import freeze_json_value, thaw_json
@@ -71,16 +71,35 @@ def now_ms() -> int:
 
 
 class SurfaceReplace(WireModel):
-    """Replace surface nodes `start..end` (both inclusive) with this event.
+    """Replace the named surface nodes with this event.
 
-    Both ends must exist as surface nodes now; `start == end` replaces one node.
-    The event's `source_event_seqs` must cite every shadowed node — which is
-    what makes compaction reversible reading and forbids quiet deletion.
+    **An id-set, not a positional range** (§5.6), and the difference is a
+    guarantee rather than a spelling. `start..end` meant "whatever currently
+    occupies those positions", so the same operation applied to a surface that
+    had moved on silently shadowed different messages. Naming the nodes makes it
+    either exactly right or a loud refusal, which is the property tau's
+    `replaces_entry_ids` has by construction and pH's range did not.
+
+    Every named seq must be a surface node *now*; the replacement lands where the
+    earliest of them was, and the rest are removed. One seq replaces one node.
+    The event's `source_event_seqs` must still cite every name here — it may cite
+    more, such as the chunks a message was built from, which is why the set lives
+    on the op rather than being read back off the citation.
     """
 
     op: Literal["replace"] = "replace"
-    start: Seq
-    end: Seq
+    replaces: tuple[Seq, ...]
+
+    @field_validator("replaces")
+    @classmethod
+    def _named_and_distinct(cls, value: tuple[int, ...]) -> tuple[int, ...]:
+        # A replacement that names nothing would shadow nothing and still take a
+        # surface slot; a repeat means the writer built the set by accident.
+        if not value:
+            raise ValueError("surfaceOp replace must name at least one surface node")
+        if len(set(value)) != len(value):
+            raise ValueError("surfaceOp replace must not name a surface node twice")
+        return value
 
 
 SurfaceOp: TypeAlias = 'Literal["append"] | SurfaceReplace'

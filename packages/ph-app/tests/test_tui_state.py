@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from ph.persistence.jsonl import session_path
 from ph.testing import write_reference_fork
 from ph_app.tui.autocomplete import (
     PathCompleter,
@@ -173,8 +174,11 @@ def test_path_completion_survives_a_missing_directory(tmp_path: Path) -> None:
 
 
 def _write_session(directory: Path, session_id: str, title: str, **header: object) -> None:
-    record = {"id": session_id, "createdAt": 0, "cwd": "/work", **header}
-    (directory / f"{session_id}.jsonl").write_text(
+    family = str(header.get("family") or header.get("parentSession") or session_id)
+    record = {"id": session_id, "createdAt": 0, "cwd": "/work", "family": family, **header}
+    path = session_path(directory, session_id, family)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
         "\n".join(
             [
                 json.dumps({"type": "session/header", "header": record}),
@@ -234,12 +238,74 @@ def test_a_child_whose_ancestor_is_gone_still_gets_a_row(tmp_path: Path) -> None
     assert summary.parent == "deleted", "and it still says what it is missing"
 
 
+def test_a_segment_cycle_still_lists_every_session(tmp_path: Path) -> None:
+    """A corrupt header must not empty the picker.
+
+    Two segments naming each other have no chain head, so nothing represents
+    them; hanging each under the other then puts both inside the children graph
+    with no root above them, and the render walk — which starts from roots —
+    emits nothing at all. Every row vanishes because two are broken, against
+    this view's own rule that losing a session is worse than misplacing one.
+    """
+    write_reference_fork(tmp_path, "s0", "s1", boundary=4, kind="segment", family="s0")
+    write_reference_fork(tmp_path, "s1", "s0", boundary=4, kind="segment", family="s0")
+
+    assert sorted(choice.value for choice in session_choices(tmp_path)) == ["s0", "s1"]
+
+
 def test_forked_sessions_are_listed_under_their_parent(tmp_path: Path) -> None:
     """The header records the fork; the picker shows it as one."""
     _write_session(tmp_path, "root", "the original")
     _write_session(tmp_path, "branch", "a fork", parentSession="root")
     labels = [choice.label for choice in session_choices(tmp_path)]
     assert labels == ["the original", "  ↳ a fork"]
+
+
+def test_a_rolled_session_is_one_row_with_no_indent(tmp_path: Path) -> None:
+    """**A segment is the same conversation in a new file, so it is one row.**
+
+    Structurally a roll is a fork at the tip, so before `kind` existed nothing on
+    disk told them apart and this rendered as a staircase — three nested rows
+    carrying one inherited title between them, for one conversation. The row that
+    survives is the **tip**: the newest file, and the one a resume should open.
+    """
+    _write_session(tmp_path, "s0", "the conversation")
+    write_reference_fork(tmp_path, "s1", "s0", boundary=4, kind="segment")
+    write_reference_fork(tmp_path, "s2", "s1", boundary=8, kind="segment", family="s0")
+
+    rows = session_choices(tmp_path)
+    assert [choice.label for choice in rows] == ["the conversation"]
+    assert [choice.value for choice in rows] == ["s2"], "the tip is what a resume opens"
+
+
+def test_a_fork_still_indents_under_its_parent(tmp_path: Path) -> None:
+    """The other half of the same rule: a branch *is* a second conversation."""
+    _write_session(tmp_path, "s0", "the original")
+    write_reference_fork(tmp_path, "b1", "s0", boundary=4, kind="fork")
+
+    assert [choice.label for choice in session_choices(tmp_path)] == [
+        "the original",
+        "  ↳ the original",
+    ]
+
+
+def test_a_branch_of_a_rolled_session_lands_under_the_surviving_row(tmp_path: Path) -> None:
+    """The case that makes contraction more than cosmetic.
+
+    Forking an early segment leaves a child whose parent is a file the list no
+    longer shows. Mapping it through the contraction puts it under the row that
+    stands for that conversation; without that it would be orphaned to the root
+    and read as an unrelated session.
+    """
+    _write_session(tmp_path, "s0", "the conversation")
+    write_reference_fork(tmp_path, "s1", "s0", boundary=4, kind="segment")
+    write_reference_fork(tmp_path, "b1", "s0", boundary=2, kind="fork")
+
+    rows = session_choices(tmp_path)
+    assert [(choice.value, choice.label) for choice in rows] == [
+        ("s1", "the conversation"),
+        ("b1", "  ↳ the conversation"),
+    ]
 
 
 # ------------------------------------------------------------- credentials --

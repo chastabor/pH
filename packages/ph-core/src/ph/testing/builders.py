@@ -18,7 +18,7 @@ from typing import Any
 from ..agent.types import AgentOptions
 from ..cordis import DEPLOYMENT, Boundary, Context
 from ..llm.types import ContextForm, PluginSource
-from ..persistence.jsonl import HEADER_LINE_TYPE, session_path
+from ..persistence.jsonl import HEADER_LINE_TYPE, locate_session, session_path
 from ..seams.workspace import (
     ACQUIRED,
     DISPOSED,
@@ -26,7 +26,7 @@ from ..seams.workspace import (
     SharedWorkspaceProvider,
     WorkspaceSeam,
 )
-from ..session import Session, SessionEvent, SessionHeader
+from ..session import Session, SessionEvent, SessionHeader, SessionKind
 from ..session.json import dumps
 from ..tools.definition import ToolDefinition, ToolOutput, define_tool, text_content
 from ..tools.registry import ToolRuntime
@@ -40,6 +40,7 @@ __all__ = [
     "reference_fork",
     "run_tool",
     "simple_tool",
+    "stored_log",
     "tool_result_payload",
     "tool_runtime",
     "user_payload",
@@ -328,7 +329,7 @@ def workspace_log(*events: tuple[str, dict[str, Any]], session_id: str = "s") ->
 
 
 def reference_fork(
-    child: str, parent: str, *, boundary: int
+    child: str, parent: str, *, boundary: int, kind: SessionKind = "fork", family: str | None = None
 ) -> tuple[SessionHeader, list[SessionEvent]]:
     """A child that stores **only its own events**, beginning at `boundary`.
 
@@ -347,7 +348,17 @@ def reference_fork(
     The first event sits at `boundary`, which both marks the file as owing a
     prefix and says how long that prefix is.
     """
-    header = SessionHeader(id=child, created_at=1, parent_session=parent, seed_length=boundary)
+    header = SessionHeader(
+        id=child,
+        created_at=1,
+        parent_session=parent,
+        seed_length=boundary,
+        kind=kind,
+        # A child inherits its parent's lineage. Defaulting to `parent` is right
+        # for the common case — forking a root, whose family is its own id — and
+        # a test chaining segments off a deeper session says which.
+        family=family or parent,
+    )
     own = [
         SessionEvent(type="turn/start", seq=boundary, time=1, data={"turn": boundary}),
         SessionEvent(
@@ -360,7 +371,15 @@ def reference_fork(
     return header, own
 
 
-def write_reference_fork(root: Path, child: str, parent: str, *, boundary: int) -> Path:
+def write_reference_fork(
+    root: Path,
+    child: str,
+    parent: str,
+    *,
+    boundary: int,
+    kind: SessionKind = "fork",
+    family: str | None = None,
+) -> Path:
     """`reference_fork` written under `root` in the format `read_session` reads.
 
     Through `to_wire` and the real header line type rather than a dict spelled
@@ -373,8 +392,9 @@ def write_reference_fork(root: Path, child: str, parent: str, *, boundary: int) 
     call instead, which is the same "the test states the format itself" failure
     one layer out. `session_path` is the one naming rule.
     """
-    header, own = reference_fork(child, parent, boundary=boundary)
-    path = session_path(root, child)
+    header, own = reference_fork(child, parent, boundary=boundary, kind=kind, family=family)
+    path = session_path(root, child, header.family)
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         "".join(
             f"{dumps(record)}\n"
@@ -386,3 +406,18 @@ def write_reference_fork(root: Path, child: str, parent: str, *, boundary: int) 
         encoding="utf-8",
     )
     return path
+
+
+def stored_log(root: Path, session_id: str, *, family: str | None = None) -> Path:
+    """Where a session's log is, whatever layout the store wrote it in.
+
+    A test that spells `root / f"{session_id}.jsonl"` pins the layout, and the
+    family directories moved it — twenty-two of them broke at once, which is the
+    argument for this existing rather than for a second round of hand-editing.
+
+    Falls back to the path the log *would* take, so a test can assert a file is
+    absent before the first flush and poll for it afterwards. `family` defaults
+    to the session's own id, which is right for a root; a fork or a segment
+    inherits its parent's and should say so.
+    """
+    return locate_session(root, session_id) or session_path(root, session_id, family or session_id)

@@ -13,7 +13,6 @@ typed is the best title a session has.
 from __future__ import annotations
 
 import json
-import os
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
@@ -21,7 +20,7 @@ from pathlib import Path
 from pydantic import ValidationError
 
 from ph.persistence import MAX_DEPTH
-from ph.persistence.jsonl import HEADER_LINE_TYPE, session_path
+from ph.persistence.jsonl import HEADER_LINE_TYPE, family_log, session_logs
 from ph.session import SessionHeader
 
 from ..wire import obj, text_of_wire
@@ -45,6 +44,16 @@ class SessionSummary:
     parent: str | None = None
     """The session this one was forked from, when the header says so."""
 
+    kind: str = ""
+    """`"fork"`, `"segment"`, or empty for a root — which has no parent to qualify."""
+
+    family: str = ""
+    """The lineage directory this log sits in — every ancestor is a sibling in it.
+
+    Read from the same one-line header peek as `parent`, and it is what turns the
+    ancestor walk below from a store-wide search into an open.
+    """
+
     @property
     def when(self) -> str:
         return datetime.fromtimestamp(self.modified).strftime("%Y-%m-%d %H:%M")
@@ -54,21 +63,13 @@ def session_summaries(sessions_dir: Path, *, limit: int = 50) -> list[SessionSum
     """Stored sessions, most recently touched first. Unreadable files are skipped.
 
     One `stat` per file: the directory entry's, reused for both the sort and
-    the summary.
+    the summary. `session_logs` walks one level of family directories, which is
+    where every log lives, and hands them back newest-first.
     """
-    try:
-        with os.scandir(sessions_dir) as entries:
-            found = [
-                (entry, entry.stat())
-                for entry in entries
-                if entry.name.endswith(".jsonl") and entry.is_file()
-            ]
-    except OSError:
-        return []
-    found.sort(key=lambda pair: pair[1].st_mtime, reverse=True)
+    found = sorted(session_logs(sessions_dir), key=lambda pair: pair[1].st_mtime, reverse=True)
     summaries: list[SessionSummary] = []
-    for entry, stat in found[:limit]:
-        summary = _summarize(Path(entry.path), stat.st_mtime, stat.st_size)
+    for path, stat in found[:limit]:
+        summary = _summarize(path, stat.st_mtime, stat.st_size)
         if summary is not None:
             summaries.append(summary)
     # A reference-forked child holds only its own events, so the `user/message`
@@ -81,13 +82,21 @@ def session_summaries(sessions_dir: Path, *, limit: int = 50) -> list[SessionSum
     for index, summary in enumerate(summaries):
         if not summary.title and summary.parent is not None:
             summaries[index] = replace(
-                summary, title=_inherited_title(sessions_dir, summary.parent, known)
+                summary, title=_inherited_title(sessions_dir, summary, known)
             )
     return summaries
 
 
-def _inherited_title(sessions_dir: Path, parent: str, known: dict[str, SessionSummary]) -> str:
+def _inherited_title(
+    sessions_dir: Path, of: SessionSummary, known: dict[str, SessionSummary]
+) -> str:
     """The nearest ancestor's title, for a child whose log starts mid-conversation.
+
+    **Opened, not searched for.** An ancestor is a sibling inside this session's
+    own family directory, so the path is a join. Resolving each one by id instead
+    scanned every family in the store: measured at 200 families whose newest rows
+    were segment tips, 111.8 ms and 200 store scans against 18.6 ms — 6x, and it
+    runs synchronously on the UI thread.
 
     Bounded by the same `MAX_DEPTH` the reader walks, which is also what
     terminates a hand-edited cycle — a repeat costs up to 64 dict lookups rather
@@ -95,10 +104,14 @@ def _inherited_title(sessions_dir: Path, parent: str, known: dict[str, SessionSu
     spends on every chained read. It stops at the first ancestor that will not
     read: a picker owes a row, not an exception.
     """
+    parent = of.parent
+    family = of.family or of.session_id
     for _ in range(MAX_DEPTH):
+        if parent is None:
+            return ""
         summary = known.get(parent)
         if summary is None:
-            summary = _summarize(session_path(sessions_dir, parent), 0.0, 0)
+            summary = _summarize(family_log(sessions_dir / family, parent), 0.0, 0)
             if summary is None:
                 return ""
             # **Cached back**, because a segmented run is one chain: every row
@@ -116,6 +129,8 @@ def _inherited_title(sessions_dir: Path, parent: str, known: dict[str, SessionSu
 def _summarize(path: Path, modified: float, size: int) -> SessionSummary | None:
     title = ""
     cwd = ""
+    kind = ""
+    family = ""
     parent: str | None = None
     try:
         with path.open("r", encoding="utf-8") as handle:
@@ -136,6 +151,8 @@ def _summarize(path: Path, modified: float, size: int) -> SessionSummary | None:
                     if header is not None:
                         cwd = header.cwd or ""
                         parent = header.parent_session
+                        kind = header.kind or ""
+                        family = header.family
                     continue
                 if record.get("type") == "user/message":
                     text = text_of_wire(obj(record.get("data")).get("content")).strip()
@@ -144,7 +161,14 @@ def _summarize(path: Path, modified: float, size: int) -> SessionSummary | None:
     except OSError:
         return None
     return SessionSummary(
-        session_id=path.stem, modified=modified, size=size, title=title, cwd=cwd, parent=parent
+        session_id=path.stem,
+        modified=modified,
+        size=size,
+        title=title,
+        cwd=cwd,
+        kind=kind,
+        family=family,
+        parent=parent,
     )
 
 

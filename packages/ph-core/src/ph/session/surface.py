@@ -84,17 +84,21 @@ def is_in_place_rewrite(event: SessionEvent) -> bool:
     operation = event.surface_op
     if not is_replacement_surface_event(event) or not isinstance(operation, SurfaceReplace):
         return False
-    return operation.start == operation.end and tuple(event.source_event_seqs or ()) == (
-        operation.start,
+    return (
+        len(operation.replaces) == 1 and tuple(event.source_event_seqs or ()) == operation.replaces
     )
 
 
 @dataclass(frozen=True, slots=True)
 class SurfaceFoldReplacement:
     seq: int
-    start: int
-    end: int
     shadowed_seqs: tuple[int, ...]
+    """The nodes this event took out, in **surface order**.
+
+    `start`/`end` used to sit beside this and no consumer ever read them — the
+    range was an encoding of the set, and the set is what anyone asking "what did
+    this compaction shadow" actually wants.
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,10 +121,6 @@ class _AppendPlan:
 @dataclass(frozen=True, slots=True)
 class _ReplacePlan:
     seq: int
-    start: int
-    end: int
-    start_index: int
-    end_index: int
     shadowed_seqs: tuple[int, ...]
 
 
@@ -168,21 +168,41 @@ def _assert_provenance(event: SessionEvent, shadowed_seqs: Sequence[int]) -> Non
         )
 
 
-def _replacement_range(state: _FoldState, op: SurfaceReplace) -> tuple[int, int, tuple[int, ...]]:
-    try:
-        start_index = state.nodes.index(op.start)
-    except ValueError:
-        raise SurfaceError(f"surface replace: start seq {op.start} not found in surface") from None
-    try:
-        end_index = state.nodes.index(op.end)
-    except ValueError:
-        raise SurfaceError(f"surface replace: end seq {op.end} not found in surface") from None
-    if start_index > end_index:
-        raise SurfaceError(
-            f"surface replace: start seq {op.start} (index {start_index}) is after "
-            f"end seq {op.end} (index {end_index})"
-        )
-    return start_index, end_index, tuple(state.nodes[start_index : end_index + 1])
+def _shadowed(state: _FoldState, op: SurfaceReplace) -> tuple[int, ...]:
+    """Which nodes this replacement takes out, in surface order.
+
+    **Membership, never arithmetic.** Every named seq has to be a node right now
+    or the whole operation is refused — there is no "between", so a name that has
+    already been shadowed cannot be silently re-shadowed and a range cannot drift
+    over messages nobody cited.
+
+    Returned in surface order rather than the order the writer listed them, so a
+    consumer reading `shadowed_seqs` sees the conversation's order and not an
+    accident of how the set was built.
+
+    **One pass with a set, not `.index` per name.** The first version resolved
+    each name by scanning the node list from position 0, which is O(names x
+    nodes): a compaction shadowing 1 000 of 2 000 nodes measured 4.5 ms against
+    0.13 ms for the range op it replaced — 35x, and quadratic in the number of
+    names, which is precisely the direction compaction grows.
+    """
+    if len(op.replaces) == 1:
+        # **The common case keeps the cheap test.** A membership scan stops at
+        # the node it finds, so replacing an early one costs its position; the
+        # set below always costs the whole surface. Building it here made a pass
+        # of 200 in-place rewrites on a 2 000-node surface *slower* than the
+        # range op it replaced — 16.7 ms against 9.8 — because every one of them
+        # names exactly one node.
+        only = op.replaces[0]
+        if only not in state.nodes:
+            raise SurfaceError(f"surface replace: seq {only} is not a current surface node")
+        return (only,)
+    present = set(state.nodes)
+    absent = next((seq for seq in op.replaces if seq not in present), None)
+    if absent is not None:
+        raise SurfaceError(f"surface replace: seq {absent} is not a current surface node")
+    named = set(op.replaces)
+    return tuple(node for node in state.nodes if node in named)
 
 
 def _assert_tool_result_rewrite(
@@ -232,17 +252,10 @@ def _plan(
         _assert_provenance(event, ())
         return _AppendPlan(seq=event.seq)
     assert isinstance(op, SurfaceReplace)
-    start_index, end_index, shadowed = _replacement_range(state, op)
+    shadowed = _shadowed(state, op)
     _assert_provenance(event, shadowed)
     _assert_tool_result_rewrite(event, shadowed, log)
-    return _ReplacePlan(
-        seq=event.seq,
-        start=op.start,
-        end=op.end,
-        start_index=start_index,
-        end_index=end_index,
-        shadowed_seqs=shadowed,
-    )
+    return _ReplacePlan(seq=event.seq, shadowed_seqs=shadowed)
 
 
 def _apply(
@@ -252,11 +265,24 @@ def _apply(
         state.nodes.append(plan.seq)
         return None
     if isinstance(plan, _ReplacePlan):
-        state.nodes[plan.start_index : plan.end_index + 1] = [plan.seq]
+        # `shadowed_seqs` is in surface order, so its first element is the
+        # earliest node this takes out — which is where the replacement lands.
+        # Nothing ahead of that was shadowed, so the count of survivors before it
+        # is unchanged and the index needs no adjusting.
+        insert_at = state.nodes.index(plan.shadowed_seqs[0])
+        if len(plan.shadowed_seqs) == 1:
+            # **The common case, and the one that must stay O(1).** Every
+            # `truncate_arguments`, every offloaded tool result and every elided
+            # paste is one node standing in for one node. Rebuilding the whole
+            # list for those measured 3.3x slower across a realistic pass than
+            # the same-length slice assignment the range op used to do.
+            state.nodes[insert_at] = plan.seq
+        else:
+            shadowed = set(plan.shadowed_seqs)
+            state.nodes[:] = [node for node in state.nodes if node not in shadowed]
+            state.nodes.insert(insert_at, plan.seq)
         state.replace_generation += 1
-        return SurfaceFoldReplacement(
-            seq=plan.seq, start=plan.start, end=plan.end, shadowed_seqs=plan.shadowed_seqs
-        )
+        return SurfaceFoldReplacement(seq=plan.seq, shadowed_seqs=plan.shadowed_seqs)
     return None
 
 

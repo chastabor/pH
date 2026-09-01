@@ -155,7 +155,7 @@ async def apply(ctx: Context, config: Config) -> None:
                 ),
             ).to_wire(),
             SurfaceIntent(
-                surface_op=SurfaceReplace(start=event.seq, end=event.seq),
+                surface_op=SurfaceReplace(replaces=(event.seq,)),
                 source_event_seqs=(event.seq,),
             ),
         )

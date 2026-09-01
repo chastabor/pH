@@ -56,8 +56,9 @@ from ..paths import resolve_roots
 from ..seams.diagnostics import Diagnostic, contribute
 from ..session import Session, SessionEvent, SessionHeader
 from ..session.json import dumps
+from .families import locate_under, logs_under, path_under
 from .lineage import materialise
-from .protocol import SessionPersistence, StoredSession, attach
+from .protocol import SessionPersistence, StoredSession, attach, stored_row
 
 __all__ = ["TursoSessionStore", "apply"]
 
@@ -74,15 +75,34 @@ own sequence number, so reading it back in order needs no sort and holding two
 events at one number is impossible."""
 
 
-def session_db(root: Path, session_id: str) -> Path:
-    """Where one session's database lives. The filename *is* the id."""
-    return root / f"{session_id}{SUFFIX}"
+def session_db(root: Path, session_id: str, family: str) -> Path:
+    """Where a session's database is written: `<root>/<family>/<id><SUFFIX>`."""
+    return path_under(root, family, session_id, SUFFIX)
+
+
+def session_dbs(root: Path) -> list[tuple[Path, os.stat_result]]:
+    """Every stored database, newest first."""
+    return logs_under(root, SUFFIX)
+
+
+def locate_db(root: Path, session_id: str) -> Path | None:
+    """The database for one id, wherever it sits. JSONL's rule, shared."""
+    return locate_under(root, session_id, SUFFIX)
 
 
 @dataclass(slots=True)
 class _Buffer:
     pending: list[SessionEvent] = field(default_factory=list)
     header_written: bool = False
+    family: str = ""
+    """Which directory this session's database lives in.
+
+    On the buffer rather than in a dict of its own, because `forget` already
+    clears buffers and a parallel map keyed by session id was cleared by nothing
+    — it grew for the life of the process, which is the exact leak `_release`
+    exists to argue against one method down. JSONL keeps the same fact on
+    `_Buffer.path`.
+    """
 
 
 @dataclass(slots=True)
@@ -110,7 +130,10 @@ class TursoSessionStore:
         """
         if session.id in self._buffers:
             return
-        buffer = _Buffer()
+        # The family is on the header in hand; remembering it here is what keeps
+        # `_connect` a pure function of what this store already knows, rather
+        # than a search on every write.
+        buffer = _Buffer(family=session.header.family)
         # `events[durable_length:]`, not the whole log. What is below that line
         # is already durable *somewhere* — in this database for a resume, in the
         # parent's for a reference-fork — and queueing it anyway is not a
@@ -182,7 +205,7 @@ class TursoSessionStore:
     # ------------------------------------------------------------- reading --
 
     def exists(self, session_id: str) -> bool:
-        return session_db(self.root, session_id).is_file()
+        return locate_db(self.root, session_id) is not None
 
     def read(self, session_id: str) -> tuple[SessionHeader, list[SessionEvent]]:
         """The session's full log, following its lineage when it stores a reference.
@@ -204,22 +227,47 @@ class TursoSessionStore:
             for ancestor in set(self._connections) - held:
                 self._release(ancestor)
 
-    def read_own(self, session_id: str) -> tuple[SessionHeader, list[SessionEvent]]:
-        """This database and nothing else."""
-        if not self.exists(session_id):
+    def read_own(
+        self, session_id: str, upto: int | None = None, family: str | None = None
+    ) -> tuple[SessionHeader, list[SessionEvent]]:
+        """This database and nothing else, up to `upto` if one is given."""
+        # One resolution, not two: the `exists` gate here searched the store and
+        # then `_connect` searched it again for the same id, so a chained read
+        # paid two full scans per ancestor.
+        path = self._path_for(session_id, family)
+        if not path.is_file():
             raise FileNotFoundError(f"no stored session {session_id!r}")
-        cursor = self._connect(session_id).cursor()
+        cursor = self._connect(session_id, path).cursor()
         rows = cursor.execute("SELECT wire FROM header WHERE id = ?", (session_id,)).fetchall()
         if not rows:
             raise FileNotFoundError(f"session {session_id!r} has no header")
         header = SessionHeader.model_validate(json.loads(rows[0][0]))
         # `ORDER BY seq` is the clustered key, so this is the log in the order
         # it was written — the property an append-only file gives for free.
-        events = [
-            SessionEvent.from_wire(json.loads(wire))
-            for (wire,) in cursor.execute("SELECT wire FROM events ORDER BY seq").fetchall()
-        ]
+        # `seq` is the clustered key, so the bound is a range scan that stops —
+        # not a filter over rows already fetched.
+        rows = (
+            cursor.execute("SELECT wire FROM events ORDER BY seq")
+            if upto is None
+            else cursor.execute("SELECT wire FROM events WHERE seq < ? ORDER BY seq", (upto,))
+        ).fetchall()
+        events = [SessionEvent.from_wire(json.loads(wire)) for (wire,) in rows]
         return header, events
+
+    def _path_for(self, session_id: str, family: str | None = None) -> Path:
+        """This session's database, by what is known before what is on disk.
+
+        A family in hand — from the caller, or from the buffer this store is
+        already keeping — is a path. Anything else is searched for, and a session
+        that is neither tracked nor on disk is a root about to be written, whose
+        family is its own id.
+        """
+        if family is None:
+            buffer = self._buffers.get(session_id)
+            family = buffer.family if buffer is not None else None
+        if family:
+            return session_db(self.root, session_id, family)
+        return locate_db(self.root, session_id) or session_db(self.root, session_id, session_id)
 
     def locate(self, session_id: str) -> Path | None:
         """One database per session, so there is always a path to point at.
@@ -227,7 +275,7 @@ class TursoSessionStore:
         Which is what makes P5-03's lease work here at all: a shared database
         had none, and `locate` returning `None` silently disabled I-5.
         """
-        return session_db(self.root, session_id)
+        return self._path_for(session_id)
 
     def stored(self, *, limit: int = 50) -> list[StoredSession]:
         """What is on record, most recently touched first.
@@ -251,47 +299,37 @@ class TursoSessionStore:
                 self._release(peeked)
 
     def _stored(self, *, limit: int) -> list[StoredSession]:
-        try:
-            with os.scandir(self.root) as entries:
-                found = [
-                    (entry, entry.stat())
-                    for entry in entries
-                    if entry.name.endswith(SUFFIX) and entry.is_file()
-                ]
-        except OSError:
-            return []
-        found.sort(key=lambda pair: pair[1].st_mtime, reverse=True)
+        found = session_dbs(self.root)
         listed: list[StoredSession] = []
-        for entry, stat in found[:limit]:
-            session_id = entry.name[: -len(SUFFIX)]
-            header = self._peek_header(session_id)
+        for path, stat in found[:limit]:
+            # The path the scan already found, not another search for it: this
+            # loop threw it away and made `_peek_header` re-locate every row —
+            # 199 full store scans to list 200 sessions.
+            session_id = path.name[: -len(SUFFIX)]
             listed.append(
-                StoredSession(
-                    session_id=session_id,
-                    modified=stat.st_mtime,
-                    cwd=(header.cwd or "") if header is not None else "",
-                    parent=header.parent_session if header is not None else None,
-                )
+                stored_row(session_id, self._peek_header(session_id, path), stat.st_mtime)
             )
         return listed
 
     # ----------------------------------------------------------- internals --
 
-    def _peek_header(self, session_id: str) -> SessionHeader | None:
+    def _peek_header(self, session_id: str, path: Path | None = None) -> SessionHeader | None:
         try:
-            cursor = self._connect(session_id).cursor()
+            cursor = self._connect(session_id, path).cursor()
             rows = cursor.execute("SELECT wire FROM header WHERE id = ?", (session_id,)).fetchall()
             return SessionHeader.model_validate(json.loads(rows[0][0])) if rows else None
         except Exception:
             return None
 
-    def _connect(self, session_id: str) -> Any:
+    def _connect(self, session_id: str, path: Path | None = None) -> Any:
         connection = self._connections.get(session_id)
         if connection is None:
             import turso
 
-            self.root.mkdir(parents=True, exist_ok=True)
-            connection = turso.connect(str(session_db(self.root, session_id)))
+            # the family directory is created with the path in `_path_for`
+            path = path if path is not None else self._path_for(session_id)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            connection = turso.connect(str(path))
             cursor = connection.cursor()
             for statement in SCHEMA:
                 cursor.execute(statement)

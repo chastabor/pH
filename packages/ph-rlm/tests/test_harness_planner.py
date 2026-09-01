@@ -211,7 +211,7 @@ async def test_the_conversation_is_what_the_model_saw(refining: Refining) -> Non
     session.append(
         "user/message",
         user_payload("(summary of earlier conversation)", "m2"),
-        SurfaceIntent(SurfaceReplace(start=0, end=0), (first.seq,)),
+        SurfaceIntent(SurfaceReplace(replaces=(first.seq,)), (first.seq,)),
     )
 
     await ctx.commands.dispatch("/refine", session=session, agent=agent)

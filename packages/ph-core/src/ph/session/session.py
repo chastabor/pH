@@ -23,9 +23,9 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable, Sequence
 from pathlib import PurePath
-from typing import Any, Literal
+from typing import Any, Literal, TypeAlias
 
-from pydantic import NonNegativeInt, field_validator
+from pydantic import Field, NonNegativeInt, field_validator
 
 from ..llm.types import Message
 from ..selectors import matches_any, parse_all
@@ -50,6 +50,15 @@ log = logging.getLogger("ph.session")
 SessionObserver = Callable[["Session", SessionEvent], None]
 
 
+SessionKind: TypeAlias = Literal["fork", "segment"]
+"""Why a log has a parent: a **branch**, or the same session continued.
+
+Named because six sites spell it — the header, `SessionStore._branch`, two test
+builders and two listing rows — and a bare `str` at any of them turns a typo
+("segement") into a value that validates and never matches.
+"""
+
+
 class SessionHeader(WireModel):
     """Immutable storage metadata, kept *outside* the conversation log.
 
@@ -71,6 +80,45 @@ class SessionHeader(WireModel):
     from child work — a fork otherwise looks like a session that simply started
     with a long conversation.
     """
+    family: str = Field(default_factory=lambda data: data["id"], min_length=1)
+    """Which lineage this log belongs to — the id of the root it descends from.
+
+    The directory a log lives in: `sessions/<family>/<id>.jsonl`. Every fork,
+    segment and subagent beneath a root inherits its value, so one conversation
+    and everything it spawned is one directory — which is what makes a lineage
+    movable, archivable and checkable as a unit, and what lets "is anything in
+    here orphaned" be answered by listing one directory.
+
+    **Never absent.** A root heads its own lineage, so the default *is* the id —
+    a `default_factory` reading the already-validated `id`, which covers direct
+    construction and `model_validate` alike. No caller repeats it, no reader
+    needs a "what if there is no family" branch, and no path has two shapes.
+    `min_length=1` makes an explicit empty string a refusal rather than something
+    quietly rewritten. Stored rather than derived because deriving it
+    means walking `parent_session` to the root, and walking needs paths, and the
+    path is what the family is for.
+    """
+
+    kind: SessionKind | None = None
+    """Why this log has a parent: a **branch**, or the same session continued.
+
+    Structurally the two are identical — `roll` is `fork` at the tip — so nothing
+    on disk could tell them apart, and every reader of `parent_session` had to
+    guess "branch". The picker guessed wrong in the visible direction: a session
+    rolled three times rendered as a staircase of three nested rows carrying one
+    inherited title, when it is one conversation in three files.
+
+    On the **child's** header, where the backward link already lives, because
+    that is the half every consumer reads from a one-line peek — `stored()` and
+    `_summarize` both. The forward half has to stay an event (`session/segmented`)
+    for a mechanical reason: JSONL writes a header once and never rewrites it, so
+    a `continued_by` on the *parent* would be durable under Turso and silently
+    lost under JSONL.
+
+    `None` means a **root**: no parent, so no reason to have one. Every log with
+    a `parent_session` has a kind, set by whichever call made it.
+    """
+
     origin: Literal["subagent"] | None = None
     delegation_depth: NonNegativeInt | None = None
     agent_preset: str | None = None

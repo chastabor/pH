@@ -63,6 +63,12 @@ class StoredSession:
     cwd: str = ""
     parent: str | None = None
 
+    # **No `kind`**, for the reason above. It was added here, filled by one
+    # backend, missed by the other, and read by nobody: the picker resolves a
+    # segment from `SessionSummary`, off its own header peek. It comes back when
+    # a listing consumer needs it — and then through `stored_row`, so it cannot
+    # reach one backend and miss the other again.
+
     # **No `size` and no `title`**, deliberately. `size` meant two different
     # things — bytes on disk from JSONL, an event count from Turso — into one
     # field a picker renders with `filesize.decimal`, and 93% of the Turso
@@ -71,6 +77,23 @@ class StoredSession:
     # that lies, and it would have let a picker migration fall through to hex
     # ids with nothing failing. Both come back when a consumer needs them and
     # can say what they mean.
+
+
+def stored_row(session_id: str, header: SessionHeader | None, modified: float) -> StoredSession:
+    """One listing row from one header peek. **The only place rows are built.**
+
+    Both backends produced this by hand from the same two inputs, and the moment
+    a field was added it reached one of them and not the other — silently, since
+    the parity suite pinned `session_id` and `cwd` only. A header this build
+    cannot parse still gets a row: losing a session from a listing is worse than
+    showing it without its details.
+    """
+    return StoredSession(
+        session_id=session_id,
+        modified=modified,
+        cwd=(header.cwd or "") if header is not None else "",
+        parent=header.parent_session if header is not None else None,
+    )
 
 
 @runtime_checkable
@@ -121,8 +144,19 @@ class SessionPersistence(Protocol):
         """
         ...
 
-    def read_own(self, session_id: str) -> tuple[SessionHeader, list[SessionEvent]]:
+    def read_own(
+        self, session_id: str, upto: int | None = None, family: str | None = None
+    ) -> tuple[SessionHeader, list[SessionEvent]]:
         """This one stored log, unchained — the primitive `read` composes.
+
+        `upto` is a hint: events at or above it are not wanted, and returning
+        them anyway is slower but not wrong.
+
+        `family` is **not** a hint. Every member of a lineage shares one family
+        directory, so the walk knows where an ancestor lives and passing it turns
+        a directory search into a path. Without it a chained read paid one scan
+        per generation — 31% of a depth-5 read at 200 families, growing with the
+        store rather than with the log.
 
         Declared here rather than left to convention because it is the half a
         backend actually implements. Without it a third backend can satisfy this

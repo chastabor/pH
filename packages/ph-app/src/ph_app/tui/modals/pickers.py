@@ -98,19 +98,32 @@ def model_choices(
 
 
 def session_choices(sessions_dir: Path, *, current: str = "") -> list[Choice]:
-    """Stored sessions, newest first, children indented under their fork parent.
+    """Stored sessions, newest first, **branches** indented under their parent.
+
+    Two kinds of parent link reach this list and they must not render alike. A
+    fork is a second conversation and belongs one level in. A segment is the
+    *same* conversation in a new file — so a session rolled three times is one
+    row, not a staircase of three carrying one inherited title between them.
+
+    So: contract every segment edge, keep every fork edge. Each chain of segments
+    collapses to its **tip**, which is both the newest file and the one a resume
+    should open; the rows a person picks from are one per conversation.
 
     A child whose parent is not on disk is shown at the root rather than hidden:
     losing a session from the list is worse than showing it in the wrong place.
     """
     summaries = {summary.session_id: summary for summary in session_summaries(sessions_dir)}
+    under = _contract_segments(summaries)
     children: dict[str, list[str]] = {}
     roots: list[str] = []
-    for summary in summaries.values():
-        if summary.parent is not None and summary.parent in summaries:
-            children.setdefault(summary.parent, []).append(summary.session_id)
+    for session_id in summaries:
+        if session_id not in under:
+            continue  # a superseded segment; its tip carries the row
+        parent = under[session_id]
+        if parent is None:
+            roots.append(session_id)
         else:
-            roots.append(summary.session_id)
+            children.setdefault(parent, []).append(session_id)
 
     rows: list[Choice] = []
 
@@ -123,6 +136,61 @@ def session_choices(sessions_dir: Path, *, current: str = "") -> list[Choice]:
     for root in roots:
         walk(root, 0)
     return rows
+
+
+def _contract_segments(summaries: dict[str, SessionSummary]) -> dict[str, str | None]:
+    """Every surviving row, mapped to the row it branches from (`None` = a root).
+
+    A segment chain is one conversation, so it gets one row: the tip. Absence
+    from this map is what marks a superseded segment — and mapping a *branch* to
+    a surviving row is what lets a fork of an earlier segment land under the
+    conversation it came from rather than under a file the list no longer shows.
+
+    One map rather than two, because the two halves were only ever used together
+    and the caller had to compose them to ask either question.
+
+    The branch parent is read from the chain's **origin** — the only member whose
+    parent link is a fork rather than a continuation — so a rolled session stays
+    exactly where it was before it rolled.
+    """
+    continues = {
+        summary.parent: summary.session_id
+        for summary in summaries.values()
+        if summary.kind == "segment" and summary.parent in summaries
+    }
+    # Hoisted: this was a linear scan of the values *inside* the loop below, so
+    # the contraction was quadratic in the number of listed sessions.
+    continued = set(continues.values())
+    represents: dict[str, str] = {}
+    origin_of: dict[str, str] = {}
+    for origin in summaries:
+        if origin in continued:
+            continue  # not a chain head; it is reached from its own origin
+        chain, node = [origin], origin
+        while (following := continues.get(node)) is not None and following not in chain:
+            chain.append(following)
+            node = following
+        for member in chain:
+            represents[member] = node
+        origin_of[node] = origin
+    # A segment *cycle* has no head, so nothing above reached it. Each member
+    # then stands for itself rather than vanishing from the list — this view's
+    # rule is that losing a session is worse than showing it in the wrong place,
+    # and dropping the whole map on a corrupt header is the worst version of
+    # losing one.
+    stranded = [one for one in summaries if one not in represents]
+    for one in stranded:
+        represents[one] = one
+        origin_of[one] = one
+    branched: dict[str, str | None] = {}
+    for tip, origin in origin_of.items():
+        parent = summaries[origin].parent
+        # A cycle member is shown at the root. Hanging it under its own partner
+        # would put both inside the children graph with nothing above them, and
+        # the render walk starts from roots — so the rows would not merely be
+        # misplaced, they would all disappear.
+        branched[tip] = None if tip in stranded else represents.get(parent) if parent else None
+    return branched
 
 
 def _session_row(summary: SessionSummary, depth: int, *, marked: bool) -> Choice:

@@ -24,6 +24,7 @@ import pytest
 from daemon_helpers import PROFILE, running
 
 from ph.seams.schedule import Schedule
+from ph.testing import stored_log
 from ph_app.daemon import DaemonClient, recovery, serve, server
 from ph_app.daemon import supervisor as supervisor_module
 from ph_app.daemon.server import DaemonUnavailable
@@ -699,7 +700,7 @@ async def test_the_ladder_gives_up_after_its_last_attempt_and_reports(
         # await — so reading immediately raced the very ordering under test,
         # about one run in six. With the flush deleted this waits out its
         # timeout instead, which is still a failure.
-        written = tmp_path / "sessions" / "doomed.jsonl"
+        written = stored_log(tmp_path / "sessions", "doomed")
         await _until(lambda: _on_disk(written, recovery.FAILED), what="the give-up to reach disk")
 
 
@@ -728,7 +729,7 @@ async def test_a_root_resumed_mid_ladder_does_not_start_the_count_over(
             # appends, and this test is about what the next daemon can read
             # back — so shutting down at the in-memory flip raced the flush that
             # makes the claim true, and the resumed root came back `retrying`.
-            written = tmp_path / "sessions" / "stubborn.jsonl"
+            written = stored_log(tmp_path / "sessions", "stubborn")
             await _until(
                 lambda: _on_disk(written, recovery.FAILED),
                 what="the spent ladder to reach disk",
@@ -921,7 +922,7 @@ async def test_the_release_is_recorded_before_it_happens(tmp_path: Path) -> None
         await _settled(client, "recorded", events=1)
         await daemon.server.supervisor.sweep(after=0)
 
-        assert _on_disk(tmp_path / "sessions" / "recorded.jsonl", recovery.PASSIVATED), (
+        assert _on_disk(stored_log(tmp_path / "sessions", "recorded"), recovery.PASSIVATED), (
             "the record did not reach disk with the release"
         )
 
@@ -1356,7 +1357,7 @@ async def test_the_record_is_on_disk_before_anyone_could_read_it(
         shutil.rmtree(tmp_path / "xdg")
         await daemon.server.check_reachable()
 
-        stored = (tmp_path / "sessions" / "durable.jsonl").read_text(encoding="utf-8")
+        stored = stored_log(tmp_path / "sessions", "durable").read_text(encoding="utf-8")
         assert recovery.UNREACHABLE in stored
 
 

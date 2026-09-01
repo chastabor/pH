@@ -41,12 +41,26 @@ from ..session import SessionEvent, SessionHeader
 
 __all__ = ["MAX_DEPTH", "LineageError", "ReadOne", "lineage_faults", "materialise"]
 
-ReadOne: TypeAlias = Callable[[str], tuple[SessionHeader, list[SessionEvent]]]
-"""How one backend reads one stored log, unchained.
+ReadOne: TypeAlias = Callable[
+    [str, int | None, str | None], tuple[SessionHeader, list[SessionEvent]]
+]
+"""How one backend reads one stored log, unchained, up to a boundary.
 
 A callable rather than a Protocol method so the walk lives in one place and each
 backend keeps its own `read` as the thing that knows about files or rows. JSONL
 and Turso disagree about everything below this line and about nothing above it.
+
+`family` is **not** a hint: every member of a lineage shares one directory, so
+the walk knows where each ancestor lives and hands it over rather than making the
+backend search. Without it a chained read paid a directory scan per generation,
+which scales with the size of the store instead of the length of the log.
+
+`upto` is **a hint, not a contract**: events at or above it are not wanted, and a
+backend that returns them anyway is slower but still correct, because the walk
+filters what it takes regardless. Deliberately that way round — making the bound
+load-bearing would mean a backend that quietly ignored it produced a *wrong* log,
+which is exactly how reference-forking came to be a silent no-op on Turso once
+already.
 """
 
 MAX_DEPTH = 64
@@ -94,29 +108,19 @@ def materialise(read_one: ReadOne, session_id: str) -> tuple[SessionHeader, list
     generation below it still lacks, so the assembled log contains every event
     once. What is *kept* is 1.00x the result.
 
-    What is **read** is not, and an earlier version of this docstring claimed
-    otherwise. `read_one` is a backend's whole-log read, so an ancestor is parsed
-    and validated in full however little of it is wanted.
-
-    How much that costs depends entirely on where the fork was made, which is
-    worth stating because the two ends look nothing alike:
-
-    * **At the tip** — the common fork — the child wants nearly all of the
-      ancestor, so parsing all of it is very close to the useful work. Measured:
-      27.3 ms to read a reference-forked child of a 5 000-event parent, against
-      26.6 ms for the same log self-contained. 2.6%.
-    * **Early in a long parent, or deep in a chain**, a generation may contribute
-      50 events out of 10 000 and still be parsed whole — ~170x the useful work.
-
-    So the fix is real but narrow: a bounded read (`WHERE seq < ?` in Turso, an
-    early break in JSONL) widening `ReadOne` to carry the boundary. Recorded here
-    rather than in a plan, because this is the docstring that was wrong.
+    **What is read is bounded too**, which it was not at first: `read_one` was a
+    whole-log read, so an ancestor contributing 50 events out of 10 000 was
+    parsed and validated in full — ~170x the useful work at an early fork
+    boundary, though only 2.6% at the tip, where the child wants nearly all of
+    it anyway. `upto` carries the boundary now: Turso adds `WHERE seq < ?`, JSONL
+    stops reading lines. The tail costs a dict lookup instead of a validate and
+    freeze.
 
     Walks iteratively rather than recursively: the chain is data from disk, and a
     hand-edited header naming a cycle should meet a bound rather than the
     interpreter's stack.
     """
-    header, events = read_one(session_id)
+    header, events = read_one(session_id, None, None)
     # A file that starts at 0 says it holds its own history. Cross-check that
     # against the header before believing it: `Session.append` mints
     # `seq = len(self._log)`, so a reference-forked child built with an empty
@@ -167,7 +171,7 @@ def materialise(read_one: ReadOne, session_id: str) -> tuple[SessionHeader, list
                 session_id=session_id,
             )
         try:
-            ancestor_header, ancestor_events = read_one(parent)
+            ancestor_header, ancestor_events = read_one(parent, owed, header.family)
         except Exception as error:
             raise LineageError(
                 f"session {session_id!r} inherits {owed} event(s) from {parent!r}, "

@@ -68,7 +68,7 @@ def test_cache_rebuilds_only_on_a_surface_rewrite() -> None:
     session.append(
         "user/message",
         user_payload("summary", "m3"),
-        SurfaceIntent(SurfaceReplace(start=0, end=1), (0, 1)),
+        SurfaceIntent(SurfaceReplace(replaces=(0, 1)), (0, 1)),
     )
     rebuilt = session.derive_messages()
     assert [m.content[0].text for m in rebuilt] == ["summary"]
@@ -82,7 +82,7 @@ def test_transcript_keeps_what_the_surface_shadows() -> None:
     session.append(
         "user/message",
         user_payload("summary", "m3"),
-        SurfaceIntent(SurfaceReplace(start=0, end=1), (0, 1)),
+        SurfaceIntent(SurfaceReplace(replaces=(0, 1)), (0, 1)),
     )
     # The model sees the summary; the human still sees the conversation.
     assert [m.content[0].text for m in session.derive_messages()] == ["summary"]

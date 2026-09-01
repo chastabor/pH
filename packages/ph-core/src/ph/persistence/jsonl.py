@@ -35,15 +35,19 @@ from ..cordis import Context, plugin
 from ..paths import resolve_roots
 from ..session import Session, SessionEvent, SessionHeader
 from ..session.json import dumps
+from .families import locate_under, logs_under, path_under
 from .lineage import materialise
-from .protocol import SessionPersistence, StoredSession, attach
+from .protocol import SessionPersistence, StoredSession, attach, stored_row
 
 __all__ = [
     "JsonlSessionStore",
     "apply",
+    "family_log",
+    "locate_session",
     "read_records",
     "read_session",
     "resumption_of",
+    "session_logs",
     "session_path",
 ]
 
@@ -64,9 +68,32 @@ log = logging.getLogger("ph.persistence.jsonl")
 
 HEADER_LINE_TYPE = "session/header"
 
+SUFFIX = ".jsonl"
+"""One statement of the extension, so a rename is one edit."""
 
-def session_path(root: Path, session_id: str) -> Path:
-    return root / f"{session_id}.jsonl"
+
+def family_log(family_dir: Path, session_id: str) -> Path:
+    """A log inside one family directory. Members are flat within a family."""
+    return family_dir / f"{session_id}{SUFFIX}"
+
+
+def session_path(root: Path, session_id: str, family: str) -> Path:
+    """Where a session's log is written: `<root>/<family>/<id>.jsonl`."""
+    return path_under(root, family, session_id, SUFFIX)
+
+
+def session_logs(root: Path) -> list[tuple[Path, os.stat_result]]:
+    """Every stored log under `root`, newest first."""
+    return logs_under(root, SUFFIX)
+
+
+def locate_session(root: Path, session_id: str) -> Path | None:
+    """The log for one id, wherever it sits. `None` if there is none.
+
+    A caller holding the family should build the path instead — see
+    `locate_under` for what this costs.
+    """
+    return locate_under(root, session_id, SUFFIX)
 
 
 @dataclass(slots=True)
@@ -112,8 +139,11 @@ class JsonlSessionStore:
         """
         if session.id in self._buffers:
             return
-        self.root.mkdir(parents=True, exist_ok=True)
-        path = session_path(self.root, session.id)
+        path = session_path(self.root, session.id, session.header.family)
+        # The **family directory**, not just the root: a log now lives one level
+        # down, and creating only the root left every flush raising into
+        # `session/flush`'s listener set.
+        path.parent.mkdir(parents=True, exist_ok=True)
         buffer = _Buffer(path=path, header_written=path.exists())
         buffer.pending.extend(session.events[session.durable_length :])
         self._buffers[session.id] = buffer
@@ -150,7 +180,7 @@ class JsonlSessionStore:
     # four; a backend with one answers them from the filesystem, as here.
 
     def exists(self, session_id: str) -> bool:
-        return session_path(self.root, session_id).is_file()
+        return locate_session(self.root, session_id) is not None
 
     def read(self, session_id: str) -> tuple[SessionHeader, list[SessionEvent]]:
         """The session's full log, following its lineage when it stores a reference.
@@ -162,13 +192,35 @@ class JsonlSessionStore:
         """
         return materialise(self.read_own, session_id)
 
-    def read_own(self, session_id: str) -> tuple[SessionHeader, list[SessionEvent]]:
+    def read_own(
+        self, session_id: str, upto: int | None = None, family: str | None = None
+    ) -> tuple[SessionHeader, list[SessionEvent]]:
         """This file and nothing else — the unchained read `materialise` walks with."""
-        return read_session(session_path(self.root, session_id))
+        path = (
+            session_path(self.root, session_id, family)
+            if family is not None
+            else locate_session(self.root, session_id)
+        )
+        if path is None or not path.is_file():
+            raise FileNotFoundError(f"no stored session {session_id!r}")
+        return read_session(path, upto=upto)
 
     def locate(self, session_id: str) -> Path | None:
-        """This backend writes files, so it can always say where."""
-        return session_path(self.root, session_id)
+        """This backend writes files, so it can always say where.
+
+        **Answers before the file exists**, which is what P5-03's lease needs:
+        `supervisor` calls this to lease a root *before* creating it, and a
+        `None` here is read as "this backend has nothing to lease", skipping I-5
+        in silence. A tracked session's path is already decided; anything else is
+        searched for; and a session that is neither is a root about to be
+        written, whose family is its own id.
+        """
+        buffer = self._buffers.get(session_id)
+        if buffer is not None:
+            return buffer.path
+        return locate_session(self.root, session_id) or session_path(
+            self.root, session_id, session_id
+        )
 
     def stored(self, *, limit: int = 50) -> list[StoredSession]:
         """What is on record, most recently touched first.
@@ -180,28 +232,10 @@ class JsonlSessionStore:
         TUI's picker keeps its richer summary; this is the part every backend
         can answer, which is what the Protocol is for.
         """
-        try:
-            with os.scandir(self.root) as entries:
-                found = [
-                    (entry, entry.stat())
-                    for entry in entries
-                    if entry.name.endswith(".jsonl") and entry.is_file()
-                ]
-        except OSError:
-            return []
-        found.sort(key=lambda pair: pair[1].st_mtime, reverse=True)
-        listed: list[StoredSession] = []
-        for entry, stat in found[:limit]:
-            header = _peek_header(Path(entry.path))
-            listed.append(
-                StoredSession(
-                    session_id=Path(entry.path).stem,
-                    modified=stat.st_mtime,
-                    cwd=(header.cwd or "") if header is not None else "",
-                    parent=header.parent_session if header is not None else None,
-                )
-            )
-        return listed
+        return [
+            stored_row(path.stem, _peek_header(path), stat.st_mtime)
+            for path, stat in session_logs(self.root)[:limit]
+        ]
 
     def forget(self, session_id: str) -> None:
         self._buffers.pop(session_id, None)
@@ -271,12 +305,18 @@ def _peek_header(path: Path) -> SessionHeader | None:
         return None
 
 
-def read_session(path: Path) -> tuple[SessionHeader, list[SessionEvent]]:
+def read_session(
+    path: Path, *, upto: int | None = None
+) -> tuple[SessionHeader, list[SessionEvent]]:
     """Read a stored session back, validating every envelope.
 
     Returns the raw header and events; acceptance — the known-types refusal,
     the header-id match, the surface rules — happens when they seed a
     `Session`, on the one path every seed takes.
+
+    `upto` stops at the first event whose seq reaches it. The log is append-only
+    and `seq` is its index, so everything after the first such line is at or
+    above it too — there is nothing below the boundary further down to miss.
     """
     header: SessionHeader | None = None
     events: list[SessionEvent] = []
@@ -292,6 +332,13 @@ def read_session(path: Path) -> tuple[SessionHeader, list[SessionEvent]]:
             if record.get("type") == HEADER_LINE_TYPE:
                 header = SessionHeader.model_validate(record["header"])
                 continue
+            if header is not None and upto is not None and record.get("seq", -1) >= upto:
+                # Read off the **raw** record, before `from_wire`: skipping the
+                # validate-and-freeze of the tail is the entire saving, and a
+                # bound applied after parsing would save nothing at all. Guarded
+                # on the header so a file that puts it after an event still
+                # yields one rather than raising "no session header line".
+                break
             events.append(SessionEvent.from_wire(record))
     if header is None:
         raise ValueError(f"{path}: no session header line")

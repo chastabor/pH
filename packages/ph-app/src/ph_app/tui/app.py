@@ -452,7 +452,12 @@ class PHTuiApp(App[str | None]):
         # `stored()`.
         store = front.ctx.get("session_persistence")
         located = store.locate(front.session.id) if store is not None else None
-        directory = located.parent if located is not None else self.home / "sessions"
+        # **Up past the family directory.** A log lives at
+        # `<sessions>/<family>/<id>.jsonl`, so `located.parent` is the lineage
+        # this session belongs to — one conversation and its branches — and a
+        # picker showing only that lists everything except what a person opened
+        # it to find.
+        directory = located.parent.parent if located is not None else self.home / "sessions"
         self._pick(
             "sessions",
             session_choices(directory, current=front.session.id),

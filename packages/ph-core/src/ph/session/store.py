@@ -24,7 +24,7 @@ from typing import Any, Literal
 
 from ..cordis import Context, Disposer, events, plugin
 from .events import SessionEvent, now_ms
-from .session import Session, SessionHeader
+from .session import Session, SessionHeader, SessionKind
 
 __all__ = [
     "SessionForkError",
@@ -123,6 +123,17 @@ class SessionStore:
             raise SessionForkError(f'session "{resolved}" already exists', "SESSION_ALREADY_EXISTS")
         fields: dict[str, Any] = {"id": resolved, "createdAt": now_ms()}
         fields.update(meta or {})
+        # **Inheritance at the one construction gate**, so a child shares its
+        # parent's directory whatever made it. `_branch` was enforcing this and
+        # the other caller that creates a child — the subagent spawn — was not,
+        # so every subagent got a family of its own and the layout's central
+        # claim, one conversation and everything it spawned in one directory,
+        # was false for the thing that spawns most. A root needs no line here:
+        # `SessionHeader` defaults an absent family to the session's own id.
+        parent_id = fields.get("parentSession")
+        parent = self.get(str(parent_id)) if parent_id else None
+        if parent is not None:
+            fields.setdefault("family", parent.header.family)
         header = SessionHeader.model_validate(fields)
         return self._publish(Session(resolved, seed=seed, header=header, durable=inherited))
 
@@ -260,9 +271,29 @@ class SessionStore:
             raise SessionForkError(
                 f'session "{child_session_id}" already exists', "SESSION_ALREADY_EXISTS"
             )
+        return self._branch(source, boundary, child_session_id, kind="fork")
+
+    def _branch(
+        self,
+        source: Session | str,
+        boundary: int | None,
+        child_session_id: str | None,
+        *,
+        kind: SessionKind,
+    ) -> Session:
+        """The shared body of `fork` and `roll`; `kind` is the only difference.
+
+        Private because `kind` is not a choice a caller makes — it is which of
+        the two operations they called. Exposing it on `fork` would invite a
+        third answer, and there are only two.
+        """
         live = self._resolve_source(source)
         seed = self._fork_seed(live, boundary)
-        meta: dict[str, Any] = {"parentSession": live.id, "seedLength": len(seed)}
+        meta: dict[str, Any] = {
+            "parentSession": live.id,
+            "seedLength": len(seed),
+            "kind": kind,
+        }
         if live.header.cwd is not None:
             meta["cwd"] = live.header.cwd
         return self.create(child_session_id, seed=list(seed), meta=meta, inherited=len(seed))
@@ -304,7 +335,7 @@ class SessionStore:
         after the child that references it.
         """
         live = self._resolve_source(source)
-        child = self.fork(live, None, child_session_id)
+        child = self._branch(live, None, child_session_id, kind="segment")
         live.append("session/segmented", {"continues": child.id})
         return child
 

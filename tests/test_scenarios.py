@@ -15,6 +15,7 @@ import pytest
 from ph.agent.types import AgentOptions
 from ph.persistence.jsonl import read_session
 from ph.session import Session
+from ph.testing import stored_log
 
 pytestmark = pytest.mark.anyio
 
@@ -33,7 +34,7 @@ async def test_a_session_survives_a_restart_and_continues(mount: Any, tmp_path: 
     await ctx.dispose()
 
     # A second process opens the stored log and keeps going.
-    header, events = read_session(tmp_path / "sessions" / "s.jsonl")
+    header, events = read_session(stored_log(tmp_path / "sessions", "s"))
     resumed_ctx = await mount(_replies("second answer"))
     resumed = resumed_ctx.sessions.adopt(Session("s", seed=events, header=header))
     await resumed_ctx.agents.create(resumed, FAKE).prompt("second question")

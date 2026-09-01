@@ -19,7 +19,7 @@ import pytest
 from ph.persistence.jsonl import read_session
 from ph.session import Session, SessionEvent, SurfaceIntent
 from ph.testing import FAKE_OPTIONS as FAKE
-from ph.testing import user_payload, write_reference_fork
+from ph.testing import stored_log, user_payload, write_reference_fork
 
 pytestmark = pytest.mark.anyio
 
@@ -42,7 +42,7 @@ async def test_flush_writes_a_header_line_and_one_line_per_event(
     session.append("turn/start", {"turn": 1})
     session.append("turn/end", {"turn": 1, "reason": {"kind": "completed"}})
 
-    path = tmp_path / "sessions" / "s.jsonl"
+    path = stored_log(tmp_path / "sessions", "s")
     assert not path.exists(), "append must not touch the disk"
 
     await ctx.sessions.flush(session)
@@ -57,7 +57,7 @@ async def test_a_stored_session_reads_back_identically(mount: Any, tmp_path: Pat
     await ctx.agents.create(session, FAKE).prompt("hello")
     await ctx.sessions.flush(session)
 
-    header, events = read_session(tmp_path / "sessions" / "s.jsonl")
+    header, events = read_session(stored_log(tmp_path / "sessions", "s"))
     assert header.id == "s"
     assert [event.to_wire() for event in events] == [event.to_wire() for event in session.events]
     # And it re-derives to the same messages, which is what "resume" means.
@@ -73,7 +73,7 @@ async def test_flush_is_idempotent_and_appends_only_new_events(mount: Any, tmp_p
     session.append("turn/end", {"turn": 1, "reason": {"kind": "completed"}})
     await ctx.sessions.flush(session)
 
-    assert len((tmp_path / "sessions" / "s.jsonl").read_text().splitlines()) == 3
+    assert len(stored_log(tmp_path / "sessions", "s").read_text().splitlines()) == 3
 
 
 async def test_a_forked_session_stores_a_reference_not_a_copy(mount: Any, tmp_path: Path) -> None:
@@ -98,7 +98,7 @@ async def test_a_forked_session_stores_a_reference_not_a_copy(mount: Any, tmp_pa
     child = ctx.sessions.fork(parent, None, "child")
     await ctx.sessions.flush(child)
 
-    header, own = read_session(tmp_path / "sessions" / "child.jsonl")
+    header, own = read_session(stored_log(tmp_path / "sessions", "child", family="parent"))
     assert header.parent_session == "parent"
     assert header.seed_length == 2
     assert [event.type for event in own] == ["session/end-seed"], "the seed was not re-written"
@@ -139,7 +139,7 @@ async def test_a_child_is_never_durable_before_the_prefix_it_references(
     child = ctx.sessions.fork(parent, None, "child")
     await ctx.sessions.flush(child)
 
-    assert (tmp_path / "sessions" / "parent.jsonl").exists(), "the ancestor went first"
+    assert stored_log(tmp_path / "sessions", "parent").exists(), "the ancestor went first"
     _, whole = ctx.session_persistence.read("child")
     assert [event.seq for event in whole] == [0, 1, 2]
 
@@ -296,7 +296,7 @@ async def test_segments_each_hold_only_their_own_run(mount: Any, tmp_path: Path)
 
     root = tmp_path / "sessions"
     held = {
-        name: [event.seq for event in read_session(root / f"{name}.jsonl")[1]]
+        name: [event.seq for event in read_session(stored_log(root, name, family="s0"))[1]]
         for name in ("s0", "s1", "s2")
     }
     assert held == {"s0": [0, 1, 2, 3, 4], "s1": [4, 5, 6, 7, 8, 9], "s2": [9, 10, 11]}, (

@@ -67,12 +67,14 @@ def test_replace_op_round_trips() -> None:
         time=1,
         data={"id": "m", "role": "user", "content": [], "source": {"kind": "user"}},
         source_event_seqs=(3, 4),
-        surface_op=SurfaceReplace(start=3, end=4),
+        surface_op=SurfaceReplace(replaces=(3, 4)),
     )
     wire = event.to_wire()
-    assert wire["surfaceOp"] == {"op": "replace", "start": 3, "end": 4}
+    # A tuple in memory, because it rides on a frozen event; an array on disk.
+    assert wire["surfaceOp"] == {"op": "replace", "replaces": (3, 4)}
+    assert json.loads(json.dumps(wire))["surfaceOp"] == {"op": "replace", "replaces": [3, 4]}
     restored = SessionEvent.from_wire(json.loads(json.dumps(wire)))
-    assert restored.surface_op == SurfaceReplace(start=3, end=4)
+    assert restored.surface_op == SurfaceReplace(replaces=(3, 4))
     assert restored.source_event_seqs == (3, 4)
     assert restored.to_wire() == wire
 

@@ -174,7 +174,7 @@ async def test_compaction_marks_what_it_replaced_and_keeps_it(mount: Any) -> Non
             form="compaction",
             summary="1 message summarized",
         ),
-        SurfaceIntent(SurfaceReplace(start=0, end=0), (first.seq,)),
+        SurfaceIntent(SurfaceReplace(replaces=(first.seq,)), (first.seq,)),
     )
     adapter = TuiEventAdapter()
     for event in session.events:
@@ -212,7 +212,7 @@ async def test_an_argument_truncation_does_not_add_a_second_assistant_row(
     session.append(
         "assistant/message",
         assistant_payload("here is the file", "a1"),
-        SurfaceIntent(SurfaceReplace(start=original.seq, end=original.seq), (original.seq,)),
+        SurfaceIntent(SurfaceReplace(replaces=(original.seq,)), (original.seq,)),
     )
     adapter = TuiEventAdapter()
     for event in session.events:
@@ -247,7 +247,7 @@ async def test_a_truncation_replacement_does_not_reset_the_token_footer(
     session.append(
         "assistant/message",
         assistant_payload("first", "a1"),
-        SurfaceIntent(SurfaceReplace(start=old.seq, end=old.seq), (old.seq,)),
+        SurfaceIntent(SurfaceReplace(replaces=(old.seq,)), (old.seq,)),
     )
     adapter = TuiEventAdapter()
     for event in session.events:
@@ -320,7 +320,7 @@ async def test_a_plugins_replacement_is_not_called_a_compaction(mount: Any) -> N
             form="notice",
             summary="2 MB offloaded",
         ),
-        SurfaceIntent(SurfaceReplace(start=0, end=0), (pasted.seq,)),
+        SurfaceIntent(SurfaceReplace(replaces=(0,)), (pasted.seq,)),
     )
     adapter = TuiEventAdapter()
     for event in session.events:

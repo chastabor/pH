@@ -47,7 +47,7 @@ def test_replace_shadows_nodes_and_leaves_the_log_intact() -> None:
     session.append(
         "user/message",
         user_payload("summary of one and two", "m4"),
-        SurfaceIntent(SurfaceReplace(start=1, end=2), (1, 2)),
+        SurfaceIntent(SurfaceReplace(replaces=(1, 2)), (1, 2)),
     )
     assert session.surface.nodes == (4, 3)
     assert len(session.events) == before + 1
@@ -62,27 +62,57 @@ def test_replace_must_cite_every_shadowed_node() -> None:
         session.append(
             "user/message",
             user_payload("summary", "m4"),
-            SurfaceIntent(SurfaceReplace(start=1, end=2), (1,)),
+            SurfaceIntent(SurfaceReplace(replaces=(1, 2)), (1,)),
         )
     # A refused candidate leaves the surface exactly as it was.
     assert session.surface.nodes == (1, 2, 3)
     assert len(session.events) == 4
 
 
-def test_replace_bounds_must_exist_and_be_ordered() -> None:
+def test_a_replace_must_name_nodes_that_are_on_the_surface_now() -> None:
+    """Membership, and nothing in between.
+
+    A range could be *bounded* by two real nodes and still sweep up whatever sat
+    between them; a name either is a current node or the whole operation is
+    refused. That refusal is the branch-safety property: the same replacement
+    applied to a surface that has moved on cannot quietly shadow different
+    messages.
+    """
     session = _conversation()
-    with pytest.raises(SurfaceError, match="start seq 99 not found"):
+    with pytest.raises(SurfaceError, match="seq 99 is not a current surface node"):
         session.append(
             "user/message",
             user_payload("x", "m4"),
-            SurfaceIntent(SurfaceReplace(start=99, end=2), (99, 2)),
+            SurfaceIntent(SurfaceReplace(replaces=(99, 2)), (99, 2)),
         )
-    with pytest.raises(SurfaceError, match="is after end seq"):
-        session.append(
-            "user/message",
-            user_payload("x", "m5"),
-            SurfaceIntent(SurfaceReplace(start=3, end=1), (1, 2, 3)),
-        )
+
+
+def test_the_order_the_names_are_given_in_does_not_matter() -> None:
+    """A **set**, so `(2, 1)` and `(1, 2)` are one operation.
+
+    Under a range this was an error — "start is after end" — a rule about the
+    encoding rather than about the conversation. The replacement lands where the
+    earliest named node was, and the shadowed set comes back in surface order
+    whichever way it was written.
+    """
+    session = _conversation()
+    event = session.append(
+        "user/message",
+        user_payload("x", "m5"),
+        SurfaceIntent(SurfaceReplace(replaces=(2, 1)), (1, 2)),
+    )
+
+    assert session.surface.nodes == (event.seq, 3)
+    assert fold_surface(session.events).replacements[-1].shadowed_seqs == (1, 2)
+
+
+def test_a_replace_must_name_something_and_name_it_once() -> None:
+    """Refused at construction: an empty set shadows nothing while still taking a
+    surface slot, and a repeat means the writer built the set by accident."""
+    with pytest.raises(ValueError, match="at least one surface node"):
+        SurfaceReplace(replaces=())
+    with pytest.raises(ValueError, match="must not name a surface node twice"):
+        SurfaceReplace(replaces=(1, 1))
 
 
 def test_source_seqs_must_be_earlier_and_unique() -> None:
@@ -111,14 +141,14 @@ def test_tool_result_replacement_may_change_only_content() -> None:
     session.append(
         "tool/result",
         tool_result_payload("preview…", "r1"),
-        SurfaceIntent(SurfaceReplace(start=0, end=0), (0,)),
+        SurfaceIntent(SurfaceReplace(replaces=(0,)), (0,)),
     )
     assert session.surface.nodes == (1,)
     with pytest.raises(SurfaceError, match="may change only content"):
         session.append(
             "tool/result",
             tool_result_payload("preview…", "r2", call_id="OTHER"),
-            SurfaceIntent(SurfaceReplace(start=1, end=1), (1,)),
+            SurfaceIntent(SurfaceReplace(replaces=(1,)), (1,)),
         )
 
 
@@ -130,7 +160,7 @@ def test_tool_result_replacement_targets_exactly_one_node() -> None:
         session.append(
             "tool/result",
             tool_result_payload("merged", "r3"),
-            SurfaceIntent(SurfaceReplace(start=0, end=1), (0, 1)),
+            SurfaceIntent(SurfaceReplace(replaces=(0, 1)), (0, 1)),
         )
 
 
@@ -139,7 +169,7 @@ def test_fold_matches_the_incremental_manager() -> None:
     session.append(
         "user/message",
         user_payload("summary", "m4"),
-        SurfaceIntent(SurfaceReplace(start=1, end=2), (1, 2)),
+        SurfaceIntent(SurfaceReplace(replaces=(1, 2)), (1, 2)),
     )
     folded = fold_surface(session.events)
     # The offline reconstructor and the live manager must agree, or "replay the
@@ -162,7 +192,7 @@ def test_surface_predicates() -> None:
     session.append(
         "user/message",
         user_payload("summary", "m4"),
-        SurfaceIntent(SurfaceReplace(start=1, end=2), (1, 2)),
+        SurfaceIntent(SurfaceReplace(replaces=(1, 2)), (1, 2)),
     )
     assert not is_surface_event(session.events[0])
     assert is_append_surface_event(session.events[1])
@@ -189,13 +219,13 @@ def test_an_in_place_rewrite_is_told_apart_from_a_substitution() -> None:
     in_place = session.append(
         "user/message",
         user_payload("one, elided", "m3"),
-        SurfaceIntent(SurfaceReplace(start=first.seq, end=first.seq), (first.seq,)),
+        SurfaceIntent(SurfaceReplace(replaces=(first.seq,)), (first.seq,)),
     )
     substitution = session.append(
         "user/message",
         user_payload("a summary of both", "m4"),
         SurfaceIntent(
-            SurfaceReplace(start=in_place.seq, end=second.seq), (in_place.seq, second.seq)
+            SurfaceReplace(replaces=(in_place.seq, second.seq)), (in_place.seq, second.seq)
         ),
     )
 

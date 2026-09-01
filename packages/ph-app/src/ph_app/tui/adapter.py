@@ -39,6 +39,7 @@ from ph.seams.subagents import downgrade_text, fold_subagent_event
 from ph.session import (
     Session,
     SessionEvent,
+    SurfaceReplace,
     is_in_place_rewrite,
     is_replacement_surface_event,
     thaw_json,
@@ -117,7 +118,15 @@ class TuiEventAdapter:
         if is_replacement_surface_event(event):
             # Whatever its cause, a replacement shadows the rows it cites: they
             # stay above it, dimmed.
-            self._mark_shadowed(event.source_event_seqs or ())
+            # The **op's set**, not the citation. `source_event_seqs` may name
+            # more than the replacement shadowed — the chunks a message was
+            # built from — so dimming from it greys rows that are still live.
+            operation = event.surface_op
+            self._mark_shadowed(
+                operation.replaces
+                if isinstance(operation, SurfaceReplace)
+                else tuple(event.source_event_seqs or ())
+            )
             # But only compaction is compaction. `input-offload` (P4-02) also
             # substitutes on the surface, and calling its preview "history
             # compacted" would tell the reader their conversation was summarized

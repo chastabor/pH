@@ -257,3 +257,26 @@ def test_a_parent_that_keeps_writing_after_a_roll_has_made_a_branch() -> None:
     types = [event.type for event in parent.events]
     assert types[5] == "session/segmented"
     assert types[6:], "the branch is in the log, not lost"
+
+
+def test_a_child_inherits_its_parents_lineage_however_it_was_made() -> None:
+    """**Not only through `fork` and `roll`.**
+
+    Inheritance was enforced inside `_branch`, and the other caller that creates
+    a child — the subagent spawn, which goes straight to `create` with a
+    `parentSession` in its meta — was not updated. Every subagent got a family
+    directory of its own, so the layout's central claim, one conversation and
+    everything it spawned in one directory, was false for the thing that spawns
+    most. The rule lives at the single construction gate now, where a third
+    branching caller cannot forget it.
+    """
+    store = _store()
+    root = store.create("r")
+    _closed_turn(root, 1, "hello")
+    branch = store.fork(root, None, "b")
+    segment = store.roll(root, "s")
+    subagent = store.create("kid", meta={"parentSession": root.id, "origin": "subagent"})
+    grandchild = store.create("g", meta={"parentSession": branch.id})
+
+    assert root.header.family == "r", "a root heads its own lineage"
+    assert [one.header.family for one in (branch, segment, subagent, grandchild)] == ["r"] * 4

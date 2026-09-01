@@ -178,7 +178,7 @@ def test_a_replacement_is_never_offloaded_again() -> None:
         "user/message",
         user_payload("still long " * 100),
         SurfaceIntent(
-            surface_op=SurfaceReplace(start=original.seq, end=original.seq),
+            surface_op=SurfaceReplace(replaces=(original.seq,)),
             source_event_seqs=(original.seq,),
         ),
     )

@@ -8,14 +8,15 @@ Protocol; none reaches for a path, a directory or a table.
 
 from __future__ import annotations
 
+from dataclasses import fields
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from ph.persistence import MAX_DEPTH, LineageError, lineage_faults
+from ph.persistence import MAX_DEPTH, LineageError, lineage_faults, materialise
 from ph.persistence.jsonl import JsonlSessionStore
-from ph.persistence.protocol import SessionPersistence
+from ph.persistence.protocol import SessionPersistence, StoredSession
 from ph.session import Session, SessionEvent, SessionHeader, SurfaceIntent
 from ph.testing import reference_fork, user_payload
 
@@ -369,9 +370,16 @@ async def test_a_profile_resumes_through_whichever_backend_it_mounted(
 # ------------------------------------------------- lineage (feasibility §5.3) --
 
 
-def _reference_fork(store: SessionPersistence, child: str, parent: str, boundary: int) -> Session:
-    """`reference_fork` put through this backend."""
-    header, own = reference_fork(child, parent, boundary=boundary)
+def _reference_fork(
+    store: SessionPersistence, child: str, parent: str, boundary: int, family: str | None = None
+) -> Session:
+    """`reference_fork` put through this backend.
+
+    `family` because a lineage shares one directory, which `SessionStore.create`
+    settles for anything it builds — a header assembled here has to say it, and a
+    synthetic chain with no real root has to pick one.
+    """
+    header, own = reference_fork(child, parent, boundary=boundary, family=family)
     session = Session(child, header=header)
     store.track(session)
     for event in own:
@@ -523,7 +531,7 @@ async def test_a_cycle_in_the_lineage_is_refused_and_shown(store: SessionPersist
     found instead.
     """
     for name, parent in (("a", "b"), ("b", "a")):
-        session = _reference_fork(store, name, parent, boundary=4)
+        session = _reference_fork(store, name, parent, boundary=4, family="a")
         await store.flush(session)
 
     with pytest.raises(LineageError, match="cycle") as caught:
@@ -544,7 +552,7 @@ async def test_a_chain_deeper_than_the_bound_is_refused(store: SessionPersistenc
     # Each link owes the one above it and supplies nothing, so the walk cannot
     # terminate before the bound does.
     for depth in range(MAX_DEPTH + 2):
-        session = _reference_fork(store, f"d{depth}", f"d{depth + 1}", boundary=4)
+        session = _reference_fork(store, f"d{depth}", f"d{depth + 1}", boundary=4, family="d0")
         await store.flush(session)
 
     with pytest.raises(LineageError, match=f"more than {MAX_DEPTH} deep") as caught:
@@ -642,7 +650,9 @@ async def test_a_seeded_child_writes_only_what_this_store_lacks(
     child = Session(
         "c",
         seed=list(parent.events),
-        header=SessionHeader(id="c", created_at=1, parent_session="p", seed_length=inherited),
+        header=SessionHeader(
+            id="c", created_at=1, parent_session="p", seed_length=inherited, family="p"
+        ),
         durable=inherited,
     )
     store.track(child)
@@ -652,6 +662,115 @@ async def test_a_seeded_child_writes_only_what_this_store_lacks(
     assert [event.type for event in own] == ["session/end-seed"], "the prefix was re-written"
     assert own[0].seq == inherited, "and the first seq is what marks the file as owing one"
     assert [event.seq for event in store.read("c")[1]] == list(range(inherited + 1))
+
+
+async def test_a_listing_row_says_the_same_thing_from_either_backend(
+    store: SessionPersistence,
+) -> None:
+    """**One projection, so a new listing field cannot reach one backend only.**
+
+    `kind` was added to `StoredSession`, filled by JSONL, missed by Turso, and
+    read by nobody — so a Turso-backed picker would have gone back to drawing a
+    rolled session as a staircase with every test green. The field set is pinned
+    here because that is the part that drifted: both backends now build rows
+    through `stored_row`, and a field added outside it fails this before it can
+    reach one of them.
+    """
+    assert {field.name for field in fields(StoredSession)} == {
+        "session_id",
+        "modified",
+        "cwd",
+        "parent",
+    }, "a new listing field belongs in `stored_row`, where both backends get it"
+
+    parent = _session(store, "p", cwd="/work")
+    _append(store, parent, "turn/start", {"turn": 0})
+    _append(store, parent, "turn/end", {"turn": 0, "reason": {"kind": "completed"}})
+    await store.flush(parent)
+    await store.flush(_reference_fork(store, "c", "p", boundary=2))
+
+    rows = {row.session_id: row for row in store.stored()}
+    assert rows["p"].parent is None and rows["p"].cwd == "/work"
+    assert rows["c"].parent == "p"
+
+
+async def test_a_bounded_read_stops_at_the_boundary(store: SessionPersistence) -> None:
+    """**What keeps a chained read from parsing an ancestor whole.**
+
+    A child forked early in a long parent inherits a sliver of it, and without a
+    bound the whole ancestor was still parsed, validated and frozen to produce
+    it. Measured on a 10 000-event ancestor contributing 50 events: 53.7 ms
+    unbounded against 0.3 ms bounded (JSONL, 179x), 61.3 against 0.4 (Turso,
+    173x). At the *tip* — the common fork — it changes nothing, because the child
+    wants nearly all of the ancestor anyway.
+    """
+    parent = _session(store, "p")
+    for turn in range(3):
+        _append(store, parent, "turn/start", {"turn": turn})
+        _append(store, parent, "turn/end", {"turn": turn, "reason": {"kind": "completed"}})
+    await store.flush(parent)
+
+    whole = store.read_own("p")[1]
+    bounded = store.read_own("p", 4)[1]
+
+    assert [event.seq for event in whole] == [0, 1, 2, 3, 4, 5]
+    assert [event.seq for event in bounded] == [0, 1, 2, 3], (
+        "everything below the bound, and no more"
+    )
+    assert store.read_own("p", 0)[1] == [], "a bound of zero asks for nothing"
+
+
+def test_the_walk_asks_each_ancestor_for_exactly_what_it_still_owes() -> None:
+    """The bound is the count the next generation down is short, nothing else."""
+    asked: list[tuple[str, int | None]] = []
+
+    def read_one(
+        session_id: str, upto: int | None, family: str | None
+    ) -> tuple[SessionHeader, list[SessionEvent]]:
+        asked.append((session_id, upto))
+        return _segment(session_id)
+
+    materialise(read_one, "c")
+    assert asked == [("c", None), ("b", 6), ("a", 3)], (
+        "the target whole, then each ancestor bounded by what remained"
+    )
+
+
+def test_a_backend_that_ignores_the_bound_still_reads_correctly() -> None:
+    """**`upto` is a hint, and the walk must not depend on it being honoured.**
+
+    Making the bound load-bearing would mean a backend that quietly ignored it
+    produced a *wrong* log rather than a slow one — which is precisely how
+    reference-forking came to be a silent no-op on Turso once already. So the
+    walk re-checks what it takes, and a backend that over-returns costs time.
+    """
+
+    def ignores_the_bound(
+        session_id: str, upto: int | None, family: str | None
+    ) -> tuple[SessionHeader, list[SessionEvent]]:
+        return _segment(session_id)  # every event it has, bound or no bound
+
+    header, events = materialise(ignores_the_bound, "c")
+    assert header.id == "c"
+    assert [event.seq for event in events] == list(range(9))
+
+
+def _segment(session_id: str) -> tuple[SessionHeader, list[SessionEvent]]:
+    """A three-file lineage a -> b -> c, each holding three of nine events."""
+    order = {"a": 0, "b": 3, "c": 6}
+    start = order[session_id]
+    parent = {"b": "a", "c": "b"}.get(session_id)
+    header = SessionHeader(
+        id=session_id,
+        created_at=1,
+        parent_session=parent,
+        seed_length=start or None,
+        family="a",
+    )
+    return header, [
+        SessionEvent(type="turn/start", seq=seq, time=1, data={"turn": seq})
+        for seq in range(start, start + 3)
+    ]
 
 
 def test_the_survey_and_the_reader_agree_on_how_deep_is_too_deep() -> None:

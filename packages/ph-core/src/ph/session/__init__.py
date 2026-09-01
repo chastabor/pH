@@ -33,7 +33,7 @@ from .request_header import (
     fold_request_header,
     header_equals,
 )
-from .session import Session, SessionHeader, SessionObserver
+from .session import Session, SessionHeader, SessionKind, SessionObserver
 from .store import (
     SessionForkError,
     SessionStore,
@@ -68,6 +68,7 @@ __all__ = [
     "SessionFoldCache",
     "SessionForkError",
     "SessionHeader",
+    "SessionKind",
     "SessionObserver",
     "SessionStore",
     "SurfaceError",

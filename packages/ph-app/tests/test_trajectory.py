@@ -25,11 +25,10 @@ import pytest
 from ph.cordis import Context
 from ph.llm.types import PluginSource
 from ph.persistence import read_session
-from ph.persistence.jsonl import session_path
 from ph.session import Session, SurfaceIntent, SurfaceReplace, is_fork_boundary
 from ph.session.json import thaw_json
 from ph.session.known_event_types import KNOWN_SESSION_EVENT_TYPES
-from ph.testing import assistant_payload, user_payload
+from ph.testing import assistant_payload, stored_log, user_payload
 from ph_app.tui.adapter import RECORDLESS as TRANSCRIPT_RECORDLESS
 from ph_app.tui.trajectory import HANDLERS, RECORDLESS, TrajectoryRecord, build_trajectory
 
@@ -264,7 +263,7 @@ def test_a_compaction_is_its_own_kind() -> None:
     session.append(
         "user/message",
         user_payload("(summary of earlier)", "m2"),
-        SurfaceIntent(SurfaceReplace(start=0, end=0), (first.seq,)),
+        SurfaceIntent(SurfaceReplace(replaces=(first.seq,)), (first.seq,)),
     )
     assert kinds(build_trajectory(session)) == ["user", "compacted"]
 
@@ -353,7 +352,7 @@ async def test_a_stored_log_and_a_live_one_project_identically(mount: Any, tmp_p
         )
     await ctx.sessions.flush(live)
 
-    header, events = read_session(session_path(ctx.session_persistence.root, live.id))
+    header, events = read_session(stored_log(ctx.session_persistence.root, live.id))
     stored = Session(live.id, seed=events, header=header)
 
     replayed = build_trajectory(stored)
