@@ -13,7 +13,7 @@ Citations are `file:line` at the time of writing.
 
 ---
 
-## 1. The shape of the thing
+## 1. The overall shape
 
 pH is an agent harness with **no privileged core**. The agent loop, the model
 adapter, the tool registry and the session log are not framework internals — they
@@ -429,7 +429,7 @@ Sibling gates: `test_cordis_events.py:61` (every dispatched event is declared),
 `test_seams.py` (per-seam failure-mode contracts), `test_layering.py:19` (import
 layering).
 
-### 3.4 Decline is not failure — a pattern worth naming
+### 3.4 Decline is not failure pattern
 
 `WorkspaceSeam.acquire` distinguishes **three** outcomes, and the distinction is
 load-bearing because half the directories a person runs pH in are not git
@@ -644,7 +644,7 @@ implementation refuses if the session or the **parent** is not live — checked
 ceiling** (`ph_rlm/subagents.py:333-379`). A deleted child is never rehydrated;
 the tombstone is the record.
 
-> ### A session resumes repeatedly, and that took a fix
+> ### A session resumes repeatedly
 >
 > **What a resume owes the store is not what the store already has.** A resume
 > seeds the stored events, then adds two things nobody wrote: the repair closers,
@@ -864,7 +864,7 @@ update the roster. And because `dispose` unwinds children before its own effects
 that handler runs when the child's scope is *already gone*, which bounds what it
 may do (§2.5).
 
-### 6.5 Capability: a child never holds more than its parent
+### 6.5 Capability: a child never holds more than its parent at time of initialization
 
 This is the security content of the hierarchy, and it is enforced at the **seam**,
 not left to providers (`seams/subagents.py:673-701`):
@@ -959,7 +959,7 @@ was chosen (`seams/workspace.py:589-614`).
 
 ---
 
-## 7. The five invariants, and where they bite
+## 7. The five invariants, and where they affect
 
 The port plan (`Python_Harness_Port_Plan.md` §2) lists five invariants carried
 from DeepSeek Harness. They are worth reading as *properties the architecture
@@ -1025,6 +1025,11 @@ and asserts **the seam's own context did not grow an effect**. A lint additional
 refuses `subprocess.Popen` and `tempfile.mkdtemp` outside the seams, "because the
 fiftieth plugin author will not have read §4.9" (`resources.py:5-8`).
 
+**Where it is imperfect.** Outside state needs to be idempotent. Should a change
+take place in an external database, or an email get sent out, those cannot be
+undone as the session may repeat those actions after the harness has unwound.
+The invariant is about the *harness*, not the external state.
+
 ### I3 — Model-visible means logged
 
 **Mechanism.** `Session.derive_messages()` (`session/session.py:310-333`) projects
@@ -1082,7 +1087,7 @@ Four rules the planner enforces:
 log through the same rules, so an external reconstructor must reach the same
 nodes (`surface.py:263-275`).
 
-**Where it bites.** `transcript()` and `derive_messages()` deliberately differ:
+**Areas affected.** `transcript()` and `derive_messages()` deliberately differ:
 the transcript keeps what compaction shadowed, because a human scrolling back
 should still see what they said. Two projections, one log.
 
@@ -1102,16 +1107,15 @@ Consumer. The implementation adds two things the statement does not:
    capability probes, one registration-time obligation check, and tree-walking
    gate tests that refuse an unclassified seam.
 
-**Where it bites — the payoff is real.** Containment tiers, code runtimes,
+**Areas affected — the benefits.** Containment tiers, code runtimes,
 compaction engines and persistence backends are provider swaps. The `worktree`
 tier is a row; removing it degrades every agent to `shared` with a recorded
 reason rather than breaking a consumer. The subagent seam holds *many* providers
 by name because "run a child" legitimately has several answers in one deployment.
 
-**The decline/fail distinction (§3.4) is part of this invariant, and is the part
-most often missed.** A seam must be able to say *"I could not serve this, and
-here is the code for why"* without that being an error — otherwise every optional
-tier becomes a startup failure.
+**The decline/fail distinction (§3.4) is part of this invariant.** A seam must
+be able to say *"I could not serve this, and here is the code for why"* without
+that being an error — otherwise every optional tier becomes a startup failure.
 
 ---
 
