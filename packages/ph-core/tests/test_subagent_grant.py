@@ -17,6 +17,13 @@ The second claim is smaller and about usefulness rather than safety: a skill
 named at spawn is **direction**. Its body goes in the child's prompt, because a
 child created to follow a procedure should not have to spend a turn fetching it,
 and might not.
+
+## Why `SubagentRun.scope` is handed back to the seam
+
+The ceiling was a documented obligation on *providers* before this field, and the
+second call site had already missed it: `rehydrate` builds a fresh scope for a
+settled child and narrowed nothing, so a child that outlived its own restriction
+came back holding the deployment-wide set.
 """
 
 from __future__ import annotations

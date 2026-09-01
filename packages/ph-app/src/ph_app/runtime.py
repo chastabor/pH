@@ -36,8 +36,8 @@ def compose(documents: Sequence[Path]) -> list[tuple[str, Any]]:
     """Read and parse the profile once, for a caller that mounts it repeatedly.
 
     The daemon mounts one `Context` per root and the YAML never changes between
-    them, so re-reading it per root was ~74% of the cost of starting one. Every
-    other mode composes exactly once and should keep calling `mounted(paths)`.
+    them, so re-reading it per root is most of the cost of starting one. Every other
+    mode composes exactly once and should keep calling `mounted(paths)`.
     """
     return Loader.from_paths(list(documents)).documents
 

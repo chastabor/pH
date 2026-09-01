@@ -536,17 +536,11 @@ class Kernel:
             value = await binding.dispatch(**frame["args"])
         except CodeRunFailure as failure:
             # Recorded, answered, *and* aborted — all three, because only the
-            # third actually enforces C3.
-            #
-            # The reply makes a well-behaved cell raise `RunStopped` and unwind.
-            # But a cell is not obliged to behave: `except BaseException: pass`
-            # followed by `Path(...).write_text(...)` completed the write, and
-            # the run then "failed" afterwards — the tool call reported a refusal
-            # the program had already routed around. Raw Python is not reachable
-            # by any waterfall, so the only thing that can stop it is ending the
-            # process's turn: the same frame-then-signal-then-kill ladder user
-            # cancellation uses. "Run-scoped abort fires" is the plan's wording
-            # and this is it.
+            # third actually enforces C3. The reply makes a well-behaved cell
+            # raise `RunStopped` and unwind, but a cell is not obliged to behave
+            # and raw Python is not reachable by any waterfall — so the only
+            # thing that can stop it is ending the process's turn, via the same
+            # frame-then-signal-then-kill ladder user cancellation uses.
             active.failure = failure
             await self._reply(frame["id"], ok=False, message=failure.message, fatal=True)
             if active.aborting_since is None:
@@ -607,19 +601,15 @@ class Kernel:
     async def _recv_line(self) -> bytes | None:
         """The next frame's bytes, or `None` when the child is gone or hostile.
 
-        Two things here are not incidental.
+        **The buffer is a `bytearray` and only its tail is scanned.** With `bytes` and
+        `+=`, a multi-megabyte frame copies the whole buffer per 64 KiB chunk and
+        re-scans it for a newline, which is quadratic in the frame size. Appending to a
+        `bytearray` and searching from the previous length makes both linear.
 
-        **The buffer is a `bytearray` and only its tail is scanned.** With `bytes`
-        and `+=`, a multi-megabyte frame copies the whole buffer per 64 KiB chunk
-        and re-scans it for a newline: a 16 MiB snapshot spent **834 ms of
-        1160 ms** doing exactly that. Appending to a `bytearray` and searching
-        from the previous length makes both linear — measured 1160 ms → 221 ms.
-
-        **The buffer is capped.** The child holds this descriptor and runs
-        model-written code, so `os.write(3, b"x" * 10**10)` is a thing it can do;
-        without a cap the host grows the buffer until it is killed. A frame past
-        the cap is not a frame — it is treated as the channel being unusable
-        (C10).
+        **The buffer is capped.** The child holds this descriptor and runs model-written
+        code, so `os.write(3, b"x" * 10**10)` is a thing it can do; without a cap the host
+        grows the buffer until it is killed. A frame past the cap is not a frame — it is
+        treated as the channel being unusable (C10).
         """
         sock = self._sock
         if sock is None:
@@ -661,10 +651,9 @@ class Kernel:
                     await anyio.wait_writable(sock)
                     sent = sock.send(view)
                 except (OSError, anyio.ClosedResourceError):
-                    # Only a real closure gets here now. Contention used to land
-                    # in this branch as `BusyResourceError` and was reported as
-                    # the child having exited — eight concurrent replies were
-                    # enough to "kill" a perfectly healthy kernel.
+                    # Only a real closure gets here: `_send_lock` is what keeps
+                    # contention from arriving as `BusyResourceError` and being
+                    # reported as the child having exited.
                     self._on_closed()
                     return
                 view = view[sent:]
@@ -879,12 +868,11 @@ def _declare(namespace: CodeBindingNamespace) -> dict[str, Any]:
 def _json_safe(value: Any) -> Any:
     """A tool's result in a form the reply frame can carry.
 
-    `thaw_json` is the whole job: a value that came back through the log is
-    frozen — a `MappingProxyType` over tuples — and `json.dumps` will not
-    serialize that. There is no round trip through JSON here, because `encode`
-    is about to serialize the frame anyway; doing it twice cost 2.8 ms against
-    1.2 ms for a 1 MiB result. Anything `json` still cannot represent is handled
-    by `encode`'s `default`.
+    `thaw_json` is the whole job: a value that came back through the log is frozen —
+    a `MappingProxyType` over tuples — and `json.dumps` will not serialize that. There
+    is deliberately **no round trip through JSON here**, because `encode` is about to
+    serialize the frame anyway. Anything `json` still cannot represent is handled by
+    `encode`'s `default`.
     """
     return thaw_json(value)
 

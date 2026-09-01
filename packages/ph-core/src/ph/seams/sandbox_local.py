@@ -28,9 +28,6 @@ Permission denied`. `sandbox-exec` is macOS-only and cannot be run here at all, 
 its profile is written deny-by-default and the probe is what stands between
 "unverified" and "claimed".
 
-What was measured — of the confinement, and of what the wrapper costs:
-`tests/test_sandbox_local.py`.
-
 @module ph.seams.sandbox_local
 """
 
@@ -211,34 +208,28 @@ class SandboxProbe:
 async def probe_sandbox(ctx: Context, backend: LocalBackend, scratch: Path) -> SandboxProbe:
     """Try to escape the sandbox, and claim the tier only if the kernel stopped it.
 
-    **Two checks in one process, and the second is what stops a useless backend
-    passing.** A profile that denies everything refuses the escape and would look
-    confining while being unusable — the first command an agent ran would fail
-    and somebody would switch the tier off. So the probe writes *inside* the
-    workspace, which must succeed, and *outside* it by absolute path, which must
-    not.
+    **Two checks, and the second is what stops a useless backend passing.** A profile
+    that denies everything refuses the escape and would look confining while being
+    unusable — the first command an agent ran would fail and somebody would switch
+    the tier off. So the probe writes *inside* the workspace, which must succeed, and
+    *outside* it by absolute path, which must not.
 
-    One spawn rather than two, because `sh` keeps going after a failed redirect
-    so both writes are attempted and both outcomes are readable afterwards. The
-    checks stay independent — "refused inside" and "escaped" remain
-    distinguishable — while the probe stops paying twice for namespace setup:
-    measured 14.5 ms as two spawns against 8.2 ms as one, on the serial startup
-    path where nothing else can overlap it.
+    One spawn rather than two, because `sh` keeps going after a failed redirect, so
+    both writes are attempted and both outcomes readable. The checks stay independent
+    — "refused inside" and "escaped" remain distinguishable — while the probe stops
+    paying twice for namespace setup on the serial startup path.
 
-    Not the exit code, ever. That lesson is written twice next door: `agentfs run
-    --experimental-sandbox` exits 0, prints nothing, and writes straight through
-    to the host; and `agentfs run` prints its whole session banner when the
-    sandbox failed to start and the command never ran. What the probe reads is
-    the files.
+    **Never the exit code.** What the probe reads is the files: a backend can exit 0
+    having written straight through to the host, and can print a whole session banner
+    when the sandbox failed to start and the command never ran.
 
-    The backend's **own words** are the decline, when it has any. "the sandbox
-    refused a write inside the workspace" is true and useless; `setting up uid
-    map: Permission denied` is what tells an operator to add an AppArmor profile.
+    The backend's **own words** are the decline, when it has any. "the sandbox refused
+    a write inside the workspace" is true and useless; `setting up uid map: Permission
+    denied` is what tells an operator to add an AppArmor profile.
 
-    Once, at mount, because it is a property of the host — and deliberately not
-    cached across processes: `kernel.apparmor_restrict_unprivileged_userns` is a
-    live sysctl, so a remembered "yes" is exactly the fail-open this row exists
-    to prevent.
+    Once, at mount, because it is a property of the host — and deliberately **not**
+    cached across processes: `kernel.apparmor_restrict_unprivileged_userns` is a live
+    sysctl, so a remembered "yes" is exactly the fail-open this row exists to prevent.
     """
     work = scratch / "sandbox-probe"
     workspace, outside = work / "work", work / "outside.txt"

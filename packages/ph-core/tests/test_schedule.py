@@ -31,6 +31,28 @@ paid on every `ph -p` and every TUI start that never sees a cron expression.
 works in UTC when handed a float and in the machine's zone when handed a naive
 datetime — an accident of the library rather than a decision. What made it visible
 was `ph agents schedule` printing the next fire time.
+
+## Why every numeric field on the wire is milliseconds
+
+The first version read `interval` as **seconds** while comparing it against
+millisecond stamps, which made a five-minute schedule fire every **300 ms**. One
+unit across `grace_ms`, `timeout_ms`, `duration_ms` and this seam's own
+`dueAt`/`firedAt` means no conversion and nothing to get backwards.
+
+## Why `created_at` comes from the event and not from the wire model
+
+`created_at` was a caller obligation nobody honoured, so **every schedule the
+daemon created anchored at epoch 0** — an hourly interval was due the moment it
+existed, and a cron's first claim walked forward from 1970, measured at **six and a
+half minutes of blocked event loop for `* * * * *`**. The event carries the
+timestamp already.
+
+## Why the fold short-circuits on `latest(CREATED)`
+
+The common root has no schedules at all — `schedule` is a `base.yaml` row, so every
+mounted root carries the seam — and the walk costs the same either way: **22.6 ms at
+500 000 events, whether or not it finds anything**. `latest` is an incremental fold,
+so the check answers in **84 ns**.
 """
 
 from __future__ import annotations

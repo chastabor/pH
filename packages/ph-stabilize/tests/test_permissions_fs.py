@@ -29,6 +29,11 @@ anywhere" must round to refusal. For a *walk* the same rounding refuses
 everywhere: `deny read **/.env` — the idiomatic spelling — has an empty head, so
 every directory "could" hold a match. Measured on this repository before the
 guard: **11 489 results down to 6.**
+
+## Why `_prefix_of` is cached
+
+`_spellings` runs per gated read *and per file a walk visits*, and P4-06 measured
+`Path.relative_to` at **26 µs there — 92% of the check**.
 """
 
 from __future__ import annotations

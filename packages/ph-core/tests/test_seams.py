@@ -4,6 +4,16 @@ Grouped because each seam's contract is small and its *failure mode* is the
 interesting part: approval fails closed, sandbox refuses rather than passing
 through, credentials never surrender a value above the adapter edge, and a
 persistent code runtime cannot register without promising to snapshot.
+
+## Why `assemble` builds the `AssembleContext` itself
+
+Callers used to construct it and hand it in, which made one object play both roles:
+the thing a caller *states* (a `Boundary`, possibly `DEPLOYMENT`) and the thing a
+provider *reads* (a real `Context`).
+
+That cost more than a type. The waterfall was handed the **caller's** request while
+providers were handed a narrowed copy, so a `system-prompt/assemble` listener and a
+`PromptSection.text` could see two different scopes for one assembly.
 """
 
 from __future__ import annotations

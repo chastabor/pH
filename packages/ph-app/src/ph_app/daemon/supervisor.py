@@ -182,9 +182,9 @@ class Root:
     """The retry ladder's state (P5-04), folded from the log when this root
     starts and maintained by `retry`/`give_up`/`recovered` from there.
 
-    Held rather than re-folded, for the measurement `accepted` records below: a
-    whole-log scan per read is 4.9 ms at 200 000 events, and `status` is read
-    for every root on every `sessions/list`."""
+    Held rather than re-folded, for the reason `accepted` gives below: `status` is
+    read for every root on every `sessions/list`, and a whole-log scan per read puts
+    that on the daemon's event loop."""
     commands: set[str] = field(default_factory=set)
     """Commands already run, folded from this session's own log.
 
@@ -485,9 +485,9 @@ class Supervisor:
             self.roots[root_id] = root
 
             def relay(source: Session, event: SessionEvent) -> None:
-                # Nothing is built before there is somebody to send it to: this runs
-                # once per streamed chunk, and rendering a payload for zero watchers
-                # measured 6.6 µs an event — 13 ms of a 2 000-chunk turn, discarded.
+                # Nothing is built before there is somebody to send it to: this
+                # runs once per streamed chunk, so a payload rendered for zero
+                # watchers is work thrown away per event.
                 if not root.subscribers:
                     return
                 root.publish(
@@ -763,21 +763,19 @@ class Supervisor:
             schedule = root.ctx.get("schedule")
             if schedule is None:
                 continue
-            # The whole per-root body, not just the claim. The guard used to
-            # cover `claim` alone — which barely raises, since a bad expression
-            # logs and declines — while `prompt` and `_flush`, the two calls
-            # that genuinely fail, sat outside it. One bad root taking the pass
-            # down is what this is for.
+            # The whole per-root body, not just the claim: `claim` barely raises
+            # (a bad expression logs and declines) where `prompt` and `_flush` are
+            # the two calls that genuinely fail. One bad root must not take the
+            # whole pass down.
             try:
                 claimed = schedule.claim(root.session, now=stamp)
                 for entry in claimed:
                     log.info("ph_app.daemon: root %s firing schedule %s", root.id, entry.id)
                     await self.prompt(root.id, entry.prompt)
                     fired.append(entry.id)
-                # Only when something was appended. The condition also read
-                # `or schedule.live(...)`, which folded the whole log a second
-                # time to decide to flush a buffer the first fold had just left
-                # empty — 24 ms a root at 500 000 events, every five seconds.
+                # Only when something was appended: adding `or schedule.live(...)`
+                # folds the whole log a second time to decide whether to flush a
+                # buffer the first fold has just left empty, every five seconds.
                 if claimed:
                     await self._flush(root)
             except Exception:
@@ -946,19 +944,15 @@ class Supervisor:
         # root reaching this line is idle and unwatched — exactly the steady
         # state the sweeper exists for — so a fold above it runs on every sweep
         # of the whole ninety-minute window and is discarded eighty-nine times
-        # out of ninety. Measured over one idle window at 500 000 events across
-        # 50 roots: **60.9 s of event loop as written, 1.3 ms with this line
-        # first**, and `idle_for` costs 43 ns.
+        # out of ninety.
         if root.idle_for(now) < after * 1000:
             return False
         # Through the seam's cached fold rather than the bare function:
         # `SessionFoldCache` keys on `session.seq`, and an idle root's log does
         # not grow, so every sweep after the first is a dict hit instead of a
-        # whole-log walk (0.09 µs against 13.5 ms at 500 000 events). That is
-        # what saves the root this returns `False` for — idle, unwatched, one
-        # unsettled child — which would otherwise re-fold every sixty seconds
-        # for the life of the daemon: 16 minutes of event loop a day at 50 such
-        # roots.
+        # whole-log walk. That is what saves the root this returns `False` for —
+        # idle, unwatched, one unsettled child — which would otherwise re-fold
+        # every sixty seconds for the life of the daemon.
         subagents = root.ctx.get("subagents")
         roster = subagents.roster(root.session) if subagents is not None else {}
         if any(child_is_live(child) for child in roster.values()):

@@ -14,6 +14,19 @@ P5-01 shipped the two transports as two: the daemon grew `root/*` methods and
 invisible because **each transport only ever tested itself** — which is why the
 envelope, the version and the capability block now live in `ph_app.protocol` and
 each server owns only its method table.
+
+## Why the daemon composes the profile once and mounts it many times
+
+The daemon mounts one `Context` per root and the YAML never changes between them,
+so re-reading it per root was **~74% of the cost of starting one**. Every other
+mode composes exactly once.
+
+## Why the snapshot page is a count and not a byte budget
+
+The first draft measured each event with its own `dumps` to fill a 512 KiB page,
+which cost **8.2 ms per page — 2.2x the encode it existed to bound** — and all of
+it was discarded. A count needs no measuring pass, and the transport's `MAX_LINE`
+is the real protection against an oversized frame.
 """
 
 from __future__ import annotations

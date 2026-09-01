@@ -10,6 +10,13 @@ all git's behaviour, not ours.
 absolute-path write escapes a worktree and is supposed to; only the `sandbox`
 tier refuses it (E13). A test here asserting otherwise would be the tier-table
 regression §12 Q10 exists to prevent.
+
+## Why the decline code is read off git's state and not its stderr
+
+The first version matched `"already used by worktree"` in the message. That string
+is gettext-translated — `ctx.subprocess` passes `LANG`/`LC_ALL` through, since they
+are not credential-shaped — so on a non-English host **every decline collapsed to
+the generic code**, in the row whose entire purpose is telling an operator why.
 """
 
 from __future__ import annotations

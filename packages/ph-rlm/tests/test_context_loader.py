@@ -9,6 +9,12 @@ model as merged cell stdout, capped but never offloaded, with nothing to attribu
 a query to. Registered tools reached as `await tools.context_search(...)` yield
 one governed dispatch per query, which is what lets `tools/post-execute` reshape
 one oversized result and leave its siblings alone (C5).
+
+## Why `_joined` is built once and sliced
+
+`chunk` slices it through the offsets `Document` already keeps, so paging a large
+corpus is arithmetic per call. The first version rebuilt — and, for lines, re-split
+— the whole corpus on **every page of a walk that exists to visit all of it**.
 """
 
 from __future__ import annotations

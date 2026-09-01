@@ -37,8 +37,6 @@ registers only if the host copy is untouched.
 **Nothing is ever installed.** A missing binary or an unavailable backend is a
 decline that says so, in `ph doctor`, through the diagnostics seam.
 
-The measurements behind each of those choices: `tests/test_workspace_agentfs.py`.
-
 @module ph.seams.workspace_agentfs
 """
 
@@ -219,17 +217,15 @@ class OverlayProbe:
 async def probe_overlay(ctx: Context, scratch: Path) -> OverlayProbe:
     """Write a canary through a throwaway overlay and see whether the host moved.
 
-    **Isolation, not availability, and the difference was measured.** With
-    `agentfs v0.6.4` installed, `agentfs run --experimental-sandbox` exits 0,
-    prints no error, and writes straight through to the host — it sandboxes only
-    its own mount — so a probe that checked the exit code would have claimed the
-    tier while the agent had none. This claims the tier only if the host copy is
-    unchanged after a write through the overlay.
+    **Isolation, not availability.** A backend can exit 0, print no error, and write
+    straight through to the host — sandboxing only its own mount — so a probe that
+    checked the exit code would claim the tier while the agent had none. This claims
+    the tier only if the host copy is unchanged after a write through the overlay.
 
-    Runs once, at mount, because the answer is a property of the host: a kernel
-    that refuses namespaces or a FUSE backend that will not start does not change
-    its mind between agents, and re-probing per acquire is how a profile that
-    declines pays for the tier it is not using.
+    Runs once, at mount, because the answer is a property of the host: a kernel that
+    refuses namespaces or a FUSE backend that will not start does not change its mind
+    between agents, and re-probing per acquire is how a profile that declines pays for
+    the tier it is not using.
     """
     if shutil.which("agentfs") is None:
         return OverlayProbe(False, "agentfs is not installed")
@@ -288,11 +284,10 @@ class AgentFsProvider:
     tier: ContainmentTier = field(default="worktree", init=False)
     """**A peer of the worktree tier, not a rung above it.**
 
-    An overlay bounds exactly what a worktree bounds — writes that resolve
-    against cwd — and misses exactly what a worktree misses, an absolute-path raw
-    write, which was verified by writing outside the mount from a command running
-    inside it. The rung between `worktree` and `sandbox` belongs to something that
-    confines the process; naming it here would make `ph doctor` overstate this.
+    An overlay bounds exactly what a worktree bounds — writes that resolve against cwd
+    — and misses exactly what a worktree misses, an absolute-path raw write. The rung
+    between `worktree` and `sandbox` belongs to something that confines the process;
+    naming it here would make `ph doctor` overstate this.
     """
 
     def describe_tier(self) -> TierDescription:
@@ -379,10 +374,9 @@ class AgentFsProvider:
     async def _record_base(self, store: Path, base: Path) -> None:
         """Remember where this overlay came from, if it came from a repository.
 
-        Gated on a `stat` rather than asked of git unconditionally: on a base
-        that is not a repository the spawn fails just as fast as it succeeds
-        (~2 ms measured either way), which is a process per agent bought on the
-        one branch where it can return nothing.
+        Gated on a `stat` rather than asked of git unconditionally: on a base that
+        is not a repository the spawn fails just as slowly as it succeeds, which is a
+        process per agent bought on the one branch where it can return nothing.
         """
         if not await anyio.to_thread.run_sync((base / ".git").exists):
             return
@@ -521,12 +515,11 @@ test that already had the path in hand.
 _DIFF_LINE = re.compile(r"^([AMD]) (\w) (/.*)$")
 """`agentfs diff`'s rows: an operation, a type, and an absolute path in the overlay.
 
-**Any type letter, not a list of the ones known when this was written.** The
-first version matched `[fd]` and AgentFS types a symlink `l`, so every symlink an
-agent created was dropped from the changeset — silently, because a row that does
-not match is a row that is not there. `_apply` refuses a letter it does not
-understand instead, which turns the next new type into a refusal naming it rather
-than into work that quietly fails to arrive.
+**Any type letter, not a list of the ones known when this was written.** A row
+that does not match is a row that is not there, so a narrower pattern drops
+whatever AgentFS learns to report next — silently. `_apply` refuses a letter it
+does not understand instead, which turns a new type into a refusal naming it
+rather than into work that quietly fails to arrive.
 """
 
 

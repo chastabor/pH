@@ -246,9 +246,10 @@ class SessionStore:
         the parent may run on forever without invalidating a descendant. This needs no
         lock, no copy-on-write and no invalidation.
 
-        A fork is cheap on disk and **not** free in memory, and the seed is still handed
-        over in full because every reader downstream wants a whole session. What that
-        costs, and why a trusted-seed path was not taken here: `tests/test_fork.py`.
+        A fork is cheap on disk and **not** free in memory: `_readmit` re-freezes every
+        seeded event. The seed is still handed over in full because every reader
+        downstream wants a whole session, and a trusted-seed path would be a change to
+        the session model rather than to `fork`.
         """
         if child_session_id is not None and child_session_id in self._entries:
             raise SessionForkError(
@@ -400,15 +401,14 @@ def is_fork_boundary(log: Sequence[SessionEvent], boundary: int) -> bool:
 def fork_boundaries(log: Sequence[SessionEvent]) -> set[int]:
     """Every seq `fork` would accept, from one pass over the log (A6).
 
-    The same rule as `open_turn_at`, answered for the whole log at once, because
-    a reader that marks *which records* a fork may aim at needs it for every one
-    of them — and asking per record rescans the prefix each time. That is
-    quadratic: an 8 000-event session cost 467 ms to fold, which became a frozen
-    UI once the trajectory could be opened from a running chat (P4-17).
+    The same rule as `open_turn_at`, answered for the whole log at once, because a
+    reader that marks *which records* a fork may aim at needs it for every one of them
+    — and asking per record rescans the prefix each time, which is quadratic and
+    freezes a UI that opens the trajectory from a running chat (P4-17).
 
-    Keyed by seq and admitted only where the seq is the event's own index, which
-    is the contiguity `_fork_seed` requires anyway — so this marks nothing the
-    fork would then refuse.
+    Keyed by seq and admitted only where the seq is the event's own index, which is the
+    contiguity `_fork_seed` requires anyway — so this marks nothing the fork would then
+    refuse.
     """
     boundaries: set[int] = set()
     open_turn = False

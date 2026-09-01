@@ -123,10 +123,9 @@ class DaemonClient:
         await waiting.wait()
         frame = self._replies.pop(request_id, {})
         if not frame:
-            # Woken by the pump ending rather than by an answer. Named, rather
-            # than the empty `{}` this used to return, which every caller then
-            # read as a successful reply with no fields in it — and named as a
-            # *disconnection*, because no server said no.
+            # Woken by the pump ending rather than by an answer. Named, because an
+            # empty `{}` reads as a successful reply with no fields in it — and
+            # named as a *disconnection*, because no server said no.
             raise DaemonGone
         if "error" in frame:
             raise DaemonError.of(frame["error"])

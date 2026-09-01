@@ -20,6 +20,16 @@ path, the common one, **2.5x** more expensive than before `type:` existed, becau
 the tag scan ran whether or not anyone had typed a tag. A malformed term also
 constructed and raised a `SelectorError` per record: thousands of exceptions caught
 and dropped.
+
+**The segment-chain title cache.** A segmented run is one chain, so every row below
+walks the same ancestors. Measured on a **60-segment chain: 550 opens and 39.9 ms
+against 60 and 4.6 ms** — synchronously, on the UI thread.
+
+**The trajectory filter coalesces keystrokes.** `DataTable` virtualizes *rendering*,
+not row construction: a refill measures every cell of every row, so a
+thousand-record log costs **~150 ms per keystroke and typing four characters cost
+625 ms**. Row surgery is worse, because removing the rows that drop out reindexes
+the table each time — so the fix is the frequency, not the primitive.
 """
 
 from __future__ import annotations

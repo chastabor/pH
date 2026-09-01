@@ -53,10 +53,10 @@ for its history should not be handed a frame that trips the transport's own
 `MAX_LINE` — or a reply it must buffer whole before rendering a line. The cursor
 in each reply is what asks for the next page.
 
-**A count, not a byte budget.** The first draft measured each event with its own
-`dumps` to fill a 512 KiB page, which cost 8.2 ms per page — *2.2x the encode it
-existed to bound*, and all of it discarded. A count needs no measuring pass, and
-the transport's `MAX_LINE` is the real protection against an oversized frame.
+**A count, not a byte budget.** Measuring each event with its own `dumps` to fill
+a byte page costs more than the encode it exists to bound, and all of it is
+discarded. A count needs no measuring pass, and the transport's `MAX_LINE` is the
+real protection against an oversized frame.
 """
 
 Dispatch = Callable[[str, dict[str, Any]], Awaitable[Any]]
@@ -201,9 +201,8 @@ async def respond(request_frame: dict[str, Any], dispatch: Dispatch) -> dict[str
         #
         # Read off the *instance*, which is what already carries a code here —
         # `HarnessError`, `SessionForkError` and friends all set `self.code` in
-        # `__init__`. The first draft read `type(error)`, so those four families
-        # were structurally invisible to it and a `SessionForkError` out of
-        # `sessions.create` reached the client unnamed on this very path.
+        # `__init__`, so keying on `type(error)` would make those four families
+        # structurally invisible.
         reason = getattr(error, "code", "")
         if isinstance(reason, str) and reason:
             failure["data"] = {"reason": reason}

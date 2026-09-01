@@ -38,6 +38,21 @@ plus exit 0 is not evidence the command ran. The actual failure was `Failed to
 make mounts private: Permission denied`, and the host file was unchanged because
 **the command never ran** — not because it was contained. Never read an exit code
 as proof of confinement (E13).
+
+**The exact version this was measured against.** With `agentfs v0.6.4` installed,
+`agentfs run --experimental-sandbox` exits 0, prints no error, and writes straight
+through to the host — it sandboxes only its own mount. A probe checking the exit
+code would have claimed the tier while the agent had none.
+
+**The symlink that was silently dropped.** The diff-row pattern first matched
+`[fd]`, and AgentFS types a symlink `l` — so every symlink an agent created fell
+out of the changeset, silently, because a row that does not match is a row that is
+not there. `_apply` now refuses a type letter it does not understand.
+
+**Why `_record_base` is gated on a `stat`.** On a base that is not a repository the
+`git` spawn fails just as slowly as it succeeds (**~2 ms either way**), so the
+`stat` buys a process per agent on the one branch where the spawn can return
+nothing.
 """
 
 from __future__ import annotations

@@ -12,6 +12,14 @@ refuses rather than adopting a directory it cannot vouch for (F9).
 0.16 µs** for the separator-aware compare — the same finding P4-06 recorded for
 `_spellings`, which `is_under` would otherwise have quietly reintroduced at every
 gated write.
+
+## Why `runtime_source` is a field and not a lookup table
+
+P5-11 first answered "which variable did the runtime tier come from" with a
+`{tier: variable}` table in its own module — a second copy of a decision
+`_resolve_runtime` had already made. It had drifted (naming `LOCALAPPDATA` for a
+Windows tier that falls back to `$XDG_CACHE_HOME` or `~/.cache`) and raised
+`KeyError` inside `ph doctor` for a tier added in `paths.py` and not there.
 """
 
 from __future__ import annotations

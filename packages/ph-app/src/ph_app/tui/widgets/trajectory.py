@@ -288,11 +288,10 @@ class TrajectoryPanel(Vertical):
     def on_input_changed(self, event: Input.Changed) -> None:
         """Coalesce a burst of keystrokes into one rebuild.
 
-        `DataTable` virtualizes *rendering*, not row construction: a refill
-        measures every cell of every row, so a thousand-record log costs ~150 ms
-        per keystroke and typing four characters cost 625 ms of it. Row surgery
-        is worse — removing the rows that drop out reindexes the table each time
-        — so the fix is the frequency, not the primitive.
+        `DataTable` virtualizes *rendering*, not row construction: a refill measures
+        every cell of every row, so the cost is per keystroke over the whole log. Row
+        surgery is worse — removing the rows that drop out reindexes the table each
+        time — so the fix is the frequency, not the primitive.
         """
         if self._pending is not None:
             self._pending.stop()

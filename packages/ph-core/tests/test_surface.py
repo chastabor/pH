@@ -14,6 +14,19 @@ The first version resolved each named seq by scanning the node list from positio
 measured 4.5 ms against 0.13 ms** for the range op it replaced — **35x**, and
 quadratic in the number of names, which is precisely the direction compaction
 grows.
+
+## Two surface fast paths, and what they are worth
+
+**The single-name replace keeps the membership scan.** A scan stops at the node it
+finds, so replacing an early one costs its position, where the set always costs the
+whole surface. Building the set unconditionally made a pass of **200 in-place
+rewrites on a 2 000-node surface slower than the range op it replaced — 16.7 ms
+against 9.8** — because almost every replace names exactly one node.
+
+**The single-node splice stays O(1).** Every `truncate_arguments`, every offloaded
+tool result and every elided paste is one node standing in for one node. Rebuilding
+the whole list for those measured **3.3x slower** across a realistic pass than the
+same-length slice assignment.
 """
 
 from __future__ import annotations

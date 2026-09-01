@@ -958,11 +958,11 @@ class SummarizeEngine:
             return False
         text = text_of(block.content, placeholder=lambda kind: f"[{kind}]")
         call_id = block.tool_call_id
-        # The offload row's own operation, not a second copy of it: where the
-        # file goes, the `offload/spilled` accounting and the sentence the model
-        # reads to find it are one relocation however it was triggered. Spelled
-        # twice, the two had already drifted on `source` — which becomes
-        # `SpillRef.retrieval_hint`, i.e. what the model is actually told.
+        # The offload row's own operation, not a second copy of it: where the file
+        # goes, the `offload/spilled` accounting and the sentence the model reads to
+        # find it are one relocation however it was triggered. `source` becomes
+        # `SpillRef.retrieval_hint` — what the model is actually told — so two
+        # spellings disagree about that.
         replacement = await spill_tool_result(
             self.ctx, session, call_id=call_id, source=f"{call_id} result", text=text
         )

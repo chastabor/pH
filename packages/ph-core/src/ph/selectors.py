@@ -21,9 +21,6 @@ Invariants enforced here:
 * An explicit scheme a surface cannot serve is refused, not answered empty.
 * No selectors at all admits everything.
 
-The collision this exists for, and why the scheme is not stored in the type
-names instead: `packages/ph-core/tests/test_selectors.py`.
-
 @module ph.selectors
 """
 

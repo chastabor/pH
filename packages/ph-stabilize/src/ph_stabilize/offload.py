@@ -143,8 +143,8 @@ def oversized(text: str, config: Config) -> bool:
     """Whether one result's text trips either threshold.
 
     The cheap character count first: the byte count is only asked when a
-    deployment set `max_inline_bytes`, and encoding a 2 MB result to answer a
-    question the char count already answered would be 70 µs per call.
+    deployment set `max_inline_bytes`, so a large result is not encoded to answer a
+    question the char count already answered.
     """
     if over_token_limit(text, config.token_limit):
         return True

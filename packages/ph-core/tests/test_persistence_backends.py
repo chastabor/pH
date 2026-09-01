@@ -47,6 +47,41 @@ the other by slicing the suffix, and a `StoredSession` field added to one listin
 was missed by the other. That is why `ph.persistence.families` exists — two
 implementations whose docstrings have to assert they agree ("JSONL's rule exactly")
 are not a mechanism.
+
+## What the Turso `track` seed offset must not be computed from
+
+The first version re-entered on every call and seeded from an index into the *log*
+computed from the length of the *buffer* — two numbers that stop agreeing after
+the first flush, so a resumed session re-queued its whole log and rewrote it. The
+boundary is `durable_length`, declared by the caller that knows.
+
+It also opened the database inside `track` to ask whether a header was owed, **on
+the event-loop thread**, because `track` is a synchronous `session/created`
+listener. JSONL's equivalent is a `stat`, and `INSERT OR REPLACE` means nothing
+needed the answer.
+
+## What the family layout costs a read that has only an id
+
+Measured at 200 families: **5.6 µs for the root fast path, 543 µs for a scan that
+finds, 1.14 ms for one that does not.** A root is one `stat` because its family is
+its own id; anything else is O(families), which is why callers holding a family go
+through `path_under` instead.
+
+## Why `StoredSession` carries no `size` and no `title`
+
+`size` meant two different things — bytes on disk from JSONL, an event count from
+Turso — in one field a picker renders with `filesize.decimal`, and **93% of the
+Turso listing's cost** went to producing the half nobody could interpret. `title`
+was set by neither backend: a field that is always empty is an affordance that
+lies, and it would have let a picker migration fall through to hex ids with nothing
+failing.
+
+## Why the Turso listing drops the handles it opened
+
+Every `_peek_header` opens a database, runs the schema DDL and caches the handle —
+**1.53 ms each, against 0.021 ms for the header `SELECT`** it was opened for, and
+never reused. Left cached, a 500-session survey holds **500 open databases and 500
+`-wal`/`-shm` sidecars** for the life of the process.
 """
 
 from __future__ import annotations

@@ -120,21 +120,17 @@ and a fourth answer fails to type-check at every site that has to handle it."""
 WalkScreen = Callable[[str, str, Any, bool], WalkDecision]
 """`(path, name, agent, is_dir) -> WalkDecision`. See `FsService.screen`.
 
-**Strings, not a `Path`, and that is a measurement rather than a preference.**
-P6-17's whole finding was that the walk pays for `pathlib` — and a screen asked
-about a `Path` puts the cost straight back, because `_walk` holds the joined
-string already and would build one per candidate purely to hand it over. Every
-screen then converts it back: `fs-local`'s ignore list wants the bare name, and
-`permissions-fs` calls `as_posix()` inside `_spellings` on its first line.
-Measured over this repository, `Path` against `str`: **41.1 ms → 28.8 ms** with
-the ignore screen alone, and **112.6 ms → 62.8 ms** with three anchored rules
-mounted — the largest single win left after P6-17, and it is entirely the type.
+**Strings, not a `Path`.** The walk pays for `pathlib` (P6-17), and a screen asked
+about a `Path` puts the cost straight back: `_walk` holds the joined string
+already and would build one per candidate purely to hand it over, which every
+screen then converts back — `fs-local`'s ignore list wants the bare name, and
+`permissions-fs` calls `as_posix()` on its first line.
 
-`path` is absolute and **posix-separated on every platform**, because that is
-what rule patterns and `matches_glob` are written in; `name` is the bare final
-component, so the common screen is a set lookup rather than a parse. A screen
-that genuinely needs a `Path` builds one on the branch that needs it, which for
-`permissions-fs` is the rare `outside-workspace` check."""
+`path` is absolute and **posix-separated on every platform**, because that is what
+rule patterns and `matches_glob` are written in; `name` is the bare final
+component, so the common screen is a set lookup rather than a parse. A screen that
+genuinely needs a `Path` builds one on the branch that needs it.
+"""
 
 WalkDecider = Callable[[str, str, bool], WalkDecision]
 """A walk's screens, with its agent already bound. See `FsService._decider`."""
@@ -618,11 +614,11 @@ def _walk(base: Path, pattern: str, limit: int | None, decide: WalkDecider | Non
     it is spelled as an absence rather than a predicate that always agrees: it lets
     the loop skip building a `Path` per candidate for a policy question nobody asked.
 
-    The relative path is a slice rather than `Path.relative_to`, the join happens
-    once, and `glob` returns `str` rather than `Path`. All three are measurements;
-    they are recorded in `tests/test_fs.py`. `os.sep` is translated rather than
-    assumed, because `matches_glob` speaks posix, and the branch is hoisted out of
-    the loop since the answer is fixed for the process.
+    Three shapes here are load-bearing on a walk of thousands of files: the relative
+    path is a slice rather than `Path.relative_to`, the join happens once, and `glob`
+    returns `str` rather than `Path`. `os.sep` is translated rather than assumed,
+    because `matches_glob` speaks posix, and the branch is hoisted out of the loop
+    since the answer is fixed for the process.
     """
     root = os.fspath(base)
     cut = len(root) + (0 if root.endswith(os.sep) else 1)
@@ -655,17 +651,16 @@ def _walk(base: Path, pattern: str, limit: int | None, decide: WalkDecider | Non
 def matches_glob(candidate: str, pattern: str) -> bool:
     """`Path.glob` semantics: `*` stays inside one segment, `**` crosses them.
 
-    Public because a permission row's path patterns and this seam's own `glob`
-    tool must mean the same thing by `**/*.env`. Two glob dialects in one
-    harness is a rule someone writes once and is then wrong about forever.
+    Public because a permission row's path patterns and this seam's own `glob` tool
+    must mean the same thing by `**/*.env`. Two glob dialects in one harness is a rule
+    someone writes once and is then wrong about forever.
 
-    **`*` does not cross a separator, and getting that wrong has a direction.**
-    The first version of this was `fnmatch`, whose `*` matches `/` — so
-    `docs/*.md` also matched `docs/private/keys.md`. For a search box that is a
-    quirk; for an ACL evaluated first-match-wins it is a hole, because the idiom
-    the rules are written in is a narrow `allow` above a broad `deny`, and an
-    `allow` that is silently wider than written permits what the `deny` under it
-    was there to stop.
+    **`*` must not cross a separator, and getting that wrong has a direction.**
+    `fnmatch`'s `*` matches `/`, so `docs/*.md` would also match
+    `docs/private/keys.md`. For a search box that is a quirk; for an ACL evaluated
+    first-match-wins it is a hole, because the idiom the rules are written in is a
+    narrow `allow` above a broad `deny` — and an `allow` silently wider than written
+    permits what the `deny` under it was there to stop.
     """
     return _compiled(pattern).match(candidate) is not None
 
@@ -781,15 +776,13 @@ async def apply(ctx: Context, config: Config) -> None:
     def ignore(_path: str, name: str, _agent: Any, is_dir: bool) -> WalkDecision:
         """The ignore list as an ordinary screen, not as a branch inside the walk.
 
-        Directories only: the constant was matched against directory names and
-        nothing else, and a file called `dist` was always visible. Registered
-        here rather than known to `_walk` so there is one mechanism for what the
-        walk skips — which is what lets a deployment reconfigure it above and
-        what gives the `.gitignore` row somewhere to land.
+        **Directories only**: the constant is matched against directory names, so a file
+        called `dist` stays visible. Registered here rather than known to `_walk` so there
+        is one mechanism for what the walk skips — which is what lets a deployment
+        reconfigure it and what gives the `.gitignore` row somewhere to land.
 
-        A set membership on the `name` the walk already had, which is what the
-        `str` half of the `WalkScreen` contract is for: reading `.name` off a
-        `Path` built for the purpose measured 70x this.
+        A set membership on the `name` the walk already had, which is what the `str` half
+        of the `WalkScreen` contract is for.
         """
         return "prune" if is_dir and name in ignored else "yield"
 

@@ -70,14 +70,12 @@ class PathRoots:
     runtime_source: str = ""
     """The environment variable the runtime tier came from, `""` for tier 3.
 
-    Carried beside the tier because it is decided at the same instant and by the
-    same `if`: `_resolve_runtime` picks a tier *because* it read a particular
-    variable, and a consumer that wanted to print which one had no way to ask.
-    P5-11 first answered that with a `{tier: variable}` table in its own module —
-    a second copy of this decision, one that had already drifted (it named
-    `LOCALAPPDATA` for a windows tier that falls back to `$XDG_CACHE_HOME` or
-    `~/.cache`) and that raised `KeyError` inside `ph doctor` for a tier added
-    here and not there. A field cannot be added without naming its source."""
+    Carried beside the tier because it is decided at the same instant and by the same
+    `if`: `_resolve_runtime` picks a tier *because* it read a particular variable, and
+    a consumer that wants to print which one has no other way to ask. A
+    `{tier: variable}` table anywhere else is a second copy of this decision that can
+    drift, and can `KeyError` on a tier added here and not there.
+    """
 
     def sessions_dir(self) -> Path:
         return self.home / "sessions"
@@ -251,9 +249,9 @@ def is_under(candidate: Path, root: Path) -> bool:
     """Whether `candidate` is `root` or inside it, both taken as given.
 
     A separator-aware prefix compare, not `Path.relative_to`, which allocates a
-    `Path` per root segment — the measurement is in `tests/test_paths.py`.
-    `normcase` because `relative_to` folds case on Windows and a naive compare would
-    not, which is the one behaviour worth keeping from it.
+    `Path` per root segment and runs at every gated write. `normcase` because
+    `relative_to` folds case on Windows and a naive compare would not, which is the
+    one behaviour worth keeping from it.
 
     **Neither path is resolved.** A caller needing symlink-safety must `resolve()`
     *before* asking: resolving inside would answer a different question than a

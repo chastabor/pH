@@ -27,6 +27,35 @@ P6-19's string screen contract worth **414 ms → 32 ms** over this repository's
 The screen's own contract follows from the same measurement: it is handed a
 **string** and a bool, so a walk that consults it does not construct a `Path` per
 candidate to ask a question that is usually "yield".
+
+## Why the screen contract is a `str` and not a `Path`
+
+The largest single win left after P6-17, and it is entirely the type. `_walk`
+already holds the joined string, so a screen asked about a `Path` would have it
+build one per candidate purely to hand it over — and every screen converts it
+back: `fs-local`'s ignore list wants the bare name, `permissions-fs` calls
+`as_posix()` inside `_spellings` on its first line.
+
+Measured over this repository, `Path` against `str`: **41.1 ms -> 28.8 ms** with
+the ignore screen alone, and **112.6 ms -> 62.8 ms** with three anchored rules
+mounted.
+
+## The glob dialect, and why `fnmatch` was wrong for it
+
+`matches_glob` implements `Path.glob` semantics: `*` stays inside one segment,
+`**` crosses them. The first version used `fnmatch`, whose `*` matches `/` — so
+`docs/*.md` also matched `docs/private/keys.md`.
+
+For a search box that is a quirk. For an ACL evaluated first-match-wins it is a
+hole, because the idiom the rules are written in is a narrow `allow` above a broad
+`deny`, and an `allow` silently wider than written permits exactly what the `deny`
+under it was there to stop.
+
+## Why the built-in ignore list is a screen and not a branch in `_walk`
+
+It is a set membership on the `name` the walk already holds — reading `.name` off a
+`Path` built for the purpose measured **70x** that. Directories only: the constant
+is matched against directory names, so a file called `dist` stays visible.
 """
 
 from __future__ import annotations

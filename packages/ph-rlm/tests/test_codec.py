@@ -5,6 +5,12 @@ here is about the host surviving that: no forged field reaches a handler, no
 non-numeric id is ever echoed back, and nothing the child can send makes the
 decoder raise — because a decoder that raises is a decoder the child can crash
 the host with, on demand.
+
+## Why `_DECODER` is built once
+
+A `parse_int` keyword bypasses `json.loads`'s cached decoder, so every frame was
+constructing a fresh `JSONDecoder` and scanner: **~3 µs of the ~9 µs `decode` spent
+per frame**.
 """
 
 from __future__ import annotations

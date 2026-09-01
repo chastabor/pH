@@ -3,8 +3,8 @@
 **One statement of the layout, for backends that agree about nothing else.** JSONL
 and Turso disagree about how a log is *encoded* and must not disagree about where
 it *is*. Two implementations whose docstrings have to assert they agree ("JSONL's
-rule exactly") are not a mechanism — what they had already drifted on is recorded
-in `tests/test_persistence_backends.py`.
+rule exactly") are not a mechanism, and the two copies had already drifted before
+either shipped.
 
 Suffix-parameterised rather than shared by inheritance, because that is the only
 thing the two backends actually differ by here.
@@ -68,13 +68,12 @@ def locate_under(root: Path, name: str, suffix: str) -> Path | None:
     """The log for one id, wherever it sits. `None` if there is none.
 
     **The cost of the family layout, stated in one place.** An id alone does not
-    determine a path, so a read that has only an id has to look: a root is
-    answered in one `stat` — its family is its own id, so it names its own
-    directory — and anything else falls through to a scan that is O(families).
+    determine a path, so a read that has only an id has to look: a root is answered in
+    one `stat` — its family is its own id, so it names its own directory — and
+    anything else falls through to a scan that is O(families).
 
     That scan is worth avoiding, and callers holding a family avoid it entirely
-    through `path_under`. Measured at 200 families: 5.6 us for the root fast
-    path, 543 us for a scan that finds, 1.14 ms for one that does not.
+    through `path_under`.
     """
     own = path_under(root, name, name, suffix)
     if own.is_file():

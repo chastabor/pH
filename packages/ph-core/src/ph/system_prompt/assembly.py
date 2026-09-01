@@ -274,17 +274,11 @@ class SystemPromptService:
     async def assemble(self, scope: Boundary, *, agent: Any = None) -> PromptAssembly:
         """Collect, order, interpolate, then run the assemble waterfall.
 
-        **The boundary is a parameter and the payload is built here** — the one
-        narrowing point, as `ToolRuntime._execution` is for a tool call. Callers
-        used to construct the `AssembleContext` themselves and hand it in, which
-        made one object play both roles: the thing a caller states (a `Boundary`,
-        possibly `DEPLOYMENT`) and the thing a provider reads (a real `Context`).
-
-        That cost more than a type. The waterfall was handed the *caller's*
-        request while providers were handed a narrowed copy, so a
-        `system-prompt/assemble` listener and a `PromptSection.text` could see
-        two different scopes for one assembly. There is one object now, and it is
-        the narrowed one.
+        **The boundary is a parameter and the payload is built here** — the one narrowing
+        point, as `ToolRuntime._execution` is for a tool call. A caller states a
+        `Boundary`, possibly `DEPLOYMENT`; a provider reads a real `Context`. One object
+        plays one role, and it is the narrowed one, so a `system-prompt/assemble` listener
+        and a `PromptSection.text` cannot see two different scopes for one assembly.
         """
         request = AssembleContext(scope=boundary_of(scope, self.ctx), agent=agent)
         target = request.scope

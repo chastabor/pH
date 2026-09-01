@@ -254,9 +254,9 @@ class Corpus:
         """Every document as one pageable text, headed by its name.
 
         Built once, lazily: `chunk` slices it through the offsets `Document`
-        already keeps, so paging a large corpus is arithmetic per call rather
-        than a fresh join — the first version rebuilt (and, for lines, re-split)
-        the whole corpus on every page of a walk that exists to visit all of it.
+        already keeps, so paging a large corpus is arithmetic per call rather than a
+        fresh join and re-split of the whole corpus on every page of a walk that
+        exists to visit all of it.
         """
         return Document.of(
             self.name,

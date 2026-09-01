@@ -137,11 +137,10 @@ class CompactionNote:
 class _NoteRegistration:
     """A note and who registered it (P6-29).
 
-    This field was called `owner` and held `layer_for`'s answer — the visibility
-    scope `notes()` filters with — which is the P6-12 conflation surviving under
-    the other question's name in the one registry that had already split them.
-    A `Running` cannot be read as the wrong half: `by.layer` filters, `by.owner`
-    is what the note's body runs as."""
+    A `Running` rather than a single scope, because it cannot be read as the wrong
+    half: `by.layer` is what `notes()` filters with, and `by.owner` is what the
+    note's body runs as. One field holding one of those under a name that reads like
+    the other is the P6-12 conflation."""
 
     note: CompactionNote
     by: Running

@@ -22,8 +22,10 @@ subprocess, so every delegation leaked a CPython.
 
 **Usage is recorded upward, for readers.** Each child `assistant/message` appends
 `subagent/usage-attributed` to the *parent's* log. It is an **additive record, not
-an input to any measurement** — nothing reads it but the TUI panel; see
-`ph-rlm/tests/test_subagents.py`.
+an input to any measurement**: `TokenMeter.last_usage` scans the log it is *given*,
+and a child's messages are in the child's log, so the parent's context measurement
+never included them and there is nothing to subtract. Nothing reads this but the
+TUI panel.
 
 **The child's workspace is taken here, not by the lifecycle row** (P4-08): its
 base is the parent's root and its access is the parent's decision, and the row
@@ -356,10 +358,9 @@ class RlmChildProvider:
         child.session = session
         # **Before anything is built.** The parent owns the drive job *and*, since
         # P6-27, the scope the child nests in — so a missing parent is a refusal,
-        # not a degradation. This guard used to sit below `agents.create`, which
-        # meant a rehydration with no parent built an agent and a scope, failed
-        # below, and left both behind: an orphan under the registry root holding
-        # the deployment-wide ceiling that nothing would ever dispose.
+        # not a degradation. Below `agents.create` this guard would leave an agent
+        # and a scope behind: an orphan under the registry root, holding the
+        # deployment-wide ceiling, that nothing would ever dispose.
         parent = self.ctx.agents.get(child.run.parent_id)
         if parent is None:
             log.debug("ph_rlm.subagents: %s has no live parent to own its drive", run_id)
@@ -640,15 +641,15 @@ class RlmChildProvider:
         """The one teardown path, whether the model asked or the parent unwound.
 
         **On the parent-teardown path the child's scope is already gone** (P6-27).
-        `Context.dispose` unwinds `_children` before its own effects, and this
-        runs as one of those effects — so the child's scope, its worktree and its
-        kernel are released *before* this is called, where they used to be
-        released *by* it. Nothing here breaks on that: `cancel` touches only the
-        phase and the inbox, and disposing an inactive scope returns at once. But
-        it bounds what this path may do. The roster, the parent's log and the
-        tombstone are live; anything needing the *child's* scope — flushing its
-        session through its own services, snapshotting its workspace — is not,
-        and would work when the model calls `delete()` and fail here.
+        `Context.dispose` unwinds `_children` before its own effects, and this runs as one
+        of those effects — so the child's scope, its worktree and its kernel are released
+        *before* this is called.
+
+        Nothing here breaks on that: `cancel` touches only the phase and the inbox, and
+        disposing an inactive scope returns at once. But it **bounds what this path may
+        do**: the roster, the parent's log and the tombstone are live; anything needing the
+        *child's* scope — flushing its session through its own services, snapshotting its
+        workspace — is not, and would work when the model calls `delete()` and fail here.
         """
         child = self._children.pop(run_id, None)
         if child is None:

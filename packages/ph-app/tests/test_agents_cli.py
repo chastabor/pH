@@ -9,6 +9,24 @@ transport would agree with whatever the code happened to do.
 The commands run in a worker thread (`to_thread.run_sync`) because each one
 calls `anyio.run` of its own, which cannot start inside the loop the daemon is
 serving on. That is not a test artefact: it is the shape a person's shell has.
+
+## Why the client joins a run of events into one write
+
+One `console.print` per event measured **98 µs — 2.3x the cost of the same events
+joined, and 240x the string they carry** — so a 2 048-event snapshot page spent
+**202 ms in Rich rather than 86 ms**.
+
+**And why `assistant/chunk` is in `NOISE`.** One line per delta is a keystroke log
+rather than a follow, and it is also almost all of the cost: a 2 000-chunk turn is
+**196 ms of rendering against 2 ms** once the chunks are dropped.
+
+## Why the client raises the group member and not the group
+
+A bare `raise` re-raises the `ExceptionGroup`, so anything `_ask` does not name
+reached the person as a group traceback instead of the exception inside it — and a
+`typer.Exit` raised by a command's own exchange became an exit code nothing reads.
+Two of these commands used to carry a `bool` back out and raise at command level to
+work around it.
 """
 
 from __future__ import annotations

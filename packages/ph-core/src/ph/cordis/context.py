@@ -113,15 +113,11 @@ def _invoke(hook: Hook, *args: Any) -> Any:
     await the same result.
 
     The binding is spelled inline rather than through `running` because `emit` fires
-    once per streamed chunk; the measurements are in
-    `tests/test_registration_ownership.py`.
+    once per streamed chunk, where even a context manager's own frame is too much.
     """
-    # Inline, and through the scope's memoized self-pair. Building a
-    # `Running` here costs **206 ns** — a frozen dataclass sets its fields
-    # through `object.__setattr__` — against **22 ns** for this load-and-branch,
-    # and it runs once per listener per chunk: 1.76 ms became 2.84 ms on the
-    # 2 000-emit bench below before the memo, which is the same 55% this
-    # function's inline binding exists to have avoided in the first place.
+    # Inline, and through the scope's memoized self-pair: building a `Running`
+    # per call means a frozen dataclass setting its fields through
+    # `object.__setattr__`, once per listener per chunk.
     owner = hook.ctx
     pair = owner._running_self
     if pair is None:
@@ -129,11 +125,10 @@ def _invoke(hook: Hook, *args: Any) -> Any:
     token = _ACTIVATING.set(pair)
     try:
         result = hook.callback(*args)
-        # `None` first, and it is most of the win. A listener that returns
-        # nothing is the overwhelming case, `inspect.isawaitable` costs **172 ns**
-        # against **16 ns** for this identity check, and it runs a second time in
+        # `None` first, and it is most of the win. A listener that returns nothing
+        # is the overwhelming case, and `inspect.isawaitable` runs a second time in
         # `emit` on the value this just returned — so the awaitability question
-        # was costing more per listener than the binding it was added to serve.
+        # costs more per listener than the binding it was added to serve.
         if result is None:
             return None
         return _as_owner(hook.ctx, result) if inspect.isawaitable(result) else result
@@ -380,8 +375,10 @@ class running:
     **Single-use**, like every context manager built at its `with`: the token lives
     on the instance, so re-entering one object would lose the outer token.
 
-    A class rather than a `@contextmanager`, and what that costs at each of the
-    twenty-one call sites: `tests/test_registration_ownership.py`.
+    A class rather than a `@contextmanager`, because the generator form costs a
+    frame, a `StopIteration` and two `send`s at each of the twenty-one call sites —
+    this is entered once per tool call, once per slash command, once per prompt row
+    per `assemble`, and once per telemetry sink per record.
     """
 
     __slots__ = ("_pair", "_token")
@@ -604,10 +601,9 @@ class Context:
         Contextvars propagate into tasks, so a coroutine spawned from a bound callback
         carries the binding; `Context.owner_for` declines a *disposed* scope and warns.
 
-        **What is bound and what still runs unbound** is enumerated by introspection in
-        `tests/test_registration_ownership.py`, which fails on anything unclassified —
-        so that list is checked rather than believed, and this docstring does not keep a
-        second copy of it.
+        **What is bound and what still runs unbound is enumerated by introspection**,
+        and the enumeration fails on anything unclassified — so that list is checked
+        rather than believed, and this docstring does not keep a second copy of it.
         """
         activating = _ACTIVATING.get()
         return activating.owner if activating is not None else None

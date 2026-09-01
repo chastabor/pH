@@ -63,9 +63,9 @@ class StoredSession:
     # reach one backend and miss the other again.
 
     # **No `size` and no `title`**, deliberately. `size` meant two different
-    # things — bytes on disk from JSONL, an event count from Turso — into one
-    # field a picker renders with `filesize.decimal`, and 93% of the Turso
-    # listing's cost went to producing the half nobody could interpret. `title`
+    # things — bytes on disk from JSONL, an event count from Turso — in one field
+    # a picker renders with `filesize.decimal`, and producing the half nobody
+    # could interpret was most of the Turso listing's cost. `title`
     # was set by neither backend: a field that is always empty is an affordance
     # that lies, and it would have let a picker migration fall through to hex
     # ids with nothing failing. Both come back when a consumer needs them and

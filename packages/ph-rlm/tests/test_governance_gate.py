@@ -17,6 +17,17 @@ the seam the real row will use. Both are marked at the assertion.
 **One Phase 4 caveat the gate records rather than tests.** `permissions-fs` is
 what makes an `fs/write-intent` veto load-bearing; until it ships, (a) asserts the
 interception and that the veto is a *denial*, which is what Phase 3 owes.
+
+## Why a denial aborts the run and does not merely reply
+
+Recorded, answered, *and* aborted — only the third actually enforces C3.
+
+The reply makes a well-behaved cell raise `RunStopped` and unwind. But a cell is
+not obliged to behave: **`except BaseException: pass` followed by
+`Path(...).write_text(...)` completed the write**, and the run then "failed"
+afterwards — the tool call reported a refusal the program had already routed
+around. Raw Python is not reachable by any waterfall, so the only thing that can
+stop it is ending the process's turn.
 """
 
 from __future__ import annotations

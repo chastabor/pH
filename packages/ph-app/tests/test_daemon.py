@@ -65,6 +65,69 @@ The hand-rolled buffer was quadratic twice over — it re-scanned the whole buff
 per chunk and recopied the tail per frame — measuring **57 ms for 4 096 frames
 arriving in one read**. It also bounded the *accumulated buffer* rather than one
 frame, so many small frames in one chunk tripped a limit documented as per-frame.
+
+## Why only success may clear the retry ladder
+
+The first version of `recovered` reset the count on any `turn/end` — which the
+retry itself *manufactures*: a re-entered `run()` finds an empty inbox and appends
+`turn/start` + `turn/end{completed}` before the same crash happens again, so the
+ladder cleared the counter that bounds it.
+
+Measured against a persistently failing flush: **165 retries in two seconds, no
+give-up, the fold pinned at one attempt and the root reporting "idle"** — the
+unbounded retry the row exists to prevent, growing the log by three events an
+iteration. A marker that only *success* writes cannot be forged by the failure.
+
+## Why attach does not replay the gap
+
+The first draft streamed the whole gap inside `attach`, one `session.event` frame
+per event, straight into a 1024-slot outbox with no await point — so a client
+reattaching to a root that had moved on by more than a thousand events got a
+`WouldBlock` out of its own attach, *after* the subscription had already been made.
+It failed at exactly **1 025**. The gate test passed only because its log was three
+events long.
+
+Catch-up now has one mechanism and it is the paged one, which also brings replay
+under the 512 KiB-class bound it never had before.
+
+## Three places the supervisor must not fold the log
+
+**`Root.recovery` is held, not re-folded.** A whole-log scan per read is **4.9 ms
+at 200 000 events**, and `status` is read for every root on every `sessions/list`.
+
+**`relay` builds nothing before there is a subscriber.** It runs once per streamed
+chunk, and rendering a payload for zero watchers measured **6.6 µs an event —
+13 ms of a 2 000-chunk turn, all discarded**.
+
+**The schedule tick flushes only when something was appended.** The condition also
+read `or schedule.live(...)`, which folded the whole log a second time to decide to
+flush a buffer the first fold had just left empty: **24 ms a root at 500 000
+events, every five seconds**.
+
+## Why `passivatable` checks quiet before it folds
+
+The root reaching that line is idle and unwatched — the steady state the sweeper
+exists for — so a fold above it runs on every sweep of the ninety-minute window and
+is discarded eighty-nine times out of ninety. Measured over one idle window at
+500 000 events across 50 roots: **60.9 s of event loop as written, 1.3 ms with the
+quiet check first**, where `idle_for` itself costs **43 ns**.
+
+The subagent fold goes through `SessionFoldCache` for the same reason: **0.09 µs
+against 13.5 ms at 500 000 events**. Without it the root that returns `False` —
+idle, unwatched, one unsettled child — re-folds every sixty seconds for the life of
+the daemon: **16 minutes of event loop a day at 50 such roots**.
+
+## Why each cadence is its own task
+
+The heartbeat rode the ticker on a counter that only advanced when a tick
+*succeeded*, so **a run of failing ticks starved the liveness record** as a side
+effect of an unrelated failure. The socket watch has its own `if` for the mirror
+reason: a test that turns the scheduler off to keep a timer out of its assertions
+must not thereby turn off the thing that notices the daemon has no door.
+
+**And why `_await` names `DaemonGone`.** It used to return an empty `{}` when woken
+by the pump ending rather than by an answer, which every caller then read as a
+successful reply with no fields in it.
 """
 
 from __future__ import annotations

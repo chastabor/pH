@@ -29,10 +29,6 @@ Invariants this seam holds:
   so a seventh `WorkspaceKind` fails to type-check rather than silently
   classifying.
 
-Why each of those is the way it is, and what went wrong before it was:
-`tests/test_workspace.py`, `test_workspace_retention.py`,
-`test_containment_ladder.py`.
-
 @module ph.seams.workspace
 """
 
@@ -124,8 +120,7 @@ WorkspaceKind: TypeAlias = Literal[
 
 An overlay is **not** a flavour of `worktree-ephemeral`: it contains the tree as
 it is, untracked and ignored files included, and its history is not git's, so
-`workspace_git` must decline it rather than run `write-tree` against a
-mountpoint (`tests/test_workspace_agentfs.py`).
+`workspace_git` must decline it rather than run `write-tree` against a mountpoint.
 """
 
 WorkspaceAccess: TypeAlias = Literal["write", "read"]

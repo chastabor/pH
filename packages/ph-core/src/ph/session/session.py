@@ -228,8 +228,10 @@ class Session:
         Deriving one from the other would be wrong — a resumed fork's
         `header.seed_length` is its *original* fork boundary.
 
-        **Not `first_live_seq`**, and why that distinction is load-bearing:
-        `tests/test_persistence_backends.py`.
+        **Not `first_live_seq`.** A resume seeds the stored events *plus* the repair
+        closers and `session/end-seed`, which are in the log and have never been
+        written — so what a store holds is a number only the caller knows, never one
+        inferred from what happens to be present at `track` time.
 
         A plain attribute rather than a header field because it describes *this
         process's* relationship to *one* store, not the session. `seed_length` next door
@@ -422,11 +424,10 @@ class Session:
     def last_event(self) -> SessionEvent | None:
         """The most recently appended event, or `None` for an empty log.
 
-        The unfiltered form of `last_event_of`, and the accessor a "when did
-        this session last do anything" question wants (P5-05's passivation
-        sweeper). `events[-1]` answers it too, at the cost of materialising a
-        snapshot of the entire log — 4 MB and 4.7 ms at 500 000 events — to read
-        one element, and the sweeper asks it of every root on every pass.
+        The unfiltered form of `last_event_of`, and the accessor a "when did this session
+        last do anything" question wants (P5-05's passivation sweeper). `events[-1]`
+        answers it too, at the cost of materialising a snapshot of the entire log to read
+        one element — and the sweeper asks it of every root on every pass.
         """
         return self._log[-1] if self._log else None
 

@@ -17,8 +17,7 @@ structural: `seq == len(log)` cannot hold two events at one number.
 
 **No full-text search**, deliberately: JSONL cannot search either, so it was never
 parity. Search over sessions is a thing built on top of a backend rather than a
-thing one backend secretly has. What it cost while it was here:
-`tests/test_persistence_backends.py`.
+thing one backend secretly has.
 
 **The write path is the JSONL one's, deliberately.** Buffered on `record`, drained
 on `flush`, off the event-loop thread — because A1 is about `append` being I/O-free,
@@ -110,14 +109,14 @@ class TursoSessionStore:
     def track(self, session: Session) -> None:
         """Start buffering a session; its existing seed is owed a write.
 
-        JSONL's shape exactly, and it has to be: an early return, then the seed
-        queued once. The first version re-entered on every call and seeded from
-        an index into the *log* computed from the length of the *buffer*, which
-        stop agreeing after the first flush — so a resumed session re-queued its
-        whole log and rewrote it. It also opened the database here to ask
-        whether a header was owed, **on the event-loop thread**, because this is
-        a synchronous `session/created` listener; JSONL's equivalent is a
-        `stat`, and `INSERT OR REPLACE` means nothing needed the answer.
+        JSONL's shape exactly, and it has to be: an early return, then the seed queued
+        once. The seed offset is `durable_length` — a boundary the *caller* declares —
+        never an index into the log computed from the length of the buffer, which stop
+        agreeing after the first flush.
+
+        Nothing here opens the database. This is a synchronous `session/created` listener,
+        so a query would run **on the event-loop thread**, and `INSERT OR REPLACE` means
+        nothing needs to ask whether a header is owed.
         """
         if session.id in self._buffers:
             return
@@ -277,11 +276,10 @@ class TursoSessionStore:
         cost grew with total history.
         """
         # Every `_peek_header` below opens a database, runs the schema DDL and
-        # caches the handle — 1.53 ms each, against 0.021 ms for the header
-        # `SELECT` it was opened for, and never reused. Left cached, a 500-session
-        # survey holds 500 open databases and 500 `-wal`/`-shm` sidecars for the
-        # life of the process. `read` already guards its chained reads this way;
-        # a listing peeks far more.
+        # caches the handle for a single header `SELECT` that never reuses it.
+        # Left cached, a 500-session survey holds 500 open databases and 500
+        # `-wal`/`-shm` sidecars for the life of the process. `read` already
+        # guards its chained reads this way; a listing peeks far more.
         held = set(self._connections)
         try:
             return self._stored(limit=limit)

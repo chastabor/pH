@@ -12,6 +12,16 @@ without the SDK, but built a provider **with no exporter** when only the OTLP ha
 was missing. That is the silent no-op reached through the other door — `ph doctor`
 would have reported a healthy telemetry sink shipping to nowhere. Either the row
 can export or it refuses.
+
+## Two per-record costs resolved at mount instead
+
+**`SCALARS` is a module-level tuple.** A `str | int | float | bool` expression
+inside `_flat` is evaluated per attribute per record: **136 ns against 40 ns** for
+the tuple.
+
+**The severity table is built once.** `SeverityNumber(...)` per record goes
+through `Enum.__call__` and costs **~180 ns a record** for a table of four that
+cannot change while the row is mounted.
 """
 
 from __future__ import annotations

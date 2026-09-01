@@ -179,11 +179,10 @@ class _Connection:
     def notify(self, method: str, params: dict[str, Any]) -> None:
         """Queue a notification, or *raise* so the root drops this watcher.
 
-        Raising is the point. An earlier draft caught `WouldBlock` here, logged
-        "dropped", and returned — so nothing was dropped, and the watcher that
-        could not keep up re-paid the whole fan-out for every later event. The
-        subscriber list belongs to the root, so the root is what removes from
-        it; this only has to fail loudly enough to be noticed.
+        **Raising is the point.** Catching `WouldBlock` here and logging "dropped"
+        drops nothing, and the watcher that cannot keep up re-pays the whole fan-out
+        for every later event. The subscriber list belongs to the root, so the root
+        is what removes from it; this only has to fail loudly enough to be noticed.
         """
         if self.outbox is None:
             raise RuntimeError("this connection is closed")
@@ -276,21 +275,17 @@ class _Connection:
     def _attach(self, root: Any, cursor: Any) -> dict[str, Any]:
         """Subscribe to what happens *next*, and say where that starts.
 
-        **Attach does not replay.** The first draft streamed the whole gap here,
-        one `session.event` frame per event, straight into a 1024-slot outbox
-        with no await point — so a client reattaching to a root that had moved
-        on by more than a thousand events got a `WouldBlock` out of its own
-        attach, after the subscription had already been made. Measured: it
-        failed at exactly 1 025. The gate test passed only because its log was
-        three events long.
+        **Attach does not replay.** Streaming the gap here — one `session.event` frame per
+        event into a fixed-size outbox with no await point — makes a client reattaching to
+        a root that has moved on get a `WouldBlock` out of its own attach, *after* the
+        subscription has been made.
 
-        So catch-up has one mechanism, and it is the paged one: the reply says
-        where the live stream begins, and the client reads `session/snapshot`
-        from its cursor up to that point. That also makes the 512 KiB-class
-        bound apply to replay, which it never did before.
+        So catch-up has one mechanism, and it is the paged one: the reply says where the
+        live stream begins, and the client reads `session/snapshot` from its cursor up to
+        that point. That also makes the 512 KiB-class bound apply to replay.
         """
-        # The root, not an id to look up again: `start` has just returned it,
-        # and re-deriving it kept a `no_such_session` branch `start` had already
+        # The root, not an id to look up again: `start` has just returned it, and
+        # re-deriving it would keep a `no_such_session` branch `start` has already
         # made unreachable.
         if root.id not in self.attached:
             self.attached.add(root.id)
@@ -405,14 +400,10 @@ class DaemonServer:
             "unreachableSince": self.unreachable_since,
             # `DiagnosticsRegistry.report()`'s shape verbatim — a list of
             # sections, each a title and `(label, value)` rows — carrying one
-            # built-in section today (P5-11's socket lifetime) and nothing else.
-            # The first draft invented a `lifetime` key beside a `survivesLogout`
-            # and a `linger` scalar, which was the same fact on the wire at two
-            # altitudes with only the rendered one read: three encodings that can
-            # disagree, and a bespoke decoder on the client for the one that
-            # wins. This envelope is what P5-12 fills from the daemon's *mounted*
-            # registry with no client change, which is the migration P5-10 said
-            # these two rows were for.
+            # built-in section today (P5-11's socket lifetime). One encoding of
+            # one fact, so nothing on the wire can disagree with itself and the
+            # client needs no bespoke decoder; P5-12 fills the same envelope from
+            # the daemon's *mounted* registry with no client change.
             "sections": [
                 {
                     "title": title,
@@ -623,10 +614,9 @@ async def serve(
                 # same file by construction rather than by assumption (P5-11).
                 identity=socket_identity(socket_path),
             )
-            # Four cadences, four tasks, one primitive. The heartbeat used to
-            # ride the ticker on a counter that only advanced when a tick
-            # *succeeded*, so a run of failing ticks starved the liveness record
-            # as a side effect of an unrelated failure.
+            # Four cadences, four tasks, one primitive: a cadence riding another's
+            # counter advances only when that one *succeeds*, so a run of failing
+            # ticks would starve an unrelated record.
             if passivate_after is not None:
                 tasks.start_soon(_every, sweep_every, server.stop, supervisor.sweep, "the sweep")
             if tick_every > 0:
@@ -635,11 +625,10 @@ async def serve(
                     _every, heartbeat_every, server.stop, supervisor.heartbeat, "the heartbeat"
                 )
             if watch_every > 0:
-                # Its own cadence and its own `if`, not a rider on the tick: the
-                # heartbeat used to ride the ticker and starved whenever an
-                # unrelated tick failed, and a test that turns the scheduler off
-                # to keep a timer out of its assertions must not thereby turn
-                # off the thing that notices the daemon has no door.
+                # Its own cadence and its own `if`, not a rider on the tick: a test
+                # that turns the scheduler off to keep a timer out of its assertions
+                # must not thereby turn off the thing that notices the daemon has no
+                # door.
                 tasks.start_soon(
                     _every, watch_every, server.stop, server.check_reachable, "the socket watch"
                 )

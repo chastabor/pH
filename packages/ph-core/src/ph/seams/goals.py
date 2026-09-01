@@ -123,11 +123,9 @@ class Goal(WireModel):
 class Spent:
     """What a run has used, counted from the log.
 
-    Mutable, and accumulated in place: the frozen version rebuilt a dataclass
-    per event, which measured **259 ms against 5.2 ms** over a 200 000-event
-    fold — fifty times the budget this seam's own cache exists to keep. The
-    enclosing `GoalState` is already mutable and reassigned by the same loop, so
-    freezing the inner record bought nothing but allocations.
+    Mutable, and accumulated in place. A frozen version rebuilds a dataclass per
+    event, and the enclosing `GoalState` is already mutable and reassigned by the
+    same loop — so freezing the inner record buys nothing but allocations.
     """
 
     continuations: int = 0
@@ -180,9 +178,8 @@ class GoalState:
 _COUNTED = frozenset({SET, CONTINUED, GATE, SETTLED, "turn/end", "assistant/message"})
 """The six types this fold reads. Everything else is skipped on a set test.
 
-A real log is mostly `assistant/chunk`, and without this every one of them paid
-a `data.get`, an open-goal scan and a six-branch `elif` to be discarded —
-measured at **597 ms against 53 ms** over a 500 000-event log.
+A real log is mostly `assistant/chunk`, and without this every one of them pays a
+`data.get`, an open-goal scan and a six-branch `elif` to be discarded.
 """
 
 
@@ -254,9 +251,8 @@ def extend_goals(
 
     The cache keys on `session.seq`, which moves on *every* event — so without
     this, the driver's per-turn read and `run_gates`' own `record_gate` between
-    gates each re-folded the whole log: a three-gate pass measured 1 136 ms at
-    500 000 events. The state is mutable and folded in place, so continuing is
-    the same step applied to a shorter slice.
+    gates each re-fold the whole log. The state is mutable and folded in place, so
+    continuing is the same step applied to a shorter slice.
     """
     for event in session.events_from(from_index):
         fold_goal_event(previous, event)
@@ -279,8 +275,7 @@ class GoalService:
     """`ctx.goals` — set a goal, record what it spends, decide when it is done.
 
     Cached like its siblings: the autonomous loop reads this between every turn,
-    and a whole-log fold per read is what `Root.accepted` measured at 4.9 ms per
-    call at 200 000 events.
+    and a whole-log fold per read is the cost `Root.accepted` records.
     """
 
     _states: SessionFoldCache[dict[str, GoalState]] = field(

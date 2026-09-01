@@ -11,6 +11,19 @@ events read off disk by a process that was not running when they were written.
 The collector's verdicts are tested against a `WorkspaceSeam` with no provider,
 because the verdicts are a *rule* and the removal is a tier's business — the two
 failing separately is the point of the split.
+
+## The evidence that went missing before retention existed
+
+An ephemeral tree is discarded *even if dirty* — that is the kind's whole promise
+— and it is also why a settled subagent's work vanished. A child admitted with
+`access="read"` gets `worktree-ephemeral`, so the child a parent most wants to
+inspect (one that failed, or was cancelled at `parent-teardown`) was exactly the
+one whose tree disposal removed.
+
+`Workspace.retained` is the exception, and deliberately an exception to `discard`
+rather than to the removal branch: a retained ephemeral tree takes the same
+keep-if-dirty path a `worktree` does, so retention buys **evidence** and not an
+unconditional checkout.
 """
 
 from __future__ import annotations

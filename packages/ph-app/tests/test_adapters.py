@@ -12,6 +12,13 @@ pin the three places it would:
   `prompt_tokens`, so leaving them in bills every hit twice in pH's accounting.
 
 The real-API smoke test is skipped without a key, per P1-15's gate.
+
+## Why the Anthropic block conversion has no per-kind branch list
+
+The previous version built branches for four block kinds and **silently omitted
+everything else**, so a message that was only an image reached the wire as an empty
+text block. Nothing is dropped now: a block kind the converter does not recognise
+still arrives.
 """
 
 from __future__ import annotations

@@ -11,6 +11,16 @@ The other half is the token estimate. A media block used to contribute **zero**,
 which meant a conversation of forty images reported no context pressure at all;
 the tests below care that the number is non-zero and proportionate, not that it
 is right to the token — it exists to answer "compact before asking?".
+
+## What the base64 cache saves
+
+A media block stays in derived history for the life of the session, so a **4 MB PDF
+attached at the first turn was re-read from disk and re-encoded into a 5.5 MB
+string for every request after it**.
+
+The cache cannot go stale, and that is a property of the naming rather than a
+promise it has to keep: `attachment_id` is the SHA-256 of the content, so two refs
+with one id have one body by definition.
 """
 
 from __future__ import annotations

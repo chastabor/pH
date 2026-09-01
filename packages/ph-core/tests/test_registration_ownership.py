@@ -55,6 +55,18 @@ listener and reported the row as free. Both were wrong, and the correction is wh
 pair (**93 ns** measured) and missed the `inspect.isawaitable` the same function
 introduced — **172 ns**, run twice per listener, which made the awaitability
 question cost more than the ownership it was serving.
+
+## Two more numbers inside `_invoke`
+
+**The scope's memoized self-pair.** Building a `Running` per call costs **206 ns** —
+a frozen dataclass sets its fields through `object.__setattr__` — against **22 ns**
+for a load-and-branch, once per listener per chunk: **1.76 ms became 2.84 ms** on
+the 2 000-emit bench before the memo.
+
+**The `None` check before `inspect.isawaitable`.** A listener that returns nothing
+is the overwhelming case; `isawaitable` costs **172 ns against 16 ns** for the
+identity check, and it runs a second time in `emit` on the value `_invoke` just
+returned.
 """
 
 from __future__ import annotations

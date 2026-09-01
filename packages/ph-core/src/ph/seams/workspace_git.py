@@ -329,12 +329,11 @@ class GitWorktreeProvider:
     async def _why(self, toplevel: Path, path: Path, ref: str) -> DeclineReason:
         """Which decline this was, asked of git's *state* rather than its prose.
 
-        The first version matched `"already used by worktree"` in stderr. That is
-        gettext-translated — `ctx.subprocess` passes `LANG`/`LC_ALL` through,
-        since they are not credential-shaped — so on a non-English host every
-        decline collapsed to the generic code, in the row whose entire purpose is
-        telling an operator why. Both facts are available structurally, and one
-        of them (`_has_ref`) was already being asked two lines above.
+        git's stderr is gettext-translated — `ctx.subprocess` passes `LANG`/`LC_ALL`
+        through, since they are not credential-shaped — so a message match would collapse
+        every decline to the generic code on a non-English host, in the row whose entire
+        purpose is telling an operator why. Both facts are available structurally, and one
+        of them (`_has_ref`) is already asked two lines above.
         """
         if await self._checked_out(toplevel, ref):
             return "branch-in-use"
@@ -379,14 +378,10 @@ class GitWorktreeProvider:
         # can still hold an untracked file git would object to, and an ephemeral
         # tree is discarded *even if dirty*, which is the kind's whole promise.
         #
-        # That promise is also why a settled subagent's evidence went missing: a
-        # child admitted with `access="read"` gets `worktree-ephemeral`, so the
-        # child a parent most wants to inspect — one that failed, or was
-        # cancelled at `parent-teardown` — was exactly the one whose tree this
-        # removed. `Workspace.retained` is the exception, and it is an exception
-        # to `discard` rather than to this branch: a retained ephemeral tree
-        # takes the same keep-if-dirty path a `worktree` does, so retention
-        # buys evidence and not an unconditional checkout (P6-28).
+        # `Workspace.retained` is the exception, and it is an exception to
+        # `discard` rather than to this branch: a retained ephemeral tree takes
+        # the same keep-if-dirty path a `worktree` does, so retention buys
+        # evidence and not an unconditional checkout (P6-28).
         code, _, err = await self._git(toplevel, "worktree", "remove", "--force", str(path))
         if code != 0:
             log.warning(
@@ -479,14 +474,13 @@ _INDEX = "ph-checkpoint-index"
 """pH's own index, beside the worktree's git dir.
 
 Per worktree, because `rev-parse --git-dir` inside a linked worktree answers with
-that worktree's own directory — so two agents checkpointing at once do not share
-a staging area, and neither touches the index the agent's `git` commands use.
+that worktree's own directory — so two agents checkpointing at once do not share a
+staging area, and neither touches the index the agent's `git` commands use.
 
-**Seeded from the worktree's real index the first time.** `git worktree add`
-has just written one full of valid stat data; starting from an empty file
-instead makes the first `add -A` re-hash every file in the repository —
-measured at 2.6 s on an 11 000-file checkout, paid per agent, on the first cell.
-Copying it costs half a millisecond.
+**Seeded from the worktree's real index the first time.** `git worktree add` has
+just written one full of valid stat data; starting from an empty file makes the
+first `add -A` re-hash every file in the repository, paid per agent on the first
+cell. Copying it costs half a millisecond.
 """
 
 
@@ -518,8 +512,8 @@ async def checkpoint(
     the most expensive thing here.
     """
     # Both guards live in `tree_hash`, which returns `None` for exactly these
-    # two conditions. Keeping copies here cost a *fifth* `git` spawn per code
-    # cell — `rev-parse --absolute-git-dir`, 1.3 ms — which is the waste
+    # two conditions. Keeping copies here costs a *fifth* `git` spawn per code
+    # cell — `rev-parse --absolute-git-dir` — which is the waste
     # `_cached_checkpoint`'s own docstring names: "one of four spawns spent
     # learning a constant".
     tree = await tree_hash(ctx, workspace)
@@ -561,7 +555,7 @@ async def restore(ctx: Context, workspace: Workspace, tree: str) -> tuple[str, .
     current — lets git touch only the paths that actually differ. `checkout-index -a
     -f` rewrites *every* file in the tree, which is slower and, worse, stamps a new
     mtime on every unchanged file and so invalidates every mtime-keyed cache the
-    person has. The measurement is in `tests/test_workspace_checkpoint.py`.
+    person has — pytest, mypy, ruff, the editor's index.
 
     Scratch, not the agent's index, so a file that was untracked before the run is
     untracked after the restore rather than silently staged. `.gitignore`d paths were
@@ -669,17 +663,15 @@ async def tree_hash(ctx: Context, workspace: Workspace) -> str | None:
 def latest_checkpoint(session: Session, agent_id: str) -> str:
     """The newest restore point *this agent* took, or `""` if it has none.
 
-    A reverse scan rather than `checkpoints()` plus `max()`: the caller that
-    wants one restore point does not need a dict of every restore point, and
-    building it copies each payload to discard all but the last — 7.2 ms and
-    0.5 MB on a 500 000-event log against 2 µs for the scan, paid on a crash
-    path that runs once per retry.
+    A reverse scan rather than `checkpoints()` plus `max()`: the caller that wants one
+    restore point does not need a dict of every restore point, and building it copies
+    each payload to discard all but the last — on a crash path that runs once per
+    retry.
 
-    Scoped to the agent, which is the rule `/revert` already states — "a restore
-    point belongs to the agent that took it". Only one agent writes into a root
-    session today (a child gets its own), so this is a latent difference rather
-    than a live one; it is here so the two readers of this fold cannot disagree
-    about it later.
+    Scoped to the agent, which is the rule `/revert` already states: a restore point
+    belongs to the agent that took it. Only one agent writes into a root session today,
+    so this is a latent difference rather than a live one — it is here so the two
+    readers of this fold cannot disagree about it later.
     """
     for event in reversed(session.events):
         if event.type == CHECKPOINT and str(event.data.get("agentId", "")) == agent_id:

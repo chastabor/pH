@@ -72,8 +72,6 @@ hardlink farm — but a build step that writes *in place* (a native addon,
 opt-in with that named. `symlink` is instant and zero-space and **shared and
 mutable**: a child writing through it reaches the parent's tree, handing back some
 of the collision isolation the tier exists to buy.
-
-What each one costs: `tests/test_workspace_provision.py`.
 """
 
 _FICLONE = 0x40049409
@@ -289,14 +287,13 @@ def _materialize(source: Path, dest: Path, mode: ProvisionMode, clone: _Cloner) 
 
 @dataclass(slots=True)
 class _Cloner:
-    """Copy-on-write where the filesystem has it, asked **once** per pair of them.
+    """Copy-on-write where the filesystem has it, asked **once** per pair of devices.
 
-    `FICLONE` costs an open, an open, a failing `ioctl`, an unlink and two closes
-    *per file* on a filesystem that cannot clone — measured at +50% wall time
-    over a 20 000-file tree, paid per child in a fan-out. The answer never varies
-    within one device pair, so it is latched; and a source and destination on
-    different devices can only ever return `EXDEV`, which two `stat` calls settle
-    without attempting anything.
+    `FICLONE` costs an open, an open, a failing `ioctl`, an unlink and two closes *per
+    file* on a filesystem that cannot clone, paid per child in a fan-out. The answer
+    never varies within one device pair, so it is latched — and a source and
+    destination on different devices can only ever return `EXDEV`, which two `stat`
+    calls settle without attempting anything.
     """
 
     _supported: dict[tuple[int, int], bool] = field(default_factory=dict)

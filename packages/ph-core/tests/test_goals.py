@@ -4,6 +4,26 @@ The seam is a fold plus four appends, so most of this drives it directly. The
 two that need a mounted profile — the gate memo and the command — go through
 `mount`, because a gate is a real shell run against a real worktree and the
 fingerprint is a real `git write-tree`.
+
+## Four measurements this fold is shaped by
+
+**`Spent` is mutable and accumulated in place.** The frozen version rebuilt a
+dataclass per event: **259 ms against 5.2 ms** over a 200 000-event fold, fifty
+times the budget this seam's own cache exists to keep.
+
+**`_COUNTED` skips everything else on a set test.** A real log is mostly
+`assistant/chunk`, and without the gate every one of them paid a `data.get`, an
+open-goal scan and a six-branch `elif` to be discarded: **597 ms against 53 ms**
+over a 500 000-event log.
+
+**`extend_goals` folds only what arrived since the last read.** The cache keys on
+`session.seq`, which moves on *every* event, so the driver's per-turn read and
+`run_gates`' own `record_gate` between gates each re-folded the whole log: a
+three-gate pass measured **1 136 ms at 500 000 events**.
+
+**The service is cached like its siblings.** The autonomous loop reads it between
+every turn, and a whole-log fold per read is the **4.9 ms per call at 200 000
+events** `Root.accepted` measured.
 """
 
 from __future__ import annotations

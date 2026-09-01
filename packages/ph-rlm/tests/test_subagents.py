@@ -20,6 +20,14 @@ Worth keeping written down because the false version was load-bearing-sounding:
 it implied a fan-out of eight would otherwise read as context pressure on the
 parent and trigger a compaction it does not need. It would not, and no code path
 depends on the event to prevent it.
+
+## Why the parent check sits above `agents.create` in `rehydrate`
+
+Below it, a rehydration with no live parent built an agent and a scope, failed, and
+left both behind: **an orphan under the registry root holding the deployment-wide
+ceiling that nothing would ever dispose**. The parent owns the drive job *and*,
+since P6-27, the scope the child nests in — so a missing parent is a refusal rather
+than a degradation.
 """
 
 from __future__ import annotations

@@ -175,9 +175,9 @@ class JsonlSessionStore:
 
     # ------------------------------------------------------------- reading --
     #
-    # The four questions a consumer used to answer by reaching for `self.root`
-    # and rebuilding a filename. A backend with no per-session file answers all
-    # four; a backend with one answers them from the filesystem, as here.
+    # The four questions a consumer would otherwise answer by reaching for
+    # `self.root` and rebuilding a filename. A backend with no per-session file
+    # answers all four; a backend with one answers them from the filesystem.
 
     def exists(self, session_id: str) -> bool:
         return locate_session(self.root, session_id) is not None

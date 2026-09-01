@@ -51,8 +51,8 @@ def _guard_int(token: str) -> int:
 
 _DECODER: Final = json.JSONDecoder(parse_int=_guard_int)
 """Built once. A `parse_int` keyword bypasses `json.loads`'s cached decoder, so
-every frame was constructing a fresh `JSONDecoder` and scanner — ~3 µs of the
-~9 µs `decode` spent per frame."""
+without this every frame constructs a fresh `JSONDecoder` and scanner.
+"""
 
 
 def has_unsafe_integer(raw: str | bytes) -> bool:

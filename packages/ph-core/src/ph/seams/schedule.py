@@ -78,13 +78,10 @@ class Schedule(WireModel):
     spec: str
     """The timing, read according to `kind`.
 
-    Milliseconds for the numeric kinds — an epoch instant for `once`, a duration
-    for `interval` — and an expression for `cron`. Milliseconds because every
-    other duration crossing this wire is (`grace_ms`, `timeout_ms`,
-    `duration_ms`, and this seam's own `dueAt`/`firedAt`), and because the first
-    version read `interval` as seconds while comparing it against millisecond
-    stamps, which made a five-minute schedule fire every 300 ms. One unit,
-    no conversion, nothing to get backwards.
+    Milliseconds for the numeric kinds — an epoch instant for `once`, a duration for
+    `interval` — and an expression for `cron`. **Milliseconds because every other
+    duration crossing this wire is** (`grace_ms`, `timeout_ms`, `duration_ms`, and this
+    seam's own `dueAt`/`firedAt`): one unit, no conversion, nothing to get backwards.
     """
     prompt: str
     """What to say to the agent when this fires.
@@ -104,12 +101,11 @@ class ScheduleState:
     created_at: int = 0
     """When `schedule/created` was appended, taken from the event's own `time`.
 
-    From the log rather than from a field on the wire model: `created_at` was a
-    caller obligation nobody honoured, so every schedule the daemon created
-    anchored at epoch 0 — an hourly interval was due the moment it existed, and
-    a cron's first claim walked forward from 1970 (measured at six and a half
-    minutes of blocked event loop for `* * * * *`). The event carries the
-    timestamp already, and `last_tick` comes from the same place."""
+    **From the log rather than from a field on the wire model.** A caller obligation
+    here is one nobody honours: a schedule anchored at epoch 0 is due the moment it
+    exists, and a cron's first claim walks forward from 1970. The event carries the
+    timestamp already, and `last_tick` comes from the same place.
+    """
     last_tick: int | None = None
     """The *due* moment of the last claimed tick, not when it was claimed.
 
@@ -137,11 +133,10 @@ def schedules(session: Session) -> dict[str, ScheduleState]:
     other than silence, and a reader of the log can see the cancellation.
     """
     # The common root has no schedules at all — `schedule` is a `base.yaml` row,
-    # so every mounted root carries the seam — and the walk costs the same
-    # either way: 22.6 ms at 500 000 events, whether or not it finds anything.
-    # `latest` is an incremental fold, so this answers in 84 ns. It scans from
-    # zero while the walk below starts at the seed boundary, which is the safe
-    # direction: no `schedule/created` anywhere means none after the seed.
+    # so every mounted root carries the seam — and the walk below costs the same
+    # whether or not it finds anything, where `latest` is an incremental fold.
+    # It scans from zero while the walk starts at the seed boundary, which is the
+    # safe direction: no `schedule/created` anywhere means none after the seed.
     if session.latest(CREATED) is None:
         return {}
     found: dict[str, ScheduleState] = {}
@@ -277,9 +272,9 @@ def _last_cron_before(spec: str, *, after: int, now: int) -> int | None:
     """The newest cron moment in `(after, now]`, or `None`.
 
     **Sought backwards from `now`, not walked forwards from `after`.** The coalescing
-    answer is the *last* matching moment, so one `get_prev` finds it whatever the gap;
-    walking forwards costs a step per missed moment. The measurements, including the
-    pathological case that settles it, are in `tests/test_schedule.py`.
+    answer is the *last* matching moment, so one `get_prev` finds it whatever the gap,
+    where walking forwards costs a step per missed moment — and an anchor far enough
+    back blocks the event loop for minutes.
 
     `croniter` is imported here rather than at module scope: `schedule` is a
     `base.yaml` row, so the module loads in every host, and the import is paid on
@@ -322,9 +317,8 @@ class ScheduleService:
     root. `SessionFoldCache` keys on `session.seq`, and a schedule only changes when
     something is appended, so every read between appends is a dict hit.
 
-    No `ctx`: the first version took one and never read it, which cost seven
-    `type: ignore` lines in the tests to construct a service the tests had to lie
-    about.
+    No `ctx`, because nothing here reads one — a service that takes an argument it
+    never uses is one a test has to lie about to construct.
     """
 
     _states: SessionFoldCache[dict[str, ScheduleState]] = field(
@@ -377,9 +371,8 @@ class ScheduleService:
             moment = due_at(state, now=now)
             if moment is None:
                 continue
-            # The due moment goes in the event and nowhere else: the only
-            # production caller discarded the copy this used to return, and one
-            # fact with two carriers is one that can disagree.
+            # The due moment goes in the event and nowhere else: one fact with two
+            # carriers is one that can disagree.
             session.append(TICK, {"id": state.schedule.id, "dueAt": moment, "firedAt": now})
             claimed.append(state.schedule)
         return claimed

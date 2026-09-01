@@ -95,9 +95,8 @@ class SurfaceFoldReplacement:
     shadowed_seqs: tuple[int, ...]
     """The nodes this event took out, in **surface order**.
 
-    `start`/`end` used to sit beside this and no consumer ever read them — the
-    range was an encoding of the set, and the set is what anyone asking "what did
-    this compaction shadow" actually wants.
+    The set, not a `start`/`end` range: the range is only an encoding of it, and
+    the set is what anyone asking "what did this compaction shadow" wants.
     """
 
 
@@ -180,17 +179,16 @@ def _shadowed(state: _FoldState, op: SurfaceReplace) -> tuple[int, ...]:
     consumer reading `shadowed_seqs` sees the conversation's order and not an accident
     of how the set was built.
 
-    **One pass with a set, not `.index` per name** — the alternative is quadratic in
-    the number of names, which is precisely the direction compaction grows. Measured
-    in `tests/test_surface.py`.
+    **One pass with a set, not `.index` per name** — resolving each name by scanning
+    the node list from 0 is O(names x nodes), quadratic in the number of names, which
+    is precisely the direction compaction grows.
     """
     if len(op.replaces) == 1:
         # **The common case keeps the cheap test.** A membership scan stops at
-        # the node it finds, so replacing an early one costs its position; the
-        # set below always costs the whole surface. Building it here made a pass
-        # of 200 in-place rewrites on a 2 000-node surface *slower* than the
-        # range op it replaced — 16.7 ms against 9.8 — because every one of them
-        # names exactly one node.
+        # the node it finds, so replacing an early one costs its position, where
+        # the set below always costs the whole surface. Building it for a
+        # single-name replace is slower than not having it, because almost every
+        # replace names exactly one node.
         only = op.replaces[0]
         if only not in state.nodes:
             raise SurfaceError(f"surface replace: seq {only} is not a current surface node")
@@ -271,9 +269,8 @@ def _apply(
         if len(plan.shadowed_seqs) == 1:
             # **The common case, and the one that must stay O(1).** Every
             # `truncate_arguments`, every offloaded tool result and every elided
-            # paste is one node standing in for one node. Rebuilding the whole
-            # list for those measured 3.3x slower across a realistic pass than
-            # the same-length slice assignment the range op used to do.
+            # paste is one node standing in for one node, so rebuilding the whole
+            # list for those is work proportional to the surface per rewrite.
             state.nodes[insert_at] = plan.seq
         else:
             shadowed = set(plan.shadowed_seqs)

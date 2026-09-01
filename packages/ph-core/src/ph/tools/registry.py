@@ -13,7 +13,7 @@ Three separable things live here because they share one traversal:
 so it is the final word even over a human's explicit approval — that is what
 "monotonic" buys, and it is why policy that must not be reorderable stays a guard
 rather than a listener. (The pH plans' summary tables list the two the other way
-round; that is a transcription slip, recorded in `tests/test_tools_pipeline.py`.)
+round; that is a transcription slip, not a second design.)
 
 @module ph.tools.registry
 """
@@ -208,10 +208,10 @@ class _View:
     transport_name: str
     """What this scope's model calls the transport.
 
-    Every check that used to compare against `RUN_CODE` compares against this
-    instead — the C6 refusal, the route-back text, the `tools` namespace that
-    must not bind the transport to itself, the code-only rule in the prompt.
-    Reading it from the view keeps those four in agreement by construction."""
+    Four checks compare against this rather than against `RUN_CODE` — the C6
+    refusal, the route-back text, the `tools` namespace that must not bind the
+    transport to itself, and the code-only rule in the prompt. Reading it from the
+    view keeps them in agreement by construction."""
     code_namespaces: dict[str, CodeNamespaceFactory]
     """The contributed binding namespaces this scope's programs may reach,
     shadowed by name like tools. Resolved with the view so the run and the SDK
@@ -290,24 +290,23 @@ class ToolRuntime:
 
         **Two questions, from one `scope`.** `owner.isolation` chooses *which layer* a
         registration lands in — tool visibility, B7's subject — while lifetime chooses
-        *when it goes away*. Both are derived here rather than passed in: the first
-        version took two contexts, and all six call sites wrote the same pair, which
-        restates the relationship six times and lets a seventh pair them wrongly.
+        *when it goes away*. Both are derived here rather than passed in, so the
+        relationship is stated once instead of at each call site where a caller could pair
+        them wrongly.
 
-        `isolation` is what keeps the two answers apart even though both now read the
-        running binding (P6-26). An activation scope is not isolated, so a row's tool
-        still lands on the global layer; an agent's scope *is* its own isolation, so a
-        tool registered from a body running for that agent lands on that agent's layer —
-        the case that let a body inside a contained child install a tool the whole
-        deployment could see.
+        `isolation` is what keeps the two answers apart even though both read the running
+        binding (P6-26). An activation scope is not isolated, so a row's tool still lands
+        on the global layer; an agent's scope *is* its own isolation, so a tool registered
+        from a body running for that agent lands on that agent's layer — the case that let
+        a body inside a contained child install a tool the whole deployment could see.
 
         **The lifetime is the *intersection* of the two, not a choice between them**
-        (P6-29): the two scopes are unrelated branches and either can end first. Owning
-        it by the row alone strands the agent's `_Layer` under a disposed key; owning it
-        by the agent alone lets a registration outlive the row whose code made it, which
-        is I2 verbatim. So the release goes on both scopes and the first to fire wins,
-        through `Running.add_disposer` — where that rule lives, because
-        `ph.seams.skills` keys `_restrictions` by the layer too.
+        (P6-29): the two scopes are unrelated branches and either can end first. Owning it
+        by the row alone strands the agent's `_Layer` under a disposed key; owning it by
+        the agent alone lets a registration outlive the row whose code made it, which is
+        I2 verbatim. So the release goes on both scopes and the first to fire wins,
+        through `Running.add_disposer` — where that rule lives, because `ph.seams.skills`
+        keys `_restrictions` by the layer too.
         """
         by = self.ctx.running_for(scope)
         key = by.layer.isolation
@@ -747,16 +746,13 @@ class ToolRuntime:
         # what registration recorded, so a registration made from a tool body
         # unwinds with the row that wrote the tool (I2); the *layer* is the live
         # execution's scope at each stage, so what it registers is visible to the
-        # agent it ran for and to nobody else (B7). P6-26 used `execution.scope`
-        # for both, which was right about containment and let a tool registered
-        # from a tool body outlive the row that registered the tool.
+        # agent it ran for and to nobody else (B7).
         #
-        # From the same `view` that just produced `definition`, which is the
-        # whole reason it is resolved here: one traversal fills `visible` and
-        # `by` together, so the pair cannot be absent while the definition is
-        # present. Asking again per stage was reachable and wrong — a tool that
-        # unregisters itself during its own `execute` is gone from the rebuilt
-        # view by `finish`.
+        # From the same `view` that produced `definition`, so one traversal fills
+        # `visible` and `by` together and the pair cannot be absent while the
+        # definition is present. Asking again per stage would be wrong: a tool
+        # that unregisters itself during its own `execute` is gone from the
+        # rebuilt view by `finish`.
         by = view.by.get(call.name) or Running(execution.scope, execution.scope)
         return ToolRunContext(execution=execution, definition=definition, by=by)
 

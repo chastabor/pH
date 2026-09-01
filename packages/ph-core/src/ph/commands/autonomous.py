@@ -51,8 +51,8 @@ log = logging.getLogger("ph.commands.autonomous")
 __all__ = ["Config", "apply", "run_gates"]
 
 USAGE = "/autonomous <objective> [-- <gate>; <gate>]  ·  /autonomous stop"
-"""The syntax, once. It was written twice — the hint and the empty-goal reply —
-and the two had already drifted about whether the gates are optional."""
+"""The syntax, once, for both the hint and the empty-goal reply — two spellings
+drift about whether the gates are optional."""
 
 
 class Config(WireModel):

@@ -59,14 +59,12 @@ AUDIO_TOKENS_PER_SECOND = 25
 MEDIA_TOKENS_UNKNOWN = 1_000
 """Order-of-magnitude costs for media whose exact price this cannot know.
 
-Deliberately rough, and that is defensible here in a way it would not be for
-billing: this estimate exists to answer "should we compact *before* asking", and
-the module's opening argument is that a guess 15% off is fine for a threshold.
-What is *not* fine is the answer these replace. A media block matched none of
-`measure`'s branches and contributed **zero**, so a conversation of forty images
-reported no pressure at all, and G2/G3's character thresholds — counted over text
-— never fired on it either. Being wrong by a factor is a rounding error against
-being wrong by everything."""
+Deliberately rough, and defensible here in a way it would not be for billing: this
+estimate exists to answer "should we compact *before* asking", and a guess 15% off
+is fine for a threshold. What is **not** fine is a media block matching none of
+`measure`'s branches and contributing zero — being wrong by a factor is a rounding
+error against being wrong by everything.
+"""
 
 
 def estimate_media_tokens(attachment: AttachmentRef) -> int:

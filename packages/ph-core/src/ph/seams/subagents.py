@@ -296,12 +296,11 @@ class SubagentRun:
     scope: Context | None = None
     """The child's own scope, set by the provider so the **seam** can bound it.
 
-    The ceiling was a documented obligation on providers before this field, and
-    the second call site had already missed it: `rehydrate` builds a fresh scope
-    for a settled child and narrowed nothing, so a child that outlived its own
-    restriction came back holding the deployment-wide set. Handing the scope
-    back makes the enforcement the seam's, on both paths, rather than a rule a
-    provider is trusted to remember."""
+    The ceiling was a documented obligation on providers before this field, and the
+    second call site had already missed it: `rehydrate` builds a fresh scope for a
+    settled child. Handing the scope back makes the enforcement the seam's, on both
+    paths, rather than a rule a provider is trusted to remember.
+    """
 
     def to_wire(self) -> dict[str, Any]:
         """The admission facts, for an event or a roster row.
@@ -355,13 +354,12 @@ class SubagentProvider(Protocol):
 class _Registered:
     """A delegation provider and who registered it (P6-29).
 
-    The sixth of these, and one of the two that survived P6-29 unbound: a
+    One of the two row-supplied objects that `_row_bodies` cannot find by shape: a
     provider is an *object satisfying a Protocol*, so `dict[str, SubagentProvider]`
-    names no callable for `_row_bodies` to find, and this claims its slot with
-    `claim_key` rather than `claim_slot`, so the source match that used to stand
-    in for "is this a provider" did not look here either. `_provider_fields`
-    discriminates on the Protocol now, which is true of a provider however it was
-    registered."""
+    names no callable, and this claims its slot with `claim_key` rather than
+    `claim_slot`. `_provider_fields` discriminates on the Protocol, which is true of a
+    provider however it was registered.
+    """
 
     provider: SubagentProvider
     by: Running
@@ -564,14 +562,11 @@ class SubagentService:
     ) -> Grant:
         """Materialize what this child may reach, from a parent that still exists.
 
-        `None` means "everything the parent holds" and is written out as that
-        explicit list. That used to be load-bearing for a reason P6-27 removed —
-        agents were siblings, so a parent's filter did not reach its child and
-        applying nothing handed the child of a narrowed parent the
-        deployment-wide set. The chain does that job now. What the list is for is
-        the ruling: **a child's capability is fixed at admission**, so this
-        records what the parent held *then* rather than deferring to what it
-        holds whenever the child is next asked. See `Grant`.
+        `None` means "everything the parent holds" and is written out as that explicit
+        list. The isolation chain already bounds the child; what the list is for is the
+        ruling — **a child's capability is fixed at admission**, so this records what the
+        parent held *then* rather than deferring to what it holds whenever the child is
+        next asked. See `Grant`.
         """
         held_skills, held_tools = held if held is not None else self.held_by(request, boundary)
         named = request.skills

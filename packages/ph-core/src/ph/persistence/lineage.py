@@ -105,13 +105,12 @@ def materialise(read_one: ReadOne, session_id: str) -> tuple[SessionHeader, list
     derivations are untouched by any of this.
 
     **The slices tile exactly**: each ancestor contributes only what the generation
-    below it still lacks, so the assembled log contains every event once. What is
-    *kept* is 1.00x the result.
+    below it still lacks, so the assembled log holds every event exactly once and
+    nothing is kept twice.
 
     **What is read is bounded too.** `upto` carries the fork boundary, so Turso adds
     `WHERE seq < ?` and JSONL stops reading lines, rather than parsing and validating
-    an ancestor in full to keep fifty of its events. The read amplification this
-    avoids is measured in `tests/test_fork.py`.
+    an ancestor in full to keep fifty of its events.
 
     Walks iteratively rather than recursively: the chain is data from disk, and a
     hand-edited header naming a cycle should meet a bound rather than the

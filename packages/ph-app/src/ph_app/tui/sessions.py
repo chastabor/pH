@@ -112,10 +112,9 @@ def _inherited_title(
             if summary is None:
                 return ""
             # **Cached back**, because a segmented run is one chain: every row
-            # below this one walks the same ancestors, and without this each of
-            # fifty rows re-opens and re-parses the same files. Measured on a
-            # 60-segment chain: 550 opens and 39.9 ms against 60 and 4.6 ms —
-            # and this runs synchronously on the UI thread.
+            # below this one walks the same ancestors, so without this each row
+            # re-opens and re-parses the same files — synchronously, on the UI
+            # thread.
             known[parent] = summary
         if summary.title or summary.parent is None:
             return summary.title

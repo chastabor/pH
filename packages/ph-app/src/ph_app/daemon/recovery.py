@@ -60,21 +60,16 @@ FAILED = "supervisor/failed"
 RECOVERED = "supervisor/recovered"
 """A retry worked. The ladder is clear, and says how many attempts it took.
 
-**The one thing that resets the count**, and the reason it has to be its own
-record rather than an existing one. The first version reset on any `turn/end`,
-which the retry *manufactures*: a re-entered `run()` finds an empty inbox and
-appends `turn/start` + `turn/end{completed}` before the same crash happens
-again, so the ladder cleared the counter that bounds it. Measured against a
-persistently failing flush: **165 retries in two seconds, no give-up, the fold
-pinned at one attempt and the root reporting "idle"** — the unbounded retry this
-row exists to prevent, growing the log by three events an iteration. A marker
-only *success* writes cannot be forged by the failure.
+**The one thing that resets the count**, and it has to be its own record rather
+than an existing one. Resetting on any `turn/end` is unsound because the retry
+*manufactures* one: a re-entered `run()` finds an empty inbox and appends
+`turn/start` + `turn/end{completed}` before the same crash happens again, so the
+ladder would clear the counter that bounds it. **A marker only *success* writes
+cannot be forged by the failure.**
 
-`supervisor/*`, not `agent/*`: `ph.agent` owns that namespace (its registry
-declares `agent/status`, `agent/error`, `agent/inbox/*` with `owner="ph.agent"`)
-and these are the supervisor's records about an agent, not the agent's own —
-`agent/failed` sat one letter from `agent/error`, which means something else
-entirely.
+`supervisor/*`, not `agent/*`: `ph.agent` owns that namespace, and these are the
+supervisor's records *about* an agent rather than the agent's own — `agent/failed`
+sits one letter from `agent/error`, which means something else entirely.
 """
 
 RETRY_DELAYS: tuple[float, ...] = (0.25, 1.0, 5.0)

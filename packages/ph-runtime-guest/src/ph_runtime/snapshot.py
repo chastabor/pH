@@ -185,7 +185,8 @@ class NamespaceSnapshotter:
             return None
         self._digests[name] = digest
         # Base64 only now that the record is known to be going out: encoding a
-        # 10 MiB payload that turns out to be unchanged measured 11 ms per cell.
+        # large payload that turns out to be unchanged is a whole pass per cell
+        # over bytes nobody will send.
         return {
             "var": name,
             "digest": digest,

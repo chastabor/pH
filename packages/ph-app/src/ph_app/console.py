@@ -74,11 +74,10 @@ def emit(text: str) -> None:
 def fail(message: str, *, code: int = 1, cause: BaseException | None = None) -> NoReturn:
     """Print a refusal on stderr and exit with it.
 
-    The two lines were written out at every refusal in both command modules,
-    which is one user-facing sentence and one exit code per site to keep in
-    step; the `$PH_RUNTIME` refusal had already been copied verbatim between
-    them. `cause` keeps the chaining, because a traceback that lost the original
-    is the thing `--pdb` was going to be used for.
+    One user-facing sentence and one exit code, in one place, rather than a pair to
+    keep in step at every refusal in both command modules. `cause` keeps the
+    chaining, because a traceback that lost the original is the thing `--pdb` was
+    going to be used for.
     """
     err.print(message)
     raise typer.Exit(code=code) from cause

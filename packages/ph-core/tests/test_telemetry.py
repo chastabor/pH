@@ -8,6 +8,17 @@ no shipped profile mounts a sink (`base.yaml` carries the row with
 proof, and they live here rather than with the OTel row because the property is
 the *seam's*: renaming or dropping an exporter must not take the seam's only
 ordering test with it.
+
+## What the media estimates replaced
+
+A media block matched none of `measure`'s branches and contributed **zero**, so a
+conversation of forty images reported no pressure at all — and G2/G3's character
+thresholds, counted over text, never fired on it either.
+
+That is why `MEDIA_TOKENS_UNKNOWN` is deliberately order-of-magnitude rather than
+precise: being wrong by a factor is a rounding error against being wrong by
+everything, and this estimate only ever answers "should we compact *before*
+asking".
 """
 
 from __future__ import annotations

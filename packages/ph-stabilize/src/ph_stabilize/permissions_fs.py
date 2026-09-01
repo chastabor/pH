@@ -35,9 +35,6 @@ and carries the sentence on `ctx.fs_permissions.reach`, so the statement toggles
 with the sandbox rather than being a paragraph in a README that is wrong half the
 time.
 
-How much that buys today, and which readers in the tree are *not* behind this
-gate: `tests/test_permissions_fs.py`.
-
 @module ph_stabilize.permissions_fs
 """
 
@@ -486,11 +483,10 @@ class FsPermissions:
 def _prefix_of(root: Path) -> str:
     """`root` as a posix path with a trailing slash.
 
-    Cached because `_spellings` runs per gated read *and per file a walk visits*
-    — P4-06 measured `Path.relative_to` at 26 µs there, 92% of the check — and
-    `lru_cache` rather than a field on the value because the bound is then the
-    cache size rather than "every root ever seen", and because a mutable cache
-    on a frozen dataclass is a public constructor argument nobody meant to add.
+    Cached because `_spellings` runs per gated read *and per file a walk visits*.
+    `lru_cache` rather than a field on the value, so the bound is the cache size rather
+    than "every root ever seen" — and because a mutable cache on a frozen dataclass is
+    a public constructor argument nobody meant to add.
     """
     return f"{root.as_posix().rstrip('/')}/"
 

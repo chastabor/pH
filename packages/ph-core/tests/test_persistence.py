@@ -17,6 +17,12 @@ reached for the JSONL implementation's shape instead. **Four of them read
 not be added without breaking all four.
 
 That is what `locate` exists to replace, and why it is allowed to answer `None`.
+
+## Why the passivation sweeper uses `last_event` and not `events[-1]`
+
+`events[-1]` materialises a snapshot of the entire log to read one element —
+**4 MB and 4.7 ms at 500 000 events** — and the sweeper asks it of every root on
+every pass.
 """
 
 from __future__ import annotations

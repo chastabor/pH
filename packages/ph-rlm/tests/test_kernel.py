@@ -16,6 +16,28 @@ The host then pays its own **~25 µs** of per-frame work.
 
 Measured: `for i in range(10_000): print(i)` took **2.1-2.6 s**; buffered into
 ~8 KiB frames it is **~2 ms**.
+
+## Why the frame buffer is a `bytearray` scanned from its tail
+
+With `bytes` and `+=`, a multi-megabyte frame copies the whole buffer per 64 KiB
+chunk and re-scans it for a newline. A **16 MiB snapshot spent 834 ms of 1160 ms**
+doing exactly that; appending to a `bytearray` and searching from the previous
+length makes both linear — **1160 ms -> 221 ms**.
+
+## Two caps that stop at the cap
+
+**No round trip through JSON in `_json_safe`.** `encode` is about to serialize the
+frame anyway; doing it twice cost **2.8 ms against 1.2 ms for a 1 MiB result**.
+
+**`_encode_value` never builds what it is about to discard.** `json.dumps` of a
+1M-element list took **40 ms and `repr` another 37 ms — 77 ms to produce 64 KiB**,
+and "end the cell with `df`" is exactly how models write cells.
+
+## Why sends are serialised behind `_send_lock`
+
+Without it, contention lands in the `OSError`/`ClosedResourceError` branch as
+`BusyResourceError` and is reported as the child having exited — **eight concurrent
+replies were enough to "kill" a perfectly healthy kernel**.
 """
 
 from __future__ import annotations

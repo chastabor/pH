@@ -174,12 +174,10 @@ def _ask[T](work: Exchange[T]) -> T:
             fail(f"[red]the daemon refused:[/red] {failure}", cause=failure)
         if isinstance(failure, OSError):
             fail(_unreachable(path, failure), cause=failure)
-        # The member, not the wrapper. A bare `raise` here re-raised the group,
-        # so anything this does not name reached the person as an
-        # `ExceptionGroup` traceback instead of the exception inside it — and a
-        # `typer.Exit` raised by a command's own exchange became an exit code
-        # nothing reads, which is why two of these commands used to carry a
-        # `bool` back out and raise at command level.
+        # The member, not the wrapper. A bare `raise` re-raises the group, so
+        # anything this does not name reaches the person as an `ExceptionGroup`
+        # traceback instead of the exception inside it — and a `typer.Exit` raised
+        # by a command's own exchange becomes an exit code nothing reads.
         raise failure from None
 
 
@@ -298,10 +296,8 @@ def _line(event: Mapping[str, Any]) -> str:
 NOISE: frozenset[str] = frozenset(
     {
         # The streamed halves of `assistant/message`, which *is* shown. One line
-        # per delta is a keystroke log, not a follow — the auditor's projection
-        # made the same call for the same reason, and here it is also almost all
-        # of the cost: a 2 000-chunk turn is 196 ms of rendering for output
-        # nobody reads, against 2 ms once these are dropped.
+        # per delta is a keystroke log, not a follow — and here it is also almost
+        # all of the rendering cost, for output nobody reads.
         "assistant/chunk",
         # The dispatch's opening half; its settled half carries the content.
         "tool/code-dispatch-start",
@@ -372,11 +368,9 @@ class _Follow:
     def write(self, events: Iterable[Mapping[str, Any]]) -> None:
         """Render a run of events as one write.
 
-        One `console.print` per event measured 98 µs — 2.3x the cost of the same
-        events joined, and 240x the string they carry — so a 2 048-event
-        snapshot page spent 202 ms in Rich rather than 86 ms. Joining is what
-        makes catching up on a long log bearable; it is also why this takes a
-        sequence rather than an event.
+        One `console.print` per event costs multiples of the same events joined,
+        which is what makes catching up on a long log bearable — and why this takes
+        a sequence rather than an event.
         """
         lines = [_line(event) for event in events if self._shows(event)]
         if lines:

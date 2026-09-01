@@ -11,6 +11,14 @@ The validation tests below are the seam's, not this row's: a skill that
 half-registers is a name the catalog offers and nothing can serve. They moved
 here from `ph-rlm` when the reader did, because the format belongs to whoever
 defines a skill and both rows now read it through this one.
+
+## Why skill restrictions are keyed by scope
+
+A flat list scanned per read made **every agent pay for every other agent's
+narrowing**: a fan-out of sixteen children put sixteen filters in front of the
+parent's own catalog, none of which could change what the parent sees, and the
+parent's prompt assembly measured **3.9x slower** for it. Keyed, a read walks
+`isolation_chain()` — the filters that can possibly apply and no others.
 """
 
 from __future__ import annotations

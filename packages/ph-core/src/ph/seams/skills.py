@@ -146,12 +146,10 @@ class SkillService:
     _restrictions: dict[Context | None, list[SkillRestriction]] = field(default_factory=dict)
     """Filters keyed by the scope they belong to, as `ctx.tools` keys its layers.
 
-    A flat list scanned per read was the first shape and it made **every agent
-    pay for every other agent's narrowing**: a fan-out of sixteen children put
-    sixteen filters in front of the parent's own catalog, none of which could
-    change what the parent sees, and the parent's prompt assembly measured 3.9 times
-    slower for it. Keyed, a read walks `isolation_chain()` — the filters that
-    can possibly apply and no others.
+    A flat list scanned per read makes **every agent pay for every other agent's
+    narrowing**: a fan-out of sixteen children puts sixteen filters in front of the
+    parent's own catalog, none of which can change what the parent sees. Keyed, a read
+    walks `isolation_chain()` — the filters that can possibly apply and no others.
     """
     _reach: dict[tuple[Context | None, ...], tuple[int, frozenset[str]]] = field(
         default_factory=dict

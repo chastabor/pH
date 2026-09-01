@@ -172,10 +172,10 @@ class AttachmentStore:
         content, so two refs with one id have one body by definition — there is
         no invalidation to get wrong.
 
-        Worth having because the alternative is paid on *every model step*: a
-        media block stays in derived history for the life of the session, so a
-        4 MB PDF attached at the first turn was re-read from disk and re-encoded
-        into a 5.5 MB string for every request after it.
+        Worth having because the alternative is paid on *every model step*: a media
+        block stays in derived history for the life of the session, so an attachment
+        added at the first turn would be re-read from disk and re-encoded for every
+        request after it.
         """
         cached = self._encoded.get(ref.attachment_id)
         if cached is not None:

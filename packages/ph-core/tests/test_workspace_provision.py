@@ -24,6 +24,14 @@ seconds plus a network round-trip for the installer they replace.
 That spread is why the default is the *isolated* one and the cheap ones are opt-in
 with their sharing named: `hardlink` is mutated in place by a build step that
 rewrites rather than replaces, and `symlink` is shared and mutable outright.
+
+## Why the `FICLONE` probe is latched per device pair
+
+On a filesystem that cannot clone, the attempt costs an open, an open, a failing
+`ioctl`, an unlink and two closes **per file** — measured at **+50% wall time over a
+20 000-file tree**, paid per child in a fan-out. The answer never varies within one
+device pair, and a source and destination on different devices can only ever return
+`EXDEV`, which two `stat` calls settle without attempting anything.
 """
 
 from __future__ import annotations

@@ -387,11 +387,10 @@ def _plain(value: Any) -> Any:
 def _encode_value(value: Any, cap: int) -> tuple[Any, bool]:
     """The cell's value as JSON if it fits, else a bounded `repr`.
 
-    Both halves stop at the cap rather than building the whole thing to measure
-    it. `json.dumps` of a 1M-element list took 40 ms and `repr` another 37 ms —
-    77 ms to produce 64 KiB — and "end the cell with `df`" is exactly how models
-    write cells. `iterencode` stops as soon as the prefix is over the cap, and
-    `reprlib` never builds more than it needs.
+    **Both halves stop at the cap rather than building the whole thing to measure
+    it** — and "end the cell with `df`" is exactly how models write cells.
+    `iterencode` stops as soon as the prefix is over the cap, and `reprlib` never
+    builds more than it needs.
     """
     if value is None:
         return None, False

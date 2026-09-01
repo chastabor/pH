@@ -60,9 +60,10 @@ than exporting the new severity as INFO.
 """
 
 SCALARS = (str, int, float, bool)
-"""What OTel accepts as an attribute value. A tuple at module scope rather than
-a `str | int | float | bool` expression inside `_flat`, because that expression
-is evaluated per attribute per record — 136 ns against 40 ns for the tuple."""
+"""What OTel accepts as an attribute value. A tuple at module scope rather than a
+`str | int | float | bool` expression inside `_flat`, which would be evaluated per
+attribute per record.
+"""
 
 
 class Config(WireModel):
@@ -98,8 +99,8 @@ async def apply(ctx: Context, config: Config) -> None:
     provider.add_log_record_processor(processor)
     logger = provider.get_logger("ph.session")
     # Resolved once at mount rather than `SeverityNumber(...)` per record: enum
-    # lookup by value goes through `Enum.__call__` and costs ~180 ns a record
-    # for a table of four that cannot change while the row is mounted.
+    # lookup by value goes through `Enum.__call__`, for a table of four that
+    # cannot change while the row is mounted.
     severities = {name: SeverityNumber(value) for name, value in SEVERITY.items()}
 
     def ship(record: SessionTelemetryRecord) -> None:

@@ -311,14 +311,13 @@ def _merge_usage(current: TokenUsage | None, raw: dict[str, Any]) -> TokenUsage:
 def _to_anthropic(message: Any, media: dict[str, str]) -> dict[str, Any]:
     """One pH message as an Anthropic message.
 
-    Tool results are user-role content blocks here rather than their own role,
-    which is the main structural difference from the OpenAI wire.
+    Tool results are user-role content blocks here rather than their own role, which
+    is the main structural difference from the OpenAI wire.
 
-    `media` holds base64 for the attachments this route will take; anything
-    absent from it becomes a pointer. Nothing is dropped — the previous version
-    of this function built branches for four block kinds and silently omitted
-    everything else, so a message that was only an image reached the wire as an
-    empty text block.
+    `media` holds base64 for the attachments this route will take; anything absent
+    from it becomes a pointer. **Nothing is dropped** — a block kind this function
+    does not recognise still reaches the wire, rather than a message that was only an
+    image arriving as an empty text block.
     """
     blocks: list[dict[str, Any]] = []
     for block in message.content:

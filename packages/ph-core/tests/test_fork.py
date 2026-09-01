@@ -41,6 +41,12 @@ takes, so a backend that ignores it is slower rather than wrong. Making the boun
 load-bearing would mean a backend quietly ignoring it produced a *wrong* log,
 which is exactly how reference-forking came to be a silent no-op on Turso once
 already.
+
+## Why `fork_boundaries` folds the whole log in one pass
+
+Asking `open_turn_at` per record rescans the prefix each time, which is quadratic:
+an **8 000-event session cost 467 ms to fold**, and that became a frozen UI once
+the trajectory could be opened from a running chat (P4-17).
 """
 
 from __future__ import annotations

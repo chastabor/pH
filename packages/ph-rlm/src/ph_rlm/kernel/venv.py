@@ -103,8 +103,8 @@ def _host_can_import_guest(python: Path) -> bool:
     both callers *refuse* on `False` — so a stale negative cannot strand a process
     that would otherwise have recovered, because there is no recovery path. A stale
     positive means someone uninstalled the guest from a live interpreter mid-run,
-    which the next spawn reports anyway. What the cache saves is measured in
-    `tests/test_venv.py`.
+    which the next spawn reports anyway. The cache bounds the cost to anything that
+    resolves repeatedly in one process, since each answer is a subprocess spawn.
     """
     try:
         completed = subprocess.run(

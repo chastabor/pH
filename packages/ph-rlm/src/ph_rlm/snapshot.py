@@ -201,10 +201,9 @@ class KernelSnapshotPolicy:
     ) -> tuple[SnapshotRecord, bytes | None] | None:
         """The record to append, and the payload to write after appending it.
 
-        The payload is decoded once and handed on. It used to be base64-decoded
-        here for the tag, decoded again to write the blob, and hashed a third
-        time to derive the path — 35 ms of the 64 ms a 16 MiB variable cost,
-        spent re-deriving what was already in hand.
+        The payload is decoded **once** and handed on: base64-decoding it for the
+        tag, again to write the blob, and hashing it a third time to derive the path
+        is three passes re-deriving what is already in hand.
         """
         name = raw.get("var")
         if not isinstance(name, str):
