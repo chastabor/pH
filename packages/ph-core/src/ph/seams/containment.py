@@ -228,6 +228,25 @@ class ContainmentService:
             rows.append((f"{prefix}bounds", description.bounds))
             rows.append((f"{prefix}does NOT bound", description.does_not_bound))
             rows.append((f"{prefix}buys", description.buys))
+        # **Both boundaries in one section, because they were contradicting each
+        # other across two.** The rows above describe the *workspace* tier, which
+        # `effective_tier` reads off the workspace provider — so a deployment with
+        # a mounted sandbox backend and no sandbox-tier workspace provider printed
+        # `bounds: nothing` here and `confines: yes` five lines down, with
+        # `strict is satisfied: yes` between them. They are genuinely different
+        # boundaries: one is the tree an agent works in, the other is every
+        # command the harness wraps. Saying so beside them is what stops a reader
+        # having to reconcile two sections.
+        confinement = enforcement_of(self.ctx)
+        if confinement is not None:
+            rows.append(
+                (
+                    "confined commands",
+                    f'a sandbox backend is mounted and enforces "{confinement}"; every '
+                    "command the harness wraps is bounded by the kernel, whatever the "
+                    "workspace rows above say about the tree",
+                )
+            )
         rows.append(("strict", "yes" if self.strict else "no"))
         if self.strict:
             rows.append(("strict is satisfied", "no" if self._unconfined() else "yes"))

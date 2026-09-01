@@ -42,6 +42,7 @@ __all__ = [
     "SubprocessService",
     "SubprocessSpawnSpec",
     "apply",
+    "first_line",
     "scrub_env",
 ]
 
@@ -55,6 +56,17 @@ SECRET_PATTERN = re.compile(r"KEY|SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL", re.I
 Substring matching, deliberately broad: `MY_API_KEY_2` and `GH_TOKEN_FILE` are
 both worth losing, and a child that genuinely needs a secret should be given it
 explicitly rather than by inheritance."""
+
+
+def first_line(text: str) -> str:
+    """The first non-blank line of a tool's output, or `""`.
+
+    Here rather than in each seam that reads a subprocess's words, because two
+    of them had it and a third was about to: a decline that quotes the backend
+    is the difference between "the sandbox refused a write" and "setting up uid
+    map: Permission denied", and only the second tells an operator what to do.
+    """
+    return next((line.strip() for line in text.splitlines() if line.strip()), "")
 
 
 def scrub_env(

@@ -67,7 +67,7 @@ from ..paths import default_home_path
 from ..wire import WireModel
 from .containment import TIERS, TierDescription
 from .diagnostics import Diagnostic, contribute
-from .subprocess import SubprocessSpawnSpec, scrub_env
+from .subprocess import SubprocessSpawnSpec, first_line, scrub_env
 from .workspace import (
     ContainmentTier,
     Workspace,
@@ -138,7 +138,7 @@ async def open_overlay(ctx: Context, store: Path, identifier: str, mountpoint: P
     code, _, err = await agentfs(ctx, store, "mount", identifier, str(mountpoint))
     if code == 0 and await is_mount(mountpoint):
         return ""
-    return _first_line(err) or "the overlay did not mount"
+    return first_line(err) or "the overlay did not mount"
 
 
 async def run(ctx: Context, program: str, cwd: Path, *args: str) -> tuple[int, str, str]:
@@ -262,7 +262,7 @@ async def probe_overlay(ctx: Context, scratch: Path) -> OverlayProbe:
     try:
         code, _, err = await agentfs(ctx, work, "init", "--base", str(base), "ph_probe")
         if code != 0:
-            return OverlayProbe(False, _first_line(err) or "agentfs init failed")
+            return OverlayProbe(False, first_line(err) or "agentfs init failed")
         refused = await open_overlay(ctx, work, "ph_probe", mount)
         if refused:
             return OverlayProbe(False, refused)
@@ -277,10 +277,6 @@ async def probe_overlay(ctx: Context, scratch: Path) -> OverlayProbe:
         if await is_mount(mount):
             await unmount(ctx, mount)
         await anyio.to_thread.run_sync(lambda: shutil.rmtree(work, ignore_errors=True))
-
-
-def _first_line(text: str) -> str:
-    return next((line.strip() for line in text.splitlines() if line.strip()), "")
 
 
 @dataclass(slots=True)
@@ -375,7 +371,7 @@ class AgentFsProvider:
 
         code, _, err = await agentfs(self.ctx, store, "init", "--base", str(base), identifier)
         if code != 0:
-            raise WorkspaceDeclined("overlay-failed", _first_line(err) or "agentfs init failed")
+            raise WorkspaceDeclined("overlay-failed", first_line(err) or "agentfs init failed")
         refused = await open_overlay(self.ctx, store, identifier, mount)
         if refused:
             raise WorkspaceDeclined("overlay-failed", refused)
@@ -640,7 +636,7 @@ async def export_overlay(ctx: Context, *, store: Path, identifier: str, ref: str
     await anyio.to_thread.run_sync(lambda: shutil.rmtree(tree, ignore_errors=True))
     code, _, err = await git(ctx, repo, "worktree", "add", "-b", ref, str(tree), commit)
     if code != 0:
-        raise ExportRefused(_first_line(err) or "could not create the export branch", reason="git")
+        raise ExportRefused(first_line(err) or "could not create the export branch", reason="git")
 
     # **One owner for the checkout's whole life.** The removal was written at
     # two exits and missing from a third: an `_apply` that raised left both the
@@ -684,7 +680,7 @@ async def _changeset(ctx: Context, store: Path, identifier: str) -> list[tuple[s
     code, out, err = await agentfs(ctx, store, "diff", identifier)
     if code != 0:
         raise ExportRefused(
-            _first_line(err) or "could not read the overlay's changes", reason="overlay"
+            first_line(err) or "could not read the overlay's changes", reason="overlay"
         )
     rows: list[tuple[str, str, str]] = []
     for line in out.splitlines():
