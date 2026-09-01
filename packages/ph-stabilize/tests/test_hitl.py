@@ -10,6 +10,17 @@ Everything after the ask is the seam's and was already true — `approval/asked`
 then `approval/decided`, fail-closed on a missing answerer, re-ask on resume.
 What P4-05 adds is that two of the four answers carry data, and the tests for
 those live here because the pipeline is where they take effect.
+
+## What the retyped copy of `DESTRUCTIVE_PATTERNS` got wrong
+
+`DESTRUCTIVE_PATTERNS` was exported, documented and tested, and reachable only
+from Python — so the first profile that wanted it retyped a subset, which had
+already diverged **on its first day**: it widened `git push` from force-only to
+**every** push, against a shipped test that pins `git push origin main` as
+ordinary, and dropped the `wget`, `dd`, `mkfs`, `chmod -R` and SQL entries.
+
+A security judgement with two homes is one that disagrees with itself, which is
+why `PATTERN_SETS` gives a profile a name to write instead.
 """
 
 from __future__ import annotations

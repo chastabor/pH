@@ -1,10 +1,8 @@
 """The wire vocabulary both transports speak (P5-02, I-7).
 
 pH answers on two: `--mode rpc` over stdio, for a caller that owns the process,
-and `$PH_RUNTIME/daemon.sock`, for one that does not. They are the same
-protocol. P5-01 shipped them as two — the daemon grew `root/*` methods and
-dropped the `"jsonrpc": "2.0"` field the RPC mode sends — and the divergence was
-invisible because each transport only ever tested itself.
+and `$PH_RUNTIME/daemon.sock`, for one that does not. **They are the same
+protocol**, and this module is what makes that checkable rather than intended.
 
 **The names are dsh's**, deliberately: `initialize`, `session/prompt`,
 `session.event`, `session.status`. dsh already ships a Python client for this
@@ -12,10 +10,10 @@ shape, and a second vocabulary would make "use the client you have" false in
 exactly the deployment Phase 5 exists for.
 
 **Envelope here, methods there.** What is genuinely transport-independent is the
-request/reply/error shaping and the version; what a transport serves — one
-session over a pipe, or many supervised roots over a socket — is its own. So
-this module owns `respond`, `notify` and the capability block, and each server
-owns its method table.
+request/reply/error shaping and the version; what a transport serves — one session
+over a pipe, or many supervised roots over a socket — is its own. So this module
+owns `respond`, `notify` and the capability block, and each server owns its method
+table.
 
 @module ph_app.protocol
 """

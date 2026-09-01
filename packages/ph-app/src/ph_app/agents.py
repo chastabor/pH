@@ -2,28 +2,23 @@
 
 Seven commands over one socket: list the roots, `attach` to one and follow it,
 `send` it a prompt, `schedule` future work, ask a root's `status`, ask the
-daemon's own `doctor`, and `shutdown`. Every one of them is a real exchange with
-a real supervisor — there is no local mode and no in-process shortcut, because
-the thing this row delivers is precisely that a person can reach a run they are
-not attached to.
+daemon's own `doctor`, and `shutdown`. Every one is a real exchange with a real
+supervisor — no local mode, no in-process shortcut, because what this row
+delivers is precisely that a person can reach a run they are not attached to.
 
 **One spine, seven commands.** `_ask` resolves the socket, connects, runs the
 client's pump and closes behind itself; each command is the body of one exchange
-plus how to print it. That is what keeps "no daemon is running" one sentence
-rather than seven, and it is where the two failures a person actually meets are
-told apart: a socket that is *absent* means nothing was started, and a socket
-that is *present but refuses* means something crashed and left its path behind.
-Those want different next steps, and a client that reported "connection refused"
-for both would send half its readers to the wrong one.
+plus how to print it. That keeps "no daemon is running" one sentence rather than
+seven, and it is where the two failures a person actually meets are told apart: a
+socket that is *absent* means nothing was started, and a socket that is *present
+but refuses* means something crashed and left its path behind.
 
 **Nothing here re-derives what the daemon knows.** `doctor` reports the socket
 the daemon bound, the policy it was started with, the cadences it is running and
-whether that socket outlives a logout, all read back over the wire — a client
-that printed what *it* would have chosen would agree with a daemon started
-differently and say nothing at all. The one exception is the case the rule was
-never about: when the connect itself fails there is no daemon to ask, and
-whether the socket is *absent* or *reaped* decides which of two opposite next
-steps a person is given (P5-11).
+whether that socket outlives a logout — all read back over the wire, because a
+client printing what *it* would have chosen would agree with a daemon started
+differently and say nothing at all. The one exception is when the connect itself
+fails and there is no daemon to ask (P5-11).
 
 @module ph_app.agents
 """

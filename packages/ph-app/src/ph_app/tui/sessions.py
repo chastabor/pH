@@ -92,17 +92,14 @@ def _inherited_title(
 ) -> str:
     """The nearest ancestor's title, for a child whose log starts mid-conversation.
 
-    **Opened, not searched for.** An ancestor is a sibling inside this session's
-    own family directory, so the path is a join. Resolving each one by id instead
-    scanned every family in the store: measured at 200 families whose newest rows
-    were segment tips, 111.8 ms and 200 store scans against 18.6 ms — 6x, and it
-    runs synchronously on the UI thread.
+    **Opened, not searched for.** An ancestor is a sibling inside this session's own
+    family directory, so the path is a join; resolving each one by id instead scans
+    every family in the store, synchronously on the UI thread.
 
-    Bounded by the same `MAX_DEPTH` the reader walks, which is also what
-    terminates a hand-edited cycle — a repeat costs up to 64 dict lookups rather
-    than a second collection to track it, the same budget `materialise` already
-    spends on every chained read. It stops at the first ancestor that will not
-    read: a picker owes a row, not an exception.
+    Bounded by the same `MAX_DEPTH` the reader walks, which is also what terminates a
+    hand-edited cycle — a repeat costs up to 64 dict lookups rather than a second
+    collection to track it. It stops at the first ancestor that will not read: a picker
+    owes a row, not an exception.
     """
     parent = of.parent
     family = of.family or of.session_id

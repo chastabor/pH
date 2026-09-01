@@ -3,9 +3,9 @@
 The load-bearing decision (P2-01's gate): **the transcript is rebuilt from
 `session.events`, never from `derive_messages()`.** The derivation is the *model's*
 view, and compaction deliberately shadows what it replaced — so rebuilding a
-resumed session from it would erase conversation the person sitting there
-already read. The adapter therefore reads the log, and marks a compacted range
-rather than dropping it.
+resumed session from it would erase conversation the person sitting there already
+read. The adapter reads the log, and marks a compacted range rather than dropping
+it.
 
 Two modes, and the difference matters:
 
@@ -13,9 +13,9 @@ Two modes, and the difference matters:
   assembled text, and ignores `assistant/chunk` entirely;
 * **live** streams the chunks and lets the message finalize them.
 
-Feeding chunks on replay would rebuild a message the log already has, one delta
-at a time, and any chunk lost to a crash would leave the transcript disagreeing
-with the log.
+Feeding chunks on replay would rebuild a message the log already has one delta at
+a time, and any chunk lost to a crash would leave the transcript disagreeing with
+the log.
 
 `HANDLERS` is the closed list of what renders. Together with `RECORDLESS` — the
 known types that are an auditor's records rather than a reader's (P3-24) — it
@@ -299,20 +299,16 @@ class TuiEventAdapter:
     def _definition(self, name: str) -> Any:
         """The definition behind a card, for presentation only.
 
-        `DEPLOYMENT` and not an agent's scope (P6-32): this renders a call the
-        *log* already recorded, and `tool/call` events carry no agent — so
-        "which agent's presentation" is unanswerable from what the log holds,
-        and the deployment view is the best available answer rather than a
-        convenient one. Asking in one agent's boundary would drop every other
-        agent's cards.
+        `DEPLOYMENT` and not an agent's scope (P6-32): this renders a call the *log*
+        already recorded, and `tool/call` events carry no agent, so "which agent's
+        presentation" is unanswerable from what the log holds.
 
         **Best available, not exact, in two ways** (§5 rule 6): a name that was
-        agent-*shadowed* at execution time renders here under the global
-        definition — a wrong card, not a blank one — and an agent-*scoped* tool
-        renders with no definition at all, because `DEPLOYMENT` is the mount's
-        chain, not a union over agents. Both are presentation-only, and both
-        have the same real fix: record the executing agent on `tool/call`,
-        which is a log-schema row, not a boundary choice here.
+        agent-*shadowed* at execution time renders under the global definition — a wrong
+        card, not a blank one — and an agent-*scoped* tool renders with no definition at
+        all, because `DEPLOYMENT` is the mount's chain, not a union over agents. Both are
+        presentation-only, and both have the same real fix: record the executing agent on
+        `tool/call`, which is a log-schema row rather than a boundary choice here.
 
         Nothing is gated on the answer; it supplies a title and a renderer.
         """
@@ -860,26 +856,24 @@ RECORDLESS: frozenset[str] = frozenset(
         "compaction/summarized",
     }
 )
-"""Known types that produce no transcript row on purpose. They are the auditor's
-records — the prompt snapshot, step timings, policy changes — and belong to the
-trajectory view (P3-24), not the conversation.
+"""Known types that produce no transcript row on purpose — the auditor's records
+(the prompt snapshot, step timings, policy changes), which belong to the
+trajectory view (P3-24) rather than the conversation.
 
-`kernel/snapshot` is here for a second reason as well as that one: there is one
-per changed variable per cell, so rendering them would bury the conversation in
-its own bookkeeping. Its companion `kernel/restored` *is* rendered, but only when
-a variable failed to come back — see `_on_kernel_restored`.
+Three entries are here for reasons of their own:
 
-`compaction/summarized` is here for a third reason again: it is the *accounting*
-for a compaction, and the compaction itself already produced a row — the
-replacement `user/message` the summary rides on. Rendering both would show one
-event twice, once as the summary a person can read and once as a token count.
-Its sibling `compaction/declined` is not record-less: a compaction that did not
-happen leaves no row of its own, and the reader is about to hit the limit it
-would have relieved.
-
-`subagent/status` and `subagent/usage-attributed` were here until P3-19 gave them
-their consumer. They still produce **no transcript row** — eight children ticking
-through `queued → running → done` would push the conversation off screen — but
-they are no longer record-less: they fold into `TuiState.subagents`, which the
-sidebar's panel draws. `subagent/admitted` and `subagent/deleted` do both, and
-the same split decides ignorability in `ph.session.known_event_types`."""
+* `kernel/snapshot` — one per changed variable per cell, so rendering them would
+  bury the conversation in its own bookkeeping. Its companion `kernel/restored`
+  *is* rendered, but only when a variable failed to come back.
+* `compaction/summarized` — the *accounting* for a compaction, where the
+  compaction itself already produced a row: the replacement `user/message` the
+  summary rides on. Its sibling `compaction/declined` is **not** record-less,
+  because a compaction that did not happen leaves no row of its own and the
+  reader is about to hit the limit it would have relieved.
+* `subagent/status` and `subagent/usage-attributed` produce no transcript row —
+  eight children ticking through `queued → running → done` would push the
+  conversation off screen — but they are not record-less: they fold into
+  `TuiState.subagents`, which the sidebar's panel draws. `subagent/admitted` and
+  `subagent/deleted` do both, and the same split decides ignorability in
+  `ph.session.known_event_types`.
+"""

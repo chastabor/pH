@@ -5,6 +5,14 @@ conditional on the surface actually being there**, so the prompt cannot advertis
 a call the agent would be denied. And **the volatile facts are a `context()`, not
 a cached section**, so a turn that changes the depth or the family does not
 re-bill the whole prefix (A12).
+
+## Why the doctrine carries no call listing
+
+Prime Agent's doctrine carried an "RLM-native call contract" paragraph, and a
+first draft of `rlm-prompt` carried a bullet list of the five delegation calls.
+Both existed because prime-agent had no generated listing. `tools:sdk` *is* that
+listing, built from the registry, so prose beside it is a second description of
+one surface — with the hand-written copy going stale first.
 """
 
 from __future__ import annotations

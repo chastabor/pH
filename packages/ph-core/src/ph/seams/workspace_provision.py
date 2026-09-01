@@ -65,17 +65,15 @@ log = logging.getLogger("ph.seams.workspace_provision")
 ProvisionMode: TypeAlias = Literal["copy", "hardlink", "symlink"]
 """How a material reaches the new workspace. Three costs, three guarantees.
 
-Measured on a synthetic dependency tree (2 000 packages, 20 000 files, 22 MB):
-`copy` 0.674 s, `hardlink` 0.188 s, `symlink` 0.003 s — against tens of seconds
-plus a network round-trip for the installer they replace.
-
 `copy` is **isolated** and the default. `hardlink` is near-free and safe for the
 replace-and-rename pattern every package manager uses — pnpm's whole store is a
 hardlink farm — but a build step that writes *in place* (a native addon,
 `patch-package`) mutates the parent's copy through the shared inode, so it is
 opt-in with that named. `symlink` is instant and zero-space and **shared and
-mutable**: a child writing through it reaches the parent's tree, handing back
-some of the collision isolation the tier exists to buy.
+mutable**: a child writing through it reaches the parent's tree, handing back some
+of the collision isolation the tier exists to buy.
+
+What each one costs: `tests/test_workspace_provision.py`.
 """
 
 _FICLONE = 0x40049409

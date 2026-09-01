@@ -1,20 +1,19 @@
 """Reading the log's plain JSON without a model in the way.
 
-Every reader of a stored or streamed log — the TUI's transcript adapter and
-session lister, `ph agents attach` — sees payloads in one of two shapes:
-**frozen**, when the event is in memory (a `MappingProxyType` over tuples), or
-**plain**, when it was persisted and read back (`dict`s over `list`s). The
-helpers here accept both, and the distinction is load-bearing: a reader that
-tested for `dict` would work on resume and silently see nothing live. Phase 1
-hit the same trap with `run_code` arguments.
+Every reader of a stored or streamed log — the TUI's transcript adapter and session
+lister, `ph agents attach` — sees payloads in one of two shapes: **frozen**, when
+the event is in memory (a `MappingProxyType` over tuples), or **plain**, when it
+was persisted and read back (`dict`s over `list`s). The helpers here accept both,
+and the distinction is load-bearing: a reader that tested for `dict` would work on
+resume and silently see nothing live.
 
-Absence is normal too. The log is JSON, every field is optional to a reader, and
-a missing one must cost a row rather than the transcript.
+Absence is normal too. The log is JSON, every field is optional to a reader, and a
+missing one must cost a row rather than the transcript.
 
-**In `ph_app`, not `ph_app.tui`, since P5-10.** `ph_app.tui.__init__` imports
-the Textual app, so a module under it cannot be read from without paying 278 ms
-of terminal framework — which a headless `ph agents attach` should never do to
-render a line of a log it just received.
+**In `ph_app`, not `ph_app.tui`.** `ph_app.tui.__init__` imports the Textual app,
+so a module under it cannot be read from without paying for the terminal framework
+— which a headless `ph agents attach` should never do to render a line of a log it
+just received.
 
 @module ph_app.wire
 """

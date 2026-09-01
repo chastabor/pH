@@ -1,9 +1,7 @@
 """The planner: the model that writes a refinement, and the gate that decides to.
 
-P3-16's second increment. The first shipped everything a refinement *is* — the
-fold, validation, apply, rollback — and left one question open: where does a
-`RefinementProposal` come from. Here, from one non-reasoning model call whose
-whole output is JSON.
+A `RefinementProposal` comes from one non-reasoning model call whose whole output
+is JSON.
 
 Two calls, deliberately different sizes. **The review gate** is cheap and answers
 one question — is there anything here worth recording — because auto-refine fires

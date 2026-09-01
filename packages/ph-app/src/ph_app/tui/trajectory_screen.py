@@ -1,21 +1,18 @@
 """The auditor's screen, and the row that contributes it (P4-17).
 
-P3-25 shipped this view as its own `App`, which reads a stored log with nothing
-mounted — the property the shape was chosen for. What it could not do was open
-*over a conversation*: `ph --mode trajectory` was the only route in.
+A `Screen` rather than an `App`, so the same view serves both entry points:
+`TrajectoryApp` composes one with records read from a file — reading a stored log
+with nothing mounted, which is the property the shape was chosen for — and
+`ctx.tui_screens` composes one from the live session. The standalone entry point
+is therefore a strict subset of the embedded one rather than a second
+implementation of it.
 
-Splitting the screen out of the app fixes that without giving the property up.
-`TrajectoryApp` composes one of these with records read from a file;
-`ctx.tui_screens` composes one from the live session; both are the same screen,
-so the standalone entry point is once again a strict subset of the embedded one
-rather than a second implementation of it.
-
-**Forking is the one action, and it is not offered everywhere.** A6 permits a
-fork at a closed turn and nowhere else, so the table marks those rows and the
-key refuses the others by *saying which rows are targets* rather than by
-rejecting after the fact. The fork itself is `ctx.sessions.fork`, which needs a
-session store — so the action is available when the view was opened from a live
-harness and reports honestly that it is not when it was opened from a file.
+**Forking is the one action, and it is not offered everywhere.** A6 permits a fork
+at a closed turn and nowhere else, so the table marks those rows and the key
+refuses the others by *saying which rows are targets* rather than by rejecting
+after the fact. The fork itself is `ctx.sessions.fork`, which needs a session
+store — so the action is available when the view was opened from a live harness
+and reports honestly that it is not when it was opened from a file.
 
 @module ph_app.tui.trajectory_screen
 """

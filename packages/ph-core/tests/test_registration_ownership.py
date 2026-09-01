@@ -22,6 +22,39 @@ The behavioural assertion is deliberately generic — *the seam's own context do
 not grow an effect* — rather than per-registry. It needs no knowledge of what
 each registry stores, so it holds for a seam this module has never heard of, and
 it is exactly the property that was wrong.
+
+## What the binding costs
+
+Recorded here rather than in `context.py`, because these are the numbers that
+justify two shapes a reader would otherwise be tempted to tidy into one.
+
+**`running` is a class, not a `@contextmanager`.** The generator form costs a
+frame, a `StopIteration` and two `send`s: **709 ns** per entry against **316 ns**
+for byte-identical branch logic. This stopped being a once-per-activation helper
+at P6-26/P6-29 — it is entered once per tool call, once per slash command, once
+per prompt row per `assemble`, and once per telemetry sink per record, at
+twenty-one sites. In situ against the pre-row build on base+headless, a **tool
+call is at parity: 26.67 µs against 26.74** — the cheaper form pays for the whole
+pair mechanism.
+
+**What it does not pay for is `assemble`**, and §5 rule 6 wants that said rather
+than discovered in a profiler. Prompt assembly enters the binding once per
+*contributing row*, so the cost scales in the thing plugins add: **55.06 µs
+against 49.85** with the nine rows base+headless contributes, ~1.2 µs per row
+beyond that. Once per turn against a model round-trip, so it is affordable — but
+a deployment with forty prompt rows pays forty bindings.
+
+**`_invoke` spells the binding inline rather than calling `running`**, one scale
+down from the same argument: `emit` fires once per streamed chunk. Cross-process
+A/B on a 2 000-chunk turn, headless with two listeners: **8.2 ms** before P6-25,
+**14.3 ms** through a `@contextmanager`, **10.5 ms** inline.
+
+An earlier version of that paragraph priced the inline form at 120 ns per
+listener and reported the row as free. Both were wrong, and the correction is why
+`_invoke` has a `None` branch at all: the 120 ns counted only the `set`/`reset`
+pair (**93 ns** measured) and missed the `inspect.isawaitable` the same function
+introduced — **172 ns**, run twice per listener, which made the awaitability
+question cost more than the ownership it was serving.
 """
 
 from __future__ import annotations

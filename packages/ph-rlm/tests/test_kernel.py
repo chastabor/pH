@@ -4,6 +4,18 @@ These are the tests that would have been prime-agent's own suite, had D19 not
 replaced its runtime. Nothing here is mocked: each test spawns CPython, hands it
 fd 3, and drives the protocol, because every property under test is a property
 of the process boundary.
+
+## Why guest stdout is coalesced into ~8 KiB frames
+
+A frame per `write` is quadratic twice over. `print` issues two writes (the text
+and the newline), and each becoming a `channel.send` means CPython 3.12's
+`_SelectorSocketTransport.write` calls `get_write_buffer_size()` —
+`sum(map(len, self._buffer))` over the pending deque — and a cell that never awaits
+never lets the transport drain, so that sum grows with everything written so far.
+The host then pays its own **~25 µs** of per-frame work.
+
+Measured: `for i in range(10_000): print(i)` took **2.1-2.6 s**; buffered into
+~8 KiB frames it is **~2 ms**.
 """
 
 from __future__ import annotations

@@ -171,20 +171,18 @@ def _assert_provenance(event: SessionEvent, shadowed_seqs: Sequence[int]) -> Non
 def _shadowed(state: _FoldState, op: SurfaceReplace) -> tuple[int, ...]:
     """Which nodes this replacement takes out, in surface order.
 
-    **Membership, never arithmetic.** Every named seq has to be a node right now
-    or the whole operation is refused — there is no "between", so a name that has
-    already been shadowed cannot be silently re-shadowed and a range cannot drift
-    over messages nobody cited.
+    **Membership, never arithmetic.** Every named seq has to be a node right now or
+    the whole operation is refused — there is no "between", so a name that has already
+    been shadowed cannot be silently re-shadowed and a range cannot drift over
+    messages nobody cited.
 
     Returned in surface order rather than the order the writer listed them, so a
-    consumer reading `shadowed_seqs` sees the conversation's order and not an
-    accident of how the set was built.
+    consumer reading `shadowed_seqs` sees the conversation's order and not an accident
+    of how the set was built.
 
-    **One pass with a set, not `.index` per name.** The first version resolved
-    each name by scanning the node list from position 0, which is O(names x
-    nodes): a compaction shadowing 1 000 of 2 000 nodes measured 4.5 ms against
-    0.13 ms for the range op it replaced — 35x, and quadratic in the number of
-    names, which is precisely the direction compaction grows.
+    **One pass with a set, not `.index` per name** — the alternative is quadratic in
+    the number of names, which is precisely the direction compaction grows. Measured
+    in `tests/test_surface.py`.
     """
     if len(op.replaces) == 1:
         # **The common case keeps the cheap test.** A membership scan stops at

@@ -4,6 +4,18 @@ The layering rule from §9: `ph-core` may not import Textual, Rich or Typer.
 It is enforced by a test rather than a convention because the cost of breaking
 it is invisible until someone tries to run the harness headless, in a daemon,
 or inside a runtime venv that has no terminal libraries at all.
+
+## What nesting an agent's scope inside its parent's replaced (P6-27)
+
+Every agent used to hang off the *registry*, so a parent and its child were
+**siblings** and `parent.ctx.reaches(child.ctx)` was `False`. The relationship
+`SessionHeader.parent_session` records, and that B7 is entirely about, had no
+representation in the tree that answers questions about it — so `ctx.subagents`
+rebuilt the ceiling by hand on every spawn, and `grant_for`'s docstring had to
+explain that writing `None` out as an explicit list "is not a nicety".
+
+The subagent provider's `parent.ctx.effect(...)` was likewise doing by hand what
+the tree now does by shape.
 """
 
 from __future__ import annotations

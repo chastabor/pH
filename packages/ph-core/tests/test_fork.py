@@ -6,6 +6,41 @@ identically.*
 Branching in pH is `fork(source, boundary)` plus `seed_length`, not a message
 tree (D2). The open-turn refusal is what keeps that honest: a fork that ended
 mid-turn would inherit a half-executed step whose tool results never arrive.
+
+## What reference-forking bought, and what it did not
+
+**On disk it is the whole point.** Ten forks of a 5 000-event session wrote
+**4.21 MiB across ten files** before, and **1 980 bytes in total** after —
+**2 231x less** — while reading any child back still yields the same 5 001
+contiguous events.
+
+**In memory it is not free, and an earlier docstring said it was** ("pointers to
+the parent's own immutable events, so sharing costs nothing"). `Session.__init__`
+runs `_readmit`, which calls `SessionEvent.readmitted()` on every seeded event: a
+fresh object plus a full re-freeze of the payload. Measured on a 5 000-event
+parent: **18.2 ms for the fork, 14.4 ms of it (79%) in `readmitted`, 2.2 MB
+allocated.** So a fork is not yet O(1) end to end.
+
+The re-freeze is genuinely needed on the replay and wire paths it was written for,
+and is duplicate work here, where the seed comes from a live log every event of
+which `append` already froze. Left alone deliberately — a trusted-seed path is a
+change to the session model, not to `fork` — but `roll` turns forking into a
+routine operation, so the next person should know where the time goes.
+
+## The read amplification `upto` removes
+
+`read_one` was a whole-log read at first, so an ancestor contributing **50 events
+out of 10 000** was parsed and validated in full: **~170x the useful work at an
+early fork boundary**, though only **2.6% at the tip**, where the child wants
+nearly all of it anyway. `upto` carries the boundary now — Turso adds
+`WHERE seq < ?`, JSONL stops reading lines — and the tail costs a dict lookup
+instead of a validate and freeze.
+
+`upto` is deliberately **a hint, not a contract**: the walk re-filters what it
+takes, so a backend that ignores it is slower rather than wrong. Making the bound
+load-bearing would mean a backend quietly ignoring it produced a *wrong* log,
+which is exactly how reference-forking came to be a silent no-op on Turso once
+already.
 """
 
 from __future__ import annotations

@@ -6,6 +6,19 @@ that promised, at registration, to keep it visible (D6). These are the tests tha
 the promise is kept, and that keeping it has the properties the promise implies:
 a fork sees the namespace as of its boundary, an unchanged variable costs
 nothing, and a blob that cannot be trusted is not unpickled.
+
+## Why the guest tries the C pickler before `dill`
+
+`dill.Pickler` subclasses `pickle._Pickler`, the **pure-Python** one, so a large
+container is serialized in Python bytecode: a **1M-element list measured 463 ms
+per cell against 6.8 ms for `pickle`**. The digest comparison alone saves the
+*send* and not the serialization, which runs after every cell for every name — so
+the pickler choice is on the hot path even when nothing is emitted.
+
+**An over-cap variable stops at the cap.** The pickler writes into a sink that
+raises once it passes `max_value_bytes`, so the 200 MiB DataFrame in the module's
+own example costs **16 MiB of work per cell rather than 200**, and reports
+`too-large` either way.
 """
 
 from __future__ import annotations

@@ -1,23 +1,23 @@
 """`ctx.code_runtime` — the seam definition only (P1-06, C1).
 
-No provider ships in Phase 1. What ships is the *contract*, and one assertion
-inside it that is easy to miss and expensive to omit:
+What ships is the *contract*, and one assertion inside it that is easy to miss and
+expensive to omit:
 
-> a provider declaring `persistence: "namespace"` **must** emit
-> `kernel/snapshot` events, and that is checked when it registers — not the
-> first time someone forks a session and discovers the state was never durable.
+> a provider declaring `persistence: "namespace"` **must** emit `kernel/snapshot`
+> events, and that is checked when it registers — not the first time someone forks
+> a session and discovers the state was never durable.
 
 This is D17 enforced by the seam rather than left to convention. dsh withheld a
 persistent Python REPL precisely because "cross-call state would be invisible to
 the log"; pH admits one only from a provider that has promised, at registration,
-to keep it visible. A promise checked at runtime would be discovered by the
-person who lost work.
+to keep it visible. A promise checked at runtime would be discovered by the person
+who lost work.
 
-Binding names are also validated here: one `bindings` list has to be valid
+**Binding names are validated here too.** One `bindings` list has to be valid
 against every backend regardless of `language`, so names must be portable
-identifiers and must clear the reserved sets of every shipped language. A name
-that is legal in Python and reserved in TypeScript would make a binding set
-silently backend-specific.
+identifiers and must clear the reserved sets of every shipped language — a name
+legal in Python and reserved in TypeScript would make a binding set silently
+backend-specific.
 
 @module ph.seams.code_runtime
 """

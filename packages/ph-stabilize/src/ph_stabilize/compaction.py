@@ -1,78 +1,57 @@
 """`compaction-summarize` — the conversation replaced by a summary (P4-03, G4).
 
 Deep Agents' `SummarizationMiddleware` and dsh's `compaction-basic`, landed on
-pH's seams as one `CompactionEngine`. The numbers are upstream's, taken from the
-pinned releases rather than remembered: trigger at `0.85` of the window and keep
-`0.10` of it when the window is known, and `170 000` tokens / `6 messages` when
-it is not — `compute_summarization_defaults` in `deepagents`, which is also the
-row's gate.
+pH's seams as one `CompactionEngine`. The numbers are upstream's, from the pinned
+releases: trigger at `0.85` of the window and keep `0.10` of it when the window is
+known, `170 000` tokens / `6 messages` when it is not
+(`compute_summarization_defaults` in `deepagents`).
 
-**The whole safety argument is one sentence: it is a surface `replace` (A3).**
-The summary is appended as a `user/message` whose `surfaceOp` shadows the range
-it stands for, citing every shadowed seq. `derive_messages()` yields the
-summary; the log keeps every event; `transcript()` still shows the person the
-conversation they had. That is why compaction here is a *reading* of an
-append-only log rather than an edit to it, and why the same mechanism serves
-offloading, rollback and fork/replay.
+Invariants this row holds:
 
-**Two triggers, and they are genuinely different questions.** `agent/pre-step`
-asks "will the next request be too big" from an *estimate*, because no usage
-number exists for a request nobody has made. `agent/request-error` asks nothing
-— the provider has already answered with `CONTEXT_WINDOW_EXCEEDED`, which
-`llm-retry` deliberately declines to retry so that this row can see it. The
-pre-step estimate ignores the messages the step is about to append: they are one
-turn's worth against 15% of a window kept in reserve by the 0.85 fraction, and a
-paste large enough to change that answer is `input-offload`'s case (G3), not
-this one. When it is neither, the overflow trigger is the net.
+* **It is a surface `replace` (A3)** — the whole safety argument. The summary is
+  appended as a `user/message` whose `surfaceOp` shadows the range it stands for,
+  citing every shadowed seq. `derive_messages()` yields the summary; the log keeps
+  every event; `transcript()` still shows the person the conversation they had.
+  The same sentence covers the two cheaper remedies below, so **the log never
+  changes**.
+* **The cut never splits a call from its result.** A cutoff from the retention
+  budget is moved *back* to the nearest balanced boundary. Balance is folded over
+  the surface in current order (dsh's `tool-pairing`), not over step markers,
+  because a previous compaction has already moved what "position" means. If the
+  only balanced cut is the start of the conversation, nothing is compacted and
+  the attempt **says so** — shipping an orphaned `tool-result` to a provider that
+  rejects it is not a repair.
+* **Two cheaper remedies run before the expensive one.** Over-long call arguments
+  in *retained* history are elided on every pressure check (§7.4 item 2); on
+  overflow the trailing tool-result batch is spilled and pointed at (§7.4 item 7)
+  before summarization is attempted at all — that batch is precisely the shape
+  that leaves no balanced cut.
+* **The request replays the conversation's own envelope**: same `system`, same
+  `tools`, the shadowed messages as themselves, and the extraction prompt
+  appended as the last *user* message. So the request is a strict prefix of the
+  one the loop just made, which is what makes the call nearly free on a provider
+  that caches prefixes (A12) — and why the prompt cannot go in `system`, since
+  anything put there changes the prefix. It also means the summarizer sees the
+  whole range as real `tool-call`/`tool-result` blocks rather than a rendered
+  tail, so nothing is silently withheld from it.
+* **Carrying the tools is the cost of carrying the prefix**, and the two are not
+  separable. A model primed to act may answer with a tool call and no prose, so a
+  reply with no text is retried once in the self-contained shape — without tools,
+  and with the whole range. Cheap first, correct second.
+* **Overflow never replays**, because the envelope in question is the request a
+  provider just refused for being too large. It sends upstream's own 4 000-token
+  tail (`_DEFAULT_TRIM_TOKEN_LIMIT`, `strategy="last"`) rendered as text, which is
+  also the only shape that can carry it — a *suffix* of a balanced range may begin
+  with an orphaned tool result. When that tail is trimmed the rendered text
+  **says so**, because a model told to write "SESSION INTENT" from the middle of a
+  conversation, and not told that is what it is reading, will state the middle as
+  the intent.
 
-**The cut never splits a call from its result.** A cutoff is chosen from the
-retention budget and then moved *back* to the nearest balanced boundary — one
-where no tool call is still waiting for its result. Balance is folded over the
-surface in current order (dsh's `tool-pairing`), not over step markers, because
-a previous compaction has already moved what "position" means. If the only
-balanced cut is the start of the conversation, nothing is compacted and the
-attempt says so: a single oversized retained unit cannot be repaired by
-replacing a surface, and pretending otherwise would mean shipping an orphaned
-`tool-result` to a provider that rejects it.
-
-**Two cheaper remedies run before the expensive one.** A summary costs a model
-call and replaces conversation, so it is the last resort rather than the only
-one. On every pressure check, over-long call arguments in *retained* history are
-elided first (§7.4 item 2) — bytes the model itself sent, still in the log,
-removed from what it is shown for nothing. On overflow, the trailing tool-result
-batch is spilled and pointed at (§7.4 item 7) before summarization is attempted
-at all, which matters because that batch is precisely the shape that leaves no
-balanced cut: without the clip, the one case the overflow trigger exists for is
-the one it could not fix. Both are surface `replace`s like the summary, so the
-same sentence covers all three — the log never changes.
-
-**The request replays the conversation's own envelope.** Same `system`, same
-`tools`, the shadowed messages as themselves, and the extraction prompt appended
-as the last *user* message — so the request is a strict prefix of the one the
-loop just made, because the shadowed range is a prefix of the surface. That is
-what makes the call nearly free on a provider that caches prefixes (A12), and it
-is why the prompt cannot go in `system`: anything put there changes the prefix.
-It also means the summarizer is shown the *whole* range as real `tool-call` and
-`tool-result` blocks rather than a rendered tail, so nothing is silently
-withheld from the summary — a summary written from a tail cannot mention what it
-never saw, and cannot say so either.
-
-**Carrying the tools is the cost of carrying the prefix.** The two are not
-separable: dropping the schemas changes the prefix immediately after `system`.
-So a model primed to act may answer a summarize request with a tool call and no
-prose, and a reply with no text is retried once in the self-contained shape —
-without tools, and with the whole range rather than a tail. Cheap first, correct
-second; falling back gives up the cache and hides nothing.
-
-**Overflow never replays, and keeps upstream's trim.** The envelope in question
-is the request a provider just refused for being too large. That path sends
-upstream's own 4 000-token tail (`_DEFAULT_TRIM_TOKEN_LIMIT`, `strategy="last"`)
-rendered as text — which is also the only shape that can carry it, since a
-*suffix* of a balanced range may begin with an orphaned tool result that no
-provider will accept as a message. One deviation there: when the tail is trimmed
-the rendered text *says so*, because a model told to write "SESSION INTENT" from
-the middle of a conversation, and not told that is what it is reading, will
-state the middle as the intent.
+Two triggers, and they ask genuinely different questions: `agent/pre-step` asks
+"will the next request be too big" from an *estimate*, because no usage number
+exists for a request nobody has made; `agent/request-error` asks nothing — the
+provider has already answered `CONTEXT_WINDOW_EXCEEDED`, which `llm-retry`
+declines to retry so this row can see it.
 
 @module ph_stabilize.compaction
 """
@@ -925,23 +904,21 @@ class SummarizeEngine:
     async def clip_overflow_tail(self, agent: Any) -> tuple[int, ...]:
         """Shrink the trailing tool-result batch before summarizing (§7.4 item 7).
 
-        The case that motivates it is exactly the one where summarization is
-        least able to help: a step ends with a batch of tool results that is
-        itself larger than the retention budget, so every balanced cut leaves it
-        in place and `safe_cutoff` correctly declines. Clipping the tail is what
-        makes the *next* attempt possible — and often makes the request fit on
-        its own, which is why the caller retries when this alone changed
-        something.
+        The case that motivates it is the one summarization is least able to help: a step
+        ends with a batch of tool results larger than the retention budget, so every
+        balanced cut leaves it in place and `safe_cutoff` correctly declines. Clipping is
+        what makes the *next* attempt possible — and often makes the request fit on its
+        own, which is why the caller retries when this alone changed something.
 
-        **One path where upstream has two.** deepagents head-slices a
-        `read_file` result and points back at its `file_path`, avoiding a copy
-        of a file already on disk, and offloads everything else. pH offloads
-        everything: the spill store is content-addressed, so re-spilling the
-        same text costs one file rather than one per occurrence, and the model
-        gets one shape of pointer to learn instead of two. A `tool/result`
-        surface `replace` is the mechanism, and the surface validator already
-        constrains it to changing content alone — which is the invariant that
-        makes this safe to do to history the model has already read.
+        **One path where upstream has two.** deepagents head-slices a `read_file` result
+        and points back at its `file_path`, and offloads everything else; pH offloads
+        everything. The spill store is content-addressed, so re-spilling the same text
+        costs one file rather than one per occurrence, and the model gets one shape of
+        pointer to learn instead of two.
+
+        A `tool/result` surface `replace` is the mechanism, and the surface validator
+        constrains it to changing content alone — the invariant that makes this safe to
+        do to history the model has already read.
         """
         session: Session | None = getattr(agent, "session", None)
         if session is None:

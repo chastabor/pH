@@ -563,6 +563,8 @@ async def test_an_unreadable_parent_refuses_instead_of_granting_everything(
 
     Fail-open on the path whose own docstring says *"a spawn that could widen
     would make delegation the privilege escalation I7 exists to prevent"*.
+    Reproduced before the fix: a parent denied one tool produced a **7-tool
+    ceiling where its own was 6**.
     """
     ctx = await mount()
     ctx.tools.register(simple_tool("wide_open"))

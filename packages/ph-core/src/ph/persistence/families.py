@@ -1,17 +1,13 @@
 """Where a lineage's logs sit on disk: `<root>/<family>/<name><suffix>`.
 
-**One statement of the layout, for backends that agree about nothing else.**
-JSONL and Turso disagree about how a log is *encoded* and must not disagree about
-where it *is* — but the address rule was written out twice, once per backend, and
-the copies had already drifted before either shipped: one kept a dead `OSError`
-handler its twin had dropped, one recovered an id with `path.stem` and the other
-by slicing the suffix, and a `StoredSession` field added to one listing was
-missed by the other. Two implementations whose docstrings have to assert they
-agree ("JSONL's rule exactly") are not a mechanism.
+**One statement of the layout, for backends that agree about nothing else.** JSONL
+and Turso disagree about how a log is *encoded* and must not disagree about where
+it *is*. Two implementations whose docstrings have to assert they agree ("JSONL's
+rule exactly") are not a mechanism — what they had already drifted on is recorded
+in `tests/test_persistence_backends.py`.
 
 Suffix-parameterised rather than shared by inheritance, because that is the only
-thing the two backends actually differ by here. `attach` next door made the same
-move for the same reason.
+thing the two backends actually differ by here.
 
 @module ph.persistence.families
 """

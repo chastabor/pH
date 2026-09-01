@@ -14,6 +14,12 @@ The rest is what the records have to carry to be worth reading: the prompt
 snapshot *and* the one it replaced, the tool catalog as it was at call time,
 timings derived from event times rather than measured at render, and a fork
 point that is only ever a closed turn (A6).
+
+## Why `ph_app.wire` is not under `ph_app.tui`
+
+`ph_app.tui.__init__` imports the Textual app, so a module under it cannot be read
+from without paying **278 ms** of terminal framework import — which a headless
+`ph agents attach` should never do to render a line of a log it just received.
 """
 
 from __future__ import annotations

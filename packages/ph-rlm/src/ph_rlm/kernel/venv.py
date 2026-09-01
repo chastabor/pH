@@ -99,21 +99,12 @@ def guest_project_dir() -> Path | None:
 def _host_can_import_guest(python: Path) -> bool:
     """Whether an interpreter can import the guest — asked once per path.
 
-    Cached because it is a property of an interpreter, answered by spawning one,
-    and both callers *refuse* on `False` — so a stale negative cannot strand a
-    process that would otherwise have recovered, because there is no recovery
-    path: `resolve_interpreter` raises and the caller does not continue. A stale
-    positive means someone uninstalled the guest from a live interpreter
-    mid-run, which the next spawn reports anyway.
-
-    `PythonCodeRuntime.environment()` already memoizes its resolution, so a
-    deployment paid this once regardless; what the cache removes is the cost to
-    anything that resolves repeatedly in one process — 79 subprocess spawns and
-    1.45 s across the test suite, re-answering one question about one path.
-
-    Keyed on the path, so a test that rewrites *one* interpreter from broken to
-    working in place would see the first answer. Give the two cases two paths;
-    `tmp_path` already does.
+    Cached because it is a property of an interpreter, answered by spawning one, and
+    both callers *refuse* on `False` — so a stale negative cannot strand a process
+    that would otherwise have recovered, because there is no recovery path. A stale
+    positive means someone uninstalled the guest from a live interpreter mid-run,
+    which the next spawn reports anyway. What the cache saves is measured in
+    `tests/test_venv.py`.
     """
     try:
         completed = subprocess.run(

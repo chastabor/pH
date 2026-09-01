@@ -1,26 +1,23 @@
 """`code-runtime-python` — one CPython child per agent, governed at the frame (D1).
 
-This is the provider dsh withheld. Its README says why: *"`run_code` state is
-fresh per run — a persistent REPL-style kernel is rejected for the MVP
-(cross-call state would be invisible to the log)"*. The objection is right, and
-what answers it is not this file but the obligation the seam checks at
-registration — `persistence: "namespace"` requires `kernel/snapshot` emission —
-so the state a cell leaves behind is in the log with everything else.
+This is the provider dsh withheld, on the grounds that *"cross-call state would be
+invisible to the log"*. What answers that is not this file but the obligation the
+seam checks at registration — `persistence: "namespace"` requires
+`kernel/snapshot` emission — so the state a cell leaves behind is in the log with
+everything else.
 
 Three properties are worth reading before changing anything here.
 
-**A run reads its own frames, and owns the tasks that serve them.** The obvious
-design is a long-lived reader task per kernel, and it was the first one here —
-but a background task needs a task group, and a group entered when the kernel
-starts is exited when the kernel closes, which is a *different task*. anyio
-refuses that, correctly, and the symptom was a `ClosedResourceError` surfacing
-from a cancelled drain instead of the failure being reported.
-
-So `run()` opens a task group for the duration of one program: it reads frames
-inline until `done`, starts one task per concurrent binding call, and drains the
-child's stdout and stderr in the same group. Everything is entered and exited by
-one task. `done` is therefore the last frame of a run — which is why the guest
-snapshots *before* settling.
+**A run reads its own frames, and owns the tasks that serve them.** `run()` opens
+a task group for the duration of one program: it reads frames inline until `done`,
+starts one task per concurrent binding call, and drains the child's stdout and
+stderr in the same group, so everything is entered and exited by **one** task. A
+long-lived reader task per kernel — the obvious design, and the first one here —
+needs a group entered when the kernel starts and exited when it closes, which is a
+*different* task; anyio refuses that, and the symptom was a `ClosedResourceError`
+from a cancelled drain instead of the real failure being reported. `done` is
+therefore the last frame of a run, which is why the guest snapshots *before*
+settling.
 
 None of this reintroduces the deadlock that made fd 3 a separate channel (D5): a
 cell awaiting a `reply` is not blocking the host's read loop, because the host's

@@ -1,39 +1,36 @@
 """Per-variable snapshots, guest side (D17).
 
 Per *variable*, not per namespace, and that is the whole design: an unchanged
-200 MiB DataFrame emits nothing, because its digest did not move. Snapshotting
-the namespace as one blob would append that DataFrame again on every cell that
-touched anything at all, and the log would grow with the *size of the namespace*
-rather than the size of the change.
+200 MiB DataFrame emits nothing, because its digest did not move. Snapshotting the
+namespace as one blob would append that DataFrame again on every cell that touched
+anything at all, and the log would grow with the *size of the namespace* rather
+than the size of the change.
 
 Three things make "emits nothing" actually cheap, because the digest comparison
-alone saves the *send* and not the *serialization* — which runs after every cell,
+alone saves the *send* and not the serialization — which runs after every cell,
 for every name:
 
-**The C pickler is tried first.** `dill.Pickler` subclasses `pickle._Pickler`,
-the pure-Python one, so a large container is serialized in Python bytecode: a
-1M-element list measured 463 ms per cell against 6.8 ms for `pickle`. Anything
-the C pickler refuses — a cell-defined function, class or lambda, none of which
-is importable from `__ph_cell__` — falls back to `dill`, and `dill.loads` reads
-standard pickle bytes unchanged. Each object takes the same path every time, so
-digests stay stable.
+**The C pickler is tried first.** `dill.Pickler` subclasses `pickle._Pickler`, the
+pure-Python one, so a large container would be serialized in Python bytecode.
+Anything the C pickler refuses — a cell-defined function, class or lambda, none of
+which is importable from `__ph_cell__` — falls back to `dill`, and `dill.loads`
+reads standard pickle bytes unchanged. Each object takes the same path every time,
+so digests stay stable.
 
 **A definitively-immutable value is compared by identity.** If the object under a
-name is the same `bytes`/`str`/`int` object as last cell, its content cannot
-have changed, so nothing is serialized at all. This is deliberately *not*
-extended to tuples or frozensets: `t = ([1],)` keeps its identity while its
-contents change, and a fast path that is wrong once is worse than no fast path.
+name is the same `bytes`/`str`/`int` object as last cell, its content cannot have
+changed, so nothing is serialized. Deliberately *not* extended to tuples or
+frozensets: `t = ([1],)` keeps its identity while its contents change, and a fast
+path that is wrong once is worse than no fast path.
 
 **An over-cap variable stops at the cap.** The pickler writes into a sink that
-raises once it passes `max_value_bytes`, so the docstring's own 200 MiB example
-costs 16 MiB of work per cell rather than 200 — and reports `too-large` either
-way.
+raises once it passes `max_value_bytes`, and reports `too-large` either way.
 
 What is deliberately **not** captured: the binding proxies, the imported skill
-modules, and anything else the bootstrap put there. Those are rebuilt at boot
-from the `boot` frame, so pickling them would store a stale copy of the
-harness's own surface — and `dill` would happily serialize a proxy holding a
-closure over a dead channel.
+modules, and anything else the bootstrap put there. Those are rebuilt at boot from
+the `boot` frame, so pickling them would store a stale copy of the harness's own
+surface — and `dill` would happily serialize a proxy holding a closure over a dead
+channel.
 
 `dill` is imported lazily. A runtime venv without it still snapshots everything
 the C pickler accepts, which is a degraded session rather than no session.

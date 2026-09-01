@@ -4,6 +4,13 @@ The managed venv is not built here: doing so shells out to `uv` and reaches the
 network, which is not a property worth asserting in every test run. What is
 asserted is every *decision* around it — staleness, refusals, and the fact that
 deleting `$PH_CACHE` costs a rebuild and nothing else.
+
+## Why the guest-import probe is cached
+
+`PythonCodeRuntime.environment()` already memoizes its own resolution, so a
+deployment pays the probe once regardless. What the cache removes is the cost to
+anything that resolves repeatedly in one process: **79 subprocess spawns and
+1.45 s across the test suite**, re-answering one question about one path.
 """
 
 from __future__ import annotations

@@ -232,40 +232,23 @@ class SessionStore:
     ) -> Session:
         """Create a live child session from a stable prefix of a live source.
 
-        `boundary` is an inclusive source event seq; omitted means the source's
-        current last event. The slice may end on a between-turn event but must
-        not end inside an open turn.
+        `boundary` is an inclusive source event seq; omitted means the source's current
+        last event. The slice may end on a between-turn event but must not end inside an
+        open turn.
 
-        **The child holds the prefix in memory and does not re-store it.** Every
-        reader — the transcript fold, the
-        surface fold, `derive_messages` — sees a whole session exactly as before.
-        What changes is the disk: the child's file begins at `session/end-seed`,
-        at seq `seed_length`, and its header says which log the rest came from.
-        Measured: ten forks of a 5 000-event session wrote **4.21 MiB** across
-        ten files and now write **1 980 bytes** in total — 2 231x less — while
-        reading any child back still yields the same 5 001 contiguous events.
+        **The child holds the prefix in memory and does not re-store it.** Every reader —
+        the transcript fold, the surface fold, `derive_messages` — sees a whole session
+        exactly as before. What changes is the disk: the child's file begins at
+        `session/end-seed`, at seq `seed_length`, and its header says which log the rest
+        came from.
 
-        What a fork still costs is in *memory*: 18 ms to validate the seed into a
-        new `Session`. That is unchanged by this and is why a fork is not yet
-        O(1) end to end; it is also why the seed is still handed over in full,
-        since every reader downstream wants a whole session.
+        **The prefix a child depends on is immutable**, because the log is append-only, so
+        the parent may run on forever without invalidating a descendant. This needs no
+        lock, no copy-on-write and no invalidation.
 
-        In memory it is *not* free, and an earlier version of this said it was
-        ("pointers to the parent's own immutable events, so sharing costs
-        nothing"). `Session.__init__` runs `_readmit`, which calls
-        `SessionEvent.readmitted()` on every seeded event — a fresh object plus a
-        full re-freeze of the payload. Measured on a 5 000-event parent: 18.2 ms
-        for the fork, 14.4 ms of it (79%) in `readmitted`, 2.2 MB allocated. The
-        re-freeze is genuinely needed on the replay and wire paths it was written
-        for, and is duplicate work here, where the seed comes from a live log
-        every event of which `append` already froze. Left alone deliberately —
-        a trusted-seed path is a change to the session model, not to `fork` —
-        but `roll` turns forking into a routine operation, so the next person
-        should know where the time goes.
-
-        The prefix a child depends on is immutable, because the log is
-        append-only — so the parent may run on forever without invalidating a
-        descendant, and this needs no lock, no copy-on-write and no invalidation.
+        A fork is cheap on disk and **not** free in memory, and the seed is still handed
+        over in full because every reader downstream wants a whole session. What that
+        costs, and why a trusted-seed path was not taken here: `tests/test_fork.py`.
         """
         if child_session_id is not None and child_session_id in self._entries:
             raise SessionForkError(
@@ -283,9 +266,9 @@ class SessionStore:
     ) -> Session:
         """The shared body of `fork` and `roll`; `kind` is the only difference.
 
-        Private because `kind` is not a choice a caller makes — it is which of
-        the two operations they called. Exposing it on `fork` would invite a
-        third answer, and there are only two.
+        Private because `kind` is not a choice a caller makes — it is which of the two
+        operations they called. Exposing it on `fork` would invite a third answer, and
+        there are only two.
         """
         live = self._resolve_source(source)
         seed = self._fork_seed(live, boundary)

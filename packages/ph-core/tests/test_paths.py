@@ -5,6 +5,13 @@ Gate: *a wrong-owner tier-3 directory refuses to start.*
 Tiers 1 and 2 get their properties from the OS; tier 3 is a predictable name in
 a world-writable directory, which is the classic symlink-hijack shape. pH
 refuses rather than adopting a directory it cannot vouch for (F9).
+
+## Why `is_under` is a prefix compare and not `Path.relative_to`
+
+`relative_to` allocates a `Path` per root segment and measured **17.9 µs against
+0.16 µs** for the separator-aware compare — the same finding P4-06 recorded for
+`_spellings`, which `is_under` would otherwise have quietly reintroduced at every
+gated write.
 """
 
 from __future__ import annotations

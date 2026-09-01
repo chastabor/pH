@@ -75,20 +75,16 @@ is offered and the syntax the predicate implements cannot drift.
 class Query:
     """A filter query, tokenized and parsed **once per rebuild**.
 
-    Compiled here rather than inside the per-record predicate, which is where it
-    started and where it cost the most: `refresh_rows` calls the predicate once
-    per record, so parsing inside it re-lexed the query and re-parsed every
-    selector for every row on every keystroke — and made the *plain free-text*
-    path, the common one, 2.5x more expensive than before `type:` existed,
-    because the tag scan ran whether or not anyone had typed a tag. A malformed
-    term also constructed and raised a `SelectorError` per record, thousands of
-    exceptions caught and dropped.
+    Compiled here rather than inside the per-record predicate: `refresh_rows` calls
+    the predicate once per record, so parsing inside it re-lexed the query and
+    re-parsed every selector for every row on every keystroke — and made the *plain
+    free-text* path, the common one, more expensive than before `type:` existed,
+    because the tag scan ran whether or not anyone had typed a tag.
 
-    `bad` is how a malformed or foreign `type:` term reaches the caller without
-    an exception per row. It matches nothing, because this compiles while a
-    person is still typing — `type:w` on the way to `type:workspace` must not
-    throw. The refusal that explains itself belongs on a command line, where the
-    input is complete.
+    `bad` is how a malformed or foreign `type:` term reaches the caller without an
+    exception per row. It matches nothing, because this compiles while a person is
+    still typing — `type:w` on the way to `type:workspace` must not throw. The refusal
+    that explains itself belongs on a command line, where the input is complete.
     """
 
     selectors: tuple[Selector, ...] = ()

@@ -9,6 +9,14 @@ The order is `tools/pre-execute` → approval on `ask` → **guards** →
 is what "monotonic" means: policy that must not be reorderable stays a guard
 rather than a listener, and no amount of listener ordering — or a human's
 approval — turns its denial back into permission.
+
+**The plans have this backwards, and the assertion below is the arbiter.** pH
+follows dsh (`docs/tool-execution-pipeline.md`, and `prepareExecution` in
+`packages/core/tools/src/index.ts`); the pH plans' summary tables list guards
+*before* approval. That is a transcription slip rather than a design, and the
+difference is the whole of what a guard is for: put it before approval and a
+human's explicit yes is the final word, which is exactly the reordering
+"monotonic" forbids.
 """
 
 from __future__ import annotations

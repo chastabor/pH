@@ -3,27 +3,24 @@
 **This module is written twice on purpose.** Its twin is
 `ph_rlm.kernel.protocol`, and neither imports the other: the guest runs in
 `$PH_CACHE/runtime-venv` with almost nothing installed, and making it import the
-host package would put the harness inside the process boundary that exists to
-keep the harness out. What keeps the two in step is `test_protocol_mirror.py`,
-which compares `PROTOCOL_VERSION`, every frame's required and optional field
-set, and the truncation marker byte for byte (D7, D4).
+host package would put the harness inside the process boundary that exists to keep
+the harness out. What keeps the two in step is `test_protocol_mirror.py`, which
+compares `PROTOCOL_VERSION`, every frame's required and optional field set, and
+the truncation marker byte for byte (D7, D4).
 
-`FRAME_FIELDS` is the *only* declaration of the vocabulary on this side. There
-were also `TypedDict`s for each frame; nothing consumed them at runtime, and
-under `from __future__ import annotations` their `__required_keys__` cannot see
-`NotRequired` — so they reported `namespaceId` as required while `FRAME_FIELDS`
-had it optional. A third copy that no test compared had already drifted, which
-is the argument against keeping it as documentation.
+**`FRAME_FIELDS` is the *only* declaration of the vocabulary on this side** — a
+second one that no test compares is a copy that drifts, and one already had.
 
 Because there are two definitions across the two *sides*, there is exactly one
-owner of every default: the **host**. `boot` carries every limit as a required field, so a guest has
-nothing to guess and a changed default cannot mean two things at once.
+owner of every default: the **host**. `boot` carries every limit as a required
+field, so a guest has nothing to guess and a changed default cannot mean two
+things at once.
 
 Frame names and field names are camelCase on the wire, matching dsh's
-`code-runtime-python` protocol so its mirror test remains a usable reference
-(Q2). `call` carries the namespace under the key `global`, which is what dsh
-calls it — a binding namespace *is* a global in the program — so the Python-side
-name is `namespace` and the wire name is not.
+`code-runtime-python` protocol so its mirror test remains a usable reference (Q2).
+`call` carries the namespace under the key `global`, which is what dsh calls it —
+a binding namespace *is* a global in the program — so the Python-side name is
+`namespace` and the wire name is not.
 
 @module ph_runtime.protocol
 """

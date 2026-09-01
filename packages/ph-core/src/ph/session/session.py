@@ -83,40 +83,32 @@ class SessionHeader(WireModel):
     family: str = Field(default_factory=lambda data: data["id"], min_length=1)
     """Which lineage this log belongs to — the id of the root it descends from.
 
-    The directory a log lives in: `sessions/<family>/<id>.jsonl`. Every fork,
-    segment and subagent beneath a root inherits its value, so one conversation
-    and everything it spawned is one directory — which is what makes a lineage
-    movable, archivable and checkable as a unit, and what lets "is anything in
-    here orphaned" be answered by listing one directory.
+    The directory a log lives in: `sessions/<family>/<id>.jsonl`. Every fork, segment
+    and subagent beneath a root inherits its value, so one conversation and everything
+    it spawned is one directory — which is what lets "is anything in here orphaned" be
+    answered by listing one directory.
 
-    **Never absent.** A root heads its own lineage, so the default *is* the id —
-    a `default_factory` reading the already-validated `id`, which covers direct
-    construction and `model_validate` alike. No caller repeats it, no reader
-    needs a "what if there is no family" branch, and no path has two shapes.
-    `min_length=1` makes an explicit empty string a refusal rather than something
-    quietly rewritten. Stored rather than derived because deriving it
-    means walking `parent_session` to the root, and walking needs paths, and the
-    path is what the family is for.
+    **Never absent.** A root heads its own lineage, so the default *is* the id — a
+    `default_factory` reading the already-validated `id`, covering direct construction
+    and `model_validate` alike. `min_length=1` makes an explicit empty string a
+    refusal rather than something quietly rewritten. Stored rather than derived,
+    because deriving it means walking `parent_session` to the root, and walking needs
+    paths, and the path is what the family is for.
     """
 
     kind: SessionKind | None = None
     """Why this log has a parent: a **branch**, or the same session continued.
 
-    Structurally the two are identical — `roll` is `fork` at the tip — so nothing
-    on disk could tell them apart, and every reader of `parent_session` had to
-    guess "branch". The picker guessed wrong in the visible direction: a session
-    rolled three times rendered as a staircase of three nested rows carrying one
-    inherited title, when it is one conversation in three files.
+    Structurally the two are identical — `roll` is `fork` at the tip — so nothing on
+    disk could tell them apart, and every reader of `parent_session` had to guess
+    "branch". `None` means a **root**; every log with a `parent_session` has a kind,
+    set by whichever call made it.
 
-    On the **child's** header, where the backward link already lives, because
-    that is the half every consumer reads from a one-line peek — `stored()` and
-    `_summarize` both. The forward half has to stay an event (`session/segmented`)
-    for a mechanical reason: JSONL writes a header once and never rewrites it, so
-    a `continued_by` on the *parent* would be durable under Turso and silently
-    lost under JSONL.
-
-    `None` means a **root**: no parent, so no reason to have one. Every log with
-    a `parent_session` has a kind, set by whichever call made it.
+    On the **child's** header, where the backward link already lives, because that is
+    the half every consumer reads from a one-line peek. The forward half has to stay
+    an event (`session/segmented`) for a mechanical reason: JSONL writes a header once
+    and never rewrites it, so a `continued_by` on the *parent* would be durable under
+    Turso and silently lost under JSONL.
     """
 
     origin: Literal["subagent"] | None = None
@@ -223,36 +215,26 @@ class Session:
         self.durable_length = durable
         """How many leading events a **store already holds**; 0 unless declared.
 
-        Read by a backend to tell what it still owes from what is already
-        written: `track` queues `events[durable_length:]`.
+        Read by a backend to tell what it still owes from what is already written:
+        `track` queues `events[durable_length:]`.
 
-        **A constructor argument, not an attribute set afterwards.** Publishing a
-        session is what makes a store queue it — `session/created` reaches
-        `track` synchronously — so a boundary assigned one line after
-        construction is a boundary assigned one line too late, and the window is
-        invisible: the store simply writes more than it needed to. As a keyword
-        the ordering cannot be got wrong.
+        **A constructor argument, not an attribute set afterwards.** Publishing a session
+        is what makes a store queue it — `session/created` reaches `track` synchronously
+        — so a boundary assigned one line after construction is one line too late, and
+        the window is invisible: the store simply writes more than it needed to.
 
-        Two callers declare it, and they mean different numbers: `resume_session`
-        passes the stored log's length, `SessionStore.create` passes a fork's
-        inherited prefix. Deriving one from the other would be wrong — a resumed
-        fork's `header.seed_length` is its *original* fork boundary, nothing to
-        do with how much of it is on disk now.
+        Two callers declare it and they mean different numbers: `resume_session` passes
+        the stored log's length, `SessionStore.create` passes a fork's inherited prefix.
+        Deriving one from the other would be wrong — a resumed fork's
+        `header.seed_length` is its *original* fork boundary.
 
-        **Not `first_live_seq`, and the difference is a defect that shipped.** A
-        resume seeds the stored events *plus* the repair closers
-        `interrupted_turn_closers` synthesized, and the constructor then appends
-        `session/end-seed` on top. Those are in the log and have never been
-        written. A backend that treated everything present at `track` time as
-        durable dropped them and wrote only what arrived afterwards through
-        `record`, leaving a **gap in the seq space** — and `_readmit` refuses a
-        gap, so the session resumed exactly once and then could not be opened
-        again. Measured: a daemon root survived two lifetimes.
+        **Not `first_live_seq`**, and why that distinction is load-bearing:
+        `tests/test_persistence_backends.py`.
 
         A plain attribute rather than a header field because it describes *this
-        process's* relationship to *one* store, not the session. `seed_length`
-        next door is the durable fork boundary and travels with the log;
-        this is neither durable nor a property of the log.
+        process's* relationship to *one* store, not the session. `seed_length` next door
+        is the durable fork boundary and travels with the log; this is neither durable nor
+        a property of the log.
         """
         self.first_live_seq = len(self._log)
         """The first seq appended IN THIS PROCESS.
@@ -452,19 +434,15 @@ class Session:
         """Every event under one or more namespace selectors, in log order (P6-33).
 
         `session.select("workspace")` is all five `workspace/*` types;
-        `session.select("workspace/acquired")` is the one. The vocabulary is
-        `log`, so a bare pattern needs no prefix and `bus:tools` is refused rather
-        than answered emptily — a person asking a session log about bus events has
-        the wrong surface, and an empty result would read as "there are none".
+        `session.select("workspace/acquired")` is the one. The vocabulary is `log`, so a
+        bare pattern needs no prefix and `bus:tools` is **refused** rather than answered
+        emptily — an empty result would read as "there are none".
 
-        **Namespace-aware where `last_event_of` is exact.** That one takes whole
-        type names and answers with the newest; this takes prefixes and answers
-        with all of them. Both stay, because "the current sandbox mode" and "every
-        workspace record" are different questions and the second should not be
-        spelled as a list of five literals a new type would silently fall out of.
+        Namespace-aware where `last_event_of` is exact: that one takes whole type names
+        and answers with the newest. Both stay, because "every workspace record" should
+        not be spelled as a list of five literals a new type would silently fall out of.
 
-        No patterns returns the whole log — the caller asked for no filter, which
-        is what an unfiltered read is.
+        No patterns returns the whole log.
         """
         selectors = parse_all(patterns, vocabulary="log")
         return tuple(event for event in self._log if matches_any(event.type, selectors))

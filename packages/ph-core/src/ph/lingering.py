@@ -192,17 +192,16 @@ class RuntimeLifetime:
     def _outlook(self) -> tuple[bool | None, str, str]:
         """`(survives, why, what to run)` — the four cases, decided in one place.
 
-        One `match` over the two facts that carry the information, rather than
-        three ladders re-walking a tri-state that had already thrown some away.
-        The flattening was lossy and the loss showed: `survives_logout` folded
-        *unknown linger* and *outside the reaped tree* into the same `None`, so a
-        host with no `/var/lib/systemd/linger` and a socket inside
-        `$XDG_RUNTIME_DIR` — precisely the host the module says deserves the
-        question — was told "the socket outlives logout", which is the one thing
-        nobody could know about it. It is now its own case, and it is the reason
-        the tuple is returned whole: an answer, its sentence and its command are
-        three views of one decision, and deciding them separately is how they
-        came to disagree.
+        One `match` over the two facts that carry the information, rather than three
+        ladders re-walking a tri-state that had already thrown some away. **Unknown
+        linger and outside-the-reaped-tree are separate cases**, not one `None`: a host
+        with no `/var/lib/systemd/linger` and a socket inside `$XDG_RUNTIME_DIR` — exactly
+        the host this module says deserves the question — must not be told "the socket
+        outlives logout", which is the one thing nobody could know about it.
+
+        The tuple is returned whole because an answer, its sentence and its command are
+        three views of one decision, and deciding them separately is how they came to
+        disagree.
         """
         match (self.linger, self.reaped_at_logout):
             case ("not-applicable", _):

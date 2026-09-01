@@ -1,26 +1,23 @@
 """`$PH_RUNTIME/daemon.sock` — the supervisor's front door (P5-01).
 
 A unix socket rather than stdio, which is the whole point: stdio has exactly one
-peer and dies with it, and a daemon exists to be reconnected to. The method
-names extend `--mode rpc`'s shape rather than starting a second vocabulary, so
-the SDK client dsh already ships stays usable and P5-02 adds capabilities to
-*this* surface instead of a parallel one.
+peer and dies with it, and a daemon exists to be reconnected to. The method names
+extend `--mode rpc`'s shape rather than starting a second vocabulary.
 
-**The socket is state, and stale state is a lie.** A path left behind by a
-crashed daemon makes every client hang on a connect that will never be answered,
-so binding removes an unresponsive one first and refuses a responsive one — the
+**The socket is state, and stale state is a lie.** A path left behind by a crashed
+daemon makes every client hang on a connect that will never be answered, so
+binding removes an unresponsive one first and **refuses a responsive one** — the
 second is another daemon, which is P5-03's lease to arbitrate rather than this
 row's to overwrite.
 
 The same sentence read the other way is P5-11: a path that stopped being *this*
 daemon's socket is a lie about this daemon. `$PH_RUNTIME` sits under
-`$XDG_RUNTIME_DIR`, which logind reaps at logout for a user who is not
-lingering, so the door can be removed while the process behind it keeps running
-— and every later client is told "no daemon socket" and to start one, which the
-leases the first is still holding will refuse. `watch` compares the socket's
-inode against the one bound here on a cadence, and says so in each root's own
-log, because by then the surfaces that could carry the news are exactly the ones
-that went away.
+`$XDG_RUNTIME_DIR`, which logind reaps at logout for a user who is not lingering,
+so the door can be removed while the process behind it keeps running — and every
+later client is told "no daemon socket" and to start one, which the leases the
+first is still holding will refuse. `watch` compares the socket's inode against
+the one bound here, and says so in each root's own log, because by then the
+surfaces that could carry the news are exactly the ones that went away.
 
 @module ph_app.daemon.server
 """
@@ -461,23 +458,17 @@ class DaemonServer:
     async def check_reachable(self) -> str:
         """One watch pass: is the socket at our path still ours? (P5-11)
 
-        `""` when it is. Two shapes of no, and they want the same record but not
-        the same sentence: `removed` is logout reaping `$XDG_RUNTIME_DIR` out
-        from under a daemon that keeps running, and `replaced` is what happens
-        next — the person logs back in, `ph daemon` binds a *new* socket at the
-        same path, and two supervisors now believe they own this user's roots.
-        An existence check reads the second as a recovery, which is why the
-        identity is a `(dev, inode)` pair rather than a boolean.
+        `""` when it is. Two shapes of no, wanting the same record and not the same
+        sentence: `removed` is logout reaping `$XDG_RUNTIME_DIR` out from under a daemon
+        that keeps running, and `replaced` is what happens next — the person logs back in,
+        `ph daemon` binds a *new* socket at the same path, and two supervisors now believe
+        they own this user's roots. An existence check reads the second as a recovery,
+        which is why the identity is a `(dev, inode)` pair rather than a boolean.
 
-        One method rather than a pure `watch()` and an announcing wrapper: the
-        comparison had exactly one caller, and splitting it put the "already
-        latched" guard twenty lines from where the latch is set.
-
-        Deliberately not a shutdown. The roots keep working — their tasks hold
-        no reference to a connection, which is P5-01's whole inversion — and
-        ending an hour of in-flight work over a socket problem would be the
-        failure mode this row is written to prevent, arriving from the other
-        side.
+        **Deliberately not a shutdown.** The roots keep working — their tasks hold no
+        reference to a connection, which is P5-01's whole inversion — and ending an hour
+        of in-flight work over a socket problem would be this row's own failure mode
+        arriving from the other side.
         """
         if self.identity is None or self.unreachable_since is not None:
             # Nothing to compare against (a caller that built this by hand), or

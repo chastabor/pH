@@ -182,20 +182,14 @@ class SubagentRequest:
     scope: Context | None = None
     """The boundary this delegation is made **from** (P6-31).
 
-    Not the child's — that does not exist yet when the ceiling is computed, and
-    when it does it is `SubagentRun.scope`, which `_enforce` checks is inside
-    this one. Two values with a containment relation, which is what P6-27 made
-    structural.
+    Not the child's — that does not exist yet when the ceiling is computed, and when
+    it does it is `SubagentRun.scope`, which `_enforce` checks is inside this one.
 
-    The same value and the same argument as `ToolExecutionInput.scope`: the
-    caller states the boundary, the seam does not guess it. A tool body that
-    spawns already holds it as `run.scope`, non-optional, beside the
-    `parent=run.agent` it was passing — the shape `ctx.fs` had before P6-24. The
-    history of which callers sat unread belongs to `_delegating_boundary` and the
-    plan row, not to a field enumeration that a third spawner would falsify.
-
-    Optional, and `_delegating_boundary` resolves it, because a `SubagentRequest`
-    is built by callers and by providers rather than only inside this seam."""
+    The same value and the same argument as `ToolExecutionInput.scope`: the caller
+    states the boundary, the seam does not guess it. Optional only because a
+    `SubagentRequest` is built by callers and by providers rather than only inside
+    this seam; `_delegating_boundary` resolves it.
+    """
     name: str | None = None
     """A stable label for the roster. Defaulted by the provider when omitted."""
     provider: str | None = None
@@ -475,51 +469,23 @@ class SubagentService:
     def _delegating_boundary(self, request: SubagentRequest) -> Context:
         """The boundary a spawn's ceiling is computed in — stated, not guessed (P6-31).
 
-        Four cases, and the third is the one that was wrong:
+        Four cases:
 
-        * **a stated `request.scope`** wins, as it does everywhere else;
-        * **no scope and no parent** is the mount — a spawn with no parent is a
-          root delegation, and the deployment-wide set is what it legitimately
-          holds;
-        * **a parent whose `.ctx` cannot be read** now refuses. It used to yield
-          `None`, and `None` is not "no ceiling" here — `SkillService.reach` and
-          `ToolRuntime.names` both resolve it to the *mount*, which is the
-          **unrestricted** set. So an unreadable parent did not narrow a child,
-          it handed it everything the deployment holds, and `_enforce` then
-          skipped its containment check for the same reason. Reproduced before
-          the fix: a parent denied one tool produced a 7-tool ceiling where its
-          own was 6.
+        * **a stated `request.scope`** wins, as it does everywhere else — "a stated scope
+          wins before any handle is consulted" is the security property here;
+        * **no scope and no parent** is the mount: a spawn with no parent is a root
+          delegation, and the deployment-wide set is what it legitimately holds;
+        * **a parent whose `.ctx` cannot be read** is **refused**. `None` is not "no
+          ceiling" — `SkillService.reach` and `ToolRuntime.names` both resolve it to the
+          *mount*, the unrestricted set — so an unreadable parent did not narrow a child,
+          it handed it everything the deployment holds. There is no narrower default to
+          pick, and this is the one path whose stake is that a spawn which could widen
+          would make delegation a privilege escalation (I7);
+        * **a parent with a usable `.ctx`** is that scope.
 
-          That is fail-open on the one path whose own docstring names the stake —
-          *"a spawn that could widen would make delegation the privilege
-          escalation I7 exists to prevent"* — so it is refused rather than
-          defaulted, and there is no narrower default to pick anyway;
-        * **a parent with a usable `.ctx`** is that scope, which is what every
-          caller got before and still gets.
-
-        Resolved here, at the entry, by the code that knows a parent was meant —
-        not in the downstream registries. `SkillService.reach` briefly kept a
-        `scope or self.ctx` fallback for this row's benefit; P6-32 then removed
-        it the other way, by signature: `reach` now *requires* a `Boundary`, and
-        the callers who legitimately mean the deployment spell `DEPLOYMENT`.
-        Either way the registry never guesses; this method is where the guess
-        used to happen and is now refused.
-
-        **This is the last four-case resolver in production.** `ctx.fs` had the
-        other one; P6-32 deleted it rather than converting it, because requiring
-        a stated `Boundary` makes the case it refused — a handle too broken to
-        name a scope, with nothing stated beside it — unrepresentable. That
-        cannot happen here: `SubagentRequest` is a payload a caller builds, so
-        the handle arrives whether or not a boundary does, and the refusal has
-        somewhere to fire.
-
-        One more of this shape exists outside production — `ph.testing`'s
-        `boundary_for`, same four cases in the same order — and the difference is
-        the argument against hoisting yet: its refusal is a bare `TypeError`
-        where this one is a coded `SubagentSpawnError` that spawn tests match on.
-        The case *order* is the half worth centralising if a third production
-        resolver ever appears, because "a stated scope wins before any handle is
-        consulted" is the security property; the refusal is per-seam and stays.
+        Resolved here, at the entry, by the code that knows a parent was meant — never in
+        the downstream registries, which since P6-32 require a stated `Boundary` and so
+        cannot guess either.
         """
         if request.scope is not None:
             return request.scope
@@ -539,19 +505,15 @@ class SubagentService:
     ) -> None:
         """Refuse a spawn that asks for more than the parent holds (P4-13b).
 
-        **Here rather than in each provider**, because this is the one path
-        every delegation takes and a ceiling one provider forgot would not be
-        one. An earlier draft split it — the seam refusing, each provider
-        narrowing — on the theory that a forgetful provider would lose a
-        preference rather than a boundary. That was false, and the second call
-        site had already proved it: `rehydrate` builds a fresh scope for a
-        settled child, narrowed nothing, and handed it the deployment-wide set.
-        So the seam applies the grant too, through `SubagentRun.scope`.
+        **Here rather than in each provider**, because this is the one path every
+        delegation takes and a ceiling one provider forgot would not be one. The seam
+        applies the grant too, through `SubagentRun.scope`, because `rehydrate` builds a
+        fresh scope for a settled child and would otherwise hand it the deployment-wide
+        set.
 
-        Refused rather than silently intersected, on `_resolve_model`'s argument
-        one field over: a child that came back with something other than what
-        was asked for is a result the parent cannot interpret. A `reviewer`
-        child missing its review skill does the job wrong and reports success.
+        Refused rather than silently intersected: a child that came back with something
+        other than what was asked for is a result the parent cannot interpret — a
+        `reviewer` child missing its review skill does the job wrong and reports success.
         """
         held_skills, held_tools = held if held is not None else self.held_by(request)
         for kind, asked, holds in (
@@ -631,18 +593,14 @@ class SubagentService:
         """Bound the child, or refuse the spawn if this provider cannot be bounded.
 
         Fail-closed, and narrowly: a provider that does not hand back a scope is
-        unbounded, which is only *unsafe* when the grant actually narrows
-        something. So a deployment where nothing is restricted keeps working
-        with any provider, and the moment a spawn means to narrow, a provider
-        that cannot deliver that is refused rather than silently ignored.
+        unbounded, which is only *unsafe* when the grant actually narrows something. So a
+        deployment where nothing is restricted keeps working with any provider, and the
+        moment a spawn means to narrow, a provider that cannot deliver that is refused
+        rather than silently ignored.
 
-        **The containment check no longer has an off switch** (P6-31). It read
-        `owner = getattr(parent, "ctx", None)` and skipped itself when that came
-        back `None` — so the two failures lined up: the same unreadable parent
-        that produced an unrestricted ceiling also turned off the check that
-        would have noticed the child was not inside it. `boundary` is resolved
-        by `_delegating_boundary`, which refuses rather than yielding `None`, so
-        by here it is always a `Context` and the check always runs.
+        **The containment check has no off switch** (P6-31). `boundary` is resolved by
+        `_delegating_boundary`, which refuses rather than yielding `None`, so by here it
+        is always a `Context` and the check always runs.
         """
         if run.scope is not None:
             # **A provider's scope must be inside the parent's** (P6-27).
@@ -834,31 +792,21 @@ async def apply(ctx: Context, config: Any) -> None:
 class Grant:
     """What one child may reach, resolved to names and fixed at admission.
 
-    **Materialized, and since P6-27 that is a *policy* rather than a workaround.**
-    It used to be both. Agents were siblings, so a child inherited nothing and a
-    grant had to write the parent's holdings out or the child would get the
-    deployment-wide set — and the docstring justified the snapshot on the
-    grounds that "the parent may be gone" by the time it was applied. Nesting
-    removed that reason: the ceiling is now the isolation chain, and a disposed
-    parent fires the effect that pops the child from `_children`, so an orphaned
-    rehydration is unreachable rather than unbounded.
+    **A child's capability is fixed at the moment it is admitted.** A parent that
+    gains a tool afterwards does not widen a child already running: the child was
+    spawned for a job, with a ceiling its prompt and its brief were written against,
+    and silently growing that mid-flight would make "what could this child do"
+    unanswerable from the admission record. A parent that needs a child with more
+    spawns a *new* child, whose admission says so.
 
-    What survives is the rule the snapshot also happened to enforce, now kept on
-    purpose: **a child's capability is fixed at the moment it is admitted.** A
-    parent that gains a tool afterwards does not widen a child already running —
-    the child was spawned for a job, with a ceiling its prompt and its brief were
-    written against, and silently growing that mid-flight would make "what could
-    this child do" unanswerable from the admission record. A parent that needs a
-    child with more spawns a *new* child, whose admission says so.
+    That is why the allow-list stays even though the isolation chain would bound the
+    child anyway: the chain answers "no more than the parent **holds**", and this
+    answers "no more than the parent held **then**". Only the second is stable enough
+    to read a transcript against.
 
-    That is why the allow-list stays even though the chain would bound the child
-    anyway: the chain answers "no more than the parent **holds**", and this
-    answers "no more than the parent held **then**". Only the second is stable
-    enough to read a transcript against.
-
-    `brief` is rendered here rather than read per assembly: it is the cached
-    prompt prefix, and a `PromptSection` that hits the filesystem on every model
-    step is neither static nor free.
+    `brief` is rendered here rather than read per assembly: it is the cached prompt
+    prefix, and a `PromptSection` that hits the filesystem on every model step is
+    neither static nor free.
     """
 
     skills: tuple[str, ...]
@@ -869,21 +817,14 @@ class Grant:
         """Bound a child's scope to this grant.
 
         **Narrowing is by restriction, never by registration.** A scope's own
-        registration is unmaskable by its own filter — a filter reaches
-        everything *outside* the scope that wrote it and nothing inside — so
-        registering on a child is a way to hand it something its parent cannot
-        see, which is the opposite of a ceiling. Filters only intersect, so they
-        are the only instrument a spawn is allowed to use.
+        registration is unmaskable by its own filter — a filter reaches everything
+        *outside* the scope that wrote it and nothing inside — so registering on a child
+        is a way to hand it something its parent cannot see, which is the opposite of a
+        ceiling. Filters only intersect, so they are the only instrument a spawn may use.
 
-        The premise was quoted from `_build_view`'s old rule, that "a restriction
-        filters GLOBAL names only". P6-27 replaced that — an *ancestor's*
-        registration is maskable now, and must be, or a child could never be
-        narrowed below a parent that registered on its own scope. The conclusion
-        is unchanged, because the half that carried it is the half that stayed:
-        a scope still cannot filter itself.
-
-        The Code Mode transport survives either way, by construction: a child
-        that cannot call anything is not a narrower child, it is a broken one.
+        An *ancestor's* registration is maskable (P6-27), and must be, or a child could
+        never be narrowed below a parent that registered on its own scope. What still
+        holds is that a scope cannot filter itself.
         """
         skills = ctx.get("skills")
         if skills is not None:
@@ -1014,33 +955,25 @@ def reachable_family(sessions: Iterable[Session], agent_id: str) -> dict[str, Fa
 def descendants(lineage: Iterable[tuple[str, str | None]], agent_id: str) -> list[str]:
     """`agent_id` and everything spawned beneath it, transitively (P6-28).
 
-    **Not `reachable_family`, and the difference is the point.** That answers
-    "who may this agent *address*" — the C7 nuclear family, which includes
-    siblings and the parent — and it is the right rule for a message. This
-    answers "whose leftovers are mine to account for", and the two must not be
-    the same set: a sibling's worktree is not this agent's to enumerate, still
-    less to collect, and borrowing the messaging rule here would widen a
-    filesystem question with an answer computed for a different one. That is the
-    shape of privilege escalation I7 names, arrived at by reuse rather than by
-    intent.
+    **Not `reachable_family`, and the difference is the point.** That answers "who
+    may this agent *address*" — the C7 nuclear family, including siblings and the
+    parent — which is the right rule for a message. This answers "whose leftovers are
+    mine to account for": a sibling's worktree is not this agent's to enumerate,
+    still less to collect, and borrowing the messaging rule would widen a filesystem
+    question with an answer computed for a different one (I7).
 
-    Transitive where `reachable_family` is one hop, and for the same reason read
-    the other way: a grandchild that failed is evidence its grandparent is the
-    only live party left to look at, because the child that spawned it settled
-    too. The row's own case — a parent diagnosing from a transcript — does not
-    stop at one generation.
+    Transitive where `reachable_family` is one hop: a grandchild that failed is
+    evidence its grandparent is the only live party left to look at, because the
+    child that spawned it settled too.
 
-    An agent's id is its session's id, so the links are `parent_session` and
-    nothing needs a side index. **`(id, parent)` pairs rather than `Session`
-    objects**, which is what lets the collector answer this from a *listing*:
-    `StoredSession` already carries both, filled from the one-line header peek
-    the backend was paying anyway, so a family can be narrowed before a single
-    log is read rather than after all of them are. A caller holding sessions
-    spells the pair at the call site, which is one comprehension.
+    An agent's id is its session's id, so the links are `parent_session` and nothing
+    needs a side index. **`(id, parent)` pairs rather than `Session` objects**, which
+    is what lets the collector answer this from a *listing* — a family is narrowed
+    before a single log is read rather than after all of them are.
 
-    Breadth-first from `agent_id`, and cycle-safe by construction: `seen` is
-    tested before descent, so a log claiming its own ancestor as a child — a
-    corrupted or hand-edited header — costs a wasted lookup rather than a hang.
+    Breadth-first, and cycle-safe by construction: `seen` is tested before descent,
+    so a log claiming its own ancestor as a child costs a wasted lookup rather than a
+    hang.
     """
     children: dict[str, list[str]] = {}
     known = set()

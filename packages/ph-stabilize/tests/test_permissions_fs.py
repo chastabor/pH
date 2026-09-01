@@ -8,10 +8,27 @@ an exception is written, and a rule set evaluated by specificity — or by
 tested because the honest answer is a refusal: the rules describe paths that do
 not exist yet, so a subtree cannot be checked one path at a time.
 
-Everything reaches the disk through `ctx.fs`, never through a tool name, which
-is what makes the same rules cover a Code Mode binding and an MCP server's
-writer. The tests therefore drive `ctx.fs` directly wherever the tool layer
-would only be re-testing the pipeline.
+Everything reaches the disk through `ctx.fs`, never through a tool name, so the
+tests drive `ctx.fs` directly wherever the tool layer would only be re-testing
+the pipeline.
+
+**Be honest about how much that placement buys today.** `tool-fs` is currently
+the *only* caller of `FsService.read`/`write`/`edit` in the tree, so the coverage
+this shape earns is mostly future. A Code Mode binding is the namespaced face of a
+governed tool and does route through here. `memory-agents-md` and `ph-rlm`'s
+harness service both read with `Path.read_text` and are **not** covered. An MCP
+server is a remote client and can never reach `ctx.fs` at all — an earlier version
+of this docstring claimed the rules covered its writer, which was never true. The
+placement is still right, because it is where the next writer lands for free, but
+the argument for it is "one gate rather than one per tool" and not a list of
+things already behind it.
+
+**Why `_refuses_under` takes `require_head`.** `_could_match_under` answers
+`True` for a pattern with no literal head, because for a *delete* "could match
+anywhere" must round to refusal. For a *walk* the same rounding refuses
+everywhere: `deny read **/.env` — the idiomatic spelling — has an empty head, so
+every directory "could" hold a match. Measured on this repository before the
+guard: **11 489 results down to 6.**
 """
 
 from __future__ import annotations

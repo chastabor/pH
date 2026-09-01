@@ -836,13 +836,13 @@ session, and bodies at 16 KiB.
 **Usage is attributed upward.** Each child `assistant/message` appends
 `subagent/usage-attributed` to the **parent's** log.
 
-> The producing module says this exists "so the token meter **can** subtract a
-> child's tokens from the parent's own context measurement". Verified: the meter
-> does not read this event — `TokenMeter.last_usage` scans only `assistant/message`
-> in the log it is given (`seams/token_meter.py:163-168`), and a child's messages
-> are in the *child's* log, so the parent's measurement is already correct. The
-> event is an **additive record for readers**; its only consumer today is the TUI
-> panel. "Can" is doing the work in that sentence.
+> It is an **additive record for readers**, not an input to any measurement: the
+> meter does not read this event — `TokenMeter.last_usage` scans only
+> `assistant/message` in the log it is given (`seams/token_meter.py:163-168`), and
+> a child's messages are in the *child's* log, so the parent's measurement is
+> already correct without it. Its only consumer today is the TUI panel. The
+> producing module claimed the meter "can subtract" a child's tokens; that wording
+> is now corrected at the source.
 
 **`descendants()` is deliberately not `reachable_family`.** Descent is transitive
 and covers grandchildren; the messaging family is one hop and includes siblings.
@@ -1137,7 +1137,6 @@ Stated here rather than left to be discovered, per the codebase's own rule.
 | Tool-call limit with `exit: "error"` — the "one failed `tool/result`, not a turn stop" reading is traced, not tested | untested |
 | Kernel-namespace rehydration: `kernel/snapshot` / `kernel/restored` exist as types but nothing wires them into the resume path | unwired |
 | `LlmRuntime.register_adapter` uses no claiming helper and takes no `scope=` — the one provider slot outside the ownership sweep | documented in place |
-| The token-meter subtraction described in `ph_rlm/subagents.py:23-27` is not what the meter does (§6.3) | doc drift |
 
 ---
 
@@ -1147,10 +1146,18 @@ Stated here rather than left to be discovered, per the codebase's own rule.
   built on the `Context` tree.
 - **Then** `ph/bundles/base.yaml` — 49 rows is the whole default harness, in
   order, with comments explaining each.
-- **Docstrings carry the reasoning.** This codebase records *why* at length,
-  including measurements and the defects that motivated a design. A docstring
-  saying "the first draft did X, which broke Y" is the most valuable thing in the
-  file.
+- **Application code states the contract and the invariants; tests state why.**
+  A docstring under `src/` says what a thing does, what it refuses, and which
+  invariants it is holding — and stops there. The reasoning this codebase records
+  at length — the measurement, the defect that motivated a design, the
+  alternative that was rejected and on what grounds — lives in the test that
+  holds the behaviour to account, next to an assertion that fails if the
+  reasoning stops being true. A `src/` module whose *why* is worth reading names
+  its test file at the end of its docstring; that pointer is the index into the
+  reasoning.
+- **So read the tests for the argument.** "The first draft did X, which broke Y"
+  is still the most valuable sentence in the codebase; it is now in
+  `packages/*/tests/`, where X is a test that fails.
 - **`ph events`** prints the live producer/consumer matrix.
 - **`ph doctor --profile <name>`** mounts a profile and reports what it actually
   composed — the effective containment tier, what the file rules reach, what runs

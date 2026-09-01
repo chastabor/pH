@@ -309,16 +309,13 @@ def _cell_facts(details: dict[str, Any]) -> str:
     """The `IpythonToolDetails` line — only the facts that are true.
 
     Read as a plain mapping rather than by importing the model: the payload is
-    ph-rlm's, and ph-app does not depend on the bundle. A field this build does
-    not know is ignored, which is what lets a tool enrich its own card without
-    the transcript learning its schema.
+    ph-rlm's, and ph-app does not depend on the bundle. A field this build does not
+    know is ignored, which is what lets a tool enrich its own card without the
+    transcript learning its schema.
 
-    The dispatch *count* is deliberately absent: the collapsible below already
-    reports it, from the `tool/code-dispatch-start` fold that owns those rows.
-    Rendering it here too would put two projections of one number in one widget,
-    able to disagree — which is what A11 forbids, and what the first draft of
-    this card did (a snapshot showing "3 governed calls" over a section titled
-    "1 governed call").
+    The dispatch *count* is deliberately absent: the collapsible below already reports
+    it, from the `tool/code-dispatch-start` fold that owns those rows. Two projections
+    of one number in one widget can disagree, which is what A11 forbids.
     """
     facts: list[str] = []
     attachments = int(details.get("attachments") or 0)

@@ -9,6 +9,62 @@ the work does not.
 The socket is a real unix socket under `tmp_path` and the frames are real JSONL;
 there is no in-process shortcut, because what this row delivers is precisely the
 transport and a fake one would agree with whatever the code did.
+
+## Measurements the supervisor's shapes are chosen for
+
+Kept here rather than in `supervisor.py`, because each one is the reason a shape
+that looks over-thought is not.
+
+**One `anyio.Lock` in `start`, not one per root id.** `prompt` calls `start` on
+*every turn*, so a per-id table minted a lock per call to throw it away — 832 B
+and 0.65 µs each — and retained an entry per id ever started, cleared nowhere, in
+the one process built to run for weeks. A single lock costs a serialized mount
+(~2 ms) between two *different* new roots, which happens at most once per root,
+while the returning-client path skips the lock's checkpoint entirely.
+
+**The lease is acquired inline, not on a worker thread.** Wrapping it in
+`to_thread.run_sync` measured **+340 µs on a 1.9 ms root start — twice the 166 µs
+the acquire itself costs** — because a real start is seconds after the last one
+and pays a cold thread plus a cold selector wakeup every time. At `timeout=0` the
+acquire is one `os.open` and a non-blocking `flock`: it cannot wait, so there is
+no blocking to move off the loop. Its neighbours settle it — `path.is_file()` two
+lines down and `resume_session`'s whole-log read are both on the loop thread.
+
+**`filelock(thread_local=False)` cost three tests to find**, two of them
+P5-01's, all failing as "this session is already active" against a daemon that
+had cleanly shut down. filelock keeps its re-entrancy counter in a thread-local,
+so a lease taken on a worker thread and released from the event loop finds a
+counter of zero and returns having released nothing — no error, no warning, and a
+lock file held until the process dies.
+
+**`Root.accepted` folds once and keeps the set.** The first draft re-scanned the
+whole log per command, which measured **4.9 ms at 200 000 events** on the
+daemon's own event loop, stalling every other connection for that long.
+
+**The recovery fold must not be called from `Root.status`.** `describe()` reads
+`status` for every root on every `sessions/list`, and folding there measured
+**2.3 ms per root at 100 000 events, 12.5 ms at 500 000, and 128 ms for fifty
+roots at once, with no await point between them.** It is folded once at root
+start and maintained through `Root.retry`/`give_up`/`recovered`.
+
+## Why the ladder does not retry a failed *turn*
+
+The first draft of `recovery` retried `turn/end{error}`, and this row's own tests
+are what showed it completing with **no request made at all**. The failed turn had
+already *claimed* its message from the inbox, so the second `run()` found nothing
+pending and ended at `phase.step == 0` with `kind="completed"` — a trivially
+successful empty turn that clears the ladder and reports a healthy root which
+answered nothing. Strictly worse than not retrying.
+
+Re-splicing the claimed message instead was the other candidate: it appends a
+second `user/message` and shows the model the same prompt twice.
+
+## Why framing uses anyio's `receive_until`
+
+The hand-rolled buffer was quadratic twice over — it re-scanned the whole buffer
+per chunk and recopied the tail per frame — measuring **57 ms for 4 096 frames
+arriving in one read**. It also bounded the *accumulated buffer* rather than one
+frame, so many small frames in one chunk tripped a limit documented as per-frame.
 """
 
 from __future__ import annotations

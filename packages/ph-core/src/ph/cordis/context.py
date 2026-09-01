@@ -102,31 +102,19 @@ class Hook:
 def _invoke(hook: Hook, *args: Any) -> Any:
     """Call one listener as an effect of the scope that registered it (P6-25).
 
-    **The one place ownership is established for a dispatch**, and the reason it
-    is a function rather than a line in each loop: there are five dispatch modes,
-    and "remember to bind" written five times is the shape of rule this row
-    exists to stop relying on. A sixth mode cannot omit what it never writes.
+    **The one place ownership is established for a dispatch.** A function rather
+    than a line in each loop: there are five dispatch modes, and a sixth cannot omit
+    what it never writes.
 
-    Sync and async are one path here. A listener returning an awaitable gets it
-    back wrapped in `_as_owner`, so whoever awaits or spawns it receives a
-    coroutine that binds itself; a listener returning a value has already run
-    inside the binding below. Callers need no idea which kind they have, which is
-    what lets `emit` spawn and `serial` await the same result.
+    Sync and async are one path. A listener returning an awaitable gets it back
+    wrapped in `_as_owner`, so whoever awaits or spawns it receives a coroutine that
+    binds itself; one returning a value has already run inside the binding. Callers
+    need no idea which kind they have, which is what lets `emit` spawn and `serial`
+    await the same result.
 
-    **The binding is spelled inline rather than through `running`**, and that is
-    a measurement rather than a preference: `@contextmanager` costs a generator,
-    an `__enter__`, an `__exit__` and a `StopIteration`, and `emit` fires once
-    per streamed chunk. Cross-process A/B on a 2 000-chunk turn, headless with
-    two listeners: **8.2 ms** before this row, **14.3 ms** through a
-    `@contextmanager`, **10.5 ms** inline. `running` keeps the
-    once-per-activation path, where the difference is unmeasurable.
-
-    An earlier draft of this paragraph priced the inline form at 120 ns per
-    listener and reported the row as free. Both were wrong, and the review that
-    caught it is the reason for the `None` branch below: that figure counted only the
-    `set`/`reset` pair (**93 ns** measured) and missed the `inspect.isawaitable`
-    this same function introduced — **172 ns**, run twice per listener, which
-    made the awaitability question cost more than the ownership it was serving.
+    The binding is spelled inline rather than through `running` because `emit` fires
+    once per streamed chunk; the measurements are in
+    `tests/test_registration_ownership.py`.
     """
     # Inline, and through the scope's memoized self-pair. Building a
     # `Running` here costs **206 ns** — a frozen dataclass sets its fields
@@ -254,44 +242,24 @@ class ForkScope:
 
 @dataclass(frozen=True, slots=True)
 class Deployment:
-    """Everything this deployment holds — the widest boundary, said out loud.
+    """Everything this deployment holds — the widest boundary, said out loud (P6-32).
 
-    **"Widest" along the restriction axis only, and that is worth being exact
-    about**: a reader given `DEPLOYMENT` resolves the *mount's* isolation chain,
-    which no restriction narrows — but an **agent-scoped registration is not on
-    it**. `view(DEPLOYMENT)` does not see a tool registered on one agent's scope,
-    verified; it is the view `scope=None` always read, named. A caller asking
-    "is this available to *anyone*" (an audit, a collision check across agents)
-    is asking a per-layer question this sentinel does not answer, and making
-    `boundary_of` iterate layers to answer it would turn a boundary into a
-    search.
+    **"Widest" along the restriction axis only.** A reader given `DEPLOYMENT`
+    resolves the *mount's* isolation chain, which no restriction narrows — but an
+    **agent-scoped registration is not on it**: `view(DEPLOYMENT)` does not see a
+    tool registered on one agent's scope. It is the view `scope=None` always read,
+    named. "Is this available to *anyone*" is a per-layer question this sentinel does
+    not answer.
 
-    **The point is that it has a name** (P6-32). A policy reader takes a scope to
-    answer for, and `scope: Context | None = None` made two different things one
-    spelling: *"I did not state a boundary"*, which is an absence of information,
-    and *"I mean the deployment"*, which is a legitimate answer that `ph doctor`,
-    the prompt catalog and a root spawn all need. With one spelling every reader
-    has to pick a default for the ambiguous case, and the convenient default is
-    `scope or self.ctx` — the mount, which is the widest boundary there is.
+    **The point is that it has a name.** `scope: Context | None = None` made two
+    different things one spelling — "I did not state a boundary", an absence of
+    information, and "I mean the deployment", a legitimate answer. With one spelling
+    every reader has to default the ambiguous case, and the convenient default is
+    the mount: the widest boundary there is.
 
-    That default is one root cause wearing four faces, each found and fixed
-    separately as though it were local: `owner_for(None)` falling through to the
-    seam so a registration outlived its row (P6-12); `_scope_of(agent)` returning
-    `None` so an agent-scoped screen applied to nobody (P6-24); `held_by`'s
-    `None` reaching `reach`/`names` as the *unrestricted* set, so an unreadable
-    parent handed a child everything the deployment holds (P6-31); and
-    `_enforce` skipping its containment check on the same `None`.
-
-    So "everything" gets a name and the default comes off. `DEPLOYMENT` is
-    greppable — "who asked for the widest boundary" is one search — where passing
-    the mount `Context` explicitly would not be, since `ctx` is in scope
-    everywhere and reaches for itself.
-
-    **Not `None` meaning "nothing", which was the other candidate.** That trades a
-    silent-wide failure for a silent-narrow one: an empty tool set or an empty
-    prompt degrades a model quietly rather than erroring, and nobody notices. The
-    half that does the work is removing the *default*, so a call site that states
-    no boundary fails mypy rather than any runtime rule.
+    Not `None` meaning "nothing", which trades a silent-wide failure for a
+    silent-narrow one. The half that does the work is removing the *default*, so a
+    call site stating no boundary fails mypy rather than a runtime rule.
     """
 
 
@@ -302,20 +270,15 @@ Boundary: TypeAlias = "Context | Deployment"
 """What a policy reader takes: a scope, or `DEPLOYMENT` for all of them.
 
 Deliberately **not** `| None`. A reader whose parameter has no default cannot be
-called without answering the question, and mypy is what asks — at build time,
-against every call site, rather than a runtime rule that only fires on the paths
-a test happens to drive.
+called without answering the question, and mypy asks at build time against every
+call site rather than only the paths a test drives.
 
 **A *registration* takes a `Context`, never this**, and so do the two
-dispatch-time resolvers — `Context.owner_for` and `Context.layer_for` — which
-read the running binding rather than a stated value. `ctx.fs`'s `screen`,
-`ToolRuntime`'s `register`/`restrict`/`guard`/`present_as` and every `claim_*`
-call hand their scope to `add_disposer` and to `reaches` — it is what the
-registration is an *effect of* and what it is visible *to*, P6-12's two
-questions. `DEPLOYMENT` is neither: there is nothing for it to unwind with. So a
-mechanical `Context | None → Boundary` sweep must stop at the readers, and the
-registration methods P6-32 defers are deferred to P6-12's mechanism rather than
-merely unconverted."""
+dispatch-time resolvers, `Context.owner_for` and `Context.layer_for`, which read
+the running binding rather than a stated value: a scope is what a registration is
+an *effect of* and what it is visible *to* (P6-12's two questions). `DEPLOYMENT`
+is neither — there is nothing for it to unwind with.
+"""
 
 
 def boundary_of(scope: Boundary, mount: Context) -> Context:
@@ -336,43 +299,18 @@ class Running:
     """Who is running — as the *two* questions it has to answer (P6-29).
 
     Public because it is also **what a registry records at registration time**.
-    Every one of them invokes a row's body later — a tool, a command, a
-    compaction note, a prompt section, a status field, a diagnostic, a telemetry
-    sink, and each of the five single-slot providers — and to enter the right
-    binding then, they have to have kept both answers now. `Context.running_for`
-    hands them exactly this object, so "what registration recorded" and "what the
-    invoker binds" are one type rather than two fields a registry pairs up by
-    hand and can pair up wrongly.
+    Every registry invokes a row's body later — a tool, a command, a compaction
+    note, a prompt section, a status field, a diagnostic, a telemetry sink, each of
+    the five single-slot providers — and to enter the right binding then it must have
+    kept both answers now. `Context.running_for` hands them exactly this object.
 
-    P6-12 established that a registration answers two questions with one value,
-    and split the readers into `Context.owner_for` (whose lifetime) and
-    `Context.layer_for` (who may see it). It did not split what they read, and
-    for two rows it did not have to: an `apply` and a listener both run *as one
-    scope*, so the owner and the layer are the same object and one `Context` in
-    the var said both truthfully.
+    The two come apart precisely when a **registry** invokes the body: a tool's
+    `execute` belongs to the row that registered the tool (I2 — whose code it is)
+    while it is visible to the *agent* it was invoked for (B7 — a different scope).
 
-    A body a **registry** invokes is the case where they come apart. A tool's
-    `execute` belongs to the row that registered the tool — that is whose code it
-    is, and I2 says a registration made from it unwinds with that row — while it
-    is visible to the *agent* it was invoked for, which is B7's answer and a
-    different scope entirely. P6-26 bound `execution.scope` for both, which made
-    containment right and quietly re-answered lifetime as "the agent": a tool
-    registered from a tool body outlived the row that registered the tool,
-    verified.
-
-    Two fields rather than a second `ContextVar` because they are one fact — *who
-    is running* — read two ways, and two variables can be set out of step. The
-    only way to bind one is `running()`, which takes both.
-
-    **What this makes possible is the rest of the rule.** `CompactionSeam.render`
-    and `SystemPromptService.assemble` each hold the target scope in a local and
-    invoke a row's body two lines later; they could not join P6-26 because the
-    target is a *layer* while the owner is still the registering row, and one
-    `Context` cannot say both. The same shape covers `StatusField.read`,
-    `Diagnostic.read` and a `claim_slot` provider, where there is no target at
-    all and both halves are simply what registration recorded — which is why "a
-    provider has no agent" stopped being an objection: nothing needs an agent for
-    the *owner* half.
+    Two fields rather than a second `ContextVar` because they are one fact — *who is
+    running* — read two ways, and two variables can be set out of step. The only way
+    to bind one is `running()`, which takes both.
     """
 
     owner: Context
@@ -383,33 +321,21 @@ class Running:
     def add_disposer(self, dispose: Disposer, *, label: str = "") -> Disposer:
         """Release when **either** scope ends — the pair's lifetime, not a half's.
 
-        Before P6-29 the two could not diverge, so "when does this go away" had
-        one answer and `Context.add_disposer` was the whole of it. Once a body a
-        registry invokes registers as its row *for* an agent, they are unrelated
-        branches and either can end first — and picking one is wrong in a
-        different direction each way. Owning it by the row alone leaves whatever
-        the layer keyed on a disposed scope: `ToolRuntime._layers` went 2 → 2
-        across an agent's disposal where it goes 2 → 1. Owning it by the agent
-        alone lets a registration outlive the row whose code made it, which is I2
-        verbatim. So it is neither: the registration is meaningful only while
-        both are alive.
+        Once a body a registry invokes registers as its row *for* an agent, the two are
+        unrelated branches and either can end first. Picking one is wrong in a different
+        direction each way: owning it by the row alone leaves whatever the layer keyed on
+        a disposed scope, and owning it by the agent alone lets a registration outlive
+        the row whose code made it, which is I2 verbatim. The registration is meaningful
+        only while both are alive.
 
-        **Here rather than in each registry**, because a registry keyed on the
-        layer has to ask this question and there is now more than one — the tools
-        registry keys `_layers` by `layer.isolation`, and `ph.seams.skills` keys
-        `_restrictions` the same way. A rule with two sites and one
-        implementation is the shape this whole row exists to delete. It lives on
-        `Running` and not on `Context` because `Context.add_disposer(..., also=)`
-        would ask one scope to know about a pair it does not hold; the pair is
-        the object that holds both.
+        **Here rather than in each registry**, because more than one registry keys on the
+        layer (`ToolRuntime._layers`, `ph.seams.skills._restrictions`). On `Running` and
+        not on `Context` because `Context.add_disposer(..., also=)` would ask one scope
+        to know about a pair it does not hold.
 
-        The once-guard is `Context.add_disposer`'s: the releaser it returns flips
-        `_Effect.done` and drops the effect before calling through, so `finish`
-        calling the layer's releaser re-enters exactly one level and stops at a
-        guard that already exists. Whichever scope ends first removes the sibling
-        effect from the other, so nothing is left behind on the one that did not.
-        `claim_key`, `claim_entry` and `claim_slot` take `Context | Running`, so a
-        seam opts in by handing them the pair instead of `by.owner`.
+        The once-guard is `Context.add_disposer`'s: the releaser flips `_Effect.done` and
+        drops the effect before calling through, so `finish` re-enters exactly one level
+        and stops. Whichever scope ends first removes the sibling effect from the other.
         """
         drop_layer: Disposer | None = None
 
@@ -435,61 +361,27 @@ listener half."""
 class running:
     """Bind "who is running" for the duration of a block.
 
-    Public since P6-26, because the fourth consumer is in another package's
-    layer: a registry that invokes a body — a tool's `execute`, a command's
-    `run` — has to make that body's scope current, and reaching into a private
-    of `ph.cordis.context` to do it would be the seam layer depending on an
-    underscore.
+    **It takes the `Running` itself**, which is how every registry calls it: the pair
+    exists so a registry stops keeping two fields it can pair up wrongly, and
+    `running(a.owner, b.layer)` at nine call sites would be silently valid. `layer=`
+    beside a pair *overrides* the visibility half — the one thing a caller
+    legitimately knows better (`ph.seams.fs` binds the agent whose path is being
+    resolved, not the scope the resolver registered on).
 
-    **It takes the `Running` itself**, which is how every registry calls it: the
-    pair exists so a registry stops keeping two fields it can pair up wrongly,
-    and taking it apart into two positional arguments at nine call sites would
-    have handed that exact mistake back — `running(a.owner, b.layer)` is silently
-    valid. `layer=` beside a pair *overrides* the visibility half, which is the
-    one thing a caller legitimately knows better: `ph.seams.fs` binds the agent
-    whose path is being resolved rather than the scope the resolver registered on.
+    **`None` binds nothing**, for the empty half of an at-most-one slot: five seams
+    hold a provider that may not be registered.
 
-    **`None` binds nothing**, for the empty half of an at-most-one slot. Five
-    seams hold a provider that may not be registered, and each was spelling
-    `running(by.owner, by.layer) if by is not None else nullcontext()` — the same
-    conditional five times, plus two private `_as_provider()` helpers that existed
-    only because the expression was too long to inline. The state is real, so it
-    belongs in the one place that knows what binding means.
+    **`layer` defaults to `owner`**, which is the whole of the ordinary case — an
+    `apply` and a listener each run as one scope, so `running(scope)` means what it
+    always did. One call with a default rather than two functions, because the
+    *shape of the call* then says whether the two questions have one answer, and the
+    record it binds cannot be half-set.
 
-    **`layer` defaults to `owner`, which is the whole of the ordinary case.**
-    An `apply` and a listener each run as one scope, so `running(scope)` still
-    means what it always did and every existing call site is unchanged. Passing
-    the second argument is the registry case (P6-29): the body belongs to the row
-    that registered it and is visible to the target it was invoked for, and those
-    are two scopes. Spelled as one call with a default rather than two functions,
-    because a caller choosing between `running` and `running_as` is a caller who
-    can pick the wrong one — here the *shape of the call* says whether the two
-    questions have one answer, and the record it binds cannot be half-set.
+    **Single-use**, like every context manager built at its `with`: the token lives
+    on the instance, so re-entering one object would lose the outer token.
 
-    **A class rather than a `@contextmanager`, and that is a measurement.** The
-    generator form costs a frame, a `StopIteration` and two `send`s: **709 ns**
-    per entry against **316 ns** for byte-identical branch logic. This stopped
-    being a once-per-activation helper in P6-26 and P6-29 — it is now entered
-    once per tool call, once per slash command, once per prompt row per
-    `assemble`, and once per telemetry sink per record, at twenty-one sites. In
-    situ against the pre-row build on base+headless, a **tool call is at parity:
-    26.67 µs against 26.74** — the cheaper form pays for the whole pair
-    mechanism. `_invoke` still spells the two calls inline for the same reason
-    one scale down: `emit` fires per streamed chunk, where even 316 ns is too
-    much.
-
-    **What it does not pay for is `assemble`, and that is worth stating**
-    (§5 rule 6). Prompt assembly enters this once per *contributing row*, so the
-    cost scales in the thing plugins add: **55.06 µs against 49.85** with the
-    nine rows base+headless contributes, ~1.2 µs per row beyond that. Once per
-    turn, against a model round-trip, so it is affordable — but a deployment with
-    forty prompt rows pays forty bindings, and the honest place to notice that is
-    here rather than in a profiler later.
-
-    **Single-use, like every other context manager built at its `with`.** The
-    token lives on the instance, so re-entering one object would lose the outer
-    token; all twenty-one call sites construct inline, which is the only shape
-    that makes sense for a binding named after the block it wraps.
+    A class rather than a `@contextmanager`, and what that costs at each of the
+    twenty-one call sites: `tests/test_registration_ownership.py`.
     """
 
     __slots__ = ("_pair", "_token")
@@ -527,18 +419,11 @@ class running:
 async def _as_owner(scope: Context, awaitable: Any) -> Any:
     """Await something as an effect of `scope`, binding when the body *runs*.
 
-    The half of P6-25 its first version got backwards. An `async def` listener
-    called by `emit` only *builds* a coroutine — the body runs later, on a task
-    `_spawn` creates — and a task copies the context at creation, which is after
-    a binding around the *call* has already been reset. So the coroutine carried
-    the emitter's binding and never the listener's, and both gaps this row exists
-    to close survived verbatim for the most ordinary listener shape in the
-    harness: `current_owner()` read `None` inside the body, and anything it
-    registered landed on the seam and outlived its row.
-
-    Wrapping the awaitable moves the binding *inside* the body, where it is the
-    coroutine's own first act rather than something its creator did before
-    handing it over.
+    An `async def` listener called by `emit` only *builds* a coroutine — the body
+    runs later on a task, and a task copies the context at creation, which is after a
+    binding around the *call* has been reset. Wrapping the awaitable moves the
+    binding inside the body, where it is the coroutine's own first act rather than
+    something its creator did before handing it over.
     """
     # Through `running` rather than the inline pair `_invoke` uses: this is
     # already an extra coroutine frame around an `await`, so a generator's
@@ -612,40 +497,24 @@ class Context:
     def owner_for(self, scope: Context | None = None) -> Context:
         """Whose lifetime a registration made *now* belongs to (I2, P6-12).
 
-        Called as `self.ctx.owner_for(scope)` from a seam, where `self.ctx` is
-        the seam's own context and is therefore the fallback rather than the
-        answer. Three cases, in order:
+        Called as `self.ctx.owner_for(scope)` from a seam, where `self.ctx` is the seam's
+        own context and is therefore the fallback rather than the answer. Three cases, in
+        order:
 
         * **an explicit `scope=`** — the caller said so, and the only thing that
-          overrides the rest. It now means what it always read as, *"register on
-          someone else's lifetime"* (an agent's, so the registration shadows a
-          global one for that agent alone), instead of being a rule twenty
-          modules had to remember to get the *ordinary* case right;
-        * **the activation scope**, when a row's `apply` is what is running —
-          the scope cordis disposes when the row unmounts, so the registration
-          goes with it. This is the fix;
-        * **this context**, outside any activation: today's behaviour, kept so
-          the change is strictly additive for callers that are not rows at all
+          overrides the rest. It means *"register on someone else's lifetime"*;
+        * **the activation scope**, when a row's `apply` is what is running — the scope
+          cordis disposes when the row unmounts, so the registration goes with it;
+        * **this context**, outside any activation: for callers that are not rows at all
           (a test standing a service up by hand, a mode wiring one directly).
 
-        **This does not take a `Boundary`, and P6-32 settled that deliberately**
-        rather than leaving it unconverted. That row deletes a `None` which
-        resolves *wider* than any stated value. `None` here resolves through
-        `_ACTIVATING` to whoever is running — the row, verified — which is the
-        **narrowest** correct answer and the whole of P6-12. It is not "give me
-        everything", it is "I am not registering on someone else's behalf".
+        **This does not take a `Boundary`** (P6-32): `None` here resolves through
+        `_ACTIVATING` to whoever is running, which is the *narrowest* correct answer, not
+        "give me everything".
 
-        The third branch does fall back to the seam, and that is a widening in
-        I2's sense — but it is the one P6-12 diagnosed and it warns where it
-        happens (below). See `Boundary`.
-
-        **A disposed activation scope declines, and says so.** Contextvars
-        propagate into tasks spawned from `apply`, so a background task
-        registering after its row unmounted would otherwise hit
-        `add_disposer`'s `InactiveScopeError` where today it leaks quietly.
-        Raising is a behaviour change this row did not sign up for — but a
-        silent fallback would make the one path that still outlives its owner
-        both invisible and unmeasurable, so it warns. That is the only branch
+        **A disposed activation scope declines, and says so.** Contextvars propagate into
+        tasks spawned from `apply`, so a background task registering after its row
+        unmounted would otherwise leak quietly onto the seam. That is the only branch
         here that fails open, and §5 rule 6 wants it visible where it happens.
         """
         if scope is not None:
@@ -667,57 +536,28 @@ class Context:
     def layer_for(self, scope: Context | None = None) -> Context:
         """Which scope a registration is *visible to* — the other question (P6-12).
 
-        **This does not take a `Boundary` either, and for `owner_for`'s reason
-        rather than its own** (P6-32). That one is a lifetime question, so
-        `DEPLOYMENT` is obviously not an answer; this one is a *visibility*
-        question whose result feeds `reaches`, which is exactly the shape a
-        boundary has — so the lifetime argument does not transfer and the
-        exemption needs its own.
+        Separate from `owner_for` because they are different questions that used to have
+        the same answer. Visibility is `scope or this context`, and deliberately *not*
+        the activating row: moving it would change what an agent can see (B7) rather than
+        when a registration goes away.
 
-        It is that both are **dispatch-time resolvers**: they read `_ACTIVATING`
-        to answer "who is running", where a `Boundary` parameter is a caller
-        *stating* something. `None` here means "ask the binding", and inside a
-        row it resolves to that row — the narrowest answer, verified. A caller
-        with a boundary to state passes `scope=`; there is no third thing
-        `DEPLOYMENT` could mean.
+        **It does not take a `Boundary` either** (P6-32), for `owner_for`'s reason: both
+        are dispatch-time *resolvers* reading `_ACTIVATING`, where a `Boundary` parameter
+        is a caller **stating** something. `None` means "ask the binding".
 
-        Separate from `owner_for` because they are different questions that had
-        the same answer, and the review of this row found the conflation in five
-        registries: a tool layer key, a prompt section's `reaches` target, a
-        skill restriction's bucket, a compaction note's `reaches` target, and an
-        fs screen's. Visibility is `scope or this context` — unchanged, and
-        deliberately *not* the activating row, because moving it would change
-        what an agent can see (B7) rather than when a registration goes away.
+        **It follows the running binding, and `isolation` is why that is safe** (P6-26).
+        A row's activation scope is not isolated, so it inherits the mount's and a root
+        row's registration still lands on the global layer. An agent's scope *is* its own
+        isolation, so a body running for an agent lands on that agent's layer — which is
+        the containment P6-27 made structural, and the last way to escape it was a tool
+        body inside a contained child installing globally visible tools.
 
-        Spelled out so a call site says which question it is asking. A registry
-        that needs both writes `self.ctx.owner_for(scope)` and
-        `self.ctx.layer_for(scope)` side by side, and a reader can see that it
-        asked both rather than reusing one answer for two purposes.
-
-        **It follows the running binding too, and the isolation rule is why that is
-        safe** (P6-26). This deliberately did not, on the grounds that moving
-        visibility would change what an agent can see — but the two cases the
-        objection conflates are told apart by `isolation`, for free. A row's
-        activation scope is *not* isolated, so it inherits the mount's isolation
-        and a root row's registration still lands on the global layer, unchanged.
-        An agent's scope *is* its own isolation, so a body running for an agent
-        lands on that agent's layer — which is the containment P6-27 made
-        structural and this was the last way to escape: a tool body inside a
-        contained child was installing **globally visible** tools.
-
-        **The disposed branch fails open, and deliberately does not warn.**
-        Falling back to `self` means the seam's own context, whose isolation is
-        `None` — the *global* layer — so a body that outlived the scope it ran
-        for registers something the whole deployment can see. That is the mirror
-        of `owner_for`'s fail-open, in B7's direction rather than I2's, and it is
-        reachable the same way: contextvars propagate into tasks, so one spawned
-        from a tool body and still running after its agent went away takes this
-        branch. Silent because it cannot happen alone — all five call sites ask
-        `owner_for` about the same `scope` a line or two later
-        (`tools/registry._claim`, `system_prompt/assembly.section`,
-        `seams/skills.restrict`, `seams/compaction.note`), and that is where it
-        is logged. Two lines for one registration makes the honest one easier to
-        miss.
+        **The disposed branch fails open and deliberately does not warn.** Falling back
+        to `self` means the global layer, so a body that outlived its scope registers
+        something the whole deployment can see — the mirror of `owner_for`'s fail-open,
+        in B7's direction. Silent because all five call sites ask `owner_for` about the
+        same `scope` a line or two later, and that is where it is logged; two lines for
+        one registration makes the honest one easier to miss.
         """
         if scope is not None:
             return scope
@@ -730,19 +570,13 @@ class Context:
     def running_for(self, scope: Context | None = None) -> Running:
         """Both answers at once, for a registry that has to *record* them (P6-29).
 
-        **Every site that needs both should ask once**, and the reason is the
-        warning: `owner_for` logs when the activation scope it would return has
-        already been disposed, and that branch is meant to be audible. Two calls
-        for one registration make it audible twice, which is how a reader learns
-        to skim it.
+        **Every site that needs both should ask once**, because `owner_for` logs when the
+        activation scope it would return has already been disposed, and two calls for one
+        registration make that warning audible twice.
 
-        It matters most for a registry that will invoke the registered body
-        *later*, because that one must **keep** both until then. Two fields on
-        its own record is two things to hold in step, and the failure mode is
-        silent — `ph.seams.compaction` shipped a `_NoteRegistration.owner` that
-        held `layer_for`'s answer, the conflation this row is about wearing the
-        other question's name. One object cannot be half-updated, and `running()`
-        takes it whole so no call site has to take it apart again.
+        It matters most for a registry that will invoke the body *later*, which must keep
+        both until then: two fields on its own record is two things to hold in step, and
+        the failure mode is silent. One object cannot be half-updated.
         """
         return Running(self.owner_for(scope), self.layer_for(scope))
 
@@ -750,85 +584,30 @@ class Context:
     def current_owner() -> Context | None:
         """Whose *lifetime* the running code belongs to, or `None` (P6-12).
 
-        Was `current_scope`, and the rename is P6-29's point rather than tidying:
-        "the current scope" was one name for the two questions `owner_for` and
-        `layer_for` were split apart to keep separate, so the public reader was
-        still spelling the conflation the private readers had stopped making.
-        There are two now, named after the two they serve.
+        **The owner a seam registration defaults to.** Cordis builds the right scope in
+        `_activation_scope` and hands it to `apply`, but a seam only ever saw `ctx`, so
+        `ctx.commands.register(...)` gave the registry no way to know who was calling and
+        every seam defaulted the owner to its *own* context — making a row's
+        registration an effect of the **seam**, outliving the row that made it.
 
-        **The owner a seam registration should default to.** Cordis already
-        builds exactly the right scope in `_activation_scope` and hands it to
-        `apply` — it is the thing disposed when the row unmounts — but a seam
-        only ever saw `ctx`, and `ctx.commands.register(...)` gave the registry
-        no way to know who was calling. So every seam defaulted the owner to its
-        *own* context, and a registration made by a row became an effect of the
-        **seam**, outliving the row that made it: I2 held only where a caller
-        remembered `scope=`, which was 1 of 38 call sites in the tree.
+        A `ContextVar` rather than a parameter threaded through forty signatures, because
+        the answer is a property of *who is running*, not of what they are asking for —
+        and the seam methods are the API rows use, which cannot grow a mandatory
+        argument.
 
-        A `ContextVar` rather than a parameter threaded through forty
-        signatures, because the answer is a property of *who is running*, not of
-        what they are asking for — and because the seam methods are the API
-        rows use, which cannot grow a mandatory argument without breaking every
-        one of them.
+        **It answers "whose code is running", across both ways cordis runs any** (P6-25):
+        an `apply` binds its activation scope, and a dispatch binds the scope that
+        registered the listener. So a registration belongs to the row that made it
+        whether that row is being mounted, is handling another row's event, or is
+        handling one fired long after every `apply` returned.
 
-        **It answers "whose code is running", across both ways cordis runs any**
-        (P6-25). An `apply` binds its activation scope; a dispatch binds the
-        scope that registered the listener. So a registration belongs to the row
-        that made it whether that row is being mounted, is handling an event
-        fired by another row, or is handling one fired long after every `apply`
-        returned.
+        Contextvars propagate into tasks, so a coroutine spawned from a bound callback
+        carries the binding; `Context.owner_for` declines a *disposed* scope and warns.
 
-        It was briefly only the first of those, and the two gaps either side were
-        what P6-25 closed: a listener dispatched from another row's `apply` had
-        its registration attributed to the *emitting* row, and one made after
-        `apply` returned saw `None` and fell back to the seam — outliving its row
-        exactly as before the mechanism existed.
-
-        **What P6-26 bound**: every definition-owned body the *tools* registry
-        invokes — `execute`, `render`, `project_meta`, `finalize_content` — and a
-        command's `run`, each to the agent it runs *for*. Not one statement but
-        all of them, because they are one row's code reached through one
-        registry, and `render` proved what a partial rule costs: with only
-        `execute` wrapped it ran bound to *whichever `tools/execute` wrapper
-        called the inner* — measured as `plugin(session-checkpoint-policy)` on
-        the headless profile, a stranger's row picked by what happens to be
-        mounted.
-
-        **What P6-29 finished**, once the binding could hold both answers rather
-        than one: the four row bodies the *other* registries invoke — a
-        compaction note's `text`, a prompt section's and a prompt context's, a
-        status field's `read`, a diagnostic's — plus the variable and tool
-        providers beside them, every telemetry sink, and all five single-slot
-        providers (`compaction`, `code_runtime`, `sandbox`, `workspace`, and
-        `fs`'s rebase resolver) — and `ToolDefinition.classify`, the last of the
-        definition's own bodies. "A provider has no agent" had been the reason to
-        defer most of those, and it was only ever an objection to the *layer*
-        half; the owner half needs no agent at all, so `claim_slot` records the
-        pair and the scheduler binds a classifier from the same view that
-        resolved the tool.
-
-        **What still runs unbound**, and this list is meant to be exhaustive —
-        `test_registration_ownership.py` enumerates the surface by introspection
-        and fails on anything not classified, so it is checked rather than
-        believed:
-
-        * a `waterfall`'s `inner` — the *producer's* body, which nothing
-          registered, so it inherits its caller's binding. `tools/execute`'s
-          inner is the exception that binds itself, per the paragraph above;
-        * `CodeRuntimeSeam`'s SDK renderers, which the seam *hands out* rather
-          than invokes — `sdk_renderer(language)` returns the row's callable and
-          its caller calls it. Binding that means returning a wrapper instead of
-          the row's own function, which changes what a caller holds in order to
-          fix where it runs. A different shape from every entry above, and one to
-          decide on rather than to slip in;
-        * teardown callbacks — a disposer, a workspace release — which run *as*
-          a scope unwinds. Binding one would offer a lifetime to register on at
-          the moment that lifetime is ending, and `add_disposer` refuses an
-          inactive scope for the same reason.
-
-        Contextvars propagate into tasks, so a coroutine spawned from a bound
-        callback carries the binding; `Context.owner_for` declines a *disposed*
-        scope and warns rather than raising.
+        **What is bound and what still runs unbound** is enumerated by introspection in
+        `tests/test_registration_ownership.py`, which fails on anything unclassified —
+        so that list is checked rather than believed, and this docstring does not keep a
+        second copy of it.
         """
         activating = _ACTIVATING.get()
         return activating.owner if activating is not None else None
@@ -1160,20 +939,15 @@ class Context:
     def _hooks(self, event: str, *, scope: Context | None = None) -> list[Hook]:
         """The hook *records* one dispatch would reach, in registration order.
 
-        Records rather than bare callables, because a `Hook` carries the scope
-        that registered it and `_invoke` needs it: a listener runs as an effect
-        of the row that wrote it (P6-25).
+        Records rather than bare callables, because a `Hook` carries the scope that
+        registered it and `_invoke` needs it: a listener runs as an effect of the row
+        that wrote it (P6-25). There is deliberately no public route that returns bare
+        callables — hand-rolling `for cb in ctx.collect(e)` is a dispatch with no
+        binding.
 
-        It replaced a public `collect` that returned callables and had no callers
-        left once the five dispatch loops moved here — and keeping that would
-        have been worse than a dead method: hand-rolling `for cb in ctx.collect(e)`
-        is a dispatch with no binding, which is exactly the defect this row
-        closes, offered as the only public route.
-
-        **Deliberately a list, not a generator.** `bail` and `serial` return out
-        of the loop early, so a generator holding a binding across its `yield`
-        would be closed by the collector on some other task and release the token
-        in the wrong context.
+        **Deliberately a list, not a generator.** `bail` and `serial` return out of the
+        loop early, so a generator holding a binding across its `yield` would be closed
+        by the collector on some other task and release the token in the wrong context.
         """
         hooks = self._runtime.hooks.get(event)
         if not hooks:

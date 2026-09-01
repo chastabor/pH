@@ -8,6 +8,14 @@ ignored, and the feature would be missing in a way no other test can see.
 
 The truncation marker is compared byte for byte because a reader comparing a
 transcript to a log must not find two different sentences for the same event.
+
+## Why `FRAME_FIELDS` is the only declaration on each side
+
+The guest module also carried a `TypedDict` per frame. Nothing consumed them at
+runtime, and under `from __future__ import annotations` their `__required_keys__`
+cannot see `NotRequired` — so they reported `namespaceId` as **required** while
+`FRAME_FIELDS` had it optional. A third copy that no test compared had already
+drifted, which is the argument against keeping one as documentation.
 """
 
 from __future__ import annotations

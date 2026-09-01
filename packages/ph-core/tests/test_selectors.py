@@ -4,7 +4,17 @@ pH has two vocabularies that share a `namespace/name` spelling: 36 cordis bus
 events and 63 session-log types. They overlap in **zero** names, yet six roots
 appear in both and the log's `tool/*` sits one letter from the bus's `tools/*`.
 That near-miss is the gate here, not a footnote: it is precisely what a substring
-filter gets wrong, and the reason this module exists rather than a `startswith`.
+filter gets wrong, and the reason `ph.selectors` exists rather than a
+`startswith`.
+
+**Why the scheme is in the selector and not in the stored type names.**
+Namespacing the data — prefixing every stored type with `event/` — was the
+alternative, and was refused on three counts: 944 literal type strings across
+107 files; a session-format bump that would make every stored log unreadable;
+and it does not even fix the collision it is aimed at, since `event/tool` is
+still one letter from `event/tools`. Nothing anywhere holds a lone type string
+and asks "bus or log?" — the ambiguity only exists in the *question* a person
+types, which is where the scheme was put instead.
 """
 
 from __future__ import annotations
@@ -58,6 +68,25 @@ def test_the_near_miss_is_real_in_the_shipped_vocabularies() -> None:
     assert {name for name in KNOWN_SESSION_EVENT_TYPES if name.startswith("tool/")}
     assert {name for name in bus if name.startswith("tools/")}
     assert not (bus & KNOWN_SESSION_EVENT_TYPES), "the two vocabularies share no names"
+
+
+def test_the_two_vocabularies_share_roots_so_a_bare_pattern_is_ambiguous() -> None:
+    """**The premise of the whole module**, asserted rather than asserted-in-prose.
+
+    Six roots were shared when selectors were written — `agent`, `approval`,
+    `fs`, `harness`, `llm`, `session` — which is why a bare `workspace` or
+    `agent` typed into a filter does not say which vocabulary is meant, and why
+    `parse` refuses an unscoped pattern with no default instead of picking one.
+    Checked as a non-empty overlap rather than as that exact set, so adding an
+    event does not fail this; if it ever empties, `SelectorError`'s "write
+    log:x or bus:x" refusal has stopped earning its keep.
+    """
+    import_plugin_modules()
+    bus_roots = {name.split("/")[0] for name in event_registry.names()}
+    log_roots = {name.split("/")[0] for name in KNOWN_SESSION_EVENT_TYPES}
+
+    assert bus_roots & log_roots, "a bare pattern would be unambiguous"
+    assert {"agent", "session"} <= bus_roots & log_roots
 
 
 # ------------------------------------------------------------------ parsing --
@@ -178,6 +207,18 @@ def test_an_unknown_namespace_is_reported_separately_from_matching() -> None:
 def test_a_catch_all_is_never_reported_as_unknown() -> None:
     """`log:*` names no namespace, so it cannot name a wrong one."""
     assert unknown_namespaces(parse_all(["*"], vocabulary="log"), set()) == []
+
+
+def test_a_typo_report_is_deduplicated_and_keeps_the_order_typed() -> None:
+    """The report is read by the person who typed it, so: once each, in order.
+
+    `workspace` and `workspace/*` parse to the same selector, so a caller who
+    spells a namespace both ways has made one typo and should be told once. The
+    order is the order they typed, because that is the list they will scan.
+    """
+    selectors = parse_all(["wrokspace", "nope", "wrokspace/*"], vocabulary="log")
+
+    assert unknown_namespaces(selectors, {"workspace/acquired"}) == ["log:wrokspace", "log:nope"]
 
 
 # ------------------------------------------------------------ Session.select --

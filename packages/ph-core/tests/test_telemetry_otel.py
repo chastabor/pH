@@ -4,6 +4,14 @@ The seam's own ordering guarantee is asserted in `test_telemetry.py`, where it
 belongs. What is left here is this row: that a mounted `session-telemetry-otel`
 registers through `add_sink` and therefore inherits that ordering end to end,
 and that the severity table it writes out by hand still matches OTel's scale.
+
+## The half-mount this row refuses
+
+An earlier draft treated the two optional distributions differently: it refused
+without the SDK, but built a provider **with no exporter** when only the OTLP half
+was missing. That is the silent no-op reached through the other door — `ph doctor`
+would have reported a healthy telemetry sink shipping to nowhere. Either the row
+can export or it refuses.
 """
 
 from __future__ import annotations

@@ -1,8 +1,8 @@
 """`rlm-subagent-provider` — `rlm()` as a `ctx.subagents` provider (P3-11).
 
 Ported from prime-agent's `AgentSession._startRlmChildRun`. The semantics are
-its; the mechanism is pH's seams. Four properties are the whole design, and each
-one is a thing the obvious implementation gets wrong:
+its; the mechanism is pH's seams. Five properties are the whole design, and each
+is a thing the obvious implementation gets wrong:
 
 **The handle returns before the child answers.** Stated once, in
 `ph.seams.subagents` — this file's job is to keep the promise. `start()` creates
@@ -10,21 +10,20 @@ the session and the agent, appends `subagent/admitted`, starts the job, and
 returns; the child's reply arrives on a later turn as an ordinary inbox message.
 
 **Admission is logged before anything runs.** The agent is *created* first, so a
-`create` failure cannot leave a phantom child in an append-only roster, but it is
-not started until after the record exists — so no status event can precede the
+`create` failure cannot leave a phantom child in an append-only roster — but it is
+not started until after the record exists, so no status event can precede the
 record of the child it describes.
 
 **A child is an artifact of its parent's scope.** Acquired through
 `parent.ctx.effect()`, so a disposed parent unwinds its children (I2) and
 `delete()` is just "release it early". Without that, a settled child kept its
-agent scope alive for the host's lifetime — and that scope owns the child's
-kernel subprocess, so every delegation leaked a CPython.
+agent scope alive for the host's lifetime — and that scope owns the child's kernel
+subprocess, so every delegation leaked a CPython.
 
-**Usage is attributed, not double-counted.** Each child `assistant/message`
-appends `subagent/usage-attributed` to the *parent's* log, so the token meter can
-subtract a child's tokens from the parent's own context measurement while billing
-totals still include them. Without it a fan-out of eight reads as context
-pressure on the parent and triggers a compaction it does not need.
+**Usage is recorded upward, for readers.** Each child `assistant/message` appends
+`subagent/usage-attributed` to the *parent's* log. It is an **additive record, not
+an input to any measurement** — nothing reads it but the TUI panel; see
+`ph-rlm/tests/test_subagents.py`.
 
 **The child's workspace is taken here, not by the lifecycle row** (P4-08): its
 base is the parent's root and its access is the parent's decision, and the row

@@ -1,21 +1,19 @@
 """`ctx.skills` — the capability layer, and the boundary it must not cross.
 
 A skill is a package a *distribution or a user* installed. The model cannot
-install one, and `/refine` (Phase 3) cannot mint one: that is invariant I7 and
-the reason skills and the Continual Harness share a word but not a mechanism —
-the knowledge layer writes *procedure*, never *capability* (Q13).
+install one, and `/refine` cannot mint one: that is invariant I7, and the reason
+skills and the Continual Harness share a word but not a mechanism — the knowledge
+layer writes *procedure*, never *capability* (Q13).
 
-Progressive disclosure is G9, and it lives here too, as the `skills-progressive`
-row at the bottom of this file: the catalog goes in the prompt, the body stays on
-disk until the model asks for it by name. One module, because "what a skill is"
-— the format on disk, the limits, the registry, and what the model is told about
-it — is one question, and the row that reads a `SKILL.md` and the seam that
-bounds its name would otherwise state the same rule twice.
+Progressive disclosure is G9 and lives here too, as the `skills-progressive` row
+at the bottom of this file: the catalog goes in the prompt, the body stays on disk
+until the model asks for it by name. One module, because "what a skill is" — the
+format on disk, the limits, the registry, and what the model is told about it — is
+one question.
 
 **Nothing is scanned by default.** A deployment names its directories; a
 well-known path scanned at every start would make "install a skill" mean "drop a
-file in a directory", which is the capability boundary I7 draws — a skill is
-something a *distribution or a user* installed, deliberately.
+file in a directory", which is the capability boundary I7 draws.
 
 @module ph.seams.skills
 """

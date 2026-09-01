@@ -1,51 +1,43 @@
 """`workspace-agentfs` — a copy-on-write overlay as a second workspace provider (P6-21).
 
-AgentFS presents the host tree as a **read-only base** and lands every change in
-a per-agent delta layer, so an agent gets an isolated view of the whole directory
-without a checkout. Verified on a working host: a write through the overlay is
-visible to the agent and the host copy is unchanged, and two agents over one base
-each read back their own version of the same path.
+AgentFS presents the host tree as a **read-only base** and lands every change in a
+per-agent delta layer, so an agent gets an isolated view of the whole directory
+without a checkout.
 
-**It is a peer of `worktree`, not a rung above it**, and that is the correction
-this row landed with. A `mount`-based overlay does not confine the *process*: a
-command whose cwd is inside the mount can write to an absolute path outside it
-and the write lands on the host for real. Its honest columns are the worktree
-tier's columns verbatim — it bounds tool-mediated and relative-path writes,
-because both resolve against cwd, and does not bound an absolute-path raw write.
-So `tier` is `worktree` here, and the rung between `worktree` and `sandbox` is
-left for something that actually confines. Claiming otherwise would have
-`ph doctor` overstate containment, which is the single failure E1 exists to
-prevent.
+**It is a peer of `worktree`, not a rung above it.** A `mount`-based overlay does
+not confine the *process*: a command whose cwd is inside the mount can write to
+an absolute path outside it and the write lands on the host for real. Its honest
+columns are the worktree tier's verbatim — it bounds tool-mediated and
+relative-path writes, because both resolve against cwd, and does not bound an
+absolute-path raw write. So `tier` is `worktree` here, and the rung between
+`worktree` and `sandbox` is left for something that actually confines.
 
 **The one column that differs cuts against the overlay**: a relative write into a
 worktree *lands*, and git can see it; the same write into an overlay lands in the
 delta, so the agent believes work is durable that no one else will ever see.
-`discards_writes` is therefore true of `overlay-ephemeral`, which is what puts it
-under the retention policy; an `overlay` keeps its delta so the work can be
-exported afterwards.
+`discards_writes` is therefore true of `overlay-ephemeral`; an `overlay` keeps its
+delta so the work can be exported afterwards.
 
-**`mount`, not `run`, and not `exec`.** `run` is the mode that would confine —
-it adds user and mount namespaces — and it is unavailable on any host with
-`kernel.apparmor_restrict_unprivileged_userns=1`, the Ubuntu 23.10+ default.
-`exec` mounts and runs in one shot, which would suit `acquire` exactly, and it
-fails with `connection pool timeout: no connections available` on a brand-new
-agent with nothing mounted — measured on tmpfs and on ZFS, so it is neither
-backing-store sensitivity nor contention. `mount` works on both, returns in
-~60 ms leaving a live FUSE mount, and unmounts with `fusermount3 -u`. So this
-provider owns a mount lifecycle rather than wrapping a command.
+**`mount`, not `run`, and not `exec`.** `run` is the mode that would confine, and
+it is unavailable on any host with
+`kernel.apparmor_restrict_unprivileged_userns=1` (the Ubuntu 23.10+ default).
+`exec` mounts and runs in one shot, which would suit `acquire` exactly, and fails
+on a brand-new agent with nothing mounted. So this provider owns a mount lifecycle
+rather than wrapping a command.
 
 **The probe gates registration, not acquisition**, and it asserts *isolation*
-rather than availability. `register_provider` is `claim_slot`: exclusive. A row
-that claims the slot and then declines every `acquire` does not fall back to
-`worktree` — it falls back to `shared`, which is advisory, so a deployment that
-asked for more isolation would silently get none. And availability is the wrong
-question anyway: `agentfs run --experimental-sandbox` exits 0, prints nothing,
-and writes straight through to the host, so an exit-code check would claim a tier
-while the agent had no isolation at all. The probe writes a canary through a
-throwaway overlay and registers only if the host copy is untouched.
+rather than availability. `register_provider` is `claim_slot`: exclusive, so a row
+that claims the slot and then declines every `acquire` falls back to `shared` —
+advisory — and a deployment that asked for more isolation would silently get
+none. Availability is the wrong question anyway, because
+`agentfs run --experimental-sandbox` exits 0, prints nothing, and writes straight
+through to the host. The probe writes a canary through a throwaway overlay and
+registers only if the host copy is untouched.
 
 **Nothing is ever installed.** A missing binary or an unavailable backend is a
 decline that says so, in `ph doctor`, through the diagnostics seam.
+
+The measurements behind each of those choices: `tests/test_workspace_agentfs.py`.
 
 @module ph.seams.workspace_agentfs
 """
@@ -145,19 +137,17 @@ async def run(ctx: Context, program: str, cwd: Path, *args: str) -> tuple[int, s
     """One AgentFS invocation, through `ctx.subprocess` — never `os.system`.
 
     `git`'s reasoning one module over: the seam scrubs the credential-shaped
-    environment (F1) and reaps the child in a `finally` (F4), and a bare
-    `subprocess.run` would opt this module out of both for nothing.
+    environment (F1) and reaps the child in a `finally` (F4).
 
-    `LC_ALL=C` for the reason `git()` gives: stderr is gettext-translated and the
-    seam passes `LANG` through, so a refusal reason read off a tool's words would
-    otherwise depend on the operator's locale. Written here once because the
-    third spawn in this module — the unmount — had already lost it.
+    `LC_ALL=C` because stderr is gettext-translated and the seam passes `LANG`
+    through, so a refusal reason read off a tool's words would otherwise depend on the
+    operator's locale.
 
-    **`cwd` is load-bearing rather than incidental.** `agentfs init` writes its
-    delta database to `./.agentfs/<id>.db`, relative to the working directory —
-    so where this is run from decides where an agent's overlay is stored, and
-    running it from the agent's own directory is what keeps two agents' deltas
-    apart on disk as well as in the filesystem they see.
+    **`cwd` is load-bearing rather than incidental.** `agentfs init` writes its delta
+    database to `./.agentfs/<id>.db`, relative to the working directory — so where
+    this is run from decides where an agent's overlay is stored, and running it from
+    the agent's own directory is what keeps two agents' deltas apart on disk as well
+    as in the filesystem they see.
     """
     spec = SubprocessSpawnSpec(argv=(program, *args), cwd=cwd, env=scrub_env(extra={"LC_ALL": "C"}))
     result: tuple[int, str, str] = await ctx.subprocess.run(spec)
@@ -308,20 +298,13 @@ class AgentFsProvider:
     def describe_tier(self) -> TierDescription:
         """What an overlay actually bounds — which is not what its rung's row says.
 
-        `bounds` is the worktree tier's verbatim, and that is the measured
-        result rather than a convenience: a write that resolves against cwd lands
-        in the delta, and an absolute-path raw write does not, which was verified
-        by writing outside the mount from a command running inside it.
-
-        The other two columns are where the rung's stock text was false. An
-        overlay's writes reach nobody until somebody exports them, so the agent
-        can believe work is durable that no one else will ever see — P6-20 put
-        that "beside the absolute-path hole" and the implementation had nowhere to
-        put it until now. And `TIERS["worktree"]` sells "per-run checkpoints,
-        /revert", which an overlay has none of: `write-tree` against a FUSE
-        mountpoint has nothing to hash, so no restore point is ever written.
-        Advertising a mechanism the mounted tier does not have, in the one place a
-        person looks to check, is the failure E1 is about.
+        `bounds` is the worktree tier's verbatim, which is the measured result rather
+        than a convenience. The other two columns are where the rung's stock text was
+        false: an overlay's writes reach nobody until somebody exports them, and
+        `TIERS["worktree"]` sells "per-run checkpoints, /revert", which an overlay has
+        none of — `write-tree` against a FUSE mountpoint has nothing to hash, so no
+        restore point is ever written. Advertising a mechanism the mounted tier does not
+        have, in the one place a person looks to check, is the failure E1 is about.
         """
         return TierDescription(
             bounds=TIERS["worktree"].bounds,
@@ -348,20 +331,17 @@ class AgentFsProvider:
     ) -> Workspace | None:
         """A private view of `base` for this agent, or a named decline.
 
-        **`write` and `read` split exactly as the worktree tier splits them.** A
-        writer keeps its delta at release, so the work can be exported onto a
-        branch afterwards; a reader's delta is thrown away. That mapping is the
-        whole reason `write` is servable at all — an overlay with no merge-back
-        would hand a root agent a tree whose work silently evaporates, which is
-        why this declined `write` for one round.
+        **`write` and `read` split exactly as the worktree tier splits them.** A writer
+        keeps its delta at release so the work can be exported onto a branch; a reader's
+        delta is thrown away. That mapping is the whole reason `write` is servable at all
+        — an overlay with no merge-back would hand a root agent a tree whose work
+        silently evaporates.
 
-        **The base commit is recorded here, not at export**, and that is what
-        makes the export a real merge rather than an overwrite. A branch rooted
-        at whatever `HEAD` happens to be when somebody exports would present the
-        agent's work as though it had been written against a tree it never saw;
-        rooted at the commit it *did* see, `git merge` has a true three-way base
-        and finds the conflicts. Nothing to record when the base is not a
-        repository — `export_overlay` refuses those, and says so.
+        **The base commit is recorded here, not at export**, and that is what makes the
+        export a real merge rather than an overwrite: a branch rooted at whatever `HEAD`
+        happens to be when somebody exports would present the agent's work as though it
+        had been written against a tree it never saw. Nothing to record when the base is
+        not a repository — `export_overlay` refuses those, and says so.
         """
         ephemeral = access == "read"
         identifier = fs_id(session_id, agent_id)
@@ -454,23 +434,20 @@ class AgentFsProvider:
     async def reclaim(self, record: WorkspaceRecord) -> bool:
         """Release an overlay this process never acquired (F6).
 
-        **Without this the leak is reported forever and never closed.** An
-        overlay folds into `workspace_survivors` like any fresh-root kind, so
-        reconciliation finds the pair — and then `isinstance(provider,
-        ReclaimingProvider)` was False, so it logged "no mounted tier can
-        reclaim" and returned, leaving the pair open for every future session to
-        report again. `ph workspaces gc` took the same path and collected
-        nothing, while the retention summary went on telling people to run it.
+        **Without this the leak is reported forever and never closed.** An overlay folds
+        into `workspace_survivors` like any fresh-root kind, so reconciliation finds the
+        pair — and then `isinstance(provider, ReclaimingProvider)` is False, so it logs
+        "no mounted tier can reclaim" and leaves the pair open for every future session to
+        report again, while the retention summary goes on telling people to run a `gc`
+        that collects nothing.
 
-        Worse here than for a checkout: a crash skips `_release` entirely, and a
-        live FUSE mount outlives the process that made it — so what is left
-        behind is a mount table entry and a server, not a directory.
+        Worse here than for a checkout: a crash skips `_release` entirely, and a live FUSE
+        mount outlives the process that made it — so what is left behind is a mount table
+        entry and a server, not a directory.
 
-        The record locates itself: `root` is the mountpoint, so the delta is its
-        parent. Same disposal policy as an orderly release, for the reason the
-        worktree tier gives — a crash is not a reason to throw away work, and
-        reconciliation that discarded more than a normal exit would make crashing
-        worse than the leak it is closing.
+        The record locates itself: `root` is the mountpoint, so the delta is its parent.
+        Same disposal policy as an orderly release, for the reason the worktree tier
+        gives.
         """
         return await self._release(
             Path(record.root).parent,
@@ -584,26 +561,23 @@ class ExportRefused(Exception):
 async def export_overlay(ctx: Context, *, store: Path, identifier: str, ref: str) -> str:
     """Put an overlay's delta on a git branch rooted at the commit it was taken from.
 
-    **Git detects the conflicts, and that is the whole design.** The first sketch
-    of this compared file mtimes and refused when a target had moved underneath,
-    which is a worse `git merge` written by hand: it cannot tell an edit to a
-    different function from an edit to the same line, so it refuses work that
-    would have merged cleanly and accepts work that silently loses somebody's.
-    Rooting a branch at `base-commit` and committing the delta onto it hands the
-    whole question to a three-way merge that already knows how to answer it —
-    and leaves the operator a branch, which is exactly what the worktree tier
-    gives them, so the merge-back story is one story rather than two.
+    **Git detects the conflicts, and that is the whole design.** Comparing file mtimes
+    and refusing when a target has moved underneath is a worse `git merge` written by
+    hand: it cannot tell an edit to a different function from an edit to the same
+    line, so it refuses work that would have merged cleanly and accepts work that
+    silently loses somebody's. Rooting a branch at `base-commit` and committing the
+    delta onto it hands the question to a three-way merge, and leaves the operator a
+    branch — which is what the worktree tier gives them, so the merge-back story is
+    one story rather than two.
 
-    **Deliberate, never on release.** A blind apply at teardown is the failure the
-    worktree tier avoids by making the merge a separate act, and P6-28's argument
-    runs the same way: disposal is for ending things, not for applying them.
+    **Deliberate, never on release**: disposal is for ending things, not for applying
+    them (P6-28).
 
-    **Two phases, because `diff` and the mount cannot coexist.** The delta
-    database takes a single writer, so `agentfs diff` fails with a locking error
-    while the overlay is mounted. So the changeset is read first, unmounted, and
-    the content is copied afterwards through a temporary mount — which also keeps
-    the copy binary-safe, where `agentfs fs cat` would have round-tripped every
-    file through a text pipe.
+    **Two phases, because `diff` and the mount cannot coexist.** The delta database
+    takes a single writer, so `agentfs diff` fails with a locking error while the
+    overlay is mounted. The changeset is read first, unmounted, and the content copied
+    afterwards through a temporary mount — which also keeps the copy binary-safe,
+    where `agentfs fs cat` would round-trip every file through a text pipe.
 
     Returns the branch it created. The caller merges it, or does not.
     """

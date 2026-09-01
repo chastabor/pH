@@ -18,6 +18,15 @@ nobody has to use.
 **A workspace is an effect of the scope that took it (I2).** Disposing the scope
 releases it and writes the closing event, so the leak the durable pair detects at
 session open is a *crash*, not an ordinary error path.
+
+**Why this is a seam and not a tool.** A permission row can deny `edit`, because
+a deny-list needs a registered name to match — it cannot deny `open(path, "w")`.
+The workspace is what `ctx.fs`'s root and `ctx.subprocess`'s cwd resolve to, so a
+tier bounds *authored* code rather than merely observing the calls a model makes
+by name. The other half of that argument is measured in
+`test_containment_ladder.py`: an absolute-path `open()` never consults a cwd, so
+the `worktree` rung bounds nothing about `/etc/passwd` and only `sandbox` can
+refuse it at the kernel.
 """
 
 from __future__ import annotations
@@ -28,10 +37,18 @@ from typing import Any
 
 import pytest
 
+from ph.cordis import Context
 from ph.seams.workspace import (
     ContainmentTier,
     Workspace,
     WorkspaceKind,
+    discards_writes,
+    fresh_root,
+    project_access,
+    restorable,
+    workspace_of,
+    workspace_policy,
+    writable_roots,
 )
 from ph.session import Session
 from ph.testing import workspace_seam
@@ -400,3 +417,148 @@ async def test_mounting_the_seam_changes_nothing(mount: Any) -> None:
 
     assert ctx.workspace.effective_tier(child=False) == "advisory"
     assert ctx.workspace.of("any-agent") is None
+
+
+# ------------------------------------------------------- the kind vocabulary --
+
+
+def test_every_kind_is_classified_the_same_way_by_all_four_predicates() -> None:
+    """**The whole `WorkspaceKind` vocabulary, in one table.**
+
+    `mypy` already refuses a `match` that forgets a kind — that is why these four
+    are exhaustive matches rather than the membership tests they started as. What
+    it cannot catch is a kind added to the *wrong arm*, and each of these
+    predicates is one a mistake in is expensive:
+
+    * `project_access` is what a spawn records as `granted_access` and what
+      `ph doctor` prints per agent, so a wrong answer misreports containment.
+    * `fresh_root` gates provisioning. A `True` for `shared` would copy `.env`
+      onto itself — destroying the file the provisioning exists to provide.
+    * `discards_writes` is what the retention policy keys on, so a wrong `False`
+      silently loses the evidence of a failed child.
+    * `restorable` gates `/revert`, and it is the one that nearly went wrong:
+      it was `kind not in ("worktree", "worktree-ephemeral")` written inline,
+      correct but invisible to exhaustiveness, so a new kind fell outside it and
+      `/revert` answered "no restore points in this session" — true, useless, and
+      indistinguishable from a run that simply had not checkpointed yet.
+
+    Before this, three of the four asserted only the two `overlay` kinds.
+    """
+    table: dict[WorkspaceKind, tuple[str, bool, bool, bool]] = {
+        # kind                   access  fresh  discards  restorable
+        "shared": ("write", False, False, False),
+        "worktree": ("write", True, False, True),
+        "worktree-ephemeral": ("read", True, True, True),
+        "readonly-scratch": ("read", True, False, False),
+        "overlay": ("write", True, False, False),
+        "overlay-ephemeral": ("read", True, True, False),
+    }
+
+    assert set(table) == set(WorkspaceKind.__args__), "a kind was added without a row here"
+    for kind, (access, fresh, discards, restore) in table.items():
+        assert (project_access(kind), fresh_root(kind), discards_writes(kind)) == (
+            access,
+            fresh,
+            discards,
+        ), kind
+        assert restorable(kind) is restore, kind
+
+
+def test_only_the_ephemeral_kinds_lose_evidence_so_only_they_are_retained() -> None:
+    """Why `discards_writes` is the predicate the retention policy keys on.
+
+    The kinds that answer `True` discard because reaching nobody is their entire
+    promise, which makes them the only ones whose evidence an *ordinary* release
+    can lose — and therefore the only ones a policy has any business retaining
+    without being asked one tree at a time. Every other kind either keeps a dirty
+    tree for review or never had writes of its own.
+    """
+    kinds: tuple[WorkspaceKind, ...] = WorkspaceKind.__args__
+
+    discarding = {kind for kind in kinds if discards_writes(kind)}
+    assert discarding == {"worktree-ephemeral", "overlay-ephemeral"}
+    assert all(project_access(kind) == "read" for kind in discarding), (
+        "a kind that throws its writes away granted nothing of the project"
+    )
+
+
+def test_an_overlay_grants_write_because_its_delta_outlives_release() -> None:
+    """`overlay` sits with `worktree`, not with `worktree-ephemeral`.
+
+    It resembles the ephemeral checkout — writable, and the host sees nothing —
+    but its delta survives release and can be exported onto a branch, so what the
+    holder wrote *can* reach the project. Granting write is not a promise that
+    anybody ran the export, exactly as it is not a promise anybody ran a merge.
+    """
+    assert project_access("overlay") == "write" == project_access("worktree")
+    assert discards_writes("overlay") is False
+    assert project_access("overlay-ephemeral") == "read"
+    assert discards_writes("overlay-ephemeral") is True
+
+
+# ------------------------------------------------------- the writable bounds --
+
+
+def test_the_prompted_boundary_and_the_enforced_one_are_one_definition(
+    tmp_path: Path,
+) -> None:
+    """**`workspace_policy` is derived from `writable_roots`, not a second copy.**
+
+    Two consumers need this set and a third arrives with P6-05:
+    `permissions-fs`'s default rule prompts about what falls outside it, and
+    `ctx.shell` hands the same set to a backend to *enforce*. Two spellings that
+    drifted would be a tier whose name promises what its policy does not do —
+    which is the defect §4.8's table exists to prevent. A test asserting the two
+    agree catches drift after the fact; deriving one from the other prevents it,
+    and this is what pins the derivation.
+    """
+    workspace = _worktree(tmp_path)
+    policy = workspace_policy(workspace)
+
+    named = {policy.workspace_root, *policy.writable_extra}
+    assert named == {str(path) for path in writable_roots(workspace)}
+
+
+def test_scratch_is_writable_without_being_asked_about(tmp_path: Path) -> None:
+    """`scratch` is in the set, always — and it is the reason the set exists.
+
+    It sits outside the worktree by design (E5) and is the one place a read-only
+    or ephemeral agent is *told* it may write. A boundary naming only `root` would
+    prompt on exactly the writes the design invites, and would confine away the
+    redirected `TMPDIR` that makes a read-only repo usable rather than merely
+    safe.
+    """
+    workspace = _worktree(tmp_path, kind="readonly-scratch")
+
+    assert workspace.scratch in writable_roots(workspace)
+    assert workspace.root in writable_roots(workspace)
+
+
+# ------------------------------------------------------------ asking the seam --
+
+
+async def test_the_workspace_question_is_fail_soft_for_a_seam_nobody_mounted(
+    tmp_path: Path,
+) -> None:
+    """**`workspace_of` answers `None` rather than raising.** Five callers ask it.
+
+    The prompt line, `bash`, the kernel, the spawn path and the fs resolver all
+    need "where does this agent write", and the copies they each had disagreed
+    about two things: whether an agent with no `id` means `None` or a lookup with
+    an empty key, and whether a raising seam is fatal. Both are settled here,
+    fail-soft, because a profile that layers no workspace row is an ordinary
+    deployment and a caller asking during teardown is an ordinary moment — not
+    reasons for a prompt line to take the process down.
+    """
+    seam = workspace_seam(tmp_path / "scratch")
+    ctx = Context()
+
+    assert workspace_of(ctx, "agent") is None, "no seam mounted"
+    assert workspace_of(ctx, None) is None, "no agent"
+
+    ctx.provide("workspace", seam)
+    assert workspace_of(ctx, "never-acquired") is None
+    assert workspace_of(ctx, object()) is None, "an agent with no id is not a lookup key"
+
+    acquired = await seam.acquire(session_id="s", agent_id="a", base=tmp_path)
+    assert workspace_of(ctx, "a") is acquired

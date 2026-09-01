@@ -3,6 +3,34 @@
 The seam is arithmetic over a log plus one write-ahead append, so these drive it
 directly. `now` is a parameter precisely so three hours can pass without three
 hours passing.
+
+## The two measurements the implementation is shaped by
+
+**Seeking backwards beats walking forwards, and the pathological case settles
+it.** `_last_cron_before` wants the *last* matching moment, so one `get_prev`
+finds it whatever the gap; walking forwards costs a step per missed moment at
+**11.6 µs each**. A week's gap of `* * * * *` took **122 ms walking against 40 µs
+seeking**, and the seek is cheaper even in the steady state (**40 µs against
+53 µs**) because it takes one step rather than two. An anchor at epoch 0 walked
+**29 million steps — some 391 s of blocked event loop** — against the same 55 µs.
+
+**The fold is cached because `live()` is on the daemon's five-second tick.** The
+bare fold ran **34 500 times a day per root** at **22.6 ms each at 500 000
+events**, which is **49% of a core permanently at fifty roots**. `SessionFoldCache`
+keys on `session.seq`, so every read between appends is a dict hit: **104 ns, a
+237 000x reduction**.
+
+**`croniter` is imported lazily** because `schedule` is a `base.yaml` row and so
+loads in every host: the import measured **25.4 ms**, about what pydantic costs,
+paid on every `ph -p` and every TUI start that never sees a cron expression.
+
+## The bug that made `_local` a function
+
+`0 9 * * *` was firing at **09:00 UTC**, so a person on US Central who wrote
+"nine in the morning" got four in the morning, and nothing said so. croniter
+works in UTC when handed a float and in the machine's zone when handed a naive
+datetime — an accident of the library rather than a decision. What made it visible
+was `ph agents schedule` printing the next fire time.
 """
 
 from __future__ import annotations

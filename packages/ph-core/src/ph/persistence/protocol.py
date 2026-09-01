@@ -1,26 +1,19 @@
 """`SessionPersistence` — what a backend owes, without saying where it writes.
 
-Named throughout the plans since D5 and, until P5-08, declared nowhere: there
-was one implementation, so every consumer reached for *its* shape instead. Four
-of them read `store.root` and rebuilt a filename with `session_path` — the print
-mode's `log_path`, the TUI's session picker, the daemon's resume check and its
-I-5 lease — which is a JSONL fact four callers deep, and the reason a second
-backend could not be added without breaking all four.
-
 **The split that makes a non-file backend possible** is between "where are the
 bytes" and "what can you tell me". A store that keeps sessions in a database has
 no per-session path and no directory to list, but it can still answer *does this
 exist*, *read it back*, *what is stored*, and *where would a person look* — the
 last one honestly returning `None`. So the write side stays as it was (buffered
-appends, drained by `session/flush`) and the read side is stated here rather
-than inferred from a filename.
+appends, drained by `session/flush`) and the read side is stated here rather than
+inferred from a filename.
 
 **`locate` is allowed to say no**, and a caller must handle that rather than
-assume a path. Both shipped backends keep one file per session and answer with
-it — which is what lets P5-03's lease work under either — but the Protocol does
-not require it: a backend that kept sessions elsewhere would answer `None`, a
-caller that wants to *show* a path shows nothing, and one that wants to *lock*
-one declines loudly instead of inventing a path that protects nothing.
+assume a path. Both shipped backends keep one file per session and answer with it
+— which is what lets P5-03's lease work under either — but the Protocol does not
+require it: a backend that kept sessions elsewhere answers `None`, a caller that
+wants to *show* a path shows nothing, and one that wants to *lock* one declines
+loudly instead of inventing a path that protects nothing.
 
 @module ph.persistence.protocol
 """
@@ -149,22 +142,19 @@ class SessionPersistence(Protocol):
     ) -> tuple[SessionHeader, list[SessionEvent]]:
         """This one stored log, unchained — the primitive `read` composes.
 
-        `upto` is a hint: events at or above it are not wanted, and returning
-        them anyway is slower but not wrong.
+        `upto` is a hint: events at or above it are not wanted, and returning them anyway
+        is slower but not wrong.
 
-        `family` is **not** a hint. Every member of a lineage shares one family
-        directory, so the walk knows where an ancestor lives and passing it turns
-        a directory search into a path. Without it a chained read paid one scan
-        per generation — 31% of a depth-5 read at 200 families, growing with the
-        store rather than with the log.
+        `family` is **not** a hint. Every member of a lineage shares one family directory,
+        so the walk knows where an ancestor lives and passing it turns a directory search
+        into a path — without it a chained read paid one scan per generation, which scales
+        with the size of the store rather than the length of the log.
 
-        Declared here rather than left to convention because it is the half a
-        backend actually implements. Without it a third backend can satisfy this
-        Protocol with a `read` that returns one file's events, pass mypy, pass
-        `runtime_checkable`, mount through `attach` and serve *segments* as whole
-        sessions; the failure would surface as `_readmit`'s "contiguous from 0"
-        refusal inside `Session.__init__`, three layers from the cause. That is
-        verbatim the silent-failure argument `attach` is here for.
+        Declared here rather than left to convention because it is the half a backend
+        actually implements. Without it a third backend can satisfy this Protocol with a
+        `read` that returns one file's events, pass mypy, pass `runtime_checkable`, mount
+        through `attach` and serve *segments* as whole sessions — surfacing as
+        `_readmit`'s "contiguous from 0" refusal three layers from the cause.
         """
         ...
 

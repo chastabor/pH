@@ -2,32 +2,27 @@
 
 Three kinds, one mechanism: `once` at a moment, `interval` every so often, and
 `cron` on an expression. What makes this a seam rather than a timer is that a
-schedule outlives the process holding it — the daemon is the one thing in pH
-built to run for weeks, and a machine that reboots between Tuesday and Wednesday
-must not lose Wednesday's run.
+schedule outlives the process holding it.
 
 **Everything is in the log, including the claim.** A schedule is
 `schedule/created` until a matching `schedule/cancelled`; a firing is
 `schedule/tick`, appended *before* the work is delivered. That ordering is A10's
 write-ahead applied to time: a tick recorded and then lost to a crash costs one
 skipped run, while a tick delivered and then lost costs a *repeated* run — and
-for a schedule whose payload sends a prompt, repeating is the failure that bills
-twice and confuses the transcript. At-most-once, deliberately, and the log says
-which.
+for a schedule whose payload sends a prompt, repeating bills twice and confuses
+the transcript. **At-most-once, deliberately**, and the log says which.
 
-**Missed ticks coalesce**, which is the row's gate and the reason `due_at` takes
-the last claimed time rather than counting from creation. A five-minute schedule
-on a laptop that slept for three hours has thirty-six fire times behind it; a
-scheduler that delivered all thirty-six would turn a nap into a stampede, and
-one that delivered the *oldest* would work through the backlog for another three
-hours before catching up. So the answer is one tick naming the most recent due
-moment, and the gap is visible in the log because the previous tick is still
+**Missed ticks coalesce**, which is why `due_at` takes the last claimed time
+rather than counting from creation. A five-minute schedule on a laptop that slept
+for three hours has thirty-six fire times behind it; delivering all thirty-six
+turns a nap into a stampede, and delivering the *oldest* works through the backlog
+for another three hours. So the answer is one tick naming the most recent due
+moment, and the gap stays visible in the log because the previous tick is still
 there.
 
-**The clock is a parameter.** `now` is passed in rather than read here, so a
-test can advance three hours without sleeping and a caller can drive the whole
-thing from one stamp — the same seam `Supervisor.sweep` uses for the same
-reason.
+**The clock is a parameter.** `now` is passed in rather than read here, so a test
+can advance three hours without sleeping and a caller can drive the whole thing
+from one stamp.
 
 @module ph.seams.schedule
 """
@@ -198,19 +193,15 @@ def due_at(state: ScheduleState, *, now: int) -> int | None:
 def state_to_wire(state: ScheduleState, *, now: int) -> dict[str, Any]:
     """One schedule as a client is told about it — the fold's own projection.
 
-    Here rather than in the daemon that first needed it, for the reason
-    `cursor_of` gives for not living on the daemon's `Root`: this is a fact
-    about a *schedule*, and every transport serves the same one. `schedule` is a
-    `base.yaml` row, so a stdio session has schedules too, and the moment a
-    second front end lists them (P5-14, P5-15) `createdAt`/`lastTick`/`nextAt`
-    would be spelled twice with nothing able to see them disagree. The sibling
-    seam already settled the shape: `subagent_roster` returns the wire-shaped
-    fold from here, not from its caller.
+    Here rather than in the daemon that first needed it: this is a fact about a
+    *schedule*, and every transport serves the same one. `schedule` is a `base.yaml`
+    row, so a stdio session has schedules too, and the moment a second front end
+    lists them `createdAt`/`lastTick`/`nextAt` would be spelled twice with nothing
+    able to see them disagree.
 
-    `nextAt` is computed rather than stored, because it is derived from the
-    anchor and the spec and a second carrier is a second answer (A11). `None`
-    means nothing further — a `once` that has fired, or a cron whose expression
-    no longer yields.
+    `nextAt` is computed rather than stored, because it is derived from the anchor and
+    the spec and a second carrier is a second answer (A11). `None` means nothing
+    further — a `once` that has fired, or a cron whose expression no longer yields.
     """
     return {
         **state.schedule.to_wire(),
@@ -270,19 +261,14 @@ def _next_cron_after(spec: str, *, now: int) -> int | None:
 def _local(moment: int) -> datetime:
     """An epoch-ms instant as this machine's naive wall-clock time.
 
-    **Cron expressions are local, which croniter only does if you ask in
-    datetimes.** Handed a float it works in UTC, handed a naive datetime it
-    works in the machine's zone — the same expression meaning two different
-    things depending on the argument type, which is an accident of the library
-    rather than a decision. `0 9 * * *` was firing at 09:00 UTC, so a person on
-    US Central who wrote "nine in the morning" got four in the morning, and
-    nothing said so; `ph agents schedule` printing the next fire time is what
-    made it visible.
+    **Cron expressions are local, which croniter only does if you ask in datetimes.**
+    Handed a float it works in UTC; handed a naive datetime it works in the machine's
+    zone — the same expression meaning two different things depending on the argument
+    type. Local is what every crontab a person has ever written means, and there is
+    nowhere on this wire to say otherwise.
 
-    Local, because that is what every crontab a person has ever written means
-    and there is nowhere on this wire to say otherwise. The cost is the one
-    every local cron has: an hour that repeats or does not exist at a DST
-    boundary resolves by `datetime.timestamp()`'s rule rather than by ours.
+    The cost is the one every local cron has: an hour that repeats or does not exist
+    at a DST boundary resolves by `datetime.timestamp()`'s rule rather than by ours.
     """
     return datetime.fromtimestamp(moment / 1000)
 
@@ -290,18 +276,13 @@ def _local(moment: int) -> datetime:
 def _last_cron_before(spec: str, *, after: int, now: int) -> int | None:
     """The newest cron moment in `(after, now]`, or `None`.
 
-    **Sought backwards from `now`, not walked forwards from `after`.** The
-    coalescing answer is the *last* matching moment, so one `get_prev` finds it
-    whatever the gap; walking forwards costs a step per missed moment, which is
-    11.6 µs each. Measured: a week's gap of `* * * * *` took 122 ms walking and
-    40 µs seeking, and the seek is cheaper even in the steady state (40 µs
-    against 53 µs) because it takes one step rather than two. The pathological
-    case is what settles it — an anchor at epoch 0 walked 29 million steps, some
-    391 s of blocked event loop, against the same 55 µs.
+    **Sought backwards from `now`, not walked forwards from `after`.** The coalescing
+    answer is the *last* matching moment, so one `get_prev` finds it whatever the gap;
+    walking forwards costs a step per missed moment. The measurements, including the
+    pathological case that settles it, are in `tests/test_schedule.py`.
 
-    `croniter` is imported here rather than at module scope: this is one of
-    three kinds, `schedule` is a `base.yaml` row so the module loads in every
-    host, and the import measured 25.4 ms — about what pydantic costs — paid on
+    `croniter` is imported here rather than at module scope: `schedule` is a
+    `base.yaml` row, so the module loads in every host, and the import is paid on
     every `ph -p` and every TUI start that never sees a cron expression.
     """
     from croniter import croniter
@@ -333,19 +314,17 @@ class ScheduleService:
     """`ctx.schedule` — create, cancel, and claim what is due.
 
     The service writes to the log and reads back through the fold; it holds no
-    schedule state of its own beyond a cache of that fold, so a resumed session
-    and a live one answer the same question the same way (A11).
+    schedule state of its own beyond a cache of that fold, so a resumed session and a
+    live one answer the same question the same way (A11).
 
-    **Cached, like `SubagentService._rosters`, and for the reason that seam
-    gives.** `live()` is on the daemon's five-second tick path, so the bare fold
-    ran 34 500 times a day per root — 22.6 ms each at 500 000 events, which is
-    49% of a core permanently at fifty roots. `SessionFoldCache` keys on
-    `session.seq`, and a schedule only changes when something is appended, so
-    every read between appends is a dict hit: 104 ns, a 237 000x reduction.
+    **Cached, like `SubagentService._rosters`.** `live()` is on the daemon's
+    five-second tick path, so the bare fold ran tens of thousands of times a day per
+    root. `SessionFoldCache` keys on `session.seq`, and a schedule only changes when
+    something is appended, so every read between appends is a dict hit.
 
     No `ctx`: the first version took one and never read it, which cost seven
-    `type: ignore` lines in the tests to construct a service the tests had to
-    lie about.
+    `type: ignore` lines in the tests to construct a service the tests had to lie
+    about.
     """
 
     _states: SessionFoldCache[dict[str, ScheduleState]] = field(

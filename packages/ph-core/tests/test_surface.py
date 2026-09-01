@@ -6,6 +6,14 @@ log.*
 The first is invariant I4 stated as a test: compaction removes nodes from the
 *derivation*, never from history. It is why offload, rollback and fork all reuse
 one mechanism, and why a checkpointer could not have substituted.
+
+## Why `_shadowed` resolves names with a set rather than `.index`
+
+The first version resolved each named seq by scanning the node list from position
+0, which is O(names x nodes). A compaction shadowing **1 000 of 2 000 nodes
+measured 4.5 ms against 0.13 ms** for the range op it replaced — **35x**, and
+quadratic in the number of names, which is precisely the direction compaction
+grows.
 """
 
 from __future__ import annotations

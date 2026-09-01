@@ -6,6 +6,27 @@ Gate: *write-intent fires before the write; a veto prevents it.*
 reporter, which is precisely the failure the feature map records in
 prime-agent's `edit` skill — the diff is emitted after the file changed, so
 "there is no point at which anything can say no".
+
+## What the walk costs, and why `_walk` is written the way it is
+
+Recorded here rather than in `fs.py`: three findings, all P6-17, together with
+P6-19's string screen contract worth **414 ms → 32 ms** over this repository's
+11 489 files.
+
+* **The relative path is a slice, not a `Path.relative_to`.** That allocates a
+  `Path` per root segment and measured **23.5 µs per file, 62% of the walk**,
+  for a string that is already a prefix of what `os.walk` handed us. The slice is
+  **0.32 µs**.
+* **The join happens once.** `os.path.join(current, name)` was computed for the
+  slice and then thrown away, and `Path(current, name)` re-joined it.
+* **`str` out, not `Path`.** `glob` returns `list[str]` and was paying
+  `Path.__str__` — which re-parses — for every one of them, having just had the
+  string. `grep` builds the `Path` only for the files it actually opens, where a
+  construction is noise beside the read.
+
+The screen's own contract follows from the same measurement: it is handed a
+**string** and a bool, so a walk that consults it does not construct a `Path` per
+candidate to ask a question that is usually "yield".
 """
 
 from __future__ import annotations

@@ -4,56 +4,39 @@
 with a default of `allow`, attached to the `ctx.fs` seam rather than to the tools
 that happen to call it. That placement is the row: the seam fires
 `fs/read-intent`, `fs/write-intent` and `fs/edit-intent` before anything reaches
-disk, so anything that goes through `ctx.fs` is covered without this module
-knowing a single tool name — the failure `compaction`'s truncation pass and
-`offload` both argue against out loud, and that P6-16 files against `hitl`.
-
-**Be honest about how much that buys today.** `tool-fs` is currently the *only*
-caller of `FsService.read`/`write`/`edit` in the tree, so the coverage this shape
-earns is mostly future: a Code Mode binding is the namespaced face of a governed
-tool and does route through here, but `memory-agents-md` and `ph-rlm`'s harness
-service both read with `Path.read_text` and are not covered, and an MCP server is
-a remote client that can never reach `ctx.fs` at all. The placement is still
-right — it is where the next writer lands for free — but the argument for it is
-"one gate rather than one per tool", not a list of things already behind it.
+disk, so anything going through `ctx.fs` is covered without this module knowing a
+single tool name.
 
 **First-match-wins, and the order is the operator's.** Rules are evaluated top to
-bottom and the first one whose operation set and path pattern both match decides;
-nothing further is consulted. That makes a narrow `allow` above a broad `deny`
-the way an exception is written, which is how every path ACL anyone has used
-behaves. An empty rule list therefore allows everything, and layering this row
-changes nothing until a profile writes rules — the same posture `hitl` takes.
+bottom and the first whose operation set and path pattern both match decides. A
+narrow `allow` above a broad `deny` is how an exception is written. An empty rule
+list allows everything, so layering this row changes nothing until a profile
+writes rules.
 
-**Enumeration is filtered rather than asked about.** `glob` and `grep` go through
-`FsService.hide`, a synchronous predicate consulted during the walk, because a
-walk visits thousands of candidates: a per-path prompt is not something a person
-would sit through, and post-filtering `grep`'s matches would hide the rows while
-having already read every byte of the protected file. So for enumeration, `deny`
-and `interrupt` both conceal — you cannot approve nine hundred paths, and
-concealing is the answer that does not leak the thing being protected.
+**Enumeration is filtered rather than asked about**, through `FsService.screen` —
+a synchronous decision consulted during the walk. For enumeration `deny` and
+`interrupt` both conceal: you cannot approve nine hundred paths, and concealing is
+the answer that does not leak the thing being protected.
 
-**Recursive delete fails closed.** Deleting is a `write` — the port plan's own
-two-operation vocabulary, and the reason it is not a third: with a separate
-`delete` operation the obvious rule
-`{operations: ["write"], paths: ["secrets/**"], mode: "deny"}` would still have
-permitted deleting `secrets/`. What differs is the *blast radius*, not the
-permission: a rule set is a statement about paths, and a recursive delete is a
-statement about a subtree, so "may I delete this tree" cannot be answered by
-matching the tree's own path — the paths the rules describe need not exist yet,
-and the tree is enumerated by the operating system at delete time.
-`deletion_reason` therefore refuses whenever a non-allow rule *could* match any
-descendant, judged from the pattern's literal head, which is conservative in the
-only direction a delete may be wrong in. pH registers no delete tool and this row
-does not add one — a permission row that grows a capability is the wrong row — so
-this has no caller yet and is tested directly.
+**Recursive delete fails closed.** Deleting is a `write`, not a third operation:
+what differs is the *blast radius*, not the permission. "May I delete this tree"
+cannot be answered by matching the tree's own path, because the paths the rules
+describe need not exist yet and the tree is enumerated by the operating system at
+delete time. So `deletion_reason` refuses whenever a non-allow rule *could* match
+any descendant, judged from the pattern's literal head — conservative in the only
+direction a delete may be wrong in. pH registers no delete tool and this row does
+not add one, so this has no caller yet and is tested directly.
 
-**The row says what it does not cover (E9).** These rules bound *seam-mediated*
-access. A model-authored `open(path, "w")` inside a code cell, or a `subprocess`
-that shells out, never fires an intent and is not touched — N1, and no wording
-here should suggest otherwise. When no confining provider is mounted the row says
-so at mount and carries the sentence on `ctx.fs_permissions.reach`, so the
-statement toggles with the sandbox rather than being a paragraph in a README that
-is wrong half the time.
+**What this does not cover (E9).** These rules bound *seam-mediated* access. A
+model-authored `open(path, "w")` inside a code cell, or a `subprocess` that shells
+out, never fires an intent and is not touched — N1, and no wording here should
+suggest otherwise. When no confining provider is mounted the row says so at mount
+and carries the sentence on `ctx.fs_permissions.reach`, so the statement toggles
+with the sandbox rather than being a paragraph in a README that is wrong half the
+time.
+
+How much that buys today, and which readers in the tree are *not* behind this
+gate: `tests/test_permissions_fs.py`.
 
 @module ph_stabilize.permissions_fs
 """
@@ -336,22 +319,19 @@ class FsPermissions:
     def screen(self, path: str, name: str, agent: Any, is_dir: bool) -> WalkDecision:
         """What the walk may do with this path — the `ctx.fs.screen` contract (P6-19).
 
-        Two questions, not one. For a file it is `conceals`, unchanged. For a
-        **directory** it is the question `deletion_reason` already asks about a
-        recursive delete, and for the same reason: the rules describe paths that
-        do not exist yet, so "is anything in here concealed" cannot be answered
-        by matching the directory's own path. `deny secrets/**` does not match
-        `secrets` — `**` names what is *under* it — so a concealment check on
-        the directory says no, the walk descends, and the rule is then enforced
-        once per file inside a tree it should never have entered.
+        Two questions, not one. For a file it is `conceals`. For a **directory** it is
+        the question `deletion_reason` asks about a recursive delete, and for the same
+        reason: the rules describe paths that do not exist yet, so "is anything in here
+        concealed" cannot be answered by matching the directory's own path. `deny
+        secrets/**` does not match `secrets` — `**` names what is *under* it — so a
+        concealment check on the directory says no, the walk descends, and the rule is
+        then enforced once per file inside a tree it should never have entered.
 
-        `_could_match_under` is that judgement and it already existed here; this
-        row gave it a second consumer, which is also what promoted it from a
-        delete-only helper. It rounds towards refusal, which for enumeration is
-        the same direction it rounds for deletes: a directory pruned because a
-        rule *might* conceal something inside costs a listing that omits paths a
-        person could have seen, while entering one costs the leak the rule was
-        written to prevent.
+        `_refuses_under` is that judgement. It rounds towards refusal, which for
+        enumeration is the same direction it rounds for deletes: a directory pruned
+        because a rule *might* conceal something inside costs a listing that omits paths
+        a person could have seen, while entering one costs the leak the rule was written
+        to prevent.
         """
         spellings = self._spellings(path, agent)
         named = self._objection_to(spellings, "read", path, agent) is not None
@@ -384,29 +364,22 @@ class FsPermissions:
     ) -> bool:
         """Whether a non-allow rule could match *something inside* this directory.
 
-        The rules describe paths that do not exist yet — the tree is walked by
-        the operating system, not by this module — so a rule matching one file
-        inside a directory is a rule that applies to it without ever naming it.
-        `_could_match_under` is that judgement per pattern; this is the loop
-        around it, which `screen` and `deletion_reason` had a copy of each.
-        `objection` one method up exists for the same reason: two hand-written
-        rule loops are two edit sites the day `Rule` grows a field.
+        The rules describe paths that do not exist yet — the tree is walked by the
+        operating system, not by this module — so a rule matching one file inside a
+        directory applies to it without ever naming it.
 
-        **`honour_scope` is the deliberate difference between the two callers**,
-        and it is a parameter rather than a comment in each copy so the
-        asymmetry is visible from both. Enumeration honours `outside-workspace`;
-        a recursive delete does not. A delete may only ever be wrong towards
-        refusal, so over-refusing there is the safe direction — while
-        enumeration over-refusing *hides files a person may see*.
+        **`honour_scope` is the deliberate difference between the two callers**, a
+        parameter rather than a comment in each copy so the asymmetry is visible from
+        both. Enumeration honours `outside-workspace`; a recursive delete does not. A
+        delete may only ever be wrong towards refusal, while enumeration over-refusing
+        *hides files a person may see*.
 
         **`require_head` is the second difference, and the same asymmetry.**
-        `_could_match_under` answers `True` for a pattern with no literal head,
-        because for a delete "could match anywhere" must round to refusal. For a
-        walk that same rounding refuses *everywhere*: `deny read **/.env` — the
-        idiomatic way to write that rule — has an empty head, so every
-        directory "could" hold a match and the walk prunes the whole tree.
-        Measured on this repository before the guard: 11 489 results down to 6.
-        The file such a rule names is still concealed on the way past; what a
+        `_could_match_under` answers `True` for a pattern with no literal head, because
+        for a delete "could match anywhere" must round to refusal. For a walk that same
+        rounding refuses *everywhere*: `deny read **/.env` — the idiomatic spelling — has
+        an empty head, so every directory "could" hold a match and the whole tree is
+        pruned. The file such a rule names is still concealed on the way past; what a
         leading wildcard cannot justify is refusing to *look*.
         """
         outside = None

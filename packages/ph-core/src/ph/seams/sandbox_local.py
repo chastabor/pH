@@ -1,44 +1,35 @@
 """`sandbox-local` — the first real confinement backend (P6-04).
 
-`bwrap` on Linux, `sandbox-exec` on macOS. Both do the same job in the same
-shape: take an argv and hand back an argv that the **kernel** bounds, which is
-what separates the `sandbox` rung from every rung below it. A worktree bounds
-writes that resolve against cwd and an overlay bounds the same set into a delta;
-only this one refuses `open("/etc/passwd", "w")`.
+`bwrap` on Linux, `sandbox-exec` on macOS. Both do the same job in the same shape:
+take an argv and hand back an argv that the **kernel** bounds, which is what
+separates the `sandbox` rung from every rung below it. A worktree bounds writes
+that resolve against cwd and an overlay bounds the same set into a delta; only
+this one refuses `open("/etc/passwd", "w")`.
 
 **`confine` is pure argv construction, and that is deliberate.** It builds a
 command line and runs nothing, so every rule this module encodes is assertable
 without a kernel that will enforce it. The argv *is* the policy, so a test that
-reads it is testing the thing — and it is what lets the Seatbelt half be
-reviewed on a machine that cannot run it.
+reads it is testing the thing — and it is what lets the Seatbelt half be reviewed
+on a machine that cannot run it.
 
-Measured, so nobody optimises the wrong end: building the argv costs **0.83 µs**
-and wrapping a command in `bwrap` costs **~5.8 ms fixed plus ~0.3 ms per
-writable root**. The Python is 0.024% of the price, and the best possible
-micro-optimisation of it is 0.004% — 3 323 confined commands to save one
-millisecond. `confine` is left exactly as it is on purpose.
+**The probe decides registration, and it is the only reason blind implementation
+is safe.** A confinement backend that silently fails open is the worst object in
+this codebase: every caller believes the kernel is holding the line and nothing
+says otherwise. So registration is gated on a canary that writes to an absolute
+path *outside* the workspace and checks the host copy is unchanged. A backend
+whose rules are wrong in the permissive direction fails that and declines, rather
+than claiming a tier it does not occupy.
 
-**The probe decides registration, and it is the only reason blind
-implementation is safe.** A confinement backend that silently fails open is the
-worst object in this codebase: every caller believes the kernel is holding the
-line and nothing says otherwise. This module has now watched that happen twice
-next door — `agentfs run --experimental-sandbox` exits 0 while writing straight
-through to the host, and a `mount`-based overlay does not confine the process at
-all — so registration is gated on a canary that writes to an absolute path
-*outside* the workspace and checks the host copy is unchanged. A backend whose
-rules are wrong in the permissive direction fails that and declines, rather than
-claiming a tier it does not occupy.
-
-**bwrap is verified against a real kernel; Seatbelt is not.** The prerequisite
-on Ubuntu 23.10+ is an AppArmor profile at `/etc/apparmor.d/bwrap`:
+**bwrap is verified against a real kernel; Seatbelt is not.** The prerequisite on
+Ubuntu 23.10+ is an AppArmor profile at `/etc/apparmor.d/bwrap`:
 `kernel.apparmor_restrict_unprivileged_userns=1` is the default there, and an
-unprofiled `bwrap` is not setuid, so without one it dies with `setting up uid
-map: Permission denied`. With one, the measurements are in P6-04 — an
-absolute-path write refused with the host file untouched, a workspace write
-landing, `read-only` refusing everywhere, and one network interface against
-thirteen. `sandbox-exec` is macOS-only and cannot be run here at all, so its
-profile is written deny-by-default and the probe is what stands between
+unprofiled `bwrap` is not setuid, so without one it dies with `setting up uid map:
+Permission denied`. `sandbox-exec` is macOS-only and cannot be run here at all, so
+its profile is written deny-by-default and the probe is what stands between
 "unverified" and "claimed".
+
+What was measured — of the confinement, and of what the wrapper costs:
+`tests/test_sandbox_local.py`.
 
 @module ph.seams.sandbox_local
 """

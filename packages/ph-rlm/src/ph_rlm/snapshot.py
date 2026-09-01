@@ -2,31 +2,27 @@
 
 This is the module that earns `persistence: "namespace"`. The seam takes the
 provider's *promise* at registration (D6); these events are the promise being
-kept. Without them the runtime would be exactly what dsh refused to ship — a
-REPL whose cross-call state is invisible to the log — with a declaration on top.
+kept. Without them the runtime would be exactly what dsh refused to ship — a REPL
+whose cross-call state is invisible to the log — with a declaration on top.
 
 Four decisions, in the order they matter.
 
-**Per variable, not per namespace.** An unchanged 200 MiB DataFrame emits
-nothing, because its digest did not move. Snapshotting the namespace as one blob
-would append that DataFrame again on every cell that touched anything at all,
-and the log would grow with the *size of the namespace* rather than the size of
-the change.
+**Per variable, not per namespace.** An unchanged 200 MiB DataFrame emits nothing,
+because its digest did not move. Snapshotting the namespace as one blob would
+append it again on every cell that touched anything at all, and the log would grow
+with the *size of the namespace* rather than the size of the change.
 
-**The event is appended before the blob is written.** Write-ahead ordering
-(§4.9): a death between the two yields an event whose blob is missing — which
+**The event is appended before the blob is written.** Write-ahead ordering (§4.9):
+a death between the two yields an event whose blob is missing — which
 `kernel/restored` reports as a failed variable — rather than a blob nothing
-references, which nothing would ever find or collect. The orphan case is swept
-at session open (F7); the dangling-reference case is self-describing.
+references, which nothing would ever find or collect. The orphan case is swept at
+session open (F7); the dangling-reference case is self-describing.
 
-**`patch` is deliberately absent.** D17 allows a `bsdiff4` delta chain against
-an anchor, *and* says to benchmark first because `dill` output is not byte-stable
-across processes the way a QuickJS heap image is — memo ordering and
-`id()`-derived bytes move even when the value does not. The plan's own fallback
-is "snap-only, still log-resident". Per-variable digesting is what actually keeps
-growth linear, and it is here; a delta chain over unstable bytes would add a
-re-anchoring policy and a second failure mode for a gain nobody has measured.
-`SNAPSHOT_KINDS` names `patch` so the vocabulary is ready when someone does.
+**`patch` is deliberately absent.** D17 allows a `bsdiff4` delta chain against an
+anchor *and* says to benchmark first, because `dill` output is not byte-stable
+across processes the way a QuickJS heap image is — memo ordering and `id()`-derived
+bytes move even when the value does not. Per-variable digesting is what actually
+keeps growth linear. `SNAPSHOT_KINDS` names `patch` so the vocabulary is ready.
 
 **The tag is provenance, not secrecy.** HMAC-SHA256 keyed by the session id, so a
 blob from another session or a mangled file fails verification instead of being

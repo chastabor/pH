@@ -1,45 +1,37 @@
 """`workspace-git-worktree` — the `worktree` containment tier (D21, §4.8).
 
-The middle rung of the ladder, and the one whose name most invites overreading.
-It gives an agent its own checkout on `ph/<session>/<agent>`, sharing the
-repository's object store so creation is cheap, and points `ctx.fs`'s root and
-`ctx.subprocess`'s cwd at it. That bounds **every tool-mediated write and every
-relative-path raw write**, because both resolve against the agent's cwd. It does
-not bound `open("/etc/passwd", "w")`, which never consults a cwd — only the
-`sandbox` tier refuses that, at the kernel. The property bought here is
-**collision isolation and revertibility**, not confinement, and any sentence
-here, in `ph doctor`, or in a config comment that blurs the two is a defect
-(§12 Q10, E13).
+The middle rung of the ladder. It gives an agent its own checkout on
+`ph/<session>/<agent>`, sharing the repository's object store so creation is
+cheap, and points `ctx.fs`'s root and `ctx.subprocess`'s cwd at it.
 
-What that buys is concrete: eight children fanning out no longer write one tree
-concurrently, and the parent reviews a diff instead of trusting sibling writes.
+**What it bounds, exactly.** Every tool-mediated write and every relative-path
+raw write, because both resolve against the agent's cwd. **Not**
+`open("/etc/passwd", "w")`, which never consults a cwd — only the `sandbox` tier
+refuses that, at the kernel. The property bought here is **collision isolation
+and revertibility**, not confinement, and any sentence here, in `ph doctor`, or in
+a config comment that blurs the two is a defect (§12 Q10, E13).
 
-**`access="read"` is a different kind, not a different permission.** A research
-child should not be handed a checkout it might mutate — but "read-only" is an
-enforcement claim and this tier cannot make one, so `read` yields
+**`access="read"` is a different kind, not a different permission.** "Read-only"
+is an enforcement claim this tier cannot make, so `read` yields
 `worktree-ephemeral`: a full checkout the child may write, **discarded on
 disposal and never merged**. `repo_writable` stays `True`, because the writes
-happen; they simply reach nobody. Reporting `False` would be describing a
-guarantee no tier made, which is the one thing `repo_writable` exists to prevent.
+happen; they simply reach nobody.
 
-**Disposal is a policy, and the redirection env is what keeps it meaningful.**
-An unchanged worktree is removed and a changed one is kept for the user to
-inspect and merge — a rule that only says something if "changed" means the
-agent's work. `pytest` writes `.pytest_cache/` and `__pycache__/` into the tree
-it runs against, so without redirection every worktree would end up dirty and
-every one would be kept, and the policy would decay into "keep everything". The
-env therefore points the build tools' caches inside `scratch` (E12), which is
-outside the worktree and survives disposal. Best-effort by construction: a
-toolchain that insists on writing beside its sources still will, and the answer
-to that is `access="write"` for that agent, not a weaker tier.
+**Disposal is a policy, and the redirection env is what keeps it meaningful.** An
+unchanged worktree is removed and a changed one is kept to inspect and merge — a
+rule that only says something if "changed" means the agent's work. `pytest`
+writes `.pytest_cache/` and `__pycache__/` into the tree it runs against, so
+without redirection every worktree ends up dirty, every one is kept, and the
+policy decays into "keep everything". The env points build caches inside
+`scratch` (E12), which is outside the worktree and survives disposal. Best-effort
+by construction: a toolchain that insists on writing beside its sources still
+will, and the answer is `access="write"` for that agent, not a weaker tier.
 
-**Per-run restore points live here too (E7, §12 Q9c).** A denial settles the
-whole run (C3), which bounds partial state to *about* one cell — "about",
-because the program had already written whatever preceded the refused line. So
-before a run this tier captures the agent's worktree as a git **tree object**
-under a hidden ref, and `/revert` restores it. That is a capability of *this*
-tier and not of the seam: it is `git add -A`, `git write-tree` and a ref
-namespace from end to end, and a tier that is not git could not supply it.
+**Per-run restore points live here too (E7, §12 Q9c)** — `git add -A`, `git
+write-tree` and a ref namespace end to end, which is why they are a capability of
+*this* tier and not of the seam. A denial settles the whole run (C3), which bounds
+partial state to about one cell; before a run this tier captures the worktree as a
+git tree object under a hidden ref, and `/revert` restores it.
 
 @module ph.seams.workspace_git
 """
@@ -224,36 +216,26 @@ class GitWorktreeProvider:
     async def reclaim(self, record: WorkspaceRecord) -> bool:
         """Release a tree this process never acquired (F6).
 
-        The same disposal policy an orderly release runs — clean is removed,
-        dirty is kept for review — because a crash is not a reason to throw away
-        work, and reconciliation that discarded more than a normal exit would
-        make crashing *worse* than the leak it is fixing.
+        The same disposal policy an orderly release runs — clean is removed, dirty is
+        kept for review — because a crash is not a reason to throw away work, and
+        reconciliation that discarded more than a normal exit would make crashing *worse*
+        than the leak it is fixing.
 
-        **The record locates its own repository.** An earlier draft took the
-        base from the reconciling process's `ctx.fs.root`, which is a guess: a
-        pair recorded against a different checkout resolves the wrong toplevel,
-        and `WorkspaceRecord`'s claim to be "the log's own fields" was untrue of
-        the one field the reclaim actually needed. A linked worktree knows its
-        own common directory, so the tree answers the question about itself.
+        **The record locates its own repository.** Taking the base from the reconciling
+        process's `ctx.fs.root` is a guess: a pair recorded against a different checkout
+        resolves the wrong toplevel. A linked worktree knows its own common directory, so
+        the tree answers the question about itself.
 
-        There is no `Workspace`, so nothing is known to have been *provisioned*
-        and every file counts as the agent's work — which errs toward keeping,
-        where the cost is disk rather than the work. A `worktree-ephemeral`
-        record is discarded exactly as its own release would have discarded it.
+        There is no `Workspace`, so nothing is known to have been *provisioned* and every
+        file counts as the agent's work — which errs toward keeping, where the cost is
+        disk rather than the work.
 
         **A retention is an exception to `discard`, exactly as it is at release**
-        (P6-28). This had a rule of its own for one round — a reason meant return
-        "kept" and touch nothing — and two rules for one word is how a tree gets
-        deleted by whichever path happened to reach it first: an orderly release
-        kept a retained tree only if it was dirty, while a reconciliation kept it
-        either way. `Workspace.retained`'s own docstring settles which is
-        canonical, so the special case is gone and the reason folds into
-        `discard` here as it does there.
-
-        A clean retained tree is therefore removed on both paths, and it loses
-        nothing: what a child committed lives on its **branch**, which `-d`
-        declines to delete for precisely this reason. What retention buys is the
-        *uncommitted* work an ephemeral tree would otherwise have thrown away.
+        (P6-28), rather than a rule of its own here: two rules for one word is how a tree
+        gets deleted by whichever path reached it first. A clean retained tree is
+        therefore removed on both paths, and loses nothing — what a child committed lives
+        on its **branch**, which `-d` declines to delete for precisely this reason. What
+        retention buys is the *uncommitted* work an ephemeral tree would have thrown away.
         """
         if record.ref is None or not record.root.exists():
             # git pruned it, or a person removed it. Nothing to reclaim, and the
@@ -427,22 +409,19 @@ class GitWorktreeProvider:
     async def _dirty(self, path: Path, pathspec: Sequence[str]) -> bool:
         """Whether this worktree holds anything worth keeping.
 
-        `--porcelain` with untracked files included: a new file nobody staged is
-        exactly the work a discarded worktree would lose, and it is the common
-        shape of what an agent produces.
+        `--porcelain` with untracked files included: a new file nobody staged is exactly
+        the work a discarded worktree would lose.
 
-        The pathspec comes from `Workspace.agent_work_pathspec()` rather than
-        being built here, because two other consumers ask the same question —
-        `/workspaces list` and `/revert` — and when they each built their own
-        they disagreed about the same tree.
+        The pathspec comes from `Workspace.agent_work_pathspec()` rather than being built
+        here, because `/workspaces list` and `/revert` ask the same question and when
+        they each built their own they disagreed about the same tree.
 
-        An **empty** pathspec is the reconciliation case (F6): a crash leaves a
-        log record and no `Workspace`, so nothing is known to have been
-        provisioned and every file counts as the agent's work. The caller states
-        that rather than the callee decoding a sentinel — and with no exclusion
-        to refine, `--untracked-files=normal` is the right mode, because the
-        answer is a boolean and `all` enumerates every file under a provisioned
-        `node_modules` to say what one `?? node_modules/` line says.
+        An **empty** pathspec is the reconciliation case (F6): a crash leaves a log record
+        and no `Workspace`, so every file counts as the agent's work. The caller states
+        that rather than the callee decoding a sentinel — and with no exclusion to refine,
+        `--untracked-files=normal` is the right mode, because the answer is a boolean and
+        `all` enumerates every file under a provisioned `node_modules` to say what one
+        `?? node_modules/` line says.
         """
         untracked = "all" if pathspec else "normal"
         code, out, _ = await self._git(
@@ -577,21 +556,17 @@ async def _checkpoint_index(git_dir: Path) -> Path:
 async def restore(ctx: Context, workspace: Workspace, tree: str) -> tuple[str, ...]:
     """Put the worktree back to `tree`. Returns the paths the run had added.
 
-    **`read-tree --reset -u` against a *seeded* scratch index**, which is the
-    whole trick. Seeding from the checkpoint index — refreshed first, so its stat
-    data is current — lets git touch only the paths that actually differ.
-    `checkout-index -a -f` was the obvious alternative and rewrites *every* file
-    in the tree: 2.3 s of a 2.4 s restore on an 11 000-file checkout, and worse
-    than the time, it stamps a new mtime on 11 000 unchanged files and so
-    invalidates every mtime-keyed cache the person has — pytest, mypy, ruff, the
-    editor's index — making them pay for the full-tree rewrite again on their
-    next command.
+    **`read-tree --reset -u` against a *seeded* scratch index**, which is the whole
+    trick: seeding from the checkpoint index — refreshed first, so its stat data is
+    current — lets git touch only the paths that actually differ. `checkout-index -a
+    -f` rewrites *every* file in the tree, which is slower and, worse, stamps a new
+    mtime on every unchanged file and so invalidates every mtime-keyed cache the
+    person has. The measurement is in `tests/test_workspace_checkpoint.py`.
 
-    Scratch, not the agent's index, so a file that was untracked before the run
-    is untracked after the restore rather than silently staged. `.gitignore`d
-    paths were never in the checkpoint, so they are never considered in either
-    direction — a `/revert` that wiped a build cache would turn a recovery into a
-    rebuild — and `scratch` is outside the worktree entirely.
+    Scratch, not the agent's index, so a file that was untracked before the run is
+    untracked after the restore rather than silently staged. `.gitignore`d paths were
+    never in the checkpoint, so they are never considered in either direction — a
+    `/revert` that wiped a build cache would turn a recovery into a rebuild.
     """
     git_dir = await _git_dir(ctx, workspace.root)
     if git_dir is None:

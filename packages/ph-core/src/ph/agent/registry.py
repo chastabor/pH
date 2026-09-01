@@ -99,26 +99,17 @@ class AgentRegistry:
     ) -> Any:
         """Build an agent and the scope it owns.
 
-        **`parent` puts the child's scope inside its parent's** (P6-27), which is
-        what makes containment structural instead of materialised. Every agent
-        used to hang off the *registry*, so a parent and its child were siblings
-        and `parent.ctx.reaches(child.ctx)` was `False` — the relationship that
-        `SessionHeader.parent_session` records, and that B7 is entirely about,
-        had no representation in the tree that answers questions about it. So
-        `ctx.subagents` rebuilt the ceiling by hand on every spawn, and
-        `grant_for`'s docstring had to explain that writing `None` out as an
-        explicit list "is not a nicety".
+        **`parent` puts the child's scope inside its parent's** (P6-27), which is what
+        makes containment structural instead of materialised. Three things then stop being
+        remembered:
 
-        Nested, three things stop being remembered. Visibility inherits, because
-        `isolation_chain` now reaches the parent's layers and the existing
-        masking already walks it. Disposal cascades, because `Context.dispose`
-        already unwinds `_children` — the subagent provider's
-        `parent.ctx.effect(...)` was doing by hand what the tree does by shape.
-        And a parent can *reach* its child, which is what makes a supervisor able
-        to diagnose one.
+        * **visibility inherits**, because `isolation_chain` reaches the parent's layers
+          and the existing masking already walks it;
+        * **disposal cascades**, because `Context.dispose` already unwinds `_children`;
+        * **a parent can reach its child**, which is what makes a supervisor able to
+          diagnose one.
 
-        Optional and defaulting to today's behaviour: a root agent has no parent,
-        and five of the seven call sites in the tree create one.
+        Optional and defaulting to a root agent with no parent.
         """
         if self.driver_factory is None:
             raise RuntimeError("no agent driver is registered; mount an agent-loop row")

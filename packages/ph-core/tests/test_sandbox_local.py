@@ -11,6 +11,27 @@ The kernel half runs where a kernel will enforce it — on Ubuntu 23.10+ that me
 an AppArmor profile at `/etc/apparmor.d/bwrap`, without which an unprofiled,
 non-setuid `bwrap` cannot create a user namespace at all. Those tests skip
 cleanly elsewhere, and the row declines rather than claiming the tier.
+
+## What the confinement was measured to do, and what the wrapper costs
+
+**Verified against a real kernel** (bwrap, with `/etc/apparmor.d/bwrap` in place):
+an absolute-path write **refused with the host file untouched**, a workspace write
+**landing**, `read-only` **refusing everywhere**, and **one network interface
+against thirteen** on the host.
+
+**Where the time goes, so nobody optimises the wrong end.** Building the argv
+costs **0.83 µs**; wrapping a command in `bwrap` costs **~5.8 ms fixed plus
+~0.3 ms per writable root**. The Python is **0.024%** of the price, and the best
+possible micro-optimisation of it is **0.004%** — 3 323 confined commands to save
+one millisecond. `confine` is left exactly as it is on purpose.
+
+**Why the probe asserts isolation rather than availability.** This module has
+watched a backend fail open twice next door: `agentfs run --experimental-sandbox`
+exits 0 while writing straight through to the host, and a `mount`-based overlay
+does not confine the process at all. A confinement backend that silently fails
+open is the worst object in this codebase — every caller believes the kernel is
+holding the line and nothing says otherwise — so an exit code is never read as
+proof of confinement (E13).
 """
 
 from __future__ import annotations

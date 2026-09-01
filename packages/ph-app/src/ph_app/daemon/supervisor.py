@@ -132,25 +132,14 @@ NON_GUARANTEES: tuple[tuple[str, str], ...] = (
 
 Rule 6: *state what is not enforced, next to where it would be assumed* — and a
 caveat only in the docs is a defect. What is assumed here is what "one daemon,
-many long-running agents" sounds like it means, and every row above is a place
-where it does not mean it. `ph doctor` and `ph agents doctor` print them
-verbatim, so the sentences a person reads and the sentences this file is
-responsible for keeping true are the same strings.
+many long-running agents" sounds like it means, and every row is a place where it
+does not mean it.
 
-**Two of them are corrections to earlier rows' own wording**, which is why they
-are here rather than in the phase note alone. §3's N5 says pH does not "contain
-crashes between roots"; P5-04 landed after that sentence and *does* contain a
-root's own crash — what stays uncontained is the process, which is a different
-and narrower claim, and a reader who took the broad one would over-provision
-against the wrong failure. And P5-06 argues that "a machine that reboots between
-Tuesday and Wednesday must not lose Wednesday's run" — true of the log, which
-keeps the schedule, and not true of the daemon, because `tick` iterates
-`self.roots` and nothing re-mounts a root at boot. The appointment survives; the
-thing that would keep it does not.
-
-Data, not prose, for the reason every diagnostic here is: a paragraph in a
-docstring cannot be printed, and a sentence nobody can print is one nobody
-checks."""
+Data, not prose: `ph doctor` and `ph agents doctor` print these verbatim, so the
+sentences a person reads and the sentences this file is responsible for keeping
+true are the same strings. A paragraph in a docstring cannot be printed, and a
+sentence nobody can print is one nobody checks.
+"""
 
 COMMAND_ACCEPTED = "client/command"
 """The record that makes a mutating command idempotent (P5-02)."""
@@ -216,12 +205,9 @@ class Root:
     def publish(self, event: str, payload: dict[str, Any]) -> None:
         """Tell every watcher. A failing subscriber is dropped, not raised.
 
-        A client whose socket died — or one that cannot keep up — must not take
-        the root down with it, which is the inversion this whole row exists to
-        prevent. Dropping happens *here*, where the subscriber list is, so the
-        policy has one owner: an earlier draft decided it in the connection and
-        returned quietly, so the watcher it announced as dropped stayed
-        subscribed and re-paid the fan-out for every later event.
+        A client whose socket died — or one that cannot keep up — must not take the root
+        down with it, which is the inversion this row exists to prevent. Dropping happens
+        *here*, where the subscriber list is, so the policy has one owner.
         """
         for subscriber in list(self.subscribers):
             try:
@@ -277,13 +263,11 @@ class Root:
     def accepted(self, command: str) -> bool:
         """Whether this exact command already ran for this client.
 
-        **Folded once, then kept.** The set is built from the log when the root
-        starts — so it survives a restart, which is the one moment a client is
-        most likely to retry: it reconnects, cannot know whether its last
-        `session/prompt` landed, and sends it again. The first draft re-scanned
-        the whole log per command instead, which measured 4.9 ms at 200 000
-        events on the daemon's own event loop, stalling every other connection
-        for that long.
+        **Folded once, then kept.** Built from the log when the root starts, so it
+        survives a restart — the one moment a client is most likely to retry, because it
+        reconnects, cannot know whether its last `session/prompt` landed, and sends it
+        again. Re-scanning per command would put that read on the daemon's event loop,
+        stalling every other connection.
         """
         return command in self.commands
 
@@ -356,16 +340,14 @@ class Root:
         """Record that the supervisor lost the socket it was bound to (P5-11).
 
         An append and nothing else, where every other record here appends *and*
-        publishes. It reaches a watcher either way: `relay` observes this
-        session's own feed, so the `session.event` frame goes out on the same
-        append — and a client attached before the path went away is still on a
-        live stream, because the connection outlives the path it was accepted
-        through. A second `publish` here would send the same fact twice under
-        two names and grow the wire vocabulary to say nothing new.
+        publishes: `relay` observes this session's own feed, so the `session.event` frame
+        goes out on the same append, and a client attached before the path went away is
+        still on a live stream. A second `publish` would send one fact twice under two
+        names.
 
-        Not a status change either. This root is doing exactly what it was
-        doing; what broke is the door. Reporting it as `failed` would put the
-        recovery ladder to work climbing over a socket.
+        **Not a status change.** This root is doing exactly what it was doing; what broke
+        is the door. Reporting it as `failed` would put the recovery ladder to work
+        climbing over a socket.
         """
         self.session.append(UNREACHABLE, note)
 
@@ -435,29 +417,20 @@ class Supervisor:
     async def start(self, root_id: str) -> Root:
         """Take the lease for this root, then mount it (I-5).
 
-        Serialized per id, because the check-then-mount below spans two awaits:
-        two clients asking for the same new root at once both pass the
-        membership test, both mount a profile, and both reach for the same
-        session file — I-5's hazard stated exactly ("two writers on one JSONL").
-        The store's own uniqueness check does not save it: each root gets its
-        *own* `Context` and therefore its own `SessionStore`, so neither knows
-        about the other.
+        **Serialized per id**, because the check-then-mount below spans two awaits: two
+        clients asking for the same new root at once both pass the membership test, both
+        mount a profile, and both reach for the same session file — I-5's hazard exactly.
+        The store's own uniqueness check does not save it, because each root gets its own
+        `Context` and therefore its own `SessionStore`.
 
-        The lease would catch that pair too, but it would catch it as a
-        *refusal*, and a refusal is the wrong answer to the question these two
-        clients asked. Two clients naming one root want the same root; only a
-        second *process* is a conflict. So the ordering is here and the refusal
-        is there, and the second racer gets the root the first one built.
+        The lease would catch that pair as a *refusal*, which is the wrong answer to the
+        question these two clients asked: two clients naming one root want the same root,
+        and only a second *process* is a conflict. So the ordering is here and the
+        refusal is in `_lease`, and the second racer gets the root the first one built.
 
-        One lock rather than one per id, and a fast path that never reaches it.
-        `prompt` calls this on *every turn*, so a per-id table minted an
-        `anyio.Lock` per call to throw it away — 832 B and 0.65 µs each — and
-        retained an entry per id ever started, cleared nowhere, in the one
-        process built to run for weeks. A single lock costs a serialized mount
-        (~2 ms) between two *different* new roots, which happens at most once
-        per root, while the returning-client path now skips the lock's
-        checkpoint entirely. `_start` re-checks membership under it, which is
-        the ordinary double-checked build.
+        One lock rather than one per id, with a fast path that never reaches it —
+        `prompt` calls this on *every turn*. `_start` re-checks membership under it,
+        which is the ordinary double-checked build.
         """
         root = self.roots.get(root_id)
         if root is not None:
@@ -468,19 +441,16 @@ class Supervisor:
     async def _start(self, root_id: str) -> Root:
         """Mount a profile, create its agent, and give it its own task.
 
-        Through `runtime.mounted`, which exists so "a mode cannot drift from the
-        profile semantics" — and whose `finally` is what a hand-rolled
-        `Context()` + `mount()` pair loses: a mount that raised partway left a
-        live `Context` that was never in `self.roots` and so was never disposed.
-        An `AsyncExitStack` holds it because a root's lifetime is longer than
-        any one `async with`, which is `HarnessSession`'s arrangement in the TUI.
+        Through `runtime.mounted`, so a mode cannot drift from the profile semantics —
+        and its `finally` is what a hand-rolled `Context()` + `mount()` pair loses: a
+        mount that raised partway left a live `Context` that was never in `self.roots`
+        and so was never disposed. An `AsyncExitStack` holds it because a root's lifetime
+        is longer than any one `async with`.
 
-        The mount is per root and not shared: two roots are two deployments as
-        far as every seam is concerned — separate sessions, workspaces and
-        kernels — and sharing one `Context` would make a row's `ctx.provide`
-        visible to a root that never asked for it. The *parse* is shared, since
-        the YAML cannot differ between them and re-reading it was most of the
-        cost of starting one.
+        The mount is **per root and not shared**: two roots are two deployments as far as
+        every seam is concerned, and sharing one `Context` would make a row's
+        `ctx.provide` visible to a root that never asked for it. The *parse* is shared,
+        since the YAML cannot differ between them.
         """
         if root_id in self.roots:
             return self.roots[root_id]
@@ -551,55 +521,31 @@ class Supervisor:
     async def _lease(self, ctx: Context, path: Path, root_id: str) -> None:
         """Claim one session log against every other writer (I-5).
 
-        The lock in `start` orders the racers *inside* this process; this is what
-        stops a second daemon from appending to a log this one is writing. Two
-        writers on one JSONL produce exactly the corruption P5-01 measured when
-        the daemon concatenated sessions onto each other: `seq` going backwards
-        mid-file, which breaks A1 and makes every fold double-count.
+        The lock in `start` orders racers *inside* this process; this stops a second
+        daemon appending to a log this one is writing. Two writers on one JSONL put `seq`
+        backwards mid-file, which breaks A1 and makes every fold double-count.
 
-        **Daemon against daemon, and no further.** The lease is taken here, so a
-        `ph -p --session x` run against a session a daemon holds still opens it
-        — the hazard belongs to `JsonlSessionStore`, which is the thing that
-        actually writes, and leasing there would cover every mode at once. I-5
-        names the second daemon and that is what this row gates; the CLI half is
-        left for the row that moves the lease down into the store rather than
-        claimed here by a docstring.
+        **Daemon against daemon, and no further.** A `ph -p --session x` run against a
+        session a daemon holds still opens it: the hazard belongs to
+        `JsonlSessionStore`, and leasing there would cover every mode at once. I-5 names
+        the second daemon and that is what this gates.
 
-        Taken beside the log rather than at a path of its own construction: the
-        store owns where sessions live, and a lease derived independently is one
-        `PH_HOME` change away from guarding a file nobody writes.
+        Taken beside the log rather than at a path of its own construction — the store
+        owns where sessions live, and a lease derived independently is one `PH_HOME`
+        change away from guarding a file nobody writes.
 
-        `timeout=0` — "somebody else holds it" is known immediately and is a
-        refusal, not something to wait out; blocking here would also stall the
-        event loop for every *other* root this supervisor is running.
+        `timeout=0`: "somebody else holds it" is a refusal, not something to wait out,
+        and blocking here would stall the event loop for every *other* root.
 
-        Taken through `ctx.effect`, which is the repo's one mechanism for this
-        and names the case verbatim — *"every external artifact an agent takes —
-        a child process, a worktree, a temp path, a lock — is acquired through
-        here, so cleanup is structural rather than remembered (§4.9, I2)"*. The
-        first draft registered `lock.release` on a hand-held `AsyncExitStack`,
-        which made the lease the one artifact in the tree invisible to
-        `ctx.dispose()` and its labelled disposal log, and threaded the stack
-        down through `_session_for` to get there.
+        Through `ctx.effect`, the repo's one mechanism for an acquired external artifact,
+        so cleanup is structural rather than remembered (§4.9, I2).
 
-        Acquired *inline*, not on a worker thread. Wrapping it in
-        `to_thread.run_sync` measured **+340 µs on a 1.9 ms root start — twice
-        the 166 µs the acquire itself costs** — because a real start is seconds
-        after the last one and pays a cold thread plus a cold selector wakeup
-        every time. At `timeout=0` the acquire is one `os.open` and a
-        non-blocking `flock`: it cannot wait, so there is no blocking to move
-        off the loop. Its neighbours settle it — `path.is_file()` two lines down
-        and `resume_session`'s whole-log read are both on the loop thread, so a
-        200 µs threshold is not one this function was holding.
-
-        `thread_local=False` is load-bearing, and its absence is silent.
-        filelock keeps its re-entrancy counter in a thread-local by default, so
-        a lease acquired on a worker thread and released from the event loop
-        finds a counter of zero and returns *having released nothing* — no
-        error, no warning, and a lock file held until the process dies. It cost
-        three tests, two of them P5-01's, all failing as "this session is
-        already active" against a daemon that had cleanly shut down. The lease
-        belongs to the process, not to whichever thread happened to take it.
+        **`thread_local=False` is load-bearing, and its absence is silent.** filelock
+        keeps its re-entrancy counter in a thread-local by default, so a lease acquired
+        on a worker thread and released from the event loop finds a counter of zero and
+        returns *having released nothing* — no error, no warning, and a lock file held
+        until the process dies. The lease belongs to the process, not to whichever thread
+        took it.
         """
 
         def acquire() -> Callable[[], None]:
@@ -619,21 +565,18 @@ class Supervisor:
     async def _session_for(self, ctx: Context, root_id: str) -> Session:
         """The root's session — resumed from disk when there is one to resume.
 
-        **Creating unconditionally corrupted the log.** `sessions.create` mints a
-        fresh session and the JSONL store appends, so restarting a daemon with
-        the same root id concatenated a second session onto the first: one file,
-        one header, and `seq` restarting at zero halfway through, which breaks
-        A1 and makes every fold over that file double-count.
+        **Creating unconditionally corrupted the log.** `sessions.create` mints a fresh
+        session and the JSONL store appends, so restarting a daemon with the same root id
+        concatenated a second session onto the first: one file, one header, and `seq`
+        restarting at zero halfway through.
 
-        Resuming is also what connects this to F6 — a root that died holding a
-        worktree gets its `workspace/acquired` reconciled on the way back up,
-        because `session/created` fires for an adopted session too.
+        Resuming is also what connects this to F6 — a root that died holding a worktree
+        gets its `workspace/acquired` reconciled on the way back up, because
+        `session/created` fires for an adopted session too.
 
-        The resume is announced, not silent: whoever started this daemon may not
-        know a previous run crashed, and "picked up where something left off" is
-        the kind of surprise that should cost a line on stderr. The durable
-        record is the `session/resumed` event `resume_session` appends — a cron
-        job leaves the fact in the trace whether or not anyone reads stderr.
+        The resume is announced, not silent: whoever started this daemon may not know a
+        previous run crashed. The durable record is the `session/resumed` event, so a
+        cron job leaves the fact in the trace whether or not anyone reads stderr.
         """
         # A profile with no persistence writes nothing, so it has no log to
         # lease and none to resume — `path` stays `None` and both fall through
@@ -674,17 +617,15 @@ class Supervisor:
     async def _run(self, root: Root) -> None:
         """The root's own task: drive the agent whenever its inbox has work.
 
-        This is the sentence the row is built on. Nothing here refers to a
-        client, so nothing a client does — connecting, disconnecting, dying —
-        appears in this loop at all.
+        **Nothing here refers to a client**, so nothing a client does — connecting,
+        disconnecting, dying — appears in this loop at all.
 
-        A wake that arrives while the agent is already running is dropped on
-        purpose: `run()` drains the inbox until it is empty, so the turn already
-        in flight will pick the new message up, and calling it twice raises.
+        A wake arriving while the agent is already running is dropped on purpose: `run()`
+        drains the inbox until it is empty, so the turn in flight picks the new message
+        up, and calling it twice raises.
 
-        Crashes and their ladder belong to `_drive`, which this calls once per
-        wake — so nothing raising out of a root can cancel the supervisor's task
-        group and take every *other* root down with it.
+        Crashes and their ladder belong to `_drive`, so nothing raising out of a root can
+        cancel the supervisor's task group and take every *other* root down with it.
         """
         async with root.waiting:
             async for _ in root.waiting:
@@ -695,21 +636,19 @@ class Supervisor:
     async def _drive(self, root: Root) -> None:
         """One wake, and the ladder if the root's task crashes (P5-04).
 
-        **One root's crash is not the daemon's.** This runs in the supervisor's
-        task group, so anything raising out of here cancels the group and takes
-        every *other* root down with it — the failure a supervisor exists to
-        prevent. `run()` contains its own turn failures, so what reaches this
-        boundary is the unanticipated kind: a flush that cannot write, a
-        disposed context, a bug.
+        **One root's crash is not the daemon's.** This runs in the supervisor's task
+        group, so anything raising out of here would cancel the group and take every
+        other root with it. `run()` contains its own turn failures, so what reaches this
+        boundary is the unanticipated kind: a flush that cannot write, a disposed
+        context, a bug.
 
-        Those are worth retrying because the work is still in the inbox — the
-        crash happened around the turn rather than inside it — which is exactly
-        what a *turn* failure is not: that one already claimed its message, so
-        running again would produce an empty turn reporting false success. See
-        `recovery` for why that distinction decides the whole row.
+        Those are worth retrying because the work is still in the inbox — the crash
+        happened *around* the turn rather than inside it, which a turn failure is not:
+        that one already claimed its message, so running again would produce an empty
+        turn reporting false success. See `recovery`.
 
-        The delay is spent before the retry, not after the failure, so a root
-        that gives up does so immediately rather than sleeping first.
+        The delay is spent before the retry, not after the failure, so a root that gives
+        up does so immediately rather than sleeping first.
         """
         while True:
             try:
@@ -862,17 +801,14 @@ class Supervisor:
     async def announce_unreachable(self, note: dict[str, Any]) -> None:
         """Write the "nobody can reach me" record into every root, and flush it.
 
-        Flushed rather than left in the buffer, which is not the usual bar here:
-        every other record survives a crash because the log is written on the
-        way out, and this one is written precisely when the way out has stopped
-        being reliable. If the person's answer to an unreachable daemon is `kill`
-        — and it often is, because `ph agents shutdown` no longer has a door to
-        knock on — then an unflushed record is one that never explains anything
-        to anyone.
+        **Flushed rather than left in the buffer**, which is not the usual bar here:
+        every other record survives a crash because the log is written on the way out,
+        and this one is written precisely when the way out has stopped being reliable. If
+        the person's answer to an unreachable daemon is `kill`, an unflushed record never
+        explains anything to anyone.
 
-        Every root, not the busy ones: what became unreachable is the daemon,
-        and a transcript that stops without a word is the same puzzle whether or
-        not the root was mid-turn when the socket went.
+        Every root, not the busy ones: what became unreachable is the daemon, and a
+        transcript that stops without a word is the same puzzle either way.
         """
         for root in list(self.roots.values()):
             root.unreachable(note)
@@ -882,13 +818,10 @@ class Supervisor:
         """Flush a root's log, then unwind everything it took.
 
         One spelling, because there are two callers — `aclose` at shutdown and
-        `passivate` when a root goes quiet — and this pair has diverged here
-        before: `_flush` exists because `aclose`'s earlier copy skipped
-        `exits.aclose()` when the flush raised, leaving an unwritable root's
-        context undisposed. P5-05 reintroduced the same two-copies shape, down
-        to the identical warning string. Whatever joins root teardown next — a
-        lease, a reclaim, a cache eviction — now has one place to be added and
-        cannot land in only one of them.
+        `passivate` when a root goes quiet — and this pair has diverged twice: an earlier
+        `aclose` skipped `exits.aclose()` when the flush raised, leaving an unwritable
+        root's context undisposed. Whatever joins root teardown next — a lease, a
+        reclaim, a cache eviction — has one place to be added.
         """
         await self._flush(root)
         try:
@@ -914,17 +847,15 @@ class Supervisor:
     async def _restore(self, root: Root) -> bool:
         """Put the root's tree back to its last restore point, if it has one.
 
-        A retry that ran against a half-mutated tree would be a different turn
-        from the one that failed — the model would see edits from an attempt
-        nobody kept, and a ladder that compounds its own damage is worse than no
-        ladder. `workspace/checkpoint` is P4-09's record and already a fold, so
-        this asks the log rather than remembering anything.
+        A retry against a half-mutated tree would be a different turn from the one that
+        failed — the model would see edits from an attempt nobody kept, and a ladder that
+        compounds its own damage is worse than no ladder. `workspace/checkpoint` is
+        P4-09's record and already a fold, so this asks the log rather than remembering.
 
-        Best-effort by construction: an advisory-tier root has no worktree and
-        nothing to restore, and a restore that fails must not cost the retry. In
-        both cases the attempt goes ahead against the tree as it stands, and the
-        `agent/retry` record says `restored: false` so the transcript does not
-        imply a rollback that did not happen.
+        Best-effort by construction: an advisory-tier root has nothing to restore, and a
+        failed restore must not cost the retry. Either way the attempt goes ahead against
+        the tree as it stands, and `agent/retry` says `restored: false` so the transcript
+        does not imply a rollback that did not happen.
         """
         # `workspace_of`, not `ctx.workspace.of`: this runs inside `_drive`'s
         # `except`, and `ctx.workspace` *raises* on a profile that layers no
@@ -986,29 +917,26 @@ class Supervisor:
     def passivatable(self, root: Root, *, now: int, after: float) -> bool:
         """Whether this root may be released (P5-05).
 
-        Every condition is a reason a root is still *wanted*, and each is read
-        from something that already exists rather than from a flag set beside
-        it:
+        Every condition is a reason a root is still *wanted*, and each is read from
+        something that already exists rather than from a flag set beside it:
 
-        * **it is doing something** — `status` covers `running`, and covers
-          `retrying`, which matters: a root in P5-04's backoff is idle between
-          attempts and releasing it there would passivate a root mid-ladder;
-        * **somebody is watching** — `subscribers`, which is the root's own
-          attachment set, so a client that attached and never detached keeps its
-          session alive by the same fact that makes it receive events;
-        * **it has live children** — folded from `subagent/*`, because a parent
-          released while a child is still running would be rehydrated by the
-          child's own events arriving at a root that no longer exists;
+        * **it is doing something** — `status`, which covers `retrying`: a root in
+          P5-04's backoff is idle between attempts, and releasing it there would
+          passivate a root mid-ladder;
+        * **somebody is watching** — `subscribers`, the root's own attachment set, so a
+          client that attached and never detached keeps its session alive by the same
+          fact that makes it receive events;
+        * **it has live children** — folded from `subagent/*`, because a parent released
+          while a child is still running would be rehydrated by the child's own events
+          arriving at a root that no longer exists;
+        * **it has work scheduled** (P5-06) — a root with a live schedule has already
+          said when it comes back;
         * **it has been quiet long enough**, from the log.
 
-        * **it has work scheduled** — a root with a live schedule is going to
-          be needed again, and releasing it would be releasing something that
-          has already said when it comes back (P5-06).
-
-        Heartbeats were the fourth condition and turn out not to be one: a
-        heartbeat is a *record* the scheduler leaves so an operator can tell
-        "waiting for Wednesday" from "died on Tuesday", not a claim on the
-        root's life. What keeps a scheduled root mounted is the schedule.
+        A heartbeat is deliberately *not* a condition: it is a record the scheduler
+        leaves so an operator can tell "waiting for Wednesday" from "died on Tuesday",
+        not a claim on the root's life. What keeps a scheduled root mounted is the
+        schedule.
         """
         if root.status != "idle":
             return False
@@ -1063,19 +991,14 @@ class Supervisor:
     async def passivate(self, root: Root, *, now: int) -> None:
         """Release a root's process-side state, keeping its session on disk.
 
-        **Rehydration is already written**: `start()` resumes any root whose log
-        exists (P5-01), so waking one is the ordinary path rather than a second
-        mechanism — which is why this row is mostly a sweeper and a record, and
-        why the round-trip is a property rather than a feature.
+        **Rehydration is already written**: `start()` resumes any root whose log exists
+        (P5-01), so waking one is the ordinary path rather than a second mechanism.
 
-        Order matters and is the same order `aclose` uses: record, flush, then
-        unwind. Unwinding disposes the mounted `Context` and, with it, the
-        P5-03 lease on this session's log — so a passivated session is one
-        another process may legitimately open, which is the point rather than an
-        oversight.
-
-        The wake channel closes first so the root's task leaves its own loop
-        instead of being cancelled mid-turn, exactly as in `aclose`.
+        Order matters, and is `aclose`'s order: record, flush, then unwind. Unwinding
+        disposes the mounted `Context` and with it the P5-03 lease, so a passivated
+        session is one another process may legitimately open — the point rather than an
+        oversight. The wake channel closes first so the root's task leaves its own loop
+        instead of being cancelled mid-turn.
         """
         async with self._starting:
             # The same lock `start` orders itself with, and for the mirror-image

@@ -1,45 +1,35 @@
 """The retry ladder, and where it reads its own state from (P5-04).
 
 A root is the one thing in pH built to outlive whatever started it, so "the turn
-failed" cannot mean "the work stops and somebody notices eventually". This is the
-ladder that decides otherwise: retry at 250 ms, 1 s and 5 s, restore the tree
-between attempts, and after the third failure stop and *say so* rather than
-retrying forever.
+failed" cannot mean "the work stops and somebody notices eventually". This ladder
+retries at 250 ms, 1 s and 5 s, restores the tree between attempts, and after the
+third failure stops and *says so* rather than retrying forever.
 
 **Every part of that state is folded from the log.** How many attempts a root has
 made and whether it gave up are facts about the session, not fields on the
 supervisor — a daemon that crashed mid-ladder and came back would otherwise start
 the count from zero and retry a failing turn for as long as the process lives.
 
-Folded *once*, at root start, and then maintained through `Root.retry` /
-`give_up` / `recovered` — which is `Root.commands`' arrangement exactly, and for
-the measurement `Root.accepted` records: a whole-log scan per read cost 4.9 ms
-at 200 000 events on the daemon's event loop. The first draft called this fold
-from `Root.status`, which `describe()` reads for every root on every
-`sessions/list`; measured at 2.3 ms per root at 100 000 events, 12.5 ms at
-500 000, and 128 ms for fifty roots at once, with no await point between them.
+Folded **once**, at root start, and then maintained through `Root.retry` /
+`give_up` / `recovered`, which is `Root.commands`' arrangement exactly. It must
+not be folded from `Root.status`, which `describe()` reads for every root on every
+`sessions/list`.
 
 **What this ladder retries is the root's *task*, not a failed turn**, and the
 distinction is the whole design. `ReactLoopAgent.run` contains its own failures
-("a driver that propagated would take the process down with one bad turn") and
-`llm-retry` has already retried everything a model failure makes sense to retry —
-rate limits, 5xx, timeouts — while deliberately declining the rest, because "an
-unknown failure retried is an unknown failure billed twice". So a
+and `llm-retry` has already retried everything a model failure makes sense to
+retry — rate limits, 5xx, timeouts — while deliberately declining the rest,
+because an unknown failure retried is an unknown failure billed twice. So a
 `turn/end{error}` arriving here is a failure the layer that understands model
-failures decided to stop on, and re-running it from up here would be that exact
-mistake one level higher.
+failures decided to stop on.
 
-It would also not work. The failed turn already *claimed* its message from the
-inbox, so a second `run()` finds nothing pending and the driver ends the turn at
-`phase.step == 0` with `kind="completed"` — a trivially successful empty turn
-that clears the ladder and reports a healthy root which answered nothing. That is
-strictly worse than not retrying, and it is what the first draft of this module
-did until the row's own tests showed the retry turn completing with no request
-made. Re-splicing the claimed message instead would append a second
-`user/message` and show the model the same prompt twice.
+It would also not work: the failed turn already *claimed* its message from the
+inbox, so a second `run()` finds nothing pending and ends at `phase.step == 0`
+with `kind="completed"` — a trivially successful empty turn that clears the ladder
+and reports a healthy root which answered nothing.
 
-What is left is what the row names: the root's task crashing *around* the turn — a
-flush that cannot write, a disposed context, a bug — where the work is still in
+What is left is what the row names: the root's task crashing *around* the turn —
+a flush that cannot write, a disposed context, a bug — where the work is still in
 the inbox and running again is meaningful.
 
 @module ph_app.daemon.recovery

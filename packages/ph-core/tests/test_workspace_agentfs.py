@@ -7,6 +7,37 @@ The vocabulary half runs everywhere. The real half runs only where an overlay
 actually isolates, which is decided by the same probe the row ships — not by
 "is the binary installed", because `agentfs run --experimental-sandbox` exits 0
 and writes straight through to the host.
+
+## What was measured on a working host, and what each number decided
+
+**Isolation, verified.** A write through the overlay is visible to the agent and
+the host copy is unchanged; two agents over one base each read back their own
+version of the same path.
+
+**It does not confine the process, which is why `tier` is `worktree` and not a
+rung above it.** A command whose cwd is *inside* the mount wrote to an absolute
+path *outside* it and the write landed on the host for real.
+
+**Why `mount` and not `exec` or `run`.** `run` adds user and mount namespaces —
+the mode that would actually confine — and is unavailable on any host with
+`kernel.apparmor_restrict_unprivileged_userns=1`, the Ubuntu 23.10+ default.
+`exec` mounts and runs in one shot, which would suit `acquire` exactly, and fails
+with `connection pool timeout: no connections available` on a brand-new agent with
+nothing mounted — reproduced on tmpfs *and* on ZFS, so it is neither
+backing-store sensitivity nor contention. `mount` works on both, returns in
+**~60 ms** leaving a live FUSE mount, and unmounts with `fusermount3 -u`.
+
+**Acquire cost against the tier it is a peer of.** An overlay acquire is flat at
+**~90-190 ms** regardless of tree size, where `git worktree add` is linear:
+**37 ms at 1 000 files, 300-425 ms at 11 000**. What the overlay pays for that is
+read speed — FUSE reads measured **30x native**.
+
+**The `agentfs run` trap, recorded because it cost a wrong conclusion.** `agentfs
+run` prints its session banner *even when the sandbox fails to start*, so a banner
+plus exit 0 is not evidence the command ran. The actual failure was `Failed to
+make mounts private: Permission denied`, and the host file was unchanged because
+**the command never ran** — not because it was contained. Never read an exit code
+as proof of confinement (E13).
 """
 
 from __future__ import annotations

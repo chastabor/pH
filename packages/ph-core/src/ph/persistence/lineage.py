@@ -99,22 +99,19 @@ class LineageError(Exception):
 def materialise(read_one: ReadOne, session_id: str) -> tuple[SessionHeader, list[SessionEvent]]:
     """One session's full log, following its lineage to a file that starts at 0.
 
-    Returns the *child's* header — the lineage supplies events, never identity.
-    A materialised log is what every reader already expects: dense from `seq == 0`
-    and contiguous, so `_readmit`, the surface fold, the daemon's cursors and
-    both derivations are untouched by any of this.
+    Returns the *child's* header — the lineage supplies events, never identity. A
+    materialised log is what every reader already expects: dense from `seq == 0` and
+    contiguous, so `_readmit`, the surface fold, the daemon's cursors and both
+    derivations are untouched by any of this.
 
-    **The slices tile exactly**: each ancestor contributes only what the
-    generation below it still lacks, so the assembled log contains every event
-    once. What is *kept* is 1.00x the result.
+    **The slices tile exactly**: each ancestor contributes only what the generation
+    below it still lacks, so the assembled log contains every event once. What is
+    *kept* is 1.00x the result.
 
-    **What is read is bounded too**, which it was not at first: `read_one` was a
-    whole-log read, so an ancestor contributing 50 events out of 10 000 was
-    parsed and validated in full — ~170x the useful work at an early fork
-    boundary, though only 2.6% at the tip, where the child wants nearly all of
-    it anyway. `upto` carries the boundary now: Turso adds `WHERE seq < ?`, JSONL
-    stops reading lines. The tail costs a dict lookup instead of a validate and
-    freeze.
+    **What is read is bounded too.** `upto` carries the fork boundary, so Turso adds
+    `WHERE seq < ?` and JSONL stops reading lines, rather than parsing and validating
+    an ancestor in full to keep fifty of its events. The read amplification this
+    avoids is measured in `tests/test_fork.py`.
 
     Walks iteratively rather than recursively: the chain is data from disk, and a
     hand-edited header naming a cycle should meet a bound rather than the

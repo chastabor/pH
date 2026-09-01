@@ -4,6 +4,49 @@ One suite, parametrized over the two implementations, which is the only way the
 Protocol means anything — a second backend tested by its own tests would agree
 with itself and nothing else. Every test here asks a question through the
 Protocol; none reaches for a path, a directory or a table.
+
+## Why the boundary is `durable_length` and not `first_live_seq`
+
+A defect that shipped, and the reason the two names are not interchangeable.
+
+A resume seeds the stored events *plus* the repair closers
+`interrupted_turn_closers` synthesized, and the constructor then appends
+`session/end-seed` on top. Those last events are in the log and have **never been
+written**. A backend that treated everything present at `track` time as durable
+dropped them and wrote only what arrived afterwards through `record`, leaving a
+**gap in the seq space** — and `_readmit` refuses a gap, so the session resumed
+exactly once and then could not be opened again. Measured: a daemon root survived
+two lifetimes.
+
+`durable_length` is therefore what a *store* holds, declared by the caller that
+knows, and never inferred from what happens to be in the log.
+
+## What full-text search cost the Turso backend before it was removed
+
+It was never parity — JSONL cannot search either — so it was a feature riding
+along. It cost an experimental flag, a ranking that does not work through a bound
+parameter, and an index whose incremental maintenance made writes **quadratic**: a
+ten-event flush went from **1.0 ms to 227 ms** once a session passed six hundred
+events. Search over sessions, if it is wanted, is built *on top of* a backend
+rather than being a thing one backend secretly has.
+
+## Why `read_own` takes `family` and why that one is not a hint
+
+`upto` is a hint — a backend that returns events above it is slower, not wrong.
+`family` is not: every member of a lineage shares one directory, so passing it
+turns a directory search into a path. Without it a chained read paid one scan per
+generation, measured at **31% of a depth-5 read at 200 families**, growing with
+the size of the store rather than with the length of the log.
+
+## What the two copies of the family layout had already drifted on
+
+The address rule `<root>/<family>/<name><suffix>` was written out twice, once per
+backend, and the copies diverged **before either shipped**: one kept a dead
+`OSError` handler its twin had dropped, one recovered an id with `path.stem` and
+the other by slicing the suffix, and a `StoredSession` field added to one listing
+was missed by the other. That is why `ph.persistence.families` exists — two
+implementations whose docstrings have to assert they agree ("JSONL's rule exactly")
+are not a mechanism.
 """
 
 from __future__ import annotations

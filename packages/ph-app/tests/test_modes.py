@@ -6,6 +6,14 @@ The modes share one property worth testing rather than assuming: `json` and
 `rpc` emit **the log's own envelopes**, camelCase, not a per-mode rendering
 (I-7). A wrapper consuming a stream and a tool reading the stored file then
 parse one format — and dsh's tooling reads both.
+
+## Why the envelope is one module and not one per transport
+
+P5-01 shipped the two transports as two: the daemon grew `root/*` methods and
+**dropped the `"jsonrpc": "2.0"` field** the RPC mode sends. The divergence was
+invisible because **each transport only ever tested itself** — which is why the
+envelope, the version and the capability block now live in `ph_app.protocol` and
+each server owns only its method table.
 """
 
 from __future__ import annotations

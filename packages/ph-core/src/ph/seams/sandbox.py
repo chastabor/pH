@@ -72,23 +72,19 @@ class SandboxPolicy(WireModel):
 def writable_paths(policy: SandboxPolicy) -> list[str]:
     """Every path this policy permits writing, in the order a backend binds them.
 
-    **On the seam, beside the value it describes**, for `workspace_policy`'s
-    reason one module over: two backends need this set and a third arrives with
-    P6-04's own Landlock, so a rule private to one of them is a rule the next one
-    copies. `writable_roots` answers the same question of a `Workspace`; this
+    **On the seam, beside the value it describes**: two backends need this set and a
+    third arrives with Landlock, so a rule private to one of them is a rule the next
+    one copies. `writable_roots` answers the same question of a `Workspace`; this
     answers it of the policy that workspace produced.
 
-    Exhaustive over `SandboxMode` rather than an `if`, which is how every other
-    closed Literal here is answered — `project_access`, `restorable` and their
-    siblings all argue for it, and `restorable`'s docstring is specifically about
-    a membership test that nearly went wrong. A fourth mode should fail to
-    compile rather than silently inherit "workspace and extras".
+    Exhaustive over `SandboxMode` rather than an `if`, so a fourth mode fails to
+    compile rather than silently inheriting "workspace and extras".
 
-    `read-only` names no workspace root and no implicit `/tmp`: a temp directory
+    `read-only` names no workspace root and **no implicit `/tmp`**: a temp directory
     the caller did not ask for is a writable hole nobody declared, and
     `redirection_env` already points the toolchain's scratch at one that was.
-    `danger-full-access` returns nothing here because it is not a *set* of
-    writable paths — it is "everything", which each backend spells its own way.
+    `danger-full-access` returns nothing here because it is not a *set* of writable
+    paths — it is "everything", which each backend spells its own way.
     """
     extra = list(policy.writable_extra or ())
     match policy.mode:

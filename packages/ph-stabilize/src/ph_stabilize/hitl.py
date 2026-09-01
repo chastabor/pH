@@ -91,16 +91,12 @@ because the version with a clause is ordinary work.
 PATTERN_SETS: dict[str, tuple[str, ...]] = {"destructive": DESTRUCTIVE_PATTERNS}
 """Pattern sets a profile can name instead of retyping.
 
-`DESTRUCTIVE_PATTERNS` was exported, documented and tested, and reachable only
-from Python — so the first profile that wanted it retyped a subset, which had
-already diverged on its first day: it widened `git push` from force-only to
-every push, against a shipped test that pins `git push origin main` as ordinary,
-and dropped the `wget`, `dd`, `mkfs`, `chmod -R` and SQL entries. A security
-judgement with two homes is one that disagrees with itself.
+`DESTRUCTIVE_PATTERNS` was exported, documented, tested — and reachable only from
+Python, so the first profile that wanted it retyped a subset. **A security
+judgement with two homes is one that disagrees with itself**; what the copy got
+wrong is recorded in `tests/test_hitl.py`.
 
 A named set rather than `${...}` interpolation, because the loader's vocabulary
-is closed on purpose (I-8) and this is a *typed field on a row's config*, which
-is the mechanism a row already has for saying what it accepts.
 """
 
 

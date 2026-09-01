@@ -216,33 +216,24 @@ class SystemPromptService:
     ) -> Disposer:
         """Contribute to a bucket, and hand back the disposer that withdraws it.
 
-        **Two contexts, because the owner was answering two questions** (P6-12).
-        `_Registration.owner` feeds `_visible`'s `reaches` — that is *who sees
-        this section* — while `add_disposer` decides *when it goes away*. Both
-        were `scope or self.ctx`, so a row's section outlived the row: I2 held
-        only where a caller remembered `scope=`.
+        **Two contexts, because the owner answers two questions** (P6-12).
+        `_Registration.owner` feeds `_visible`'s `reaches` — *who sees this section* —
+        while `add_disposer` decides *when it goes away*. Spelling both as
+        `scope or self.ctx` made a row's section outlive the row.
 
-        **Both are kept now, not just spent** (P6-29). Four of this file's
-        buckets hold a *body* — a section's `text`, a context's, a variable's
-        provider, a tool provider — which `assemble` invokes later, and it ran
-        them unbound: anything they registered landed on the seam and outlived
-        the row. Binding needs the owner at invoke time, which means recording it
-        here rather than resolving it and dropping it.
+        **Both are kept, not just spent** (P6-29). Four of this file's buckets hold a
+        *body* — a section's `text`, a context's, a variable's provider, a tool provider —
+        which `assemble` invokes later, and binding needs the owner at invoke time, which
+        means recording it here rather than resolving it and dropping it.
 
-        The visibility target is unchanged and the lifetime is now the
-        activating row's. For a globally mounted row the two agree anyway — an
-        activation scope inherits its parent's isolation, so a root row's
-        section reaches everything either way — and keeping them separate is
-        what makes that true by construction rather than by inspection.
+        The visibility target is unchanged and the lifetime is the activating row's. For a
+        globally mounted row the two agree anyway, and keeping them separate is what makes
+        that true by construction rather than by inspection.
 
-        Through `claim_entry` rather than a hand-rolled `bucket.remove`, and it
-        was **required rather than tidier**: `@dataclass(slots=True)` defaults to
-        `eq=True`, so `_Registration` compares by *value*, and two rows
-        contributing an equal section would have had one disposal take the
-        other's. An earlier draft of this docstring claimed the opposite — that
-        the old code compared by identity and was accidentally right — which is
-        exactly the mistake `_registry`'s own docstring was written to stop
-        someone making.
+        Through `claim_entry` rather than a hand-rolled `bucket.remove`, and it is
+        **required rather than tidier**: `@dataclass(slots=True)` defaults to `eq=True`,
+        so `_Registration` compares by *value*, and two rows contributing an equal section
+        would have one disposal take the other's.
         """
         by = self.ctx.running_for(scope)
         entry = _Registration(value=value, by=by)

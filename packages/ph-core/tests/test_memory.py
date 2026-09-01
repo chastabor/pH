@@ -16,6 +16,15 @@ Discovery order is nearest-first, then the user's own file — a subdirectory's
 instructions are more specific than the repository's, and every level is kept
 rather than the nearest one winning, because `AGENTS.md` is additive by
 convention.
+
+## Why locating and reading are two passes
+
+`assemble` runs once per model *step*, so "memory is live" must not mean "every
+step reads 64 KiB from disk". Re-reading is a `stat` per candidate directory per
+turn, and the bytes are read only when a file's mtime or size moved.
+
+The first draft did the read first and checked the signature afterwards — which
+saved a `str.join` and nothing else, while paying the read on every step.
 """
 
 from __future__ import annotations

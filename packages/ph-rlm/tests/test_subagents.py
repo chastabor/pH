@@ -4,6 +4,22 @@ The load-bearing claim is **non-blocking admission**: `start()` returns once the
 child is admitted, not once it has answered. Everything else here is about the
 parent being able to act on that handle — the roster is a fold, a silent child is
 announced, usage is attributed, a revoked child leaves a tombstone.
+
+## `subagent/usage-attributed` is a record, not a correction
+
+This module's own docstring used to say the event exists "so the token meter
+**can** subtract a child's tokens from the parent's own context measurement".
+That was never true, and "can" was doing the work in the sentence.
+
+`TokenMeter.last_usage` scans only `assistant/message` in the log it is *given*,
+and a child's `assistant/message` events are in the **child's** log — so the
+parent's context measurement never included them and there is nothing to
+subtract. The event is additive, for readers; its only consumer is the TUI panel.
+
+Worth keeping written down because the false version was load-bearing-sounding:
+it implied a fan-out of eight would otherwise read as context pressure on the
+parent and trigger a compaction it does not need. It would not, and no code path
+depends on the event to prevent it.
 """
 
 from __future__ import annotations

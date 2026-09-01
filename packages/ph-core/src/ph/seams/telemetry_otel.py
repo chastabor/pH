@@ -1,18 +1,16 @@
 """`session-telemetry-otel` — ship the ledger to an OTel collector (P5-09).
 
 A **sink**, registered through `SessionTelemetry.add_sink`, which is the whole
-security argument: `add_sink` runs after the `session-telemetry/record`
-redaction waterfall settles, so an exporter physically cannot observe a record
-the redactors dropped or rewrote. A row that listened on the waterfall event
-*alongside* redaction could see the unredacted form by winning a race; this one
-has no such race to win, and the row's gate — "redaction still precedes export"
-— is that property asserted rather than a rule anyone has to remember.
+security argument: `add_sink` runs after the `session-telemetry/record` redaction
+waterfall settles, so an exporter physically cannot observe a record the redactors
+dropped or rewrote. A row that listened on the waterfall event *alongside*
+redaction could see the unredacted form by winning a race; this one has no such
+race to win.
 
-**Logs, not spans, and that is §8's decision rather than a shortcut.** The seam
-says it out loud: "the session log is the trace", and a span hierarchy would be
-a second, lossier account of what the log already holds event by event. So each
-record becomes one OTel *log record*, carrying the channel and severity pH
-already assigned. Anything wanting a waterfall view builds it from the log.
+**Logs, not spans**, which is §8's decision rather than a shortcut: "the session
+log is the trace", and a span hierarchy would be a second, lossier account of what
+the log already holds event by event. Each record becomes one OTel *log record*,
+carrying the channel and severity pH already assigned.
 
 **Optional, and honest when absent.** `opentelemetry-sdk` and the OTLP exporter
 distribution are an extra (`ph-core[otel]`), imported inside `apply` so a
@@ -20,12 +18,9 @@ deployment that never exports does not pay them, and a profile that mounts this
 row without them gets a refusal naming what to install rather than an
 `ImportError` from the loader.
 
-**Nothing here half-mounts.** An earlier draft treated the two distributions
-differently — refusing without the SDK, but building a provider with no
-exporter when only the OTLP half was missing. That is the silent no-op the
-refusal below exists to avoid, reached through the other door: `ph doctor` would
-have reported a healthy telemetry sink shipping to nowhere. Either the row can
-export or it refuses.
+**Nothing here half-mounts**: either the row can export or it refuses. Building a
+provider with no exporter would have `ph doctor` report a healthy telemetry sink
+shipping to nowhere.
 
 @module ph.seams.telemetry_otel
 """

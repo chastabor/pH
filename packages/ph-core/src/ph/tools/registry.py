@@ -9,13 +9,11 @@ Three separable things live here because they share one traversal:
   → `tools/execute` (around) → body → `tools/post-execute` → normalize →
   `finalize_content` → `tools/result` (B1-B5).
 
-**Ordering note.** dsh runs guards *after* approval
-(`docs/tool-execution-pipeline.md`, and `prepareExecution` in
-`packages/core/tools/src/index.ts`), and pH follows it. The pH plans' summary
-tables list guards before approval; that is a transcription slip, and the
-difference matters: a guard is deny-only and runs last, so it is the final word
-even over a human's explicit approval. That is what "monotonic" buys — policy
-that must not be reorderable stays a guard rather than a listener.
+**Guards run after approval**, following dsh. A guard is deny-only and runs last,
+so it is the final word even over a human's explicit approval — that is what
+"monotonic" buys, and it is why policy that must not be reorderable stays a guard
+rather than a listener. (The pH plans' summary tables list the two the other way
+round; that is a transcription slip, recorded in `tests/test_tools_pipeline.py`.)
 
 @module ph.tools.registry
 """
@@ -290,50 +288,26 @@ class ToolRuntime:
     ) -> Disposer:
         """Mutate a layer and hand back the disposer that undoes it.
 
-                **Two contexts, because the owner was answering two questions** (P6-12).
-                `owner.isolation` chose *which layer* a registration lands in — that is
-                tool visibility, B7's whole subject — while `owner.add_disposer` chose
-                *when it goes away*. One value did both because both were
-                `scope or self.ctx`, and they are not the same question: the lifetime is
-                now the activating row's, so a tool unwinds when its row unmounts, while
-                the layer stayed exactly where it was so nothing about what an agent can
-                see changed. Conflating them was what made this row's fix look risky.
+        **Two questions, from one `scope`.** `owner.isolation` chooses *which layer* a
+        registration lands in — tool visibility, B7's subject — while lifetime chooses
+        *when it goes away*. Both are derived here rather than passed in: the first
+        version took two contexts, and all six call sites wrote the same pair, which
+        restates the relationship six times and lets a seventh pair them wrongly.
 
-                **The layer moved later, and only for the case that had to move**
-                (P6-26). `layer_for` follows "who is running" too now, so the two lines
-                below read one variable again — but they still ask different questions
-                of it, and `isolation` keeps the answers apart. An activation scope is
-                not isolated, so a row's tool still lands on the global layer and the
-                paragraph above is unchanged for it. An agent's scope *is* its own
-                isolation, so a tool registered from a body running for that agent
-                lands on that agent's layer — the one case "visibility is unchanged"
-                was wrong about, because it let a body inside a contained child install
-                a tool the whole deployment could see.
+        `isolation` is what keeps the two answers apart even though both now read the
+        running binding (P6-26). An activation scope is not isolated, so a row's tool
+        still lands on the global layer; an agent's scope *is* its own isolation, so a
+        tool registered from a body running for that agent lands on that agent's layer —
+        the case that let a body inside a contained child install a tool the whole
+        deployment could see.
 
-                **Both are derived here, from `scope`, rather than passed in.** The first
-                version took the two contexts as separate arguments, and every one of the
-                six call sites wrote the same pair — which restates the relationship six
-                times and, worse, lets a seventh pair them wrongly and reintroduce the
-                defect with nothing to catch it. Deriving them from the one argument they
-                are both functions of is what makes the layering rule true by
-                construction rather than by reading six call sites — including the
-                P6-26 change above, which is one edit inside `layer_for` and not six.
-
-                **The lifetime is the *intersection* of the two, not a choice between
-                them** (P6-29). Once a tool body registers as the row that wrote it and
-                for the agent that ran it, the two scopes are unrelated branches of the
-                tree and either can end first. Owning it by the row alone strands the
-                agent's `_Layer` in `self._layers` under a disposed key — measured: the
-                layer count goes 2 → 2 across an agent's disposal where it goes 2 → 1
-                today. Owning it by the agent alone is what P6-26 shipped, and it lets a
-                registration outlive the row whose code made it, which is I2 verbatim.
-                Neither is a defensible default, and the honest answer is that such a
-                registration is only meaningful while **both** are alive.
-
-        So the release goes on both scopes and the first to fire wins —
-                through `Running.add_disposer`, which is where that rule lives, because
-                `ph.seams.skills` keys `_restrictions` by the layer too and a rule with
-                two sites and one implementation is what this row exists to delete.
+        **The lifetime is the *intersection* of the two, not a choice between them**
+        (P6-29): the two scopes are unrelated branches and either can end first. Owning
+        it by the row alone strands the agent's `_Layer` under a disposed key; owning it
+        by the agent alone lets a registration outlive the row whose code made it, which
+        is I2 verbatim. So the release goes on both scopes and the first to fire wins,
+        through `Running.add_disposer` — where that rule lives, because
+        `ph.seams.skills` keys `_restrictions` by the layer too.
         """
         by = self.ctx.running_for(scope)
         key = by.layer.isolation
@@ -559,21 +533,15 @@ class ToolRuntime:
     def view(self, scope: Boundary) -> _View:
         """Resolve what one boundary sees, most-specific-first.
 
-        Memoized per isolation chain until the next registry change. The view is
-        read several times per tool call and per prompt assembly, and changes
-        only when a row registers or disposes something.
+        Memoized per isolation chain until the next registry change: the view is read
+        several times per tool call and per prompt assembly, and changes only when a row
+        registers or disposes something.
 
-        **Stated, with no default** (P6-32). This resolved `scope or self.ctx`,
-        and `self.ctx` is the mount — whose isolation is `None`, the *global*
-        layer — so an unstated boundary was not "no tools", it was every tool the
-        deployment holds. `ToolRuntime.names(scope=None)` reaching that is half of
-        what handed a child the unrestricted ceiling in P6-31.
-
-        `DEPLOYMENT` says the wide thing deliberately, which is what lets the
-        default come off: the callers who mean it — RPC mode advertising the
-        deployment's schemas, `register_when_composed`'s name-collision check —
-        still get it, and a caller that says nothing now fails rather than being
-        handed the widest answer.
+        **Stated, with no default** (P6-32). This resolved `scope or self.ctx`, and
+        `self.ctx` is the mount — whose isolation is `None`, the *global* layer — so an
+        unstated boundary was not "no tools", it was every tool the deployment holds.
+        `DEPLOYMENT` now says the wide thing deliberately, so a caller that says nothing
+        fails rather than being handed the widest answer.
         """
         target = boundary_of(scope, self.ctx)
         cache_key = tuple(target.isolation_chain())
@@ -701,24 +669,14 @@ class ToolRuntime:
     def execution_mode(self, call: ToolExecutionInput) -> ExecutionMode:
         """The live overlap classification, re-read before every start.
 
-        **The last definition-owned body, bound like the other four** (P6-29).
-        P6-26 left this one out and said so here, on the grounds that binding it
-        meant deciding what `scope=None` should mean — but that was an objection
-        to the *layer* half only, and it is the same objection that had deferred
-        the five `claim_slot` providers. The owner half needs no target at all:
-        it is what registration recorded, and the view carries it beside the
-        definition. So a classifier that registers something now unwinds with
-        the row that wrote it instead of landing wherever the scheduler happened
-        to be called from, which was the measured P6-26 defect in the one body
-        still open to it.
+        **The last definition-owned body, bound like the other four** (P6-29): a
+        classifier that registers something unwinds with the row that wrote it instead of
+        landing wherever the scheduler happened to be called from.
 
-        The layer bound around the call is `boundary_of(call.scope, ...)` — for
-        `DEPLOYMENT` that is the mount, and the equivalence is worth stating
-        because it is load-bearing: only globally registered tools are visible
-        under `DEPLOYMENT`, and a global registration's own layer *is* the
-        mount's, so binding the mount here is binding the pair's recorded layer
-        for every tool this branch can reach. `call.scope` itself can no longer
-        be `None`; `ToolExecutionInput.scope` became required in P6-32.
+        The layer bound around the call is `boundary_of(call.scope, ...)`, and for
+        `DEPLOYMENT` that is the mount. The equivalence is load-bearing: only globally
+        registered tools are visible under `DEPLOYMENT`, and a global registration's own
+        layer *is* the mount's, so binding the mount here binds the pair's recorded layer.
         """
         view = self.view(call.scope)
         definition = view.visible.get(call.name)
@@ -1076,25 +1034,20 @@ def register_when_composed(ctx: Context, build: Callable[[], ToolDefinition | No
     """Register a tool once the profile is whole, if `build` says there is one.
 
     For the tool whose *existence* depends on something another row supplies: a
-    `skill` tool needs an installed skill, a `task` tool needs a subagent
-    provider. Both were written as their own `ctx.on("profile/mounted", ...)`
-    and immediately began to diverge, which is the same road
-    `diagnostics.contribute` took one seam over.
+    `skill` tool needs an installed skill, a `task` tool needs a subagent provider.
 
-    **Why a tool that cannot work must not be registered**, rather than
-    registered and refused: its schema and description are in the prompt of
-    every request, so a tool the deployment cannot perform spends the context
-    window teaching a capability that is not there — and the model spends a turn
-    discovering that.
+    **A tool that cannot work must not be registered**, rather than registered and
+    refused: its schema and description are in the prompt of every request, so a tool
+    the deployment cannot perform spends the context window teaching a capability
+    that is not there — and the model spends a turn discovering that.
 
-    **Why `profile/mounted` and not `ctx.inject`.** `inject` waits on a *service
-    key*, and neither condition is one: "the skills registry is non-empty" and
-    "some subagent provider is registered" are facts about a service's contents.
-    `profile/mounted` is the one moment the profile is known to be whole, which
-    is exactly when those questions have their final answer.
+    **`profile/mounted`, not `ctx.inject`.** `inject` waits on a *service key*, and
+    neither condition is one: "the skills registry is non-empty" and "some subagent
+    provider is registered" are facts about a service's contents. `profile/mounted`
+    is the one moment the profile is known to be whole.
 
     `build` returning `None` means "not in this deployment". A name already
-    registered is left alone, so a second dispatch is a no-op rather than the
+    registered is left alone, so a second dispatch is a no-op rather than a
     duplicate-name `ValueError` — which, on this event, would abort the process.
     """
 

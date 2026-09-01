@@ -3,21 +3,18 @@
 Ported from prime-agent's `prompts/rlm.ts`. Three things about the port are
 decisions rather than transcription:
 
-**Nothing here re-describes the generated surface.** Prime Agent's doctrine
-carried an "RLM-native call contract" paragraph, and a first draft of this file
-carried a bullet list of the five delegation calls. Both existed because
-prime-agent had no generated listing; `tools:sdk` *is* that listing, built from
-the registry, so prose beside it is a second description of one surface with the
-hand-written copy going stale first. What survives is what the listing cannot
-say: the rules.
+**Nothing here re-describes the generated surface.** `tools:sdk` *is* the listing
+of the delegation calls, built from the registry, so prose beside it would be a
+second description of one surface with the hand-written copy going stale first.
+What survives is what the listing cannot say: the rules.
 
 **The non-blocking rule is stated as a rule, not a hint.** `rlm.run` returns an
 admission handle, so a model that waits for an answer waits forever.
 
-**Volatile facts are a `context()`, not a `section`.** Depth, working directory
-and the family change between turns; in a cached `section` each change would
-re-bill the whole prefix (A12). They are materialized as a snapshot after
-retained history, and only when the text changed.
+**Volatile facts are a `context()`, not a `section`.** Depth, working directory and
+the family change between turns; in a cached `section` each change would re-bill
+the whole prefix (A12). They are materialized as a snapshot after retained
+history, and only when the text changed.
 
 @module ph_rlm.prompt
 """
@@ -125,21 +122,18 @@ WORKSPACE_LINE = (
 )
 """What the workspace line says when this agent holds no workspace (D21).
 
-Stated rather than omitted, because the reason the plan wants this line is that
-an agent handed a read-only repo *without notice* attempts writes and reads the
-failures as its own bug — and "nothing is bounding you" is the same warning.
+Stated rather than omitted: an agent handed a read-only repo *without notice*
+attempts writes and reads the failures as its own bug, and "nothing is bounding
+you" is the same warning.
 
-It is reached by *asking* — `facts()` emits it only when the seam has no
-workspace for this agent — rather than by asserting an absence. An assertion
-would keep telling every agent that nothing is mounted after something was, and
-the test pinning it would defend the falsehood.
+Reached by *asking* — `facts()` emits it only when the seam has no workspace for
+this agent — rather than by asserting an absence, which would keep telling every
+agent that nothing is mounted after something was.
 
-**"none acquired", not "no tier is mounted".** The first draft said the latter,
-which stopped being true the moment P4-07 put `workspace-shared` in `ph-base`:
-the seam is mounted in every profile, and what varies is whether the agent
-lifecycle has taken a workspace and which tier answered. The practical fact for
-the model is the same either way — nothing is bounding it — and that is what the
-sentence has to carry."""
+**"none acquired", not "no tier is mounted".** The seam is mounted in every
+profile since `workspace-shared` joined `ph-base`; what varies is whether the
+agent lifecycle has taken a workspace and which tier answered.
+"""
 
 
 @plugin("rlm-prompt", inject=["system_prompt", "tools", "sessions", "subagents"])
@@ -214,19 +208,16 @@ async def apply(ctx: Context, _config: Any) -> None:
 def _workspace(ctx: Context, agent_id: str) -> list[str]:
     """What is true about *this agent's* workspace, asked of the seam.
 
-    Asked of the seam for a specific agent, not read off `ctx.workspace` as if
-    the provision were a workspace: `ctx.<name>` is a service everywhere in this
-    codebase, and a workspace is per-agent state a service hands out. The first
-    draft of this line duck-typed the provision itself, which would have started
-    describing the seam object the day P4-07 mounted it.
+    Asked of the seam **for a specific agent**, not read off `ctx.workspace` as if the
+    provision were a workspace: `ctx.<name>` is a service everywhere in this codebase,
+    and a workspace is per-agent state a service hands out.
 
-    `repo_writable` is reported as the seam states it and never inferred from the
-    kind: `worktree-ephemeral` is writable and reaches nobody, and a line that
-    called it read-only would be telling the model the opposite of what happens.
+    `repo_writable` is reported as the seam states it and **never inferred from the
+    kind**: `worktree-ephemeral` is writable and reaches nobody, and a line that
+    called it read-only would tell the model the opposite of what happens.
 
-    Lines rather than one string with newlines in it, because `facts()` already
-    owns the joining — a second assembly mechanism for one block of text is one
-    that can disagree with the first about spacing.
+    Lines rather than one string with newlines in it, because `facts()` already owns
+    the joining.
     """
     workspace = workspace_of(ctx, agent_id)
     if workspace is None:

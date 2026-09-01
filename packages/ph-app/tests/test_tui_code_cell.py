@@ -8,6 +8,14 @@ row as the reason they were classified rather than rendered.
 The claim under both is the P2-01 one, one layer down: everything drawn comes
 from the settled record, so a replayed cell is the cell that ran and a resumed
 session's panel is the family the parent left.
+
+## Why the cell card does not print the dispatch count
+
+The collapsible below it already reports the count, from the
+`tool/code-dispatch-start` fold that owns those rows. Two projections of one number
+in one widget can disagree — which is what A11 forbids, and what the first draft of
+this card did: a snapshot showing **"3 governed calls" over a section titled "1
+governed call"**.
 """
 
 from __future__ import annotations

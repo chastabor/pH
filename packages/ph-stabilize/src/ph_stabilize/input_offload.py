@@ -1,38 +1,30 @@
 """`input-offload` — a pasted blob relocated, not lost (P4-02, G3).
 
 The sibling of `tool-result-offload`, for the other direction: someone pastes a
-2 MB log into the prompt. Deep Agents' `_message_eviction` handles this by
-keeping the message in `state` and substituting a preview in the *projection* it
-sends. pH has no state/projection split — it has a **log** and a **surface** —
-and that turns out to be the better fit, because pH's surface already does
-exactly this for compaction.
+2 MB log into the prompt.
 
-**One statement, two readers.** The original `user/message` is logged as the
-person sent it. A second `user/message` carrying the preview is appended with
+**One statement, two readers.** The original `user/message` is logged as the person
+sent it. A second `user/message` carrying the preview is appended with
 `surface_op: replace` citing it. From then on:
 
 * `derive_messages()` — what the model reads — yields the preview;
 * `transcript()` — what the person reads — yields the original, in full.
 
 Nothing is written twice and nothing is deleted, which is what makes the
-substitution reversible reading rather than an edit (I4). The alternative
-considered was rewriting the message before it is logged; it was rejected
-because the log would then attribute harness-authored text to the human, which
-is a false statement in an append-only record rather than merely a lossy one.
+substitution reversible reading rather than an edit (I4). Rewriting the message
+*before* it is logged was the alternative, and is refused: the log would then
+attribute harness-authored text to the human, which is a false statement in an
+append-only record rather than merely a lossy one.
 
 **Where it runs, and why there.** `agent/request` is the only seam between the
-driver appending `user/message` (from the messages `agent/pre-step` returned)
-and `_build_request` calling `derive_messages()` for the outgoing request. A
-listener here appends the replacement and returns the config untouched; the
-loop then derives, sees the replacement, and sends the preview. There is no
-second copy of the substitution to keep in step — the loop's own re-derivation
-is what applies it.
+driver appending `user/message` and `_build_request` calling `derive_messages()`.
+A listener here appends the replacement and returns the config untouched; the loop
+then derives, sees the replacement, and sends the preview. There is no second copy
+of the substitution to keep in step — the loop's own re-derivation applies it.
 
-**Only the newest message, and only once.** Upstream checks the last human
-message and skips one already evicted; the same two rules here are
-`Session.latest("user/message")` and `is_replacement_surface_event`, which makes
-the pass idempotent — the replacement is itself a `user/message`, so the next
-request finds it, sees a replacement, and stops.
+**Only the newest message, and only once.** `Session.latest("user/message")` and
+`is_replacement_surface_event` make the pass idempotent: the replacement is itself
+a `user/message`, so the next request finds it, sees a replacement, and stops.
 
 @module ph_stabilize.input_offload
 """

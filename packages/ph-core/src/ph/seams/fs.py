@@ -1,33 +1,28 @@
 """`ctx.fs` — filesystem access with an interception point before every access.
 
-Every read, every write and every edit passes through a waterfall
-(`fs/read-intent`, `fs/write-intent`, `fs/edit-intent`) *before* it touches the
-disk. That ordering is the whole value: a policy plugin that ran after the write
-would be a reporter, not a gate — which is precisely the failure the feature map
-records in prime-agent's `edit` skill, where the diff is emitted **after** the
-file changed, so "there is no point at which anything can say no".
+Every read, write and edit passes through a waterfall (`fs/read-intent`,
+`fs/write-intent`, `fs/edit-intent`) *before* it touches the disk. That ordering
+is the whole value: a policy plugin that ran after the write would be a reporter,
+not a gate.
 
 **Enumeration is filtered, not gated** (`screen`). `glob` and `grep` visit
-thousands of candidates and a waterfall per candidate would be both slow and
-absurd — nobody approves nine hundred prompts — so a policy row registers a
-synchronous screen and the walk never yields, or never enters, what it refuses.
-It runs *during* the walk rather than over the results, because `grep` reads the
-files it visits: post-filtering its matches would return no rows while having
-read every byte of the file the rule was protecting.
+thousands of candidates, so a policy row registers a synchronous screen and the
+walk never yields, or never enters, what it refuses. It runs *during* the walk
+rather than over the results, because `grep` reads the files it visits:
+post-filtering its matches would return no rows while having read every byte of
+the file the rule was protecting.
 
 **Filtered is not refused, and the two are separate questions on purpose.** A
 screen answers "may I be told this exists"; the intent waterfall answers "may I
 open it". A path a screen hides is still readable through `read` unless a rule
-also vetoes `fs/read-intent` — which is exactly right for `fs-local`'s ignore
-list, whose whole job is to keep `node_modules` out of a listing rather than to
-protect it, and which is why `permissions-fs` registers *both* a screen and a
-gate rather than deriving one from the other. A deployment reading `ignore:` as
-access control has misread it; a deployment writing a `deny` rule gets both.
+also vetoes `fs/read-intent`. So `permissions-fs` registers *both* rather than
+deriving one from the other, and a deployment reading `ignore:` as access control
+has misread it.
 
-`fs/observed` records reads, which is what lets read-before-edit be a policy
-row rather than a hard-coded rule.
+`fs/observed` records reads, which is what lets read-before-edit be a policy row
+rather than a hard-coded rule.
 
-The honest scope: this bounds *tool-mediated* access. Model-authored
+**The honest scope: this bounds *tool-mediated* access.** Model-authored
 `open(path, "w")` inside a code cell is unreachable from here by construction
 (N1) — a deny-list needs a registered name. That is what the containment ladder
 is for, and no wording in this module should suggest otherwise.
@@ -180,26 +175,17 @@ def _scope_of(agent: Any) -> Context | None:
 class ReadIntent:
     """A read awaiting policy.
 
-    Carries the `agent` its siblings carry, so a row that wants to *ask* about
-    one has somewhere to route the prompt — a permission rule that could only
-    ever refuse a read would be a narrower thing than the one that gates writes,
-    for no reason anybody chose.
+    Carries the `agent` its siblings carry, so a row that wants to *ask* about a read
+    has somewhere to route the prompt.
 
-    **`scope` is the other shared field, and it is the boundary this intent was
-    judged in** (P6-24) — stated here for all three, the way `agent` above is,
-    rather than pasted onto each. Required, and ahead of `agent` so it cannot be
-    defaulted: there is no honest fallback for "which boundary is this" once an
-    agent is in play, which is the whole of that row — the old one was the mount,
-    and no agent-scoped row reaches it. Resolved once at the public method,
-    from what the caller stated (P6-32).
+    **`scope` is the boundary this intent was judged in** (P6-24) — stated here for
+    all three intents, required, and ahead of `agent` so it cannot be defaulted:
+    there is no honest fallback for "which boundary is this" once an agent is in
+    play. Resolved once at the public method, from what the caller stated (P6-32).
 
-    On the payload rather than passed to `_gate`, and that is a **forward
-    commitment rather than a present need**: no listener in the tree reads it
-    today — `ph_stabilize/permissions_fs` reads `.agent` four times, correctly,
-    because approval routing and `roots(agent)` are agent questions. What it buys
-    is that the frozen payload records which boundary it was judged in, so a
-    listener that ever wants to answer differently per scope can, and so the gate
-    cannot be handed a different boundary than the one the screen used.
+    On the payload rather than passed to `_gate`, so the frozen record says which
+    boundary it was judged in and the gate cannot be handed a different boundary than
+    the one the screen used. No listener reads it yet.
     """
 
     path: Path
@@ -255,26 +241,20 @@ class FsService:
     """The service published as `ctx.fs`.
 
     **`agent` and `scope` are two values, and nothing checks them against each
-    other** (P6-24, P6-32). Every reader below takes both: `scope` is the policy
-    boundary — which screens apply, which intent listeners the gate reaches — and
-    is required, so a caller states it or does not call. `agent` is the *physical*
-    key: `root_for` asks the D21 rebase resolver which worktree is this agent's,
-    and the approval seam needs somewhere to route a prompt. `agent=child,
-    scope=parent.ctx` gets the child's worktree under the parent's screens, which
-    is legal by construction and invisible at the call site — stated here because
-    `_boundary` used to argue it and P6-32 deleted `_boundary` along with the
-    derivation that made it necessary.
+    other** (P6-24, P6-32). `scope` is the policy boundary — which screens apply,
+    which intent listeners the gate reaches — and is required, so a caller states it
+    or does not call. `agent` is the *physical* key: `root_for` asks the D21 rebase
+    resolver which worktree is this agent's, and the approval seam needs somewhere to
+    route a prompt. `agent=child, scope=parent.ctx` gets the child's worktree under
+    the parent's screens, which is legal by construction and invisible at the call
+    site.
 
     **The two enforcement layers P6-32 rests on are not symmetric for this seam**
-    (§5 rule 6). mypy names every unstated call site holding a typed reference;
-    the runtime `TypeError` names the rest — but for `SkillService.list` and
-    `ToolRuntime.schemas` that fires at *mount*, where any test standing a profile
-    up trips it, while these five run inside a tool body. An unconverted
-    `ctx.fs.read(path)` reached through `ctx.<seam>` (which is `Any`) therefore
-    fails at model time and `ToolRuntime._failure` normalizes it to an uncoded
-    `failed`. The mypy layer is the only one that fires early here, so a sweep
-    that skips it on the strength of "it fails at mount" is skipping the only
-    check this seam gets.
+    (§5 rule 6). mypy names every unstated call site holding a typed reference; the
+    runtime `TypeError` names the rest — but these five run inside a tool body, so an
+    unconverted `ctx.fs.read(path)` reached through `ctx.<seam>` (which is `Any`)
+    fails at *model* time and is normalized to an uncoded `failed`. The mypy layer is
+    the only one that fires early here.
     """
 
     ctx: Context
@@ -357,57 +337,35 @@ class FsService:
     def screen(self, decide: WalkScreen, *, scope: Context) -> Disposer:
         """Decide what `glob` and `grep` may show, and where they may go (P6-19).
 
-        **`Context`, not `Boundary`, and that is not an oversight** (P6-32). The
-        five readers below take a `Boundary` because they *ask* a question and
-        `DEPLOYMENT` is a legitimate answer to it. This is a **registration**: its
-        `scope` becomes `_Screen.owner` and decides what the screen *reaches*, so
-        it needs a real scope to be owned by and to unwind with. `DEPLOYMENT` is
-        a boundary, not a lifetime — there is nothing for it to be an effect of.
-        Required since P6-18 for the neighbouring reason: a defaulted owner would
-        widen policy rather than merely delay cleanup.
-
         One contribution point over **any** path the walk considers, directories
-        included, answering `"yield" | "skip" | "prune"`. It replaces `hide`,
-        which could refuse a file and could not refuse a tree: `deny secrets/**`
-        concealed every file in `secrets/` while still entering the directory and
-        paying a predicate call per file, and `permissions-fs` had no way to say
-        "never go in there" even though `_walk` already knew how to prune. Two
-        ways to drop a path collapse into one — the built-in ignore list is
-        registered through this seam by `fs-local` like any other screen, which
-        is also what lets a deployment configure it and what gives the
-        `.gitignore` row somewhere to land instead of arriving as mechanism
-        three.
+        included, answering `"yield" | "skip" | "prune"`. Pruning is why it takes
+        directories: `deny secrets/**` should never enter the tree rather than refuse the
+        same tree once per file inside it. The built-in ignore list is registered through
+        this seam by `fs-local` like any other screen, so there is one way to drop a path
+        and a deployment can configure it.
 
-        Deliberately *not* a waterfall, for the reason `hide` gave and which
-        still holds: a walk visits thousands of candidates, so asking a human
-        about each one is not a thing anyone would sit through, and awaiting a
-        listener per file would make `grep` over a repository a different kind of
-        operation. A row that both screens and vetoes keeps the two consistent;
-        this seam does not derive one from the other, because they answer
-        different questions ("may I be told this exists" and "may I open it").
+        Deliberately *not* a waterfall: a walk visits thousands of candidates, so
+        awaiting a listener per file would make `grep` over a repository a different kind
+        of operation, and asking a human about each one is not a thing anyone would sit
+        through.
 
-        The screen is asked about a path, **the agent walking**, and whether the
-        path is a directory. The agent, because the root a rule is written
-        against is per-agent once a containment tier is in force (D21): a rule
-        written `secrets/**` names one directory in the person's checkout and a
-        different one in each agent's worktree, and a screen that could not tell
-        them apart would answer for the wrong tree.
+        The screen is asked about a path, **the agent walking**, and whether the path is
+        a directory. The agent, because the root a rule is written against is per-agent
+        once a containment tier is in force (D21): `secrets/**` names one directory in
+        the person's checkout and a different one in each agent's worktree.
+
+        **`Context`, not `Boundary`** (P6-32): this is a *registration*, so its `scope`
+        becomes `_Screen.owner` and needs a real scope to be owned by and unwind with.
 
         **`scope` is required**, where every sibling registration in this package
-        defaults it to the service's own context. That default is harmless where
-        the owner is a *lifetime* handle — `rebase` two methods up still takes
-        it — but P6-18 made this same field the input to `Context.reaches`, so
-        omitting it would no longer mean "clean up with the mount", it would mean
-        **"screen every agent"**: the widest policy in the seam, chosen by
-        forgetting. `_decider` refuses to make that inference about the agent for
-        the same reason and says so; making it about the owner would be the same
-        mistake one field over, and it is the one P6-18 was written to fix.
+        defaults it to the service's own context. P6-18 made this same field the input to
+        `Context.reaches`, so omitting it would not mean "clean up with the mount", it
+        would mean **"screen every agent"**: the widest policy in the seam, chosen by
+        forgetting.
 
-        Through `claim_entry`, which removes the entry it appended **by
-        identity**. `_Screen` is a frozen dataclass and so compares by value, and
-        `FsPermissions` is one too — so two mounts with equal rules registering
-        against one service would have had `list.remove` take the wrong one.
-        That is the defect `_registry`'s own docstring exists to name.
+        Through `claim_entry`, which removes the entry **by identity**: `_Screen` and
+        `FsPermissions` are frozen dataclasses and compare by value, so two mounts with
+        equal rules would have had `list.remove` take the wrong one.
         """
         entry = _Screen(decide=decide, owner=scope)
         return claim_entry(scope, self._screens, entry, label="fs.screen")
@@ -648,34 +606,23 @@ match `**/*` must not be read whole into memory line by line."""
 def _walk(base: Path, pattern: str, limit: int | None, decide: WalkDecider | None) -> Iterator[str]:
     """Matching files under `base`, pruning refused directories *before* descent.
 
-    `Path.glob` would materialize `node_modules` in full and then discard it;
-    pruning `dirs` in place means a refused tree is never entered. Directories
-    and files are visited in sorted order so results are stable.
+    `Path.glob` would materialize `node_modules` in full and then discard it; pruning
+    `dirs` in place means a refused tree is never entered. Directories and files are
+    visited in sorted order so results are stable.
 
     `decide` is consulted here rather than over the results, because `grep` reads
-    every file this yields: filtering afterwards would hide the matches and still
-    have opened the file. It is asked about directories too (P6-19), which is
-    what lets a policy row say "never go in there" rather than refusing the same
-    tree once per file inside it. **`None` means no screen reaches this walk** —
-    the ordinary case, and the whole reason it is spelled as an absence rather
-    than as a predicate that always agrees: it is what lets the loop below skip
-    building a `Path` per candidate for a policy question nobody asked.
+    every file this yields. It is asked about directories too (P6-19), which is what
+    lets a policy row say "never go in there".
 
-    Three findings, all P6-17, and together with P6-19's string screen contract
-    they are **414 ms → 32 ms** over this repository's 11 489 files:
+    **`None` means no screen reaches this walk** — the ordinary case, and the reason
+    it is spelled as an absence rather than a predicate that always agrees: it lets
+    the loop skip building a `Path` per candidate for a policy question nobody asked.
 
-    * **The relative path is a slice, not a `Path.relative_to`.** That allocates
-      a `Path` per root segment and measured **23.5 µs per file, 62% of the
-      walk**, for a string that is already a prefix of what `os.walk` handed us.
-      The slice is 0.32 µs. `os.sep` is translated rather than assumed, because
-      `matches_glob` speaks posix and Windows does not, and the branch is hoisted
-      out of the loop since the answer is fixed for the process.
-    * **The join happens once.** `os.path.join(current, name)` was computed for
-      the slice and then thrown away, and `Path(current, name)` re-joined it.
-    * **`str` out, not `Path`.** `glob` returns `list[str]` and was paying
-      `Path.__str__` — which re-parses — for every one of them, having just
-      had the string. `grep` builds the `Path` for the files it actually opens,
-      where a construction is noise beside the read.
+    The relative path is a slice rather than `Path.relative_to`, the join happens
+    once, and `glob` returns `str` rather than `Path`. All three are measurements;
+    they are recorded in `tests/test_fs.py`. `os.sep` is translated rather than
+    assumed, because `matches_glob` speaks posix, and the branch is hoisted out of
+    the loop since the answer is fixed for the process.
     """
     root = os.fspath(base)
     cut = len(root) + (0 if root.endswith(os.sep) else 1)

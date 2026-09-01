@@ -6,6 +6,17 @@ The second is a property of the whole design, not a micro-optimisation: if
 `append` could block, every listener on the post-commit feed would be running
 behind disk latency, and the checkpoint policy would have nothing left to
 decide.
+
+## Why `SessionPersistence` had to be declared before a second backend existed
+
+It was named throughout the plans since D5 and declared nowhere, so every consumer
+reached for the JSONL implementation's shape instead. **Four of them read
+`store.root` and rebuilt a filename with `session_path`** — the print mode's
+`log_path`, the TUI's session picker, the daemon's resume check and its I-5 lease
+— which is a JSONL fact four callers deep, and the reason a second backend could
+not be added without breaking all four.
+
+That is what `locate` exists to replace, and why it is allowed to answer `None`.
 """
 
 from __future__ import annotations

@@ -1,40 +1,31 @@
 """`session-persistence-turso` — the second backend behind `SessionPersistence` (P5-08).
 
-Turso through `pyturso`: SQLite-compatible and DB-API 2.0, so this reads like
-the `sqlite3` backend D5 originally named, with a native asyncio surface and an
-optional cross-process WAL that stdlib `sqlite3` does not offer.
+Turso through `pyturso`: SQLite-compatible and DB-API 2.0, with a native asyncio
+surface and an optional cross-process WAL that stdlib `sqlite3` does not offer.
 
-**One database per session**, not one database holding many. A session is the
-unit pH creates, resumes, leases and eventually discards, so it is the unit the
-storage should be addressable by: deleting a session is deleting a file, the
-same as JSONL, rather than a `DELETE` that leaves pages behind. It is also what
-lets `locate()` answer with a real path — which is what P5-03's I-5 lease locks
-and what the session picker lists. A single shared database made `locate` return
-`None`, and a `None` there silently disables the lease.
+**One database per session**, not one database holding many. A session is the unit
+pH creates, resumes, leases and eventually discards, so it is the unit the storage
+should be addressable by: deleting a session is deleting a file, the same as JSONL.
+It is also what lets `locate()` answer with a real path — which is what P5-03's
+I-5 lease locks and what the session picker lists, and a `None` there silently
+disables the lease.
 
-**`seq INTEGER PRIMARY KEY`, which is already the ordering.** In SQLite an
-integer primary key *is* the rowid, so the table is clustered by it and a scan
-comes back in key order — a log read back in the order it was written, which is
-the one property an append-only file gives for free. (`WITHOUT ROWID` would say
-the same thing explicitly and is gated behind an experimental flag on this
-build; it earns its keep for *composite* keys, which one database per session
-removes the need for.) The key is also A1 made structural: `seq == len(log)`
-cannot hold two events at one number.
+**`seq INTEGER PRIMARY KEY`, which is already the ordering.** In SQLite an integer
+primary key *is* the rowid, so the table is clustered by it and a scan comes back
+in key order — a log read back in the order it was written. The key is also A1 made
+structural: `seq == len(log)` cannot hold two events at one number.
 
-**No full-text search.** It was here and is deliberately gone: JSONL cannot
-search either, so it was never parity — it was a feature riding along, and it
-cost an experimental flag, an index whose incremental maintenance made writes
-**quadratic** (a ten-event flush going from 1.0 ms to 227 ms once a session
-passed six hundred events), and a ranking that does not work through a bound
-parameter anyway. Search over sessions, if it is wanted, is a thing built on top
-of a backend rather than a thing one backend secretly has.
+**No full-text search**, deliberately: JSONL cannot search either, so it was never
+parity. Search over sessions is a thing built on top of a backend rather than a
+thing one backend secretly has. What it cost while it was here:
+`tests/test_persistence_backends.py`.
 
-**The write path is the JSONL one's, deliberately.** Buffered on `record`,
-drained on `flush`, off the event-loop thread — because A1 is about `append`
-being I/O-free, and that is a property of the *seam*, not of the storage.
+**The write path is the JSONL one's, deliberately.** Buffered on `record`, drained
+on `flush`, off the event-loop thread — because A1 is about `append` being I/O-free,
+and that is a property of the *seam*, not of the storage.
 
-**JSONL stays the default.** `pyturso` is pre-1.0, classified alpha, and ships
-no Windows wheels; D5's ordering — "JSONL first" — is load-bearing rather than
+**JSONL stays the default.** `pyturso` is pre-1.0, classified alpha, and ships no
+Windows wheels; D5's ordering — "JSONL first" — is load-bearing rather than
 incidental, and this is a row a profile opts into.
 
 @module ph.persistence.turso

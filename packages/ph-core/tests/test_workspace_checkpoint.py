@@ -7,9 +7,19 @@ sentence a user has to be told while it happens: **git restores the tree, not
 the world.**
 
 Real `git` throughout. What is pinned here is git's own behaviour — that a tree
-written against a scratch index leaves the agent's staging area alone, that
-`checkout-index` restores an untracked file *as* untracked, that an ignored path
-is never in a tree `add -A` built — none of which a fake would prove.
+written against a scratch index leaves the agent's staging area alone, that a
+restore leaves an untracked file untracked rather than silently staging it, that
+an ignored path is never in a tree `add -A` built — none of which a fake would
+prove.
+
+**Why the restore is `read-tree --reset -u` against a seeded scratch index.**
+Seeding from the checkpoint index — refreshed first, so its stat data is current
+— lets git touch only the paths that actually differ. `checkout-index -a -f` was
+the obvious alternative and rewrites *every* file in the tree: **2.3 s of a 2.4 s
+restore on an 11 000-file checkout**. Worse than the time, it stamps a new mtime
+on 11 000 unchanged files and so invalidates every mtime-keyed cache the person
+has — pytest, mypy, ruff, the editor's index — making them pay for the full-tree
+rewrite again on their next command.
 """
 
 from __future__ import annotations

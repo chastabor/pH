@@ -58,17 +58,15 @@ async def write_frame(stream: ByteStream, payload: dict[str, Any]) -> None:
 async def read_frames(stream: ByteStream) -> AsyncIterator[dict[str, Any]]:
     """Yield each object the peer sends, until it closes.
 
-    `BufferedByteReceiveStream.receive_until` rather than a hand-rolled buffer:
-    anyio ships the delimiter scan with the cap built in, and the hand-rolled
-    version was quadratic twice over — it re-scanned the whole buffer per chunk
-    and recopied the tail per frame, which measured 57 ms for 4 096 frames
-    arriving in one read. It also bounded the *accumulated buffer* rather than
-    one frame, so many small frames in one chunk tripped a limit documented as
-    per-frame.
+    `BufferedByteReceiveStream.receive_until` rather than a hand-rolled buffer: anyio
+    ships the delimiter scan with the cap built in. The hand-rolled version was
+    quadratic twice over — it re-scanned the whole buffer per chunk and recopied the
+    tail per frame — and it bounded the *accumulated buffer* rather than one frame, so
+    many small frames in one chunk tripped a limit documented as per-frame.
 
-    A peer that closes mid-frame ends the iteration rather than raising: it did
-    not send that frame, and acting on half of one is how a supervisor executes
-    a command nobody completed.
+    A peer that closes mid-frame **ends the iteration rather than raising**: it did not
+    send that frame, and acting on half of one is how a supervisor executes a command
+    nobody completed.
     """
     buffered = BufferedByteReceiveStream(stream)
     while True:

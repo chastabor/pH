@@ -4,6 +4,22 @@ Kept separate from the pilot tests because these are the pieces a broken
 terminal must not be able to hide: a settings file that stops the TUI starting
 is worse than a settings file pH ignores, and the only way to know which one
 happens is to test it without a running app.
+
+## Two measurements behind the session picker and the trajectory filter
+
+**`_inherited_title` opens the ancestor rather than searching for it.** An ancestor
+is a sibling inside the session's own family directory, so the path is a join.
+Resolving each one by id instead scanned every family in the store: at **200
+families whose newest rows were segment tips, 111.8 ms and 200 store scans against
+18.6 ms — 6x**, running synchronously on the UI thread.
+
+**`Query` is compiled once per rebuild, not per record.** `refresh_rows` calls the
+predicate once per record, so parsing inside it re-lexed the query and re-parsed
+every selector for every row on every keystroke — making the *plain free-text*
+path, the common one, **2.5x** more expensive than before `type:` existed, because
+the tag scan ran whether or not anyone had typed a tag. A malformed term also
+constructed and raised a `SelectorError` per record: thousands of exceptions caught
+and dropped.
 """
 
 from __future__ import annotations

@@ -71,17 +71,15 @@ still shows progress within 50 ms.
 class _CappedStream(io.TextIOBase):
     """The cell's `sys.stdout`, coalesced, streamed to the host, and capped (D4).
 
-    Coalesced because a frame per `write` is quadratic, twice over. `print`
-    issues two writes (the text and the newline), and each one used to become a
-    `channel.send`; on CPython 3.12 `asyncio`'s `_SelectorSocketTransport.write`
-    calls `get_write_buffer_size()`, which is `sum(map(len, self._buffer))` over
-    the pending deque — and a cell that never awaits never lets the transport
-    drain, so that sum grows with everything written so far. The host then pays
-    its own ~25 µs of per-frame work. Measured: `for i in range(10_000):
-    print(i)` took **2.1-2.6 s**; buffered into ~8 KiB frames it is **~2 ms**.
+    **Coalesced because a frame per `write` is quadratic, twice over.** `print` issues
+    two writes (the text and the newline), and each one becoming a `channel.send`
+    means: on CPython 3.12 `asyncio`'s `_SelectorSocketTransport.write` calls
+    `get_write_buffer_size()`, which is `sum(map(len, self._buffer))` over the pending
+    deque — and a cell that never awaits never lets the transport drain, so that sum
+    grows with everything written so far. The host then pays its own per-frame work.
 
-    Capped because unbounded stdout is unbounded context, and the marker is the
-    one the host would have written (D4).
+    Capped because unbounded stdout is unbounded context, and the marker is the one
+    the host would have written (D4).
     """
 
     def __init__(self, runner: Runner, stream: str, cap: int) -> None:

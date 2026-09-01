@@ -1,37 +1,31 @@
 """`memory-agents-md` — what the agent was told to remember, placed after the cache (G8).
 
-The content is what `agent-instructions` found in Phase 1: `AGENTS.md` walking
-up from the agent's root, nearest first, then the user's `$PH_HOME/AGENTS.md`.
-What this row changes is **where it lands**, and that turns out to be two
-properties rather than one.
+The content is what `agent-instructions` found in Phase 1: `AGENTS.md` walking up
+from the agent's root, nearest first, then the user's `$PH_HOME/AGENTS.md`. What
+this row changes is **where it lands**, and that is two properties rather than one.
 
-**It is a `context()`, not a `section()`.** A section is part of the cached
-prefix, so an edit to `AGENTS.md` changes the prefix and invalidates every
-cached token before it — on a file whose whole purpose is to be edited. G8 says
-"placed after caching so edits do not bust the static prefix", and the gate is
-that the prefix test survives a memory edit. A `context()` materializes as a
-durable snapshot *after* retained history and only when its text changed, which
-is exactly the shape a mutable instruction file needs.
+**It is a `context()`, not a `section()`.** A section is part of the cached prefix,
+so an edit to `AGENTS.md` would change the prefix and invalidate every cached
+token before it — on a file whose whole purpose is to be edited. A `context()`
+materializes as a durable snapshot *after* retained history and only when its text
+changed, which is exactly the shape a mutable instruction file needs.
 
-**The same move makes memory live.** The Phase-1 row read the files once, at
-mount, and baked the result into a static string: editing `AGENTS.md` did
-nothing at all until the process restarted. A provider is asked on every
-assembly, so what the user wrote a minute ago is in the next turn. Cheap and
-live turn out to be the same change, which is the argument for making it — the
-cache is the reason it is *safe*, not the reason it is worth doing.
+**The same move makes memory live.** A provider is asked on every assembly, so
+what the user wrote a minute ago is in the next turn — where a row that read the
+files once at mount did nothing at all until the process restarted. Cheap and live
+turn out to be the same change; the cache is the reason it is *safe*, not the
+reason it is worth doing.
 
-**Per agent, not per process.** The provider is handed the request, so the root
-is `ctx.fs.root_for(agent)`: a child working in a worktree (D21) reads the
-`AGENTS.md` of the tree it is actually in. A root read once at mount would have
-handed every child the parent's instructions and been wrong in exactly the
-deployment the tier exists for.
+**Per agent, not per process.** The provider is handed the request, so the root is
+`ctx.fs.root_for(agent)`: a child working in a worktree (D21) reads the `AGENTS.md`
+of the tree it is actually in. A root read once at mount would have handed every
+child the parent's instructions and been wrong in exactly the deployment the tier
+exists for.
 
-Re-reading is a `stat` per candidate directory per turn, and the bytes are read
-only when a file's mtime or size moved. That ordering is the whole point:
-`assemble` runs once per model *step*, so "memory is live" must not mean "every
-step reads 64 KiB from disk". Locating and reading are therefore two passes —
-the first draft did the read first and checked the signature afterwards, which
-saved a `str.join` and nothing else.
+**Locating and reading are two passes, in that order.** `assemble` runs once per
+model *step*, so "memory is live" must not mean "every step reads 64 KiB from
+disk": re-reading is a `stat` per candidate directory per turn, and the bytes are
+read only when a file's mtime or size moved.
 
 @module ph.system_prompt.memory
 """
