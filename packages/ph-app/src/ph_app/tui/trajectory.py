@@ -398,6 +398,11 @@ HANDLERS: Mapping[str, Handler] = {
     # where somebody else's work ends and this run's begins, and that the turn
     # above the seam may have been closed by the repair rather than by the model.
     "session/resumed": _on_harness_event,
+    # The mirror of the line above, and a record for the mirrored reason: the
+    # seam at the *end* of a log is as invisible as the one at the start, and an
+    # auditor who reaches the last row of a segment has reached the end of a
+    # file rather than the end of the work.
+    "session/segmented": _on_harness_event,
     # A record: "who asked for this, and had they asked before" is exactly the
     # provenance an auditor reading a daemon-driven run needs.
     "client/command": _on_harness_event,

@@ -23,10 +23,9 @@ from tui_helpers import until
 
 from ph.cordis import Context
 from ph.persistence import LineageError, read_session
-from ph.persistence.jsonl import HEADER_LINE_TYPE, session_path
+from ph.persistence.jsonl import session_path
 from ph.session import Session, SurfaceIntent
-from ph.session.json import dumps
-from ph.testing import assistant_payload, reference_fork, user_payload
+from ph.testing import assistant_payload, user_payload, write_reference_fork
 from ph_app.tui.trajectory import build_trajectory
 from ph_app.tui.trajectory_app import TrajectoryApp, load_records
 from ph_app.tui.widgets.trajectory import FORK_MARK, Query, search_index
@@ -137,28 +136,6 @@ def test_search_covers_the_source_not_only_the_text() -> None:
 # ---------------------------------------------- lineage (feasibility §5.3) --
 
 
-def _reference_fork(root: Path, child: str, parent: str, boundary: int) -> Path:
-    """`reference_fork` written out as a log file, under this view's own root.
-
-    Through `to_wire` and the real header line type rather than a dict spelled
-    out here: a test that writes the wire format longhand goes on passing after
-    the format changes, which makes it evidence for nothing.
-    """
-    header, own = reference_fork(child, parent, boundary=boundary)
-    path = root / f"{child}.jsonl"
-    path.write_text(
-        "".join(
-            f"{dumps(record)}\n"
-            for record in [
-                {"type": HEADER_LINE_TYPE, "header": header.to_wire()},
-                *(event.to_wire(thaw=False) for event in own),
-            ]
-        ),
-        encoding="utf-8",
-    )
-    return path
-
-
 async def test_a_log_under_any_filename_is_readable(mount: Any, tmp_path: Path) -> None:
     """ "A fixture, a copy someone sent" — the capability this module's docstring
     promises and nothing exercised.
@@ -190,7 +167,7 @@ async def test_a_reference_forked_child_renders_its_inherited_history(
     _, parent_events = read_session(parent_path)
     boundary = next(event.seq for event in reversed(parent_events) if event.type == "turn/end")
 
-    child = _reference_fork(root, "branch", "base", boundary + 1)
+    child = write_reference_fork(root, "branch", "base", boundary=boundary + 1)
     session_id, records = load_records(str(child))
 
     assert session_id == "branch", "the lineage supplies events, never identity"
@@ -211,7 +188,7 @@ async def test_a_child_whose_ancestor_is_gone_refuses_rather_than_showing_half(
     ctx = await mount({"id": "session-persistence", "config": {"root": str(tmp_path / "s")}})
     root = Path(ctx.session_persistence.root)
     root.mkdir(parents=True, exist_ok=True)
-    orphan = _reference_fork(root, "orphan", "deleted-parent", 4)
+    orphan = write_reference_fork(root, "orphan", "deleted-parent", boundary=4)
 
     with pytest.raises(LineageError, match="deleted-parent"):
         load_records(str(orphan))

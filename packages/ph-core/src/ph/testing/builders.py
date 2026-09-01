@@ -18,6 +18,7 @@ from typing import Any
 from ..agent.types import AgentOptions
 from ..cordis import DEPLOYMENT, Boundary, Context
 from ..llm.types import ContextForm, PluginSource
+from ..persistence.jsonl import HEADER_LINE_TYPE, session_path
 from ..seams.workspace import (
     ACQUIRED,
     DISPOSED,
@@ -26,6 +27,7 @@ from ..seams.workspace import (
     WorkspaceSeam,
 )
 from ..session import Session, SessionEvent, SessionHeader
+from ..session.json import dumps
 from ..tools.definition import ToolDefinition, ToolOutput, define_tool, text_content
 from ..tools.registry import ToolRuntime
 
@@ -46,6 +48,7 @@ __all__ = [
     "workspace_log",
     "workspace_retained",
     "workspace_seam",
+    "write_reference_fork",
 ]
 
 FAKE_OPTIONS = AgentOptions(provider="fake", model="fake-1")
@@ -355,3 +358,31 @@ def reference_fork(
         ),
     ]
     return header, own
+
+
+def write_reference_fork(root: Path, child: str, parent: str, *, boundary: int) -> Path:
+    """`reference_fork` written under `root` in the format `read_session` reads.
+
+    Through `to_wire` and the real header line type rather than a dict spelled
+    out longhand: a test that writes the wire format itself keeps passing after
+    the format changes, which makes it evidence for nothing.
+
+    Takes the **root**, not a path. The first version took a path to serve a
+    caller that stores a log under a name that is not its id — no such caller
+    exists, and three of the five sites were spelling `f"{child}.jsonl"` at the
+    call instead, which is the same "the test states the format itself" failure
+    one layer out. `session_path` is the one naming rule.
+    """
+    header, own = reference_fork(child, parent, boundary=boundary)
+    path = session_path(root, child)
+    path.write_text(
+        "".join(
+            f"{dumps(record)}\n"
+            for record in [
+                {"type": HEADER_LINE_TYPE, "header": header.to_wire()},
+                *(event.to_wire(thaw=False) for event in own),
+            ]
+        ),
+        encoding="utf-8",
+    )
+    return path

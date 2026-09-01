@@ -318,14 +318,14 @@ async def resume_session(ctx: Any, session_id: str) -> Any:
     # the one function every host calls to pick work back up.
     header, events = ctx.session_persistence.read(session_id)
     closers = interrupted_turn_closers(events)
-    revived = Session(session_id, seed=[*events, *closers], header=header)
-    # **What the store already holds is `events`, and nothing else.** The closers
+    revived = Session(session_id, seed=[*events, *closers], header=header, durable=len(events))
+    # `durable=len(events)`: **what the store already holds is `events`, and
+    # nothing else.** The closers
     # are synthesized here and the constructor appends `session/end-seed` on top;
     # both are in the log and neither has been written. A backend that inferred
     # durability from "the file exists" dropped them and left a gap in the seq
     # space, which `_readmit` refuses — so the session resumed once and never
     # again. Said here because this is the only place that knows the difference.
-    revived.durable_length = len(events)
     session = ctx.sessions.adopt(revived)
     # Recorded, not just returned. A resume is a fact about *provenance* — this
     # process picked up work somebody else started — and it is not derivable

@@ -1362,6 +1362,15 @@ def stored_survivors(
     from a half-written file. It is logged, because a store that cannot read most
     of what it listed is a real problem wearing a small number.
 
+    Since reference-forking there are **two** ways a log will not read, and while
+    skipping is right for both they mean very different things. A half-written
+    file is its own problem, and one file's worth. A *good* file whose ancestor
+    was removed takes every descendant with it, so this count can fall by far
+    more than the number of damaged files — and nothing in the shortfall says
+    which. That question is not answered here: `ph doctor`'s "Session lineage"
+    section surveys the same listing for exactly it and names the missing
+    ancestor, without opening a log.
+
     `store.read` returns the stored envelopes and the durable header; seeding a
     `Session` with them is what gives the fold `seed_length`, and paying the
     surface validation is deliberate — it is the same acceptance a resume makes,

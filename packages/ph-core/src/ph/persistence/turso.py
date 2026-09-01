@@ -111,7 +111,15 @@ class TursoSessionStore:
         if session.id in self._buffers:
             return
         buffer = _Buffer()
-        buffer.pending.extend(session.events)
+        # `events[durable_length:]`, not the whole log. What is below that line
+        # is already durable *somewhere* — in this database for a resume, in the
+        # parent's for a reference-fork — and queueing it anyway is not a
+        # harmless rewrite: it writes the child a full copy of the prefix, whose
+        # first event is then at seq 0, which `materialise` reads as "this file
+        # is complete". Reference-forking becomes a silent no-op on this backend
+        # and nothing anywhere fails. This line said `session.events` while the
+        # docstring above claimed "JSONL's shape exactly".
+        buffer.pending.extend(session.events[session.durable_length :])
         self._buffers[session.id] = buffer
 
     def record(self, session: Session, event: SessionEvent) -> None:
@@ -152,11 +160,20 @@ class TursoSessionStore:
 
     def forget(self, session_id: str) -> None:
         self._buffers.pop(session_id, None)
+        self._release(session_id)
+
+    def _release(self, session_id: str) -> None:
+        """Close one cached handle. **Not** the session's buffered work.
+
+        Split out of `forget` because the read paths need exactly this half and
+        emphatically not the other: an ancestor opened to satisfy a chained read,
+        or a database peeked for a listing, may also be a *live* session with
+        unflushed events, and `forget` would drop them on the floor with nothing
+        raised. One database per session means one handle per session, and a
+        daemon that ran for weeks would otherwise hold every one it ever opened.
+        """
         connection = self._connections.pop(session_id, None)
         if connection is not None:
-            # One database per session means one handle per session, and a
-            # daemon that ran for weeks would otherwise hold every one it ever
-            # opened.
             try:
                 connection.close()
             except Exception:  # pragma: no cover - a closed handle is fine
@@ -185,7 +202,7 @@ class TursoSessionStore:
             # through a read. Ancestors are immutable and read once; nothing is
             # gained by keeping them.
             for ancestor in set(self._connections) - held:
-                self.forget(ancestor)
+                self._release(ancestor)
 
     def read_own(self, session_id: str) -> tuple[SessionHeader, list[SessionEvent]]:
         """This database and nothing else."""
@@ -220,6 +237,20 @@ class TursoSessionStore:
         way, from the filesystem, rather than one of them from a query whose
         cost grew with total history.
         """
+        # Every `_peek_header` below opens a database, runs the schema DDL and
+        # caches the handle — 1.53 ms each, against 0.021 ms for the header
+        # `SELECT` it was opened for, and never reused. Left cached, a 500-session
+        # survey holds 500 open databases and 500 `-wal`/`-shm` sidecars for the
+        # life of the process. `read` already guards its chained reads this way;
+        # a listing peeks far more.
+        held = set(self._connections)
+        try:
+            return self._stored(limit=limit)
+        finally:
+            for peeked in set(self._connections) - held:
+                self._release(peeked)
+
+    def _stored(self, *, limit: int) -> list[StoredSession]:
         try:
             with os.scandir(self.root) as entries:
                 found = [

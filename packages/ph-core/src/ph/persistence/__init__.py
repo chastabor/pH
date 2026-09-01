@@ -10,7 +10,7 @@ from .jsonl import (
     resumption_of,
     session_path,
 )
-from .lineage import MAX_DEPTH, LineageError, ReadOne, materialise
+from .lineage import MAX_DEPTH, LineageError, ReadOne, lineage_faults, materialise
 from .repair import TOOL_NOT_STARTED, TOOL_OUTCOME_UNKNOWN, interrupted_turn_closers, repaired
 
 __all__ = [
@@ -21,6 +21,7 @@ __all__ = [
     "LineageError",
     "ReadOne",
     "interrupted_turn_closers",
+    "lineage_faults",
     "materialise",
     "read_records",
     "read_session",

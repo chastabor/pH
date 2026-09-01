@@ -418,6 +418,23 @@ class TuiEventAdapter:
             text = f"Resumed an existing session — {events} earlier events."
         self._row("resumed", "notice", text, event)
 
+    def _on_session_segmented(self, event: SessionEvent, live: bool) -> None:
+        """Say that this log stops here, and where the work carries on.
+
+        `_on_session_resumed` read the other way round, and needed for the same
+        reason: a seam at the *end* of a transcript is as invisible as one at the
+        start. Somebody scrolling to the last row has reached the end of a file,
+        not the end of the run, and without this the two are identical on screen
+        — which makes a routine segment look like a session that stopped.
+        """
+        continues = str(event.data.get("continues", ""))
+        text = (
+            f"Continued in session {continues} — this log ends here."
+            if continues
+            else "Continued in another session — this log ends here."
+        )
+        self._row("segmented", "notice", text, event)
+
     def _on_supervisor_retry(self, event: SessionEvent, live: bool) -> None:
         """This session's task crashed and is being run again (P5-04).
 
@@ -773,6 +790,7 @@ HANDLERS: Mapping[str, Handler] = {
     "command/done": TuiEventAdapter._on_command_done,
     "llm/retry": TuiEventAdapter._on_llm_retry,
     "session/resumed": TuiEventAdapter._on_session_resumed,
+    "session/segmented": TuiEventAdapter._on_session_segmented,
     "supervisor/retry": TuiEventAdapter._on_supervisor_retry,
     "supervisor/failed": TuiEventAdapter._on_supervisor_failed,
     "supervisor/recovered": TuiEventAdapter._on_supervisor_recovered,

@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from ph.testing import write_reference_fork
 from ph_app.tui.autocomplete import (
     PathCompleter,
     build_completion_state,
@@ -201,6 +202,36 @@ def test_session_summaries_title_from_the_first_user_message(tmp_path: Path) -> 
 
 def test_session_summaries_skip_a_missing_directory(tmp_path: Path) -> None:
     assert session_summaries(tmp_path / "nowhere") == []
+
+
+def test_a_reference_forked_child_takes_its_title_from_the_lineage(tmp_path: Path) -> None:
+    """A child whose log begins mid-conversation still names itself.
+
+    Its own file holds no `user/message` — that is what storing a reference
+    means — so without the walk this row renders blank and a person picking a
+    session is choosing between ids. `StoredSession`'s own comment refuses
+    exactly that outcome, in the same words, for the listing one layer down.
+    """
+    _write_session(tmp_path, "root", "the original")
+    write_reference_fork(tmp_path, "branch", "root", boundary=4)
+
+    titles = {summary.session_id: summary.title for summary in session_summaries(tmp_path)}
+    assert titles == {"root": "the original", "branch": "the original"}
+
+
+def test_a_child_whose_ancestor_is_gone_still_gets_a_row(tmp_path: Path) -> None:
+    """The reader refuses a broken chain; the picker must not.
+
+    A person whose parent log was deleted needs to *see* the orphan in order to
+    do anything about it, so a missing ancestor costs a title here rather than
+    the row — and never an exception out of a directory scan.
+    """
+    write_reference_fork(tmp_path, "orphan", "deleted", boundary=4)
+
+    [summary] = session_summaries(tmp_path)
+    assert summary.session_id == "orphan"
+    assert summary.title == ""
+    assert summary.parent == "deleted", "and it still says what it is missing"
 
 
 def test_forked_sessions_are_listed_under_their_parent(tmp_path: Path) -> None:

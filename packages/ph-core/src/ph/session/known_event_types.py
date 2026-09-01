@@ -30,6 +30,12 @@ KNOWN_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         "request/header",
         "session/end-seed",
         "session/resumed",
+        # A session continued in a fresh file (§7 step 6). The parent's own
+        # terminal record, naming the log that carries on — the forward half of
+        # a link whose backward half is the child's `parent_session` header.
+        # Needed because a segment and a branch are structurally identical: both
+        # are a fork, and only this says which one a person is looking at.
+        "session/segmented",
         # A mutating command a protocol client asked for, recorded so asking
         # twice is safe across a restart (P5-02). Not a slash `command/*`.
         "client/command",

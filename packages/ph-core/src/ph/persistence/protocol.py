@@ -28,10 +28,23 @@ one declines loudly instead of inventing a path that protects nothing.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
+from ..seams.diagnostics import Diagnostic, contribute
 from ..session import Session, SessionEvent, SessionHeader
+from .lineage import lineage_faults
+
+SURVEY_LIMIT = 500
+"""How many stored sessions the lineage check surveys.
+
+Larger than the picker's 50 because this is asking a question about the
+*store*, not showing a person a page: a broken chain that fell below the
+cut is exactly the one nobody has looked at lately. Bounded all the same,
+since the point of answering from the listing is not to walk a store
+without limit.
+"""
 
 __all__ = ["SessionPersistence", "StoredSession", "attach"]
 
@@ -70,7 +83,17 @@ class SessionPersistence(Protocol):
     """
 
     def track(self, session: Session) -> None:
-        """Start persisting this session; its existing seed is owed a write."""
+        """Start persisting this session. **Queue `events[durable_length:]`.**
+
+        Stated as a slice rather than as "its seed is owed a write", because the
+        two stopped meaning the same thing and one backend kept the old reading:
+        Turso queued the whole log, so a reference-forked child was written a
+        full copy of its prefix, `materialise` saw a first seq of 0 and called
+        the file complete, and forking silently stopped being O(1) there with
+        every test still green. `durable_length` is what the log holds and this
+        store does not — set at construction from a resume's stored length or a
+        fork's inherited prefix.
+        """
         ...
 
     def record(self, session: Session, event: SessionEvent) -> None:
@@ -120,6 +143,26 @@ class SessionPersistence(Protocol):
         ...
 
 
+def lineage_faults_of(
+    store: SessionPersistence, *, limit: int = SURVEY_LIMIT
+) -> list[tuple[str, str]]:
+    """Which of this store's logs will not materialise, and why.
+
+    A module function rather than a closure inside `attach`, because the answer
+    has more than one asker. `stored_survivors` already has a shortfall it
+    cannot explain — an unreadable ancestor silently drops a whole subtree from
+    its count — and a resume, or a future collector, wants the same question
+    before it acts. Trapped inside a `Diagnostic`, the survey was reachable only
+    by running `ph doctor`; here the diagnostic is one presentation of it.
+
+    Backend-neutral on purpose, and so not a `SessionPersistence` method: it
+    needs only the listing and `exists`, both already on the Protocol, and every
+    backend implementing its own walk is what this whole module argues against.
+    """
+    listed = store.stored(limit=limit)
+    return lineage_faults(((one.session_id, one.parent) for one in listed), store.exists)
+
+
 def attach(ctx: Any, store: SessionPersistence) -> None:
     """Wire a store to the session firehose. One subscription list, not two.
 
@@ -139,3 +182,18 @@ def attach(ctx: Any, store: SessionPersistence) -> None:
     ctx.on("session/event", store.record)
     ctx.on("session/flush", store.flush)
     ctx.on("session/disposed", lambda session: store.forget(session.id))
+
+    # **Silent while the store is healthy**, which is what `Diagnostic.read`'s
+    # empty-list contract is for: a section on every run is a section nobody
+    # reads. Registered here for `attach`'s own reason — one wiring, both
+    # backends — and it needs no profile beyond the one that mounted the store,
+    # because it answers entirely from `stored()`.
+    contribute(
+        ctx,
+        Diagnostic(
+            id="session-lineage",
+            title="Session lineage",
+            read=partial(lineage_faults_of, store),
+            order=20,
+        ),
+    )

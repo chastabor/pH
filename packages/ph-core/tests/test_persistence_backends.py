@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 
-from ph.persistence import MAX_DEPTH, LineageError
+from ph.persistence import MAX_DEPTH, LineageError, lineage_faults
 from ph.persistence.jsonl import JsonlSessionStore
 from ph.persistence.protocol import SessionPersistence
 from ph.session import Session, SessionEvent, SessionHeader, SurfaceIntent
@@ -576,3 +576,119 @@ async def test_a_short_ancestor_is_caught_as_a_gap_not_passed_on(
         store.read("wants4")
 
     assert caught.value.code == "GAP"
+
+
+# ---------------------------------------- referential integrity (§5.4a) --
+
+
+async def test_a_broken_chain_is_visible_from_the_listing_alone(
+    store: SessionPersistence,
+) -> None:
+    """**The survey `materialise` cannot do.**
+
+    `materialise` refuses a missing ancestor at the point of use: one session, at
+    resume, long after whatever removed the file. This asks the same question of
+    the whole store and costs no reads — both backends fill `StoredSession.parent`
+    from the one-line header peek they already pay for, so the answer is a
+    listing plus one `exists` per session that names a parent.
+    """
+    child = _reference_fork(store, "orphan", "vanished", boundary=4)
+    await store.flush(child)
+
+    listed = store.stored()
+    assert {one.session_id: one.parent for one in listed} == {"orphan": "vanished"}
+    assert lineage_faults(((one.session_id, one.parent) for one in listed), store.exists) == [
+        ("orphan", "ancestor vanished is missing")
+    ]
+
+
+async def test_a_healthy_store_reports_no_faults(store: SessionPersistence) -> None:
+    """Silent when there is nothing wrong, which is what keeps the section useful."""
+    parent = _session(store, "p")
+    for turn in range(3):
+        _append(store, parent, "turn/start", {"turn": turn})
+        _append(store, parent, "turn/end", {"turn": turn, "reason": {"kind": "completed"}})
+    await store.flush(parent)
+    await store.flush(_reference_fork(store, "c", "p", boundary=4))
+
+    listed = store.stored()
+    assert len(listed) == 2
+    assert lineage_faults(((one.session_id, one.parent) for one in listed), store.exists) == []
+
+
+async def test_a_seeded_child_writes_only_what_this_store_lacks(
+    store: SessionPersistence,
+) -> None:
+    """**The gate this suite was missing, and one backend was failing it.**
+
+    `_reference_fork` above builds its child with *no* seed, so `track` queues
+    the same thing whichever rule it follows — which is exactly why both backends
+    passed while Turso was queueing `session.events` whole. Every fork under it
+    got a full copy of its prefix written into the child, `materialise` then read
+    the first seq as 0 and called the file complete, and reference-forking was
+    silently not happening on that backend at all.
+
+    A child seeded the way `SessionStore.fork` seeds one is the only shape that
+    tells the two rules apart, which makes this the test the feature actually
+    needed rather than the one it was easy to write.
+    """
+    parent = _session(store, "p")
+    for turn in range(3):
+        _append(store, parent, "turn/start", {"turn": turn})
+        _append(store, parent, "turn/end", {"turn": turn, "reason": {"kind": "completed"}})
+    await store.flush(parent)
+
+    inherited = len(parent.events)
+    child = Session(
+        "c",
+        seed=list(parent.events),
+        header=SessionHeader(id="c", created_at=1, parent_session="p", seed_length=inherited),
+        durable=inherited,
+    )
+    store.track(child)
+    await store.flush(child)
+
+    own = store.read_own("c")[1]
+    assert [event.type for event in own] == ["session/end-seed"], "the prefix was re-written"
+    assert own[0].seq == inherited, "and the first seq is what marks the file as owing one"
+    assert [event.seq for event in store.read("c")[1]] == list(range(inherited + 1))
+
+
+def test_the_survey_and_the_reader_agree_on_how_deep_is_too_deep() -> None:
+    """One bound, stated twice, pinned to itself.
+
+    `materialise` refuses past `MAX_DEPTH`; the survey has to call those chains
+    unreadable or it goes quiet on exactly the shape `roll` manufactures — one
+    generation per segment, so a long-running segmented session reaches the bound
+    by ordinary use, and `ph doctor` would report a healthy store while every
+    read of the newest segment raised.
+    """
+
+    def chain(length: int) -> list[tuple[str, str | None]]:
+        return [(f"s{n}", f"s{n + 1}" if n + 1 < length else None) for n in range(length)]
+
+    assert lineage_faults(chain(MAX_DEPTH), lambda session_id: True) == []
+    faults = dict(lineage_faults(chain(MAX_DEPTH + 1), lambda session_id: True))
+    assert f"more than {MAX_DEPTH} deep" in faults["s0"]
+
+
+def test_a_parent_below_the_listing_cut_is_not_reported_as_missing() -> None:
+    """**The check that would otherwise cry wolf on every large store.**
+
+    `stored()` takes a limit, so a parent older than the cut is absent from the
+    listing while being perfectly present on disk. Membership in the listing is
+    therefore not the test; `exists` is.
+    """
+    assert lineage_faults([("kid", "root")], lambda session_id: True) == []
+    assert lineage_faults([("kid", "root")], lambda session_id: False) == [
+        ("kid", "ancestor root is missing")
+    ]
+
+
+def test_a_cycle_that_closes_inside_the_listing_is_named() -> None:
+    """A hand-edited header can point at its own descendant. Both ends are
+    unreadable, so both are reported rather than one arbitrarily chosen."""
+    assert lineage_faults([("a", "b"), ("b", "a")], lambda session_id: True) == [
+        ("a", "lineage cycles back through a"),
+        ("b", "lineage cycles back through b"),
+    ]

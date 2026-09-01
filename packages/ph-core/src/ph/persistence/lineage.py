@@ -34,12 +34,12 @@ one, which is the failure `_readmit`'s unknown-type refusal exists to prevent.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from typing import TypeAlias
 
 from ..session import SessionEvent, SessionHeader
 
-__all__ = ["MAX_DEPTH", "LineageError", "ReadOne", "materialise"]
+__all__ = ["MAX_DEPTH", "LineageError", "ReadOne", "lineage_faults", "materialise"]
 
 ReadOne: TypeAlias = Callable[[str], tuple[SessionHeader, list[SessionEvent]]]
 """How one backend reads one stored log, unchained.
@@ -95,13 +95,22 @@ def materialise(read_one: ReadOne, session_id: str) -> tuple[SessionHeader, list
     once. What is *kept* is 1.00x the result.
 
     What is **read** is not, and an earlier version of this docstring claimed
-    otherwise. `read_one` is a backend's whole-log read, so taking 50 events from
-    a 10 000-event ancestor still parses and validates all 10 000 — measured at
-    ~170x the useful work. That is invisible today, because nothing writes a
-    reference-fork yet; it becomes real the moment `fork` stops copying, and the
-    fix is a bounded read (`WHERE seq < ?` in Turso, an early break in JSONL)
-    widening `ReadOne` to take the boundary. Recorded here rather than in a plan,
-    because this is the docstring that was wrong.
+    otherwise. `read_one` is a backend's whole-log read, so an ancestor is parsed
+    and validated in full however little of it is wanted.
+
+    How much that costs depends entirely on where the fork was made, which is
+    worth stating because the two ends look nothing alike:
+
+    * **At the tip** — the common fork — the child wants nearly all of the
+      ancestor, so parsing all of it is very close to the useful work. Measured:
+      27.3 ms to read a reference-forked child of a 5 000-event parent, against
+      26.6 ms for the same log self-contained. 2.6%.
+    * **Early in a long parent, or deep in a chain**, a generation may contribute
+      50 events out of 10 000 and still be parsed whole — ~170x the useful work.
+
+    So the fix is real but narrow: a bounded read (`WHERE seq < ?` in Turso, an
+    early break in JSONL) widening `ReadOne` to carry the boundary. Recorded here
+    rather than in a plan, because this is the docstring that was wrong.
 
     Walks iteratively rather than recursively: the chain is data from disk, and a
     hand-edited header naming a cycle should meet a bound rather than the
@@ -202,3 +211,75 @@ def _assert_contiguous(events: list[SessionEvent], session_id: str, chain: list[
                 code="GAP",
                 session_id=session_id,
             )
+
+
+def lineage_faults(
+    listed: Iterable[tuple[str, str | None]], exists: Callable[[str], bool]
+) -> list[tuple[str, str]]:
+    """Stored sessions whose lineage will not materialise, and why (§5.4a).
+
+    **The cost reference-forking has and copying did not.** A copied child was
+    self-contained; a referencing one is readable only while the log it names is
+    still there. The plan's answer was to refuse to remove a session that has
+    descendants — but nothing in pH removes a session log, so there is no
+    removal to refuse. What there is, is a person with `rm`, and the failure
+    that reaches them today is a `LineageError` at resume, long after the fact,
+    on one session at a time.
+
+    So this asks the question the other way round: given everything on record,
+    which logs are *already* unreadable? Answered from the **listing** — both
+    backends fill `StoredSession.parent` from a one-line header peek they were
+    already paying for — so a whole store is surveyed without opening a log.
+
+    Rows are `(session_id, what is wrong)`, the shape a `ph doctor` section
+    takes, and an empty list keeps the section off the page entirely.
+
+    Three faults are decidable from here and a fourth is not:
+
+    * **A missing ancestor** — settled with `exists`, not with listing
+      membership, because `stored()` takes a limit and a parent below the cut is
+      present rather than gone. Reporting those would make the check cry wolf on
+      every large store.
+    * **A cycle**, when it closes inside the listing.
+    * **A chain past `MAX_DEPTH`**, which `materialise` refuses outright. Easy to
+      miss because forks are shallow — but `roll` adds a generation per segment,
+      so a long-running segmented session reaches the bound by ordinary use, and
+      a survey that stayed quiet about it would go silent on exactly the failure
+      segmentation introduces.
+    * **A gap** in the assembled seqs is *not* checked: that needs every event of
+      every ancestor, which is the read this exists to avoid. `materialise`
+      catches it at the point of use, where the cost is already being paid.
+    """
+    parents = dict(listed)
+    return [
+        (session_id, fault)
+        for session_id in parents
+        if (fault := _chain_fault(session_id, parents, exists)) is not None
+    ]
+
+
+def _chain_fault(
+    session_id: str, parents: dict[str, str | None], exists: Callable[[str], bool]
+) -> str | None:
+    """Why one session's chain will not materialise, or `None` if it will.
+
+    One chain, one answer — which is why this is a function rather than rows
+    appended to a shared list: a session contributes at most one fault, and
+    saying so in the signature is what keeps the three exits from having to be
+    read as side effects on an accumulator.
+    """
+    seen = {session_id}
+    current = parents[session_id]
+    while current is not None:
+        if current in seen:
+            return f"lineage cycles back through {current}"
+        if len(seen) >= MAX_DEPTH:
+            return f"lineage is more than {MAX_DEPTH} deep; no read will follow it"
+        if current not in parents:
+            # Outside the listing. Present on disk means the chain continues
+            # somewhere this survey cannot see, which is not a fault; absent
+            # means every descendant of it is already unreadable.
+            return None if exists(current) else f"ancestor {current} is missing"
+        seen.add(current)
+        current = parents[current]
+    return None

@@ -102,15 +102,29 @@ class SessionStore:
         *,
         seed: list[SessionEvent] | None = None,
         meta: dict[str, Any] | None = None,
+        inherited: int = 0,
     ) -> Session:
-        """Publish a new live session, optionally seeded with existing events."""
+        """Publish a new live session, optionally seeded with existing events.
+
+        `inherited` is how many leading events are **already durable in some
+        other log** — a fork's prefix, which lives in the parent's file. It is
+        the storage half of a fork and it is not `seed_length`: that one is the
+        *provenance* boundary, the line five folds read to tell parent history
+        from this session's own work, and it stays the fork boundary whatever a
+        store happens to hold.
+
+        Passed to the constructor rather than assigned after it, because
+        `session/created` is what makes a backend queue the log: a store that saw
+        the whole seed would write out the copy reference-forking exists to
+        avoid. As a keyword that ordering cannot be got wrong.
+        """
         resolved = session_id or new_session_id()
         if resolved in self._entries:
             raise SessionForkError(f'session "{resolved}" already exists', "SESSION_ALREADY_EXISTS")
         fields: dict[str, Any] = {"id": resolved, "createdAt": now_ms()}
         fields.update(meta or {})
         header = SessionHeader.model_validate(fields)
-        return self._publish(Session(resolved, seed=seed, header=header))
+        return self._publish(Session(resolved, seed=seed, header=header, durable=inherited))
 
     def adopt(self, session: Session) -> Session:
         """Publish an already-constructed session (the resume path)."""
@@ -151,8 +165,51 @@ class SessionStore:
         self.ctx.emit("session/disposed", entry.session)
 
     async def flush(self, session: Session) -> None:
-        """Await every persistence backend's drain for one session."""
-        await self.ctx.parallel("session/flush", session)
+        """Await every backend's drain for this session — **ancestors first**.
+
+        A reference-forked child's log names a parent and a count, and is
+        readable only once that parent's log actually holds those events. A child
+        made durable first and then orphaned by a crash is a log nothing can
+        read, while the reverse order is harmless at every point it can be
+        interrupted — and this is the common case, not a corner: a fork's
+        boundary is usually the parent's live tip, exactly the part not yet
+        written.
+
+        **Ordered here rather than in `attach`**, where it started. This is the
+        sole dispatcher of `session/flush` in the repo, it owns `_entries` — the
+        live graph the walk needs — and it owns `fork` and `roll`, the calls that
+        create the debt being settled. Ordering inside one backend's listener
+        instead meant the ancestors drained *outside* the dispatch, so a second
+        listener (a mirror, an exporter) saw only the child and had to
+        re-implement the walk; it ran once per attached backend; and the
+        guarantee belonged to having gone through `attach` rather than to the
+        Protocol, which is why the backend parity suite could not reach it.
+
+        The honest trade: one `flush(child)` is now N dispatches rather than one.
+        Both backends return early on an empty buffer, so the ancestors cost a
+        dict lookup each.
+        """
+        for ancestor in self._lineage(session):
+            await self.ctx.parallel("session/flush", ancestor)
+
+    def _lineage(self, session: Session) -> tuple[Session, ...]:
+        """`session` and every ancestor **live in this process**, oldest first.
+
+        An ancestor this store does not hold is one nothing here is writing, so
+        its log is already whatever it is going to be. Keyed by id so the dict
+        is both the order and the cycle bound — a hand-edited header naming its
+        own descendant costs a lookup rather than a hang.
+        """
+        # A tuple, and `chain` keyed by id: this class has its own `list` method,
+        # which shadows the builtin inside the class body — `list(...)` here
+        # resolves to it and mypy says so in a sentence nobody enjoys reading.
+        chain: dict[str, Session] = {}
+        current: Session | None = session
+        while current is not None and current.id not in chain:
+            chain[current.id] = current
+            parent = current.header.parent_session
+            current = self.get(parent) if parent is not None else None
+        return tuple(reversed(chain.values()))
 
     # ------------------------------------------------------------------ fork --
 
@@ -167,6 +224,37 @@ class SessionStore:
         `boundary` is an inclusive source event seq; omitted means the source's
         current last event. The slice may end on a between-turn event but must
         not end inside an open turn.
+
+        **The child holds the prefix in memory and does not re-store it.** Every
+        reader — the transcript fold, the
+        surface fold, `derive_messages` — sees a whole session exactly as before.
+        What changes is the disk: the child's file begins at `session/end-seed`,
+        at seq `seed_length`, and its header says which log the rest came from.
+        Measured: ten forks of a 5 000-event session wrote **4.21 MiB** across
+        ten files and now write **1 980 bytes** in total — 2 231x less — while
+        reading any child back still yields the same 5 001 contiguous events.
+
+        What a fork still costs is in *memory*: 18 ms to validate the seed into a
+        new `Session`. That is unchanged by this and is why a fork is not yet
+        O(1) end to end; it is also why the seed is still handed over in full,
+        since every reader downstream wants a whole session.
+
+        In memory it is *not* free, and an earlier version of this said it was
+        ("pointers to the parent's own immutable events, so sharing costs
+        nothing"). `Session.__init__` runs `_readmit`, which calls
+        `SessionEvent.readmitted()` on every seeded event — a fresh object plus a
+        full re-freeze of the payload. Measured on a 5 000-event parent: 18.2 ms
+        for the fork, 14.4 ms of it (79%) in `readmitted`, 2.2 MB allocated. The
+        re-freeze is genuinely needed on the replay and wire paths it was written
+        for, and is duplicate work here, where the seed comes from a live log
+        every event of which `append` already froze. Left alone deliberately —
+        a trusted-seed path is a change to the session model, not to `fork` —
+        but `roll` turns forking into a routine operation, so the next person
+        should know where the time goes.
+
+        The prefix a child depends on is immutable, because the log is
+        append-only — so the parent may run on forever without invalidating a
+        descendant, and this needs no lock, no copy-on-write and no invalidation.
         """
         if child_session_id is not None and child_session_id in self._entries:
             raise SessionForkError(
@@ -177,7 +265,48 @@ class SessionStore:
         meta: dict[str, Any] = {"parentSession": live.id, "seedLength": len(seed)}
         if live.header.cwd is not None:
             meta["cwd"] = live.header.cwd
-        return self.create(child_session_id, seed=list(seed), meta=meta)
+        return self.create(child_session_id, seed=list(seed), meta=meta, inherited=len(seed))
+
+    def roll(self, source: Session | str, child_session_id: str | None = None) -> Session:
+        """Continue a session in a fresh log — segmentation (§7 step 6).
+
+        **A fork at the tip with no divergence**, and that is the whole of it:
+        `fork(source, None)` already means "at the last event", so segmenting
+        costs a marker and a name rather than a second code path. It inherits
+        `_fork_seed`'s refusal too, which is the rule you want — a segment
+        boundary inside an open turn would start a log mid-step.
+
+        **The session id changes**, which was the decision taken and is the one
+        cost. Worth stating what it does *not* break: `/revert` resolves a
+        checkpoint by the tree hash carried in the `workspace/checkpoint` event,
+        not by looking a ref up under the current id, and the ref that keeps that
+        tree alive still stands under the old one. So a revert reaches back
+        across a roll. What does move is anything keyed by id — a client holding
+        the old one is holding a log that has stopped.
+
+        `session/segmented` is appended to the **parent**, after the fork, so it
+        is the parent's terminal record rather than something the child inherits.
+        That gives the link both directions from state that already exists: the
+        parent names its continuation, the child's header names its origin.
+        Without it a segment and a branch are indistinguishable, because
+        structurally they are the same thing.
+
+        **The parent is left live**, deliberately. Disposing it would unhook the
+        persistence observer while the `Session` object stayed perfectly usable,
+        so an append through a stale reference would vanish with nothing raised.
+        Leaving it published means an in-flight append still lands — and a caller
+        that goes on writing to it has made a *branch*, which is a legitimate
+        thing to have done and shows up as one, its events sitting after a marker
+        that says where the other side went.
+
+        Synchronous, like `fork`. Durability arrives with the next flush, which
+        `attach` orders ancestors-first, so the parent's marker cannot reach disk
+        after the child that references it.
+        """
+        live = self._resolve_source(source)
+        child = self.fork(live, None, child_session_id)
+        live.append("session/segmented", {"continues": child.id})
+        return child
 
     def _resolve_source(self, source: Session | str) -> Session:
         if isinstance(source, str):

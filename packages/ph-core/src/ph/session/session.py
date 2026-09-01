@@ -144,6 +144,8 @@ class Session:
         session_id: str,
         seed: Sequence[SessionEvent] | None = None,
         header: SessionHeader | None = None,
+        *,
+        durable: int = 0,
     ) -> None:
         self._log: list[SessionEvent] = []
         self._surface = SurfaceManager(self._log)
@@ -170,12 +172,24 @@ class Session:
                     raise ValueError(f"invalid seed event at index {index}: {error}") from error
                 self._log.append(event)
 
-        self.durable_length = 0
-        """How many leading events a **store already holds**; 0 unless set.
+        self.durable_length = durable
+        """How many leading events a **store already holds**; 0 unless declared.
 
-        Set by whoever seeded this session *from* storage — `resume_session` is
-        the only caller — and read by a backend that appends rather than
-        upserts, so it can tell what it still owes from what is already written.
+        Read by a backend to tell what it still owes from what is already
+        written: `track` queues `events[durable_length:]`.
+
+        **A constructor argument, not an attribute set afterwards.** Publishing a
+        session is what makes a store queue it — `session/created` reaches
+        `track` synchronously — so a boundary assigned one line after
+        construction is a boundary assigned one line too late, and the window is
+        invisible: the store simply writes more than it needed to. As a keyword
+        the ordering cannot be got wrong.
+
+        Two callers declare it, and they mean different numbers: `resume_session`
+        passes the stored log's length, `SessionStore.create` passes a fork's
+        inherited prefix. Deriving one from the other would be wrong — a resumed
+        fork's `header.seed_length` is its *original* fork boundary, nothing to
+        do with how much of it is on disk now.
 
         **Not `first_live_seq`, and the difference is a defect that shipped.** A
         resume seeds the stored events *plus* the repair closers

@@ -19,7 +19,7 @@ import pytest
 from ph.persistence.jsonl import read_session
 from ph.session import Session, SessionEvent, SurfaceIntent
 from ph.testing import FAKE_OPTIONS as FAKE
-from ph.testing import user_payload
+from ph.testing import user_payload, write_reference_fork
 
 pytestmark = pytest.mark.anyio
 
@@ -76,7 +76,19 @@ async def test_flush_is_idempotent_and_appends_only_new_events(mount: Any, tmp_p
     assert len((tmp_path / "sessions" / "s.jsonl").read_text().splitlines()) == 3
 
 
-async def test_a_forked_session_stores_its_seed(mount: Any, tmp_path: Path) -> None:
+async def test_a_forked_session_stores_a_reference_not_a_copy(mount: Any, tmp_path: Path) -> None:
+    """**Step 4.** The prefix stays in the parent's file; the child stores a pointer.
+
+    On disk the child begins at `session/end-seed`, stamped at seq
+    `seed_length` — which both signals that the file owes a prefix and measures
+    how much. What a *reader* gets back is byte-identical to what the copy
+    produced, and that is the whole trade: one copy of the events, the same log.
+
+    `seed_length` keeps its old meaning. It is the **provenance** boundary that
+    five folds read as "where the parent's history ends and this session's own
+    work starts" — goals spend, schedule, both inboxes, daemon recovery — and
+    repurposing it as a storage offset would have quietly changed all five.
+    """
     ctx = await mount(_root(tmp_path))
     parent = ctx.sessions.create("parent")
     parent.append("turn/start", {"turn": 1})
@@ -85,10 +97,51 @@ async def test_a_forked_session_stores_its_seed(mount: Any, tmp_path: Path) -> N
 
     child = ctx.sessions.fork(parent, None, "child")
     await ctx.sessions.flush(child)
-    header, events = read_session(tmp_path / "sessions" / "child.jsonl")
+
+    header, own = read_session(tmp_path / "sessions" / "child.jsonl")
     assert header.parent_session == "parent"
     assert header.seed_length == 2
-    assert [event.type for event in events] == ["turn/start", "turn/end", "session/end-seed"]
+    assert [event.type for event in own] == ["session/end-seed"], "the seed was not re-written"
+    assert own[0].seq == 2, "and the first seq says how much it owes"
+
+    assert [event.type for event in child.events] == [
+        "turn/start",
+        "turn/end",
+        "session/end-seed",
+    ], "in memory the child is a whole session, sharing the parent's immutable events"
+
+    _, whole = ctx.session_persistence.read("child")
+    assert [event.type for event in whole] == [event.type for event in child.events]
+    assert [event.seq for event in whole] == [0, 1, 2]
+
+
+async def test_a_child_is_never_durable_before_the_prefix_it_references(
+    mount: Any, tmp_path: Path
+) -> None:
+    """**Write ordering is the one thing copying used to give for free.**
+
+    A copied child was self-sufficient the moment it hit disk. A child that
+    stores a *reference* is only readable once the log it points at holds the
+    events it names — so a crash between the child's flush and the parent's next
+    one would leave an unreadable child, and the fork boundary is very often the
+    parent's live tip, which is exactly the part not yet written.
+
+    Nothing in the caller can order this: `fork` is synchronous and the flushes
+    are independent. So the rule lives where both backends are wired, and it is
+    the plain one — a log is flushed after everything it references.
+    """
+    ctx = await mount(_root(tmp_path))
+    parent = ctx.sessions.create("parent")
+    parent.append("turn/start", {"turn": 1})
+    parent.append("turn/end", {"turn": 1, "reason": {"kind": "completed"}})
+
+    # The parent has never been flushed. Its file does not exist.
+    child = ctx.sessions.fork(parent, None, "child")
+    await ctx.sessions.flush(child)
+
+    assert (tmp_path / "sessions" / "parent.jsonl").exists(), "the ancestor went first"
+    _, whole = ctx.session_persistence.read("child")
+    assert [event.seq for event in whole] == [0, 1, 2]
 
 
 def test_read_session_hands_acceptance_to_the_session(tmp_path: Path) -> None:
@@ -186,3 +239,73 @@ def test_events_survive_a_wire_round_trip() -> None:
     session.append("user/message", user_payload("hi"), SurfaceIntent("append"))
     for event in session.events:
         assert SessionEvent.from_wire(event.to_wire()).to_wire() == event.to_wire()
+
+
+async def test_a_broken_lineage_is_reported_by_ph_doctor(mount: Any, tmp_path: Path) -> None:
+    """**Step 5, where it can actually be acted on.**
+
+    The plan's guard was "refuse to remove a session that has descendants", but
+    nothing in pH removes a session log — so there is no removal to refuse, and
+    writing the guard anyway would be a check with no caller. What exists is a
+    person with `rm`, and what they get today is a `LineageError` at resume, one
+    session at a time, long after the fact.
+
+    So the store answers the question the other way round, and says it where a
+    person goes to ask what is wrong. The section is absent while the store is
+    healthy: `Diagnostic.read`'s empty-list contract, for the reason it gives —
+    a report that shows every section every time is one where the section that
+    matters cannot be found.
+    """
+    ctx = await mount(_root(tmp_path))
+    registry = ctx.get("diagnostics")
+    assert registry is not None, "the base profile mounts it"
+    assert "Session lineage" not in dict(registry.report()), "nothing to say yet"
+
+    root = tmp_path / "sessions"
+    root.mkdir(parents=True, exist_ok=True)
+    write_reference_fork(root, "orphan", "deleted-parent", boundary=4)
+
+    assert dict(registry.report())["Session lineage"] == [
+        ("orphan", "ancestor deleted-parent is missing")
+    ]
+
+
+async def test_segments_each_hold_only_their_own_run(mount: Any, tmp_path: Path) -> None:
+    """**Segmentation on disk: three files, one contiguous log (§7 step 6).**
+
+    Each file's events are disjoint from its neighbours' and they tile exactly,
+    which is the same property forking already relies on — a segment *is* a fork
+    at the tip, so nothing here is a second mechanism. Reading the newest one
+    walks the chain and hands back the whole run.
+    """
+    ctx = await mount(_root(tmp_path))
+    first = ctx.sessions.create("s0")
+    for turn in (1, 2):
+        first.append("turn/start", {"turn": turn})
+        first.append("turn/end", {"turn": turn, "reason": {"kind": "completed"}})
+
+    second = ctx.sessions.roll(first, "s1")
+    for turn in (3, 4):
+        second.append("turn/start", {"turn": turn})
+        second.append("turn/end", {"turn": turn, "reason": {"kind": "completed"}})
+
+    third = ctx.sessions.roll(second, "s2")
+    third.append("turn/start", {"turn": 5})
+    third.append("turn/end", {"turn": 5, "reason": {"kind": "completed"}})
+    await ctx.sessions.flush(third)
+
+    root = tmp_path / "sessions"
+    held = {
+        name: [event.seq for event in read_session(root / f"{name}.jsonl")[1]]
+        for name in ("s0", "s1", "s2")
+    }
+    assert held == {"s0": [0, 1, 2, 3, 4], "s1": [4, 5, 6, 7, 8, 9], "s2": [9, 10, 11]}, (
+        "the shared seqs are the parent's marker against the child's end-seed: "
+        "different events in different lineages, never both in one materialised log"
+    )
+
+    _, whole = ctx.session_persistence.read("s2")
+    assert [event.seq for event in whole] == list(range(12))
+    assert [event.type for event in whole].count("session/segmented") == 0, (
+        "a marker belongs to the log that stopped, not to the one that carried on"
+    )

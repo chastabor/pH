@@ -186,3 +186,74 @@ def test_fork_boundaries_agrees_with_the_per_boundary_rule() -> None:
     # inside the turn that never closed.
     assert {log[seq].type for seq in fast} == {"turn/end", "approval/policy"}
     assert not fast & {event.seq for event in log[-2:]}, "an open turn is not a target"
+
+
+# ------------------------------------------------- segmentation (§7 step 6) --
+
+
+def _rolled() -> tuple[SessionStore, Session, Session]:
+    """A store, a session with one closed turn, and the segment continuing it."""
+    store = _store()
+    parent = store.create("p")
+    _closed_turn(parent, 1, "hello")
+    return store, parent, store.roll(parent, "p2")
+
+
+def test_a_roll_continues_the_log_in_a_fresh_session() -> None:
+    """**A fork at the tip with no divergence**, which is the whole mechanism.
+
+    The child inherits every event and adds nothing of its own yet, so the two
+    logs agree completely up to the seam. What makes it a *segment* rather than a
+    branch is only that the parent stops — and the marker is what says so.
+    """
+    _, parent, child = _rolled()
+
+    assert child.header.parent_session == "p"
+    assert child.header.seed_length == 5, "everything up to the tip"
+    assert [event.type for event in child.events[:5]] == [event.type for event in parent.events[:5]]
+    assert child.events[-1].type == "session/end-seed"
+
+
+def test_the_segment_marker_is_the_parents_own_and_is_not_inherited() -> None:
+    """Appended after the fork, so it is the parent's terminal record.
+
+    The link exists in both directions from state that already exists — the
+    parent names its continuation, the child's header names its origin — and
+    neither needs a field that is not already written. Inheriting it would make
+    the child claim to have been segmented, which is the opposite of true.
+    """
+    _, parent, child = _rolled()
+
+    assert parent.events[-1].type == "session/segmented"
+    assert parent.events[-1].data["continues"] == "p2"
+    assert "session/segmented" not in [event.type for event in child.events]
+
+
+def test_a_roll_inside_an_open_turn_is_refused() -> None:
+    """Inherited from `_fork_seed`, and the right rule to inherit: a log that
+    begins mid-step is not resumable, however it came to begin there."""
+    store = _store()
+    session = store.create("p")
+    session.append("turn/start", {"turn": 1})
+
+    with pytest.raises(SessionForkError) as caught:
+        store.roll(session)
+    assert caught.value.code == "OPEN_TURN"
+
+
+def test_a_parent_that_keeps_writing_after_a_roll_has_made_a_branch() -> None:
+    """**The parent is left live on purpose.**
+
+    Disposing it would unhook the persistence observer while the `Session` object
+    stayed perfectly usable, so an append through a stale reference would vanish
+    with nothing raised. Left published, an in-flight append still lands — and a
+    caller that goes on writing has made a branch, which is a legitimate thing to
+    have done and is visible as one, its events sitting after the marker.
+    """
+    store, parent, _ = _rolled()
+
+    assert store.get("p") is parent
+    _closed_turn(parent, 2, "and again")
+    types = [event.type for event in parent.events]
+    assert types[5] == "session/segmented"
+    assert types[6:], "the branch is in the log, not lost"

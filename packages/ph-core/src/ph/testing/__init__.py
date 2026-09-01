@@ -20,6 +20,7 @@ from .builders import (
     workspace_log,
     workspace_retained,
     workspace_seam,
+    write_reference_fork,
 )
 from .diagnostics import report_section
 from .fake_adapter import FakeAdapter, text_script
@@ -66,5 +67,6 @@ __all__ = [
     "workspace_retained",
     "workspace_seam",
     "worktree_agent",
+    "write_reference_fork",
     "write_skill",
 ]
