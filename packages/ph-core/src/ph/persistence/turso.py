@@ -56,6 +56,7 @@ from ..paths import resolve_roots
 from ..seams.diagnostics import Diagnostic, contribute
 from ..session import Session, SessionEvent, SessionHeader
 from ..session.json import dumps
+from .lineage import materialise
 from .protocol import SessionPersistence, StoredSession, attach
 
 __all__ = ["TursoSessionStore", "apply"]
@@ -167,6 +168,27 @@ class TursoSessionStore:
         return session_db(self.root, session_id).is_file()
 
     def read(self, session_id: str) -> tuple[SessionHeader, list[SessionEvent]]:
+        """The session's full log, following its lineage when it stores a reference.
+
+        The same walk JSONL uses, over a different one-database read — which is
+        the point of `materialise` taking a callable: the two backends disagree
+        about everything below this line and about nothing above it.
+        """
+        held = set(self._connections)
+        try:
+            return materialise(self.read_own, session_id)
+        finally:
+            # `_connect` caches, and `forget` only ever runs for sessions this
+            # store *buffers* — so every ancestor the walk touches would leave an
+            # open database behind for the life of the process. That is precisely
+            # the exhaustion `forget`'s own comment guards against, reintroduced
+            # through a read. Ancestors are immutable and read once; nothing is
+            # gained by keeping them.
+            for ancestor in set(self._connections) - held:
+                self.forget(ancestor)
+
+    def read_own(self, session_id: str) -> tuple[SessionHeader, list[SessionEvent]]:
+        """This database and nothing else."""
         if not self.exists(session_id):
             raise FileNotFoundError(f"no stored session {session_id!r}")
         cursor = self._connect(session_id).cursor()

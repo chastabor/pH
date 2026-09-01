@@ -26,9 +26,9 @@ from textual.app import App
 from textual.binding import Binding, BindingType
 
 from ph.paths import resolve_roots
-from ph.persistence import read_session, repaired
+from ph.persistence import materialise, read_session, repaired
 from ph.persistence.jsonl import session_path
-from ph.session import Session
+from ph.session import Session, SessionEvent, SessionHeader
 
 from .config import TuiSettings, load_tui_settings
 from .themes import ThemeCatalog, fallback_variables, load_catalog
@@ -64,11 +64,47 @@ def load_records(
         path = session_path(base, target)
     if not path.is_file():
         raise FileNotFoundError(f"no session log at {path}")
-    header, events = read_session(path)
+    header, events = _lineage_of(path)
     # `repaired`, like a resume: a log whose tail was cut mid-turn is the
     # auditor's headline case, and seeding it raw would refuse the very session
     # someone opened this view to read.
     return header.id, build_trajectory(Session(header.id, seed=repaired(events), header=header))
+
+
+def _lineage_of(path: Path) -> tuple[SessionHeader, list[SessionEvent]]:
+    """The log at `path`, plus whatever prefix it inherits (feasibility §5.3).
+
+    **The auditor wants the lineage, not the segment.** A reference-forked child
+    stores only its own events, so reading the file alone would show a history
+    beginning in the middle — and `Session(seed=…)` would refuse it outright,
+    since the first event's seq would not be 0. It is also what `f` forks from:
+    a row's `source_seq` is a position in the whole conversation, not in whatever
+    file happened to hold it.
+
+    **Through `materialise`, not through `JsonlSessionStore`**, even though the
+    store is where `read` now does this. The store addresses a log as
+    `<root>/<id>.jsonl`, and this view deliberately opens *any* path — "a
+    fixture, a copy someone sent", per this module's own docstring — so routing
+    through it would quietly require a naming convention the entry point does not
+    have. What actually risked divergence was the lineage walk, and that is
+    shared; `read_session` is the leaf read on both paths.
+
+    Ancestors resolve by id **beside the target**, which is the only guess
+    available with nothing mounted and the right one for a lineage that was
+    copied somewhere as a set. A chain whose ancestors are absent raises
+    `LineageError` naming the missing one, rather than rendering a partial
+    history as if it were whole.
+    """
+    header, events = read_session(path)
+
+    def read_one(session_id: str) -> tuple[SessionHeader, list[SessionEvent]]:
+        # The target is already read, and it is the only one whose *filename* is
+        # known; everything above it is addressed the way the store addresses it.
+        if session_id == header.id:
+            return header, events
+        return read_session(session_path(path.parent, session_id))
+
+    return materialise(read_one, header.id)
 
 
 class TrajectoryApp(App[None]):

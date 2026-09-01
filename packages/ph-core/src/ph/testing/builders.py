@@ -25,7 +25,7 @@ from ..seams.workspace import (
     SharedWorkspaceProvider,
     WorkspaceSeam,
 )
-from ..session import Session
+from ..session import Session, SessionEvent, SessionHeader
 from ..tools.definition import ToolDefinition, ToolOutput, define_tool, text_content
 from ..tools.registry import ToolRuntime
 
@@ -35,6 +35,7 @@ __all__ = [
     "assistant_payload",
     "plugin_payload",
     "raising",
+    "reference_fork",
     "run_tool",
     "simple_tool",
     "tool_result_payload",
@@ -321,3 +322,36 @@ def workspace_log(*events: tuple[str, dict[str, Any]], session_id: str = "s") ->
     for kind, data in events:
         session.append(kind, data)
     return session
+
+
+def reference_fork(
+    child: str, parent: str, *, boundary: int
+) -> tuple[SessionHeader, list[SessionEvent]]:
+    """A child that stores **only its own events**, beginning at `boundary`.
+
+    Hand-built because `fork` still copies: the reader lands before anything
+    writes a reference, which is the whole point of that sequencing — the walk
+    has to be exercised before `fork` depends on it, not after.
+
+    Here rather than in either suite because both need it and they were building
+    it differently: the core one through a store, the view one by writing the
+    wire format out longhand (`"seedLength"`, `"version": 0`, the header
+    envelope). A test that spells the format itself keeps passing when the format
+    changes, which makes it evidence for nothing. Returning the header and the
+    events lets each caller persist them its own way while the *shape* of a
+    reference-fork has one definition.
+
+    The first event sits at `boundary`, which both marks the file as owing a
+    prefix and says how long that prefix is.
+    """
+    header = SessionHeader(id=child, created_at=1, parent_session=parent, seed_length=boundary)
+    own = [
+        SessionEvent(type="turn/start", seq=boundary, time=1, data={"turn": boundary}),
+        SessionEvent(
+            type="turn/end",
+            seq=boundary + 1,
+            time=1,
+            data={"turn": boundary, "reason": {"kind": "completed"}},
+        ),
+    ]
+    return header, own

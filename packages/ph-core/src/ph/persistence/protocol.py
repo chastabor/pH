@@ -90,7 +90,25 @@ class SessionPersistence(Protocol):
         ...
 
     def read(self, session_id: str) -> tuple[SessionHeader, list[SessionEvent]]:
-        """The stored header and events. Raises if there is nothing to read."""
+        """The full log, **materialised**: dense from seq 0, chain followed.
+
+        A backend whose file stores only its own run must walk `parent_session`
+        to assemble the rest — `materialise(self.read_own, session_id)` is that
+        walk, and both backends' `read` is exactly that one line.
+        """
+        ...
+
+    def read_own(self, session_id: str) -> tuple[SessionHeader, list[SessionEvent]]:
+        """This one stored log, unchained — the primitive `read` composes.
+
+        Declared here rather than left to convention because it is the half a
+        backend actually implements. Without it a third backend can satisfy this
+        Protocol with a `read` that returns one file's events, pass mypy, pass
+        `runtime_checkable`, mount through `attach` and serve *segments* as whole
+        sessions; the failure would surface as `_readmit`'s "contiguous from 0"
+        refusal inside `Session.__init__`, three layers from the cause. That is
+        verbatim the silent-failure argument `attach` is here for.
+        """
         ...
 
     def stored(self, *, limit: int = 50) -> list[StoredSession]:

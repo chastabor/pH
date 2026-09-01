@@ -35,6 +35,7 @@ from ..cordis import Context, plugin
 from ..paths import resolve_roots
 from ..session import Session, SessionEvent, SessionHeader
 from ..session.json import dumps
+from .lineage import materialise
 from .protocol import SessionPersistence, StoredSession, attach
 
 __all__ = [
@@ -152,6 +153,17 @@ class JsonlSessionStore:
         return session_path(self.root, session_id).is_file()
 
     def read(self, session_id: str) -> tuple[SessionHeader, list[SessionEvent]]:
+        """The session's full log, following its lineage when it stores a reference.
+
+        `read_own` is this backend's one-file read; `materialise` decides whether
+        a chain is owed by looking at the first event's seq. A log that starts at
+        0 is complete and is returned unchanged, which is every log written so
+        far — so this is a no-op until something writes a reference-fork.
+        """
+        return materialise(self.read_own, session_id)
+
+    def read_own(self, session_id: str) -> tuple[SessionHeader, list[SessionEvent]]:
+        """This file and nothing else — the unchained read `materialise` walks with."""
         return read_session(session_path(self.root, session_id))
 
     def locate(self, session_id: str) -> Path | None:

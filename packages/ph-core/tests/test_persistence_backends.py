@@ -13,10 +13,11 @@ from typing import Any
 
 import pytest
 
+from ph.persistence import MAX_DEPTH, LineageError
 from ph.persistence.jsonl import JsonlSessionStore
 from ph.persistence.protocol import SessionPersistence
-from ph.session import Session, SessionHeader, SurfaceIntent
-from ph.testing import user_payload
+from ph.session import Session, SessionEvent, SessionHeader, SurfaceIntent
+from ph.testing import reference_fork, user_payload
 
 pytestmark = pytest.mark.anyio
 
@@ -363,3 +364,215 @@ async def test_a_profile_resumes_through_whichever_backend_it_mounted(
     header, events = store.read("carried")
     assert header.id == "carried"
     assert [event.type for event in events] == ["turn/start"]
+
+
+# ------------------------------------------------- lineage (feasibility §5.3) --
+
+
+def _reference_fork(store: SessionPersistence, child: str, parent: str, boundary: int) -> Session:
+    """`reference_fork` put through this backend."""
+    header, own = reference_fork(child, parent, boundary=boundary)
+    session = Session(child, header=header)
+    store.track(session)
+    for event in own:
+        store.record(session, event)
+    return session
+
+
+async def test_a_log_that_starts_at_zero_is_read_unchanged(store: SessionPersistence) -> None:
+    """The no-op that makes this safe to land before anything writes a reference.
+
+    Every log written so far begins at seq 0 — a root because it is one, and
+    today's copy-forked child because the copy is right there. So chain-aware
+    reading must be invisible until a file says otherwise, and the thing that
+    says otherwise is a first event above 0.
+    """
+    session = _session(store)
+    _append(store, session, "turn/start", {"turn": 1})
+    _append(store, session, "turn/end", {"turn": 1, "reason": {"kind": "completed"}})
+    await store.flush(session)
+
+    header, events = store.read("s1")
+    assert header.id == "s1"
+    assert [event.seq for event in events] == [0, 1]
+
+
+async def test_a_child_holding_only_its_own_events_materialises_its_lineage(
+    store: SessionPersistence,
+) -> None:
+    """The mechanism: a file that begins above 0 is owed exactly that many events.
+
+    The child stores two events and reads back six. Its header is its own — a
+    lineage supplies history, never identity — and the assembled log is dense
+    from 0, which is what every reader above this already requires.
+    """
+    parent = _session(store, "p")
+    for turn in range(3):
+        _append(store, parent, "turn/start", {"turn": turn})
+        _append(store, parent, "turn/end", {"turn": turn, "reason": {"kind": "completed"}})
+    await store.flush(parent)
+
+    child = _reference_fork(store, "c", "p", boundary=4)
+    await store.flush(child)
+
+    header, events = store.read("c")
+    assert header.id == "c", "the lineage supplies events, not identity"
+    assert [event.seq for event in events] == [0, 1, 2, 3, 4, 5]
+    assert [event.type for event in events[:4]] == [event.type for event in parent.events[:4]]
+
+
+async def test_a_growing_parent_never_disturbs_a_child(store: SessionPersistence) -> None:
+    """**The safety property, and the reason this needs no lock.**
+
+    A child depends on `parent[0:n]`, and a prefix of an append-only log is
+    immutable. The parent may run forever without invalidating a descendant —
+    which is what makes one writer per file structural rather than enforced, and
+    is precisely what tau's shared-file design cannot offer.
+    """
+    parent = _session(store, "p")
+    for turn in range(3):
+        _append(store, parent, "turn/start", {"turn": turn})
+        _append(store, parent, "turn/end", {"turn": turn, "reason": {"kind": "completed"}})
+    await store.flush(parent)
+    child = _reference_fork(store, "c", "p", boundary=4)
+    await store.flush(child)
+    before = [event.seq for event in store.read("c")[1]]
+
+    for turn in (9, 10):
+        _append(store, parent, "turn/start", {"turn": turn})
+        _append(store, parent, "turn/end", {"turn": turn, "reason": {"kind": "completed"}})
+    await store.flush(parent)
+
+    assert [event.seq for event in store.read("c")[1]] == before
+    assert len(store.read("p")[1]) == 10, "the parent did grow"
+
+
+async def test_a_child_that_claims_completeness_but_is_short_is_refused(
+    store: SessionPersistence,
+) -> None:
+    """**The trap step 4 walks into**, caught before it can return a wrong log.
+
+    `Session.append` mints `seq = len(self._log)`, so a reference-forked child
+    built with an empty seed writes its first event at **0** — and a file
+    starting at 0 is exactly what this reader takes as "complete". It would hand
+    back a two-event log as a whole session and drop the inherited prefix in
+    silence, which is worse than any refusal: the caller cannot tell.
+
+    The header is what disagrees. It says the child inherits four events; the
+    file holds two and starts at zero. Those cannot both be true, so `fork` must
+    seed the child's counter at `seed_length` — and until it does, this says so.
+    """
+    header = SessionHeader(id="short", created_at=1, parent_session="p", seed_length=4)
+    session = Session("short", header=header)
+    store.track(session)
+    for seq in (0, 1):
+        store.record(session, SessionEvent(type="turn/start", seq=seq, time=1, data={"turn": seq}))
+    await store.flush(session)
+
+    with pytest.raises(LineageError, match="claims to hold its own history") as caught:
+        store.read("short")
+
+    assert caught.value.code == "TRUNCATED"
+    assert caught.value.session_id == "short"
+
+
+async def test_a_missing_ancestor_fails_loudly_and_names_it(store: SessionPersistence) -> None:
+    """A broken chain must refuse, not return a partial log.
+
+    A silent partial read reconstructs a **wrong** session rather than an
+    incomplete one — the failure `_readmit`'s unknown-type refusal exists to
+    prevent, one layer down. The refusal names the ancestor because that is the
+    only thing the reader can act on.
+    """
+    child = _reference_fork(store, "orphan", "vanished", boundary=4)
+    await store.flush(child)
+
+    with pytest.raises(LineageError, match="vanished") as caught:
+        store.read("orphan")
+
+    assert caught.value.code == "MISSING_ANCESTOR"
+
+
+async def test_a_log_above_zero_that_names_no_parent_is_refused(
+    store: SessionPersistence,
+) -> None:
+    """The other corruption: a file that owes a prefix and says nothing about it.
+
+    Distinct from a missing ancestor, and worth its own sentence — one is a
+    deleted file, the other a header that never recorded where its history came
+    from, and only the second is unrecoverable.
+    """
+    header = SessionHeader(id="rootless", created_at=1)
+    session = Session("rootless", header=header)
+    store.track(session)
+    store.record(session, SessionEvent(type="turn/start", seq=4, time=1, data={"turn": 4}))
+    await store.flush(session)
+
+    with pytest.raises(LineageError, match="names no parent") as caught:
+        store.read("rootless")
+
+    assert caught.value.code == "NO_PARENT"
+
+
+async def test_a_cycle_in_the_lineage_is_refused_and_shown(store: SessionPersistence) -> None:
+    """Two headers naming each other must meet a bound, not the stack.
+
+    The chain is data read off disk, so a hand-edited or corrupted header can
+    name its own descendant. `RecursionError` would be a true statement about the
+    interpreter and a useless one about the log, so the walk reports the cycle it
+    found instead.
+    """
+    for name, parent in (("a", "b"), ("b", "a")):
+        session = _reference_fork(store, name, parent, boundary=4)
+        await store.flush(session)
+
+    with pytest.raises(LineageError, match="cycle") as caught:
+        store.read("a")
+
+    assert caught.value.code == "CYCLE"
+
+
+async def test_a_chain_deeper_than_the_bound_is_refused(store: SessionPersistence) -> None:
+    """The syscall bound, which is not a correctness one.
+
+    A legal chain of any depth reconstructs correctly and reads the same bytes,
+    since each file contributes a disjoint slice — so this exists to stop a
+    pathological fork-of-fork from turning one read into hundreds of file opens,
+    and to give the cycle guard a backstop when the cycle is longer than the
+    walk's memory of it.
+    """
+    # Each link owes the one above it and supplies nothing, so the walk cannot
+    # terminate before the bound does.
+    for depth in range(MAX_DEPTH + 2):
+        session = _reference_fork(store, f"d{depth}", f"d{depth + 1}", boundary=4)
+        await store.flush(session)
+
+    with pytest.raises(LineageError, match=f"more than {MAX_DEPTH} deep") as caught:
+        store.read("d0")
+
+    assert caught.value.code == "TOO_DEEP"
+
+
+async def test_a_short_ancestor_is_caught_as_a_gap_not_passed_on(
+    store: SessionPersistence,
+) -> None:
+    """An ancestor that cannot supply what it was asked for.
+
+    The parent starts at 0, so the walk stops there — but it holds fewer events
+    than the child was owed, leaving a hole in the middle of the assembled log.
+    `_readmit` would refuse that hole one layer up, with no idea which ancestor
+    came up short; catching it here is what turns "seed must be contiguous from
+    0" into a sentence naming the lineage.
+    """
+    parent = _session(store, "short")
+    _append(store, parent, "turn/start", {"turn": 1})
+    _append(store, parent, "turn/end", {"turn": 1, "reason": {"kind": "completed"}})
+    await store.flush(parent)  # seqs 0 and 1 only
+
+    child = _reference_fork(store, "wants4", "short", boundary=4)
+    await store.flush(child)
+
+    with pytest.raises(LineageError, match="gap at index 2") as caught:
+        store.read("wants4")
+
+    assert caught.value.code == "GAP"
