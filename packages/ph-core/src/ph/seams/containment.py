@@ -37,6 +37,7 @@ way — the same reasoning E9's live `reach` sentence is built on.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Protocol, runtime_checkable
 
 from ..cordis import Context, plugin
 from ..wire import WireModel
@@ -50,6 +51,7 @@ __all__ = [
     "Config",
     "ContainmentService",
     "ContainmentUnavailableError",
+    "DescribingProvider",
     "TierDescription",
     "apply",
 ]
@@ -81,6 +83,29 @@ class TierDescription:
     bounds: str
     does_not_bound: str
     buys: str
+
+
+@runtime_checkable
+class DescribingProvider(Protocol):
+    """A provider whose bargain differs from the stock description of its rung.
+
+    **The columns belong to whoever occupies the rung, not to its name.** `TIERS`
+    is keyed by rung, so every provider at `worktree` inherited "buys: collision
+    isolation and revertibility (fan-out safety, per-run checkpoints, /revert)" —
+    true of a checkout and false of an overlay, which has no git tree to hash and
+    therefore never writes a restore point. `ph doctor` was advertising a
+    mechanism the mounted tier does not have, in the one place a person looks to
+    check exactly that, which is the single failure E1 exists to prevent.
+
+    Optional, like `ReclaimingProvider` and `ExportingProvider`: a provider whose
+    bargain *is* its rung's says nothing and gets the stock row. `tier` is on the
+    Protocol so the override can be matched to the rung it describes — a report
+    with two rungs must not let a child-tier provider rewrite the root's columns.
+    """
+
+    tier: ContainmentTier
+
+    def describe_tier(self) -> TierDescription: ...
 
 
 TIERS: dict[ContainmentTier, TierDescription] = {
@@ -192,11 +217,14 @@ class ContainmentService:
         if child != root:
             rows.append(("tier for children", child))
             rungs.append(child)
+        provider = None if workspace is None else workspace.provider
         for rung in rungs:
             # Prefixed only when there are two, so the ordinary single-rung
             # report reads as the table §4.8 prints rather than as a matrix.
             prefix = "" if len(rungs) == 1 else f"{rung} "
             description = TIERS[rung]
+            if isinstance(provider, DescribingProvider) and provider.tier == rung:
+                description = provider.describe_tier()
             rows.append((f"{prefix}bounds", description.bounds))
             rows.append((f"{prefix}does NOT bound", description.does_not_bound))
             rows.append((f"{prefix}buys", description.buys))

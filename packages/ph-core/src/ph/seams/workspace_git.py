@@ -71,6 +71,7 @@ from .workspace import (
     WorkspaceRecord,
     discards_writes,
     redirection_env,
+    restorable,
     workspace_of,
 )
 
@@ -671,7 +672,7 @@ async def tree_hash(ctx: Context, workspace: Workspace) -> str | None:
     exact tree does not need running again. One derivation, so a gate memo and
     a checkpoint can never disagree about whether the work changed.
     """
-    if workspace.kind not in ("worktree", "worktree-ephemeral"):
+    if not restorable(workspace.kind):
         return None
     git_dir = await _git_dir(ctx, workspace.root)
     if git_dir is None:
@@ -755,7 +756,7 @@ async def _cached_checkpoint(
     one of four spawns spent learning a constant — the same finding
     `_toplevels` records for `--show-toplevel` one class up.
     """
-    if workspace.kind not in ("worktree", "worktree-ephemeral"):
+    if not restorable(workspace.kind):
         # The gate `checkpoint` applies anyway, hoisted above the `rev-parse`
         # that would otherwise run — a subprocess in the person's own checkout,
         # for a `shared` workspace that can never have a restore point. Newly

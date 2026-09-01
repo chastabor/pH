@@ -92,6 +92,7 @@ __all__ = [
     "lifecycle",
     "project_access",
     "redirection_env",
+    "restorable",
     "stored_survivors",
     "workspace_leaks",
     "workspace_of",
@@ -217,6 +218,35 @@ def discards_writes(kind: WorkspaceKind) -> bool:
             # evidence is lost by an ordinary disposal exactly as an ephemeral
             # checkout's is — which is what puts it under the retention policy.
             return True
+
+
+def restorable(kind: WorkspaceKind) -> bool:
+    """Whether this kind has a restore mechanism at all (P6-20).
+
+    **The gate that was a membership test, which is how it nearly went wrong.**
+    `workspace_git` captured and restored behind `kind not in ("worktree",
+    "worktree-ephemeral")` — correct, but invisible to the exhaustiveness that
+    every other question about a kind is answered by. A kind added to the Literal
+    fell outside it silently, so `/revert` answered "no restore points in this
+    session" for a workspace that can never have one: true, useless, and
+    indistinguishable from a run that simply had not checkpointed yet. P6-20's
+    own gate is that such a kind **refuses** rather than no-ops, and a refusal
+    needs something to ask.
+
+    Exhaustive for `project_access`'s reason three functions up: a seventh kind
+    should fail to type-check here rather than default into "restorable" and
+    have `/revert` offer an agent a restore point that captures nothing.
+
+    An overlay is `False` today rather than forever: its delta is a perfectly
+    good restore point, it is simply not a git tree, so `write-tree` against a
+    mountpoint has nothing to say. Giving it one is a `CheckpointingProvider`,
+    which is the shape `acquire` and `reclaim` already take.
+    """
+    match kind:
+        case "worktree" | "worktree-ephemeral":
+            return True
+        case "shared" | "readonly-scratch" | "overlay" | "overlay-ephemeral":
+            return False
 
 
 def redirection_env(scratch: Path) -> dict[str, str]:

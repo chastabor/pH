@@ -32,7 +32,7 @@ from typing import Any
 
 from ..cordis import Context, plugin
 from ..seams.commands import CommandDefinition
-from ..seams.workspace import workspace_of
+from ..seams.workspace import restorable, workspace_of
 from ..seams.workspace_git import checkpoints, restore
 from ..session import Session
 
@@ -51,6 +51,16 @@ async def apply(ctx: Context, _config: Any) -> None:
         session: Session | None = invocation.session
         if session is None:
             return "refusing: /revert needs a session to read restore points from"
+        workspace = workspace_of(ctx, invocation.agent)
+        if workspace is not None and not restorable(workspace.kind):
+            # **A refusal, not "no restore points in this session"** (P6-20's own
+            # gate). That sentence is true of a kind that cannot checkpoint and
+            # useless: it reads as "not yet", so a person waits for one to appear.
+            # Naming the kind says the mechanism is absent rather than the points.
+            return (
+                f"refusing: a {workspace.kind} workspace has no restore mechanism, so it "
+                "has no restore points and will not grow any"
+            )
         points = checkpoints(session)
         raw = argument.strip()
         if not raw:
@@ -61,7 +71,6 @@ async def apply(ctx: Context, _config: Any) -> None:
 
         point = points[seq]
         call_id = str(point.get("callId", ""))
-        workspace = workspace_of(ctx, invocation.agent)
         # By id, not by comparing roots: a restore point belongs to the agent
         # that took it, and asking the seam a second time for that agent's root
         # was both a second spelling of one question and *less* safe — a disposed

@@ -65,6 +65,7 @@ import anyio
 from ..cordis import Context, plugin
 from ..paths import default_home_path
 from ..wire import WireModel
+from .containment import TIERS, TierDescription
 from .diagnostics import Diagnostic, contribute
 from .subprocess import SubprocessSpawnSpec, scrub_env
 from .workspace import (
@@ -308,6 +309,38 @@ class AgentFsProvider:
     confines the process; naming it here would make `ph doctor` overstate this.
     """
 
+    def describe_tier(self) -> TierDescription:
+        """What an overlay actually bounds — which is not what its rung's row says.
+
+        `bounds` is the worktree tier's verbatim, and that is the measured
+        result rather than a convenience: a write that resolves against cwd lands
+        in the delta, and an absolute-path raw write does not, which was verified
+        by writing outside the mount from a command running inside it.
+
+        The other two columns are where the rung's stock text was false. An
+        overlay's writes reach nobody until somebody exports them, so the agent
+        can believe work is durable that no one else will ever see — P6-20 put
+        that "beside the absolute-path hole" and the implementation had nowhere to
+        put it until now. And `TIERS["worktree"]` sells "per-run checkpoints,
+        /revert", which an overlay has none of: `write-tree` against a FUSE
+        mountpoint has nothing to hash, so no restore point is ever written.
+        Advertising a mechanism the mounted tier does not have, in the one place a
+        person looks to check, is the failure E1 is about.
+        """
+        return TierDescription(
+            bounds=TIERS["worktree"].bounds,
+            does_not_bound=(
+                'an absolute-path raw write — open("/etc/passwd", "w") never consults a '
+                "cwd; and every write it does bound lands in a delta layer nobody else "
+                "sees until it is exported"
+            ),
+            buys=(
+                "collision isolation, the tree as it actually is (untracked and ignored "
+                "files included), and instant discard — but no per-run checkpoints and "
+                "no /revert"
+            ),
+        )
+
     async def acquire(
         self,
         *,
@@ -485,7 +518,9 @@ async def apply(ctx: Context, config: Config) -> None:
             read=lambda: [
                 ("isolates", "yes" if result.isolates else "no"),
                 ("because", result.because),
-                ("tier", "worktree (peer) — an overlay does not confine the process"),
+                # The tier's honest columns live in the Containment section now,
+                # through `describe_tier` — a caveat repeated in a second section
+                # is the drift `TIERS`'s own docstring warns about.
             ],
             order=30,
         ),

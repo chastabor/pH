@@ -17,12 +17,14 @@ from typing import Any
 
 import pytest
 
+from ph.seams.containment import TIERS
 from ph.seams.workspace import (
     Workspace,
     WorkspaceRecord,
     discards_writes,
     fresh_root,
     project_access,
+    restorable,
 )
 from ph.seams.workspace_agentfs import (
     ExportRefused,
@@ -69,6 +71,43 @@ def test_an_overlay_is_a_fresh_root_so_materials_are_provisioned() -> None:
     put there — the same reason every kind but `shared` provisions."""
     assert fresh_root("overlay") is True
     assert fresh_root("overlay-ephemeral") is True
+
+
+def test_an_overlay_has_no_restore_mechanism() -> None:
+    """**P6-20's gate, as a predicate `/revert` can refuse on.**
+
+    This was a membership test inside `workspace_git`, invisible to the
+    exhaustiveness every other question about a kind gets — so a kind added to
+    the Literal fell outside it silently and `/revert` answered "no restore
+    points in this session", which reads as "not yet" for a workspace that can
+    never have one.
+    """
+    assert restorable("worktree") and restorable("worktree-ephemeral")
+    assert not restorable("overlay") and not restorable("overlay-ephemeral")
+
+
+async def test_doctor_states_what_an_overlay_bounds_not_what_its_rung_sells(
+    mount: Any, tmp_path: Path
+) -> None:
+    """**E1, in the one place a person looks to check it.**
+
+    `TIERS` is keyed by rung, so every provider at `worktree` inherited "buys:
+    collision isolation and revertibility (fan-out safety, per-run checkpoints,
+    /revert)". An overlay has none of that second half — `write-tree` against a
+    FUSE mountpoint has nothing to hash — so `ph doctor` was advertising a
+    mechanism the mounted tier does not have. The columns belong to whoever
+    occupies the rung, not to its name.
+    """
+    ctx = await mount(ROW)  # `containment` is in the base profile already
+    if ctx.workspace.provider is None:
+        pytest.skip("no working overlay on this host")
+
+    rows = dict(ctx.containment.describe())
+
+    assert "/revert" in TIERS["worktree"].buys, "the stock row is what this must not print"
+    assert "no /revert" in rows["buys"], rows["buys"]
+    assert "delta layer" in rows["does NOT bound"], rows["does NOT bound"]
+    assert rows["bounds"] == TIERS["worktree"].bounds, "what it bounds really is the same"
 
 
 async def test_git_checkpointing_declines_an_overlay(mount: Any, tmp_path: Path) -> None:
