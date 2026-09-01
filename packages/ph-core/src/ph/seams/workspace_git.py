@@ -204,6 +204,22 @@ class GitWorktreeProvider:
             ),
         )
 
+    async def export(self, record: WorkspaceRecord) -> str:
+        """The branch this agent has been committing to all along.
+
+        Nothing to build: a worktree *is* its branch, so exporting one is naming
+        it. The method exists so `/workspaces` can ask the seam one question
+        instead of asking which tier answered — the overlay tier, whose work
+        lives in a delta until somebody assembles a commit, is the one that makes
+        this verb non-trivial.
+        """
+        if record.ref is None:
+            raise WorkspaceDeclined(
+                "provider-failed",
+                f"{record.agent_id} is on a detached HEAD; there is no branch to export",
+            )
+        return record.ref
+
     async def reclaim(self, record: WorkspaceRecord) -> bool:
         """Release a tree this process never acquired (F6).
 

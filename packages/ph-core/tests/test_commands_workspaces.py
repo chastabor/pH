@@ -17,6 +17,7 @@ from typing import Any
 
 import pytest
 
+from ph.seams.workspace import WorkspaceRecord
 from ph.testing import FAKE_OPTIONS, git, git_repo, needs_git
 
 pytestmark = [pytest.mark.anyio, needs_git]
@@ -213,3 +214,45 @@ async def test_an_agents_subprocesses_unwind_before_its_workspace(mount: Any) ->
     await ctx.agents.dispose(agent.id)
 
     assert order.index("subprocess") < order.index("workspace/disposed")
+
+
+# -------------------------------------------------------------------- export --
+
+
+async def test_export_names_the_branch_a_worktree_is_already_on(
+    mount: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**One verb for both isolating tiers, and this is the trivial half.**
+
+    A worktree agent has been committing to its branch all along, so exporting
+    one is naming it. The verb exists because the overlay tier's answer is not
+    trivial — its work sits in a delta until somebody assembles a commit — and a
+    command that asked which provider was mounted would have to grow a branch per
+    tier. `ExportingProvider` is what makes it one question.
+    """
+    ctx, base = await _tiered(mount, tmp_path, monkeypatch)
+    await _left_behind(ctx, base, "a1", work=True)
+
+    ref = await ctx.workspace.export(
+        WorkspaceRecord(session_id="s1", agent_id="a1", kind="worktree", root=base, ref="ph/s1/a1")
+    )
+
+    assert ref == "ph/s1/a1"
+
+
+async def test_merge_takes_a_branch_that_has_no_worktree(
+    mount: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**What makes `export`'s own closing sentence true.**
+
+    `list` and `merge` enumerate with `git worktree list`, which an overlay never
+    appears in — it leaves a branch and no checkout. So the name `export` hands a
+    person back would have been refused by the very command it tells them to run.
+    """
+    ctx, base = await _tiered(mount, tmp_path, monkeypatch)
+    await git(ctx, base, "branch", "ph/s1/exported")
+
+    shown = await _run(ctx, "merge ph/s1/exported")
+
+    assert "refusing" not in shown, shown
+    assert "ph/s1/exported" in shown

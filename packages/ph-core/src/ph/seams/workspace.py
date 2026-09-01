@@ -72,6 +72,7 @@ __all__ = [
     "Collectable",
     "ContainmentTier",
     "DeclineReason",
+    "ExportingProvider",
     "LifecycleConfig",
     "ReclaimingProvider",
     "SharedWorkspaceProvider",
@@ -109,16 +110,37 @@ vocabulary spelled out at each of those sites is one where a typo reads as a
 tier nobody has.
 """
 
-WorkspaceKind: TypeAlias = Literal["shared", "worktree", "worktree-ephemeral", "readonly-scratch"]
+WorkspaceKind: TypeAlias = Literal[
+    "shared",
+    "worktree",
+    "worktree-ephemeral",
+    "readonly-scratch",
+    "overlay",
+    "overlay-ephemeral",
+]
 """What an agent actually got.
 
-Four kinds rather than a boolean, because the interesting distinctions are not
+Kinds rather than a boolean, because the interesting distinctions are not
 writable-or-not. `shared` is today's behaviour — one checkout, no isolation.
 `worktree` is that agent's own branch, merged back deliberately.
 `worktree-ephemeral` is a full checkout the agent may write and whose writes
 **reach nobody**: discarded on disposal, never merged. `readonly-scratch` is the
 only one where the repository is genuinely unwritable, and only a sandbox backend
-can deliver it.
+can deliver it. `overlay` and `overlay-ephemeral` are copy-on-write *views* of
+the tree — the agent may write anywhere in one and the host sees none of it,
+because every change lands in a delta layer. They split the way the worktree
+kinds split, and for the same reason: an `overlay` keeps its delta at release so
+the work can be exported onto a branch afterwards, and an `overlay-ephemeral`
+throws it away.
+
+**`overlay` is its own kind and not a flavour of `worktree-ephemeral`**, which
+they otherwise resemble: both are writable and both reach nobody. Two things
+differ and both are load-bearing. It contains the tree *as it is* — untracked
+and ignored files included, which a checkout at a commit does not have — and its
+history is not git's, so `workspace_git`'s checkpoint and restore must decline it
+rather than run `write-tree` against a mountpoint. A membership test would have
+folded it into the worktree gates by accident; a member of this Literal makes
+every `match` refuse to compile until it is classified.
 """
 
 WorkspaceAccess: TypeAlias = Literal["write", "read"]
@@ -143,9 +165,13 @@ def project_access(kind: WorkspaceKind) -> WorkspaceAccess:
     classify as `read` in `ph-rlm` — `mypy` refuses the match instead.
     """
     match kind:
-        case "shared" | "worktree":
+        case "shared" | "worktree" | "overlay":
+            # `overlay` grants write for `worktree`'s reason: its delta survives
+            # release and can be exported onto a branch, so what the holder wrote
+            # can reach the project. The export is deliberate, exactly as a merge
+            # is — granting write is not a promise that anybody ran it.
             return "write"
-        case "worktree-ephemeral" | "readonly-scratch":
+        case "worktree-ephemeral" | "readonly-scratch" | "overlay-ephemeral":
             return "read"
 
 
@@ -162,7 +188,9 @@ def fresh_root(kind: WorkspaceKind) -> bool:
     match kind:
         case "shared":
             return False
-        case "worktree" | "worktree-ephemeral" | "readonly-scratch":
+        case (
+            "worktree" | "worktree-ephemeral" | "readonly-scratch" | "overlay" | "overlay-ephemeral"
+        ):
             return True
 
 
@@ -170,20 +198,24 @@ def discards_writes(kind: WorkspaceKind) -> bool:
     """Whether release throws the agent's writes away, dirty tree and all (P6-28).
 
     The predicate the retention policy keys on, and the reason it is a function
-    here rather than a `== "worktree-ephemeral"` in the bundle that asks. Every
-    other kind either keeps a dirty tree for review or never had writes of its
-    own; this one discards, because reaching nobody is its entire promise. So it
-    is the only kind whose *evidence* can be lost by an ordinary release, which
-    makes it the only kind a policy has any business retaining by default.
+    here rather than a `== "worktree-ephemeral"` in the bundle that asks. The
+    kinds that answer `True` discard because reaching nobody is their entire
+    promise, and they are therefore the only ones whose *evidence* an ordinary
+    release can lose — which is what makes them the only ones a policy has any
+    business retaining by default. Every other kind either keeps a dirty tree for
+    review or never had writes of its own.
 
     Exhaustive for `project_access`'s reason two functions up: a kind added in
     this module should fail to type-check here rather than silently classify as
     "keeps things", which is the direction that quietly loses evidence.
     """
     match kind:
-        case "shared" | "worktree" | "readonly-scratch":
+        case "shared" | "worktree" | "readonly-scratch" | "overlay":
             return False
-        case "worktree-ephemeral":
+        case "worktree-ephemeral" | "overlay-ephemeral":
+            # An ephemeral overlay's delta is discarded on release, so its
+            # evidence is lost by an ordinary disposal exactly as an ephemeral
+            # checkout's is — which is what puts it under the retention policy.
             return True
 
 
@@ -379,7 +411,11 @@ class Workspace:
 
 
 DeclineReason: TypeAlias = Literal[
-    "not-a-repository", "branch-in-use", "path-exists", "provider-failed"
+    "not-a-repository",
+    "branch-in-use",
+    "path-exists",
+    "provider-failed",
+    "overlay-failed",
 ]
 """Why a tier could not serve a request, as a code rather than prose.
 
@@ -442,6 +478,27 @@ class ReclaimingProvider(Protocol):
     """
 
     async def reclaim(self, record: WorkspaceRecord) -> bool: ...
+
+
+@runtime_checkable
+class ExportingProvider(Protocol):
+    """A provider that can put an agent's work where the project can see it.
+
+    **A third optional capability, for `ReclaimingProvider`'s reason.** Not every
+    tier can do this: `shared` has nothing to export because the agent was
+    already writing the project, and a tier that isolates by *discarding* has
+    nothing to offer either. A `getattr` probe would report a provider whose
+    method is misnamed as "cannot export", which is the failure mode that loses
+    work rather than reporting it.
+
+    Returns the git ref the work is on, so one verb serves both isolating tiers:
+    a worktree's branch already exists and its answer is the branch it has been
+    committing to all along, while an overlay has to build one out of its delta
+    first. `/workspaces` then asks the seam rather than asking which tier it is
+    talking to — the `if provider is agentfs` branch this exists to prevent.
+    """
+
+    async def export(self, record: WorkspaceRecord) -> str: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -1092,6 +1149,20 @@ class WorkspaceSeam:
             if await self._reclaim(provider, replace(record, reason=""), "collect") is False:
                 removed.append(record)
         return removed
+
+    async def export(self, record: WorkspaceRecord) -> str | None:
+        """The ref this agent's work is on, or `None` if no tier can say.
+
+        `None` rather than a raise, matching `_reclaimer`: a profile whose tier
+        cannot export is not a broken deployment, it is one where the answer is
+        "there is nothing to move" — and a command that has to print that reads
+        better than one catching an exception two lines below the call.
+        """
+        provider = self.provider
+        if not isinstance(provider, ExportingProvider):
+            log.warning("ph.seams.workspace: no mounted tier can export %s", record.agent_id)
+            return None
+        return await provider.export(record)
 
     def _reclaimer(
         self, records: Sequence[WorkspaceRecord], verb: str

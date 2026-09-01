@@ -44,6 +44,7 @@ import anyio
 from ..cordis import Context, plugin
 from ..paths import default_home_path, is_under
 from ..seams.commands import CommandDefinition
+from ..seams.workspace import stored_survivors
 from ..seams.workspace_git import git
 from ..wire import WireModel
 
@@ -52,7 +53,8 @@ __all__ = ["KeptWorktree", "apply"]
 log = logging.getLogger("ph.commands.workspaces")
 
 USAGE = (
-    "usage: /workspaces [list | merge <agent> | remove <agent> [--with-branch] [--force-branch]]"
+    "usage: /workspaces [list | export <agent> | merge <agent> "
+    "| remove <agent> [--with-branch] [--force-branch]]"
 )
 HINT = USAGE.removeprefix("usage: /workspaces ")
 """The palette's hint is the usage line, so the two cannot drift — they already
@@ -98,6 +100,8 @@ async def apply(ctx: Context, config: Config) -> None:
         try:
             if verb in ("", "list"):
                 return await view.list()
+            if verb == "export":
+                return await view.export(rest.strip())
             if verb == "merge":
                 return await view.merge(rest.strip())
             if verb == "remove":
@@ -109,7 +113,7 @@ async def apply(ctx: Context, config: Config) -> None:
     ctx.commands.register(
         CommandDefinition(
             name="workspaces",
-            summary="List, merge or remove the worktrees agents left behind.",
+            summary="List, export, merge or remove what agents left behind.",
             argument_hint=HINT,
             run=workspaces,
         ),
@@ -205,6 +209,35 @@ class _Workspaces:
             return "no agent worktrees are left behind"
         return "\n".join(row.describe() for row in kept)
 
+    async def export(self, name: str) -> str:
+        """Put an agent's work on a branch, whichever tier it worked in.
+
+        **Asks the seam, not the tier.** A worktree agent has been committing to
+        its branch all along and the answer is that branch's name; an overlay
+        agent's work is in a delta until somebody assembles a commit from it. One
+        verb covers both because `ExportingProvider` is what answers, so this
+        command never learns which provider is mounted.
+
+        Found through the *records* rather than through `git worktree list`,
+        which is what `list` and `merge` use: an overlay has no worktree to
+        enumerate, so the git-shaped lookup cannot see one. The records are the
+        log's own, which is the only enumeration both tiers appear in.
+        """
+        if not name:
+            raise _Refused(USAGE)
+        store = self.ctx.get("session_persistence")
+        if store is None:
+            return "refusing: nothing is storing sessions, so there are no records to export"
+        survivors, _ = stored_survivors(store)
+        row = next((one for one in survivors if one.agent_id == name), None)
+        if row is None:
+            known = ", ".join(sorted({one.agent_id for one in survivors})) or "none"
+            return f"refusing: no workspace named {name!r} (known: {known})"
+        ref = await self.ctx.workspace.export(row)
+        if ref is None:
+            return f"refusing: the mounted tier cannot export {name}"
+        return f"exported {name} to {ref} — merge it with: /workspaces merge {ref}"
+
     async def merge(self, name: str) -> str:
         """Merge an agent's branch into the checkout the person is standing in.
 
@@ -213,14 +246,36 @@ class _Workspaces:
         picked one would be making it. This is the plain merge a person would
         type, offered where they already are.
         """
-        row = await self.find(name)
-        if not row.branch:
-            return f"refusing: {row.agent_id} is on a detached HEAD; there is no branch to merge"
-        code, out, err = await git(self.ctx, self.base, "merge", "--no-edit", row.branch)
+        branch = await self._branch_for(name)
+        code, out, err = await git(self.ctx, self.base, "merge", "--no-edit", branch)
         if code != 0:
             detail = (err.strip() or out.strip()).splitlines()
-            return f"could not merge {row.branch}: {detail[0] if detail else f'git exited {code}'}"
-        return f"merged {row.branch}"
+            return f"could not merge {branch}: {detail[0] if detail else f'git exited {code}'}"
+        return f"merged {branch}"
+
+    async def _branch_for(self, name: str) -> str:
+        """The branch to merge: an agent's worktree, or a ref `export` just made.
+
+        The worktree lookup first, because that is what a person names most of
+        the time. Falling through to a literal ref is what makes `export`'s own
+        closing sentence true: an overlay leaves a branch and no checkout, so the
+        git-shaped enumeration cannot find it and the name a person was just
+        handed would refuse.
+        """
+        try:
+            row = await self.find(name)
+        except _Refused:
+            code, _, _ = await git(
+                self.ctx, self.base, "rev-parse", "--verify", f"refs/heads/{name}"
+            )
+            if code == 0:
+                return name
+            raise
+        if not row.branch:
+            raise _Refused(
+                f"refusing: {row.agent_id} is on a detached HEAD; there is no branch to merge"
+            )
+        return row.branch
 
     async def remove(self, argument: str) -> str:
         parts = argument.split()

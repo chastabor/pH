@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ..seams.workspace import ContainmentTier, Workspace, WorkspaceAccess
+from ..seams.workspace import ContainmentTier, Workspace, WorkspaceAccess, WorkspaceKind
 
 __all__ = ["StubWorkspaceProvider", "acquire_for_role"]
 
@@ -38,6 +38,16 @@ class StubWorkspaceProvider:
     root: Path | None = None
     env: Mapping[str, str] = field(default_factory=dict)
     tier: ContainmentTier = "worktree"
+    kinds: tuple[WorkspaceKind, WorkspaceKind] = ("worktree", "worktree-ephemeral")
+    """What this tier answers for `write` and for `read`, in that order.
+
+    A pair rather than a hardcoded resolution, so a test can drive the seam with
+    a kind whose *provider* is not installed on the host — `("overlay",
+    "overlay-ephemeral")` exercises retention, disposal and `/revert`'s decline
+    for the overlay tier on a machine with no AgentFS, which is the CI shape
+    P6-21's own gate names. The default is the git tier's answer, so every
+    existing caller reads the same.
+    """
     bases: list[Path] = field(default_factory=list)
     """Every `base` this tier was asked about, in order — the assertion a spawn
     test makes, since branching from the *parent's* root is what puts a fan-out
@@ -58,9 +68,9 @@ class StubWorkspaceProvider:
         return Workspace(
             root=tree,
             scratch=scratch,
-            # The same resolution the git tier makes, because it is the tier's
-            # answer — not the request — that everything downstream reads.
-            kind="worktree-ephemeral" if access == "read" else "worktree",
+            # The tier's answer — not the request — is what everything
+            # downstream reads, which is the whole point of resolving here.
+            kind=self.kinds[1] if access == "read" else self.kinds[0],
             repo_writable=True,
             ref=f"ph/{session_id}/{agent_id}",
             env=self.env,
