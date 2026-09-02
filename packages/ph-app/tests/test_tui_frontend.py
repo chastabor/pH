@@ -14,7 +14,7 @@ import pytest
 from ph.seams.approval import ApprovalRequest
 from ph.seams.user_questions import UserQuestion
 from ph.testing import StubAgent, stored_log
-from ph_app.profiles import resolve_profile
+from ph_app.profiles import compose_profile
 from ph_app.tui.frontend import open_harness
 
 pytestmark = pytest.mark.anyio
@@ -46,7 +46,7 @@ async def test_the_frontend_answers_both_seams_through_a_stub(
     monkeypatch.setenv("PH_HOME", str(tmp_path))
     host = StubHost()
     front = await open_harness(
-        resolve_profile("headless"),
+        compose_profile("headless"),
         host=host,
         provider="fake",
         model="fake-1",
@@ -77,7 +77,7 @@ async def test_close_flushes_the_log(tmp_path: Path, monkeypatch: pytest.MonkeyP
     """Disposal does not flush; `close()` must, or a session is lost on exit."""
     monkeypatch.setenv("PH_HOME", str(tmp_path))
     front = await open_harness(
-        resolve_profile("headless"),
+        compose_profile("headless"),
         host=StubHost(),
         provider="fake",
         model="fake-1",

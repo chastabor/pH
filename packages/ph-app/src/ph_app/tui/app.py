@@ -23,7 +23,7 @@ tick — 30 a second — draws whatever arrived. Only the spinner is per-frame.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, ClassVar
@@ -33,7 +33,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding, BindingType
 from textual.containers import Horizontal, Vertical
 
-from ph.cordis import ProfileLayer
+from ph.cordis import Profile
 from ph.paths import resolve_roots
 from ph.seams.approval import ApprovalAnswer, ApprovalRequest
 from ph.seams.permission_presets import PRESETS
@@ -95,7 +95,7 @@ class PHTuiApp(App[str | None]):
 
     def __init__(
         self,
-        documents: Sequence[ProfileLayer],
+        profile: Profile,
         *,
         provider: str = "fake",
         model: str = "fake-1",
@@ -104,7 +104,7 @@ class PHTuiApp(App[str | None]):
         home: Path | None = None,
     ) -> None:
         super().__init__()
-        self.documents = list(documents)
+        self.profile = profile
         self.provider = provider
         self.model = model
         self.session_id = session_id
@@ -224,7 +224,7 @@ class PHTuiApp(App[str | None]):
         """Mount the harness. In a worker, so the shell paints first."""
         try:
             self.front = await open_harness(
-                self.documents,
+                self.profile,
                 host=self,
                 provider=self.provider,
                 model=self.model,
@@ -568,7 +568,7 @@ class PHTuiApp(App[str | None]):
 
 
 async def run_tui(
-    documents: Sequence[ProfileLayer],
+    profile: Profile,
     *,
     provider: str,
     model: str,
@@ -582,7 +582,7 @@ async def run_tui(
     """
     while True:
         app = PHTuiApp(
-            documents, provider=provider, model=model, session_id=session_id, resume=resume
+            profile, provider=provider, model=model, session_id=session_id, resume=resume
         )
         resume = await app.run_async()
         if resume is None:

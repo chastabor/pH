@@ -26,7 +26,7 @@ from typing import Any
 import pytest
 import yaml
 
-from ph.cordis import Context
+from ph.cordis import Context, Mount
 from ph.seams.containment import TIERS
 from ph.seams.diagnostics import Diagnostic, DiagnosticsRegistry
 from ph.testing import StubWorkspaceProvider, acquire_for_role, report_section
@@ -203,3 +203,73 @@ async def test_an_agent_that_holds_nothing_is_not_described(mount: Any) -> None:
     ctx = await mount()
 
     assert not [label for label in report_section(ctx, "Workspaces") if label.startswith("agent ")]
+
+
+# ------------------------------------------------------------------ topology --
+
+
+async def test_the_topology_section_is_a_row_like_every_other_section(mount: Any) -> None:
+    """It reaches the report through the registry, which is the whole change.
+
+    `ph doctor` built this section by hand and appended it after
+    `report()` — reasonable-looking, because it is *about* the rows rather than
+    from one of them, and only the loader knows which activated. What that cost
+    is asserted in the next two tests; what it cost immediately is that the
+    second surface rendering these sections, `ph agents doctor`, relays
+    `report()` verbatim and so could not have this one at all.
+
+    Between the readings and `Invariants`, by declared `order` rather than by
+    list position: `invariants` asks in its own comment to come last, so that a
+    person meets the deployment's account of itself before its self-assessment.
+    """
+    ctx = await mount()
+
+    titles = [title for title, _ in ctx.diagnostics.report()]
+
+    assert titles.index("Topology") > titles.index("Containment")
+    assert titles[-1] == "Invariants"
+
+
+async def test_the_topology_names_what_activated_and_the_realms(mount: Any) -> None:
+    """The half `--dump-config` cannot show, and the reason the row exists.
+
+    A dump is the composition before anything runs, so a row that mounted and
+    never activated reads there exactly like one that runs. Here the state is
+    the value.
+    """
+    rows = report_section(await mount(), "Topology")
+
+    assert rows["diagnostics"].startswith("active ·")
+    assert "from bundles/base.yaml" in rows["diagnostics"]
+    # Stated rather than left as a missing line: at `ph doctor` time there are
+    # none, because an agent's scope is created when it runs.
+    assert "none" in rows["isolated realms"]
+
+
+async def test_a_topology_that_cannot_be_read_leaves_the_rest_of_the_report(
+    mount: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The advantage that is not about tidiness — and it was a misdiagnosis.
+
+    `topology` indexes `forks` and walks a live tree, so it can raise on its own
+    after a mount that worked perfectly. Appended by hand inside `_report`, any
+    such raise came out of `doctor`'s broad catch as **"profile does not
+    mount"** — about a profile that mounted. In the registry it is one dropped
+    section with its traceback in the log, which is what that `try` is for: the
+    command is run *because* something is wrong, and losing the other four
+    sections is the least acceptable answer.
+
+    Patched on the class before the mount — the row binds `ctx.mount.topology`
+    at `apply`, so a later patch would miss it — and the mount never reads it, so
+    the subject is still a deployment that mounted and cannot describe itself.
+    """
+
+    def boom(self: Mount) -> list[tuple[str, str]]:
+        raise RuntimeError("the tree moved under me")
+
+    monkeypatch.setattr(Mount, "topology", boom)
+    ctx = await mount()
+    report = dict(ctx.diagnostics.report())
+
+    assert report["Containment"] and report["Invariants"]
+    assert report["Topology"] == [("(this section failed)", "see the log for the traceback")]

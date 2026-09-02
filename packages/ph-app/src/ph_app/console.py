@@ -92,7 +92,7 @@ spell their own `--type` can come to disagree about what it means.
 
 Here rather than in `cli.py` because `cli.py` imports the sub-apps, so a sub-app
 that wanted the alias would have to import back into it — the cycle this module
-was carved out to avoid, and which `documents_or_exit` already sits below.
+was carved out to avoid, and which `profile_or_exit` already sits below.
 """
 
 
@@ -102,7 +102,7 @@ def selectors_or_exit(patterns: Sequence[str], *, vocabulary: Scheme) -> list[Se
     The refusal is the command's, not the parser's: `parse_all` raises a
     `SelectorError` that already names the offending selector and the vocabulary
     this surface serves, and every caller wants that sentence on stderr under the
-    same exit code — `documents_or_exit`'s argument, applied to the other thing a
+    same exit code — `profile_or_exit`'s argument, applied to the other thing a
     command parses before it can do anything.
     """
     try:

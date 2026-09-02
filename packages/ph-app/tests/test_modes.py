@@ -37,8 +37,9 @@ from pathlib import Path
 
 import pytest
 
+from ph.cordis import Profile
 from ph_app.modes import render_transcript, run_json, run_rpc, run_transcript
-from ph_app.profiles import resolve_profile
+from ph_app.profiles import compose_profile
 
 pytestmark = pytest.mark.anyio
 
@@ -51,15 +52,15 @@ def anyio_backend() -> str:
 
 
 @pytest.fixture
-def documents(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> list[Path]:
+def profile(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Profile:
     monkeypatch.setenv("PH_HOME", str(tmp_path))
-    return resolve_profile("headless")
+    return compose_profile("headless")
 
 
-async def test_json_mode_streams_the_logs_own_envelopes(documents: list[Path]) -> None:
+async def test_json_mode_streams_the_logs_own_envelopes(profile: Profile) -> None:
     out = io.StringIO()
     result = await run_json(
-        documents, "hello", provider="fake", model="fake-1", session_id="demo", out=out
+        profile, "hello", provider="fake", model="fake-1", session_id="demo", out=out
     )
     lines = [json.loads(line) for line in out.getvalue().splitlines()]
     assert lines[0]["type"] == "session/header"
@@ -73,9 +74,9 @@ async def test_json_mode_streams_the_logs_own_envelopes(documents: list[Path]) -
     assert result.events == len(events)
 
 
-async def test_transcript_mode_reads_what_a_person_saw(documents: list[Path]) -> None:
+async def test_transcript_mode_reads_what_a_person_saw(profile: Profile) -> None:
     result = await run_transcript(
-        documents, "what is a session log?", provider="fake", model="fake-1"
+        profile, "what is a session log?", provider="fake", model="fake-1"
     )
     assert "you: what is a session log?" in result.text
     assert "pH: ok" in result.text
@@ -117,7 +118,7 @@ def test_the_transcript_renderer_labels_every_block_kind() -> None:
     assert rendered[5] == "← file body"
 
 
-async def test_an_rpc_round_trip_in_the_sdk_shape(documents: list[Path]) -> None:
+async def test_an_rpc_round_trip_in_the_sdk_shape(profile: Profile) -> None:
     requests = [
         {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
         {"jsonrpc": "2.0", "id": 2, "method": "session/new", "params": {"sessionId": "rpc-1"}},
@@ -132,7 +133,7 @@ async def test_an_rpc_round_trip_in_the_sdk_shape(documents: list[Path]) -> None
     ]
     stdin = io.StringIO("".join(f"{json.dumps(request)}\n" for request in requests))
     out = io.StringIO()
-    await run_rpc(documents, provider="fake", model="fake-1", stdin=stdin, out=out)
+    await run_rpc(profile, provider="fake", model="fake-1", stdin=stdin, out=out)
 
     frames = [json.loads(line) for line in out.getvalue().splitlines()]
     replies = {frame["id"]: frame for frame in frames if "id" in frame}
@@ -155,23 +156,25 @@ async def test_an_rpc_round_trip_in_the_sdk_shape(documents: list[Path]) -> None
     assert statuses == ["running", "idle"]
 
 
-async def test_an_unknown_rpc_method_is_an_error_not_a_crash(documents: list[Path]) -> None:
+async def test_an_unknown_rpc_method_is_an_error_not_a_crash(
+    profile: Profile,
+) -> None:
     stdin = io.StringIO(
         json.dumps({"jsonrpc": "2.0", "id": 1, "method": "nonsense", "params": {}}) + "\n"
     )
     out = io.StringIO()
-    await run_rpc(documents, provider="fake", model="fake-1", stdin=stdin, out=out)
+    await run_rpc(profile, provider="fake", model="fake-1", stdin=stdin, out=out)
     (frame,) = [json.loads(line) for line in out.getvalue().splitlines()]
     assert frame["error"]["code"] == -32000
     assert "nonsense" in frame["error"]["message"]
 
 
-async def test_a_malformed_rpc_line_is_ignored(documents: list[Path]) -> None:
+async def test_a_malformed_rpc_line_is_ignored(profile: Profile) -> None:
     stdin = io.StringIO(
         "{not json\n\n" + json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize"}) + "\n"
     )
     out = io.StringIO()
-    await run_rpc(documents, provider="fake", model="fake-1", stdin=stdin, out=out)
+    await run_rpc(profile, provider="fake", model="fake-1", stdin=stdin, out=out)
     frames = [json.loads(line) for line in out.getvalue().splitlines()]
     # A peer sending garbage must not take the endpoint down.
     assert len(frames) == 1

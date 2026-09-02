@@ -35,11 +35,11 @@ from typing import Annotated
 import anyio
 import typer
 
-from ph.cordis import ProfileLayer
+from ph.cordis import Profile
 from ph.seams.workspace import Collectable, stored_survivors
 
 from .console import emit, fail
-from .profiles import DEFAULT_PROFILE, ProfileOption, documents_or_exit
+from .profiles import DEFAULT_PROFILE, ProfileOption, profile_or_exit
 from .runtime import mounted
 
 __all__ = ["workspaces_app"]
@@ -74,9 +74,7 @@ def _rows(collectables: list[Collectable]) -> list[str]:
     ]
 
 
-async def _collect(
-    documents: list[ProfileLayer], *, older_than: float, remove: bool, family: str
-) -> str:
+async def _collect(profile: Profile, *, older_than: float, remove: bool, family: str) -> str:
     """Mount, fold every stored session, and either report or collect.
 
     Mounting is not optional and is the interesting cost: the *provider* is what
@@ -85,9 +83,9 @@ async def _collect(
     `reclaim`'s docstring says must not exist, since it would be free to remove
     more than a release would.
     """
-    async with mounted(documents) as run:
-        store = run.ctx.get("session_persistence")
-        seam = run.ctx.get("workspace")
+    async with mounted(profile) as ctx:
+        store = ctx.get("session_persistence")
+        seam = ctx.get("workspace")
         if store is None or seam is None:
             # Two rows, one sentence: without a store there is nothing to fold,
             # and without the seam there is no provider to end a tree with. A
@@ -162,12 +160,12 @@ def gc(
     beneath it — **descent, not the messaging family**, since a sibling's
     checkout is not this run's to collect.
     """
-    documents = documents_or_exit(profile)
+    composed = profile_or_exit(profile)
     try:
         report = anyio.run(
             partial(
                 _collect,
-                documents,
+                composed,
                 older_than=older_than * 86400.0,
                 remove=remove,
                 family=session,

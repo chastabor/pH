@@ -42,7 +42,14 @@ from ..cordis import Context, Disposer, Running, plugin, running
 from ._names import require_slug
 from ._registry import claim_key, contribute_via
 
-__all__ = ["ID_MAX", "Diagnostic", "DiagnosticsRegistry", "apply", "contribute"]
+__all__ = [
+    "ID_MAX",
+    "ORDER_SELF_ASSESSMENT",
+    "Diagnostic",
+    "DiagnosticsRegistry",
+    "apply",
+    "contribute",
+]
 
 log = logging.getLogger("ph.seams.diagnostics")
 
@@ -52,6 +59,11 @@ ID_MAX = 32
 Per-seam, as `_names` intends — it parameterises the bound precisely so each
 registry states its own. 32 is generous for a heading a person reads down the
 page, and matching the two sibling registries costs nothing here."""
+
+ORDER_SELF_ASSESSMENT = 100
+"""Where the deployment's judgement of itself sits — `invariants`' section, last.
+A reading about the deployment orders below it; a section placing itself relative
+to that boundary names the constant rather than a number two files away."""
 
 
 @dataclass(frozen=True, slots=True)

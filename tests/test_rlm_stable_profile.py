@@ -27,7 +27,7 @@ from typing import Any
 
 import pytest
 
-from ph.cordis import DEPLOYMENT, Loader
+from ph.cordis import DEPLOYMENT, Profile
 from ph.testing import FAKE_OPTIONS, run_tool
 from ph_app.profiles import available_profiles, resolve_profile
 
@@ -49,7 +49,7 @@ def _isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 
 def _rows() -> dict[str, Any]:
     """The composed rows by id — `test_rlm_profile.py`'s spelling."""
-    return {row.id: row for row in Loader.from_paths(resolve_profile(PROFILE)).rows}
+    return {row.id: row for row in Profile.from_paths(resolve_profile(PROFILE)).rows}
 
 
 def test_the_profile_is_offered_by_name() -> None:

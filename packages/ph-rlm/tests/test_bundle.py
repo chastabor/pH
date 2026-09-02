@@ -19,7 +19,7 @@ from conftest import HOST_INTERPRETER
 from runtime_helpers import dispatch_names, run_ipython_cell
 
 from ph.bundles import BASE, HEADLESS
-from ph.cordis import Context, Loader
+from ph.cordis import Context, Profile, load_profile_documents
 from ph.system_prompt.assembly import render_prompt
 from ph.testing import report_section
 from ph.tools.registry import RUN_CODE
@@ -42,9 +42,9 @@ def test_every_row_in_the_bundle_names_a_resolvable_plugin() -> None:
 
 def test_a_patch_in_the_bundle_addresses_a_row_that_exists() -> None:
     """A patch naming an unknown id is a `LoaderError`, so composing proves it."""
-    documents = Loader.from_paths([BASE, HEADLESS, BUNDLE]).documents
+    documents = load_profile_documents([BASE, HEADLESS, BUNDLE])
     documents.append(("test-overlay", [{"id": "code-runtime-python", "config": HOST_INTERPRETER}]))
-    Loader.from_documents(documents)
+    Profile.from_documents(documents)
 
 
 async def test_every_row_in_the_profile_activates(
@@ -52,7 +52,7 @@ async def test_every_row_in_the_profile_activates(
 ) -> None:
     """A row that mounts nothing is worse than one that fails: it looks fine.
 
-    `Loader.inactive()` is the loader's own answer to "which rows never met their
+    `Mount.inactive()` is the mount's own answer to "which rows never met their
     `inject` keys", and a profile with any is one where a capability silently
     is not there.
 
@@ -63,13 +63,13 @@ async def test_every_row_in_the_profile_activates(
     falsifiability.
     """
     monkeypatch.setenv("PH_HOME", str(tmp_path))
-    documents = Loader.from_paths([BASE, HEADLESS, BUNDLE]).documents
+    documents = load_profile_documents([BASE, HEADLESS, BUNDLE])
     documents.append(("test-overlay", [{"id": "code-runtime-python", "config": HOST_INTERPRETER}]))
-    loader = Loader.from_documents(documents)
+    profile = Profile.from_documents(documents)
     ctx = Context()
     try:
-        await loader.mount(ctx)
-        assert loader.inactive() == []
+        mount = await profile.mount(ctx)
+        assert mount.inactive() == []
     finally:
         await ctx.drain()
         await ctx.dispose()

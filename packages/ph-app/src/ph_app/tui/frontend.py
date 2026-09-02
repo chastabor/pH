@@ -27,13 +27,13 @@ that logged its own answer would give one decision two authors.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from ph.agent.types import AgentCancelCause, AgentOptions
-from ph.cordis import Context, ProfileLayer
+from ph.cordis import Context, Profile
 from ph.llm.types import create_user_message
 from ph.seams.approval import ApprovalAnswer, ApprovalRequest
 from ph.seams.tui_status import StatusReading
@@ -76,7 +76,7 @@ class HarnessSession:
     adapter: TuiEventAdapter
     host: ModalHost
     config_rows: tuple[Any, ...] = ()
-    """The composed configuration, as `Loader.dump()` reports it. Kept so the
+    """The composed configuration, as `Profile.dump()` reports it. Kept so the
     front-end can read what the profile declared — which credentials exist, for
     instance — instead of maintaining a second list of what pH supports."""
     _stack: AsyncExitStack = field(default_factory=AsyncExitStack)
@@ -160,7 +160,7 @@ class HarnessSession:
 
 
 async def open_harness(
-    documents: Sequence[ProfileLayer],
+    profile: Profile,
     *,
     host: ModalHost,
     provider: str,
@@ -174,8 +174,7 @@ async def open_harness(
     prompt. The replay reads `session.events` — see the module docstring.
     """
     stack = AsyncExitStack()
-    run = await stack.enter_async_context(mounted(documents))
-    ctx = run.ctx
+    ctx = await stack.enter_async_context(mounted(profile))
 
     if resume is not None:
         from ph.persistence.jsonl import resume_session
@@ -200,7 +199,7 @@ async def open_harness(
         state=state,
         adapter=adapter,
         host=host,
-        config_rows=tuple(run.loader.dump()),
+        config_rows=tuple(ctx.mount.profile.dump()),
         _stack=stack,
     )
     front._disposers.extend(_attach(ctx, front))

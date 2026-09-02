@@ -302,14 +302,69 @@ def test_a_malformed_patch_is_refused_with_the_command_s_exit_code() -> None:
         ("{id: llm-fake, config: !!python/object:os.system {}}", "--patch"),
         # The loader's own refusals, not the flag's: a row that does not exist
         # and an unknown key. A first draft checked two shapes in the CLI and let
-        # these reach `Loader.from_paths` uncaught, so `--dump-config` printed a
-        # traceback for a typo in a row id.
+        # these reach the loader uncaught, so `--dump-config` printed a traceback
+        # for a typo in a row id.
         ("{id: nope, disabled: true}", 'no row with id "nope"'),
         ("{id: llm-fake, bogus: 1}", "unknown keys"),
     ):
-        result = runner.invoke(app, ["--dump-config", "--profile", "headless", "--patch", bad])
-        assert result.exit_code == 2, (bad, result.output)
-        assert expect in result.output, (bad, result.output)
+        # Both commands, because they used to disagree: `doctor` composed inside
+        # its broad mount-failure catch and reported the same bad row as
+        # "profile does not mount" under exit 1. `profile_or_exit` composes
+        # now, so the grammar is one refusal wherever it is met.
+        for command in (["--dump-config"], ["doctor"]):
+            result = runner.invoke(app, [*command, "--profile", "headless", "--patch", bad])
+            assert result.exit_code == 2, (command, bad, result.output)
+            assert expect in result.output, (command, bad, result.output)
+            assert "does not mount" not in result.output, (command, bad)
+
+
+def test_a_profile_that_will_not_parse_is_refused_before_anything_mounts(
+    tmp_path: Path,
+) -> None:
+    """Every command, exit 2, the parser's sentence — and never "does not mount".
+
+    `profile_or_exit` resolves *and reads*, so a mode is handed a profile or
+    nothing. While it handed over paths, "that file is not YAML" surfaced at
+    whichever compose point the mode reached: exit 2 for `ph -p`, which maps
+    `LoaderError`, and — one step from the truth — `doctor`'s broad catch
+    reporting a profile that *parsed* nowhere as one that refused to *start*.
+
+    All three commands, because the point is that the refusal is the boundary's
+    rather than each command's: a fourth mode inherits it without writing
+    anything.
+    """
+    profile = tmp_path / "broken.yaml"
+    profile.write_text("- id: fs\n  name: [\n", encoding="utf-8")
+
+    for argv in (["doctor"], ["--dump-config"], ["--print", "hello"]):
+        result = runner.invoke(app, [*argv, "--profile", str(profile)])
+
+        assert result.exit_code == 2, (argv, result.output)
+        assert "broken.yaml" in result.output, (argv, result.output)
+        assert "does not mount" not in result.output, (argv, result.output)
+
+
+def test_doctor_says_when_no_row_can_report(tmp_path: Path) -> None:
+    """Rule 6, in the seam's place.
+
+    Every section `doctor` prints after the mount arrives through
+    `ctx.diagnostics` — Topology included, since it became a row. A profile that
+    mounts no `diagnostics` row has nothing to report *through*, and a report
+    that was simply empty would read as "nothing wrong", the one thing it cannot
+    mean. The hand-appended Topology used to print regardless; this is what
+    replaced that accident of construction with a sentence.
+    """
+    profile = tmp_path / "bare.yaml"
+    profile.write_text(
+        yaml.safe_dump([{"id": "fs", "name": "fs-local", "config": {"root": str(tmp_path)}}]),
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(app, ["doctor", "--profile", str(profile)])
+
+    assert result.exit_code == 0, result.output
+    assert "`diagnostics` row" in result.output
+    assert "Topology" not in result.output
 
 
 def test_events_matrix_is_generated_from_the_registry() -> None:
@@ -359,7 +414,7 @@ def test_events_refuses_an_unknown_profile_rather_than_answering_without_one() -
 
     Mounting is what fills the consumer half, and a profile that will not mount
     is reported rather than fatal — the declarations are still worth printing.
-    But `documents_or_exit` reports an *unknown* profile by raising
+    But `profile_or_exit` reports an *unknown* profile by raising
     `typer.Exit`, which is an `Exception`, so guarding the resolve turned "no
     such profile" into a complete-looking matrix and exit 0: the answer that
     looks most like success, for the input most likely to be a typo. The resolve

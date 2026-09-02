@@ -20,7 +20,7 @@ from typing import Any
 import pytest
 from stabilize_helpers import PROFILE, run_tool_calls
 
-from ph.cordis import DEPLOYMENT, Context, Loader
+from ph.cordis import DEPLOYMENT, Context, Profile, load_profile_documents
 from ph.llm.types import ToolCallBlock
 from ph.session import Session
 from ph.session.known_event_types import KNOWN_SESSION_EVENT_TYPES
@@ -77,7 +77,7 @@ def test_every_row_in_the_bundle_names_a_resolvable_plugin() -> None:
     """
     from ph.cordis.loader import resolve_plugin
 
-    rows = Loader.from_paths([BUNDLE]).dump()
+    rows = Profile.from_paths([BUNDLE]).dump()
     assert rows, "the bundle declares no rows"
     for row in rows:
         assert resolve_plugin(row["name"]) is not None, row["name"]
@@ -88,18 +88,18 @@ async def test_every_enabled_row_in_the_profile_activates(
 ) -> None:
     """A row that mounts nothing is worse than one that fails: it looks fine.
 
-    Mounted for real, because `Loader.inactive()` reads the forks `mount()`
+    Mounted for real, because `Mount.inactive()` reads the forks `mount()`
     creates — asked before mounting, as this test's first version asked, it
     answers over an empty table and cannot fail.
     """
     monkeypatch.setenv("PH_HOME", str(tmp_path))
-    documents = Loader.from_paths(PROFILE).documents
+    documents = load_profile_documents(PROFILE)
     documents.append(("test-overlay", [dict(ENABLED)]))
-    loader = Loader.from_documents(documents)
+    profile = Profile.from_documents(documents)
     ctx = Context()
     try:
-        await loader.mount(ctx)
-        assert loader.inactive() == []
+        mount = await profile.mount(ctx)
+        assert mount.inactive() == []
     finally:
         await ctx.drain()
         await ctx.dispose()

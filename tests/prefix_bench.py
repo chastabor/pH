@@ -35,12 +35,12 @@ from pathlib import Path
 from typing import Any
 
 from ph.agent.types import AgentOptions
-from ph.cordis import DEPLOYMENT, ProfileLayer
+from ph.cordis import DEPLOYMENT, Profile, ProfileDocument
 from ph.llm.types import GenerateOptions
 from ph.seams.token_meter import TokenMeter
 from ph.testing import REPLAY_ROW, RecordedStep, shared_prefix, text_chunks, tool_call_chunks
 from ph.wire import WireDataclass
-from ph_app.profiles import resolve_profile
+from ph_app.profiles import profile_documents
 from ph_app.runtime import mounted
 
 __all__ = [
@@ -227,7 +227,7 @@ def measure(
 
 
 async def run_profile(
-    profile: str, *, home: Path, paths: Sequence[Path], context_window: int
+    profile: str, *, home: Path, layers: Sequence[ProfileDocument], context_window: int
 ) -> Measurement:
     """Drive the authored workload through one shipped profile and measure it.
 
@@ -242,10 +242,10 @@ async def run_profile(
     # the guard asserts relationships rather than digits.
     work = home / f"{PROFILES.index(profile)}{WINDOWS.index(context_window)}"
     files = workload_files(work)
-    # A `(name, document)` layer is what `--patch` composes as, and `mounted`
-    # takes it directly — the compose/mount/unwind is `ph_app.runtime`'s, not a
-    # third copy of it here.
-    bench: ProfileLayer = (
+    # A `(name, document)` layer is what `--patch` composes as; composed here
+    # like any other, and mounted through `ph_app.runtime` rather than a third
+    # copy of compose/mount/unwind.
+    bench: ProfileDocument = (
         "bench",
         [
             {"id": "fs", "config": {"root": str(work)}},
@@ -253,8 +253,7 @@ async def run_profile(
             REPLAY_ROW,
         ],
     )
-    async with mounted([*paths, bench]) as run:
-        ctx = run.ctx
+    async with mounted(Profile.from_documents([*layers, bench])) as ctx:
         # The window a provider would report. Left at the adapter's 8 192
         # default, every request in this workload is over budget and the
         # measurement is of nothing but compaction.
@@ -276,7 +275,12 @@ async def run_all(home: Path) -> list[Measurement]:
     that could drift.
     """
     return [
-        await run_profile(profile, home=home, paths=resolve_profile(profile), context_window=window)
+        await run_profile(
+            profile,
+            home=home,
+            layers=profile_documents(profile),
+            context_window=window,
+        )
         for window in WINDOWS
         for profile in PROFILES
     ]

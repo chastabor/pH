@@ -14,7 +14,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from ph.cordis import ProfileLayer
+from ph.cordis import Profile
 from ph.llm.types import text_of
 
 from ..runtime import prompted
@@ -31,7 +31,7 @@ class PrintResult:
 
 
 async def run_print(
-    documents: list[ProfileLayer],
+    profile: Profile,
     prompt: str,
     *,
     provider: str,
@@ -41,7 +41,7 @@ async def run_print(
 ) -> PrintResult:
     """Run one prompt to completion and return what the model said."""
     async with prompted(
-        documents,
+        profile,
         prompt,
         provider=provider,
         model=model,

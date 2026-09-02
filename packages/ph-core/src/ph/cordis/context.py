@@ -171,6 +171,11 @@ class _Dependent:
     rather than printing an empty column. Blank for an `inject` callback, which
     is code the calling row already owns and which therefore inherits it."""
     active: bool = False
+    ever_active: bool = False
+    """Whether this has ever activated — the bit that tells `waiting on fs` for a
+    fiber that never came up from the same words for one that came up and was
+    unwound when `fs` went away. Only the second is a provider swap, which is what
+    a live reader of the topology is asking about."""
     scope: Context | None = None
     disposed: bool = False
 
@@ -244,8 +249,18 @@ class ForkScope:
         return self._dependent.active
 
     @property
+    def ever_active(self) -> bool:
+        """Whether it has activated at least once; with `active` false, it was unwound."""
+        return self._dependent.ever_active
+
+    @property
+    def unmounted(self) -> bool:
+        """Whether `dispose()` has run: retired from the tree, never to reactivate."""
+        return self._dependent.disposed
+
+    @property
     def injects(self) -> tuple[str, ...]:
-        """The service keys this plugin waits on — what `Loader.topology` names."""
+        """The service keys this plugin waits on — what `Mount.topology` names."""
         return self._spec.inject
 
     @property
@@ -751,7 +766,7 @@ class Context:
     def descendants(self) -> Iterator[Context]:
         """Every scope beneath this one, itself first, with a cycle guard.
 
-        The one tree walk, for `Loader.topology` and `scope_invariant` alike. The
+        The one tree walk, for `Mount.topology` and `scope_invariant` alike. The
         guard matters for the second caller: a tampered tree is exactly what a
         health check is asked to report on, and a walk that hung there would
         take `ph doctor` down with it.
@@ -982,6 +997,7 @@ class Context:
                 if ready and not dependent.active:
                     scope = Context._activation_scope(dependent)
                     dependent.scope, dependent.active = scope, True
+                    dependent.ever_active = True
                     runtime.dirty = True
                     # Bound around the activation, and released on the way out
                     # rather than left to the task ending: `reconcile` activates

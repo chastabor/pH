@@ -34,11 +34,12 @@ import typer
 import yaml
 from rich.table import Table
 
-from ph.cordis import Loader, LoaderError, ProfileLayer, import_plugin_modules
+from ph.cordis import LoaderError, Profile, import_plugin_modules
 from ph.cordis.catalog import config_catalog
 from ph.cordis.events import events as event_registry
 from ph.lingering import lifetime
 from ph.paths import RuntimeDirError, resolve_roots
+from ph.seams.diagnostics import DiagnosticsRegistry
 from ph.selectors import matches_any, unknown_namespaces
 
 from .agents import agents_app
@@ -51,7 +52,7 @@ from .profiles import (
     PatchOption,
     ProfileOption,
     available_profiles,
-    documents_or_exit,
+    profile_or_exit,
 )
 from .runtime import mounted
 from .workspaces import workspaces_app
@@ -132,23 +133,11 @@ def default(
     """Run a prompt, or dump the composed configuration."""
     if ctx.invoked_subcommand is not None:
         return
-    documents = documents_or_exit(profile, patch)
-
-    if dump_config:
-        # The loader's grammar is the one grammar for a `--patch` too, so its
-        # refusal is the command's refusal: exit 2, the sentence it wrote, and
-        # no traceback for a row id that does not exist.
-        try:
-            loader = Loader.from_paths(documents)
-        except LoaderError as error:
-            fail(f"[red]{error}[/red]", code=2, cause=error)
-        emit(yaml.safe_dump(loader.dump(), sort_keys=False, default_flow_style=False).rstrip())
-        return
 
     if mode == "trajectory":
-        # The auditor's view. Deliberately *before* any profile work: it mounts
-        # nothing — no agent, no provider, no answerers — because the logs worth
-        # auditing are the ones nobody can reopen (P3-25).
+        # The auditor's view. Deliberately *before* any profile work — it does
+        # not read one: it mounts nothing — no agent, no provider, no answerers —
+        # because the logs worth auditing are the ones nobody can reopen (P3-25).
         if session_id is None:
             fail("[red]--mode trajectory needs --session <id|path>[/red]", code=2)
         from .tui.trajectory_app import run_trajectory
@@ -159,9 +148,15 @@ def default(
             fail(f"[red]{error}[/red]", code=2, cause=error)
         return
 
+    composed = profile_or_exit(profile, patch)
+
+    if dump_config:
+        emit(yaml.safe_dump(composed.dump(), sort_keys=False, default_flow_style=False).rstrip())
+        return
+
     if mode == "rpc":
         # No prompt: the peer drives the session over stdio.
-        anyio.run(partial(run_rpc, documents, provider=provider, model=model))
+        anyio.run(partial(run_rpc, composed, provider=provider, model=model))
         return
 
     if mode == "tui":
@@ -172,7 +167,7 @@ def default(
         anyio.run(
             partial(
                 run_tui,
-                documents,
+                composed,
                 provider=provider,
                 model=model,
                 session_id=session_id,
@@ -187,7 +182,7 @@ def default(
 
     route = partial(
         _MODES[mode],
-        documents,
+        composed,
         prompt,
         provider=provider,
         model=model,
@@ -199,8 +194,9 @@ def default(
     except (AttachmentUnavailable, LoaderError, OSError) as error:
         # A file that cannot be read fails the *command*: `prompted` ingests
         # before the agent exists, so nothing was logged and there is no partial
-        # turn to explain. A profile that will not compose — a malformed
-        # `--patch` included — is the same kind of failure, one step earlier.
+        # turn to explain. A row whose plugin will not import is the same kind of
+        # failure one step earlier — the loader's one refusal left at mount time,
+        # now that `profile_or_exit` composes.
         fail(f"[red]{error}[/red]", code=2, cause=error)
 
     if mode == "json":
@@ -215,7 +211,10 @@ def default(
     )
 
 
-async def _note_consumers(documents: list[ProfileLayer]) -> None:
+NO_DIAGNOSTICS_ROW = "none — this profile mounts no `diagnostics` row, so no row can report"
+
+
+async def _note_consumers(profile: Profile) -> None:
     """Mount, and let every row's `ctx.on` register itself into the registry.
 
     Nothing is read back here: `note_consumer` writes into the process-wide
@@ -224,11 +223,11 @@ async def _note_consumers(documents: list[ProfileLayer]) -> None:
     beyond the mount — no session, no agent, no provider call — for `_report`'s
     reason.
     """
-    async with mounted(documents):
+    async with mounted(profile):
         return
 
 
-async def _report(documents: list[ProfileLayer]) -> list[tuple[str, list[tuple[str, str]]]]:
+async def _report(profile: Profile) -> list[tuple[str, list[tuple[str, str]]]]:
     """Compose the profile and ask every row what it has to say (P4-12).
 
     Mounting is the point. Doctor answered from `resolve_roots()` alone until
@@ -236,17 +235,16 @@ async def _report(documents: list[ProfileLayer]) -> list[tuple[str, list[tuple[s
     what the process would actually be — and every question this row was written
     for (which rung is in force, what the file rules reach, what runs model code)
     is answered by a row, not by a path. Nothing is created here beyond the
-    mount: no session, no agent, no provider call.
+    mount: no session, no agent, no provider call. Topology is a row
+    (`ph.seams.topology`), so the registry is the only source.
     """
-    async with mounted(documents) as run:
-        registry = run.ctx.get("diagnostics")
-        sections = [] if registry is None else registry.report()
-        # The loader's own account of the mount, after every row's. Not a
-        # `ctx.diagnostics` contribution, because it is *about* the rows rather
-        # than from one of them — the loader is the only thing that knows which
-        # activated — and it needs the profile, so it is not the profile-free
-        # list either. A third source, named as such (see `doctor`).
-        return [*sections, ("Topology", run.loader.topology(run.ctx))]
+    async with mounted(profile) as ctx:
+        registry: DiagnosticsRegistry | None = ctx.get("diagnostics")
+        if registry is None:
+            # Rule 6, in the seam's place: with no `diagnostics` row nothing can
+            # report, and an empty report reads as "nothing wrong".
+            return [("Diagnostics", [("sections", NO_DIAGNOSTICS_ROW)])]
+        return registry.report()
 
 
 @app.command()
@@ -306,9 +304,9 @@ def doctor(
     # Resolved *outside* the catch below, and it matters: `typer.Exit` subclasses
     # `RuntimeError`, so an unknown profile raised inside it would be caught,
     # reported as "does not mount", and re-raised with the wrong exit code.
-    documents = documents_or_exit(profile, patch)
+    composed = profile_or_exit(profile, patch)
     try:
-        sections = anyio.run(partial(_report, documents))
+        sections = anyio.run(partial(_report, composed))
     except typer.Exit:
         raise
     except Exception as error:
@@ -376,7 +374,7 @@ def daemon(
     from .daemon import serve
     from .daemon.server import DaemonUnavailable
 
-    documents = documents_or_exit(profile)
+    composed = profile_or_exit(profile)
     try:
         roots = resolve_roots(create=True)
     except RuntimeDirError as error:
@@ -399,7 +397,7 @@ def daemon(
         anyio.run(
             partial(
                 serve,
-                documents,
+                composed,
                 provider=provider,
                 model=model,
                 passivate_after=_passivation(passivate_after),
@@ -441,14 +439,14 @@ def events(
     who is running this.
     """
     import_plugin_modules()
-    # Resolved *outside* the guard below: `documents_or_exit` reports an unknown
+    # Resolved *outside* the guard below: `profile_or_exit` reports an unknown
     # profile by raising `typer.Exit`, which is an `Exception`, so catching
     # broadly around it turned "no such profile" into a full matrix and exit 0 —
     # the answer that looks most like success for the input most likely to be a
     # typo.
-    documents = documents_or_exit(profile, patch)
+    composed = profile_or_exit(profile, patch)
     try:
-        anyio.run(partial(_note_consumers, documents))
+        anyio.run(partial(_note_consumers, composed))
     except Exception as error:
         err.print(
             f"[yellow]profile {profile!r} does not mount, so no consumers are listed:[/yellow] "

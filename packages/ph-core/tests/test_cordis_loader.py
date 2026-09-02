@@ -16,9 +16,10 @@ from typing import Any
 
 import pytest
 
-from ph.cordis import Context, LoaderError, plugin
+from ph.cordis import Context, Disposer, LoaderError, plugin
 from ph.cordis.loader import (
-    Loader,
+    Profile,
+    _state,
     compose_rows,
     evaluate_predicate,
     interpolate,
@@ -116,12 +117,12 @@ def test_disabled_predicates_are_closed() -> None:
 
 
 def test_disabled_rows_are_not_mounted() -> None:
-    loader = Loader.from_documents(
+    profile = Profile.from_documents(
         [_doc("base", "- id: a\n  name: mod.a\n  disabled: true\n- id: b\n  name: mod.b\n")]
     )
-    assert [row.id for row in loader.enabled_rows()] == ["b"]
-    assert [row["id"] for row in loader.dump()] == ["a", "b"]
-    assert loader.dump()[0]["disabled"] is True
+    assert [row.id for row in profile.enabled_rows()] == ["b"]
+    assert [row["id"] for row in profile.dump()] == ["a", "b"]
+    assert profile.dump()[0]["disabled"] is True
 
 
 async def test_mounting_activates_only_rows_whose_injections_resolve() -> None:
@@ -150,7 +151,7 @@ async def test_mounting_activates_only_rows_whose_injections_resolve() -> None:
     sys.modules["ph_test_rows"] = module
 
     # Deliberately mounted consumer-first: file order must not decide.
-    loader = Loader.from_documents(
+    profile = Profile.from_documents(
         [
             _doc(
                 "base",
@@ -161,9 +162,9 @@ async def test_mounting_activates_only_rows_whose_injections_resolve() -> None:
         ]
     )
     root = Context()
-    await loader.mount(root)
+    mount = await profile.mount(root)
     assert applied == ["provider", "consumer"]
-    assert loader.inactive() == ["orphan"]
+    assert mount.inactive() == ["orphan"]
     await root.dispose()
     del sys.modules["ph_test_rows"]
 
@@ -197,7 +198,7 @@ async def test_topology_reports_what_the_mount_became_not_what_was_written() -> 
 
     _fake_module("ph_test_topology", provider=provider, consumer=consumer, orphan=orphan)
 
-    loader = Loader.from_documents(
+    profile = Profile.from_documents(
         [
             _doc(
                 "layers/base.yaml",
@@ -210,9 +211,9 @@ async def test_topology_reports_what_the_mount_became_not_what_was_written() -> 
         ]
     )
     ctx = Context()
-    await loader.mount(ctx)
+    mount = await profile.mount(ctx)
 
-    rows = dict(loader.topology(ctx))
+    rows = dict(mount.topology())
 
     assert rows["consumer"] == "active · injects t_thing · from layers/base.yaml"
     # Only the *unmet* key is named: `t_thing` resolved, and listing it as
@@ -226,8 +227,86 @@ async def test_topology_reports_what_the_mount_became_not_what_was_written() -> 
     assert rows["isolated realms"].startswith("none")
 
     agent = ctx.scope("agent:a1")
-    assert dict(loader.topology(ctx))["isolated realms"] == agent.path
+    assert dict(mount.topology())["isolated realms"] == agent.path
     await ctx.dispose()
+
+
+async def test_topology_follows_a_fiber_through_a_provider_swap() -> None:
+    """The states a *live* reader sees, and `ph doctor` never does.
+
+    `doctor` reads after the fixpoint, so it meets `active`, `waiting on`, and
+    `disabled`. A running daemon is asked mid-life: a provider swaps its service
+    out, and the fiber that injected it is *unwound* — which is not the same fact
+    as never having come up, though `_Dependent` recorded only `active` and the
+    two printed identically. Then the replacement arrives and, until the next
+    `reconcile`, the fiber is ready and not yet running; a first draft printed
+    that as `waiting on ` followed by nothing. Then it is active again. And the
+    other way a fiber goes dark: unmounted, which is not "ready".
+    """
+    withdraw: list[Disposer] = []
+
+    @plugin("t-provider")
+    async def provider(ctx: Context, config: object) -> None:
+        withdraw.append(ctx.provide("t_thing", 1))
+
+    @plugin("t-consumer", inject=["t_thing"])
+    async def consumer(ctx: Context, config: object) -> None:
+        pass
+
+    _fake_module("ph_test_swap", provider=provider, consumer=consumer)
+    profile = Profile.from_documents(
+        [
+            _doc(
+                "layers/base.yaml",
+                "- id: provider\n  name: ph_test_swap:provider\n"
+                "- id: consumer\n  name: ph_test_swap:consumer\n",
+            )
+        ]
+    )
+    ctx = Context()
+    mount = await profile.mount(ctx)
+
+    def consumer_line() -> str:
+        return dict(mount.topology())["consumer"]
+
+    assert consumer_line().startswith("active ·")
+
+    withdraw[0]()  # the provider swaps its service out
+    await ctx.reconcile()
+    assert (
+        consumer_line() == "unwound · waiting on t_thing · injects t_thing · from layers/base.yaml"
+    )
+    assert mount.inactive() == ["consumer"]
+
+    ctx.provide("t_thing", 2)  # a replacement arrives; the fixpoint has not run
+    assert consumer_line() == "activating · injects t_thing · from layers/base.yaml"
+
+    await ctx.reconcile()
+    assert consumer_line().startswith("active ·")
+
+    await mount.forks["provider"].dispose()
+    assert (
+        dict(mount.topology())["provider"] == "unmounted · injects nothing · from layers/base.yaml"
+    )
+    await ctx.dispose()
+
+
+def test_a_fork_that_never_activated_is_not_reported_as_unwound() -> None:
+    """The bit is `ever_active`, not `not active`: a fresh fork prints `waiting on`.
+
+    Direct, on `_state`, because the distinction is the whole of the change: the
+    mount-level test above shows the unwound reading, and this pins that a fiber
+    that never came up does not borrow it.
+    """
+
+    @plugin("t-consumer", inject=["t_absent"])
+    async def consumer(ctx: Context, config: object) -> None:
+        pass
+
+    fork = Context().plugin(consumer)
+
+    assert fork.ever_active is False
+    assert _state(fork) == "waiting on t_absent · injects t_absent"
 
 
 # ------------------------------------------------------ isolate: private realms --
@@ -267,7 +346,7 @@ async def test_isolate_gives_a_row_a_private_copy_of_a_service() -> None:
     per-realm reconcile in `mount` exists to close.
     """
     _realm_module("ph_test_realm")
-    loader = Loader.from_documents(
+    profile = Profile.from_documents(
         [
             _doc(
                 "base",
@@ -278,10 +357,10 @@ async def test_isolate_gives_a_row_a_private_copy_of_a_service() -> None:
         ]
     )
     ctx = Context()
-    await loader.mount(ctx)
+    mount = await profile.mount(ctx)
 
-    shared = loader.forks["shared-reader"].ctx
-    private = loader.forks["private-reader"].ctx
+    shared = mount.forks["shared-reader"].ctx
+    private = mount.forks["private-reader"].ctx
     assert shared is not None and private is not None
     assert shared.t_seen is ctx.t_fs, "the sibling should see the shared service"
     assert private.t_seen is not ctx.t_fs, "the isolating row saw the shared service"
@@ -289,7 +368,7 @@ async def test_isolate_gives_a_row_a_private_copy_of_a_service() -> None:
     # The shared instance is untouched: a realm adds a provision, it does not
     # replace one, so root and every other row keep what they had.
     assert ctx.t_fs["root"] == "shared"
-    assert "private-reader/fs" in loader.forks
+    assert "private-reader/fs" in mount.forks
     await ctx.dispose()
 
 
@@ -302,7 +381,7 @@ async def test_isolate_with_a_mapping_overrides_the_private_copy_s_config() -> N
     private copy without touching the shared row.
     """
     _realm_module("ph_test_realm_override")
-    loader = Loader.from_documents(
+    profile = Profile.from_documents(
         [
             _doc(
                 "base",
@@ -313,14 +392,14 @@ async def test_isolate_with_a_mapping_overrides_the_private_copy_s_config() -> N
         ]
     )
     ctx = Context()
-    await loader.mount(ctx)
+    mount = await profile.mount(ctx)
 
-    sealed = loader.forks["sealed"].ctx
+    sealed = mount.forks["sealed"].ctx
     assert sealed is not None
     assert sealed.t_seen["root"] == "/sealed"
     assert ctx.t_fs["root"] == "shared"
     # The dump reads back as written, in whichever of the two forms was used.
-    dumped = {row["id"]: row for row in loader.dump()}
+    dumped = {row["id"]: row for row in profile.dump()}
     assert dumped["sealed"]["isolate"] == {"fs": {"root": "/sealed"}}
     await ctx.dispose()
 
@@ -357,7 +436,7 @@ def test_isolate_is_checked_when_the_layers_compose_not_when_they_mount(
     if site:
         documents.append(_doc("site", site))
     with pytest.raises(LoaderError, match=match):
-        Loader.from_documents(documents)
+        Profile.from_documents(documents)
 
 
 async def test_a_realm_is_reported_and_unwinds_with_the_root() -> None:
@@ -369,7 +448,7 @@ async def test_a_realm_is_reported_and_unwinds_with_the_root() -> None:
     realm would be a provision nothing can reach and nothing can release.
     """
     _realm_module("ph_test_realm_topology")
-    loader = Loader.from_documents(
+    profile = Profile.from_documents(
         [
             _doc(
                 "base",
@@ -379,20 +458,20 @@ async def test_a_realm_is_reported_and_unwinds_with_the_root() -> None:
         ]
     )
     ctx = Context()
-    await loader.mount(ctx)
+    mount = await profile.mount(ctx)
 
-    rows = dict(loader.topology(ctx))
+    rows = dict(mount.topology())
     assert rows["sealed/fs"].startswith("active · injects nothing · private copy in realm:sealed")
     assert rows["sealed/fs"].endswith("own config")
     assert rows["isolated realms"] == "root/realm:sealed"
 
-    private = loader.forks["sealed/fs"].ctx
+    private = mount.forks["sealed/fs"].ctx
     assert private is not None
     realm = private.parent
     assert realm is not None and realm.active and realm.label == "realm:sealed"
     await ctx.dispose()
     assert not realm.active and not private.active
-    assert not loader.forks["sealed/fs"].active
+    assert not mount.forks["sealed/fs"].active
 
 
 async def test_a_private_copy_that_cannot_activate_is_refused_not_fallen_through() -> None:
@@ -427,7 +506,7 @@ async def test_a_private_copy_that_cannot_activate_is_refused_not_fallen_through
 
     # `late` provides `t_late` *after* the isolating row, so the private copy
     # cannot be ready when the realm is settled.
-    loader = Loader.from_documents(
+    profile = Profile.from_documents(
         [
             _doc(
                 "base",
@@ -439,5 +518,5 @@ async def test_a_private_copy_that_cannot_activate_is_refused_not_fallen_through
     )
     ctx = Context()
     with pytest.raises(LoaderError, match='isolates "fs", whose private copy is waiting on t_late'):
-        await loader.mount(ctx)
+        await profile.mount(ctx)
     await ctx.dispose()

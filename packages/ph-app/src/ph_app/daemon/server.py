@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import logging
 import os
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -34,7 +34,7 @@ from typing import Any
 import anyio
 from anyio.abc import ByteStream
 
-from ph.cordis import ProfileLayer
+from ph.cordis import Profile
 from ph.lingering import RuntimeLifetime, lifetime, socket_identity
 from ph.paths import resolve_roots
 from ph.resources import GRACE_SECONDS
@@ -553,7 +553,7 @@ async def _clear_stale(path: Path) -> None:
 
 
 async def serve(
-    documents: Sequence[ProfileLayer],
+    profile: Profile,
     *,
     provider: str = "fake",
     model: str = "fake-1",
@@ -595,7 +595,7 @@ async def serve(
         # Optional with a "not serving" guard: a supervisor that cannot start a
         # root is a state that should not be representable.
         supervisor = Supervisor(
-            documents=list(documents),
+            profile=profile,
             tasks=tasks,
             provider=provider,
             model=model,

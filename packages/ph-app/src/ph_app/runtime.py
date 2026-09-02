@@ -11,54 +11,29 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 from ph.agent.types import AgentOptions
-from ph.cordis import Context, Loader, ProfileLayer
+from ph.cordis import Context, Profile
 from ph.session import Session
 
 from .attach import ingest, prompt_message
 
-__all__ = ["MountedRun", "mounted", "prompted"]
-
-
-@dataclass(slots=True)
-class MountedRun:
-    """A live root context and the loader that composed it."""
-
-    ctx: Context
-    loader: Loader
-
-
-def compose(documents: Sequence[ProfileLayer]) -> list[tuple[str, Any]]:
-    """Read and parse the profile once, for a caller that mounts it repeatedly.
-
-    The daemon mounts one `Context` per root and the YAML never changes between
-    them, so re-reading it per root is most of the cost of starting one. Every other
-    mode composes exactly once and should keep calling `mounted(paths)`.
-    """
-    return Loader.from_paths(list(documents)).documents
+__all__ = ["mounted", "prompted"]
 
 
 @asynccontextmanager
-async def mounted(
-    documents: Sequence[ProfileLayer], *, parsed: Sequence[tuple[str, Any]] | None = None
-) -> AsyncIterator[MountedRun]:
-    """Compose a profile, mount it, and unwind the whole tree on exit.
+async def mounted(profile: Profile) -> AsyncIterator[Context]:
+    """Mount a composed profile, and unwind the whole tree on exit.
 
-    `parsed` skips the read for a caller that already has `compose()`'s result;
-    the rows are rebuilt per mount either way, so two roots still get two
-    independent configurations and never share a `Context`.
+    A `Profile`, composed once at `profile_or_exit`: nothing is read or composed
+    here, and repeated mounts of one profile never share a `Context`. What this
+    one became is `ctx.mount`.
     """
-    loader = (
-        Loader.from_documents(parsed) if parsed is not None else Loader.from_paths(list(documents))
-    )
     ctx = Context()
     try:
-        await loader.mount(ctx)
-        yield MountedRun(ctx=ctx, loader=loader)
+        await profile.mount(ctx)
+        yield ctx
     finally:
         # Disposal is structural: every registration and every acquired
         # artifact unwinds with its scope, children first (invariant I2).
@@ -68,7 +43,7 @@ async def mounted(
 
 @asynccontextmanager
 async def prompted(
-    documents: Sequence[ProfileLayer],
+    profile: Profile,
     prompt: str,
     *,
     provider: str,
@@ -86,8 +61,7 @@ async def prompted(
     `agent.prompt`, uniformly: with nothing attached the two are identical, so
     the alternative would be a branch whose two halves have to stay in step.
     """
-    async with mounted(documents) as run:
-        ctx = run.ctx
+    async with mounted(profile) as ctx:
         session = ctx.sessions.create(session_id)
         if before is not None:
             before(ctx, session)

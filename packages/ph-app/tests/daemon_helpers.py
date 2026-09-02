@@ -22,12 +22,13 @@ from typing import Any
 import anyio
 
 from ph.bundles import BASE, HEADLESS
+from ph.cordis import Profile
 from ph.paths import resolve_roots
 from ph_app.daemon import DaemonClient, serve
 
 __all__ = ["PROFILE", "Daemon", "running"]
 
-PROFILE = [BASE, HEADLESS]
+PROFILE = Profile.from_paths([BASE, HEADLESS])
 
 
 @dataclass(slots=True)

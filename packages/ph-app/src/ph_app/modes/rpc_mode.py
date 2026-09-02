@@ -21,7 +21,7 @@ from typing import Any, TextIO
 import anyio
 
 from ph.agent.types import AgentOptions
-from ph.cordis import DEPLOYMENT, ProfileLayer
+from ph.cordis import DEPLOYMENT, Profile
 from ph.session import Session, SessionEvent, dumps
 
 from ..protocol import capabilities, notification, respond
@@ -107,7 +107,7 @@ class RpcServer:
 
 
 async def run_rpc(
-    documents: list[ProfileLayer],
+    profile: Profile,
     *,
     provider: str,
     model: str,
@@ -117,8 +117,8 @@ async def run_rpc(
     """Serve JSON-RPC until stdin closes."""
     source = stdin if stdin is not None else sys.stdin
     sink = out if out is not None else sys.stdout
-    async with mounted(documents) as run:
-        server = RpcServer(ctx=run.ctx, out=sink, provider=provider, model=model)
+    async with mounted(profile) as ctx:
+        server = RpcServer(ctx=ctx, out=sink, provider=provider, model=model)
         while True:
             line = await anyio.to_thread.run_sync(source.readline)
             if not line:

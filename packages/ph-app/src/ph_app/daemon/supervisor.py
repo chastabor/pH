@@ -26,7 +26,7 @@ journaling (P5-02), leases against a second daemon (P5-03), crash retries
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from contextlib import AsyncExitStack, suppress
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -38,7 +38,7 @@ from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStre
 from filelock import FileLock, Timeout
 
 from ph.agent.types import AgentOptions
-from ph.cordis import Context, ProfileLayer
+from ph.cordis import Context, Profile
 from ph.llm.types import create_user_message
 from ph.paths import resolve_roots
 from ph.persistence import resume_session, resumption_of
@@ -51,7 +51,7 @@ from ph.session import Session, SessionEvent, now_ms
 from ph.tools.errors import error_message
 
 from ..protocol import Refusal, cursor_of
-from ..runtime import compose, mounted
+from ..runtime import mounted
 from .recovery import (
     FAILED,
     PASSIVATE_AFTER,
@@ -404,7 +404,7 @@ class Root:
 class Supervisor:
     """Every root this daemon is running, and the task group they live in."""
 
-    documents: Sequence[ProfileLayer]
+    profile: Profile
     tasks: TaskGroup
     provider: str = "fake"
     model: str = "fake-1"
@@ -423,7 +423,6 @@ class Supervisor:
     would rather not resurrect a long-abandoned session sets a bound here."""
     roots: dict[str, Root] = field(default_factory=dict)
     _starting: anyio.Lock = field(default_factory=anyio.Lock)
-    _parsed: Sequence[tuple[str, Any]] | None = None
 
     async def start(self, root_id: str) -> Root:
         """Take the lease for this root, then mount it (I-5).
@@ -460,16 +459,13 @@ class Supervisor:
 
         The mount is **per root and not shared**: two roots are two deployments as far as
         every seam is concerned, and sharing one `Context` would make a row's
-        `ctx.provide` visible to a root that never asked for it. The *parse* is shared,
-        since the YAML cannot differ between them.
+        `ctx.provide` visible to a root that never asked for it. The *composition* is shared:
+        `profile` arrives composed, and each root mounts it.
         """
         if root_id in self.roots:
             return self.roots[root_id]
-        if self._parsed is None:
-            self._parsed = compose(self.documents)
         async with AsyncExitStack() as exits:
-            run = await exits.enter_async_context(mounted(self.documents, parsed=self._parsed))
-            ctx = run.ctx
+            ctx = await exits.enter_async_context(mounted(self.profile))
             session = await self._session_for(ctx, root_id)
             options = AgentOptions(provider=self.provider, model=self.model)
             agent = ctx.agents.create(session, options)

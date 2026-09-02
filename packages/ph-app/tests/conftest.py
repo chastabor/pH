@@ -9,7 +9,7 @@ from typing import Any
 import pytest
 
 from ph.paths import resolve_roots
-from ph_app.profiles import resolve_profile
+from ph_app.profiles import compose_profile
 from ph_app.tui.app import PHTuiApp
 
 
@@ -42,7 +42,7 @@ def make_tui_app(tmp_path: Path) -> Callable[..., PHTuiApp]:
         # `headless` by default because most of the TUI is not about the
         # posture; `profile="tui"` is what a test asking about a row the
         # interactive profile contributes — a screen, say — passes.
-        app = PHTuiApp(resolve_profile(profile), **options)
+        app = PHTuiApp(compose_profile(profile), **options)
         if project is not None:
             # `PHTuiApp.project` is `Path.cwd()`, and the sidebar prints it. A
             # snapshot taken here therefore embedded the developer's checkout —

@@ -20,6 +20,17 @@ adapter, the tool registry and the session log are not framework internals — t
 are rows in a YAML profile, mounted as plugins into a dependency-injection tree,
 and any of them can be replaced without forking anything else.
 
+**Two axes organise everything below, and dsh's notes name them: space and
+time.** *Space* is the topology — the `Context` tree, what is mounted, which
+service each plugin resolved, which realm an agent runs in. cordis owns it, and
+`ph doctor` reports it. *Time* is the session log — the immutable, append-only
+order in which state changed and results arrived. The persistence rows own it,
+and `ph --mode trajectory` reads it. The agent loop sits between the two: it
+reads the log to build a request (I3) and acts through the topology to run a
+tool. Neither axis is allowed to stand in for the other, which is I4 in one
+sentence — the log is never rewritten, and what the model sees is a projection
+of it.
+
 ```
 ┌──────────────────────────────────────────────────────────────────────────┐
 │ ph-app          CLI (Typer) · TUI (Textual) · daemon · 6 output modes    │
@@ -34,8 +45,8 @@ and any of them can be replaced without forking anything else.
 │                 memory · skills-progressive                              │
 ├──────────────────────────────────────────────────────────────────────────┤
 │ ph.cordis       Context · services · effects · scopes/isolation          │
-│                 Loader (rows → plugin tree) · patches · entry points     │
-│                 5 dispatch modes · event declaration registry            │
+│                 Profile → Mount (rows → plugin tree) · patches · entry pts │
+│                 4 dispatch modes · event declaration registry            │
 └──────────────────────────────────────────────────────────────────────────┘
                               ┊ fd 3, framed protocol v2
 ┌──────────────────────────────────────────────────────────────────────────┐
@@ -50,10 +61,10 @@ and any of them can be replaced without forking anything else.
 |---|---|
 | Packages | 5 (`ph-core`, `ph-app`, `ph-rlm`, `ph-stabilize`, `ph-runtime-guest`) |
 | Source | ~48 000 lines |
-| Tests | 1 533 |
-| Registered plugins | 80 across the `ph.plugins` entry-point group |
+| Tests | 1 796 (one skipped without a provider key) |
+| Registered plugins | 90 across the `ph.plugins` entry-point group |
 | Installable bundles | 2 (`rlm`, `stabilize`) via `ph.bundles` |
-| Base profile | 49 rows (`ph/bundles/base.yaml`) |
+| Base profile | 55 rows (`ph/bundles/base.yaml`) |
 | Capability seams | 27 service keys across 26 modules |
 | Declared bus events | 36 |
 | Python | ≥ 3.12 |
@@ -112,10 +123,22 @@ A profile is an ordered list of YAML documents. Each document holds **rows** (a
 row mounts one plugin with one config) or **patches** addressing an existing row
 by id (`cordis/loader.py:275-294`).
 
-A patch may `insert`, `remove`, replace `config`, or set `disabled`
-(`loader.py:235-272`). A patch replaces a row's **whole** config rather than
-merging into it, deliberately: "a row's effective value is always one layer's,
-readable in one place" (`loader.py:264-266`).
+A patch may `insert`, `remove`, replace `config`, set `disabled`, or set
+`isolate` (§2.7). A patch replaces a row's **whole** config rather than merging
+into it, deliberately: "a row's effective value is always one layer's, readable
+in one place" (`loader.py:264-266`).
+
+**Three layers, and the third is reachable from the command line.** dsh's notes
+name them — bundle, profile, patch — and for six phases pH had the third only as
+a file, `$PH_HOME/profiles/<name>.yaml`. `--patch` on `ph`, `ph doctor` and
+`ph events` takes a patch entry as YAML and composes it last, as the `cli`
+layer, so `--dump-config` prints `layer: cli` beside what it changed and
+`doctor`'s topology says `by cli`. It is the *same grammar* as a document,
+deliberately: a second spelling for "change this row" is how a flag and a file
+come to accept different things. And it goes through `safe_yaml_load`, so the
+code-tag refusal that guards a file guards the flag — the argument that a
+`!!js`-style value in a profile is refused at parse time (D9, I-8) would be worth
+nothing if the command line were a way around it.
 
 YAML is read by `SafeRowLoader`, which strips every non-scalar implicit
 conversion — refusing timestamps, sexagesimals, and any unknown `!tag`
@@ -124,7 +147,7 @@ interpolation.
 
 ### 2.3 Activation is service-driven, never file-ordered
 
-`Loader.mount(ctx)` mounts every enabled row in file order — **and nothing runs**
+`Profile.mount(ctx)` mounts every enabled row in file order — **and nothing runs**
 (`loader.py:409-426`). Execution begins at `Context.reconcile()`, which runs to a
 fixpoint because activating one plugin may provide the service another was
 waiting on (`context.py:1060-1098`).
@@ -150,8 +173,30 @@ moment a profile is whole and nothing has run. A row uses it either to **refuse
 the deployment** (a strict containment posture with no sandbox backend) or to
 **collect what the profile turned out to contain** (`loader.py:59-86`).
 
-`loader.inactive()` reports row ids whose plugin never activated — an unmet
-`inject` key (`loader.py:428-430`).
+**dsh calls this unit a *fiber*.** pH's spelling is `ForkScope` — the mounted
+plugin — over `_Dependent`, the reactive half: the keys it waits on, the
+activation callback, and the scope it owns while active. The mechanism is the
+same, a wrapper that watches its dependencies and activates when all are
+present. The word does not appear in this codebase, which is said here so a
+reader arriving from dsh can find the thing it names.
+
+`Mount.inactive()` reports row ids whose plugin is not active — an unmet
+`inject` key (`loader.py:612-614`). `Mount.topology()` renders that per row —
+`active`, `activating`, `waiting on <key>`, `unwound · waiting on <key>`,
+`unmounted`, or `disabled · by <layer>` — with what each injects and which layer
+put it there, into `ph doctor`'s **Topology** section: the live half that
+`--dump-config` deliberately does not show. dsh's rule is that the dump must show what *is* running, because once
+structure comes from configuration the static code no longer says; for one
+round pH had the answer in `inactive()` and nothing called it.
+
+The section reaches the report as **a row like any other** (`seams/topology.py`,
+`id: topology` in `base.yaml`), which is why `Profile.mount` provides the `Mount` as
+`ctx.mount`: `ph.seams` may import `ph.cordis` and never the reverse, so cordis
+cannot file the report itself. A hand-appended section cost a misdiagnosis — a
+raise in the reader came out of `doctor`'s broad catch as *"profile does not
+mount"*, about a profile that had mounted — and put this one section out of reach
+of `ph agents doctor`, which relays `DiagnosticsRegistry.report()`'s shape
+verbatim.
 
 ### 2.4 Services and realms
 
@@ -201,17 +246,22 @@ reconciliation) exists separately.
 > cancellation, and the daemon's shielded 10-second `finally` is what makes that
 > survivable. See §8.
 
-### 2.6 Dispatch: five modes, and every event is declared
+### 2.6 Dispatch: four modes, and every event is declared
 
 | Mode | Semantics | Line |
 |---|---|---|
 | `emit` | Sync, return values ignored. A coroutine is scheduled, not awaited. `contained=True` logs a failing listener and continues | `context.py:1184` |
-| `bail` | Sync until a listener returns a bail value | `context.py:1211` |
 | `serial` | Awaits listeners in registration order until one bails | `context.py:1220` |
 | `parallel` | All listeners concurrently, all awaited; failures collected into an `ExceptionGroup` | `context.py:1229` |
 | `waterfall` | Around-middleware. Listeners run outermost-first and receive `(*args, next)`; returning without calling `next()` vetoes the rest of the chain, `inner` included | `context.py:1253` |
 
-> The port plan's §2 diagram says "4 dispatch modes". The code has **five**.
+> Four modes, where P0-03 ported five and P6-25 still counts five. The fifth
+> was a synchronous `bail` — `serial` without the `await` — that no package
+> ever declared an event in and that dsh does not have. Dropped rather than
+> kept for symmetry; a mode nothing uses is vocabulary a reader has to learn for
+> no reason. The one rule it carried, that `0` bails because a decision object
+> is never falsy by accident, lives on in `is_bailed` and is held by `serial`.
+> The drop is recorded against P0-03 in the plan, where the port history lives.
 
 **Every event must be declared before it can be listened to or dispatched.**
 `EventRegistry.declare(name, mode, payload, owner, doc)` (`cordis/events.py:47`)
@@ -266,6 +316,40 @@ Two derived questions answer everything about visibility:
 A plugin's *activation* scope is deliberately **transparent** — it is not
 `isolated`, so it answers `isolation == None` and its registrations are global
 (`context.py:606-610`). Isolation is for agents, not for rows.
+
+**A realm can be asked for from YAML, which is dsh's `isolate.fs`.** A row that
+says `isolate: [fs]` runs in a scope that is an isolation boundary *and* its own
+provisioning realm — `scope()`, the same thing an agent gets — and the loader
+mounts a second copy of the `fs` row inside it first, so that copy's `provide`
+lands in the realm. The isolating row and everything beneath it then resolve
+the private `ctx.fs`; every other row keeps the shared one, because nothing was
+redirected — `_provision` walks up from the realm and meets the nearer provision
+first. The mapping form, `isolate: {fs: {root: /sealed}}`, is the case the
+feature exists for: a private copy with identical config is a second instance
+and nothing more.
+
+Two things about the spelling are deliberate. It names **row ids, not service
+keys**: a row does not declare what it provides, so `fs` is the row whose
+`apply` provides `ctx.fs`, and that is the name a compose-time check can
+verify — an id that is not a row, a row isolating itself, or a private copy of a
+row a later layer disabled are all refused before `--dump-config` prints. And
+the private copies are settled by their own `reconcile()` before the isolating
+row mounts, **and then checked**. `has(key)` is true from the realm the moment
+root provides the key, so the isolating row is ready at once — against the
+shared instance — and only registration order makes the private copy win. The
+reconcile fixes that order for a copy that is ready; it does nothing for one
+whose own `inject` is unmet, which would stay waiting while the row activated
+against root's service and the realm silently fell through to exactly what it
+was meant to replace. So a private copy that did not activate is a **refusal**
+naming the key it lacks: what it needs has to be provided by a row above the
+realm. A first draft claimed the reconcile alone covered this; the test that
+showed otherwise was the one not yet written. `Mount.topology` lists each realm
+and each private copy under `<row>/<source>`.
+
+What a realm does **not** do is change hands while an agent is running in it —
+the provider a realm holds is the one it was mounted with. That is the one half
+of dsh's isolation story pH has not built, and §8 records it as a deliberate
+deferral rather than a gap to be discovered.
 
 ### 2.8 `Boundary` and `DEPLOYMENT`
 
@@ -495,7 +579,7 @@ ph workspaces gc [--profile] [--older-than DAYS] [--remove] [--session ID]
 non-guarantees, available profiles — then **mounts** the profile and prints every
 `ctx.diagnostics` section. If the profile refuses to start (a strict containment
 posture with no sandbox backend), that is the most important thing it can say, so
-it reports a sentence and exits 1 rather than a traceback (`cli.py:275-282`).
+it reports a sentence and exits 1 rather than a traceback (`cli.py:312-318`).
 
 `ph agents` is the client half of the daemon. Every command goes through one
 `_ask()` spine, which is what keeps "no daemon is running" one sentence rather
@@ -551,9 +635,9 @@ command, Textual action, key binding), so adding one is a table row plus a metho
 ### 5.1 Mount
 
 ```
-profile name ──► documents_or_exit ──► Loader.from_paths ──► compose_rows
-                                                                   │
-                                          Context() ◄──────────────┘
+profile name ──► profile_or_exit ──► Profile.from_documents ──► compose_rows
+                 (resolve + read + compose, once)                     │
+                                          Context() ◄─────────────────┘
                                               │
                             ctx.plugin(row) ×N   (nothing runs yet)
                                               │
@@ -562,7 +646,7 @@ profile name ──► documents_or_exit ──► Loader.from_paths ──► c
                                  ctx.serial("profile/mounted")
 ```
 
-`mounted()` (`ph_app/runtime.py:45-66`) wraps this and guarantees
+`mounted()` (`ph_app/runtime.py:25-42`) wraps this and guarantees
 `await ctx.drain(); await ctx.dispose()` in an unconditional `finally`.
 `prompted()` adds the run: create session → ingest attachments → create agent →
 `followup` → `run()` → **flush**. Attachments are ingested *before* the agent
@@ -1161,6 +1245,17 @@ tier is a row; removing it degrades every agent to `shared` with a recorded
 reason rather than breaking a consumer. The subagent seam holds *many* providers
 by name because "run a child" legitimately has several answers in one deployment.
 
+**And one benefit dsh's notes state that this document had not: the prefix
+cache.** A consumer addresses a capability by its *signature* — `read(path=…)`,
+`ctx.fs.root_for(agent)` — so a provider swap changes what is behind the path
+without changing the path, and the bytes the model has already seen stay
+byte-identical (A12). That is why swapping a workspace tier or a filesystem
+backend does not invalidate a cached prefix, and why "same interface, different
+storage" is a cost argument and not only an architectural one. P6-03 measured
+the property it protects: without stabilization, every request's cacheable
+prefix is its predecessor in full — 74.9 % of everything sent — and it is
+compaction's surface `replace`, not any provider swap, that breaks it.
+
 **The decline/fail distinction (§3.4) is part of this invariant.** A seam must
 be able to say *"I could not serve this, and here is the code for why"* without
 that being an error — otherwise every optional tier becomes a startup failure.
@@ -1185,6 +1280,7 @@ Stated here rather than left to be discovered, per the codebase's own rule.
 | Tool-call limit with `exit: "error"` — the "one failed `tool/result`, not a turn stop" reading is traced, not tested | untested |
 | Kernel-namespace rehydration: `kernel/snapshot` / `kernel/restored` exist as types but nothing wires them into the resume path | unwired |
 | `LlmRuntime.register_adapter` uses no claiming helper and takes no `scope=` — the one provider slot outside the ownership sweep | documented in place |
+| **Per-service isolation is implemented** (`isolate:` on a row, §2.7 — dsh's `isolate.fs`), but a realm's provider cannot be **swapped mid-session**: dsh's example — "we start processing sensitive data, so we swap the filesystem to read-only and the agent still sees the same filesystem" — has no pH spelling. `fs.rebase` is a `claim_slot`, so the *root* can change under a stable `ctx.fs`; read-only is a `permissions-fs` rule or the `readonly-scratch` workspace kind, both fixed at mount. The mechanism a swap needs (`claim_slot` releasing to a new claimant) exists; no row drives it and nothing has asked for it. **Deferred by decision, not by omission**: it will be built when a use case shows up, and the use case will decide whether the answer is a provider swap, a rule, or a new realm | deferred until a use case |
 
 ---
 
@@ -1192,7 +1288,7 @@ Stated here rather than left to be discovered, per the codebase's own rule.
 
 - **Start at** `packages/ph-core/src/ph/cordis/context.py`. Everything else is
   built on the `Context` tree.
-- **Then** `ph/bundles/base.yaml` — 49 rows is the whole default harness, in
+- **Then** `ph/bundles/base.yaml` — 55 rows is the whole default harness, in
   order, with comments explaining each.
 - **Application code states the contract and the invariants; tests state why.**
   A docstring under `src/` says what a thing does, what it refuses, and which
@@ -1200,9 +1296,11 @@ Stated here rather than left to be discovered, per the codebase's own rule.
   at length — the measurement, the defect that motivated a design, the
   alternative that was rejected and on what grounds — lives in the test that
   holds the behaviour to account, next to an assertion that fails if the
-  reasoning stops being true. A `src/` module whose *why* is worth reading names
-  its test file at the end of its docstring; that pointer is the index into the
-  reasoning.
+  reasoning stops being true. **The index into that reasoning is the filename,
+  not a pointer**: `seams/workspace_git.py` is held by `tests/test_workspace_git.py`,
+  and so on throughout. A `src/` docstring does not name its test file, because a
+  pointer is one more place for the two to drift apart while the convention
+  already answers the question.
 - **So read the tests for the argument.** "The first draft did X, which broke Y"
   is still the most valuable sentence in the codebase; it is now in
   `packages/*/tests/`, where X is a test that fails.

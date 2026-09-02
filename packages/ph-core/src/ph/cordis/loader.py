@@ -38,7 +38,9 @@ from .events import events
 
 __all__ = [
     "ENTRY_POINT_GROUP",
-    "Loader",
+    "Mount",
+    "Profile",
+    "ProfileDocument",
     "Row",
     "compose_rows",
     "entry_point_targets",
@@ -142,9 +144,11 @@ class Row:
     against **row ids** rather than service keys, because a row does not declare
     what it provides — `provide` is a runtime call — so `fs` names the row whose
     `apply` provides `ctx.fs`, and the loader mounts a second copy of that row
-    inside this row's realm. For the seams the two spellings coincide by
-    convention (`fs` → `ctx.fs`, `tools` → `ctx.tools`); where they do not, the
-    row id is the one that can be checked at compose time."""
+    inside this row's realm. The two spellings sometimes coincide (`fs` →
+    `ctx.fs`, `tools` → `ctx.tools`) and in `base.yaml` often do not — `session`
+    provides `ctx.sessions`, `agent` provides `ctx.agents` — so this is a row id
+    and not a service key, which is also the half that can be checked at compose
+    time."""
 
     def to_dump(self) -> dict[str, Any]:
         dump: dict[str, Any] = {"id": self.id, "name": self.name}
@@ -336,7 +340,15 @@ def _check_isolation(rows: Sequence[Row]) -> None:
                 )
 
 
-def compose_rows(documents: Sequence[tuple[str, Any]]) -> list[Row]:
+ProfileDocument = tuple[str, Any]
+"""One parsed layer of a profile: where it came from, and its entries.
+
+The provenance is a *name*, not a path, because not every layer has a file — a
+`--patch` on the command line is a document like any other — and a name is what
+`Row.layer` carries and `--dump-config` prints."""
+
+
+def compose_rows(documents: Sequence[ProfileDocument]) -> list[Row]:
     """Compose ordered profile documents into the final row list.
 
     Each document is either a plain list of rows or a list of patch entries.
@@ -359,21 +371,11 @@ def compose_rows(documents: Sequence[tuple[str, Any]]) -> list[Row]:
     return rows
 
 
-ProfileLayer = Path | tuple[str, Any]
-"""One layer of a profile: a YAML file, or a `(name, document)` already parsed.
-
-The second form is what lets a layer come from somewhere other than a file
-without every caller that mounts a profile learning a second type — a
-`--patch` on the command line is a document with no path, and it composes like
-any other layer, with its name as its provenance."""
-
-
-def load_profile_documents(layers: Sequence[ProfileLayer]) -> list[tuple[str, Any]]:
+def load_profile_documents(paths: Sequence[Path]) -> list[ProfileDocument]:
+    """Read and parse each layer; the path is the provenance its rows carry."""
     return [
-        layer
-        if isinstance(layer, tuple)
-        else (str(layer), safe_yaml_load(layer.read_text(encoding="utf-8"), origin=str(layer)))
-        for layer in layers
+        (str(path), safe_yaml_load(path.read_text(encoding="utf-8"), origin=str(path)))
+        for path in paths
     ]
 
 
@@ -416,11 +418,27 @@ def _entry_point_targets(group: str = ENTRY_POINT_GROUP) -> dict[str, str]:
 
 
 def _state(fork: ForkScope) -> str:
-    """`active · injects …` or `waiting on <the unmet key> · injects …`."""
+    """One fork's state, as `Mount.topology` prints it.
+
+    Five, and the middle three are what a *live* reader sees — `ph doctor` reads
+    after the fixpoint and meets only the first and the fourth. `activating`:
+    every key is met and `reconcile` has not reached it yet. `unwound · waiting
+    on <key>`: it was active and a key it injects went away — a provider swap took
+    it down, which is the case a running daemon is asked about. `waiting on
+    <key>`: it never came up. `unmounted`: `dispose()` retired it. A first draft
+    printed the second as `waiting on ` followed by nothing, and could not tell
+    the third from the fourth.
+    """
     injects = ", ".join(fork.injects) or "nothing"
+    if fork.unmounted:
+        return f"unmounted · injects {injects}"
     if fork.active:
         return f"active · injects {injects}"
-    return f"waiting on {', '.join(fork.waiting_on)} · injects {injects}"
+    missing = fork.waiting_on
+    if not missing:
+        return f"activating · injects {injects}"
+    verb = "unwound · waiting on" if fork.ever_active else "waiting on"
+    return f"{verb} {', '.join(missing)} · injects {injects}"
 
 
 def import_plugin_modules() -> list[ModuleType]:
@@ -468,21 +486,25 @@ def resolve_plugin(name: str) -> Any:
 
 
 @dataclass(slots=True)
-class Loader:
-    """Composes a profile and mounts its rows onto a context."""
+class Profile:
+    """A composed profile: the rows, and the documents they came from.
 
-    documents: list[tuple[str, Any]] = field(default_factory=list)
+    Composed **once** — at `profile_or_exit` for a command, at its fixture for a
+    test — and mounted as many times as there are deployments to mount it on; the
+    daemon holds one of these and a `Mount` per root. Sharing is safe because `Row`
+    is frozen and `interpolate` copies each config on its way into a fork, so two
+    mounts of one profile never hold the same config object.
+    """
+
+    documents: list[ProfileDocument] = field(default_factory=list)
     rows: list[Row] = field(default_factory=list)
-    forks: dict[str, ForkScope] = field(default_factory=dict)
-    """Every mounted plugin by row id. A private copy mounted into a realm is keyed
-    `"<isolating row>/<source row>"`, which is also how `topology` labels it."""
 
     @classmethod
-    def from_documents(cls, documents: Sequence[tuple[str, Any]]) -> Loader:
+    def from_documents(cls, documents: Sequence[ProfileDocument]) -> Profile:
         return cls(documents=list(documents), rows=compose_rows(documents))
 
     @classmethod
-    def from_paths(cls, paths: Sequence[ProfileLayer]) -> Loader:
+    def from_paths(cls, paths: Sequence[Path]) -> Profile:
         return cls.from_documents(load_profile_documents(paths))
 
     def enabled_rows(self) -> Iterator[Row]:
@@ -492,17 +514,29 @@ class Loader:
         """The composed row list, for `--dump-config`."""
         return [row.to_dump() for row in self.rows]
 
-    async def mount(self, ctx: Context) -> None:
-        """Mount every enabled row, then settle the tree.
+    async def mount(self, ctx: Context) -> Mount:
+        """Mount every enabled row onto `ctx`, settle the tree, and return the mount.
 
         Rows mount in file order, but nothing runs until `reconcile()`:
         activation is service-availability driven, so a row that needs `llm`
         waits for whichever row provides it regardless of where it sits.
+
+        **The `Mount` is provided as `ctx.mount` before the first row**: `ph.seams`
+        may import `ph.cordis` and never the reverse, so this is how the
+        `topology` row reaches what only the mount knows. Deliberately a widening,
+        and worth naming as one — every row can now read the whole composition,
+        disabled rows included. It grants no *capability* a row lacked, since
+        `ctx.plugin` and `ctx.scope` are public, and the composition is the profile
+        the person wrote, which `--dump-config` prints for anyone who can start the
+        process.
         """
+        mount = Mount(profile=self, root=ctx)
+        ctx.provide("mount", mount)
+        forks = mount.forks
         by_id = {row.id: row for row in self.rows}
         for row in self.enabled_rows():
             if not row.isolate:
-                self.forks[row.id] = ctx.plugin(resolve_plugin(row.name), interpolate(row.config))
+                forks[row.id] = ctx.plugin(resolve_plugin(row.name), interpolate(row.config))
                 continue
             # dsh's `isolate.fs`. The row's own scope becomes an isolation
             # boundary and its own provisioning realm — `scope()` is exactly
@@ -529,7 +563,7 @@ class Loader:
             for source_id, override in row.isolate.items():
                 source = by_id[source_id]
                 config = source.config if override is None else override
-                privates[source_id] = self.forks[f"{row.id}/{source_id}"] = realm.plugin(
+                privates[source_id] = forks[f"{row.id}/{source_id}"] = realm.plugin(
                     resolve_plugin(source.name), interpolate(config)
                 )
             await ctx.reconcile()
@@ -542,7 +576,7 @@ class Loader:
                         "provided by rows above it, or the realm would fall through to the "
                         "shared service it exists to replace"
                     )
-            self.forks[row.id] = realm.plugin(resolve_plugin(row.name), interpolate(row.config))
+            forks[row.id] = realm.plugin(resolve_plugin(row.name), interpolate(row.config))
         await ctx.reconcile()
         # The one moment a composed profile is whole and nothing has run yet, so
         # a row can refuse the deployment it finds itself in (E8). `serial`
@@ -552,13 +586,35 @@ class Loader:
         # layered after it, so a verdict computed then would be wrong for
         # precisely the profile that orders things that way.
         await ctx.serial("profile/mounted")
+        return mount
+
+
+@dataclass(slots=True)
+class Mount:
+    """What one `Profile` became on one context — the half a `Profile` cannot know.
+
+    The composition is `profile`; this is what happened when it was mounted: the
+    fork each row became, on the root it was mounted on. Two objects because they
+    are two lifetimes — a `Profile` outlives every mount of it, a `Mount` goes with
+    its root — and so that nothing composes twice: the daemon composes once and
+    mounts per root.
+    """
+
+    profile: Profile
+    root: Context
+    """The deployment context, for `topology`'s realm walk. Held here so a reader
+    need not know to pass the *root* rather than its own scope — a walk from a
+    row's scope finds no realms and reports "none", silently."""
+    forks: dict[str, ForkScope] = field(default_factory=dict)
+    """Every mounted plugin by row id. A private copy mounted into a realm is keyed
+    `"<isolating row>/<source row>"`, which is also how `topology` labels it."""
 
     def inactive(self) -> list[str]:
-        """Row ids whose plugin never activated — an unmet `inject` key."""
+        """Row ids whose plugin is not active — an unmet `inject` key."""
         return [row_id for row_id, fork in self.forks.items() if not fork.active]
 
-    def topology(self, ctx: Context) -> list[tuple[str, str]]:
-        """What the mount *became*, row by row — the half `dump()` cannot show.
+    def topology(self) -> list[tuple[str, str]]:
+        """What the mount *became*, row by row — the half `Profile.dump()` cannot show.
 
         `dump()` is the composition before anything runs, and it is honest about
         that. But a row that mounted and never activated — an unmet `inject` key
@@ -567,17 +623,17 @@ class Loader:
         *is* running, because once structure comes from configuration the static
         code no longer says. `inactive()` had that answer and nothing called it.
 
-        One line per row: whether it activated, what it injects, which key it is
-        waiting on when it did not, and which layer put it there. Disabled rows
-        are listed too — "this was turned off by `rlm-stable.yaml`" is what a
-        person asking "why isn't X running" needs, and omitting it would make a
-        disabled row indistinguishable from an absent one. Then the isolated
-        realms reachable from `ctx`: none at `ph doctor` time, since an agent's
-        scope is created when it runs, and that absence is stated rather than
-        left as a missing line.
+        One line per row: its state (`_state` — active, activating, waiting on a
+        key, unwound, unmounted), what it injects, and which layer put it there.
+        Disabled rows are listed too — "this was turned off by `rlm-stable.yaml`"
+        is what a person asking "why isn't X running" needs, and omitting it would
+        make a disabled row indistinguishable from an absent one. Then the
+        isolated realms under the root: none at `ph doctor` time, since an agent's
+        scope is created when it runs, and that absence is stated rather than left
+        as a missing line.
         """
         lines: list[tuple[str, str]] = []
-        for row in self.rows:
+        for row in self.profile.rows:
             fork = self.forks.get(row.id)
             # The last two path components — `bundles/base.yaml`,
             # `ph_rlm/bundle.yaml`, `profiles/rlm-stable.yaml` — because every
@@ -598,7 +654,7 @@ class Loader:
                         f"{_state(private)} · private copy in realm:{row.id} · {how}",
                     )
                 )
-        realms = [node.path for node in ctx.descendants() if node.isolation is node]
+        realms = [node.path for node in self.root.descendants() if node.isolation is node]
         lines.append(
             (
                 "isolated realms",

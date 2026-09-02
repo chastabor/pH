@@ -362,13 +362,13 @@ def test_anthropic_thinking_and_tool_blocks_map_across() -> None:
 async def test_real_api_smoke(tmp_path: Any, monkeypatch: Any) -> None:  # pragma: no cover
     """P1-15's gate: one real round trip, skipped without a key."""
     from ph.agent.types import AgentOptions
-    from ph_app.profiles import resolve_profile
+    from ph_app.profiles import compose_profile
     from ph_app.runtime import mounted
 
     monkeypatch.setenv("PH_HOME", str(tmp_path))
-    async with mounted(resolve_profile("deepseek")) as run:
-        session = run.ctx.sessions.create("smoke")
-        agent = run.ctx.agents.create(
+    async with mounted(compose_profile("deepseek")) as ctx:
+        session = ctx.sessions.create("smoke")
+        agent = ctx.agents.create(
             session, AgentOptions(provider="deepseek", model="deepseek-chat", max_tokens=64)
         )
         await agent.prompt("Reply with the single word: ok")

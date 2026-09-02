@@ -23,7 +23,7 @@ from conftest import HOST_INTERPRETER
 from runtime_helpers import dispatch_names, run_ipython_cell
 
 from ph.bundles import installed_bundles, resolve_bundle
-from ph.cordis import Loader
+from ph.cordis import Profile
 from ph.session.json import freeze_json_value
 from ph.testing import FAKE_OPTIONS
 from ph.tools import ToolResult
@@ -77,7 +77,7 @@ def test_the_profile_is_offered_by_name() -> None:
 def test_the_composed_profile_is_code_mode_on_the_shipped_runtime() -> None:
     """What `--dump-config --profile rlm` would print: the facts a person reads
     to know which pH they are running."""
-    rows = {row.id: row for row in Loader.from_paths(resolve_profile("rlm")).rows}
+    rows = {row.id: row for row in Profile.from_paths(resolve_profile("rlm")).rows}
 
     assert rows["tools"].config["mode"] == "code"
     assert rows["code-runtime-python"].name == "code-runtime-python"

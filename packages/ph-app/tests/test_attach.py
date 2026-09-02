@@ -24,16 +24,11 @@ from ph.llm.types import attachment_of, text_of
 from ph.session import Session, thaw_json
 from ph_app.attach import AttachmentUnavailable, ingest, prompt_message
 from ph_app.modes import run_print
-from ph_app.profiles import resolve_profile
+from ph_app.profiles import compose_profile
 
 pytestmark = pytest.mark.anyio
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"pixels" * 64
-
-
-def _headless(tmp_path: Path) -> list[Path]:
-    """The shipped one-shot profile, which mounts the fake adapter."""
-    return resolve_profile("headless")
 
 
 def _attach(tmp_path: Path, name: str = "diagram.png", body: bytes = PNG) -> Path:
@@ -65,7 +60,7 @@ async def test_the_one_shot_mode_accepts_an_attachment(
     monkeypatch.setenv("PH_HOME", str(tmp_path))
 
     result = await run_print(
-        _headless(tmp_path),
+        compose_profile("headless"),
         "what is this?",
         provider="fake",
         model="fake-1",
@@ -86,7 +81,7 @@ async def test_the_attachment_is_stored_and_carried_on_the_message(
 
     source = _attach(tmp_path)
     async with prompted(
-        _headless(tmp_path),
+        compose_profile("headless"),
         "what is this?",
         provider="fake",
         model="fake-1",
@@ -115,7 +110,7 @@ async def test_the_same_file_attached_twice_stores_one_blob(
 
     first, second = _attach(tmp_path, "a.png"), _attach(tmp_path, "b.png")
     async with prompted(
-        _headless(tmp_path),
+        compose_profile("headless"),
         "these two",
         provider="fake",
         model="fake-1",
@@ -142,7 +137,7 @@ async def test_a_route_that_cannot_read_it_says_so_three_ways(
 
     source = _attach(tmp_path)
     async with prompted(
-        _headless(tmp_path),
+        compose_profile("headless"),
         "what is this?",
         provider="fake",
         model="fake-1",
@@ -167,8 +162,7 @@ async def test_the_refusal_is_recorded_once_not_once_per_step(
     from ph_app.runtime import mounted
 
     source = _attach(tmp_path)
-    async with mounted(_headless(tmp_path)) as run:
-        ctx = run.ctx
+    async with mounted(compose_profile("headless")) as ctx:
         session = ctx.sessions.create("repeat")
         refs = await ingest(ctx, [source])
         agent = ctx.agents.create(session, AgentOptions(provider="fake", model="fake-1"))

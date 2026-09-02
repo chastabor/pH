@@ -14,7 +14,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from ph.cordis import ProfileLayer
+from ph.cordis import Profile
 from ph.llm.types import Message, ReasoningBlock, TextBlock, ToolCallBlock, ToolResultBlock, text_of
 
 from ..runtime import prompted
@@ -54,7 +54,7 @@ def render_transcript(messages: tuple[Message, ...]) -> str:
 
 
 async def run_transcript(
-    documents: list[ProfileLayer],
+    profile: Profile,
     prompt: str,
     *,
     provider: str,
@@ -63,7 +63,7 @@ async def run_transcript(
     attachments: Sequence[Path] = (),
 ) -> TranscriptResult:
     async with prompted(
-        documents,
+        profile,
         prompt,
         provider=provider,
         model=model,

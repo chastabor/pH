@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TextIO
 
-from ph.cordis import Context, ProfileLayer
+from ph.cordis import Context, Profile
 from ph.session import Session, SessionEvent, dumps
 
 from ..runtime import prompted
@@ -30,7 +30,7 @@ class JsonResult:
 
 
 async def run_json(
-    documents: list[ProfileLayer],
+    profile: Profile,
     prompt: str,
     *,
     provider: str,
@@ -51,7 +51,7 @@ async def run_json(
         stream.write(f"{dumps({'type': 'session/header', 'header': session.header.to_wire()})}\n")
 
     async with prompted(
-        documents,
+        profile,
         prompt,
         provider=provider,
         model=model,

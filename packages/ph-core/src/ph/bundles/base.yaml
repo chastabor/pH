@@ -50,6 +50,13 @@
 - id: diagnostics
   name: diagnostics
 
+# What the mount *became* — which rows activated, what each waits on, which
+# layer disabled one, which realms exist — as against `--dump-config`, which is
+# the composition before anything runs. dsh's rule: once structure comes from
+# configuration, the static code no longer says what is running.
+- id: topology
+  name: topology
+
 # --- capability seams ------------------------------------------------------
 # Definition + one local provider each. A deployment swaps a provider by
 # addressing the row; consumers never learn which one answered (I5).

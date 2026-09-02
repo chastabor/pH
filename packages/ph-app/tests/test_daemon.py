@@ -1529,7 +1529,7 @@ async def test_a_hand_built_server_with_no_bound_socket_watches_nothing(
     reaped_host()
     async with anyio.create_task_group() as tasks:
         built = server.DaemonServer(
-            supervisor=Supervisor(documents=PROFILE, tasks=tasks),
+            supervisor=Supervisor(profile=PROFILE, tasks=tasks),
             stop=anyio.Event(),
             path=tmp_path / "nowhere.sock",
         )

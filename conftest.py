@@ -19,7 +19,7 @@ from typing import Any
 import pytest
 
 from ph.bundles import BASE, HEADLESS
-from ph.cordis import Context, Loader
+from ph.cordis import Context, Profile, load_profile_documents
 
 MountProfile = Callable[..., Awaitable[Context]]
 
@@ -139,7 +139,7 @@ async def mount(tmp_path: Path) -> AsyncIterator[MountProfile]:
             paths = list(profile)
         else:
             paths = [BASE, HEADLESS, profile]
-        documents = Loader.from_paths(paths).documents
+        documents = load_profile_documents(paths)
         # The filesystem root goes to `tmp_path` for the same reason `PH_HOME`
         # does, and it is the stronger of the two: `fs.root` is what a workspace
         # tier *branches a git worktree from*, so a test that left it at the
@@ -153,7 +153,7 @@ async def mount(tmp_path: Path) -> AsyncIterator[MountProfile]:
         if overlay_rows:
             documents.append(("test-overlay", list(overlay_rows)))
         ctx = Context()
-        await Loader.from_documents(documents).mount(ctx)
+        await Profile.from_documents(documents).mount(ctx)
         roots.append(ctx)
         return ctx
 

@@ -48,7 +48,7 @@ from typing import Any
 from ..cordis import Context, Disposer, Running, plugin, running
 from ._names import require_slug
 from ._registry import claim_key, contribute_via
-from .diagnostics import Diagnostic
+from .diagnostics import ORDER_SELF_ASSESSMENT, Diagnostic
 from .diagnostics import contribute as contribute_diagnostic
 
 __all__ = [
@@ -223,6 +223,6 @@ async def apply(ctx: Context, _config: Any) -> None:
             read=registry.describe,
             # Last: a person scanning `ph doctor` for what is wrong should meet
             # the deployment's own account of itself before its self-assessment.
-            order=100,
+            order=ORDER_SELF_ASSESSMENT,
         ),
     )

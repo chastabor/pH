@@ -492,7 +492,7 @@ def test_the_daemon_status_reply_is_json_and_says_what_it_is(
     async def read() -> dict[str, Any]:
         async with anyio.create_task_group() as tasks:
             server = DaemonServer(
-                supervisor=Supervisor(documents=PROFILE, tasks=tasks),
+                supervisor=Supervisor(profile=PROFILE, tasks=tasks),
                 stop=anyio.Event(),
                 path=tmp_path / "daemon.sock",
             )

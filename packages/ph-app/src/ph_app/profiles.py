@@ -17,7 +17,7 @@ from typing import Annotated, Any, TypeAlias
 import typer
 
 from ph.bundles import BASE, HEADLESS, resolve_bundle
-from ph.cordis import LoaderError, ProfileLayer
+from ph.cordis import LoaderError, Profile, ProfileDocument, load_profile_documents
 from ph.cordis.loader import safe_yaml_load
 from ph.paths import resolve_roots
 
@@ -30,7 +30,9 @@ __all__ = [
     "Bundle",
     "ProfileOption",
     "available_profiles",
-    "documents_or_exit",
+    "compose_profile",
+    "profile_documents",
+    "profile_or_exit",
     "resolve_profile",
 ]
 
@@ -171,25 +173,50 @@ CLI_LAYER = "cli"
 topology print as its provenance."""
 
 
-def documents_or_exit(profile: str, patches: Sequence[str] = ()) -> list[ProfileLayer]:
-    """The profile's layers plus any `--patch` entries, or exit 2 saying why not.
+def profile_documents(name: str) -> list[ProfileDocument]:
+    """`resolve_profile`, read: the profile's layers as documents, raising as its parts raise.
+
+    The stage a caller wants when it has a layer of its own to add before
+    composing — the benchmark's `bench` document, a fixture's overlay.
+    """
+    return load_profile_documents(resolve_profile(name))
+
+
+def compose_profile(name: str) -> Profile:
+    """A shipped profile, composed and ready to mount — for a test or a bench.
+
+    A command goes through `profile_or_exit`, which is this plus the exit code.
+    """
+    return Profile.from_documents(profile_documents(name))
+
+
+def profile_or_exit(profile: str, patches: Sequence[str] = ()) -> Profile:
+    """The profile composed, `--patch` entries included — or exit 2 saying why not.
 
     The refusal is the command's, not the resolver's: `resolve_profile` raises a
     `ValueError` that already names the available profiles, and every caller
-    wants that sentence on stderr under the same exit code. A `--patch` that will
-    not parse, or is a scalar, is refused here the same way; everything else
-    about its shape — unknown keys, a row id that does not exist, a bad
-    `isolate:` — is the loader's grammar, refused by the loader, and mapped to
-    the same exit code where the loader runs.
+    wants that sentence on stderr under the same exit code.
+
+    **Everything about the profile is refused here, once, and nothing composes
+    twice.** A command past this line holds a `Profile`; every mode mounts that
+    rather than re-reading or re-composing, so "no such profile", "not YAML" and
+    a row id that does not exist are one refusal under one exit code wherever
+    they are met — a bad row used to be exit 2 from `ph -p` and "profile does not
+    mount" under exit 1 from `ph doctor`. What stays with the mount is the
+    mount's: a plugin that cannot be imported, an `isolate:` copy that never
+    activates, a row refusing the deployment.
     """
     try:
-        layers: list[ProfileLayer] = list(resolve_profile(profile))
-    except ValueError as error:
+        documents = profile_documents(profile)
+    except (ValueError, LoaderError, OSError) as error:
         fail(f"[red]{error}[/red]", code=2, cause=error)
     if patches:
         entries = [entry for text in patches for entry in _patch_entries(text)]
-        layers.append((CLI_LAYER, entries))
-    return layers
+        documents.append((CLI_LAYER, entries))
+    try:
+        return Profile.from_documents(documents)
+    except LoaderError as error:
+        fail(f"[red]{error}[/red]", code=2, cause=error)
 
 
 def _patch_entries(text: str) -> list[Any]:
