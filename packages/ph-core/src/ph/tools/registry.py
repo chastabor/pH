@@ -21,7 +21,7 @@ round; that is a transcription slip, not a second design.)
 from __future__ import annotations
 
 import logging
-from collections.abc import Awaitable, Callable, Iterator, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from typing import Any, Literal
@@ -510,24 +510,41 @@ class ToolRuntime:
     def _presented_name(self, target: Context) -> str:
         """The transport's presented name, from the layer cells alone."""
         presentation = next(
-            (layer.transport for layer in self._chain(target) if layer.transport is not None),
+            (
+                layer.transport
+                for layer in self._layers_for(target.isolation_chain())
+                if layer.transport is not None
+            ),
             None,
         )
         return presentation.name if presentation is not None else RUN_CODE
 
-    def _chain(self, target: Context) -> Iterator[_Layer]:
-        """This scope's layers, most-specific-first.
+    def stale_views(self) -> list[str]:
+        """Cached views that no longer equal what a rebuild would produce (I6, P6-01).
 
-        Layers alone: the key had one consumer, the `key is None` guard that
-        P6-27 deleted, and every remaining call site was unpacking it into a
-        throwaway — in two different spellings, which is how a reader comes to
-        wonder whether it once mattered. It is still `target.isolation_chain()`
-        for anything that needs it back.
+        Here rather than in the invariant row that declares it, because the cache
+        is this class's own secret: a check written against `_views` from outside
+        would be quietly disabled by a rename, and an invariant that can stop
+        being checked without anybody noticing is worse than no invariant at all.
+
+        Every cached entry is at the current generation — `_changed` clears the
+        table when it bumps the counter — so every one of them is an answer `view`
+        would serve, and every one is compared.
         """
-        for key in target.isolation_chain():
-            layer = self._layers.get(key)
-            if layer is not None:
-                yield layer
+        found: list[str] = []
+        for chain, (_, cached) in self._views.items():
+            fresh = self._build_view(self._layers_for(chain))
+            differing = sorted(
+                name
+                for name in fresh.visible.keys() | cached.visible.keys()
+                if fresh.visible.get(name) is not cached.visible.get(name)
+            )
+            if differing:
+                # The innermost key names the view; `None` — the global layer,
+                # always last — is the only key a chain of one can hold.
+                where = chain[0].path if chain[0] is not None else "the deployment"
+                found.append(f"the cached view for {where} differs from a rebuild on {differing}")
+        return found
 
     def view(self, scope: Boundary) -> _View:
         """Resolve what one boundary sees, most-specific-first.
@@ -547,14 +564,24 @@ class ToolRuntime:
         cached = self._views.get(cache_key)
         if cached is not None and cached[0] == self._generation:
             return cached[1]
-        view = self._build_view(target)
+        view = self._build_view(self._layers_for(cache_key))
         self._views[cache_key] = (self._generation, view)
         return view
 
-    def _build_view(self, target: Context) -> _View:
+    def _layers_for(self, chain: Sequence[Context | None]) -> list[_Layer]:
+        """The layers an isolation chain resolves to, most-specific-first.
+
+        Split out from `_chain` so a view can be rebuilt from a **cache key**
+        rather than from the context it was first built for. The key already is
+        `target.isolation_chain()`, and the layers are all `_build_view` ever
+        wanted from the target — which is what makes the view a pure function of
+        the key, and therefore what makes `stale_views` able to check it.
+        """
+        return [layer for key in chain if (layer := self._layers.get(key)) is not None]
+
+    def _build_view(self, layers: Sequence[_Layer]) -> _View:
         visible: dict[str, ToolDefinition] = {}
         by: dict[str, Running] = {}
-        layers = list(self._chain(target))
         mode = next((layer.mode for layer in layers if layer.mode is not None), None)
         # Carried rather than re-sliced. `layers[:index]` allocated a list and a
         # generator *per tool name per layer* to say "the strictly nearer
@@ -658,7 +685,7 @@ class ToolRuntime:
 
     def guard_reason(self, execution: ToolExecution) -> str | None:
         """The first monotonic denial from every layer this call can see."""
-        for layer in self._chain(execution.scope):
+        for layer in self._layers_for(execution.scope.isolation_chain()):
             for guard in layer.guards:
                 reason = guard(execution)
                 if reason is not None:

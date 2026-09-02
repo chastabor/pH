@@ -22,6 +22,7 @@ from typing import Any
 
 from ..cordis import Context, plugin
 from ..llm.types import GenerateOptions
+from ..seams.invariants import Invariant, contribute
 
 __all__ = ["ModelVisibleNotLoggedError", "apply"]
 
@@ -57,3 +58,17 @@ async def apply(ctx: Context, config: Any) -> None:
     # request — the invariant is about what the LOOP built, not what middleware
     # made of it.
     ctx.on("llm/stream", check, prepend=True)
+
+    # Declared as well as enforced (P6-01). Whether I3 holds has always been a
+    # property of the *profile* — this row is optional — and nothing said so.
+    # `check=None` because there is no state between requests to poll: what this
+    # invariant can honestly report is that every request was held to it, never
+    # that it holds right now.
+    contribute(
+        ctx,
+        Invariant(
+            id="model-visible-logged",
+            statement="every loop request's messages are the session's own derivation",
+            order=1,
+        ),
+    )

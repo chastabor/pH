@@ -244,7 +244,21 @@
   name: llm-retry
 
 # --- invariants ------------------------------------------------------------
-# "Model-visible means logged" is checked at runtime, not only in tests: a
-# harness that can only prove this in CI cannot prove it about your session.
+# Checked at runtime, not only in tests: a harness that can only prove these in
+# CI cannot prove them about your session. The registry is what makes the set
+# *visible* — every one of these rows is optional, so "pH enforces I3" was only
+# ever true of a profile, and `ph doctor` now says which.
+- id: invariants
+  name: invariants
+
 - id: agent-loop-invariant
   name: agent-loop-invariant
+
+- id: session-invariant
+  name: session-invariant
+
+- id: tools-invariant
+  name: tools-invariant
+
+- id: scope-invariant
+  name: scope-invariant

@@ -40,7 +40,7 @@ from typing import Any
 
 from ..cordis import Context, Disposer, Running, plugin, running
 from ._names import require_slug
-from ._registry import claim_key
+from ._registry import claim_key, contribute_via
 
 __all__ = ["ID_MAX", "Diagnostic", "DiagnosticsRegistry", "apply", "contribute"]
 
@@ -134,30 +134,12 @@ class DiagnosticsRegistry:
 def contribute(ctx: Context, diagnostic: Diagnostic) -> None:
     """Offer a section from a row's `apply`, whether or not this seam is mounted.
 
-    **Through `ctx.inject` rather than a `ctx.get` at `apply` time**, which is
-    the difference between a contribution that works and one that works if the
-    rows happen to be in the right order. A `ctx.get` here reads whatever has
-    been provided *so far*, so a contributor mounted above `diagnostics` finds
-    nothing, contributes nothing, and reports that nowhere — for the one command
-    whose whole job is to be complete. `inject` waits for the key through the
-    loader's reconcile fixpoint instead, so the two rows may sit in either
-    order, which is what `base.yaml` promises about every other row in it.
-
-    Optional, still: a hard `inject=["diagnostics"]` on the row itself would
-    make a *report* a precondition for the thing being reported on. `ph_rlm`'s
-    kernel-snapshot row made exactly this call for exactly this reason — "the
-    compaction seam is a nice to have here, and a deployment that removed the
-    compaction row must not thereby lose kernel snapshots".
-
-    The unwind comes free: `fn` is handed a child scope that disposes when the
-    key goes away or the row unloads, so the section leaves with whatever
-    answers it and no caller has to remember `scope=`.
+    `contribute_via` carries the rule and the reason. `ph_rlm`'s kernel-snapshot
+    row made the same call for the same reason — "the compaction seam is a nice
+    to have here, and a deployment that removed the compaction row must not
+    thereby lose kernel snapshots".
     """
-
-    def register(scope: Context) -> None:
-        scope.diagnostics.register(diagnostic, scope=scope)
-
-    ctx.inject(["diagnostics"], register, label=f"diagnostic({diagnostic.id})")
+    contribute_via(ctx, "diagnostics", diagnostic, label=f"diagnostic({diagnostic.id})")
 
 
 @plugin("diagnostics")

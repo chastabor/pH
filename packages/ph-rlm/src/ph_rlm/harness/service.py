@@ -433,6 +433,30 @@ class HarnessService:
         staged.write_text(f"{payload}\n", encoding="utf-8")
         staged.replace(path)
 
+    def stale_projections(self) -> list[str]:
+        """Every written projection that no longer equals the fold behind it (I6, P6-01).
+
+        Here rather than in the invariant row that declares it, because the
+        projection's layout is this service's own: which sessions have one, where
+        it lives, what it projects. A row that enumerated `[None, *sessions]` from
+        outside encoded a write path this service does not have — nothing calls
+        `write_projection(None)` — and would silently miss a third projection the
+        day one is added.
+
+        Per session because the projection is per session. **A missing file is not
+        drift**: nothing requires a session to have projected, and an alarm loudest
+        where the feature is used least is one people learn to ignore.
+        """
+        sessions = self.ctx.get("sessions")
+        if sessions is None:
+            return []
+        return [
+            f"session {session.id}: {path} does not equal the fold it projects"
+            for session in sessions.list()
+            if (path := self.projection_path(session)).exists()
+            and not self.verify_projection(session)
+        ]
+
     def verify_projection(self, session: Session | None) -> bool:
         """Whether the file on disk equals the fold.
 

@@ -23,6 +23,7 @@ import pytest
 
 from ph.testing import FAKE_OPTIONS
 from ph_rlm import BUNDLE
+from ph_rlm.harness import HarnessEdit
 from ph_rlm.kernel.journal import OrphanJournal
 from ph_rlm.kernel.manager import Kernel, KernelLimits, _declare
 from ph_rlm.kernel.venv import resolve_interpreter
@@ -59,6 +60,33 @@ set that drifts between them tests different things while appearing to test one.
 
 HARNESS_ROW: dict[str, Any] = {"id": "rlm-harness", "name": "rlm-harness"}
 """The Continual Harness row (P3-16), shared by both harness test modules."""
+
+INVARIANT_ROW: dict[str, Any] = {"id": "rlm-harness-invariant", "name": "rlm-harness-invariant"}
+"""I6's harness half (P6-01). Mounted only by the module that asserts on it."""
+
+Harnessed = Callable[..., Any]
+
+
+@pytest.fixture
+def harnessed(mounted_runtime: Any) -> Harnessed:
+    """`await harnessed(*rows)` -> `(ctx, session, agent)` with the harness mounted.
+
+    On the real runtime, so H1 probes a live kernel, and with `$PH_HOME` under
+    `tmp_path` (the root `mount` fixture), so the global log is this test's.
+    Extra rows ride along so the invariant module can add its own without a
+    second fixture of the same name mounting a different set.
+    """
+
+    async def build(*rows: dict[str, Any]) -> tuple[Any, Any, Any]:
+        return await mounted_runtime(session_id="harness", extra_rows=[HARNESS_ROW, *rows])
+
+    return build
+
+
+def note_edit(entry_id: str, title: str = "a thing learned") -> HarnessEdit:
+    """The smallest refinement: one created note."""
+    return HarnessEdit(action="create", kind="note", id=entry_id, title=title, content="body")
+
 
 HOST_INTERPRETER: dict[str, Any] = {"python": "host", "sweepOrphans": False}
 """The offline pin for `code-runtime-python`, as a *config fragment*.

@@ -345,6 +345,12 @@ def _diagnostic(service: Any) -> Any:
     return service.register(Diagnostic(id="p612", read=lambda: [("a", "b")]))
 
 
+def _invariant(service: Any) -> Any:
+    from ph.seams.invariants import Invariant
+
+    return service.register(Invariant(id="p612", statement="p612 holds", check=lambda: []))
+
+
 def _status(service: Any) -> Any:
     from ph.seams.tui_status import StatusField
 
@@ -410,6 +416,7 @@ def _note(service: Any) -> Any:
 RECIPES: dict[str, tuple[str, Callable[[Any], Any]]] = {
     "CommandRegistry.register": ("commands", _command),
     "DiagnosticsRegistry.register": ("diagnostics", _diagnostic),
+    "InvariantRegistry.register": ("invariants", _invariant),
     "TuiStatusRegistry.register": ("tui_status", _status),
     "SkillService.register": ("skills", _skill),
     "SystemPromptService.section": ("system_prompt", _section),
@@ -1336,6 +1343,7 @@ BOUND: dict[str, str] = {
     "CommandDefinition.run": "CommandRegistry.dispatch",
     "CompactionNote.text": "CompactionSeam.notes",
     "Diagnostic.read": "DiagnosticsRegistry.report",
+    "Invariant.check": "InvariantRegistry.verify",
     "PromptContext.text": "SystemPromptService.assemble",
     "PromptSection.text": "SystemPromptService.assemble",
     # The two buckets whose element type *is* the body, visible since

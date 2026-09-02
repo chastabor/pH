@@ -26,7 +26,10 @@ one re-export away.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from ..cordis import Context
 
 from ..cordis import Context, Disposer, Running
 
@@ -115,3 +118,32 @@ def claim_slot(by: Running, holder: Any, attribute: str, value: Any, *, label: s
             setattr(holder, record, None)
 
     return by.owner.add_disposer(release, label=label)
+
+
+def contribute_via(ctx: Context, key: str, item: Any, *, label: str) -> None:
+    """Register `item` on the service at `key` once it exists — mounted yet or not.
+
+    **Through `ctx.inject` rather than a `ctx.get` at `apply` time**, which is the
+    difference between a contribution that works and one that works if the rows
+    happen to be in the right order. A `ctx.get` reads whatever has been provided
+    *so far*, so a contributor mounted above the seam finds nothing, contributes
+    nothing, and reports that nowhere. `inject` waits for the key through the
+    loader's reconcile fixpoint instead, so the two rows may sit in either order —
+    which is what `base.yaml` promises about every other row in it.
+
+    Optional, still: a hard `inject=[key]` on the contributing row would make the
+    *report* a precondition for the thing being reported on.
+
+    The unwind comes free: `register` is handed a child scope that disposes when
+    the key goes away or the row unloads, so the contribution leaves with whatever
+    answers it and no caller has to remember `scope=`.
+
+    Here beside `claim_key` for the same reason it is: this rule was written by
+    hand in two seams with a paragraph of prose each explaining why, and a third
+    seam wanting it would copy whichever it read first.
+    """
+
+    def register(scope: Context) -> None:
+        getattr(scope, key).register(item, scope=scope)
+
+    ctx.inject([key], register, label=label)

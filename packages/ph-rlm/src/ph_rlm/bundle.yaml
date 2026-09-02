@@ -92,6 +92,12 @@
 - id: rlm-harness
   name: rlm-harness
 
+# I6's live example (P6-01). `harness_state.json` is written for humans and
+# nothing reads it back, which is exactly the arrangement that lets a projection
+# drift unnoticed — so the invariant is checked rather than assumed.
+- id: rlm-harness-invariant
+  name: rlm-harness-invariant
+
 # Capability-layer skills (P3-18): `SKILL.md` for the catalog, an installable
 # package for the kernel. The knowledge layer (`/refine`) may point at these and
 # may not create them — I7, and the reason the two share a word, not a mechanism.

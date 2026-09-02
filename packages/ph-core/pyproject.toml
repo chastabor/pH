@@ -67,6 +67,7 @@ token-meter = "ph.seams.token_meter:apply"
 user-questions = "ph.seams.user_questions:apply"
 containment = "ph.seams.containment:apply"
 diagnostics = "ph.seams.diagnostics:apply"
+invariants = "ph.seams.invariants:apply"
 workspace-shared = "ph.seams.workspace:apply"
 workspace-agentfs = "ph.seams.workspace_agentfs:apply"
 workspace-git-worktree = "ph.seams.workspace_git:apply"
@@ -94,6 +95,9 @@ code-runtime-stub = "ph.testing.stub_runtime:apply"
 llm-replay = "ph.testing.replay_adapter:apply"
 tools-code-mode = "ph.tools.code_mode:apply"
 agent-loop-invariant = "ph.agent_loop.invariant:apply"
+session-invariant = "ph.session.invariant:apply"
+tools-invariant = "ph.tools.invariant:apply"
+scope-invariant = "ph.seams.scope_invariant:apply"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/ph"]

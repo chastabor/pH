@@ -16,12 +16,11 @@ prove something about the harness's imports rather than the model's.
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from typing import Any
 
 import anyio
 import pytest
-from conftest import HARNESS_ROW
+from conftest import Harnessed, note_edit
 
 from ph.system_prompt import (
     join_context_sections,
@@ -46,26 +45,6 @@ from ph_rlm.harness import (
 
 pytestmark = pytest.mark.anyio
 
-Harnessed = Callable[[], Any]
-
-
-@pytest.fixture
-def harnessed(mounted_runtime: Any) -> Harnessed:
-    """`await harnessed()` -> `(ctx, session, agent)` with the harness mounted.
-
-    On the real runtime, so H1 probes a live kernel, and with `$PH_HOME` under
-    `tmp_path` (the root `mount` fixture), so the global log is this test's.
-    """
-
-    async def build() -> tuple[Any, Any, Any]:
-        return await mounted_runtime(session_id="harness", extra_rows=[HARNESS_ROW])
-
-    return build
-
-
-def _note(entry_id: str, title: str = "a thing learned") -> HarnessEdit:
-    return HarnessEdit(action="create", kind="note", id=entry_id, title=title, content="body")
-
 
 def _allow(ctx: Any) -> list[str]:
     """Answer approval prompts, and record what was asked."""
@@ -85,7 +64,7 @@ def _allow(ctx: Any) -> list[str]:
 async def test_an_applied_refinement_is_the_state(harnessed: Harnessed) -> None:
     ctx, session, agent = await harnessed()
     record = await ctx.harness.apply(
-        RefinementProposal(summary="learned something", edits=[_note("prefer-uv")]),
+        RefinementProposal(summary="learned something", edits=[note_edit("prefer-uv")]),
         session=session,
         agent=agent,
     )
@@ -107,7 +86,7 @@ async def test_deleting_the_state_and_re_deriving_is_byte_identical(harnessed: H
     """
     ctx, session, agent = await harnessed()
     await ctx.harness.apply(
-        RefinementProposal(summary="one", edits=[_note("first")]), session=session, agent=agent
+        RefinementProposal(summary="one", edits=[note_edit("first")]), session=session, agent=agent
     )
     await ctx.harness.apply(
         RefinementProposal(
@@ -116,7 +95,7 @@ async def test_deleting_the_state_and_re_deriving_is_byte_identical(harnessed: H
                 HarnessEdit(
                     action="update", kind="note", id="first", title="revised", content="v2"
                 ),
-                _note("second"),
+                note_edit("second"),
             ],
         ),
         session=session,
@@ -138,11 +117,13 @@ async def test_a_fork_inherits_the_harness_as_of_its_boundary(harnessed: Harness
     """
     ctx, session, agent = await harnessed()
     await ctx.harness.apply(
-        RefinementProposal(summary="before", edits=[_note("early")]), session=session, agent=agent
+        RefinementProposal(summary="before", edits=[note_edit("early")]),
+        session=session,
+        agent=agent,
     )
     boundary = session.events[-1].seq
     await ctx.harness.apply(
-        RefinementProposal(summary="after", edits=[_note("late")]), session=session, agent=agent
+        RefinementProposal(summary="after", edits=[note_edit("late")]), session=session, agent=agent
     )
 
     assert set(fold_session(session).entries["note"]) == {"early", "late"}
@@ -185,7 +166,7 @@ async def test_h5_the_doctrine_is_not_editable(harnessed: Harnessed) -> None:
         await ctx.harness.apply(
             RefinementProposal(
                 summary="rewrite everything",
-                edits=[_note("base_system_prompt", "a new doctrine")],
+                edits=[note_edit("base_system_prompt", "a new doctrine")],
             ),
             session=session,
             agent=agent,
@@ -205,7 +186,7 @@ async def test_h1_an_unresolvable_reference_is_rejected_on_the_event(harnessed: 
         RefinementProposal(
             summary="mixed",
             edits=[
-                _note("this-one-is-fine"),
+                note_edit("this-one-is-fine"),
                 HarnessEdit(
                     action="create",
                     kind="skill",
@@ -321,12 +302,12 @@ async def test_h3_a_global_edit_prompts_and_a_local_one_does_not(harnessed: Harn
     asked = _allow(ctx)
 
     await ctx.harness.apply(
-        RefinementProposal(summary="local", edits=[_note("mine")]), session=session, agent=agent
+        RefinementProposal(summary="local", edits=[note_edit("mine")]), session=session, agent=agent
     )
     assert asked == [], "a local refinement asked for approval"
 
     await ctx.harness.apply(
-        RefinementProposal(summary="everyone", edits=[_note("shared")]),
+        RefinementProposal(summary="everyone", edits=[note_edit("shared")]),
         scope="global",
         session=session,
         agent=agent,
@@ -349,7 +330,7 @@ async def test_h3_a_declined_global_edit_writes_nothing(harnessed: Harnessed) ->
 
     with pytest.raises(RefinementRefused, match="not approved"):
         await ctx.harness.apply(
-            RefinementProposal(summary="everyone", edits=[_note("shared")]),
+            RefinementProposal(summary="everyone", edits=[note_edit("shared")]),
             scope="global",
             session=session,
             agent=agent,
@@ -362,7 +343,7 @@ async def test_h3_fails_closed_with_nowhere_to_ask(harnessed: Harnessed) -> None
     ctx, session, agent = await harnessed()
     with pytest.raises(RefinementRefused, match="not approved"):
         await ctx.harness.apply(
-            RefinementProposal(summary="everyone", edits=[_note("shared")]),
+            RefinementProposal(summary="everyone", edits=[note_edit("shared")]),
             scope="global",
             session=session,
             agent=agent,
@@ -378,7 +359,7 @@ async def test_a_global_refinement_folds_from_its_own_log(harnessed: Harnessed) 
     ctx, session, agent = await harnessed()
     _allow(ctx)
     await ctx.harness.apply(
-        RefinementProposal(summary="deployment-wide", edits=[_note("house-style")]),
+        RefinementProposal(summary="deployment-wide", edits=[note_edit("house-style")]),
         scope="global",
         session=session,
         agent=agent,
@@ -400,13 +381,13 @@ async def test_a_local_entry_shadows_a_global_one(harnessed: Harnessed) -> None:
     ctx, session, agent = await harnessed()
     _allow(ctx)
     await ctx.harness.apply(
-        RefinementProposal(summary="everywhere", edits=[_note("style", "the house rule")]),
+        RefinementProposal(summary="everywhere", edits=[note_edit("style", "the house rule")]),
         scope="global",
         session=session,
         agent=agent,
     )
     await ctx.harness.apply(
-        RefinementProposal(summary="here", edits=[_note("style", "what this repo does")]),
+        RefinementProposal(summary="here", edits=[note_edit("style", "what this repo does")]),
         session=session,
         agent=agent,
     )
@@ -423,7 +404,7 @@ async def test_concurrent_global_writes_are_both_recorded(harnessed: Harnessed) 
 
     async def write(index: int) -> None:
         await ctx.harness.apply(
-            RefinementProposal(summary=f"n{index}", edits=[_note(f"entry-{index}")]),
+            RefinementProposal(summary=f"n{index}", edits=[note_edit(f"entry-{index}")]),
             scope="global",
             session=session,
             agent=agent,
@@ -444,7 +425,7 @@ async def test_h6_rollback_restores_the_fold(harnessed: Harnessed) -> None:
     """The plan's gate. Derivable because each apply recorded what it replaced."""
     ctx, session, agent = await harnessed()
     await ctx.harness.apply(
-        RefinementProposal(summary="original", edits=[_note("kept", "the first title")]),
+        RefinementProposal(summary="original", edits=[note_edit("kept", "the first title")]),
         session=session,
         agent=agent,
     )
@@ -455,7 +436,7 @@ async def test_h6_rollback_restores_the_fold(harnessed: Harnessed) -> None:
             summary="a regrettable change",
             edits=[
                 HarnessEdit(action="update", kind="note", id="kept", title="worse", content="x"),
-                _note("also-added"),
+                note_edit("also-added"),
             ],
         ),
         session=session,
@@ -481,7 +462,7 @@ async def test_h6_rollback_restores_the_fold(harnessed: Harnessed) -> None:
 async def test_h6_a_refinement_is_not_rolled_back_twice(harnessed: Harnessed) -> None:
     ctx, session, agent = await harnessed()
     record = await ctx.harness.apply(
-        RefinementProposal(summary="one", edits=[_note("thing")]), session=session, agent=agent
+        RefinementProposal(summary="one", edits=[note_edit("thing")]), session=session, agent=agent
     )
     await ctx.harness.rollback(record.refine_id, session=session, agent=agent)
     with pytest.raises(RefinementRefused, match="already been rolled back"):
@@ -494,7 +475,7 @@ async def test_h6_rolling_back_a_global_refinement_asks_too(harnessed: Harnessed
     ctx, session, agent = await harnessed()
     asked = _allow(ctx)
     record = await ctx.harness.apply(
-        RefinementProposal(summary="everyone", edits=[_note("shared")]),
+        RefinementProposal(summary="everyone", edits=[note_edit("shared")]),
         scope="global",
         session=session,
         agent=agent,
@@ -512,7 +493,7 @@ async def test_h6_rolling_back_a_global_refinement_asks_too(harnessed: Harnessed
 async def test_the_command_reports_and_rolls_back(harnessed: Harnessed) -> None:
     ctx, session, agent = await harnessed()
     record = await ctx.harness.apply(
-        RefinementProposal(summary="one", edits=[_note("thing")]), session=session, agent=agent
+        RefinementProposal(summary="one", edits=[note_edit("thing")]), session=session, agent=agent
     )
 
     shown = await ctx.commands.dispatch("/refine --show", session=session, agent=agent)
@@ -601,7 +582,7 @@ async def test_the_projection_is_written_and_equals_the_fold(harnessed: Harnesse
     """
     ctx, session, agent = await harnessed()
     await ctx.harness.apply(
-        RefinementProposal(summary="one", edits=[_note("thing")]), session=session, agent=agent
+        RefinementProposal(summary="one", edits=[note_edit("thing")]), session=session, agent=agent
     )
 
     path = ctx.harness.projection_path(session)

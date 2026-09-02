@@ -638,6 +638,18 @@ class Context:
         return self._parent
 
     @property
+    def children(self) -> tuple[Context, ...]:
+        """The scopes this one will unwind, in creation order.
+
+        A copy, not the list: `dispose` iterates `_children` and clears it, so a
+        caller holding the live list would be mutating the unwind underneath it.
+        The read-only counterpart of `parent`, and the other half of what a walk
+        of the tree needs — `scope_invariant` is the caller, and it exists to
+        find a scope this list should no longer contain.
+        """
+        return tuple(self._children)
+
+    @property
     def root(self) -> Context:
         *_, last = self._chain()
         return last

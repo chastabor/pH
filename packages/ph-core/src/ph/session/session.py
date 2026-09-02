@@ -41,7 +41,7 @@ from .request_header import (
     parse_request_context,
     parse_request_header,
 )
-from .surface import SurfaceManager
+from .surface import SurfaceManager, fold_surface
 
 __all__ = ["Session", "SessionHeader", "SessionObserver"]
 
@@ -376,6 +376,55 @@ class Session:
         return self._context_fold.read(self._log)
 
     # ------------------------------------------------------------- derivation --
+
+    def stale(self) -> list[str]:
+        """Every incremental projection of the log that no longer equals its fold (I6).
+
+        Three of them, each maintained lazily and each a way for a reader to be
+        told about a log that no longer exists: `events` (a snapshot invalidated on
+        append), the surface (`SurfaceManager`, folded from where it left off), and
+        `derive_messages` (memoized per node — the projection I3 compares every
+        request against, so a drift here is one `agent-loop-invariant` would pass).
+        `fold_surface` is the canonical replay of the same rules over the whole log;
+        the manager's own docstring says an external reconstructor "must reach the
+        same nodes", and this is where that is asked rather than assumed.
+
+        Here rather than in the invariant row that declares it, for
+        `ToolRuntime.stale_views`' reason: these caches are this class's own secret,
+        and a check written against `_log` from outside is one a rename disables
+        without anybody noticing. Every trip path is a writer that bypassed `append`
+        — which is what these caches exist to be invalidated by, and what only a
+        check inside the class can honestly detect.
+
+        O(events) per call — the fold is the point — so polled, never run on append.
+        """
+        found: list[str] = []
+        if len(self.events) != len(self._log):
+            found.append(
+                f"session {self.id}: the events snapshot holds {len(self.events)} where the "
+                f"log holds {len(self._log)}"
+            )
+        canonical = fold_surface(self._log).nodes
+        if self._surface.nodes != canonical:
+            found.append(
+                f"session {self.id}: the surface projects {len(self._surface.nodes)} node(s) "
+                f"where its fold gives {len(canonical)}"
+            )
+            # The derivation is memoized *over* the surface, so with the surface
+            # wrong it is wrong for the surface's reason — and forcing it would
+            # index the log at nodes the log no longer has.
+            return found
+        derived = tuple(
+            message
+            for message in (derive_event_message(self._log[seq]) for seq in canonical)
+            if message is not None
+        )
+        if self.derive_messages() != derived:
+            found.append(
+                f"session {self.id}: derive_messages holds {len(self.derive_messages())} "
+                f"message(s) where a fresh derivation gives {len(derived)}"
+            )
+        return found
 
     def derive_messages(self) -> tuple[Message, ...]:
         """The LLM message history, derived from the ordered surface.
