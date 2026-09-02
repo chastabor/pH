@@ -19,6 +19,7 @@ from ..agent.types import AgentOptions
 from ..cordis import DEPLOYMENT, Boundary, Context
 from ..llm.types import ContextForm, PluginSource
 from ..persistence.jsonl import HEADER_LINE_TYPE, locate_session, session_path
+from ..seams.skills import SkillService
 from ..seams.workspace import (
     ACQUIRED,
     DISPOSED,
@@ -160,6 +161,20 @@ def raising(error: BaseException) -> Callable[..., Any]:
         raise error
 
     return body
+
+
+def skill_service() -> tuple[Context, SkillService]:
+    """A root context with a bare skill registry provided as `skills`.
+
+    `tool_runtime`'s shape for the sibling registry, and here for its stated
+    reason: the three-line constructor was written out per test module, and a
+    seam whose construction drifts is one where two suites disagree about what a
+    default looks like.
+    """
+    root = Context()
+    service = SkillService(ctx=root)
+    root.provide("skills", service)
+    return root, service
 
 
 def tool_runtime() -> tuple[Context, ToolRuntime]:

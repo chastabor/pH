@@ -19,6 +19,27 @@ run while the tree is mid-unwind, where a parent legitimately still lists a chil
 it is in the middle of disposing. The property is about what is true once the
 unwind settles, and that is exactly what a poll sees.
 
+**`Context.dispose` now guarantees this rather than merely usually having it**
+(P6-02): leaving the parent's list happens in a `finally`, so a cancellation
+partway through the unwind — the one path a live process could reach this state
+by, since `CancelledError` is a `BaseException` the effect loop does not catch —
+unlinks anyway.
+
+Which means this poll no longer observes that failure *at all*, rather than
+observing it less often: an abandoned scope is unlinked before anything could
+walk to it, and a stranded grandchild points at a parent that no longer lists it,
+so the walk cannot reach either. What is left here is tampering and a future bug
+that reintroduces the state — a smaller subject, and an honest one.
+
+Not enforced (§5 rule 6): **the abandoned work a cancelled unwind leaves is
+reported only by a `log.warning`** from `Context._leave_tree`, and no shipped
+entry point installs a handler for it. The state this poll was written to make
+observable is now prevented; the state that replaced it is not observable here.
+Giving it a carrier — a ledger on `_Runtime`, or a durable event a seam records —
+would put a row back in this report with real content: a lease or a worktree
+stranded by a cancelled teardown, which is exactly what nothing can currently
+see.
+
 @module ph.seams.scope_invariant
 """
 

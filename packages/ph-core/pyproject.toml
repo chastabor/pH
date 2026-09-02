@@ -97,6 +97,7 @@ tools-code-mode = "ph.tools.code_mode:apply"
 agent-loop-invariant = "ph.agent_loop.invariant:apply"
 session-invariant = "ph.session.invariant:apply"
 tools-invariant = "ph.tools.invariant:apply"
+skills-invariant = "ph.seams.skills_invariant:apply"
 scope-invariant = "ph.seams.scope_invariant:apply"
 
 [tool.hatch.build.targets.wheel]

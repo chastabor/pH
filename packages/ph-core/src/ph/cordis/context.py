@@ -293,6 +293,23 @@ is neither — there is nothing for it to unwind with.
 """
 
 
+def chain_label(chain: Sequence[Context | None]) -> str:
+    """How a report names a cache entry keyed by an isolation chain.
+
+    `chain[0]` rather than a scan for the first non-`None`, and the difference is
+    a property rather than a shortcut: `isolation_chain` appends only non-`None`
+    keys and then exactly one trailing `None`, so the innermost key is the first
+    and `None` can only be last. A scan would read as though an interior `None`
+    were possible, which is the shape neither caller could handle anyway.
+
+    Here rather than in either caller because both chain-keyed caches — the tool
+    view and the skill reach — print this in the same `ph doctor` section, and
+    two spellings of one ordering invariant is how the two rows come to disagree
+    about which scope an entry belongs to.
+    """
+    return chain[0].path if chain and chain[0] is not None else "the deployment"
+
+
 def boundary_of(scope: Boundary, mount: Context) -> Context:
     """Resolve a stated boundary to the scope that answers it.
 
@@ -920,22 +937,68 @@ class Context:
         child — a subagent's tombstone, a supervisor's bookkeeping — because
         such an effect runs after that child's scope is already gone. See
         `ph_rlm.subagents._release`, which is exactly that shape.
+
+        **Leaving the tree is guaranteed, whatever the unwind does** (I2). Every
+        `await` below can be cancelled, and `CancelledError` is a `BaseException`
+        that the effect loop's `except Exception` deliberately does not catch —
+        so without the `finally` a cancellation partway through left this scope
+        `_active=False`, still in its parent's `_children`, still holding its
+        services, and unretryable, because the early return above makes a second
+        `dispose()` a no-op. That state is a leak of everything beneath it, and
+        it is the one path a live process can reach it by.
         """
         if not self._active:
             return
         self._active = False
-        for child in reversed(list(self._children)):
-            await child.dispose()
-        self._children.clear()
-        while self._effects:
-            effect = self._effects.pop()
-            if effect.done:
-                continue
-            effect.done = True
-            try:
-                await maybe_await(effect.dispose())
-            except Exception:
-                log.exception("ph.cordis: effect %r failed to dispose", effect.label)
+        try:
+            for child in reversed(list(self._children)):
+                await child.dispose()
+            while self._effects:
+                effect = self._effects.pop()
+                if effect.done:
+                    continue
+                effect.done = True
+                try:
+                    await maybe_await(effect.dispose())
+                except Exception:
+                    log.exception("ph.cordis: effect %r failed to dispose", effect.label)
+        finally:
+            self._leave_tree()
+
+    def _leave_tree(self) -> None:
+        """Unlink from the parent and drop what this scope served. Cannot fail.
+
+        Nothing here awaits, which is the property that lets it run in a `finally`
+        during cancellation: an `await` there would re-raise before finishing the
+        job it is there to guarantee.
+
+        Not `detach`, which on this class already means the opposite — running a
+        coroutine *outside* the caller's lifetime.
+
+        **What was left behind is named, never destroyed.** A non-empty `_effects`
+        or `_children` here means a cancellation cut the unwind short; on the
+        ordinary path both are already empty, since every child unlinks itself
+        here and the effect loop drains as it goes. Those disposers were *already*
+        unreachable through `dispose` before this method existed — the early
+        return above makes a second call a no-op — so nothing that would otherwise
+        have run is lost by arriving here. They stay callable through the
+        `release` closure `add_disposer` handed out, which is why this reports
+        them and leaves them alone.
+
+        Not enforced (§5 rule 6): that report is a `log.warning`, and no shipped
+        entry point installs a handler for it. Making abandoned teardown
+        *queryable* — a ledger on `_Runtime`, or a durable event a seam records —
+        is unbuilt, and it is the half that would let `ph doctor` see a lease or a
+        worktree stranded by a cancelled unwind.
+        """
+        if self._effects or self._children:
+            log.warning(
+                "ph.cordis: %s was cut short while unwinding; %d child scope(s) and these "
+                "effect(s) were never disposed: %s",
+                self.path,
+                len(self._children),
+                [effect.label or "unlabelled" for effect in self._effects],
+            )
         self._services.clear()
         # Breaks the `self -> Running -> self` cycle the memo makes, in the
         # same breath as the parent/child one below: a context that has been

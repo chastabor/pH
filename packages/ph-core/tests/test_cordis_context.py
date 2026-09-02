@@ -7,6 +7,9 @@ remembered, or every new plugin is a new chance to leak a subprocess.
 
 from __future__ import annotations
 
+import asyncio
+import logging
+
 import pytest
 
 from ph.cordis import (
@@ -16,6 +19,8 @@ from ph.cordis import (
     ServiceNotFoundError,
     plugin,
 )
+from ph.seams.scope_invariant import violations as scope_violations
+from ph.testing import raising
 
 pytestmark = pytest.mark.anyio
 
@@ -180,3 +185,95 @@ async def test_activation_scopes_are_transparent_and_agent_scopes_isolate() -> N
     assert activation.reaches(agent) and activation.reaches(other)
     assert agent.reaches(agent) and not agent.reaches(other)
     assert not other.reaches(agent)
+
+
+# ------------------------------------------------- cancellation mid-dispose --
+
+
+async def test_a_cancelled_dispose_still_leaves_the_tree(caplog: pytest.LogCaptureFixture) -> None:
+    """I2's structural half, held at the one path a live process can break it by.
+
+    `CancelledError` is a `BaseException`, so the effect loop's `except Exception`
+    deliberately does not catch it — and before the `finally`, a cancellation
+    partway through left the scope still in its parent's `_children`, holding its
+    services, and unretryable. See `Context.dispose` for why that state is a leak
+    of everything beneath it.
+
+    Raising `CancelledError` from a disposer rather than racing a real timeout:
+    the property under test is what `dispose` guarantees when an `await` in it
+    does not return, and a `move_on_after` around a sleep would test the same
+    thing with a clock in the way.
+    """
+    root = Context()
+    child = root.scope("child")
+    child.provide("thing", "value")
+    ran: list[str] = []
+
+    child.add_disposer(lambda: ran.append("stranded"), label="stranded")
+    child.add_disposer(raising(asyncio.CancelledError()), label="cancelled-here")
+    child.add_disposer(lambda: ran.append("first"), label="first")
+
+    with (
+        caplog.at_level(logging.WARNING, logger="ph.cordis"),
+        pytest.raises(asyncio.CancelledError),
+    ):
+        await child.dispose()
+
+    # The cancellation still propagates — swallowing it would leave the caller
+    # believing a teardown it asked to stop had finished.
+    assert ran == ["first"], "the loop continued past the cancellation"
+    # ...the scope is gone from the tree regardless...
+    assert child not in root.children
+    assert not child.active and not child.has("thing")
+    # ...and what it could not finish is named rather than silently dropped.
+    assert "was cut short while unwinding" in caplog.text
+    assert "stranded" in caplog.text
+
+
+async def test_an_ordinary_dispose_reports_nothing_abandoned(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The warning has to stay rare enough to be worth reading.
+
+    On the ordinary path both lists are already empty by the time the scope
+    leaves the tree, so a clean unwind is silent. A warning on every disposal
+    would be the same as none.
+    """
+    root = Context()
+    child = root.scope("child")
+    child.add_disposer(lambda: None, label="ordinary")
+    grandchild = child.scope("grandchild")
+    grandchild.add_disposer(lambda: None, label="also-ordinary")
+
+    with caplog.at_level(logging.WARNING, logger="ph.cordis"):
+        await child.dispose()
+
+    assert caplog.text == ""
+    assert child not in root.children and grandchild not in child.children
+
+
+async def test_a_cancelled_child_does_not_strand_its_parent() -> None:
+    """The cascade, which is where the leak is largest.
+
+    `dispose` unwinds children before its own effects, so a child cancelled
+    partway through propagates out of the *parent's* loop too. Both must leave
+    the tree: a parent that stayed linked would keep the whole subtree — its
+    services and everything they close over — reachable for as long as the root
+    lives, which for a deployment scope is the process.
+
+    Asserted through `scope_invariant.violations`, the P6-01 poll that watches for
+    exactly this state, so the guarantee and its checker cannot drift apart. It
+    covers the half a membership check misses: a child whose `parent` no longer
+    lists it.
+    """
+    root = Context()
+    parent = root.scope("parent")
+    child = parent.scope("child")
+    child.add_disposer(raising(asyncio.CancelledError()), label="cancelled-here")
+
+    with pytest.raises(asyncio.CancelledError):
+        await parent.dispose()
+
+    assert scope_violations(root) == [], "a disposed scope was left reachable from the root"
+    assert parent not in root.children and child not in parent.children
+    assert not parent.active and not child.active

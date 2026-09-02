@@ -26,12 +26,21 @@ from typing import Any
 
 import pytest
 
-from ph.cordis import Context
+from ph.cordis import DEPLOYMENT, Context
 from ph.seams.invariants import Invariant, InvariantRegistry, Violation
 from ph.seams.scope_invariant import violations as scope_violations
+from ph.seams.skills import SkillRestriction, SkillService
+from ph.seams.skills_invariant import violations as skill_violations
 from ph.session import SurfaceIntent
 from ph.session.invariant import violations as session_violations
-from ph.testing import report_section, simple_tool, tool_runtime, user_payload
+from ph.testing import (
+    report_section,
+    simple_tool,
+    skill,
+    skill_service,
+    tool_runtime,
+    user_payload,
+)
 from ph.tools.invariant import violations as tool_violations
 
 pytestmark = pytest.mark.anyio
@@ -241,6 +250,117 @@ async def test_a_registry_change_empties_the_cache_rather_than_ageing_it() -> No
     assert tool_violations(root) == []
 
 
+# -------------------------------------------------------------------- skills --
+
+
+async def test_a_reach_cache_that_outlived_its_generation_trips_the_skill_invariant() -> None:
+    """The same I6 the tool view gets, on the registry where drift costs the ceiling.
+
+    `SkillService.reach` is `ToolRegistry.view`'s arrangement — chain-keyed, memoized
+    against a counter — and has its failure mode. But `reach` is the one place skill
+    filters compose, so a stale entry does not serve a stale *listing*: it keeps a
+    skill reachable after the row owning it unloaded.
+
+    Mutating `_skills` without `_changed()` is what a forgetful registration path
+    does; every shipped one calls it, which is why the check has no content until
+    somebody writes the one that does not.
+    """
+    root, skills = skill_service()
+    skills.register(skill("read-code"))
+    assert skills.reach(DEPLOYMENT) == {"read-code"}, "nothing was cached to go stale"
+
+    assert skill_violations(root) == []
+
+    skills._skills.pop("read-code")
+
+    (found,) = skill_violations(root)
+    assert "['read-code']" in found and "rebuild gives []" in found
+
+
+async def test_a_narrowing_clears_the_cache_rather_than_ageing_it() -> None:
+    """The ordinary path stays silent, including the one that changes the answer.
+
+    `restrict` mutates the table *and* calls `_changed()`, which clears it — so the
+    next `reach` rebuilds and there is nothing stale to find. A check that reported
+    every narrowing would fire on the deployments that use narrowing most, which is
+    the same as not firing at all.
+
+    The clearing is asserted directly. A first draft cached a set, restricted, and
+    then only checked the *answer* — but `_changed()` empties `_reach`, so the entry
+    was gone before either assertion ran and the mechanism the docstring argued for
+    was the one thing nothing observed.
+    """
+    root, skills = skill_service()
+    skills.register(skill("read-code"))
+    skills.register(skill("write-code"))
+    skills.reach(DEPLOYMENT)
+    assert skills._reach, "nothing was cached to invalidate"
+
+    skills.restrict(SkillRestriction(deny=("write-code",)))
+
+    assert skills._reach == {}, "a narrowing aged the cache instead of emptying it"
+    assert skills.reach(DEPLOYMENT) == {"read-code"}, "the narrowing did not take"
+    assert skill_violations(root) == []
+
+
+async def test_a_child_reaching_past_its_ancestor_trips_the_skill_invariant(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The ceiling itself — the failure comparing a fold against itself cannot see.
+
+    Both sides of the staleness check go through `_resolve`, so a fold that composed
+    restrictions *wrongly* would be confirmed rather than caught. And the wrong
+    composition is the one this registry exists to prevent: P4-13b's whole security
+    content is that a child holds a subset of its parent and never more. The tool
+    registry shipped exactly this bug — "a child inherited its parent's scoped tools
+    and could not be narrowed out of them, so a grant could widen a child but never
+    bound it" — and `stale_views` could not have caught it either.
+
+    Checkable here and not next door because two things hold for skills alone:
+    `isolation_chain` is suffix-ordered, so an ancestor's chain is a suffix of its
+    descendant's, and a restriction only ever intersects. A deeper chain therefore
+    applies a superset of the filters and must reach a subset. A tool view has no
+    such rule — a grandchild may legitimately hold what its granting parent cannot
+    see.
+
+    The fold is replaced with the broken one rather than a cache entry being planted,
+    because that is the shape of the real defect: with the bug in `_resolve` itself
+    both sides of the equality agree, the staleness clause stays silent, and only the
+    ceiling clause has anything to say. Planting a widened entry would have tripped
+    the staleness clause instead and proved nothing about this one.
+    """
+    root, skills = skill_service()
+    skills.register(skill("read-code"))
+    skills.register(skill("write-code"))
+    parent = root.scope("parent", module="test")
+    child = parent.scope("child", module="test")
+    skills.restrict(SkillRestriction(deny=("write-code",)), scope=parent)
+
+    assert skills.reach(child) == {"read-code"}, "the parent's narrowing did not reach the child"
+    assert skill_violations(root) == []
+
+    # The fold as the tool registry once had it: this layer's filters only, so an
+    # ancestor's narrowing never reaches the child.
+    monkeypatch.setattr(
+        SkillService,
+        "_resolve",
+        lambda self, chain: frozenset(
+            name
+            for name in self._skills
+            if all(one.admits(name) for one in self._restrictions.get(chain[0], ()))
+        ),
+    )
+    skills._changed()
+    assert skills.reach(parent) == {"read-code"}
+    assert skills.reach(child) == {"read-code", "write-code"}, "the bug did not take"
+
+    found = skill_violations(root)
+    assert [one for one in found if "where a rebuild gives" in one] == [], (
+        "the staleness clause fired, so this is not testing the ceiling clause"
+    )
+    assert any("a narrowing widened" in one and "write-code" in one for one in found), found
+
+
 # --------------------------------------------------------------------- scope --
 
 
@@ -304,17 +424,27 @@ async def test_the_rows_reach_the_report_through_the_real_mount(mount: Any) -> N
 
     rows = report_section(ctx, "Invariants")
 
-    assert set(rows) == {
-        "model-visible-logged",
-        "session-log",
-        "tool-view-cache",
-        "scope-unwind",
-    }
+    pollable = ("session-log", "tool-view-cache", "skill-reach-cache", "scope-unwind")
+    assert set(rows) == {"model-visible-logged", *pollable}
     assert rows["model-visible-logged"].startswith("enforced inline ·")
-    assert all(
-        rows[name].startswith("holds ·")
-        for name in ("session-log", "tool-view-cache", "scope-unwind")
-    ), rows
+    assert all(rows[name].startswith("holds ·") for name in pollable), rows
+
+
+async def test_a_row_whose_subject_is_gone_reports_nothing_rather_than_holds(
+    mount: Any,
+) -> None:
+    """`inject` is what makes "absent rather than assumed" true of a *service*.
+
+    Dropping the `skills` row leaves `skills-invariant` with nothing to check.
+    Guarding on `ctx.get("skills") is None` and returning `[]` would print
+    `skill-reach-cache: holds` about a registry that is not there — the lie
+    shaped like reassurance this seam's two-kinds distinction exists to prevent.
+    An unmet `inject` key means the row never activates, so the invariant leaves
+    the report with the thing it was about.
+    """
+    ctx = await mount({"id": "skills", "remove": True})
+
+    assert "skill-reach-cache" not in report_section(ctx, "Invariants")
 
 
 async def test_an_unmounted_invariant_is_absent_rather_than_assumed(mount: Any) -> None:

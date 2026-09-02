@@ -34,6 +34,7 @@ from ..cordis import (
     Disposer,
     Running,
     boundary_of,
+    chain_label,
     events,
     plugin,
     running,
@@ -540,10 +541,10 @@ class ToolRuntime:
                 if fresh.visible.get(name) is not cached.visible.get(name)
             )
             if differing:
-                # The innermost key names the view; `None` — the global layer,
-                # always last — is the only key a chain of one can hold.
-                where = chain[0].path if chain[0] is not None else "the deployment"
-                found.append(f"the cached view for {where} differs from a rebuild on {differing}")
+                found.append(
+                    f"the cached view for {chain_label(chain)} differs from a rebuild "
+                    f"on {differing}"
+                )
         return found
 
     def view(self, scope: Boundary) -> _View:

@@ -260,5 +260,8 @@
 - id: tools-invariant
   name: tools-invariant
 
+- id: skills-invariant
+  name: skills-invariant
+
 - id: scope-invariant
   name: scope-invariant

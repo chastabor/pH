@@ -37,6 +37,7 @@ from ..cordis import (
     Disposer,
     LoaderError,
     boundary_of,
+    chain_label,
     plugin,
     safe_yaml_load,
 )
@@ -247,13 +248,87 @@ class SkillService:
         cached = self._reach.get(chain)
         if cached is not None and cached[0] == self._generation:
             return cached[1]
-        names = frozenset(
-            name
-            for name in self._skills
-            if all(one.admits(name) for key in chain for one in self._restrictions.get(key, ()))
-        )
+        names = self._resolve(chain)
         self._reach[chain] = (self._generation, names)
         return names
+
+    def _resolve(self, chain: tuple[Context | None, ...]) -> frozenset[str]:
+        """What one isolation chain may reach: a pure function of the chain and the tables.
+
+        Split out of `reach` so the memo and the check that audits it cannot hold
+        two definitions of one fold — a second copy would let `stale_reach`
+        confirm a set the pipeline never serves, which is the one failure an
+        audit must not have. Purity is the property that makes it checkable at
+        all: given the same chain, `_skills` and `_restrictions`, this returns the
+        same set, so a cached answer that differs is drift and nothing else.
+
+        **The filters are gathered once, not per name.** Written inside the
+        per-name `all(...)` this did one dict lookup per skill per chain key to
+        answer a question with no filters in it at all — 5.44 µs against 0.36 µs
+        for twenty skills on an unnarrowed chain, which is every deployment-wide
+        resolve and every agent nobody narrowed.
+        """
+        filters = [one for key in chain for one in self._restrictions.get(key, ())]
+        if not filters:
+            return frozenset(self._skills)
+        return frozenset(name for name in self._skills if all(one.admits(name) for one in filters))
+
+    def stale_reach(self) -> list[str]:
+        """Cached reach sets that no longer equal a rebuild (I6, P6-01).
+
+        Here rather than in the invariant row that declares it, for
+        `ToolRuntime.stale_views`' reason: the cache is this class's own secret,
+        and a check written against `_reach` from outside is one a rename
+        disables without anybody noticing.
+
+        **What a stale entry costs is the ceiling, not a listing.** `reach` is
+        what decides which skills an agent may use, so an entry that outlived a
+        `_changed()` keeps a skill reachable after the row owning it unloaded, or
+        hands a narrowed child the set its parent holds — the widening P4-13b
+        calls the whole security content of that row, and the one direction this
+        registry is built to make impossible.
+
+        Every cached entry is at the current generation, because `_changed`
+        clears the table when it bumps the counter — so every one is an answer
+        `reach` would serve, and every one is compared.
+        """
+        found: list[str] = []
+        entries = list(self._reach.items())
+        for chain, (_, cached) in entries:
+            fresh = self._resolve(chain)
+            if fresh != cached:
+                found.append(
+                    f"the cached skill reach for {chain_label(chain)} serves {sorted(cached)} "
+                    f"where a rebuild gives {sorted(fresh)}"
+                )
+        # **And the ceiling itself, which comparing a fold against itself cannot
+        # see.** Both sides above go through `_resolve`, so a fold that composed
+        # restrictions *wrongly* would be confirmed, not caught — and the wrong
+        # composition is the one this registry exists to prevent. The tool
+        # registry shipped exactly that bug: "a child inherited its parent's
+        # scoped tools and could not be narrowed out of them, so a grant could
+        # widen a child but never bound it."
+        #
+        # Checkable here because two things hold for skills and not for tools:
+        # `isolation_chain` is suffix-ordered, so an ancestor's chain is a
+        # suffix of its descendant's; and a restriction only ever intersects
+        # (`NameFilter` neither field widens). A deeper chain therefore applies a
+        # superset of the filters, so its reach must be a subset. A tool view
+        # has no such rule — a grandchild may legitimately hold what its
+        # granting parent cannot see — which is why this clause is skills' own
+        # and not copied from next door.
+        for chain, (_, narrow) in entries:
+            for ancestor, (_, wide) in entries:
+                if (
+                    len(ancestor) < len(chain)
+                    and chain[-len(ancestor) :] == ancestor
+                    and (extra := sorted(narrow - wide))
+                ):
+                    found.append(
+                        f"{chain_label(chain)} reaches {extra}, which its ancestor "
+                        f"{chain_label(ancestor)} does not — a narrowing widened"
+                    )
+        return found
 
     def admits(self, name: str, scope: Boundary) -> bool:
         """Whether `scope` may reach this skill at all."""
