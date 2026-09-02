@@ -21,6 +21,7 @@ the generic code**, in the row whose entire purpose is telling an operator why.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -149,16 +150,27 @@ async def test_a_non_repository_declines_and_the_seam_falls_back(
 # ------------------------------------------------------------------ disposal --
 
 
-async def test_a_clean_worktree_is_removed_and_a_dirty_one_is_kept(
+async def test_a_dirty_worktree_is_committed_to_its_branch_and_then_removed(
     mount: Any, tmp_path: Path
 ) -> None:
     """The policy, and both halves of it: an agent that changed nothing leaves
-    nothing to clean up, and an agent that did work leaves it for the user to
-    inspect and merge.
+    nothing behind, and an agent that did work leaves a **branch** to inspect and
+    merge — never a directory.
 
-    `kept` rides `workspace/disposed` for exactly this reason — "nothing changed,
-    so it was removed" and "these writes were thrown away" are different facts
-    and a reader cannot derive either from the kind.
+    The directory is a resource the agent borrowed; the branch is the artifact. A
+    checkout left on disk is an orphan: nothing enumerates it, nothing collects it,
+    and its contents are invisible to `export`, `merge` and every other verb
+    `/workspaces` offers, all of which name refs. It is also the thing a crash
+    destroys — a branch is not.
+
+    This is what the overlay tier had always done ("the worktree goes, the branch
+    stays"); the worktree tier was the outlier, and disposal is now one policy at
+    both tiers.
+
+    `kept` rides `workspace/disposed` to separate "nothing changed, so it was
+    removed" from "this branch holds work" — neither is derivable from the kind.
+    Note that it needs no bookkeeping of its own: `git branch -d` refuses an
+    unmerged branch, and *that refusal is the fact*.
     """
     ctx, base = await _tiered(mount, tmp_path)
     session = ctx.sessions.create("s1")
@@ -174,7 +186,11 @@ async def test_a_clean_worktree_is_removed_and_a_dirty_one_is_kept(
     )
     (dirty.root / "work.txt").write_text("real work\n", encoding="utf-8")
     await ctx.workspace.dispose("dirty")
-    assert (dirty.root / "work.txt").exists()
+    assert not dirty.root.exists(), "the checkout outlived the agent that borrowed it"
+
+    # The work is not gone — it moved to where a crash cannot reach it.
+    code, out, _ = await git(ctx, base, "show", f"{dirty.ref}:work.txt")
+    assert code == 0 and out == "real work\n"
 
     kept = {
         event.data["agentId"]: event.data["kept"]
@@ -210,10 +226,11 @@ async def test_an_ephemeral_worktree_is_discarded_even_when_dirty(
 async def test_committed_work_survives_disposal_of_a_clean_worktree(
     mount: Any, tmp_path: Path
 ) -> None:
-    """The keep-dirty rule reads `git status`, and a commit empties it.
+    """Disposal reads `git status` to decide whether to commit, and a commit empties it.
 
-    So an agent that finished its work properly presents as *clean* — and
-    force-deleting its branch there would discard exactly what the rule exists to
+    So an agent that finished its work properly presents as *clean*, takes no
+    commit of its own, and reaches the removal with everything already on the
+    branch — where force-deleting would discard exactly what disposal exists to
     protect. The tree goes (it is reconstructible from the branch); the branch
     stays, because git refuses to drop an unmerged one, and `kept` says so.
     """
@@ -254,11 +271,42 @@ async def test_disposal_leaves_the_repository_able_to_re_acquire(
     assert second.root == first.root
 
 
+async def test_a_worktree_is_rebuilt_from_its_branch_with_the_work_on_it(
+    mount: Any, tmp_path: Path
+) -> None:
+    """The round trip the whole policy is for, and the reason a crash is survivable.
+
+    Disposal takes the checkout back and leaves the branch, so re-acquiring has to
+    rebuild the directory *with the work in it* — otherwise "the branch is the
+    artifact" is a claim about storage rather than about recovery. `git worktree
+    add` attaches an existing branch rather than resetting it (`-B` would silently
+    drop it), which is what makes this hold.
+
+    An agent that died mid-run reaches this same path: `reclaim` runs the same
+    disposal, so the branch holds what the tree held when the process stopped, and
+    starting the agent again hands it back its own work. What a crash costs is a
+    directory.
+    """
+    ctx, base = await _tiered(mount, tmp_path)
+    first = await ctx.workspace.acquire(session_id="s1", agent_id="a1", base=base, access="write")
+    (first.root / "half-done.txt").write_text("interrupted here\n", encoding="utf-8")
+
+    await ctx.workspace.dispose("a1")
+    assert not first.root.exists()
+
+    second = await ctx.workspace.acquire(session_id="s1", agent_id="a1", base=base, access="write")
+
+    assert second.root == first.root
+    assert (second.root / "half-done.txt").read_text(encoding="utf-8") == "interrupted here\n", (
+        "the rebuilt worktree did not come back with the work its branch holds"
+    )
+
+
 async def test_an_existing_worktree_is_reused_rather_than_recreated(
     mount: Any, tmp_path: Path
 ) -> None:
     """A resume finds this agent's own tree, and recreating it would discard the
-    work the keep-dirty policy exists to preserve."""
+    uncommitted work disposal exists to put on the branch."""
     ctx, base = await _tiered(mount, tmp_path)
 
     first = await ctx.workspace.acquire(session_id="s1", agent_id="a1", base=base, access="write")
@@ -455,7 +503,9 @@ async def test_work_beside_the_materials_still_keeps_the_worktree(
 
     (disposed,) = [e for e in session.events if e.type == "workspace/disposed"]
     assert disposed.data["kept"] is True
-    assert (workspace.root / "real-work.txt").exists()
+    assert not workspace.root.exists()
+    code, out, _ = await git(ctx, base, "show", "ph/s1/a1:real-work.txt")
+    assert code == 0 and out == "the agent did this\n", "the work beside the materials was lost"
 
 
 async def test_nothing_is_provisioned_into_a_shared_workspace(mount: Any, tmp_path: Path) -> None:
@@ -583,12 +633,23 @@ async def test_a_retained_ephemeral_tree_survives_the_kind_that_discards_it(
     that, and it is why a child that *failed* leaves its parent diagnosing from a
     transcript. `Workspace.retained` is the exception, and it is an exception to
     `discard`, not to the whole policy: a retained tree takes the same
-    keep-if-dirty path an ordinary `worktree` does, so retention buys evidence
-    rather than an unconditional checkout.
+    commit-then-remove path an ordinary `worktree` does.
 
-    The reason rides `workspace/disposed`, which is what lets a fold tell three
-    things apart that all leave a directory on disk: a deliberate keep says why,
-    a dirty-tree keep is `kept` with no reason, and a leak has no closing event.
+    **So retention buys a branch, not a directory** — and that is a strictly better
+    thing to buy. The evidence a parent needs to diagnose a cancelled child now
+    survives the crash of the process holding it, is reachable by `export` and
+    `merge` like any other artifact, and costs a ref instead of a checkout. What
+    would be wrong is retaining the *tree*: nothing enumerates an orphaned
+    directory, and it is exactly what a crash destroys.
+
+    A retained ephemeral branch is visible where an unretained one is deleted
+    outright, and that is the exception working as intended rather than a leak in
+    the kind's promise: nothing is merged, so the writes still reach nobody, and
+    the retention is a logged act with a reason attached.
+
+    The reason rides `workspace/disposed`, which lets a fold tell three outcomes
+    apart: a deliberate keep says why, an ordinary keep is `kept` with no reason,
+    and a leak has no closing event at all.
     """
     ctx, base = await _tiered(mount, tmp_path)
     session = ctx.sessions.create("s1")
@@ -601,8 +662,11 @@ async def test_a_retained_ephemeral_tree_survives_the_kind_that_discards_it(
     assert ctx.workspace.retain("a1", "error") is True
     await ctx.workspace.dispose("a1")
 
-    assert workspace.root.exists(), "the tree a parent needs to inspect was removed anyway"
-    assert (workspace.root / "evidence.txt").exists()
+    assert not workspace.root.exists(), "retention kept the directory instead of the work"
+    code, out, _ = await git(ctx, base, "show", "ph/s1/a1:evidence.txt")
+    assert code == 0 and out == "what the child was doing\n", (
+        "the evidence a parent needs to inspect was discarded with the checkout"
+    )
     closed = [one for one in session.events if one.type == "workspace/disposed"]
     assert [one.data.get("retained") for one in closed] == ["error"]
     assert [one.data.get("kept") for one in closed] == [True]
@@ -673,9 +737,11 @@ async def test_reconciliation_honours_a_retention_the_way_release_does(
     tree gets deleted by whichever path happened to reach it first, so the
     special case is gone and a reason folds into `discard` here as it does there.
 
-    The dirty tree below is the evidence, and it survives a crash exactly as it
-    survives a clean shutdown. What a child *committed* needs no retention: it is
-    on the branch, which `-d` declines to delete.
+    The uncommitted work below is the evidence, and it reaches the branch on the
+    crash path exactly as it does on a clean shutdown — which is the property that
+    makes a crash cost a directory rather than a day's work. What a child
+    committed itself needs no retention at all: it is already on the branch, which
+    `-d` declines to delete.
     """
     ctx, base = await _tiered(mount, tmp_path)
     session = ctx.sessions.create("s1")
@@ -687,21 +753,33 @@ async def test_reconciliation_honours_a_retention_the_way_release_does(
     (record,) = workspace_survivors(session)
 
     assert await ctx.workspace.provider.reclaim(record) is True
-    assert (workspace.root / "evidence.txt").exists(), "the crash path discarded the evidence"
+    assert not workspace.root.exists(), "reconciliation left the checkout behind"
+    code, out, _ = await git(ctx, base, "show", "ph/s1/a1:evidence.txt")
+    assert code == 0 and out == "what the child was doing\n", (
+        "the crash path discarded the evidence"
+    )
 
 
-async def test_the_collector_revokes_the_retention_rather_than_overriding_it(
-    mount: Any, tmp_path: Path
-) -> None:
-    """The property that lets the age bound be a default rather than a decision.
+async def test_disposal_leaves_the_collector_nothing_to_collect(mount: Any, tmp_path: Path) -> None:
+    """What the age-bounded stay of execution is *for*, once nothing is retained on disk.
 
-    `collect` hands the record back to `reclaim` with its reason cleared, so what
-    runs is the disposal policy that would have run at release time had nobody
-    retained the tree. An ephemeral checkout is discarded — its writes reached
-    nobody by construction and the stay of execution has expired — while an
-    ordinary `worktree` takes the keep-dirty path, so an agent's uncommitted work
-    survives its own garbage collector. Nothing here can destroy more than an
-    ordinary release would have.
+    P6-28's collector was written when a retained tree was a directory, and its job
+    was disk pressure: an evidence checkout nobody came back for is a copy of the
+    repository that outlives its reason. Disposal now commits and removes, so on the
+    ordinary path there is no directory to age out and every verdict is `gone`.
+
+    **That is a narrowing, not a hole, and what changed is what gets retained.** The
+    branches below survive the collector, and should: a branch is the artifact, it
+    costs a ref rather than a checkout, and a garbage collector that deleted the
+    thing disposal just went to the trouble of saving would be the bug this row
+    exists to prevent. What still reaches `collect` is a tree disposal *could not*
+    remove — the case pinned at the end — which is now the only way a directory
+    outlives its agent.
+
+    Not enforced (§5 rule 6): retained branches have no age bound at all. Bounding
+    them needs a record to know its repository, and it does not — a
+    `WorkspaceRecord` locates a *tree*, and once the tree is gone nothing on it can
+    find the ref's repo. `/workspaces remove` is the deliberate verb meanwhile.
     """
     ctx, base = await _tiered(mount, tmp_path)
     session = ctx.sessions.create("s1")
@@ -716,14 +794,61 @@ async def test_the_collector_revokes_the_retention_rather_than_overriding_it(
         ctx.workspace.retain(agent_id, "the child was cancelled")
         await ctx.workspace.dispose(agent_id)
 
-    rows = ctx.workspace.collectable(
-        workspace_survivors(session), older_than=1.0, now=1e9, touched={"s1": 0.0}
-    )
-    assert sorted(one.verdict for one in rows) == ["collect", "collect"]
-    removed = await ctx.workspace.collect(rows)
+    records = workspace_survivors(session)
+    rows = ctx.workspace.collectable(records, older_than=1.0, now=1e9, touched={"s1": 0.0})
+    assert sorted(one.verdict for one in rows) == ["gone", "gone"]
+    assert await ctx.workspace.collect(rows) == []
 
-    assert [one.agent_id for one in removed] == ["gone"]
-    assert not ephemeral.root.exists(), "the expired stay of execution did not run out"
-    assert (ordinary.root / "work.txt").exists(), (
-        "the collector destroyed work an ordinary release would have kept"
+    # Nothing was destroyed: both agents' work is on their branches, the ephemeral
+    # one included — its retention is what bought it a branch rather than a `-D`.
+    for agent_id in ("gone", "dirty"):
+        code, out, _ = await git(ctx, base, "show", f"ph/s1/{agent_id}:work.txt")
+        assert code == 0 and out == "uncommitted\n", f"{agent_id} lost its evidence"
+
+    # The one live subject left: a checkout disposal could not remove. Retention
+    # still buys it a stay of execution, and the stay still expires.
+    stranded = ordinary.root
+    stranded.mkdir(parents=True, exist_ok=True)
+    (stranded / "left.txt").write_text("disposal could not remove this\n", encoding="utf-8")
+    stuck = replace(records[0], agent_id="stuck", root=stranded, ref=None)
+    (row,) = ctx.workspace.collectable([stuck], older_than=1.0, now=1e9, touched={"s1": 0.0})
+    assert row.verdict == "collect"
+
+
+async def test_a_provisioned_secret_is_not_committed_to_the_branch(
+    mount: Any, tmp_path: Path
+) -> None:
+    """The risk disposal took on the day it started committing, pinned at its edge.
+
+    A provisioned file the project does **not** gitignore is the sharp case. Under
+    the old policy it was merely dirt — `git status` called the tree dirty, the tree
+    was kept, and the worst outcome was a checkout nobody wanted. Now the same file
+    is one `git add -A` away from a ref somebody merges, which turns a
+    provisioning convenience into a credential in the project's history.
+
+    So the exclusion is not only about `kept` reading correctly any more, and this
+    asserts the stronger property: the material is *on disk* in the tree (the agent
+    needs it) and *absent from* the commit, while the work beside it survives.
+
+    `git show` on the ref rather than a `status` count, because what is being pinned
+    is the content of the artifact — the one thing a person merges.
+    """
+    ctx = await mount(
+        TIER_ROW,
+        {"id": "workspace-lifecycle", "config": {"provision": [{"source": "secret.env"}]}},
     )
+    base = await git_repo(ctx, tmp_path / "repo")
+    (base / "secret.env").write_text("TOKEN=shhh\n", encoding="utf-8")
+    session = ctx.sessions.create("s1")
+    workspace = await ctx.workspace.acquire(
+        session_id="s1", agent_id="a1", base=base, access="write", session=session
+    )
+    assert (workspace.root / "secret.env").exists(), "the agent never got the material"
+    (workspace.root / "real-work.txt").write_text("the agent did this\n", encoding="utf-8")
+
+    await ctx.workspace.dispose("a1")
+
+    code, out, _ = await git(ctx, base, "show", "ph/s1/a1:real-work.txt")
+    assert code == 0 and out == "the agent did this\n", "the work was not committed"
+    code, _, _ = await git(ctx, base, "show", "ph/s1/a1:secret.env")
+    assert code != 0, "a provisioned credential was committed to a branch somebody merges"

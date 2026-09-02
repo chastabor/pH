@@ -2,8 +2,8 @@
 
 `ctx.effect` unwinds a workspace when the process exits; a process that *dies*
 unwinds nothing. What is left behind looks, to `git worktree list`, exactly like
-a tree the disposal policy kept on purpose for review — so the filesystem cannot
-tell a leak from a feature, and `/workspaces` cannot either.
+a tree a live agent is working in — so the filesystem cannot tell a leak from a
+running run, and `/workspaces` cannot either.
 
 **The log can.** A `disposed` with `kept: true` is the policy deciding; no
 `disposed` at all is a process that died holding the tree. That asymmetry is the
@@ -169,18 +169,29 @@ async def test_a_leak_whose_tree_is_already_gone_still_closes_its_pair(
 
 
 @needs_git
-async def test_a_dirty_leak_is_kept_rather_than_discarded(mount: Any, tmp_path: Path) -> None:
+async def test_a_dirty_leak_reaches_the_branch_rather_than_being_discarded(
+    mount: Any, tmp_path: Path
+) -> None:
     """A crash is not a reason to throw away work. Reconciliation runs the same
-    disposal policy an orderly release runs, so a tree with the agent's work in
-    it survives — reconciliation that discarded more than a normal exit would
-    make crashing *worse* than the leak it is fixing.
+    disposal policy an orderly release runs, so what the agent had written when the
+    process died is committed to its branch — reconciliation that discarded more
+    than a normal exit would make crashing *worse* than the leak it is fixing.
+
+    **This is the half of the design that makes crashing cheap.** The checkout is a
+    resource the agent borrowed and reconciliation takes it back; the branch is the
+    artifact and reconciliation is what puts the last of the work on it. A tree left
+    on disk instead would be an orphan holding the only copy of that work — which is
+    the arrangement where a *second* crash, or a `rm -rf` of a temp directory,
+    costs the day the first crash did not.
     """
     _ctx, session, _agent, workspace = await worktree_agent(mount, tmp_path)
     (workspace.root / "unfinished.txt").write_text("half a thought\n", encoding="utf-8")
 
-    _reopened, revived = await _reopen(mount, tmp_path / "repo", session)
+    reopened, revived = await _reopen(mount, tmp_path / "repo", session)
 
-    assert (workspace.root / "unfinished.txt").exists(), "reconciliation discarded the work"
+    assert not workspace.root.exists(), "reconciliation left the checkout behind"
+    code, out, _ = await git(reopened, tmp_path / "repo", "show", f"{workspace.ref}:unfinished.txt")
+    assert code == 0 and out == "half a thought\n", "reconciliation discarded the work"
     closing = [event for event in revived.events if event.type == "workspace/disposed"]
     assert closing[-1].data["kept"] is True
 

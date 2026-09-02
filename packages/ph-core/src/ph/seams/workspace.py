@@ -277,6 +277,15 @@ def workspace_of(ctx: Context, agent: Any) -> Workspace | None:
     return found
 
 
+EXCLUDE = ":(exclude)"
+"""Git's pathspec magic for "everything but this".
+
+Named because `workspace_git._commit` reads it back off the pathspec to learn
+which entries were provisioned: the two are one fact, and a marker spelled twice
+is a secret that reaches a branch the day one of them changes.
+"""
+
+
 @dataclass(frozen=True, slots=True)
 class Workspace:
     """One agent's working directory, and the truth about what it bounds.
@@ -336,7 +345,7 @@ class Workspace:
     provisioned *and* what kind it holds, and P4-09's checkpoint refs will be a
     third such fact.
 
-    The answer is only knowable here — P4-08's policy is "keep dirty, remove clean,
+    The answer is only knowable here — P4-08's policy is "commit, then remove,
     discard ephemeral even if dirty", so `kind` cannot be asked instead. The seam
     records it on `workspace/disposed` so a reader can tell "nothing changed, so it
     was removed" from "these writes were thrown away by design".
@@ -353,7 +362,7 @@ class Workspace:
         The positive `.` is required: exclusions alone match everything, which is the
         opposite of what they read as.
         """
-        return [".", *(f":(exclude){entry}" for entry in self.provisioned)]
+        return [".", *(f"{EXCLUDE}{entry}" for entry in self.provisioned)]
 
 
 DeclineReason: TypeAlias = Literal[

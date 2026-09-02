@@ -136,7 +136,7 @@ def test_gc_refuses_a_tree_inside_the_age_bound(tmp_path: Path, roots: Path) -> 
 
     assert result.exit_code == 0, result.output
     assert "recent" in result.stdout
-    assert "removed 0 of 0" in result.stdout
+    assert "collected 0 tree(s): 0 discarded, 0 kept" in result.stdout
     assert tree.exists()
 
 
@@ -156,7 +156,10 @@ def test_gc_collects_only_what_the_tier_can_end(tmp_path: Path, roots: Path) -> 
     )
 
     assert result.exit_code == 0, result.output
-    assert "removed 0 of 1" in result.stdout
+    assert "collected 1 tree(s): 0 discarded, 1 kept" in result.stdout
+    assert "could not end it" in result.stdout, (
+        "a tier that collected nothing must not be reported as one that saved the work"
+    )
     assert tree.exists()
 
 

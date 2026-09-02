@@ -163,9 +163,10 @@ class ProvisionReport:
     """Every path that now exists in the workspace because we put it there.
 
         Carried to disposal, where it is what keeps this row from defeating the
-        tier it serves: a copied `.env` the project does not gitignore is an
-        untracked file, so `git status` calls the tree dirty, so the keep-dirty
-        policy keeps it — and "remove a clean worktree" stops meaning anything.
+        tier it serves — and, since disposal commits, what keeps a copied secret
+        out of git. A `.env` the project does not gitignore is an untracked file:
+        `git status` calls the tree dirty, and `git add -A` would put it on the
+        branch somebody merges.
 
         **Not** solved with `info/exclude`, and that is worth writing down
         because it is the obvious wrong answer. Git resolves `info/exclude`

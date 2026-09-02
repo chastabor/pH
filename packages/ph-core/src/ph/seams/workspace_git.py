@@ -55,6 +55,7 @@ from ..tools.definition import ToolExecution
 from ..wire import WireModel
 from .subprocess import SubprocessSpawnSpec, scrub_env
 from .workspace import (
+    EXCLUDE,
     ContainmentTier,
     DeclineReason,
     Workspace,
@@ -107,6 +108,38 @@ async def git(
     )
     result: tuple[int, str, str] = await ctx.subprocess.run(spec)
     return result
+
+
+BRANCH_PREFIX = "ph/"
+"""What every branch this tier makes is named under.
+
+Shared with `/workspaces`, which enumerates the prefix to find the artifacts
+disposal leaves. A management command that offered to delete a person's own
+branches would be a different and much worse tool, and this prefix is the whole
+of what keeps it from being one — so the two must not drift.
+"""
+
+
+COMMIT_AS_PH = (
+    "-c",
+    "user.name=pH",
+    "-c",
+    "user.email=ph@localhost",
+    "commit",
+    "--no-verify",
+    "--no-gpg-sign",
+)
+"""Prefix for a commit pH makes on its own behalf, ending at the message.
+
+pH commits in two places — a worktree's disposal and an overlay's export — and
+both are *saves*, not contributions. The identity is supplied rather than read
+because a workspace runs with `GIT_CONFIG_GLOBAL` redirected into its scratch
+(`redirection_env`), where there is no `user.email` to find; the two `--no-`
+flags are here for the same reason the identity is, which is that nothing about
+this commit should be able to block on an operator's setup. A hook or a signing
+prompt failing would strand work that git was about to make durable, and both
+checks belong on the merge that publishes it.
+"""
 
 
 _UNSAFE_REF = re.compile(r"[^A-Za-z0-9._-]+")
@@ -170,7 +203,7 @@ class GitWorktreeProvider:
         if toplevel is None:
             raise WorkspaceDeclined("not-a-repository", f"{base} is not a git repository")
 
-        ref = f"ph/{sanitize_ref(session_id)}/{sanitize_ref(agent_id)}"
+        ref = f"{BRANCH_PREFIX}{sanitize_ref(session_id)}/{sanitize_ref(agent_id)}"
         path = self.root / sanitize_ref(session_id) / sanitize_ref(agent_id)
         await self._add(toplevel, path, ref)
 
@@ -216,10 +249,12 @@ class GitWorktreeProvider:
     async def reclaim(self, record: WorkspaceRecord) -> bool:
         """Release a tree this process never acquired (F6).
 
-        The same disposal policy an orderly release runs — clean is removed, dirty is
-        kept for review — because a crash is not a reason to throw away work, and
-        reconciliation that discarded more than a normal exit would make crashing *worse*
-        than the leak it is fixing.
+        The same disposal policy an orderly release runs — commit what is uncommitted,
+        then remove the checkout — because a crash is not a reason to throw away work,
+        and reconciliation that discarded more than a normal exit would make crashing
+        *worse* than the leak it is fixing. **This is what makes a crash cost a directory
+        instead of a day**: the branch ends up holding what the tree held when the
+        process died, and a worktree is re-addable from a branch.
 
         **The record locates its own repository.** Taking the base from the reconciling
         process's `ctx.fs.root` is a guess: a pair recorded against a different checkout
@@ -227,15 +262,16 @@ class GitWorktreeProvider:
         the tree answers the question about itself.
 
         There is no `Workspace`, so nothing is known to have been *provisioned* and every
-        file counts as the agent's work — which errs toward keeping, where the cost is
-        disk rather than the work.
+        file counts as the agent's work — which errs toward committing, where the cost
+        is a commit somebody can drop rather than work nobody can recover.
 
         **A retention is an exception to `discard`, exactly as it is at release**
         (P6-28), rather than a rule of its own here: two rules for one word is how a tree
-        gets deleted by whichever path reached it first. A clean retained tree is
-        therefore removed on both paths, and loses nothing — what a child committed lives
+        gets deleted by whichever path reached it first. A retained tree is
+        therefore removed on both paths and loses nothing — everything a child did lives
         on its **branch**, which `-d` declines to delete for precisely this reason. What
-        retention buys is the *uncommitted* work an ephemeral tree would have thrown away.
+        retention buys is the *uncommitted* work an ephemeral tree would have thrown away,
+        which is a commit on that branch rather than a directory to go looking for.
         """
         if record.ref is None or not record.root.exists():
             # git pruned it, or a person removed it. Nothing to reclaim, and the
@@ -295,8 +331,8 @@ class GitWorktreeProvider:
 
         A worktree already checked out at this path is *reused*: the agent id is
         the key, so finding one means finding this agent's own tree, and
-        recreating it would discard the work the keep-dirty policy exists to
-        preserve. A branch that exists without a worktree is attached rather
+        recreating it would discard the uncommitted work disposal exists to
+        put on the branch. A branch that exists without a worktree is attached rather
         than reset, for the same reason — `-B` would silently drop it.
         """
         if (path / ".git").exists():
@@ -359,19 +395,35 @@ class GitWorktreeProvider:
         discard: bool,
         pathspec: Sequence[str],
     ) -> bool:
-        """Remove or keep, and report which. The disposal policy, in one place.
+        """Commit, remove, and report whether anything was kept. The disposal policy.
 
-        Returns whether anything was **kept**, which is what rides
-        `workspace/disposed` — the difference between "nothing changed, so it was
-        removed" and "these writes were thrown away by design" is not derivable
-        from the kind, and a reader should not have to guess it. Every path
-        reports what actually happened rather than what was intended: a removal
-        that failed leaves the tree on disk, and saying `False` there would make
-        the field a statement of policy instead of a record.
+        **The checkout always goes; the branch is what survives.** Uncommitted work is
+        committed to it first, so `kept` means "this branch holds work" rather than "a
+        directory is still on disk" — the two were the same claim while disposal left
+        dirty trees behind, and only the first one is durable.
+
+        Every path reports what actually happened rather than what was intended: a
+        commit or a removal that failed leaves the tree on disk and says `True`, which
+        keeps the field a record instead of a statement of policy.
         """
-        if not discard and await self._dirty(path, pathspec):
-            log.info(
-                "ph.seams.workspace_git: keeping %s on %s — it has changes to review", path, ref
+        if not path.exists():
+            # Disposed already. Reconciliation and the scope that acquired the tree
+            # can both reach this — and now that the ordinary path *removes*, the
+            # second arrival is the common case rather than the odd one. It decides
+            # nothing; it only reports what the first left, which is the branch.
+            code, out, _ = await self._git(toplevel, "branch", "--list", ref)
+            return code == 0 and bool(out.strip())
+        if (
+            not discard
+            and await self._dirty(path, pathspec)
+            and not await self._commit(path, ref, pathspec)
+        ):
+            log.warning(
+                "ph.seams.workspace_git: could not commit %s to %s — keeping the tree, "
+                "because the only thing worse than an orphaned checkout is deleting one "
+                "whose work never reached the branch",
+                path,
+                ref,
             )
             return True
         # `--force` even for the clean case: a tree measured clean a moment ago
@@ -380,8 +432,8 @@ class GitWorktreeProvider:
         #
         # `Workspace.retained` is the exception, and it is an exception to
         # `discard` rather than to this branch: a retained ephemeral tree takes
-        # the same keep-if-dirty path a `worktree` does, so retention buys
-        # evidence and not an unconditional checkout (P6-28).
+        # the same commit-then-remove path a `worktree` does, so retention buys
+        # a branch to read and not a checkout to trip over (P6-28).
         code, _, err = await self._git(toplevel, "worktree", "remove", "--force", str(path))
         if code != 0:
             log.warning(
@@ -394,12 +446,63 @@ class GitWorktreeProvider:
             await self._git(toplevel, "branch", "-D", ref)
             return False
         # `-d`, not `-D`: a clean worktree is not evidence that its branch was
-        # merged — an agent that committed its work leaves nothing in
-        # `git status`, and force-deleting there would discard exactly the work
-        # the keep-dirty rule exists to protect. Git refuses instead, the branch
-        # survives, and `kept` says so.
+        # merged — by this line everything the agent did is *on* that branch,
+        # whether the agent committed it or `_commit` just did, and forcing here
+        # would delete precisely what disposal set out to preserve. Git refuses
+        # instead, the branch survives, and `kept` says so.
         code, _, _ = await self._git(toplevel, "branch", "-d", ref)
         return code != 0
+
+    async def _commit(self, path: Path, ref: str, pathspec: Sequence[str]) -> bool:
+        """Put the tree's uncommitted work on its own branch. Reports whether it landed.
+
+        **The branch is the artifact; the checkout is a resource the agent borrowed.**
+        A directory left behind is an orphan — nothing enumerates it, nothing collects
+        it, and its contents are invisible to every verb `/workspaces` offers, all of
+        which name branches. Committing makes the work durable in the one place that
+        already survives a crash, which is also what makes recovery cheap: a worktree
+        can be re-added from a branch, so a process that dies mid-run loses a
+        directory rather than a day.
+
+        **A failure here cancels the removal, not the work.** The caller keeps the
+        tree, which is the pre-branch behaviour and the right fallback: an orphan is
+        worse than a clean disposal and better than a deletion.
+
+        **Staged wide and then narrowed**, rather than by handing `add` the same
+        exclusions `_dirty` reads. `git add -A -- . ':(exclude)deps'` exits 1 with "the
+        following paths are ignored by one of your .gitignore files": naming an ignored
+        path in a pathspec is a request to add it, and `:(exclude)` does not exempt it
+        from that check. It stages the rest anyway, so tolerating the failure would
+        work and would also swallow every real one. `reset` narrows without ever
+        naming a path *to* `add`, and is a no-op for a provisioned entry the project
+        already ignores.
+
+        **The narrowing is what keeps a secret off the branch.** A provisioned `.env`
+        the project does *not* gitignore is the case: it was dirt the old policy could
+        only mistake for the agent's work, and it is a file `add -A` would now publish
+        to a ref somebody merges.
+
+        `--no-verify` and `--no-gpg-sign` because this commit is a save, not a
+        contribution: a pre-commit hook that fails, or a signing prompt with no
+        terminal to answer it, would strand the work on disk over a check that belongs
+        on the merge.
+        """
+        provisioned = [one[len(EXCLUDE) :] for one in pathspec if one.startswith(EXCLUDE)]
+        steps: list[tuple[str, ...]] = [("add", "-A")]
+        if provisioned:
+            steps.append(("reset", "--quiet", "--", *provisioned))
+        steps.append((*COMMIT_AS_PH, "-m", f"{ref}: work at disposal"))
+        for args in steps:
+            code, _, err = await self._git(path, *args)
+            if code != 0:
+                log.warning(
+                    "ph.seams.workspace_git: git %s failed in %s (%s)",
+                    args[0],
+                    path,
+                    err.strip() or f"git exited {code}",
+                )
+                return False
+        return True
 
     async def _dirty(self, path: Path, pathspec: Sequence[str]) -> bool:
         """Whether this worktree holds anything worth keeping.

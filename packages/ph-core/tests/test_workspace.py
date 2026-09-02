@@ -311,7 +311,7 @@ async def test_disposing_the_owning_scope_releases_the_workspace(tmp_path: Path)
 async def test_a_discarded_workspace_says_so(tmp_path: Path) -> None:
     """`kept` is the teardown's answer, not a field set at acquire time.
 
-    P4-08's policy is "keep dirty, remove clean, **discard ephemeral even if
+    P4-08's policy is "commit, then remove, **discard ephemeral even if
     dirty**" — a decision made while releasing, so a value frozen at acquire
     could not carry it and `kind` cannot be asked instead. The record is what
     lets a reader tell "nothing changed, so it was removed" from "these writes
@@ -470,8 +470,8 @@ def test_only_the_ephemeral_kinds_lose_evidence_so_only_they_are_retained() -> N
     The kinds that answer `True` discard because reaching nobody is their entire
     promise, which makes them the only ones whose evidence an *ordinary* release
     can lose — and therefore the only ones a policy has any business retaining
-    without being asked one tree at a time. Every other kind either keeps a dirty
-    tree for review or never had writes of its own.
+    without being asked one tree at a time. Every other kind either commits its
+    work to a branch first or never had writes of its own.
     """
     kinds: tuple[WorkspaceKind, ...] = WorkspaceKind.__args__
 

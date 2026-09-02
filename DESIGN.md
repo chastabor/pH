@@ -923,20 +923,21 @@ child (`tests/test_subagent_grant.py:485-519`).
 | `advisory` | `shared` | `True` | no — honoured by *saying so* |
 | `worktree` | `worktree` / `worktree-ephemeral` | `True` for both | no |
 | `worktree` | `overlay` / `overlay-ephemeral` | `True` for both | no — a **peer** of the row above, not a rung between it and `sandbox` |
-| `sandbox` | `readonly-scratch` | `False` | yes, at the kernel — **but nothing produces this kind yet** (P6-05) |
+| `sandbox` | `readonly-scratch` | `False` | yes, at the kernel |
 
 **Two boundaries wear the word "sandbox", and they are not the same one.**
-`ctx.sandbox` bounds *every command the harness wraps*, and it is real: P6-04
-landed `sandbox-local`, which claims the slot only after a probe writes a canary
-outside the workspace and finds the host copy unchanged
-(`seams/sandbox_local.py:318`). The `sandbox` **workspace tier** — the row of the
-table above, which would hand an agent a `readonly-scratch` workspace — has no
-producer: no `WorkspaceProvider` in the tree declares `tier="sandbox"`, so
-`WorkspaceSeam.effective_tier` can never return it. `ph doctor` prints both,
-which is why `describe()` grew a separate **"confined commands"** row
-(`seams/containment.py:238-249`): a reader must not have to reconcile
-"bounds: nothing" in the workspace section with a kernel that is in fact
-refusing the write.
+`ctx.sandbox` bounds *every command the harness wraps* (P6-04's `sandbox-local`,
+which claims its slot only after a probe writes a canary outside the workspace and
+finds the host copy unchanged). The `sandbox` **workspace tier** is what an agent
+is *handed*: `workspace-readonly-scratch` (P6-05) roots the workspace inside the
+agent's own scratch and reports `repo_writable=False`, so the repository is
+readable and writable nowhere. The second depends on the first and says so — the
+row claims the rung only when a backend is mounted and enforcing, because
+`repo_writable=False` without one is E1's failure in the field E1 is about.
+
+`ph doctor` prints both, which is why `describe()` carries a separate **"confined
+commands"** row: a reader must not have to reconcile "bounds: nothing" in the
+workspace section with a kernel that is in fact refusing the write.
 
 The rule, verbatim (`seams/workspace.py:9-14`):
 
@@ -960,22 +961,20 @@ Both halves of tier selection can only **lower** the answer: a chosen `advisory`
 declines a registered provider, and an absent provider cannot deliver whatever
 was chosen (`seams/workspace.py:589-614`).
 
-> **The top *workspace* rung is vocabulary-complete and implementation-absent.**
-> `readonly-scratch` is declared and exhaustively classified by all four kind
-> predicates, but **nothing in the tree produces it** — verified. The kinds ever
-> built are `shared` (`workspace.py:466`), `worktree`/`worktree-ephemeral`
-> (`workspace_git.py:181`) and `overlay`/`overlay-ephemeral`
-> (`workspace_agentfs.py:358`). That, plus the `partial` degradation path, is
-> what P6-05 still owes.
->
-> **What is no longer true is the sentence that used to follow.** This paragraph
+> **The ladder is complete, and this paragraph has been wrong twice.** It once
 > read "no tier in pH bounds an absolute-path write, and `containment.strict` has
-> nothing to satisfy it". Both halves are now false: `sandbox-local` (bwrap)
-> landed in P6-04 and was verified against a real kernel — an absolute-path write
-> refused with the host file untouched — and `strict` is satisfiable, because
-> `_unconfined` (`seams/containment.py:255`) asks `enforcement_of(ctx)`, the
-> **sandbox seam**, not the workspace provider. Seatbelt and Landlock remain
-> unwritten.
+> nothing to satisfy it" — closed by P6-04's `sandbox-local`, verified against a
+> real kernel. It then read that the top *workspace* rung was
+> vocabulary-complete and implementation-absent — closed by P6-05's
+> `workspace-readonly-scratch`, whose own gate writes to the repository from a
+> confined child and finds it untouched. Every kind in `WorkspaceKind` now has a
+> producer, and `effective_tier` can return every rung in `ContainmentTier`.
+>
+> What remains unwritten is *backends*: `sandbox-local` ships `bwrap` only, so
+> Seatbelt is written deny-by-default and never run, and Landlock does not exist.
+> A host with neither has no `sandbox` rung — the row declines rather than
+> claiming one, which is the whole of why the claim is trustworthy where it is
+> made.
 
 > **`DowngradeReason` has exactly one member** — `workspace-not-mounted` — and one
 > producer. A *tier-driven* narrowing (asking `write`, getting
@@ -1150,7 +1149,6 @@ Stated here rather than left to be discovered, per the codebase's own rule.
 
 | Gap | Status |
 |---|---|
-| **The `sandbox` workspace tier has no producer.** `readonly-scratch` is declared and classified by every kind predicate, but nothing hands one out and no `WorkspaceProvider` declares `tier="sandbox"`, so `effective_tier` can never return it (§6.6). *Commands* are confined — that is `ctx.sandbox`, a different boundary, landed in P6-04 | P6-05 |
 | `sandbox-local` ships `bwrap` only; the Seatbelt half is written deny-by-default and **has never been run** — the probe is what stands between "unverified" and "claimed". Landlock is unwritten | P6-04, partial |
 | `install_lifecycle` (signal handling, grace period, self-`SIGKILL`) has **no production caller**; `ph daemon` calls bare `anyio.run` | unwired |
 | `AgentCancelCause.kind` declares `hook` and `legacy`; neither is ever constructed | dead vocabulary |

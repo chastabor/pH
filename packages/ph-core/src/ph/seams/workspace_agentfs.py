@@ -67,7 +67,7 @@ from .workspace import (
     discards_writes,
     redirection_env,
 )
-from .workspace_git import git, sanitize_ref
+from .workspace_git import COMMIT_AS_PH, git, sanitize_ref
 
 __all__ = [
     "ORIGIN",
@@ -622,18 +622,7 @@ async def export_overlay(ctx: Context, *, store: Path, identifier: str, ref: str
             await unmount(ctx, mount)
 
         await git(ctx, tree, "add", "-A")
-        await git(
-            ctx,
-            tree,
-            "-c",
-            "user.name=pH",
-            "-c",
-            "user.email=ph@localhost",
-            "commit",
-            "--no-verify",
-            "-m",
-            f"{ref}: overlay export",
-        )
+        await git(ctx, tree, *COMMIT_AS_PH, "-m", f"{ref}: overlay export")
     finally:
         # The worktree goes, the branch stays — the branch *is* the deliverable,
         # and a checkout left behind is both a second copy of work that now lives

@@ -1,9 +1,16 @@
-"""P4-08b — `/workspaces`, the human half of the keep-dirty policy (E15).
+"""P4-08b — `/workspaces`, the human half of the disposal policy (E15).
 
-The `worktree` tier keeps a dirty worktree on disposal on purpose, and that
-*creates* the accumulation `wtp`'s README opens with: trees and `ph/*` branches
-piling up with nothing in the harness to see or finish them. This is the command
-that finishes them, and every interesting assertion here is a **refusal**.
+The `worktree` tier commits an agent's work to its own branch and takes the
+checkout back, and that *creates* the accumulation `wtp`'s README opens with:
+`ph/*` branches piling up with nothing in the harness to see or finish them.
+This is the command that finishes them, and every interesting assertion here is
+a **refusal**.
+
+**Rows are branches, and that is the whole shape of this command.** It listed
+checkouts for one round, which meant it could see exactly the two states that
+are not the ordinary one — a tree a live agent holds, and a tree disposal failed
+to remove — and reported every agent that finished cleanly as nothing at all.
+The artifact is what should be enumerable; a directory is a resource.
 
 Real `git` throughout, for the same reason the tier's own tests use it: what is
 being pinned is git's behaviour — that `-d` declines an unmerged branch, that a
@@ -42,7 +49,13 @@ async def _tiered(mount: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
 
 
 async def _left_behind(ctx: Any, base: Path, agent_id: str, *, work: bool) -> Path:
-    """One disposed agent's worktree, kept or removed by the policy itself."""
+    """One disposed agent, left behind by the policy itself.
+
+    Returns the (now removed) checkout path, because a few tests need to say that
+    it is gone. With `work=True` disposal commits before removing, so what this
+    leaves is a branch with the agent's work on it and no directory — which is why
+    no test here has to `git commit` by hand any more.
+    """
     workspace = await ctx.workspace.acquire(
         session_id="s1", agent_id=agent_id, base=base, access="write"
     )
@@ -64,31 +77,40 @@ async def _run(ctx: Any, argument: str = "") -> str:
 async def test_listing_shows_what_the_policy_left_behind(
     mount: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The whole reason the command exists: a dirty tree is kept deliberately,
-    and until now nothing could tell a person it was there."""
+    """The whole reason the command exists: an agent's work is committed to a
+    branch deliberately, and nothing else in the harness would tell a person it
+    was there."""
     ctx, base = await _tiered(mount, tmp_path, monkeypatch)
-    await _left_behind(ctx, base, "dirty-one", work=True)
+    removed = await _left_behind(ctx, base, "dirty-one", work=True)
 
     shown = await _run(ctx, "list")
 
     assert "dirty-one" in shown
     assert "ph/s1/dirty-one" in shown
-    assert "dirty" in shown
+    assert "branch" in shown, "the row's state should say the artifact is a branch"
+    assert str(removed) not in shown and not removed.exists()
 
 
 async def test_listing_ignores_worktrees_ph_did_not_make(
     mount: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`git worktree list` reports the user's own trees too, and a management
-    command that offered to delete those would be a different and much worse
-    tool."""
+    """A repository is full of branches and worktrees that are not pH's, and a
+    management command that offered to delete those would be a different and much
+    worse tool.
+
+    `BRANCH_PREFIX` is the whole of the guard now that rows are branches — the
+    `root` check that used to do this job only ever saw checkouts, and there are
+    usually none. A person's own branch is not under `ph/`, so it never becomes a
+    row and `remove` can never be aimed at it.
+    """
     ctx, base = await _tiered(mount, tmp_path, monkeypatch)
     await git(ctx, base, "worktree", "add", "-b", "mine", str(tmp_path / "mine"), "HEAD")
+    await git(ctx, base, "branch", "feature/x")
 
     shown = await _run(ctx, "list")
 
-    assert "mine" not in shown
-    assert shown == "no agent worktrees are left behind"
+    assert "mine" not in shown and "feature/x" not in shown
+    assert shown == "no agent workspaces are left behind"
 
 
 # -------------------------------------------------------------------- refuse --
@@ -116,9 +138,7 @@ async def test_an_unmerged_branch_is_kept_and_the_flag_is_named(
     so git refuses, the work survives, and the answer says which flag overrides
     it rather than making a person guess."""
     ctx, base = await _tiered(mount, tmp_path, monkeypatch)
-    root = await _left_behind(ctx, base, "committed", work=True)
-    await git(ctx, root, "add", "-A")
-    await git(ctx, root, "commit", "-m", "the child's work")
+    await _left_behind(ctx, base, "committed", work=True)
 
     shown = await _run(ctx, "remove committed --with-branch")
 
@@ -160,8 +180,6 @@ async def test_remove_with_branch_takes_both_when_the_branch_is_merged(
     doing both is its answer."""
     ctx, base = await _tiered(mount, tmp_path, monkeypatch)
     root = await _left_behind(ctx, base, "done", work=True)
-    await git(ctx, root, "add", "-A")
-    await git(ctx, root, "commit", "-m", "work")
     await git(ctx, base, "merge", "--no-edit", "ph/s1/done")
 
     shown = await _run(ctx, "remove done --with-branch")
@@ -178,9 +196,7 @@ async def test_merge_brings_the_work_back_to_the_tree_the_person_is_in(
     """The parent reviews a diff rather than trusting sibling writes (E2) — this
     is where that diff gets taken."""
     ctx, base = await _tiered(mount, tmp_path, monkeypatch)
-    root = await _left_behind(ctx, base, "child", work=True)
-    await git(ctx, root, "add", "-A")
-    await git(ctx, root, "commit", "-m", "work")
+    await _left_behind(ctx, base, "child", work=True)
 
     shown = await _run(ctx, "merge child")
 
@@ -256,3 +272,53 @@ async def test_merge_takes_a_branch_that_has_no_worktree(
 
     assert "refusing" not in shown, shown
     assert "ph/s1/exported" in shown
+
+
+# ------------------------------------------------------------------- strays --
+
+
+async def test_removing_a_branch_only_row_asks_for_the_flag(
+    mount: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The refusal that keeps `--with-branch` meaning what it says.
+
+    Every successfully disposed agent is now a row with no checkout, so a bare
+    `remove` has nothing to remove. Doing the branch anyway would make the flag
+    decorative and delete an artifact a person did not ask about; reporting
+    "removed" and touching nothing would be a lie. So it refuses, says where the
+    work actually is, and names the flag — the shape every other refusal here
+    takes.
+    """
+    ctx, base = await _tiered(mount, tmp_path, monkeypatch)
+    await _left_behind(ctx, base, "finished", work=True)
+
+    shown = await _run(ctx, "remove finished")
+
+    assert "--with-branch" in shown and "ph/s1/finished" in shown
+    _, branches, _ = await git(ctx, base, "branch", "--list", "ph/s1/finished")
+    assert branches.strip(), "a bare remove deleted the branch it refused to remove"
+
+
+async def test_a_checkout_disposal_could_not_remove_is_listed_as_a_stray(
+    mount: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The one way a directory outlives its agent, and the reason `dirty` survives.
+
+    Disposal removes the checkout unless git refuses — a commit that failed, a
+    `worktree remove` that did. That leftover is the only thing here a person
+    might want to delete *without* touching the branch, and whether it is safe to
+    is exactly what `dirty` answers: clean means the branch already has
+    everything, so the directory is pure waste.
+    """
+    ctx, base = await _tiered(mount, tmp_path, monkeypatch)
+    root = await _left_behind(ctx, base, "stuck", work=True)
+    await git(ctx, base, "worktree", "add", str(root), "ph/s1/stuck")
+    (root / "unsaved.txt").write_text("never reached the branch\n", encoding="utf-8")
+
+    assert "stray-dirty" in await _run(ctx, "list")
+
+    shown = await _run(ctx, "remove stuck")
+
+    assert str(root) in shown and not root.exists()
+    _, branches, _ = await git(ctx, base, "branch", "--list", "ph/s1/stuck")
+    assert branches.strip(), "removing the stray checkout took the artifact with it"

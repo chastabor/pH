@@ -1,33 +1,37 @@
-"""`/workspaces` — the human half of the keep-dirty policy (E15).
+"""`/workspaces` — the human half of the disposal policy (E15).
 
-The `worktree` tier keeps a dirty worktree on disposal, on purpose: an agent
-that did work leaves it for a person to inspect and merge. That is the right
-default and it *creates* an accumulation problem — trees under
-`$PH_HOME/worktrees/<session>/<agent>` on branches `ph/<session>/<agent>`, one
-per agent that wrote something, with nothing in the harness to see or finish
-them. `wtp`'s README opens with exactly this complaint about bare git
-("remove worktree, forget to delete the branch, orphaned branches accumulate")
-and answers it with `remove --with-branch`; this is that answer, scoped to the
-trees pH made.
+The `worktree` tier commits an agent's work to `ph/<session>/<agent>` and takes
+the checkout back: the branch is the artifact, a directory is a resource the
+agent borrowed. That is the right default and it *creates* an accumulation
+problem — one branch per agent that wrote something, with nothing in the harness
+to see or finish them. `wtp`'s README opens with exactly this complaint about
+bare git ("remove worktree, forget to delete the branch, orphaned branches
+accumulate") and answers it with `remove --with-branch`; this is that answer,
+scoped to the branches pH made.
+
+**Rows are branches.** They were checkouts for one round, which meant this
+command could see exactly the two states that are *not* the ordinary one — a
+tree a live agent holds, and a tree disposal failed to remove — and reported
+every agent that finished cleanly as nothing at all. A checkout is now extra
+information attached to a row rather than the thing being listed.
 
 **Three refusals, and each is the interesting part.**
 
-A tree a *live agent holds* is refused. The seam is asked, not the filesystem,
-because a worktree that is clean this instant belongs to an agent that may write
-to it in the next — and it is matched by **root path**, not by inverting the
-directory name back into an agent id, because `sanitize_ref` is lossy and an id
-that does not sanitize to itself would read as unheld and lose its protection.
+A workspace a *live agent holds* is refused. The seam is asked, not the
+filesystem, because a checkout that is clean this instant belongs to an agent
+that may write to it in the next — and it is matched by **root path**, not by
+inverting a directory name back into an agent id, because `sanitize_ref` is
+lossy and an id that does not sanitize to itself would read as unheld and lose
+its protection.
 
-A branch is deleted with `-d`, never `-D`, unless `--force-branch` says so. A
-clean worktree is *not* evidence that its branch was merged: an agent that
-committed its work leaves nothing in `git status`, and force-deleting there
-discards exactly what the keep-dirty rule exists to protect. Git refuses, and
-the refusal names the flag that would override it.
+A branch is deleted with `-d`, never `-D`, unless `--force-branch` says so, and
+a row with no checkout refuses a bare `remove` outright. Every disposed agent is
+such a row, so deleting the branch anyway would make `--with-branch` decorative
+and throw away the artifact disposal went to the trouble of saving.
 
-Nothing outside pH's own worktree root is listed or touched. The command reads
-`git worktree list`, which reports the user's own worktrees too, and a
-management command that offered to delete those would be a different and much
-worse tool.
+Nothing outside `BRANCH_PREFIX` is listed or touched. That prefix is the whole
+of the guard now that rows are branches — a person's own `feature/x` never
+becomes a row, so `remove` can never be aimed at it.
 
 @module ph.commands.workspaces
 """
@@ -45,6 +49,7 @@ from ..cordis import Context, plugin
 from ..paths import default_home_path, is_under
 from ..seams.commands import CommandDefinition
 from ..seams.workspace import stored_survivors
+from ..seams.workspace_git import BRANCH_PREFIX as PREFIX
 from ..seams.workspace_git import git
 from ..wire import WireModel
 
@@ -63,21 +68,33 @@ had, with `--force-branch` in one and not the other."""
 
 @dataclass(frozen=True, slots=True)
 class KeptWorktree:
-    """One worktree pH made and left behind."""
+    """One artifact pH left behind: a branch, and whatever checkout is still on it."""
 
-    path: Path
     branch: str
     agent_id: str
     session_id: str
+    path: Path | None
+    """The checkout, when one still exists — which is no longer the normal case.
+
+    Disposal commits and removes, so a directory here means one of exactly two
+    things: a live agent is working in it, or disposal could not remove it. Both
+    are worth seeing; neither is the artifact."""
     dirty: bool
     held: bool
-    """Whether a live agent still has it. A held tree is a *current* workspace,
-    not a leftover, and is listed as such rather than hidden — an operator
-    wondering where the disk went should see all of them."""
+    """Whether a live agent still has it. A held workspace is a *current* one, not
+    a leftover, and is listed as such rather than hidden — an operator wondering
+    where the disk went should see all of them."""
 
     def describe(self) -> str:
-        state = "held" if self.held else ("dirty" if self.dirty else "clean")
-        return f"{self.agent_id:<16} {state:<6} {self.session_id:<14} {self.branch:<24} {self.path}"
+        state = (
+            "held"
+            if self.held
+            else "branch"
+            if self.path is None
+            else ("stray-dirty" if self.dirty else "stray")
+        )
+        where = str(self.path) if self.path is not None else "-"
+        return f"{self.agent_id:<16} {state:<11} {self.session_id:<14} {self.branch:<24} {where}"
 
 
 class Config(WireModel):
@@ -113,7 +130,7 @@ async def apply(ctx: Context, config: Config) -> None:
     ctx.commands.register(
         CommandDefinition(
             name="workspaces",
-            summary="List, export, merge or remove what agents left behind.",
+            summary="List, export, merge or remove the branches agents left behind.",
             argument_hint=HINT,
             run=workspaces,
         ),
@@ -132,7 +149,7 @@ class _Refused(Exception):
 
 @dataclass(frozen=True, slots=True)
 class _Workspaces:
-    """One dispatch's view of the worktrees pH left behind.
+    """One dispatch's view of the branches pH left behind.
 
     A value rather than five functions threading `(ctx, root, base)`: all three
     are fixed for the whole of one `/workspaces` invocation.
@@ -143,52 +160,82 @@ class _Workspaces:
     base: Path
 
     async def kept(self, *, with_status: bool = True) -> list[KeptWorktree]:
-        """Every pH-made worktree the repository still knows about.
+        """Every artifact pH left in this repository: one row per `ph/*` branch.
 
-        Read from `git worktree list --porcelain` rather than by walking `root`,
-        because git's registration is what makes a directory a worktree — a
-        stale directory git has pruned is not one, and a tree someone moved
-        still is.
+        **Branches, not directories, because a branch is what disposal leaves.** A
+        checkout is a resource an agent borrows and disposal takes back; the branch
+        is what survives it, and it is what `export`, `merge` and `remove` already
+        name. Enumerating checkouts listed only the two states that are *not* the
+        ordinary one — a tree a live agent still holds, and a tree disposal failed
+        to remove — and reported every successfully disposed agent as nothing at
+        all.
 
-        `with_status=False` for the verbs that only need a name: `git status` is
-        one subprocess per tree and `merge`/`remove` never read `dirty`.
+        `BRANCH_PREFIX` rather than a walk of `refs/heads`: pH's own prefix is the
+        whole of what keeps this from being a command that offers to delete a
+        person's `feature/x`.
+
+        The worktree join is what remains of the old enumeration, and it still earns
+        its subprocess — it is how `held` and a stray checkout's `path` are known.
+        Filtered by `root` for the same reason as before: a `ph/*` branch checked
+        out somewhere else is not a tree this command made.
+
+        `with_status=False` for the verbs that only need a name: `git status` is one
+        subprocess per checkout and `merge`/`remove` never read `dirty`.
         """
-        code, out, _ = await git(self.ctx, self.base, "worktree", "list", "--porcelain")
+        code, out, _ = await git(
+            self.ctx, self.base, "branch", "--list", "--format=%(refname:short)", f"{PREFIX}*"
+        )
         if code != 0:
             return []
-        live = {workspace.root: workspace for workspace in self.ctx.workspace.live()}
-        rows = [(path, branch) for path, branch in _parse(out) if is_under(path, self.root)]
-        dirty = dict.fromkeys((path for path, _ in rows), False)
-        pending = [path for path, _ in rows if with_status and path not in live]
+        branches = [line.strip() for line in out.splitlines() if line.strip()]
+        if not branches:
+            return []
+        code, out, _ = await git(self.ctx, self.base, "worktree", "list", "--porcelain")
+        checkouts = {
+            branch: path
+            for path, branch in (_parse(out) if code == 0 else [])
+            if branch and is_under(path, self.root)
+        }
+        live = {workspace.root for workspace in self.ctx.workspace.live()}
+        dirty = dict.fromkeys(branches, False)
+        pending = [
+            branch
+            for branch in branches
+            if with_status and branch in checkouts and checkouts[branch] not in live
+        ]
         if pending:
-            # Concurrent, because this is one subprocess per leftover and the
-            # thing the keep-dirty policy is designed to accumulate is leftovers.
-            async def measure(path: Path) -> None:
-                dirty[path] = await self._dirty(path)
+            # Concurrent, because this is one subprocess per stray checkout, and a
+            # run that has stranded one has usually stranded several.
+            async def measure(branch: str) -> None:
+                dirty[branch] = await self._dirty(checkouts[branch])
 
             async with anyio.create_task_group() as group:
-                for path in pending:
-                    group.start_soon(measure, path)
-        return [
-            KeptWorktree(
-                path=path,
-                branch=branch,
-                agent_id=path.name,
-                session_id=path.parent.name,
-                dirty=dirty[path],
-                held=path in live,
+                for branch in pending:
+                    group.start_soon(measure, branch)
+        rows = []
+        for branch in branches:
+            agent_id, session_id = _identify(branch)
+            path = checkouts.get(branch)
+            rows.append(
+                KeptWorktree(
+                    branch=branch,
+                    agent_id=agent_id,
+                    session_id=session_id,
+                    path=path,
+                    dirty=dirty[branch],
+                    held=path is not None and path in live,
+                )
             )
-            for path, branch in rows
-        ]
+        return rows
 
     async def _dirty(self, path: Path) -> bool:
         """`--untracked-files=normal`, because the answer is a boolean.
 
-        `all` enumerates every file under a provisioned `node_modules` to say
-        what one `?? node_modules/` line says. A tree in this list is one the
-        disposal policy *kept*, which it does only when the agent's own work is
-        in it, so no exclusion is needed here — a held tree is never measured at
-        all, since `describe` reports it as held.
+        `all` enumerates every file under a provisioned `node_modules` to say what
+        one `?? node_modules/` line says. Measured only for a *stray* checkout —
+        one disposal could not remove — where the question is whether removing the
+        directory by hand loses anything the branch does not already have. A held
+        tree is never measured at all, since `describe` reports it as held.
         """
         code, out, _ = await git(self.ctx, path, "status", "--porcelain")
         return code != 0 or bool(out.strip())
@@ -206,7 +253,7 @@ class _Workspaces:
     async def list(self) -> str:
         kept = await self.kept()
         if not kept:
-            return "no agent worktrees are left behind"
+            return "no agent workspaces are left behind"
         return "\n".join(row.describe() for row in kept)
 
     async def export(self, name: str) -> str:
@@ -254,16 +301,16 @@ class _Workspaces:
         return f"merged {branch}"
 
     async def _branch_for(self, name: str) -> str:
-        """The branch to merge: an agent's worktree, or a ref `export` just made.
+        """The branch to merge: an agent's, or a ref `export` just made.
 
-        The worktree lookup first, because that is what a person names most of
-        the time. Falling through to a literal ref is what makes `export`'s own
-        closing sentence true: an overlay leaves a branch and no checkout, so the
-        git-shaped enumeration cannot find it and the name a person was just
-        handed would refuse.
+        The agent lookup first, because that is what a person names most of the
+        time. Falling through to a literal ref is what makes `export`'s own closing
+        sentence true: an overlay's branch is not under `BRANCH_PREFIX`, so the
+        prefixed enumeration cannot find it and the name a person was just handed
+        would refuse.
         """
         try:
-            row = await self.find(name)
+            return (await self.find(name)).branch
         except _Refused:
             code, _, _ = await git(
                 self.ctx, self.base, "rev-parse", "--verify", f"refs/heads/{name}"
@@ -271,11 +318,6 @@ class _Workspaces:
             if code == 0:
                 return name
             raise
-        if not row.branch:
-            raise _Refused(
-                f"refusing: {row.agent_id} is on a detached HEAD; there is no branch to merge"
-            )
-        return row.branch
 
     async def remove(self, argument: str) -> str:
         parts = argument.split()
@@ -294,14 +336,26 @@ class _Workspaces:
                 "it is released when that agent is disposed"
             )
 
-        code, _, err = await git(
-            self.ctx, self.base, "worktree", "remove", "--force", str(row.path)
-        )
-        if code != 0:
-            return f"could not remove {row.path}: {err.strip() or f'git exited {code}'}"
-        removed = f"removed {row.path}"
-        if "--with-branch" not in flags or not row.branch:
-            return removed
+        if row.path is None:
+            # The ordinary row now: disposal already took the checkout back, so the
+            # branch is all there is and removing it cannot be the default. The two
+            # flags keep the meanings they had — this only stops the verb reading
+            # "remove nothing" for every successfully disposed agent.
+            if "--with-branch" not in flags:
+                return (
+                    f"refusing: {row.agent_id} has no checkout to remove — its work is on "
+                    f"{row.branch}\npass --with-branch to delete the branch too"
+                )
+            removed = f"{row.agent_id} had no checkout"
+        else:
+            code, _, err = await git(
+                self.ctx, self.base, "worktree", "remove", "--force", str(row.path)
+            )
+            if code != 0:
+                return f"could not remove {row.path}: {err.strip() or f'git exited {code}'}"
+            removed = f"removed {row.path}"
+            if "--with-branch" not in flags:
+                return removed
 
         force = "--force-branch" in flags
         code, _, err = await git(self.ctx, self.base, "branch", "-D" if force else "-d", row.branch)
@@ -313,6 +367,20 @@ class _Workspaces:
                 "pass --force-branch to delete it anyway"
             )
         return f"{removed} and branch {row.branch}"
+
+
+def _identify(branch: str) -> tuple[str, str]:
+    """`ph/<session>/<agent>` into the two ids, as `(agent, session)`.
+
+    `sanitize_ref` collapses `/` out of both components at acquire, so a
+    well-formed branch has exactly three parts. Anything else under the prefix is
+    somebody's own branch and is reported whole rather than mis-attributed — a
+    wrong agent id here is a `remove` aimed at the wrong row.
+    """
+    parts = branch.split("/")
+    if len(parts) != 3:
+        return branch, ""
+    return parts[2], parts[1]
 
 
 def _parse(porcelain: str) -> list[tuple[Path, str]]:

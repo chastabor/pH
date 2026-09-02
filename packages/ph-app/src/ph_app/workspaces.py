@@ -45,7 +45,7 @@ from .runtime import mounted
 __all__ = ["workspaces_app"]
 
 workspaces_app = typer.Typer(
-    help="Account for the worktrees agents left behind, across every stored session.",
+    help="Account for the branches agents left behind, across every stored session.",
     add_completion=False,
 )
 
@@ -110,17 +110,21 @@ async def _collect(documents: list[Path], *, older_than: float, remove: bool, fa
             lines.append("re-run with --remove to collect them")
             return "\n".join(lines)
         removed = await seam.collect(rows)
+        kept = counts["collect"] - len(removed)
         lines.append(
-            f"\nremoved {len(removed)} of {counts['collect']} collectable tree(s); "
+            f"\ncollected {counts['collect']} tree(s): {len(removed)} discarded, {kept} kept; "
             f"{counts['held']} held, {counts['recent']} within the age bound"
         )
-        if len(removed) < counts["collect"]:
-            # The gap is the keep-dirty policy doing its job, not a failure: a
-            # retained *worktree* with uncommitted work in it survives its own
-            # garbage collector, and a person who counted the lines above and
-            # got a smaller number is owed the reason rather than left to guess.
+        if kept:
+            # The gap is usually the disposal policy doing its job rather than a
+            # failure — work a retained tree still held goes to its branch, so the
+            # tree ends and the artifact does not. Both reasons are offered because
+            # this cannot tell them apart: `reclaim` answers a bool, and a tier that
+            # declined to collect at all looks exactly like one that saved the work
+            # first. Naming only the happy one would be the overstatement E1 forbids.
             lines.append(
-                "the rest had uncommitted work and were kept — `/workspaces remove` ends those"
+                "a kept tree's work is on its branch, or the mounted tier could not end it — "
+                "`/workspaces list` tells them apart"
             )
         return "\n".join(lines)
 

@@ -282,9 +282,10 @@ async def test_the_report_names_what_was_put_there(trees: tuple[Path, Path]) -> 
     """The list that keeps this row from defeating the tier it serves.
 
     A copied `.env` the project does not gitignore is an untracked file, so
-    `git status` calls the tree dirty, so the keep-dirty policy keeps it — and
-    "remove a clean worktree" stops meaning anything. `provisioned` is what
-    disposal subtracts, and `test_workspace_git.py` pins the end of that.
+    `git status` calls the tree dirty and `git add -A` puts it on the branch —
+    which is a credential in the project's history, not just a checkout nobody
+    wanted. `provisioned` is what disposal subtracts, and `test_workspace_git.py`
+    pins the end of that.
 
     **Not `info/exclude`**, which is the obvious wrong answer and was the first
     one tried: git resolves `info/exclude` against the *common* directory even
