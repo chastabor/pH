@@ -45,6 +45,7 @@ from typing import Any, Final, Literal, TypeAlias
 
 from ph.cordis import Context, plugin
 from ph.seams.compaction import CompactionNote
+from ph.seams.spill import SpillClaim
 from ph.session import Session
 from ph.wire import WireModel
 
@@ -57,7 +58,6 @@ __all__ = [
     "apply",
     "fold_namespace",
     "namespaces_in",
-    "referenced_locators",
     "render_live_variables",
 ]
 
@@ -138,18 +138,6 @@ def namespaces_in(session: Session) -> set[str]:
         if event.type == "kernel/snapshot"
         if isinstance(namespace := event.data.get("namespace"), str)
     }
-
-
-def referenced_locators(session: Session) -> set[str]:
-    """Every spill locator the log still points at, for the open-time sweep (F7)."""
-    found: set[str] = set()
-    for event in session.events:
-        if event.type != "kernel/snapshot":
-            continue
-        locator = (event.data.get("record") or {}).get("locator")
-        if isinstance(locator, str):
-            found.add(locator)
-    return found
 
 
 @dataclass(slots=True)
@@ -311,26 +299,6 @@ class KernelSnapshotPolicy:
             return
         session.append("kernel/restored", {"namespace": namespace, **outcome})
 
-    # ------------------------------------------------------------------- GC --
-
-    async def sweep(self, session: Session) -> list[str]:
-        """Drop blobs no event references (F7), at session open.
-
-        Both halves come from the same log: the namespaces to visit *and* the
-        locators to keep are read from this session's own events. Sweeping every
-        namespace the process had seen against one session's reference set
-        deleted other sessions' blobs — for them the set was empty, so everything
-        they owned looked unreferenced.
-        """
-        spill = self.ctx.get("spill_store")
-        if spill is None:
-            return []
-        referenced = referenced_locators(session)
-        removed: list[str] = []
-        for namespace in sorted(namespaces_in(session)):
-            removed.extend(await spill.sweep(owner=_owner(namespace), referenced=referenced))
-        return removed
-
 
 def render_live_variables(session: Session) -> str:
     """The names the kernel still holds, for a compaction summary prompt (G10).
@@ -386,12 +354,25 @@ async def apply(ctx: Context, config: Config) -> None:
     ctx.provide("kernel_snapshots", policy)
     ctx.python_runtime.snapshots = policy
 
-    async def sweep_on_open(session: Session) -> None:
-        removed = await policy.sweep(session)
-        if removed:
-            log.info("ph_rlm.snapshot: swept %d unreferenced kernel blob(s)", len(removed))
+    def claim_kernel_blobs(scope: Context) -> None:
+        """Contribute this row's blobs to the seam's open-time sweep (P6-15).
 
-    ctx.on("session/created", sweep_on_open)
+        Through `ctx.inject` for `announce_live_variables`' reason: the store is
+        optional here (a small namespace inlines), and a bare `ctx.get` at mount
+        reads `None` under a profile that orders `spill-local` later — a sweep that
+        silently collects nothing.
+        """
+        scope.spill_store.claim(
+            SpillClaim(
+                label="rlm-kernel-snapshot",
+                event_type="kernel/snapshot",
+                owner=lambda data: _owner(str(data["namespace"])),
+                locator=lambda data: (data.get("record") or {}).get("locator"),
+            ),
+            scope=scope,
+        )
+
+    ctx.inject(["spill_store"], claim_kernel_blobs, label="rlm-kernel-spill-claim")
 
     def announce_live_variables(scope: Context) -> None:
         """Tell a compaction summary what the kernel still holds (G10, P4-03).

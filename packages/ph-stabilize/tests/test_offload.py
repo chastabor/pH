@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from stabilize_helpers import PROFILE, blob, break_spill
+from stabilize_helpers import PROFILE, blob, break_spill, events_of
 
 from ph.cancel import CancelToken
 from ph.cordis import DEPLOYMENT
@@ -326,3 +326,51 @@ async def test_it_measures_the_projection_another_listener_produced(mount: Any) 
     assert TOO_LARGE in model_text(event), "the inflated projection went unmeasured"
     (spilled,) = [e for e in session.events if e.type == "offload/spilled"]
     assert Path(spilled.data["locator"]).read_text(encoding="utf-8") == blob(THRESHOLD + 1)
+
+
+# ---------------------------------------------------------------- the sweep --
+
+
+async def test_a_blob_whose_event_never_landed_is_swept_at_the_next_open(
+    mount: Any,
+) -> None:
+    """**P6-15's gate, through the producers that were never swept.** Both
+    directions in one test, because a sweep that deleted *everything* would pass
+    the orphan half while destroying the offload the model was told it could read
+    back — which is what a per-producer sweep produces on a shared owner."""
+    ctx = await mount(profile=PROFILE)
+    session = ctx.sessions.create("swept")
+    await _run(ctx, session, "big", blob(THRESHOLD + 1))
+    (spilled,) = events_of(session, "offload/spilled")
+    live = Path(spilled.data["locator"])
+
+    orphan = await ctx.spill_store.save_text(
+        owner=session.id, source="a crash", suggested_name="never-recorded.md", content="lost"
+    )
+    assert Path(orphan.locator).is_file(), "the crash-shaped file exists before the sweep"
+
+    removed = await ctx.spill_store.sweep_session(session)
+
+    assert removed == [orphan.locator], removed
+    assert not Path(orphan.locator).exists()
+    assert live.is_file(), "the offload the model was told to read back must survive"
+
+
+async def test_the_sweep_is_wired_to_session_open(mount: Any) -> None:
+    """The seam mounts the listener, so it exists wherever the store does.
+
+    Asserted separately from the fold because they fail differently: a fold that
+    is wrong deletes the wrong files, and a fold nobody calls deletes nothing and
+    looks exactly like a clean store. The second is what P6-15 was — the sweep
+    was correct and its listener belonged to one producer.
+    """
+    ctx = await mount(profile=PROFILE)
+    session = ctx.sessions.create("wired")
+    orphan = await ctx.spill_store.save_text(
+        owner=session.id, source="a crash", suggested_name="orphan.md", content="lost"
+    )
+
+    ctx.emit("session/created", session)
+    await ctx.drain()
+
+    assert not Path(orphan.locator).exists(), "session open did not sweep"

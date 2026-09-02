@@ -84,6 +84,7 @@ from ph.llm.types import (
     text_of,
 )
 from ph.seams.compaction import CompactionError, CompactionResult, CompactionTrigger
+from ph.seams.spill import SpillClaim
 from ph.seams.token_meter import TokenBaseline
 from ph.session import (
     EpochHeader,
@@ -1264,6 +1265,8 @@ class SummarizeEngine:
 )
 async def apply(ctx: Context, config: Config) -> None:
     """Register the engine and arm the two automatic triggers."""
+    ctx.spill_store.claim(SpillClaim.under_session("compaction-summarize", "compaction/summarized"))
+
     engine = SummarizeEngine(ctx=ctx, config=config)
     ctx.compaction.register(engine)
 

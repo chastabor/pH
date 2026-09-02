@@ -36,6 +36,7 @@ from typing import Any
 
 from ph.cordis import Context, plugin
 from ph.llm.types import PluginSource, create_user_message, text_of
+from ph.seams.spill import SpillClaim
 from ph.session import (
     Session,
     SessionEvent,
@@ -103,6 +104,7 @@ def _pending(session: Session, config: Config) -> tuple[SessionEvent, str] | Non
 @plugin("input-offload", inject=["spill_store"], config=Config)
 async def apply(ctx: Context, config: Config) -> None:
     """Replace an oversized pasted message on the surface, not in the log."""
+    ctx.spill_store.claim(SpillClaim.under_session("input-offload", "offload/input-spilled"))
 
     async def offload(proposal: Any, next_: Any) -> Any:
         session: Session | None = getattr(proposal.agent, "session", None)

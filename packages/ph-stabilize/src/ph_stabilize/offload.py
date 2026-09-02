@@ -41,6 +41,7 @@ from typing import Any
 
 from ph.cordis import Context, plugin
 from ph.llm.types import text_of
+from ph.seams.spill import SpillClaim
 from ph.session import Session
 from ph.tools.definition import Accept, ToolExecution, ToolExecutionResult, text_content
 from ph.wire import WireModel
@@ -203,6 +204,7 @@ async def spill_tool_result(
 @plugin("tool-result-offload", inject=["tools", "spill_store"], config=Config)
 async def apply(ctx: Context, config: Config) -> None:
     """Replace an oversized result with a preview and a path to the rest."""
+    ctx.spill_store.claim(SpillClaim.under_session("tool-result-offload", "offload/spilled"))
 
     async def offload(execution: ToolExecution, result: ToolExecutionResult, next_: Any) -> Any:
         decision = await next_(execution, result)

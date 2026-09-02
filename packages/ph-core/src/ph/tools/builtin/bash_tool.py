@@ -82,6 +82,9 @@ async def apply(ctx: Context, config: Any) -> None:
             parameters=BashArgs,
             output=ToolOutput(schema=BashValue, render=_render),
             execute=run_command,
+            # A shell command reaches past the tree by construction; `/revert`
+            # restores the worktree, not the world.
+            is_irreversible=True,
             present_call=lambda args: ToolCallView(
                 card="terminal",
                 title=str(args.get("description") or "Run command"),

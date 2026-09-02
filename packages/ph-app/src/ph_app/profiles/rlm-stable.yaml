@@ -51,9 +51,10 @@
           recursively, publishes, or runs as another user.
       # Code Mode's transport reaches the same places by another road (C3).
       # Keyed by the *reserved* name: the registry renames the transport to
-      # whatever the presentation calls it (`ipython`, here), and `hitl`
-      # resolves that — a profile naming `ipython` would turn its own gate off
-      # the day a deployment renamed the presentation.
+      # whatever the presentation calls it (`ipython`, here), and `hitl` resolves
+      # that. Naming `ipython` instead would not turn the gate off — the tool
+      # declares `is_irreversible`, so `declared` still catches it — but the
+      # additions below are keyed by name and would stop applying (P6-16).
       run_code:
         preset: destructive
         when:

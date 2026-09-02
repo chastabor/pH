@@ -15,16 +15,20 @@ from __future__ import annotations
 
 import hashlib
 import logging
-from dataclasses import dataclass
+from collections.abc import Callable, Iterable, Mapping
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import anyio
 
-from ..cordis import Context, plugin
+from ..cordis import Context, Disposer, plugin
 from ..paths import default_home_path
+from ..session import Session
 from ..wire import WireModel
+from ._registry import claim_entry
 
-__all__ = ["SpillRef", "SpillStore", "apply"]
+__all__ = ["SpillClaim", "SpillRef", "SpillStore", "apply"]
 
 log = logging.getLogger("ph.seams.spill")
 
@@ -37,12 +41,53 @@ class SpillRef(WireModel):
     retrieval_hint: str
 
 
+def _plain_locator(data: Mapping[str, Any]) -> str | None:
+    """`data["locator"]` when it is a string — the seam's own convention.
+
+    A spill that failed open records its event with `locator: None`, so a
+    non-string is skipped rather than coerced: `"None"` in the reference set
+    keeps a file that does not exist and reads as a producer doing its job.
+    """
+    locator = data.get("locator")
+    return locator if isinstance(locator, str) else None
+
+
+@dataclass(frozen=True, slots=True)
+class SpillClaim:
+    """One producer's blobs: where they live, and which event names each (F7).
+
+    Contributed rather than known here. The sweep began as one producer's own
+    `session/created` listener; every producer added afterwards wrote blobs
+    nothing collected, and a crash between a blob write and the append naming it
+    leaked a file permanently. A per-producer sweep is how that happens twice, so
+    there is one sweep and producers contribute to its fold.
+
+    `owners` is unconditional — read even from a log with no spill events — so
+    the crash case (blob written, event never appended) is still visited. Both
+    readers are per event, which is what lets the seam fold every claim in **one
+    pass** over the log: a producer whose owner is templated from the event
+    (`kernel/<namespace>`) reads it there rather than scanning the log itself.
+    """
+
+    label: str
+    event_type: str
+    owners: Callable[[Session], Iterable[str]] = lambda _session: ()
+    locator: Callable[[Mapping[str, Any]], str | None] = _plain_locator
+    owner: Callable[[Mapping[str, Any]], str | None] = lambda _data: None
+
+    @classmethod
+    def under_session(cls, label: str, event_type: str) -> SpillClaim:
+        """A producer writing under `session.id` whose events carry `locator`."""
+        return cls(label=label, event_type=event_type, owners=lambda session: {session.id})
+
+
 @dataclass(slots=True)
 class SpillStore:
     """The service published as `ctx.spill_store`."""
 
     ctx: Context
     root: Path
+    _claims: list[SpillClaim] = field(default_factory=list)
 
     def locator_for(self, *, owner: str, suggested_name: str, content: bytes) -> Path:
         """Where `content` will be written — derived, not written.
@@ -115,26 +160,79 @@ class SpillStore:
     async def load_bytes(self, locator: str) -> bytes:
         return await anyio.to_thread.run_sync(lambda: Path(locator).read_bytes())
 
-    async def sweep(self, *, owner: str, referenced: set[str]) -> list[str]:
-        """Delete this owner's blobs that no event references (F7).
+    def claim(self, claim: SpillClaim, *, scope: Context | None = None) -> Disposer:
+        """Contribute one producer's owners and references to the open-time sweep."""
+        return claim_entry(
+            self.ctx.owner_for(scope), self._claims, claim, label=f"spill.claim({claim.label})"
+        )
 
-        Called at session open, because a blob whose event never landed — a crash
-        between the append and the write — is otherwise never reconciled by
-        anything. Returns what it removed, so the caller can say so.
+    async def sweep_session(self, session: Session) -> list[str]:
+        """Drop every blob this session's log no longer names (F7, P6-15).
+
+        **Union first, then visit each owner once.** Three producers write under
+        `session.id`, so sweeping each claim against only *its own* references
+        would have each delete the others' files, every one behaving correctly.
+
+        **A claim that raises aborts the sweep.** A reference set assembled from
+        some of the claims is *smaller* than the truth, and a small reference set
+        does not skip work — it deletes live blobs.
+
+        One pass over the log and one thread hop for the whole thing: this runs
+        on every session open, resume and fork, and a fold of a long log belongs
+        off the event loop.
         """
+        claims = tuple(self._claims)
 
-        def remove() -> list[str]:
-            directory = self.root / owner
-            if not directory.is_dir():
-                return []
-            gone: list[str] = []
-            for path in sorted(directory.iterdir()):
-                if path.is_file() and str(path) not in referenced:
-                    path.unlink(missing_ok=True)
-                    gone.append(str(path))
-            return gone
+        def run() -> list[str]:
+            owners: set[str] = set()
+            referenced: set[str] = set()
+            by_type: dict[str, list[SpillClaim]] = {}
+            for claim in claims:
+                try:
+                    owners.update(claim.owners(session))
+                except Exception:
+                    return _abort(claim, session)
+                by_type.setdefault(claim.event_type, []).append(claim)
+            for event in session.events:
+                for claim in by_type.get(event.type, ()):
+                    try:
+                        locator = claim.locator(event.data)
+                        owner = claim.owner(event.data)
+                    except Exception:
+                        return _abort(claim, session)
+                    if locator is not None:
+                        referenced.add(locator)
+                    if owner is not None:
+                        owners.add(owner)
+            removed: list[str] = []
+            for owner in sorted(owners):
+                removed.extend(_remove_unreferenced(self.root / owner, referenced))
+            return removed
 
-        return await anyio.to_thread.run_sync(remove)
+        return await anyio.to_thread.run_sync(run)
+
+
+def _abort(claim: SpillClaim, session: Session) -> list[str]:
+    log.warning(
+        "ph.seams.spill: %s could not report its blobs; skipping the sweep for session %s "
+        "rather than deleting against a partial reference set",
+        claim.label,
+        session.id,
+        exc_info=True,
+    )
+    return []
+
+
+def _remove_unreferenced(directory: Path, referenced: set[str]) -> list[str]:
+    """Delete the files in one owner directory that no claim references."""
+    if not directory.is_dir():
+        return []
+    gone: list[str] = []
+    for path in sorted(directory.iterdir()):
+        if path.is_file() and str(path) not in referenced:
+            path.unlink(missing_ok=True)
+            gone.append(str(path))
+    return gone
 
 
 def _write(directory: Path, path: Path, payload: bytes) -> None:
@@ -152,4 +250,13 @@ class Config(WireModel):
 async def apply(ctx: Context, config: Config) -> None:
     """Mount the local spill store."""
     root = default_home_path(config.root, "spill")
-    ctx.provide("spill_store", SpillStore(ctx=ctx, root=root))
+    store = SpillStore(ctx=ctx, root=root)
+    ctx.provide("spill_store", store)
+
+    async def sweep_on_open(session: Session) -> None:
+        """The one open-time sweep, owned by the store rather than by a producer."""
+        removed = await store.sweep_session(session)
+        if removed:
+            log.info("ph.seams.spill: swept %d unreferenced blob(s)", len(removed))
+
+    ctx.on("session/created", sweep_on_open)

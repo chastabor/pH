@@ -335,6 +335,35 @@ async def test_a_profile_can_present_the_transport_under_its_own_name(mount: Any
     assert ipython.description == "Python cells."
 
 
+async def test_renaming_the_transport_keeps_what_it_declares_about_itself(mount: Any) -> None:
+    """**P6-16's motivating case, pinned where it would silently break.**
+
+    The transport declares `is_irreversible` — a cell is model-authored raw
+    Python and may do anything — and `hitl` reads that declaration to decide
+    whether a call is worth asking a person about. It reads it *through the
+    view*, under whatever name the profile presents, so the whole capability
+    gate for the surface that most needs one rides on the rename carrying the
+    field.
+
+    `rename` uses `dataclasses.replace` and so carries it by construction, which
+    is precisely why this is worth a test: the safe behaviour here is the
+    *absence* of an explicit field list, and the natural way to break it is for
+    someone to make `rename` construct a `ToolDefinition` by hand. That would
+    drop the declaration, raise nothing, and turn the gate off.
+    """
+    ctx = await _code_ctx(mount)
+    before = ctx.tools.get(RUN_CODE, scope=DEPLOYMENT)
+    assert before is not None and before.irreversible({"program": "anything"})
+
+    ctx.tools.present_transport(_as_ipython())
+
+    after = ctx.tools.get("ipython", scope=DEPLOYMENT)
+    assert after is not None
+    assert after.irreversible({"program": "anything"}), (
+        "the declaration must travel with the tool, not with the name it was registered under"
+    )
+
+
 async def test_the_presented_name_is_what_the_model_may_call(mount: Any) -> None:
     """The C6 refusal follows the rename, or the model is told to call a name
     that no longer resolves."""

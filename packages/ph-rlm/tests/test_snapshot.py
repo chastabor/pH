@@ -34,7 +34,7 @@ cell**.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -49,7 +49,6 @@ from ph.testing import FAKE_OPTIONS, plugin_payload, user_payload
 from ph_rlm.snapshot import (
     KernelSnapshotPolicy,
     fold_namespace,
-    referenced_locators,
     render_live_variables,
 )
 
@@ -213,20 +212,33 @@ async def test_a_spilled_variable_still_restores(mounted_runtime: Mounted) -> No
     assert result.value["value"] == 20_000
 
 
+def _kernel_locators(session: Any) -> set[str]:
+    """The spill locators this log's `kernel/snapshot` events still name.
+
+    `Mapping`, not `dict`: a frozen payload is a `MappingProxyType`, and a `dict`
+    test here read every live event as having no record — the trap `ph_app.wire`
+    exists to name, met once more while writing this helper.
+    """
+    return {
+        record["locator"]
+        for event in session.select("kernel/snapshot")
+        if isinstance(record := event.data.get("record"), Mapping)
+        and isinstance(record.get("locator"), str)
+    }
+
+
 async def test_unreferenced_blobs_are_swept(mounted_runtime: Mounted) -> None:
     """F7: a blob whose event never landed is otherwise never reconciled."""
     ctx, session, agent = await mounted_runtime(
         session_id="kernel-state", snapshot_config={"inlineBlobMax": 256}
     )
     await run_cell(ctx, "big = 'z' * 20_000", agent=agent, session=session)
-    policy: KernelSnapshotPolicy = ctx.kernel_snapshots
-
     directory = Path(ctx.spill_store.root) / f"kernel/{agent.id}"
     orphan = directory / "deadbeefdeadbeef-nothing.dill"
     orphan.write_bytes(b"nobody points at this")
-    kept = referenced_locators(session)
+    kept = _kernel_locators(session)
 
-    removed = await policy.sweep(session)
+    removed = await ctx.spill_store.sweep_session(session)
     assert str(orphan) in removed
     assert not orphan.exists()
     assert all(Path(locator).exists() for locator in kept)
@@ -243,19 +255,18 @@ async def test_a_sweep_leaves_another_sessions_blobs_alone(mounted_runtime: Moun
         session_id="kernel-state", snapshot_config={"inlineBlobMax": 256}
     )
     await run_cell(ctx, "mine = 'a' * 20_000", agent=agent, session=session)
-    policy: KernelSnapshotPolicy = ctx.kernel_snapshots
-    ours = referenced_locators(session)
+    ours = _kernel_locators(session)
     assert ours
 
     # A second session in the same process, with its own agent and its own blob.
     other_session = ctx.sessions.create("another-session")
     other_agent = ctx.agents.create(other_session, FAKE_OPTIONS)
     await run_cell(ctx, "theirs = 'b' * 20_000", agent=other_agent, session=other_session)
-    theirs = referenced_locators(other_session)
+    theirs = _kernel_locators(other_session)
     assert theirs and theirs != ours
 
     # Opening either session must not collect the other's blobs.
-    assert await policy.sweep(other_session) == []
+    assert await ctx.spill_store.sweep_session(other_session) == []
     assert all(Path(locator).exists() for locator in ours | theirs)
 
 

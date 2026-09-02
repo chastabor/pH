@@ -498,6 +498,20 @@ class ToolDefinition:
     """Only `True` opts a call into a parallel group. Omission, a raise, and any
     non-`True` return are all exclusive — the safe default, since a tool that
     has not thought about overlap must not be assumed to tolerate it."""
+    is_irreversible: Callable[[Any], bool] | None = None
+    """This call may do something the harness cannot take back (P6-16).
+
+    A **per-call predicate over the arguments**, not a flag, because the tool that
+    most needs it cannot answer in general: one `run_code` cell may read a file or
+    drop a table, and `bash` is a different command every time. Same shape as
+    `is_concurrency_safe`, for the same reason — the producer is the only party
+    that knows.
+
+    Roughly the complement of `effects_confined_to_workspace`, but a separate field
+    rather than derived from it: a call may reach past the tree without being hard
+    to take back — a URL read, a query — and over-asking is how a gate teaches its
+    user to stop reading it. Whether a person is actually asked is `hitl`'s call.
+    """
     present_call: Callable[[Any], ToolCallView | None] | None = None
     present_result: Callable[[Any, ToolResult], ToolResultView | None] | None = None
 
@@ -528,13 +542,12 @@ class ToolDefinition:
 
     def classify(self, args: Any) -> ExecutionMode:
         """The live overlap classification for one call's arguments."""
-        classifier = self.is_concurrency_safe
-        if classifier is None:
-            return ExecutionMode(kind="exclusive")
-        try:
-            return ExecutionMode(kind="parallel" if classifier(args) is True else "exclusive")
-        except Exception:
-            return ExecutionMode(kind="exclusive")
+        parallel = _answers_true(self.is_concurrency_safe, args)
+        return ExecutionMode(kind="parallel" if parallel else "exclusive")
+
+    def irreversible(self, args: Any) -> bool:
+        """Whether this call declares itself hard to take back (P6-16)."""
+        return _answers_true(self.is_irreversible, args)
 
 
 @dataclass(frozen=True, slots=True)
@@ -586,6 +599,7 @@ def define_tool(
     arguments_disposable: bool = False,
     effects_confined_to_workspace: bool = False,
     is_concurrency_safe: Callable[[Any], bool] | bool | None = None,
+    is_irreversible: Callable[[Any], bool] | bool | None = None,
     present_call: Callable[[Any], ToolCallView | None] | None = None,
     present_result: Callable[[Any, ToolResult], ToolResultView | None] | None = None,
 ) -> ToolDefinition:
@@ -615,14 +629,6 @@ def define_tool(
         result = execute(args, run_ctx)
         return await result if inspect.isawaitable(result) else result
 
-    safe: Callable[[Any], bool] | None
-    if is_concurrency_safe is True:
-        safe = lambda _args: True  # noqa: E731 - a one-expression classifier
-    elif callable(is_concurrency_safe):
-        safe = is_concurrency_safe
-    else:
-        safe = None
-
     return ToolDefinition(
         name=name,
         description=description,
@@ -634,10 +640,30 @@ def define_tool(
         self_limits=self_limits,
         arguments_disposable=arguments_disposable,
         effects_confined_to_workspace=effects_confined_to_workspace,
-        is_concurrency_safe=safe,
+        is_concurrency_safe=_classifier(is_concurrency_safe),
+        is_irreversible=_classifier(is_irreversible),
         present_call=present_call,
         present_result=present_result,
     )
+
+
+def _classifier(flag: Callable[[Any], bool] | bool | None) -> Callable[[Any], bool] | None:
+    """`True` → always; a callable → itself; anything else → not declared."""
+    if flag is True:
+        return lambda _args: True
+    return flag if callable(flag) else None
+
+
+def _answers_true(classifier: Callable[[Any], bool] | None, args: Any) -> bool:
+    """Only `True` counts. Omission, a non-`True` return and a **raise** all mean
+    "not declared": a predicate that throws did not answer, and turning silence
+    into a claim would make one buggy classifier claim on every call."""
+    if classifier is None:
+        return False
+    try:
+        return classifier(args) is True
+    except Exception:
+        return False
 
 
 def _default_render(value: Any) -> str:

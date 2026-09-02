@@ -66,6 +66,7 @@ import pytest
 from ph.seams.containment import TIERS
 from ph.seams.workspace import (
     Workspace,
+    WorkspaceKind,
     WorkspaceRecord,
     discards_writes,
     fresh_root,
@@ -81,7 +82,7 @@ from ph.seams.workspace_agentfs import (
     store_for,
 )
 from ph.seams.workspace_git import tree_hash
-from ph.testing import StubWorkspaceProvider, git, git_repo, needs_git
+from ph.testing import FAKE_OPTIONS, StubWorkspaceProvider, git, git_repo, needs_git
 
 pytestmark = pytest.mark.anyio
 
@@ -130,6 +131,49 @@ def test_an_overlay_has_no_restore_mechanism() -> None:
     """
     assert restorable("worktree") and restorable("worktree-ephemeral")
     assert not restorable("overlay") and not restorable("overlay-ephemeral")
+
+
+async def test_revert_refuses_an_overlay_and_still_lists_for_a_worktree(
+    mount: Any, tmp_path: Path
+) -> None:
+    """**The other half of P6-20's gate: the sentence a person actually reads.**
+
+    The predicate above was asserted and the branch that consumes it was not, so
+    the refusal could have regressed to the empty listing with `restorable`
+    still answering `False` and nothing failing.
+
+    The distinction is the whole point. "no restore points in this session" is
+    *true* of an overlay, and it reads as **not yet** — so a person waits for one
+    to appear when no mechanism will ever produce one. Naming the kind says the
+    mechanism is absent rather than the points.
+
+    Both kinds are driven through one command, because a branch that refused
+    *everything* would satisfy the overlay half while breaking `/revert`
+    outright, and that is exactly the reading a single-case test would pass.
+    """
+    revert_row = {"insert": [{"id": "workspace-revert", "name": "workspace-revert"}]}
+    kinds: dict[str, tuple[WorkspaceKind, WorkspaceKind]] = {
+        "ov": ("overlay", "overlay-ephemeral"),
+        "wt": ("worktree", "worktree-ephemeral"),
+    }
+    shown: dict[str, str] = {}
+    for name, pair in kinds.items():
+        ctx = await mount(revert_row)
+        ctx.workspace.register_provider(StubWorkspaceProvider(root=tmp_path / name, kinds=pair))
+        session = ctx.sessions.create(f"s-{name}")
+        agent = ctx.agents.create(session, FAKE_OPTIONS)
+        workspace = await ctx.workspace.acquire(
+            session_id=session.id, agent_id=agent.id, base=tmp_path, access="write", session=session
+        )
+        assert workspace.kind == pair[0]
+        shown[name] = str(await ctx.commands.dispatch("/revert", session=session, agent=agent))
+
+    assert shown["ov"].startswith("refusing: a overlay workspace has no restore mechanism"), shown[
+        "ov"
+    ]
+    assert shown["wt"] == "no restore points in this session", (
+        "a restorable kind with no checkpoints yet gets the listing, not the refusal"
+    )
 
 
 async def test_doctor_states_what_an_overlay_bounds_not_what_its_rung_sells(

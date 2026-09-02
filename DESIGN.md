@@ -173,7 +173,7 @@ await ctx.effect(enter, label="worktree")
 
 `Context.effect` acquires an artifact and registers its release in one step, so
 a failure between the two cannot leave the artifact unregistered
-(`context.py:995-1008`). Its docstring states the rule: *"Every external artifact
+(`context.py:775`). Its docstring states the rule: *"Every external artifact
 an agent takes — a child process, a worktree, a temp path, a lock — is acquired
 through here, so cleanup is structural rather than remembered."*
 
@@ -922,17 +922,34 @@ child (`tests/test_subagent_grant.py:485-519`).
 |---|---|---|---|
 | `advisory` | `shared` | `True` | no — honoured by *saying so* |
 | `worktree` | `worktree` / `worktree-ephemeral` | `True` for both | no |
-| `sandbox` | `readonly-scratch` | `False` | yes, at the kernel |
+| `worktree` | `overlay` / `overlay-ephemeral` | `True` for both | no — a **peer** of the row above, not a rung between it and `sandbox` |
+| `sandbox` | `readonly-scratch` | `False` | yes, at the kernel — **but nothing produces this kind yet** (P6-05) |
 
-The rule, verbatim (`seams/workspace.py:10-19`):
+**Two boundaries wear the word "sandbox", and they are not the same one.**
+`ctx.sandbox` bounds *every command the harness wraps*, and it is real: P6-04
+landed `sandbox-local`, which claims the slot only after a probe writes a canary
+outside the workspace and finds the host copy unchanged
+(`seams/sandbox_local.py:318`). The `sandbox` **workspace tier** — the row of the
+table above, which would hand an agent a `readonly-scratch` workspace — has no
+producer: no `WorkspaceProvider` in the tree declares `tier="sandbox"`, so
+`WorkspaceSeam.effective_tier` can never return it. `ph doctor` prints both,
+which is why `describe()` grew a separate **"confined commands"** row
+(`seams/containment.py:238-249`): a reader must not have to reconcile
+"bounds: nothing" in the workspace section with a kernel that is in fact
+refusing the write.
 
-> **`repo_writable` is a claim, and the seam refuses to overstate it.** The
-> `worktree` tier gives an agent its own checkout: collisions are isolated and a
-> run is revertible, but an absolute-path `open()` never consults a cwd, so that
-> tier bounds nothing about `/etc/passwd`. Only `sandbox` can refuse that write,
-> at the kernel. **So a caller asking for `access="read"` gets the strongest kind
-> the mounted tier can actually provide, and `repo_writable` records which
-> guarantee was obtained rather than which was requested.**
+The rule, verbatim (`seams/workspace.py:9-14`):
+
+> **`repo_writable` records which guarantee was obtained, never which was
+> requested.** A caller asking `access="read"` gets the strongest kind the
+> mounted tier can actually provide; `False` means a tier is enforcing it. Any
+> wording here, in `ph doctor`, or in a config comment that blurs request and
+> guarantee is a defect (§12 Q10).
+
+The reasoning that used to sit in that docstring — an absolute-path `open()`
+never consults a cwd, so the `worktree` tier bounds nothing about `/etc/passwd`
+— now lives in `tests/test_workspace.py` and is measured at the rung itself in
+`test_containment_ladder.py`, per §9's rule.
 
 `project_access(kind)` maps the kind back to what was granted *of the project*: a
 `worktree-ephemeral` child may write its checkout freely and merges nothing, so
@@ -943,14 +960,22 @@ Both halves of tier selection can only **lower** the answer: a chosen `advisory`
 declines a registered provider, and an absent provider cannot deliver whatever
 was chosen (`seams/workspace.py:589-614`).
 
-> **The top rung is vocabulary-complete and implementation-absent.**
-> `readonly-scratch` is declared and exhaustively classified, but **no provider in
-> the tree produces it and no sandbox provider is registered anywhere** —
-> verified. The only kinds ever built are `shared` (`workspace.py:474`) and
-> `worktree`/`worktree-ephemeral` (`workspace_git.py:188`). `sandbox-local`
-> (bwrap → Landlock / Seatbelt) is Phase 6 work. Until it lands, **no tier in pH
-> bounds an absolute-path write**, and `containment.strict` has nothing to
-> satisfy it.
+> **The top *workspace* rung is vocabulary-complete and implementation-absent.**
+> `readonly-scratch` is declared and exhaustively classified by all four kind
+> predicates, but **nothing in the tree produces it** — verified. The kinds ever
+> built are `shared` (`workspace.py:466`), `worktree`/`worktree-ephemeral`
+> (`workspace_git.py:181`) and `overlay`/`overlay-ephemeral`
+> (`workspace_agentfs.py:358`). That, plus the `partial` degradation path, is
+> what P6-05 still owes.
+>
+> **What is no longer true is the sentence that used to follow.** This paragraph
+> read "no tier in pH bounds an absolute-path write, and `containment.strict` has
+> nothing to satisfy it". Both halves are now false: `sandbox-local` (bwrap)
+> landed in P6-04 and was verified against a real kernel — an absolute-path write
+> refused with the host file untouched — and `strict` is satisfiable, because
+> `_unconfined` (`seams/containment.py:255`) asks `enforcement_of(ctx)`, the
+> **sandbox seam**, not the workspace provider. Seatbelt and Landlock remain
+> unwritten.
 
 > **`DowngradeReason` has exactly one member** — `workspace-not-mounted` — and one
 > producer. A *tier-driven* narrowing (asking `write`, getting
@@ -1125,7 +1150,8 @@ Stated here rather than left to be discovered, per the codebase's own rule.
 
 | Gap | Status |
 |---|---|
-| **The sandbox tier does not exist.** `readonly-scratch` is declared and classified but has no producer; no sandbox provider is registered. No tier currently bounds an absolute-path write (§6.6) | Phase 6 |
+| **The `sandbox` workspace tier has no producer.** `readonly-scratch` is declared and classified by every kind predicate, but nothing hands one out and no `WorkspaceProvider` declares `tier="sandbox"`, so `effective_tier` can never return it (§6.6). *Commands* are confined — that is `ctx.sandbox`, a different boundary, landed in P6-04 | P6-05 |
+| `sandbox-local` ships `bwrap` only; the Seatbelt half is written deny-by-default and **has never been run** — the probe is what stands between "unverified" and "claimed". Landlock is unwritten | P6-04, partial |
 | `install_lifecycle` (signal handling, grace period, self-`SIGKILL`) has **no production caller**; `ph daemon` calls bare `anyio.run` | unwired |
 | `AgentCancelCause.kind` declares `hook` and `legacy`; neither is ever constructed | dead vocabulary |
 | `TurnEndReason(kind="interrupted")` is never constructed as a dataclass — it reaches logs only as repair's wire payload | dead vocabulary |

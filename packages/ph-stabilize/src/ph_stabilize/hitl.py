@@ -2,7 +2,14 @@
 
 Deep Agents' `interrupt_on` config and its `manual | auto | yolo` posture, on
 `tools/pre-execute`: when a rule matches, the listener returns `Ask` and the
-registry routes it through `ctx.approval` (B3). Everything after that already
+registry routes it through `ctx.approval` (B3).
+
+**The tool's declaration is the default; a configured rule is the override**
+(P6-16). A tool declares `is_irreversible` and is gated under `Config.declared`;
+a key in `interrupt_on` replaces that for one tool by name. Upstream has only the
+name, and a name is a rendering choice — this bundle's own Code Mode transport is
+renamed in place by a presentation row — so a gate keyed on it alone goes quietly
+inert for the surface that most needs one. Everything after that already
 exists — the seam records `approval/asked` and `approval/decided`, fails closed
 on a missing answerer, and re-asks on resume because an `asked` with no `decided`
 *is* the pending state.
@@ -13,17 +20,24 @@ run it — tell the model this). Both exist because stopping a turn to say "wron
 path" or "you don't need that, the answer is X" costs a round trip that answering
 in place does not.
 
-**The classifier is a predicate, and its verdict is logged with the ask.** A rule
-may be `true` (always ask) or carry a `when` — a pattern set matched against the
-call's arguments. What it matched goes into the ask's `reason`, so a person is
-told *why* they are being asked and an auditor can see what the classifier
-thought. A gate whose reasoning is invisible is one nobody can tune.
+**The classifier parses; it does not pattern-match.** `preset: destructive` runs
+`ph_stabilize.destructive`, which reads each string argument in its own dialect —
+shell through `shlex`, SQL as statements, Python through `ast` — and judges the
+*structure*. The regexes it replaces could not see a command line as a grammar,
+and had the failure that invites: the arguments were scanned as rendered JSON, so
+a real newline became the two characters `\\` and `n`, and every `\\b`-anchored
+pattern stopped matching anything on a second line. A `when:` list is still
+regex, as the deployment's own escape hatch, but it is matched against the
+decoded strings rather than the envelope.
+
+What was found goes into the ask's `reason` in the parser's words — *`rm -rf
+build` (removes files)* — so a person is told what the harness saw and an auditor
+can tune it. A gate whose reasoning is invisible is one nobody can tune.
 
 **`run_code` is the case that motivates the shape.** A cell is not a tool name;
 one `ipython` call may delete a tree, force-push, or open a socket. So the
-default patterns read the program text, and the row asks about *that cell*
-rather than about the transport — which is why matching is on arguments and not
-on the tool.
+classifier reads the program, follows a `subprocess.run(...)` back into the shell
+reader, and asks about *that cell* rather than about the transport.
 
 @module ph_stabilize.hitl
 """
@@ -32,26 +46,24 @@ from __future__ import annotations
 
 import re
 from functools import lru_cache
-from typing import Any, Literal
+from typing import Any, Final, Literal
 
 from pydantic import Field
 
 from ph.cordis import Context, plugin
 from ph.seams.approval import ApprovalDecisionName
 from ph.session import Session
-from ph.session.json import dumps
 from ph.tools.definition import Ask, ToolExecution
 from ph.tools.registry import RUN_CODE
 from ph.wire import WireModel
+from ph_stabilize.destructive import findings, strings_in
 
 __all__ = [
-    "DESTRUCTIVE_PATTERNS",
-    "PATTERN_SETS",
+    "DESTRUCTIVE",
     "ApprovalMode",
     "Config",
     "Rule",
     "apply",
-    "matches",
     "set_mode",
 ]
 
@@ -64,40 +76,13 @@ routine write from `rm -rf`. `yolo` asks about nothing, and is a thing a person
 turns on deliberately for a session they are watching.
 """
 
-DESTRUCTIVE_PATTERNS: tuple[str, ...] = (
-    r"\brm\s+-[a-zA-Z]*[rf]",
-    r"\bgit\s+push\b.*--force|\bgit\s+push\s+-f\b",
-    r"\bgit\s+reset\s+--hard\b",
-    r"\bDROP\s+(TABLE|DATABASE|SCHEMA)\b",
-    r"\bTRUNCATE\s+TABLE\b",
-    r"\bDELETE\s+FROM\b(?!.*\bWHERE\b)",
-    r"\bshutil\.rmtree\b",
-    r"\bos\.remove\b|\bos\.unlink\b|\bPath\([^)]*\)\.unlink\b",
-    r"\bmkfs\b|\bdd\s+if=",
-    r"\bchmod\s+-R\b|\bchown\s+-R\b",
-    r">\s*/dev/sd[a-z]",
-    r"\bcurl\b.*\|\s*(ba)?sh\b|\bwget\b.*\|\s*(ba)?sh\b",
-)
-"""What the shipped classifier looks for, from the port plan's own list.
+DESTRUCTIVE: Final = "destructive"
+"""The one shipped preset: the parsed classifier in `ph_stabilize.destructive`.
 
-Case-insensitive, matched against the *text* of a call's arguments. Deliberately
-a small set of things that are hard to undo rather than a general audit: a rule
-that fires on everything is one a person learns to approve without reading, and
-that is worse than no rule. `DELETE FROM` without a `WHERE` is the one lookahead,
-because the version with a clause is ordinary work.
-"""
-
-
-PATTERN_SETS: dict[str, tuple[str, ...]] = {"destructive": DESTRUCTIVE_PATTERNS}
-"""Pattern sets a profile can name instead of retyping.
-
-Reachable from a profile, not only from Python: **a security judgement with two
-homes is one that disagrees with itself**, and the first profile that wanted this
-list retyped a subset of it.
-
-A named set rather than `${...}` interpolation, because the loader's vocabulary
-is closed on purpose (I-8) and this is a *typed field on a row's config*, which
-is the mechanism a row already has for saying what it accepts.
+A name rather than a pattern list, because what it selects is no longer a list.
+The tables it dispatches to — `SHELL_RULES`, `SQL_STATEMENTS`, `PYTHON_CALLS` —
+are public there, so a deployment reads what it gates without this module
+re-exporting a copy that could drift from it.
 """
 
 
@@ -105,10 +90,10 @@ class Rule(WireModel):
     """When to ask about one tool."""
 
     preset: str = ""
-    """A shipped pattern set to use, by name — see `PATTERN_SETS`.
+    """A shipped classifier to run, by name — `destructive` is the only one.
 
-    Unioned with `when`, so a profile names the curated set and adds the
-    deployment-specific patterns beside it rather than choosing between them.
+    Unioned with `when`, so a profile takes the parsed classifier *and* adds its
+    own site-specific patterns rather than choosing between them.
     """
     when: tuple[str, ...] = ()
     """Patterns matched against the call's arguments. Empty means *always ask* —
@@ -124,20 +109,45 @@ class Rule(WireModel):
     description: str = ""
     """Extra words for the prompt, when the tool's name is not enough."""
 
-    def patterns(self) -> tuple[str, ...]:
-        """Everything this rule matches on. Empty still means *always ask*."""
-        named = PATTERN_SETS.get(self.preset, ()) if self.preset else ()
-        return (*named, *self.when)
+    def conditional(self) -> bool:
+        """Whether this rule has a condition at all.
+
+        A rule with neither a preset nor a pattern is the `true` form upstream
+        spells as a bare rule: *always ask*. Kept as the absence of a condition
+        rather than a second type, and asked here so `gate` does not have to
+        re-derive "did anything have a chance to match" from two fields.
+        """
+        return bool(self.preset or self.when)
+
+    def found_in(self, arguments: Any) -> list[str]:
+        """What this rule found in one call's arguments, in a person's words.
+
+        The preset's parser first, then the deployment's own patterns. Both read
+        the *decoded string leaves* — `strings_in` — rather than the arguments
+        rendered to JSON, which is what put a literal `\\n` between a command and
+        the line before it and silently unanchored every shipped pattern.
+        """
+        found = [str(one) for one in findings(arguments)] if self.preset == DESTRUCTIVE else []
+        if self.when:
+            found.extend(match for match in _matches(arguments, self.when) if match not in found)
+        return found
 
 
 class Config(WireModel):
     """Row config."""
 
     mode: ApprovalMode = "auto"
+    declared: Rule = Field(default_factory=lambda: Rule(preset="destructive"))
+    """What a tool earns by declaring `is_irreversible` with no rule naming it.
+
+    **The curated destructive set, not "ask every time."** `bash` and a code cell
+    declare because *any* command may reach past the tree, and asking on `ls` is
+    how a gate gets rubber-stamped; under `manual` a declaration does mean every
+    call. Configurable here — not a constant — so a deployment's extra patterns
+    and description are written once at the capability and survive a tool being
+    renamed, where a per-tool entry would silently stop applying."""
     interrupt_on: dict[str, Rule] = Field(default_factory=dict)
-    """Tool name → when to ask. Empty by default: layering this bundle must not
-    start prompting, because a harness that asks about everything on first run
-    teaches its user to stop reading the prompts."""
+    """Per-tool overrides, by name. Empty means every tool gets what it declares."""
 
 
 @lru_cache(maxsize=64)
@@ -151,27 +161,21 @@ def _compiled(patterns: tuple[str, ...]) -> tuple[re.Pattern[str], ...]:
     return tuple(re.compile(one, re.IGNORECASE | re.DOTALL) for one in patterns)
 
 
-def matches(arguments: Any, patterns: tuple[str, ...]) -> list[str]:
-    """What in this call's arguments a pattern matched — the *text*, not the rule.
+def _matches(arguments: Any, patterns: tuple[str, ...]) -> list[str]:
+    """What a deployment's own patterns matched — the *text*, not the rule.
 
-    The arguments are rendered to text and scanned, rather than any field being
-    named: `run_code` carries a program, `bash` a command, `write` a path and a
-    body, and a rule that had to know which key to read would be a rule per tool.
-
-    The canonical encoder, because `execution.arguments` is the *frozen* tree:
-    `json.dumps` cannot walk a `MappingProxyType`, so it would hand the whole
-    tree to `default=` and scan a Python repr — which contains the same
-    substrings, and would therefore have gone on matching while being wrong.
+    Each decoded string leaf is scanned separately rather than the arguments
+    rendered to JSON: the envelope's escaping is what turned a newline into two
+    characters and stopped `\\b` matching, and scanning leaves also means a
+    pattern cannot match across a field boundary that does not exist.
     """
-    try:
-        text = dumps(arguments)
-    except (TypeError, ValueError):
-        text = str(arguments)
     found: list[str] = []
     for pattern in _compiled(patterns):
-        hit = pattern.search(text)
-        if hit is not None and hit.group(0) not in found:
-            found.append(hit.group(0))
+        for text in strings_in(arguments):
+            hit = pattern.search(text)
+            if hit is not None and hit.group(0) not in found:
+                found.append(hit.group(0))
+                break
     return found
 
 
@@ -200,26 +204,23 @@ async def apply(ctx: Context, config: Config) -> None:
     """Ask a human before a configured call runs."""
 
     def rule_for(execution: ToolExecution) -> Rule | None:
-        """This call's rule, resolving the reserved transport name.
+        """This call's rule: a configured override, else what the tool declares.
 
-        A profile writes `run_code` because that is the *reserved* transport
-        name — unregisterable, unshadowable, unrestrictable — but the registry
-        renames the transport in place to whatever a presentation row calls it,
-        so under `rlm` the name reaching here is `ipython`. Keyed literally, the
-        Code Mode half of a deployment's human gate is **silently inert**: the
-        config parses, the tests pass, and nothing ever asks.
-
-        Resolved rather than requiring profiles to write the presentation name,
-        because that name is a *rendering* choice and this is a policy about the
-        transport itself — a deployment that renamed its presentation would
-        otherwise turn its own approval gate off without touching it.
+        A profile writes `run_code` because that is the *reserved* transport name,
+        but the registry renames the transport in place to whatever a presentation
+        row calls it — so a `run_code` entry is also honoured for the presented
+        name, and the lookup is scope-aware because an agent-shadowed registration
+        is a different tool with the same name.
         """
+        view = ctx.tools.view(execution.scope)
         rule = config.interrupt_on.get(execution.name)
+        if rule is None and execution.name == view.transport_name:
+            rule = config.interrupt_on.get(RUN_CODE)
         if rule is not None:
             return rule
-        scope = getattr(execution, "scope", None)
-        if execution.name == ctx.tools.view(scope).transport_name:
-            return config.interrupt_on.get(RUN_CODE)
+        definition = view.visible.get(execution.name)
+        if definition is not None and definition.irreversible(execution.arguments):
+            return config.declared
         return None
 
     async def gate(execution: ToolExecution, next_: Any) -> Any:
@@ -229,9 +230,9 @@ async def apply(ctx: Context, config: Config) -> None:
         mode = _mode(execution.session, config)
         if mode == "yolo":
             return await next_(execution)
-        patterns = rule.patterns()
-        matched = matches(execution.arguments, patterns) if patterns else []
-        if mode == "auto" and patterns and not matched:
+        conditional = rule.conditional()
+        matched = rule.found_in(execution.arguments) if conditional else []
+        if mode == "auto" and conditional and not matched:
             # A rule with a condition, in the posture that trusts it: nothing
             # matched, so this is the routine case the condition exists to let
             # through. `manual` asks anyway, which is what `manual` means.

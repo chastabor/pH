@@ -395,6 +395,12 @@ def _question(service: Any) -> Any:
     return service.register_answerer(lambda _question: None)
 
 
+def _spill_claim(service: Any) -> Any:
+    from ph.seams.spill import SpillClaim
+
+    return service.claim(SpillClaim(label="p612", event_type="p612/spilled", owners=lambda _s: ()))
+
+
 def _note(service: Any) -> Any:
     from ph.seams.compaction import CompactionNote
 
@@ -413,6 +419,7 @@ RECIPES: dict[str, tuple[str, Callable[[Any], Any]]] = {
     "ToolRuntime.register": ("tools", _tool),
     "ToolRuntime.restrict": ("tools", _restrict),
     "ApprovalService.register_answerer": ("approval", _approval),
+    "SpillStore.claim": ("spill_store", _spill_claim),
     "UserQuestionService.register_answerer": ("user_questions", _question),
     "CompactionSeam.note": ("compaction", _note),
 }
@@ -1393,6 +1400,12 @@ UNBOUND: dict[str, str] = {
     "_FrontEnd.drawn": "TUI presentation, outside the pipeline",
     "_FrontEnd.present": "TUI presentation, outside the pipeline",
     "_Layer.guards": "a monotonic policy answer, read on the deny path",
+    "SpillClaim.owners": "a policy answer read by the sweep; nothing to register",
+    "SpillClaim.owner": "a policy answer read by the sweep; nothing to register",
+    "SpillClaim.locator": "a policy answer read by the sweep; nothing to register",
+    # Unlike its sibling `is_concurrency_safe`, which the scheduler binds because it
+    # holds the `Running` pair from the same view; `hitl` holds only a definition.
+    "ToolDefinition.is_irreversible": "a policy answer over arguments; nothing to register",
     "_Screen.decide": "a policy answer; its own owner is what fs filters on",
     # --- factories and transports --------------------------------------------
     "_Layer.code_namespaces": "a factory, invoked to build bindings for a run",

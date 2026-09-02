@@ -341,6 +341,9 @@ async def apply(ctx: Context, config: Config) -> None:
                 render=lambda _args, value: text_content(_render_run(value)),
             ),
             execute=run_code,
+            # A cell is model-authored raw Python, and this is the tool a profile
+            # renames — so a name-keyed gate is inert exactly here (P6-16).
+            is_irreversible=True,
         )
     )
 
