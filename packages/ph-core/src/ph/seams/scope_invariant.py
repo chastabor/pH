@@ -56,15 +56,9 @@ __all__ = ["apply", "violations"]
 def violations(root: Context) -> list[str]:
     """Every retained-but-dead context reachable from `root`, and every broken link."""
     found: list[str] = []
-    seen: set[int] = set()
-    pending = [root]
-    while pending:
-        node = pending.pop()
-        if id(node) in seen:
-            # A cycle would make this walk hang rather than report, which is the
-            # one outcome a health check must not have.
-            continue
-        seen.add(id(node))
+    # `descendants` carries the cycle guard: a tampered tree is exactly what this
+    # is asked to report on, and a walk that hung there would take the report down.
+    for node in root.descendants():
         for child in node.children:
             if not child.active:
                 found.append(f"{node.path} still holds disposed scope {child.path}")
@@ -73,7 +67,6 @@ def violations(root: Context) -> list[str]:
                 # unreachable for disposal from the scope that lists it, so the
                 # unwind would skip it while the list keeps it alive.
                 found.append(f"{child.path} is listed by {node.path} but does not point back")
-            pending.append(child)
     return found
 
 

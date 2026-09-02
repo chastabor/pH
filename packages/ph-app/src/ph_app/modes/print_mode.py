@@ -14,6 +14,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from ph.cordis import ProfileLayer
 from ph.llm.types import text_of
 
 from ..runtime import prompted
@@ -30,7 +31,7 @@ class PrintResult:
 
 
 async def run_print(
-    documents: list[Path],
+    documents: list[ProfileLayer],
     prompt: str,
     *,
     provider: str,

@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from ph.agent.types import AgentOptions
-from ph.cordis import Context, Loader
+from ph.cordis import Context, Loader, ProfileLayer
 from ph.session import Session
 
 from .attach import ingest, prompt_message
@@ -32,7 +32,7 @@ class MountedRun:
     loader: Loader
 
 
-def compose(documents: Sequence[Path]) -> list[tuple[str, Any]]:
+def compose(documents: Sequence[ProfileLayer]) -> list[tuple[str, Any]]:
     """Read and parse the profile once, for a caller that mounts it repeatedly.
 
     The daemon mounts one `Context` per root and the YAML never changes between
@@ -44,7 +44,7 @@ def compose(documents: Sequence[Path]) -> list[tuple[str, Any]]:
 
 @asynccontextmanager
 async def mounted(
-    documents: Sequence[Path], *, parsed: Sequence[tuple[str, Any]] | None = None
+    documents: Sequence[ProfileLayer], *, parsed: Sequence[tuple[str, Any]] | None = None
 ) -> AsyncIterator[MountedRun]:
     """Compose a profile, mount it, and unwind the whole tree on exit.
 
@@ -68,7 +68,7 @@ async def mounted(
 
 @asynccontextmanager
 async def prompted(
-    documents: Sequence[Path],
+    documents: Sequence[ProfileLayer],
     prompt: str,
     *,
     provider: str,

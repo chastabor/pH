@@ -314,7 +314,6 @@ NOT_A_LIFETIME: dict[str, str] = {
     # cordis dispatch. Found only once the walker covered the whole `ph` tree
     # rather than `ph.seams` plus two hand-written names — six methods that a
     # narrower walk had made invisible.
-    "Context.bail": "which scope's listeners to dispatch to",
     "Context._hooks": "which scope's listeners to dispatch to",
     "Context.emit": "which scope's listeners to dispatch to",
     "Context.parallel": "which scope's listeners to dispatch to",

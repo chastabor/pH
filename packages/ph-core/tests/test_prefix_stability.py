@@ -28,12 +28,10 @@ from ph.agent.types import AgentOptions
 from ph.llm.types import GenerateOptions
 from ph.system_prompt.assembly import PromptContext, PromptSection
 from ph.testing import FAKE_OPTIONS as FAKE
-from ph.testing import ReplayAdapter, recorded_steps
+from ph.testing import REPLAY_ROW, ReplayAdapter, recorded_steps, shared_prefix
 from ph.tools import ToolOutput, define_tool, text_content
 
 pytestmark = pytest.mark.anyio
-
-REPLAY_ROW = {"insert": [{"id": "llm-replay", "name": "llm-replay"}]}
 
 
 def _shape(message: Any) -> dict[str, Any]:
@@ -56,6 +54,12 @@ def _shape(message: Any) -> dict[str, Any]:
 
 
 def _assert_prefix_stable(requests: list[GenerateOptions]) -> None:
+    """Every request extends the last in full — `shared_prefix` is the whole predecessor.
+
+    `shared_prefix` is A12's definition of a hit, shared with the P6-03
+    benchmark that prices it, so the structural test and the priced one cannot
+    come to disagree about what a hit is.
+    """
     for index in range(1, len(requests)):
         previous, current = requests[index - 1], requests[index]
         assert current.system == previous.system, (
@@ -63,13 +67,10 @@ def _assert_prefix_stable(requests: list[GenerateOptions]) -> None:
             "before it is invalidated"
         )
         assert len(current.messages) >= len(previous.messages)
-        for position, (before, after) in enumerate(
-            zip(previous.messages, current.messages, strict=False)
-        ):
-            assert before.id == after.id, (
-                f"request {index} rewrote history at position {position}: a cached "
-                "prefix only survives if earlier messages stay put"
-            )
+        assert shared_prefix(previous, current) == len(previous.messages), (
+            f"request {index} rewrote history: a cached prefix only survives if earlier "
+            "messages stay put"
+        )
 
 
 async def _record(ctx: Any, prompts: list[str]) -> Any:

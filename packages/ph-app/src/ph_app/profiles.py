@@ -9,13 +9,16 @@ layered on top, so a deployment overrides a row by id without forking a bundle.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated, TypeAlias
+from typing import Annotated, Any, TypeAlias
 
 import typer
 
 from ph.bundles import BASE, HEADLESS, resolve_bundle
+from ph.cordis import LoaderError, ProfileLayer
+from ph.cordis.loader import safe_yaml_load
 from ph.paths import resolve_roots
 
 from .console import fail
@@ -147,15 +150,68 @@ the cycle. This module already owns what a profile *is*; the flag that names one
 belongs beside it. `console.py` was carved out for the same reason and states it.
 """
 
+PatchOption: TypeAlias = Annotated[
+    list[str],
+    typer.Option(
+        "--patch",
+        help="A profile patch as YAML — `{id: fs, config: {root: /tmp/x}}`, "
+        "`{id: tool-todo, disabled: false}`, `{id: hitl, remove: true}`, or "
+        "`{insert: [...]}`. Repeatable; applied last, as the `cli` layer.",
+    ),
+]
+"""dsh's third layer — bundle, profile, *patch from the command line* — which pH
+had only as a file under `$PH_HOME/profiles/`. Same grammar as a profile
+document, deliberately: a second spelling for "change this row" is how the two
+come to accept different things. Parsed by `safe_yaml_load`, so the code-tag
+refusal that guards a file guards the flag."""
 
-def documents_or_exit(profile: str) -> list[Path]:
-    """The profile's documents, or exit 2 saying which names exist.
+
+CLI_LAYER = "cli"
+"""The layer a `--patch` composes under — what `--dump-config` and `ph doctor`'s
+topology print as its provenance."""
+
+
+def documents_or_exit(profile: str, patches: Sequence[str] = ()) -> list[ProfileLayer]:
+    """The profile's layers plus any `--patch` entries, or exit 2 saying why not.
 
     The refusal is the command's, not the resolver's: `resolve_profile` raises a
     `ValueError` that already names the available profiles, and every caller
-    wants that sentence on stderr under the same exit code.
+    wants that sentence on stderr under the same exit code. A `--patch` that will
+    not parse, or is a scalar, is refused here the same way; everything else
+    about its shape — unknown keys, a row id that does not exist, a bad
+    `isolate:` — is the loader's grammar, refused by the loader, and mapped to
+    the same exit code where the loader runs.
     """
     try:
-        return resolve_profile(profile)
+        layers: list[ProfileLayer] = list(resolve_profile(profile))
     except ValueError as error:
         fail(f"[red]{error}[/red]", code=2, cause=error)
+    if patches:
+        entries = [entry for text in patches for entry in _patch_entries(text)]
+        layers.append((CLI_LAYER, entries))
+    return layers
+
+
+def _patch_entries(text: str) -> list[Any]:
+    """One `--patch` value as the entries of a profile document.
+
+    A mapping is one entry; a list is spliced in as several. No shape check
+    beyond that, deliberately: `compose_rows` already decides row-versus-patch
+    per entry and refuses every malformed one, and a second checker here is the
+    grammar written twice. A first draft inferred `insert:` around a list whose
+    entries all carried `name` — a rule the loader already applies to a bare
+    row in any document — and returned the un-inferred case as a nested list,
+    which the loader could only refuse.
+    """
+    try:
+        entry = safe_yaml_load(text, origin="--patch")
+    except LoaderError as error:
+        fail(f"[red]--patch {text!r}: {error}[/red]", code=2, cause=error)
+    if isinstance(entry, list):
+        return entry
+    if isinstance(entry, dict):
+        return [entry]
+    fail(
+        f"[red]--patch {text!r}: expected a mapping like `{{id: <row>, config: {{...}}}}`[/red]",
+        code=2,
+    )

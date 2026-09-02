@@ -361,6 +361,53 @@ async def test_a_child_reaching_past_its_ancestor_trips_the_skill_invariant(
     assert any("a narrowing widened" in one and "write-code" in one for one in found), found
 
 
+# ------------------------------------------------------ dead cache keys (I2) --
+
+
+@pytest.mark.parametrize("registry", ["tools", "skills"])
+async def test_a_disposed_scope_is_not_retained_as_a_cache_key(registry: str) -> None:
+    """The leak the two chain-keyed caches had, and the one nothing could observe.
+
+    Both memos key on `tuple(target.isolation_chain())`, which holds its scopes
+    **strongly** — so a disposed agent's `Context` was retained by its own cache
+    key until something invalidated the registry, which a deployment that has
+    stopped registering never does. Measured before the fix: 500 sequential
+    agents left 500 entries in each table, ~2 KiB apiece, unbounded; 2000 agents
+    retained 4.0 MiB. After: 9 KiB.
+
+    **`scope-unwind` cannot see this.** That poll walks live children from the
+    root, and these scopes are gone from the tree — properly, since P6-02 made
+    leaving it a guarantee. The retention is on the registry side, which is why
+    the fix is a sweep on the miss path rather than another row in the report.
+
+    Both registries are asserted through one test because the property belongs to
+    the *key*, which is the only thing they share — their values, folds and
+    invalidation side effects all differ.
+    """
+    if registry == "tools":
+        root, service = tool_runtime()
+        service.register(simple_tool("read"))
+        fill, table = service.view, service._views
+    else:
+        root, service = skill_service()
+        service.register(skill("read-code"))
+        fill, table = service.reach, service._reach
+
+    kept = root.scope("kept", module="test")
+    fill(kept)
+    for index in range(20):
+        agent = root.scope(f"agent:{index}", module="test")
+        fill(agent)
+        await agent.dispose()
+    fill(root.scope("fresh", module="test"))
+
+    assert all(key is None or key.active for chain in table for key in chain), (
+        f"a disposed scope is still a {registry} cache key"
+    )
+    # The live scope's entry survives: this is a sweep of the dead, not a flush.
+    assert tuple(kept.isolation_chain()) in table, "sweeping dropped a live scope's entry"
+
+
 # --------------------------------------------------------------------- scope --
 
 
@@ -430,21 +477,34 @@ async def test_the_rows_reach_the_report_through_the_real_mount(mount: Any) -> N
     assert all(rows[name].startswith("holds ·") for name in pollable), rows
 
 
-async def test_a_row_whose_subject_is_gone_reports_nothing_rather_than_holds(
-    mount: Any,
+@pytest.mark.parametrize(
+    ("row", "service", "invariant"),
+    [
+        ("skills-invariant", "skills", "skill-reach-cache"),
+        ("tools-invariant", "tools", "tool-view-cache"),
+    ],
+)
+async def test_a_row_whose_service_is_gone_reports_nothing_rather_than_holds(
+    mount: Any, row: str, service: str, invariant: str
 ) -> None:
     """`inject` is what makes "absent rather than assumed" true of a *service*.
 
-    Dropping the `skills` row leaves `skills-invariant` with nothing to check.
-    Guarding on `ctx.get("skills") is None` and returning `[]` would print
-    `skill-reach-cache: holds` about a registry that is not there — the lie
-    shaped like reassurance this seam's two-kinds distinction exists to prevent.
-    An unmet `inject` key means the row never activates, so the invariant leaves
-    the report with the thing it was about.
-    """
-    ctx = await mount({"id": "skills", "remove": True})
+    Each of these rows checks a property *of* a registry, so dropping the
+    registry leaves the row with nothing to check. Guarding on
+    `ctx.get(...) is None` and returning `[]` — which all three did — printed
+    `holds` about a service that is not there: the lie shaped like reassurance
+    that this seam's two-kinds distinction exists to prevent, given in the
+    deployment where it is least earned. An unmet `inject` key means the row
+    never activates, so the invariant leaves the report along with its subject.
 
-    assert "skill-reach-cache" not in report_section(ctx, "Invariants")
+    `session-invariant` gained the same `inject` and is not parametrised here:
+    removing the `session` row makes the profile itself incoherent — three other
+    rows require `sessions` — so its overstatement was unreachable rather than
+    latent. The guard is consistent, not load-bearing.
+    """
+    ctx = await mount({"id": service, "remove": True})
+
+    assert invariant not in report_section(ctx, "Invariants")
 
 
 async def test_an_unmounted_invariant_is_absent_rather_than_assumed(mount: Any) -> None:

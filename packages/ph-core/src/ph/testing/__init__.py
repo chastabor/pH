@@ -27,7 +27,15 @@ from .builders import (
 from .diagnostics import report_section
 from .fake_adapter import FakeAdapter, text_script
 from .git import WORKTREE_ROWS, git, git_repo, needs_git, worktree_agent
-from .replay_adapter import RecordedStep, ReplayAdapter, recorded_steps
+from .replay_adapter import (
+    REPLAY_ROW,
+    RecordedStep,
+    ReplayAdapter,
+    recorded_steps,
+    shared_prefix,
+    text_chunks,
+    tool_call_chunks,
+)
 from .skills import skill, write_skill
 from .stub_runtime import StubCodeRuntime
 from .stub_sandbox import StubSandboxProvider
@@ -36,6 +44,7 @@ from .stub_workspace import StubWorkspaceProvider, acquire_for_role
 
 __all__ = [
     "FAKE_OPTIONS",
+    "REPLAY_ROW",
     "WORKTREE_ROWS",
     "FakeAdapter",
     "RecordedStep",
@@ -57,11 +66,14 @@ __all__ = [
     "reference_fork",
     "report_section",
     "run_tool",
+    "shared_prefix",
     "simple_tool",
     "skill",
     "skill_service",
     "stored_log",
+    "text_chunks",
     "text_script",
+    "tool_call_chunks",
     "tool_result_payload",
     "tool_runtime",
     "user_payload",

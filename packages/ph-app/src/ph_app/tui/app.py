@@ -33,6 +33,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding, BindingType
 from textual.containers import Horizontal, Vertical
 
+from ph.cordis import ProfileLayer
 from ph.paths import resolve_roots
 from ph.seams.approval import ApprovalAnswer, ApprovalRequest
 from ph.seams.permission_presets import PRESETS
@@ -94,7 +95,7 @@ class PHTuiApp(App[str | None]):
 
     def __init__(
         self,
-        documents: Sequence[Path],
+        documents: Sequence[ProfileLayer],
         *,
         provider: str = "fake",
         model: str = "fake-1",
@@ -567,7 +568,7 @@ class PHTuiApp(App[str | None]):
 
 
 async def run_tui(
-    documents: Sequence[Path],
+    documents: Sequence[ProfileLayer],
     *,
     provider: str,
     model: str,

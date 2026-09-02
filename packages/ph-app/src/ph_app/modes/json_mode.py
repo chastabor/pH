@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TextIO
 
-from ph.cordis import Context
+from ph.cordis import Context, ProfileLayer
 from ph.session import Session, SessionEvent, dumps
 
 from ..runtime import prompted
@@ -30,7 +30,7 @@ class JsonResult:
 
 
 async def run_json(
-    documents: list[Path],
+    documents: list[ProfileLayer],
     prompt: str,
     *,
     provider: str,

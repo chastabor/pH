@@ -38,7 +38,7 @@ from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStre
 from filelock import FileLock, Timeout
 
 from ph.agent.types import AgentOptions
-from ph.cordis import Context
+from ph.cordis import Context, ProfileLayer
 from ph.llm.types import create_user_message
 from ph.paths import resolve_roots
 from ph.persistence import resume_session, resumption_of
@@ -404,7 +404,7 @@ class Root:
 class Supervisor:
     """Every root this daemon is running, and the task group they live in."""
 
-    documents: Sequence[Path]
+    documents: Sequence[ProfileLayer]
     tasks: TaskGroup
     provider: str = "fake"
     model: str = "fake-1"

@@ -24,15 +24,18 @@ __all__ = ["apply", "violations"]
 
 def violations(ctx: Context) -> list[str]:
     """Every live session whose projections disagree with its log."""
-    sessions = ctx.get("sessions")
-    if sessions is None:
-        return []
-    return [detail for session in sessions.list() for detail in session.stale()]
+    return [detail for session in ctx.sessions.list() for detail in session.stale()]
 
 
-@plugin("session-invariant")
+@plugin("session-invariant", inject=["sessions"])
 async def apply(ctx: Context, _config: Any) -> None:
-    """Declare the session half of I6, pollable."""
+    """Declare the session half of I6, pollable.
+
+    `inject=["sessions"]` for the reason `skills-invariant` states: a deployment
+    with no session store has nothing for this to be true *of*, and reporting it
+    as holding would be an overstatement about the one thing the log is supposed
+    to be the source of.
+    """
     contribute(
         ctx,
         Invariant(

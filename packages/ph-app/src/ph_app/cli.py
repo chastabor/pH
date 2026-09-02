@@ -34,7 +34,7 @@ import typer
 import yaml
 from rich.table import Table
 
-from ph.cordis import Loader, import_plugin_modules
+from ph.cordis import Loader, LoaderError, ProfileLayer, import_plugin_modules
 from ph.cordis.catalog import config_catalog
 from ph.cordis.events import events as event_registry
 from ph.lingering import lifetime
@@ -48,6 +48,7 @@ from .daemon.recovery import PASSIVATE_AFTER
 from .modes import run_json, run_print, run_rpc, run_transcript
 from .profiles import (
     DEFAULT_PROFILE,
+    PatchOption,
     ProfileOption,
     available_profiles,
     documents_or_exit,
@@ -119,16 +120,28 @@ def default(
         str | None, typer.Option("--resume", help="Session id to reopen (tui only).")
     ] = None,
     dump_config: Annotated[
-        bool, typer.Option("--dump-config", help="Print the composed rows and exit.")
+        bool,
+        typer.Option(
+            "--dump-config",
+            help="Print the composed rows and exit — the mount as written; "
+            "`ph doctor` shows what activated.",
+        ),
     ] = False,
+    patch: PatchOption = [],  # noqa: B006 - typer builds the list per invocation
 ) -> None:
     """Run a prompt, or dump the composed configuration."""
     if ctx.invoked_subcommand is not None:
         return
-    documents = documents_or_exit(profile)
+    documents = documents_or_exit(profile, patch)
 
     if dump_config:
-        loader = Loader.from_paths(documents)
+        # The loader's grammar is the one grammar for a `--patch` too, so its
+        # refusal is the command's refusal: exit 2, the sentence it wrote, and
+        # no traceback for a row id that does not exist.
+        try:
+            loader = Loader.from_paths(documents)
+        except LoaderError as error:
+            fail(f"[red]{error}[/red]", code=2, cause=error)
         emit(yaml.safe_dump(loader.dump(), sort_keys=False, default_flow_style=False).rstrip())
         return
 
@@ -183,10 +196,11 @@ def default(
     )
     try:
         outcome = anyio.run(route)
-    except (AttachmentUnavailable, OSError) as error:
+    except (AttachmentUnavailable, LoaderError, OSError) as error:
         # A file that cannot be read fails the *command*: `prompted` ingests
         # before the agent exists, so nothing was logged and there is no partial
-        # turn to explain.
+        # turn to explain. A profile that will not compose — a malformed
+        # `--patch` included — is the same kind of failure, one step earlier.
         fail(f"[red]{error}[/red]", code=2, cause=error)
 
     if mode == "json":
@@ -201,7 +215,7 @@ def default(
     )
 
 
-async def _note_consumers(documents: list[Path]) -> None:
+async def _note_consumers(documents: list[ProfileLayer]) -> None:
     """Mount, and let every row's `ctx.on` register itself into the registry.
 
     Nothing is read back here: `note_consumer` writes into the process-wide
@@ -214,7 +228,7 @@ async def _note_consumers(documents: list[Path]) -> None:
         return
 
 
-async def _report(documents: list[Path]) -> list[tuple[str, list[tuple[str, str]]]]:
+async def _report(documents: list[ProfileLayer]) -> list[tuple[str, list[tuple[str, str]]]]:
     """Compose the profile and ask every row what it has to say (P4-12).
 
     Mounting is the point. Doctor answered from `resolve_roots()` alone until
@@ -226,11 +240,20 @@ async def _report(documents: list[Path]) -> list[tuple[str, list[tuple[str, str]
     """
     async with mounted(documents) as run:
         registry = run.ctx.get("diagnostics")
-        return [] if registry is None else registry.report()
+        sections = [] if registry is None else registry.report()
+        # The loader's own account of the mount, after every row's. Not a
+        # `ctx.diagnostics` contribution, because it is *about* the rows rather
+        # than from one of them — the loader is the only thing that knows which
+        # activated — and it needs the profile, so it is not the profile-free
+        # list either. A third source, named as such (see `doctor`).
+        return [*sections, ("Topology", run.loader.topology(run.ctx))]
 
 
 @app.command()
-def doctor(profile: ProfileOption = DEFAULT_PROFILE) -> None:
+def doctor(
+    profile: ProfileOption = DEFAULT_PROFILE,
+    patch: PatchOption = [],  # noqa: B006 - typer builds the list per invocation
+) -> None:
     """Report the path roots, then mount a profile and report what it composed."""
     try:
         roots = resolve_roots()
@@ -283,7 +306,7 @@ def doctor(profile: ProfileOption = DEFAULT_PROFILE) -> None:
     # Resolved *outside* the catch below, and it matters: `typer.Exit` subclasses
     # `RuntimeError`, so an unknown profile raised inside it would be caught,
     # reported as "does not mount", and re-raised with the wrong exit code.
-    documents = documents_or_exit(profile)
+    documents = documents_or_exit(profile, patch)
     try:
         sections = anyio.run(partial(_report, documents))
     except typer.Exit:
@@ -396,6 +419,7 @@ def events(
     as_json: Annotated[bool, typer.Option("--json", help="Emit JSON.")] = False,
     type_: TypeOption = [],  # noqa: B006 - typer builds the list per invocation
     profile: ProfileOption = DEFAULT_PROFILE,
+    patch: PatchOption = [],  # noqa: B006 - typer builds the list per invocation
 ) -> None:
     """Print the event producer/consumer matrix.
 
@@ -422,7 +446,7 @@ def events(
     # broadly around it turned "no such profile" into a full matrix and exit 0 —
     # the answer that looks most like success for the input most likely to be a
     # typo.
-    documents = documents_or_exit(profile)
+    documents = documents_or_exit(profile, patch)
     try:
         anyio.run(partial(_note_consumers, documents))
     except Exception as error:

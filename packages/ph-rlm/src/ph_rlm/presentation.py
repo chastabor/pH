@@ -69,7 +69,7 @@ statement of fact. The correction is the doctrine's job (`ph_rlm.prompt`), which
 states plainly that there are no magics and names `await tools.bash(...)`; the
 conformance suite asserts the doctrine and the runtime agree. Do not "fix" this
 string to match — changing it changes what the model was trained against, and
-`test_presentation.py` pins it verbatim for that reason."""
+it is pinned verbatim for that reason."""
 
 
 class IpythonToolDetails(WireModel):

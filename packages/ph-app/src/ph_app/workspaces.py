@@ -29,13 +29,13 @@ from __future__ import annotations
 
 from collections import Counter
 from functools import partial
-from pathlib import Path
 from time import time
 from typing import Annotated
 
 import anyio
 import typer
 
+from ph.cordis import ProfileLayer
 from ph.seams.workspace import Collectable, stored_survivors
 
 from .console import emit, fail
@@ -74,7 +74,9 @@ def _rows(collectables: list[Collectable]) -> list[str]:
     ]
 
 
-async def _collect(documents: list[Path], *, older_than: float, remove: bool, family: str) -> str:
+async def _collect(
+    documents: list[ProfileLayer], *, older_than: float, remove: bool, family: str
+) -> str:
     """Mount, fold every stored session, and either report or collect.
 
     Mounting is not optional and is the interesting cost: the *provider* is what

@@ -5,7 +5,7 @@ once, exactly as in dsh:
 
 * a **repository of services** — a plugin claims `ctx.<key>` with `provide()`
   and every other plugin finds it by key rather than by import;
-* an **event bus** — `emit` / `parallel` / `serial` / `bail` / `waterfall`,
+* an **event bus** — `emit` / `parallel` / `serial` / `waterfall`,
   with the dispatch mode fixed by the declaration (see `ph.cordis.events`);
 * a **disposal scope** — every registration and every acquired artifact is an
   effect that unwinds when the scope disposes (invariant I2).
@@ -39,7 +39,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
-from collections.abc import Awaitable, Callable, Iterator, Sequence
+from collections.abc import Awaitable, Callable, Iterator, MutableMapping, Sequence
 from contextlib import suppress
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
@@ -80,7 +80,7 @@ async def maybe_await(value: Any) -> Any:
 
 
 def is_bailed(value: Any) -> bool:
-    """Whether a listener's return value stops a `serial`/`bail` dispatch.
+    """Whether a listener's return value stops a `serial` dispatch.
 
     Ported verbatim from cordis: anything but `None` and `False` bails. `0` and
     `""` bail, deliberately — a decision object is never falsy by accident, and
@@ -175,7 +175,16 @@ class _Dependent:
     disposed: bool = False
 
     def ready(self) -> bool:
-        return self.ctx.active and all(self.ctx.has(key) for key in self.keys)
+        return self.ctx.active and not self.missing()
+
+    def missing(self) -> list[str]:
+        """The inject keys not yet provided at this dependent's own scope.
+
+        One predicate for `ready`, for the loader's refusal, and for `ph doctor`'s
+        `waiting on …` — asked against `self.ctx`, which for a private copy in a
+        realm is the realm. Two callers had spelled it against two different
+        scopes."""
+        return [key for key in self.keys if not self.ctx.has(key)]
 
     def deactivate(self) -> Awaitable[None] | None:
         """Drop the activation scope, unwinding everything it registered."""
@@ -235,6 +244,16 @@ class ForkScope:
         return self._dependent.active
 
     @property
+    def injects(self) -> tuple[str, ...]:
+        """The service keys this plugin waits on — what `Loader.topology` names."""
+        return self._spec.inject
+
+    @property
+    def waiting_on(self) -> list[str]:
+        """The inject keys still unmet, at the scope that would have to provide them."""
+        return self._dependent.missing()
+
+    @property
     def ctx(self) -> Context | None:
         """The activation scope while the plugin is active, else `None`."""
         return self._dependent.scope
@@ -291,6 +310,42 @@ the running binding rather than a stated value: a scope is what a registration i
 an *effect of* and what it is visible *to* (P6-12's two questions). `DEPLOYMENT`
 is neither — there is nothing for it to unwind with.
 """
+
+
+def drop_dead_chains(cache: MutableMapping[tuple[Context | None, ...], Any]) -> None:
+    """Delete every memo entry whose innermost scope has been disposed (I2).
+
+    A chain-keyed cache holds its keys **strongly**, so an entry outlives the
+    scope it describes: an agent is disposed, its `Context` is retained by the
+    key tuple, and nothing drops it until the registry's next invalidation —
+    which for a deployment that has stopped registering is never. Measured at
+    ~2 KiB per agent and unbounded: 500 agents through a daemon leave 500 entries
+    in each of the two caches.
+
+    **Only `chain[0]` is asked**, not every key: the innermost scope is the one
+    that dies, and `dispose` unwinds children inside the parent's own dispose, so
+    an ancestor cannot be dead while its descendant is live except for the
+    moment mid-unwind — and that entry is caught on the next miss. Scanning the
+    whole chain cost 4x more to answer the same question.
+
+    **Swept rather than unwound, and the alternative is real.** `Context` has a
+    `__weakref__` slot, so an eviction disposer per scope with a `WeakSet` of
+    hooked scopes would retain nothing and need no re-registration — it is not
+    ruled out by the mechanics. The sweep is chosen because it is smaller: no
+    per-registry hook table, no disposer per scope, and `SkillService._changed`
+    already drops dead scopes out of `_restrictions` the same way. A cache is a
+    thing legitimately allowed to forget.
+
+    Called on a **miss**, which keeps it O(live scopes): a miss is the only moment
+    the table grows, and sweeping then keeps the count proportional to what is
+    alive rather than to what has ever run.
+
+    Here, beside `chain_label` and `isolation_chain`, because the key's shape is
+    the only thing the tool-view and skill-reach caches share.
+    """
+    dead = [chain for chain in cache if chain and chain[0] is not None and not chain[0].active]
+    for chain in dead:
+        del cache[chain]
 
 
 def chain_label(chain: Sequence[Context | None]) -> str:
@@ -693,6 +748,24 @@ class Context:
         *_, last = self._chain()
         return last
 
+    def descendants(self) -> Iterator[Context]:
+        """Every scope beneath this one, itself first, with a cycle guard.
+
+        The one tree walk, for `Loader.topology` and `scope_invariant` alike. The
+        guard matters for the second caller: a tampered tree is exactly what a
+        health check is asked to report on, and a walk that hung there would
+        take `ph doctor` down with it.
+        """
+        seen: set[int] = set()
+        pending = [self]
+        while pending:
+            node = pending.pop()
+            if id(node) in seen:
+                continue
+            seen.add(id(node))
+            yield node
+            pending.extend(node.children)
+
     @property
     def path(self) -> str:
         return "/".join(reversed([node._label for node in self._chain()]))
@@ -1045,8 +1118,8 @@ class Context:
         callables — hand-rolling `for cb in ctx.collect(e)` is a dispatch with no
         binding.
 
-        **Deliberately a list, not a generator.** `bail` and `serial` return out of the
-        loop early, so a generator holding a binding across its `yield` would be closed
+        **Deliberately a list, not a generator.** `serial` returns out of the loop
+        early, so a generator holding a binding across its `yield` would be closed
         by the collector on some other task and release the token in the wrong context.
         """
         hooks = self._runtime.hooks.get(event)
@@ -1081,15 +1154,6 @@ class Context:
                 # `_invoke` already wrapped it, so the task binds when the body
                 # runs rather than inheriting whatever was current at `_spawn`.
                 self._spawn(result, event)
-
-    def bail(self, event: str, *args: Any, scope: Context | None = None) -> Any:
-        """Dispatch synchronously until a listener returns a bail value."""
-        event_registry.check(event, "bail")
-        for hook in self._hooks(event, scope=scope):
-            result = _invoke(hook, *args)
-            if is_bailed(result):
-                return result
-        return None
 
     async def serial(self, event: str, *args: Any, scope: Context | None = None) -> Any:
         """Await listeners in registration order until one bails."""

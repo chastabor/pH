@@ -19,9 +19,6 @@ Invariants this row holds:
 * **`access` does not widen the tier.** A caller asking `write` gets the kind too,
   with `repo_writable=False` saying it did not get what it asked for.
 
-Why it is gated at registration rather than at acquire, and why on `profile/mounted`
-rather than in `apply`: `tests/test_workspace_scratch.py`.
-
 @module ph.seams.workspace_scratch
 """
 

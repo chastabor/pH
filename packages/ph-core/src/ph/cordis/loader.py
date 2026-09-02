@@ -135,6 +135,16 @@ class Row:
     disabled: bool = False
     layer: str = ""
     """Which profile document contributed this row's current config."""
+    isolate: dict[str, Any] | None = None
+    """Row ids this row wants private copies of, each with a config override or `None`.
+
+    dsh's `isolate.fs`: an isolated realm for one service. Here it is spelled
+    against **row ids** rather than service keys, because a row does not declare
+    what it provides — `provide` is a runtime call — so `fs` names the row whose
+    `apply` provides `ctx.fs`, and the loader mounts a second copy of that row
+    inside this row's realm. For the seams the two spellings coincide by
+    convention (`fs` → `ctx.fs`, `tools` → `ctx.tools`); where they do not, the
+    row id is the one that can be checked at compose time."""
 
     def to_dump(self) -> dict[str, Any]:
         dump: dict[str, Any] = {"id": self.id, "name": self.name}
@@ -142,6 +152,10 @@ class Row:
             dump["config"] = self.config
         if self.disabled:
             dump["disabled"] = True
+        if self.isolate is not None:
+            # Always the mapping: `isolate: [fs]` dumps as `{fs: null}`, which
+            # `_as_isolate` reads back to the same thing. One dump shape.
+            dump["isolate"] = dict(self.isolate)
         dump["layer"] = self.layer
         return dump
 
@@ -217,7 +231,7 @@ def _as_rows(entries: Iterable[Any], layer: str) -> list[Row]:
             raise LoaderError(f"{layer}: a row must be a mapping, got {entry!r}")
         if "name" not in entry:
             raise LoaderError(f"{layer}: row {entry!r} has no name")
-        unknown = set(entry) - {"id", "name", "config", "disabled"}
+        unknown = set(entry) - {"id", "name", "config", "disabled", "isolate"}
         if unknown:
             raise LoaderError(f"{layer}: row {entry!r} has unknown keys {sorted(unknown)}")
         rows.append(
@@ -227,14 +241,37 @@ def _as_rows(entries: Iterable[Any], layer: str) -> list[Row]:
                 config=entry.get("config"),
                 disabled=evaluate_predicate(entry.get("disabled")),
                 layer=layer,
+                isolate=_as_isolate(entry.get("isolate"), layer),
             )
         )
     return rows
 
 
+def _as_isolate(value: Any, layer: str) -> dict[str, Any] | None:
+    """`isolate:` as a list of row ids, or a mapping of row id to config override.
+
+    Two spellings for one fact, and both normalise to the mapping: `[fs]` is
+    "a private `fs` with the row's own config", `{fs: {root: /tmp/x}}` is "a
+    private `fs` rooted somewhere else" — which is the case the feature exists
+    for, since a private copy with identical config is a second instance and
+    nothing more.
+    """
+    if value is None:
+        return None
+    if isinstance(value, list):
+        if not all(isinstance(one, str) for one in value):
+            raise LoaderError(f"{layer}: isolate: must list row ids, got {value!r}")
+        return dict.fromkeys(value)
+    if isinstance(value, dict):
+        if not all(isinstance(one, str) for one in value):
+            raise LoaderError(f"{layer}: isolate: keys must be row ids, got {value!r}")
+        return dict(value)
+    raise LoaderError(f"{layer}: isolate: must be a list of row ids or a mapping, got {value!r}")
+
+
 def _apply_patch(rows: list[Row], patch: Mapping[str, Any], layer: str) -> list[Row]:
     """Apply one patch entry to the composed row list."""
-    unknown = set(patch) - {"insert", "id", "config", "disabled", "remove"}
+    unknown = set(patch) - {"insert", "id", "config", "disabled", "remove", "isolate"}
     if unknown:
         raise LoaderError(f"{layer}: patch has unknown keys {sorted(unknown)}")
     if "insert" in patch:
@@ -267,9 +304,36 @@ def _apply_patch(rows: list[Row], patch: Mapping[str, Any], layer: str) -> list[
             updated = replace(updated, config=patch["config"], layer=layer)
         if "disabled" in patch:
             updated = replace(updated, disabled=evaluate_predicate(patch["disabled"]), layer=layer)
+        if "isolate" in patch:
+            updated = replace(updated, isolate=_as_isolate(patch["isolate"], layer), layer=layer)
         rows[index] = updated
         return rows
     raise LoaderError(f'{layer}: no row with id "{row_id}" to patch')
+
+
+def _check_isolation(rows: Sequence[Row]) -> None:
+    """Every `isolate:` names a row that exists, is enabled, and is not itself.
+
+    Checked once the layers are composed rather than at mount, so `--dump-config`
+    refuses the same profile `ph` would — a private copy of a row a later layer
+    removed is a mount that fails after the person has read a dump that looked
+    fine.
+    """
+    by_id = {row.id: row for row in rows}
+    for row in rows:
+        for source_id in row.isolate or ():
+            source = by_id.get(source_id)
+            if source is None:
+                raise LoaderError(
+                    f'{row.layer}: row "{row.id}" isolates "{source_id}", which is not a row'
+                )
+            if source.id == row.id:
+                raise LoaderError(f'{row.layer}: row "{row.id}" cannot isolate itself')
+            if source.disabled:
+                raise LoaderError(
+                    f'{row.layer}: row "{row.id}" isolates "{source_id}", which is disabled — '
+                    "a private copy of a row that is off would be the only copy running"
+                )
 
 
 def compose_rows(documents: Sequence[tuple[str, Any]]) -> list[Row]:
@@ -291,13 +355,25 @@ def compose_rows(documents: Sequence[tuple[str, Any]]) -> list[Row]:
                 rows = _apply_patch(rows, entry, layer)
             else:
                 rows.extend(_as_rows([entry], layer))
+    _check_isolation(rows)
     return rows
 
 
-def load_profile_documents(paths: Sequence[Path]) -> list[tuple[str, Any]]:
+ProfileLayer = Path | tuple[str, Any]
+"""One layer of a profile: a YAML file, or a `(name, document)` already parsed.
+
+The second form is what lets a layer come from somewhere other than a file
+without every caller that mounts a profile learning a second type — a
+`--patch` on the command line is a document with no path, and it composes like
+any other layer, with its name as its provenance."""
+
+
+def load_profile_documents(layers: Sequence[ProfileLayer]) -> list[tuple[str, Any]]:
     return [
-        (str(path), safe_yaml_load(path.read_text(encoding="utf-8"), origin=str(path)))
-        for path in paths
+        layer
+        if isinstance(layer, tuple)
+        else (str(layer), safe_yaml_load(layer.read_text(encoding="utf-8"), origin=str(layer)))
+        for layer in layers
     ]
 
 
@@ -337,6 +413,14 @@ def resolve_entry_point(group: str, name: str, *, default_attribute: str = "") -
 def _entry_point_targets(group: str = ENTRY_POINT_GROUP) -> dict[str, str]:
     """The plugin group by default, so existing callers read unchanged."""
     return entry_point_targets(group)
+
+
+def _state(fork: ForkScope) -> str:
+    """`active · injects …` or `waiting on <the unmet key> · injects …`."""
+    injects = ", ".join(fork.injects) or "nothing"
+    if fork.active:
+        return f"active · injects {injects}"
+    return f"waiting on {', '.join(fork.waiting_on)} · injects {injects}"
 
 
 def import_plugin_modules() -> list[ModuleType]:
@@ -390,13 +474,15 @@ class Loader:
     documents: list[tuple[str, Any]] = field(default_factory=list)
     rows: list[Row] = field(default_factory=list)
     forks: dict[str, ForkScope] = field(default_factory=dict)
+    """Every mounted plugin by row id. A private copy mounted into a realm is keyed
+    `"<isolating row>/<source row>"`, which is also how `topology` labels it."""
 
     @classmethod
     def from_documents(cls, documents: Sequence[tuple[str, Any]]) -> Loader:
         return cls(documents=list(documents), rows=compose_rows(documents))
 
     @classmethod
-    def from_paths(cls, paths: Sequence[Path]) -> Loader:
+    def from_paths(cls, paths: Sequence[ProfileLayer]) -> Loader:
         return cls.from_documents(load_profile_documents(paths))
 
     def enabled_rows(self) -> Iterator[Row]:
@@ -413,8 +499,50 @@ class Loader:
         activation is service-availability driven, so a row that needs `llm`
         waits for whichever row provides it regardless of where it sits.
         """
+        by_id = {row.id: row for row in self.rows}
         for row in self.enabled_rows():
-            self.forks[row.id] = ctx.plugin(resolve_plugin(row.name), interpolate(row.config))
+            if not row.isolate:
+                self.forks[row.id] = ctx.plugin(resolve_plugin(row.name), interpolate(row.config))
+                continue
+            # dsh's `isolate.fs`. The row's own scope becomes an isolation
+            # boundary and its own provisioning realm — `scope()` is exactly
+            # that, and it is the same scope an agent gets — and a second copy of
+            # each named row is mounted *inside* it. That copy's `provide` lands
+            # in the realm, so `ctx.fs` resolves to the private instance for this
+            # row and for everything beneath it, while every other row keeps the
+            # shared one. Nothing is redirected: `_provision` walks up from the
+            # realm and finds the nearer provision first.
+            #
+            # Settled before this row mounts, and then **checked**. `has(key)` is
+            # true from the realm the moment root provides the key, so the
+            # isolating row is ready immediately — against the shared service —
+            # and only registration order would make the private copy win. A
+            # reconcile here fixes the order for a copy that is ready, and does
+            # nothing for one that is not: a copy whose own `inject` is unmet
+            # stays waiting, the row activates against root's instance, and the
+            # realm silently falls through to exactly what it was meant to
+            # replace. So a private copy that did not activate is a refusal,
+            # naming the key it lacks: what it needs has to be provided above the
+            # realm, by a row earlier in the profile.
+            realm = ctx.scope(f"realm:{row.id}")
+            privates: dict[str, ForkScope] = {}
+            for source_id, override in row.isolate.items():
+                source = by_id[source_id]
+                config = source.config if override is None else override
+                privates[source_id] = self.forks[f"{row.id}/{source_id}"] = realm.plugin(
+                    resolve_plugin(source.name), interpolate(config)
+                )
+            await ctx.reconcile()
+            for source_id, private in privates.items():
+                if not private.active:
+                    missing = ", ".join(private.waiting_on)
+                    raise LoaderError(
+                        f'row "{row.id}" isolates "{source_id}", whose private copy is waiting '
+                        f"on {missing}; a row mounted into a realm must have its dependencies "
+                        "provided by rows above it, or the realm would fall through to the "
+                        "shared service it exists to replace"
+                    )
+            self.forks[row.id] = realm.plugin(resolve_plugin(row.name), interpolate(row.config))
         await ctx.reconcile()
         # The one moment a composed profile is whole and nothing has run yet, so
         # a row can refuse the deployment it finds itself in (E8). `serial`
@@ -428,3 +556,53 @@ class Loader:
     def inactive(self) -> list[str]:
         """Row ids whose plugin never activated — an unmet `inject` key."""
         return [row_id for row_id, fork in self.forks.items() if not fork.active]
+
+    def topology(self, ctx: Context) -> list[tuple[str, str]]:
+        """What the mount *became*, row by row — the half `dump()` cannot show.
+
+        `dump()` is the composition before anything runs, and it is honest about
+        that. But a row that mounted and never activated — an unmet `inject` key
+        — looks identical there to one that runs, and a reader of the YAML has no
+        way to tell which they have. dsh's rule is that the dump has to show what
+        *is* running, because once structure comes from configuration the static
+        code no longer says. `inactive()` had that answer and nothing called it.
+
+        One line per row: whether it activated, what it injects, which key it is
+        waiting on when it did not, and which layer put it there. Disabled rows
+        are listed too — "this was turned off by `rlm-stable.yaml`" is what a
+        person asking "why isn't X running" needs, and omitting it would make a
+        disabled row indistinguishable from an absent one. Then the isolated
+        realms reachable from `ctx`: none at `ph doctor` time, since an agent's
+        scope is created when it runs, and that absence is stated rather than
+        left as a missing line.
+        """
+        lines: list[tuple[str, str]] = []
+        for row in self.rows:
+            fork = self.forks.get(row.id)
+            # The last two path components — `bundles/base.yaml`,
+            # `ph_rlm/bundle.yaml`, `profiles/rlm-stable.yaml` — because every
+            # bundle file is called `bundle.yaml` and its directory is the name
+            # that distinguishes them, while the full absolute path is a table
+            # column nobody can read.
+            layer = "/".join(Path(row.layer).parts[-2:])
+            if fork is None:
+                lines.append((row.id, f"disabled · by {layer}"))
+                continue
+            lines.append((row.id, f"{_state(fork)} · from {layer}"))
+            for source_id, override in (row.isolate or {}).items():
+                private = self.forks[f"{row.id}/{source_id}"]
+                how = "own config" if override is None else "overridden config"
+                lines.append(
+                    (
+                        f"{row.id}/{source_id}",
+                        f"{_state(private)} · private copy in realm:{row.id} · {how}",
+                    )
+                )
+        realms = [node.path for node in ctx.descendants() if node.isolation is node]
+        lines.append(
+            (
+                "isolated realms",
+                ", ".join(realms) or "none — an agent's scope is created when it runs",
+            )
+        )
+        return lines

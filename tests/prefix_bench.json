@@ -1,0 +1,82 @@
+[
+  {
+    "profile": "rlm",
+    "contextWindow": 200000,
+    "cachedTokens": [
+      0,
+      1339,
+      17944,
+      17953,
+      34510,
+      34519
+    ],
+    "requestTokens": [
+      1339,
+      17944,
+      17953,
+      34510,
+      34519,
+      35641
+    ]
+  },
+  {
+    "profile": "rlm-stable",
+    "contextWindow": 200000,
+    "cachedTokens": [
+      0,
+      1735,
+      18346,
+      18355,
+      34912,
+      34921
+    ],
+    "requestTokens": [
+      1735,
+      18346,
+      18355,
+      34912,
+      34921,
+      36043
+    ]
+  },
+  {
+    "profile": "rlm",
+    "contextWindow": 8192,
+    "cachedTokens": [
+      0,
+      1339,
+      17944,
+      17953,
+      34510,
+      34519
+    ],
+    "requestTokens": [
+      1339,
+      17944,
+      17953,
+      34510,
+      34519,
+      35641
+    ]
+  },
+  {
+    "profile": "rlm-stable",
+    "contextWindow": 8192,
+    "cachedTokens": [
+      0,
+      1676,
+      1676,
+      1676,
+      2879,
+      2884
+    ],
+    "requestTokens": [
+      1735,
+      18368,
+      18314,
+      2879,
+      2884,
+      2889
+    ]
+  }
+]

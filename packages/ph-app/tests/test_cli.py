@@ -150,6 +150,29 @@ def test_doctor_mounts_the_profile_and_prints_the_tier_table(roots: Path) -> Non
     assert "does NOT bound" in result.stdout
 
 
+def test_doctor_reports_the_live_topology_not_only_the_composition(roots: Path) -> None:
+    """dsh's rule, which pH had only half of: the dump must show what *is* running.
+
+    `--dump-config` prints the composed rows before anything runs, and says so.
+    But a row that mounted and never activated — an unmet `inject` key — looks
+    identical there to one that runs. `Loader.inactive()` knew the difference
+    and nothing called it, so a reader of the YAML had no way to learn which
+    they had. `doctor` now ends with the loader's own account of the mount: per
+    row, whether it activated, on what, and from which layer; then the isolated
+    realms, which are none at doctor time and are said to be none rather than
+    left as a missing line.
+    """
+    result = runner.invoke(app, ["doctor", "--profile", "headless"])
+
+    assert result.exit_code == 0, result.output
+    assert "Topology" in result.stdout
+    assert "active · injects" in result.stdout
+    # Provenance is the last two path components, because every bundle file is
+    # `bundle.yaml` and its directory is the name that tells them apart.
+    assert "bundles/base.yaml" in result.stdout
+    assert "an agent's scope is created when it runs" in result.stdout
+
+
 def test_a_row_contributes_a_reading_without_ph_app_importing_it(
     tmp_path: Path, roots: Path
 ) -> None:
@@ -216,6 +239,77 @@ def test_doctor_refuses_an_unknown_profile_with_the_same_code(roots: Path) -> No
     assert result.exit_code == 2
     assert "unknown profile" in result.output
     assert "does not mount" not in result.output
+
+
+def test_a_patch_from_the_command_line_composes_as_the_last_layer() -> None:
+    """dsh's third layer — bundle, profile, *patch from the CLI* — which pH had
+    only as a file.
+
+    Same grammar as a profile document, on purpose: a second spelling for "change
+    this row" is how a flag and a file come to accept different things. The
+    provenance is what proves it composed rather than being applied some other
+    way — `layer: cli`, printed beside the change, in the same dump every other
+    layer appears in.
+    """
+    result = runner.invoke(
+        app,
+        ["--dump-config", "--profile", "headless", "--patch", "{id: llm-fake, disabled: true}"],
+    )
+    assert result.exit_code == 0, result.output
+    rows = {row["id"]: row for row in yaml.safe_load(result.stdout)}
+    assert rows["llm-fake"]["disabled"] is True
+    assert rows["llm-fake"]["layer"] == "cli"
+    # Untouched rows keep their own provenance: the cli layer is one more
+    # document, not a rewrite of the composition.
+    assert rows["llm"]["layer"].endswith("base.yaml")
+
+
+def test_two_patches_compose_in_order_and_reach_the_live_topology() -> None:
+    """Repeatable, and visible where it matters — in what the mount *became*.
+
+    `isolate:` and `disabled:` are both patch verbs, so both are reachable from
+    the flag; and `doctor` names `cli` as the layer that flipped a row, which is
+    the answer to "why isn't X running" when the reason was typed a moment ago.
+    """
+    result = runner.invoke(
+        app,
+        [
+            "doctor",
+            "--profile",
+            "headless",
+            "--patch",
+            "{id: skills-invariant, disabled: true}",
+            "--patch",
+            "{id: tools-invariant, disabled: true}",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "skills-invariant" in result.stdout and "disabled · by cli" in result.stdout
+    assert "skill-reach-cache" not in result.stdout, "a disabled row's invariant was still reported"
+
+
+def test_a_malformed_patch_is_refused_with_the_command_s_exit_code() -> None:
+    """The refusal is the command's, under the same exit code an unknown profile gets.
+
+    Three shapes a person can type that cannot mean anything: not YAML, a scalar
+    where a mapping is needed, and — the one that matters — a code tag. The
+    argument that a `!!js`-style value in a profile is refused at parse time is
+    worth nothing if the command line is a way around it.
+    """
+    for bad, expect in (
+        ("{id: llm-fake, disabled: [", "--patch"),
+        ("just-a-word", "expected a mapping"),
+        ("{id: llm-fake, config: !!python/object:os.system {}}", "--patch"),
+        # The loader's own refusals, not the flag's: a row that does not exist
+        # and an unknown key. A first draft checked two shapes in the CLI and let
+        # these reach `Loader.from_paths` uncaught, so `--dump-config` printed a
+        # traceback for a typo in a row id.
+        ("{id: nope, disabled: true}", 'no row with id "nope"'),
+        ("{id: llm-fake, bogus: 1}", "unknown keys"),
+    ):
+        result = runner.invoke(app, ["--dump-config", "--profile", "headless", "--patch", bad])
+        assert result.exit_code == 2, (bad, result.output)
+        assert expect in result.output, (bad, result.output)
 
 
 def test_events_matrix_is_generated_from_the_registry() -> None:

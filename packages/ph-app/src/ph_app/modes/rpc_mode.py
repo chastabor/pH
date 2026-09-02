@@ -16,13 +16,12 @@ from __future__ import annotations
 import json
 import sys
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any, TextIO
 
 import anyio
 
 from ph.agent.types import AgentOptions
-from ph.cordis import DEPLOYMENT
+from ph.cordis import DEPLOYMENT, ProfileLayer
 from ph.session import Session, SessionEvent, dumps
 
 from ..protocol import capabilities, notification, respond
@@ -108,7 +107,7 @@ class RpcServer:
 
 
 async def run_rpc(
-    documents: list[Path],
+    documents: list[ProfileLayer],
     *,
     provider: str,
     model: str,

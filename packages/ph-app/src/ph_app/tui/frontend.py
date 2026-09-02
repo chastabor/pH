@@ -3,8 +3,7 @@
 Kept apart from `PHTuiApp` on purpose. Everything interesting about a front-end
 is here — which seams it answers, how a prompt becomes a turn, what a resume
 rebuilds from — and all of it is testable against a `ModalHost` stub with no
-terminal in the loop (`test_tui_frontend.py` does exactly that). The app is
-then only widgets and keys.
+terminal in the loop. The app is then only widgets and keys.
 
 Three decisions worth reading before changing this file.
 
@@ -31,11 +30,10 @@ import logging
 from collections.abc import Callable, Sequence
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any, Protocol
 
 from ph.agent.types import AgentCancelCause, AgentOptions
-from ph.cordis import Context
+from ph.cordis import Context, ProfileLayer
 from ph.llm.types import create_user_message
 from ph.seams.approval import ApprovalAnswer, ApprovalRequest
 from ph.seams.tui_status import StatusReading
@@ -162,7 +160,7 @@ class HarnessSession:
 
 
 async def open_harness(
-    documents: Sequence[Path],
+    documents: Sequence[ProfileLayer],
     *,
     host: ModalHost,
     provider: str,

@@ -18,9 +18,9 @@ from .errors import EventModeError, UndeclaredEventError
 
 __all__ = ["DispatchMode", "EventDeclaration", "EventRegistry", "events"]
 
-DispatchMode = Literal["emit", "parallel", "serial", "bail", "waterfall"]
+DispatchMode = Literal["emit", "parallel", "serial", "waterfall"]
 
-_MODES: frozenset[str] = frozenset({"emit", "parallel", "serial", "bail", "waterfall"})
+_MODES: frozenset[str] = frozenset({"emit", "parallel", "serial", "waterfall"})
 
 
 @dataclass(frozen=True, slots=True)

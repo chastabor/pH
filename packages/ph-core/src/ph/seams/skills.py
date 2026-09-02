@@ -38,6 +38,7 @@ from ..cordis import (
     LoaderError,
     boundary_of,
     chain_label,
+    drop_dead_chains,
     plugin,
     safe_yaml_load,
 )
@@ -248,6 +249,10 @@ class SkillService:
         cached = self._reach.get(chain)
         if cached is not None and cached[0] == self._generation:
             return cached[1]
+        # On the miss, before the table grows — `_changed` already sweeps dead
+        # scopes out of `_restrictions`, and this is the same sweep for the memo
+        # keyed by those scopes (I2).
+        drop_dead_chains(self._reach)
         names = self._resolve(chain)
         self._reach[chain] = (self._generation, names)
         return names

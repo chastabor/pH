@@ -35,6 +35,7 @@ from ..cordis import (
     Running,
     boundary_of,
     chain_label,
+    drop_dead_chains,
     events,
     plugin,
     running,
@@ -565,6 +566,10 @@ class ToolRuntime:
         cached = self._views.get(cache_key)
         if cached is not None and cached[0] == self._generation:
             return cached[1]
+        # On the miss, before the table grows: a disposed agent's `Context` is
+        # retained by its own key until something invalidates, which a deployment
+        # that has stopped registering never does (I2).
+        drop_dead_chains(self._views)
         view = self._build_view(self._layers_for(cache_key))
         self._views[cache_key] = (self._generation, view)
         return view

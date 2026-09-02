@@ -17,7 +17,6 @@ from ph.cordis import Context, events, plugin
 pytestmark = pytest.mark.anyio
 
 events.declare("test/emit", "emit", owner="tests")
-events.declare("test/bail", "bail", owner="tests")
 events.declare("test/serial", "serial", owner="tests")
 events.declare("test/parallel", "parallel", owner="tests")
 events.declare("test/waterfall", "waterfall", owner="tests")
@@ -139,14 +138,20 @@ async def test_serial_stops_on_the_first_bail() -> None:
     assert seen == [1, 2]
 
 
-async def test_bail_treats_zero_as_an_answer() -> None:
+async def test_serial_treats_zero_as_an_answer() -> None:
+    """`is_bailed`'s one rule, held where it is still used.
+
+    This was pinned on `bail`, the synchronous twin of `serial`, until that mode
+    was dropped: it had no declared event in any package and no counterpart in
+    dsh — pH's own addition, unused across six phases. The rule outlives the
+    mode: `0` bails, because a decision object is never falsy by accident, and
+    treating a legitimate zero as "no answer" is the bug this exists to prevent.
+    """
     root = Context()
-    root.on("test/bail", lambda: None)
-    root.on("test/bail", lambda: 0)
-    root.on("test/bail", lambda: "later")
-    # `0` bails: a decision object is never falsy by accident, and treating a
-    # legitimate zero as "no answer" is the bug this rule exists to prevent.
-    assert root.bail("test/bail") == 0
+    root.on("test/serial", lambda: None)
+    root.on("test/serial", lambda: 0)
+    root.on("test/serial", lambda: "later")
+    assert await root.serial("test/serial") == 0
 
 
 async def test_parallel_runs_every_listener_and_aggregates_failures() -> None:

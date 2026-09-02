@@ -34,6 +34,7 @@ from typing import Any
 import anyio
 from anyio.abc import ByteStream
 
+from ph.cordis import ProfileLayer
 from ph.lingering import RuntimeLifetime, lifetime, socket_identity
 from ph.paths import resolve_roots
 from ph.resources import GRACE_SECONDS
@@ -552,7 +553,7 @@ async def _clear_stale(path: Path) -> None:
 
 
 async def serve(
-    documents: Sequence[Path],
+    documents: Sequence[ProfileLayer],
     *,
     provider: str = "fake",
     model: str = "fake-1",
