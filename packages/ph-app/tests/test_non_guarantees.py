@@ -17,11 +17,21 @@ one nobody is told about, and that is what these hold.
 Second, that the two sentences which are **not** obvious from the row they
 qualify are still true. Both were found while writing them down, which is the
 argument for writing them down: `supervisor/*` crashes are contained per root
-(P5-04) rather than not at all, and a schedule does *not* survive a daemon
-restart on its own, though P5-06's row says the log makes sure it does. The log
-does. The daemon does not, and only a test keeps that distinction from quietly
-inverting the day somebody adds boot-time rehydration — or from quietly staying
-false if they never do.
+(P5-04) rather than not at all.
+
+**One row has been earned back, and a narrower one replaces it.** "The log keeps
+the appointment; nothing is watching it" was true and is not: P6-23 gave the
+schedule seam an index of what is due, so a daemon wakes exactly the roots that
+have an appointment and leaves every other session unleased. Its assertion now
+lives in `test_daemon.py` asserting the opposite, which is the correct way for a
+non-guarantee to end.
+
+What is left is the honest boundary, and it is a row of its own: **nothing fires
+while the daemon is down.** pH keeps an appointment while it runs and catches up
+when it starts; a run that has to happen whether or not the daemon is up belongs
+to cron, anacron or a systemd timer, which already do this and which pH is not
+trying to replace. Stating that is the point — a person who reads "schedule" and
+assumes a crontab is the reader this table exists for.
 """
 
 from __future__ import annotations
@@ -34,7 +44,6 @@ import pytest
 from daemon_helpers import running
 from typer.testing import CliRunner
 
-from ph.seams.schedule import Schedule
 from ph_app.cli import app
 from ph_app.daemon import recovery
 from ph_app.daemon.supervisor import NON_GUARANTEES
@@ -49,7 +58,7 @@ CLAIMED = {
     "crash containment": "per root, not per process",
     "CPU": "shared",
     "restart": "not rolling",
-    "after a restart": "roots are not re-mounted",
+    "while the daemon is down": "nothing fires",
     "per user": "one daemon per $PH_RUNTIME",
 }
 """Every N5 row, and the phrase that carries it.
@@ -158,43 +167,3 @@ async def test_a_roots_own_crash_is_contained_and_the_process_is_the_boundary(
                 event.type == "assistant/message" for event in healthy.session.events_from(0)
             ):
                 await anyio.sleep(0.01)
-
-
-async def test_a_schedule_does_not_fire_again_after_a_restart(tmp_path: Path) -> None:
-    """ "The log keeps the appointment; nothing is watching it."
-
-    P5-06 argues that a schedule outlives the process holding it, and of the
-    *log* that is exactly right — `schedule/created` is still there. What does
-    not outlive the process is the thing that reads it: `Supervisor.tick`
-    iterates `self.roots`, and a fresh daemon has none until a client asks for
-    one. So the appointment survives and is never kept, which is a gap a person
-    can only find by missing a run.
-
-    Asserted rather than fixed, because the fix is a row and not a sentence
-    (P6-23) — and not the row it first looked like: `SessionPersistence.stored()`
-    already enumerates, so what is missing is a way to know *which* logs hold an
-    appointment without reading all of them, and a way to wake those roots
-    without taking every session's lease. The day that lands, this test fails and
-    the sentence it guards comes out — which is the correct way for a
-    non-guarantee to end.
-    """
-    socket = tmp_path / "first.sock"
-    async with running(tmp_path, path=socket) as first:
-        root = await first.server.supervisor.start("appointed")
-        root.ctx.schedule.create(
-            root.session, Schedule(id="s", kind="interval", spec="1000", prompt="tick")
-        )
-        made = root.ctx.schedule.states(root.session)["s"].created_at
-        assert await first.server.supervisor.tick(now=made + 5_000) == ["s"], "fires while mounted"
-        await first.server.supervisor._flush(root)
-
-    # A second daemon over the same `$PH_HOME`, which is what a restart is.
-    async with running(tmp_path, name="second") as second:
-        assert list(second.server.supervisor.roots) == [], "nothing is re-mounted at boot"
-        assert await second.server.supervisor.tick(now=made + 600_000) == []
-
-        # And the appointment really is still in the log — the loss is the
-        # watcher, not the record, which is what makes the row's wording exact.
-        resumed = await second.server.supervisor.start("appointed")
-        assert "s" in resumed.ctx.schedule.states(resumed.session)
-        assert await second.server.supervisor.tick(now=made + 600_000) == ["s"]

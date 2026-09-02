@@ -35,8 +35,10 @@ from datetime import datetime
 from typing import Any, Literal, TypeAlias
 
 from ..cordis import Context, plugin
-from ..session import Session, SessionFoldCache
+from ..paths import resolve_roots
+from ..session import Session, SessionFoldCache, now_ms
 from ..wire import WireModel
+from .schedule_index import ScheduleIndex
 
 __all__ = [
     "CANCELLED",
@@ -319,8 +321,16 @@ class ScheduleService:
 
     No `ctx`, because nothing here reads one — a service that takes an argument it
     never uses is one a test has to lie about to construct.
+
+    `index` is how an appointment survives the *process* rather than only the log
+    (P6-23). Optional, and absent is the shipped behaviour of every mode but the
+    daemon: a `ph -p` run with no `$PH_HOME` index still schedules, it simply
+    leaves nothing for a later daemon to find. When it is present every write here
+    updates it, because the seam is the only party that knows the moment an
+    appointment changes.
     """
 
+    index: ScheduleIndex | None = None
     _states: SessionFoldCache[dict[str, ScheduleState]] = field(
         default_factory=lambda: SessionFoldCache(schedules)
     )
@@ -336,6 +346,7 @@ class ScheduleService:
     def create(self, session: Session, schedule: Schedule) -> Schedule:
         """Record a schedule. It is live from the moment the event lands."""
         session.append(CREATED, schedule.to_wire())
+        self.reindex(session)
         return schedule
 
     def cancel(self, session: Session, schedule_id: str) -> bool:
@@ -352,6 +363,7 @@ class ScheduleService:
         if state is None or state.cancelled:
             return False
         session.append(CANCELLED, {"id": schedule_id})
+        self.reindex(session)
         return True
 
     def live(self, session: Session) -> list[ScheduleState]:
@@ -375,7 +387,33 @@ class ScheduleService:
             # carriers is one that can disagree.
             session.append(TICK, {"id": state.schedule.id, "dueAt": moment, "firedAt": now})
             claimed.append(state.schedule)
+        if claimed:
+            # After the appends, so the fold this reads has the ticks in it: an
+            # index written from the pre-claim state would name a moment that has
+            # just been served and wake the root again for it.
+            self.reindex(session, now=now)
         return claimed
+
+    def reindex(self, session: Session, *, now: int | None = None) -> None:
+        """Tell the index when this session is next due, or that it is not.
+
+        The earliest moment any of its live schedules wants, so one entry answers
+        for a session however many appointments it holds — the daemon's question
+        is "is this root worth mounting", not "which schedule".
+
+        `None` when nothing is outstanding, which removes the entry: a cancelled
+        schedule and a `once` that has fired both mean a daemon should stop
+        waking for this session.
+        """
+        if self.index is None:
+            return
+        stamp = now if now is not None else now_ms()
+        moments = [
+            moment
+            for state in self.live(session)
+            if (moment := next_at(state, now=stamp)) is not None
+        ]
+        self.index.record(session.id, next_at=min(moments) if moments else None, now=stamp)
 
     def heartbeat(self, session: Session, *, now: int, live: int) -> None:
         """Record that the scheduler is still watching this root.
@@ -386,11 +424,31 @@ class ScheduleService:
         session.append(HEARTBEAT, {"at": now, "live": live})
 
 
-@plugin("schedule")
-async def apply(ctx: Context, _config: Any) -> None:
+class Config(WireModel):
+    """Row config for the schedule seam."""
+
+    index: bool = True
+    """Whether to keep the per-`$PH_HOME` index of what is due (P6-23).
+
+    On by default, because the cost is a small write when an appointment changes
+    and the thing it buys is a schedule that survives a restart. A deployment
+    that does not want a daemon waking its sessions turns it off here rather than
+    by deleting a file something else will rewrite.
+    """
+
+
+@plugin("schedule", config=Config)
+async def apply(ctx: Context, config: Config) -> None:
     """Publish `ctx.schedule`."""
-    service = ScheduleService()
+    service = ScheduleService(index=ScheduleIndex(resolve_roots().home) if config.index else None)
     ctx.provide("schedule", service)
     # The cache is bounded by live sessions, and this is what makes that true —
     # the same line `subagents` uses for the same reason.
     ctx.on("session/disposed", lambda session: service.forget_session(session.id))
+    # Opening a session *is* the index's rebuild path (P6-23, I-6). A log written
+    # by a build with no index, an entry deleted by hand, one left stale by a
+    # crash between the append and the write — all correct themselves here,
+    # without the scan of every stored log a wholesale rebuild would need. The
+    # write is skipped when nothing moved, so the ordinary open costs a fold the
+    # cache already has.
+    ctx.on("session/created", lambda session: service.reindex(session))

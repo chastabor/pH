@@ -40,8 +40,10 @@ from filelock import FileLock, Timeout
 from ph.agent.types import AgentOptions
 from ph.cordis import Context
 from ph.llm.types import create_user_message
+from ph.paths import resolve_roots
 from ph.persistence import resume_session, resumption_of
 from ph.seams.schedule import Schedule, state_to_wire
+from ph.seams.schedule_index import ScheduleIndex
 from ph.seams.subagents import child_is_live
 from ph.seams.workspace import workspace_of
 from ph.seams.workspace_git import latest_checkpoint, restore
@@ -57,6 +59,7 @@ from .recovery import (
     RECOVERED,
     RETRY,
     UNREACHABLE,
+    WAKE_WITHIN,
     Recovery,
     recovery_of,
 )
@@ -114,12 +117,14 @@ NON_GUARANTEES: tuple[tuple[str, str], ...] = (
     (
         "restart",
         "not rolling. Stopping the daemon stops every root; the next daemon resumes one "
-        "from its log when a client asks for it",
+        "from its log when a client asks for it, or when a schedule of its own comes due",
     ),
     (
-        "after a restart",
-        "roots are not re-mounted, so a schedule does not fire until something touches "
-        "its root. The log keeps the appointment; nothing is watching it",
+        "while the daemon is down",
+        "nothing fires. A schedule is kept only while `ph daemon` runs; on start it "
+        "catches up, one run per missed window. For work that must happen whether or "
+        "not the daemon is up, start it from cron, anacron or a systemd timer — pH "
+        "schedules inside a conversation and does not replace them",
     ),
     (
         "per user",
@@ -410,6 +415,12 @@ class Supervisor:
     per-daemon configuration — and because threading it through `serve`, the
     sweeper task and two method signatures spelled one constant in eight places,
     two of them positionally unchecked through `start_soon`."""
+    wake_within: float | None = WAKE_WITHIN
+    """How stale an indexed appointment may be and still wake its root (P6-23).
+
+    `None` — the default — catches up on whatever was missed, however long the
+    daemon was down, which is the scheduler's whole promise. A deployment that
+    would rather not resurrect a long-abandoned session sets a bound here."""
     roots: dict[str, Root] = field(default_factory=dict)
     _starting: anyio.Lock = field(default_factory=anyio.Lock)
     _parsed: Sequence[tuple[str, Any]] | None = None
@@ -742,6 +753,87 @@ class Supervisor:
         """
         schedule = root.ctx.get("schedule")
         return [] if schedule is None else list(schedule.live(root.session))
+
+    async def rehydrate(self, *, now: int | None = None) -> list[str]:
+        """Mount the unmounted roots that have an appointment due (P6-23).
+
+        **The gap this closes is silence.** A schedule outlives its process and
+        `tick` iterates `self.roots`, which a boot has none of — so the log kept
+        the appointment and nothing kept the log, and the only symptom was a run
+        that did not happen.
+
+        **An index, not a scan, and the reasons are three separate failures.**
+        Reading every stored log to find which hold a schedule is 500 reads
+        before the first connection is answered. Mounting them all is a profile,
+        a workspace and possibly a kernel each, which is the cost P5-05 exists to
+        release. And `start` takes P5-03's **lease**, so waking everything claims
+        every session on the machine and the next `ph -p` over any of them is
+        refused — loud, immediate, and hitting sessions with no schedule at all.
+        So only what is due is mounted, and every other session stays unleased.
+
+        **No second delivery path.** This mounts; the ordinary `tick` fires. That
+        is what makes a missed window behave as P5-06 already settled it — `claim`
+        coalesces to the most recent due moment and records it write-ahead — and
+        it is why a machine off from Tuesday to Thursday runs Wednesday's work
+        once rather than twice or never.
+
+        Failures are per root and logged: a session the index names but that will
+        not mount costs its own appointment, not the pass.
+        """
+        index = self._index()
+        if index is None:
+            return []
+        stamp = now if now is not None else now_ms()
+        woken: list[str] = []
+        for entry in sorted(index.read().values(), key=lambda one: one.next_at):
+            if entry.session_id in self.roots or entry.next_at > stamp:
+                continue
+            if self.wake_within is not None and stamp - entry.updated > self.wake_within * 1000:
+                log.info(
+                    "ph_app.daemon: not waking %s; its appointment was last confirmed %d s ago",
+                    entry.session_id,
+                    (stamp - entry.updated) // 1000,
+                )
+                continue
+            try:
+                await self.start(entry.session_id)
+            except Exception:
+                log.warning(
+                    "ph_app.daemon: could not wake %s for its schedule",
+                    entry.session_id,
+                    exc_info=True,
+                )
+                continue
+            log.info(
+                "ph_app.daemon: woke %s for a schedule due at %d",
+                entry.session_id,
+                entry.next_at,
+            )
+            woken.append(entry.session_id)
+        return woken
+
+    def _index(self) -> ScheduleIndex | None:
+        """The index this daemon reads, or `None` when nothing indexes.
+
+        Built from the same `$PH_HOME` the seam writes under, rather than asked
+        of a mounted root: at boot there are none, which is the whole situation.
+        """
+        try:
+            return ScheduleIndex(resolve_roots().home)
+        except Exception:
+            log.warning("ph_app.daemon: no schedule index; nothing will be woken", exc_info=True)
+            return None
+
+    async def wake_and_tick(self, *, now: int | None = None) -> list[str]:
+        """One scheduler pass: mount what is due, then fire what is mounted.
+
+        The two are separate methods because they answer to different owners —
+        `rehydrate` reads an index this daemon does not write, `tick` drives roots
+        it does — and one cadence because a root woken for an appointment that is
+        not then fired in the same pass waits a whole interval to be noticed.
+        """
+        await self.rehydrate(now=now)
+        return await self.tick(now=now)
 
     async def tick(self, *, now: int | None = None) -> list[str]:
         """Fire whatever is due on every mounted root (P5-06). Returns their ids.

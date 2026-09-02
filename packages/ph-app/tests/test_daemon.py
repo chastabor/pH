@@ -1537,3 +1537,141 @@ async def test_a_hand_built_server_with_no_bound_socket_watches_nothing(
         assert await built.check_reachable() == ""
         assert built.status()["unreachableSince"] is None
         tasks.cancel_scope.cancel()
+
+
+# ------------------------------------------------------- P6-23: rehydration --
+
+
+async def test_a_daemon_wakes_a_root_whose_schedule_came_due_while_it_was_down(
+    tmp_path: Path,
+) -> None:
+    """**P6-23's gate, and the inversion of a non-guarantee.**
+
+    P5-06 argues a schedule outlives the process holding it, and of the *log* it
+    was always right — `schedule/created` is still there. What did not outlive the
+    process was the thing that reads it: `tick` iterates `self.roots` and a boot
+    has none, so the appointment survived and was never kept. The failure shape
+    was silence — no error, no log, found by somebody noticing a run that did not
+    happen — which `test_non_guarantees.py` asserted verbatim until this landed.
+
+    Driven at a simulated `now` on both halves, because the point is the *window*:
+    a real boot a second later has nothing due yet, which is the reason the old
+    assertion went on passing after rehydration was wired in.
+    """
+    socket = tmp_path / "first.sock"
+    async with running(tmp_path, path=socket) as first:
+        root = await first.server.supervisor.start("appointed")
+        root.ctx.schedule.create(
+            root.session, Schedule(id="s", kind="interval", spec="1000", prompt="tick")
+        )
+        made = root.ctx.schedule.states(root.session)["s"].created_at
+        await first.server.supervisor._flush(root)
+
+    async with running(tmp_path, name="second") as second:
+        supervisor = second.server.supervisor
+        assert list(supervisor.roots) == [], "nothing is mounted until something is due"
+
+        fired = await supervisor.wake_and_tick(now=made + 600_000)
+
+        assert fired == ["s"], "the appointment was kept without a client asking"
+        assert "appointed" in supervisor.roots, "and its root is mounted to keep it"
+
+
+async def test_a_session_with_no_appointment_is_left_alone(tmp_path: Path) -> None:
+    """**The half that makes the fix safe**, and the reason this is an index.
+
+    `Supervisor.start` takes P5-03's lease, so "mount every stored session at
+    boot" would claim every session on the machine and refuse the next `ph -p`
+    over any of them with `session_already_active` — loud, immediate, and hitting
+    sessions that have no schedule at all. Strictly worse than the silence it
+    would be fixing. So only what the index names is woken.
+
+    Both sessions are in one daemon on purpose: a test that only showed the plain
+    one staying asleep would pass just as well against a daemon that wakes
+    nothing, which is the state this row replaces.
+    """
+    socket = tmp_path / "first.sock"
+    async with running(tmp_path, path=socket) as first:
+        plain = await first.server.supervisor.start("no-appointment")
+        await first.server.supervisor._flush(plain)
+        root = await first.server.supervisor.start("appointed")
+        root.ctx.schedule.create(
+            root.session, Schedule(id="s", kind="interval", spec="1000", prompt="tick")
+        )
+        made = root.ctx.schedule.states(root.session)["s"].created_at
+        await first.server.supervisor._flush(root)
+
+    async with running(tmp_path, name="second") as second:
+        supervisor = second.server.supervisor
+
+        await supervisor.wake_and_tick(now=made + 600_000)
+
+        assert "appointed" in supervisor.roots, "the mechanism is live"
+        assert "no-appointment" not in supervisor.roots, "and it woke only what is due"
+
+        # And the untouched session is still openable, which is what unleased means.
+        reopened = await supervisor.start("no-appointment")
+        assert reopened.id == "no-appointment"
+
+
+async def test_catch_up_is_unbounded_by_default(tmp_path: Path) -> None:
+    """**The scheduler's whole promise, and its whole scope.**
+
+    pH keeps an appointment while `ph daemon` runs and picks up where it left off
+    when it starts — however long it was down, coalesced by `claim` to one run per
+    missed window. Bounding that by default would be a second policy on top of the
+    one P5-06 already settled, and the OS already ships cron, anacron and systemd
+    timers for anyone who wants a run to happen without a daemon at all.
+
+    A year is well past any bound a default could reasonably have carried, which
+    is what makes this an assertion about the *absence* of one.
+    """
+    socket = tmp_path / "first.sock"
+    async with running(tmp_path, path=socket) as first:
+        root = await first.server.supervisor.start("long-gone")
+        root.ctx.schedule.create(
+            root.session, Schedule(id="s", kind="interval", spec="1000", prompt="tick")
+        )
+        made = root.ctx.schedule.states(root.session)["s"].created_at
+        await first.server.supervisor._flush(root)
+
+    async with running(tmp_path, name="second") as second:
+        supervisor = second.server.supervisor
+        assert supervisor.wake_within is None, "the shipped default is to catch up"
+
+        a_year_later = made + 365 * 24 * 60 * 60 * 1000
+
+        assert await supervisor.wake_and_tick(now=a_year_later) == ["s"]
+
+
+async def test_a_deployment_can_bound_how_stale_an_appointment_may_be(
+    tmp_path: Path,
+) -> None:
+    """The knob, for a deployment that would rather not resurrect a session
+    somebody abandoned — a shape the OS tools do not have, because a schedule here
+    is attached to a *conversation* and not to a crontab entry.
+
+    Off by default; this is what turning it on does. Lifting it again on the same
+    daemon is what makes the test say something: it proves the appointment was due
+    and wakeable all along, and that the *bound* declined it.
+    """
+    socket = tmp_path / "first.sock"
+    async with running(tmp_path, path=socket) as first:
+        root = await first.server.supervisor.start("abandoned")
+        root.ctx.schedule.create(
+            root.session, Schedule(id="s", kind="interval", spec="1000", prompt="tick")
+        )
+        made = root.ctx.schedule.states(root.session)["s"].created_at
+        await first.server.supervisor._flush(root)
+
+    async with running(tmp_path, name="second", wake_within=60.0) as second:
+        supervisor = second.server.supervisor
+        long_after = made + 600_000 + 60_000 + 1
+
+        assert await supervisor.wake_and_tick(now=long_after) == []
+        assert list(supervisor.roots) == [], "a stale appointment is not resurrected"
+
+        supervisor.wake_within = None
+
+        assert await supervisor.wake_and_tick(now=long_after) == ["s"]
+        assert "abandoned" in supervisor.roots, "the bound declined it, not the mechanism"

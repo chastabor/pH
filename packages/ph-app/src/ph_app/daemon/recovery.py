@@ -176,3 +176,23 @@ Measured from the log's own last event rather than from a timer, so it means
 three-day-old log is immediately eligible, which is correct — and cannot drift
 from what the transcript shows.
 """
+
+
+WAKE_WITHIN: float | None = None
+"""How stale an indexed appointment may be and still wake its root, or `None`.
+
+**`None` by default: a daemon catches up on whatever it missed, however long it
+was down.** That is the whole of what pH's scheduler promises — it keeps an
+appointment while it runs, and on start it picks up where it left off, coalesced
+by `claim` to one run per missed window. Bounding that by default would be a
+second policy on top of the one `claim` already settled, and the row's own
+argument is that pH is not in the business of out-cronning cron.
+
+The knob exists because a schedule is attached to a *conversation* rather than to
+a crontab entry, so "resurrect a session abandoned in March" is a shape the OS
+tools do not have. A deployment that would rather not can set a bound here; the
+default is that a schedule somebody deliberately created is a schedule they meant.
+
+It only ever bites on appointments nobody has kept: one a daemon is serving
+refreshes its entry every time it fires.
+"""

@@ -50,7 +50,7 @@ from ..protocol import (
     resume_at,
 )
 from .framing import FramingError, read_frames, write_frame
-from .recovery import PASSIVATE_AFTER
+from .recovery import PASSIVATE_AFTER, WAKE_WITHIN
 from .supervisor import NON_GUARANTEES, Supervisor
 
 __all__ = ["DaemonServer", "serve"]
@@ -557,6 +557,7 @@ async def serve(
     provider: str = "fake",
     model: str = "fake-1",
     passivate_after: float | None = PASSIVATE_AFTER,
+    wake_within: float | None = WAKE_WITHIN,
     sweep_every: float = SWEEP_EVERY,
     tick_every: float = TICK_EVERY,
     heartbeat_every: float = HEARTBEAT_EVERY,
@@ -598,6 +599,7 @@ async def serve(
             provider=provider,
             model=model,
             passivate_after=passivate_after,
+            wake_within=wake_within,
         )
         try:
             server = DaemonServer(
@@ -620,7 +622,15 @@ async def serve(
             if passivate_after is not None:
                 tasks.start_soon(_every, sweep_every, server.stop, supervisor.sweep, "the sweep")
             if tick_every > 0:
-                tasks.start_soon(_every, tick_every, server.stop, supervisor.tick, "the tick")
+                # Woken before fired, and on the tick's own cadence rather than
+                # once at boot: a session can gain an appointment at any moment
+                # from a `ph -p` run in another process, and a root the sweeper
+                # released is unmounted again by the time its next one is due
+                # (P6-23). One small file read per pass buys both.
+                await supervisor.rehydrate()
+                tasks.start_soon(
+                    _every, tick_every, server.stop, supervisor.wake_and_tick, "the tick"
+                )
                 tasks.start_soon(
                     _every, heartbeat_every, server.stop, supervisor.heartbeat, "the heartbeat"
                 )

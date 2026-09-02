@@ -62,6 +62,7 @@ import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 
@@ -74,6 +75,7 @@ from ph.seams.schedule import (
     next_at,
     schedules,
 )
+from ph.seams.schedule_index import INDEX_NAME, ScheduleIndex
 from ph.session import Session, now_ms
 
 MINUTE = 60_000
@@ -319,3 +321,76 @@ def _last_due(session: Session) -> int:
     """The `dueAt` of the most recent tick — the log's copy, the only copy."""
     ticks = [event for event in session.events_from(0) if event.type == TICK]
     return int(ticks[-1].data["dueAt"])
+
+
+# ------------------------------------------------ P6-23: the what-is-due index --
+
+
+def _index(tmp_path: Path) -> ScheduleIndex:
+    return ScheduleIndex(tmp_path)
+
+
+def test_an_appointment_is_recorded_and_withdrawn_with_the_schedule(tmp_path: Path) -> None:
+    """The index tracks what is outstanding, not what has ever been scheduled.
+
+    A cancellation removes the entry rather than tombstoning it, so the file
+    stays the size of the work owed instead of the size of every schedule ever
+    made — and a daemon reading it wakes nothing for a session that has nothing.
+    """
+    index = _index(tmp_path)
+    service = ScheduleService(index=index)
+    session = Session("s1")
+
+    service.create(session, Schedule(id="a", kind="interval", spec="60000", prompt="tick"))
+    assert "s1" in index.read()
+
+    service.cancel(session, "a")
+    assert index.read() == {}, "a cancelled schedule leaves nothing to wake for"
+
+
+def test_the_entry_names_the_earliest_of_a_sessions_appointments(tmp_path: Path) -> None:
+    """One entry per session, because the daemon's question is "is this root worth
+    mounting" rather than "which schedule" — and the answer is the soonest."""
+    index = _index(tmp_path)
+    service = ScheduleService(index=index)
+    session = Session("s1")
+
+    service.create(session, Schedule(id="far", kind="once", spec="9000000", prompt="a"))
+    service.create(session, Schedule(id="near", kind="once", spec="1000", prompt="b"))
+
+    assert index.read()["s1"].next_at == 1000
+
+
+def test_opening_a_session_reconciles_its_entry(tmp_path: Path) -> None:
+    """**The rebuild path, and why it needs no scan** (I-6).
+
+    A log written by a build with no index, an entry deleted by hand, one left
+    stale by a crash between the append and the write — all of them correct
+    themselves the moment anything opens that session, which is exactly the
+    condition the old behaviour required to fire a schedule at all. A wholesale
+    rebuild would have to read every stored log, which is the scan the index
+    exists to avoid.
+    """
+    index = _index(tmp_path)
+    session = Session("s1")
+    ScheduleService().create(  # no index: the log gets the schedule, the file does not
+        session, Schedule(id="a", kind="interval", spec="60000", prompt="tick")
+    )
+    assert index.read() == {}, "nothing recorded it"
+
+    ScheduleService(index=index).reindex(session)
+
+    assert "s1" in index.read(), "opening the session is what rebuilds the entry"
+
+
+def test_a_missing_or_unreadable_index_reads_as_empty(tmp_path: Path) -> None:
+    """Every failure is "this file cannot tell you what is due", and the honest
+    answer to that is the behaviour that shipped before the index existed — a late
+    run — rather than an exception on a daemon's boot path."""
+    assert _index(tmp_path).read() == {}, "missing"
+
+    (tmp_path / INDEX_NAME).write_text("{ not json", encoding="utf-8")
+    assert _index(tmp_path).read() == {}, "corrupt"
+
+    (tmp_path / INDEX_NAME).write_text('{"version": 99, "sessions": {}}', encoding="utf-8")
+    assert _index(tmp_path).read() == {}, "a version this build does not know"
