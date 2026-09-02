@@ -162,6 +162,14 @@ class _Dependent:
     keys: tuple[str, ...]
     activate: Callable[[Context], Any]
     label: str
+    module: str = ""
+    """The module whose code runs in the activation scope, when one is known.
+
+    A plugin's, stamped by `ForkScope` from its `apply`. It reaches
+    `Context._module`, which is what `ctx.on` reports to `note_consumer` — so
+    this field is the whole reason `ph events` can name who listens to an event
+    rather than printing an empty column. Blank for an `inject` callback, which
+    is code the calling row already owns and which therefore inherits it."""
     active: bool = False
     scope: Context | None = None
     disposed: bool = False
@@ -206,7 +214,16 @@ class ForkScope:
         self._spec = spec
         self._config = config
         self._dependent, self._unmount = parent._register_dependent(
-            spec.inject, self._apply, label=f"plugin({spec.name})"
+            spec.inject,
+            self._apply,
+            label=f"plugin({spec.name})",
+            # Where the plugin's code lives, which nothing else in the mount path
+            # knows: the loader has a name and an entry point, and the *module* is
+            # the thing `ctx.on` reports as a consumer. Without it every scope
+            # inherited the root's empty string and `note_consumer` — whose guard
+            # is `if module` — recorded nothing, for every event, in every
+            # profile.
+            module=getattr(spec.apply, "__module__", ""),
         )
 
     @property
@@ -489,7 +506,12 @@ class Context:
     def _activation_scope(cls, dependent: _Dependent) -> Context:
         """The transparent scope a plugin's `apply` runs in."""
         owner = dependent.ctx
-        return cls(owner, label=dependent.label, provide_to=owner._provide_to, module=owner._module)
+        return cls(
+            owner,
+            label=dependent.label,
+            provide_to=owner._provide_to,
+            module=dependent.module or owner._module,
+        )
 
     def owner_for(self, scope: Context | None = None) -> Context:
         """Whose lifetime a registration made *now* belongs to (I2, P6-12).
@@ -835,11 +857,18 @@ class Context:
         return release
 
     def _register_dependent(
-        self, keys: Sequence[str], activate: Callable[[Context], Any], *, label: str
+        self,
+        keys: Sequence[str],
+        activate: Callable[[Context], Any],
+        *,
+        label: str,
+        module: str = "",
     ) -> tuple[_Dependent, Disposer]:
         """The one registration path for plugins and injections alike."""
         self._assert_active()
-        dependent = _Dependent(ctx=self, keys=tuple(keys), activate=activate, label=label)
+        dependent = _Dependent(
+            ctx=self, keys=tuple(keys), activate=activate, label=label, module=module
+        )
         self._runtime.dependents.append(dependent)
         self._runtime.dirty = True
         return dependent, self.add_disposer(dependent.retire, label=label)

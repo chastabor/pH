@@ -229,6 +229,90 @@ def test_events_matrix_is_generated_from_the_registry() -> None:
     assert by_name["session/event"]["mode"] == "emit"
 
 
+def test_the_matrix_names_consumers_not_only_producers() -> None:
+    """The half a producer/consumer matrix is named for, and it was empty.
+
+    Two defects, one behind the other. The rendered table had no consumers
+    column at all — `matrix()` carried the field, so `--json` looked complete.
+    And the field itself was *always* empty: `note_consumer` guards on
+    `if module`, `Context._module` was only ever set by `Context.scope`, and
+    nothing in the mount path set it — so every scope inherited the root's empty
+    string and no listener was ever recorded, in any profile. `ForkScope` now
+    stamps the plugin's own `apply.__module__`.
+
+    Consumers are also why this command mounts. A `declare` runs at import, so
+    producers are knowable without one; `ctx.on` runs when a row *activates*, so
+    consumers are a property of the profile and not of the code.
+
+    `llm/stream` is asserted because it is the one every deployment listens to
+    for a reason worth noticing — the I3 invariant prepends itself there — so an
+    empty answer here means the mechanism is broken rather than the profile
+    being quiet.
+    """
+    result = runner.invoke(app, ["events", "--json"])
+    assert result.exit_code == 0, result.output
+    by_name = {row["name"]: row for row in json.loads(result.stdout)}
+
+    assert "ph.agent_loop.invariant" in by_name["llm/stream"]["consumers"], (
+        "no listener was recorded, so the consumer half of the matrix is dead"
+    )
+    assert by_name["llm/stream"]["producer"] != "", "a producer went missing"
+    assert "consumers" in runner.invoke(app, ["events", "--type", "llm"]).output
+
+
+def test_events_refuses_an_unknown_profile_rather_than_answering_without_one() -> None:
+    """The failure mode a broad `except` introduced, caught once and pinned here.
+
+    Mounting is what fills the consumer half, and a profile that will not mount
+    is reported rather than fatal — the declarations are still worth printing.
+    But `documents_or_exit` reports an *unknown* profile by raising
+    `typer.Exit`, which is an `Exception`, so guarding the resolve turned "no
+    such profile" into a complete-looking matrix and exit 0: the answer that
+    looks most like success, for the input most likely to be a typo. The resolve
+    now happens outside the guard, and `doctor`'s exit code is the one to match.
+    """
+    result = runner.invoke(app, ["events", "--profile", "nosuchprofile"])
+    assert result.exit_code == 2
+    assert "unknown profile" in result.output
+
+
+def test_the_config_catalog_is_generated_from_each_row_s_own_model() -> None:
+    """P6-02's other half: a profile is rows *and* their config, and only the
+    rows were enumerable.
+
+    Generated from `PluginSpec.config_model`, so a field added to a row appears
+    here without anybody remembering to write it down — the argument `ph events`
+    makes about declarations, applied to configuration. The assertions below name
+    a real row's real field, so a catalog that stopped reading the models would
+    fail rather than print an empty shell.
+    """
+    result = runner.invoke(app, ["config", "--json"])
+    assert result.exit_code == 0, result.output
+    catalog = json.loads(result.stdout)
+    by_name = {entry["name"]: entry for entry in catalog}
+
+    assert not [entry for entry in catalog if "error" in entry], "a row failed to resolve"
+    worktree = by_name["workspace-git-worktree"]
+    assert worktree["injects"] == ["workspace", "subprocess"]
+    ((option,),) = (worktree["config"],)
+    assert (option["name"], option["type"], option["default"]) == ("root", "str | null", "None")
+    assert "outside the repository on purpose" in option["doc"], (
+        "the field's own prose was not read off the source"
+    )
+    # A row with no `Config` is a fact, not an absence: it is listed with an
+    # empty option set rather than omitted, so "no options" and "not found"
+    # stay distinguishable.
+    assert by_name["diagnostics"]["config"] == []
+
+
+def test_the_catalog_refuses_an_unknown_row_rather_than_printing_nothing() -> None:
+    """An empty table answers "no such row" and "that row has no options"
+    identically, and the person typing it meant one of them."""
+    result = runner.invoke(app, ["config", "--row", "workspace-git-worktree", "--row", "nope"])
+    assert result.exit_code == 2
+    assert "nope" in result.output and "workspace-git-worktree" not in result.output
+
+
 def test_print_mode_answers_and_writes_a_readable_log(tmp_path: Path, monkeypatch: Any) -> None:
     monkeypatch.setenv("PH_HOME", str(tmp_path))
     result = runner.invoke(app, ["-p", "what is a session log?", "--session", "demo"])

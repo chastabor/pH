@@ -35,6 +35,7 @@ import yaml
 from rich.table import Table
 
 from ph.cordis import Loader, import_plugin_modules
+from ph.cordis.catalog import config_catalog
 from ph.cordis.events import events as event_registry
 from ph.lingering import lifetime
 from ph.paths import RuntimeDirError, resolve_roots
@@ -198,6 +199,19 @@ def default(
     err.print(
         f"[dim]session {outcome.session_id} · {outcome.events} events · {outcome.log_path}[/dim]"
     )
+
+
+async def _note_consumers(documents: list[Path]) -> None:
+    """Mount, and let every row's `ctx.on` register itself into the registry.
+
+    Nothing is read back here: `note_consumer` writes into the process-wide
+    `EventRegistry` as a side effect of listening, so the mount *is* the query
+    and the registry outlives the scope that filled it. Nothing is created
+    beyond the mount — no session, no agent, no provider call — for `_report`'s
+    reason.
+    """
+    async with mounted(documents):
+        return
 
 
 async def _report(documents: list[Path]) -> list[tuple[str, list[tuple[str, str]]]]:
@@ -381,6 +395,7 @@ def daemon(
 def events(
     as_json: Annotated[bool, typer.Option("--json", help="Emit JSON.")] = False,
     type_: TypeOption = [],  # noqa: B006 - typer builds the list per invocation
+    profile: ProfileOption = DEFAULT_PROFILE,
 ) -> None:
     """Print the event producer/consumer matrix.
 
@@ -388,8 +403,33 @@ def events(
     the way a hand-written table does. Declarations live in the plugin modules
     that own them, so every registered plugin is imported first — third-party
     wheels included.
+
+    **Then a profile is mounted, and that is what makes the consumer half real.**
+    Importing a module runs its `declare` calls, so producers are knowable from
+    an import alone — but a *consumer* is recorded by `ctx.on`, which runs when a
+    row activates. Without a mount this printed a producer matrix under a
+    producer/consumer heading, with every consumer list empty and nothing saying
+    why. Which rows listen is a property of the profile, so the answer is
+    per-profile and the flag is the same one `doctor` takes.
+
+    A profile that will not mount is reported rather than fatal: the declarations
+    are still worth printing, and a person debugging a broken profile is exactly
+    who is running this.
     """
     import_plugin_modules()
+    # Resolved *outside* the guard below: `documents_or_exit` reports an unknown
+    # profile by raising `typer.Exit`, which is an `Exception`, so catching
+    # broadly around it turned "no such profile" into a full matrix and exit 0 —
+    # the answer that looks most like success for the input most likely to be a
+    # typo.
+    documents = documents_or_exit(profile)
+    try:
+        anyio.run(partial(_note_consumers, documents))
+    except Exception as error:
+        err.print(
+            f"[yellow]profile {profile!r} does not mount, so no consumers are listed:[/yellow] "
+            f"{error}"
+        )
     # The bus vocabulary, so a bare `tools` needs no prefix — and `log:workspace`
     # is refused rather than answered emptily, because this registry holds no
     # session-log types and the two share six roots (P6-33).
@@ -410,9 +450,84 @@ def events(
     table.add_column("mode")
     table.add_column("payload")
     table.add_column("producer")
+    # The consumers are half of what a producer/consumer matrix is *for*, and
+    # the rendered table shipped without them for a round — `matrix()` had
+    # carried them all along, so the JSON was complete and only the half a
+    # person reads was missing. An event with no listener is a real finding
+    # (a declared extension point nobody uses), so an empty cell says so.
+    table.add_column("consumers")
     table.add_column("what it is")
     for row in matrix:
-        table.add_row(row["name"], row["mode"], row["payload"] or "", row["producer"], row["doc"])
+        table.add_row(
+            row["name"],
+            row["mode"],
+            row["payload"] or "",
+            row["producer"],
+            "\n".join(row["consumers"]),
+            row["doc"],
+        )
+    console.print(table)
+
+
+@app.command()
+def config(
+    as_json: Annotated[bool, typer.Option("--json", help="Emit JSON.")] = False,
+    row: Annotated[list[str], typer.Option("--row", help="Only these rows. Repeatable.")] = [],  # noqa: B006 - typer builds the list per invocation
+    all_: Annotated[
+        bool, typer.Option("--all", help="Include rows that take no configuration.")
+    ] = False,
+) -> None:
+    """Print what every row accepts as configuration.
+
+    Generated from each plugin's own `config=` model, so it cannot drift from
+    the code the way a hand-written options table does — the same argument
+    `ph events` makes about the event registry, applied to the other half of
+    what a profile is.
+
+    Rows with no options are omitted unless `--all` asks for them: "this row has
+    no configuration" is worth being able to look up, but it is not what
+    somebody scanning for a knob is reading past sixty of.
+    """
+    catalog = config_catalog()
+    wanted = {name.strip() for name in row if name.strip()}
+    if wanted:
+        catalog = [entry for entry in catalog if entry["name"] in wanted]
+        missing = sorted(wanted - {entry["name"] for entry in catalog})
+        if missing:
+            # A name that resolves to nothing is a typo far more often than it
+            # is an unregistered row, and this catalog knows every name it
+            # holds — so it says which, rather than printing an empty table.
+            fail(f"[red]no registered row named: {', '.join(missing)}[/red]", code=2)
+    if as_json:
+        emit(json.dumps(catalog, indent=2))
+        return
+    shown = [entry for entry in catalog if all_ or entry["config"] or entry.get("error")]
+    if not shown:
+        emit("no row matched")
+        return
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("row")
+    table.add_column("option")
+    table.add_column("type")
+    table.add_column("default")
+    table.add_column("what it does")
+    for entry in shown:
+        if error := entry.get("error"):
+            table.add_row(entry["name"], "[red]unavailable[/red]", "", "", error)
+            continue
+        if not entry["config"]:
+            table.add_row(entry["name"], "[dim]none[/dim]", "", "", "")
+            continue
+        for index, field in enumerate(entry["config"]):
+            table.add_row(
+                entry["name"] if index == 0 else "",
+                field["name"],
+                field["type"],
+                # Required has no default, and printing one would invent a
+                # value a profile must actually supply.
+                "[bold]required[/bold]" if field["required"] else (field["default"] or ""),
+                field["doc"],
+            )
     console.print(table)
 
 

@@ -222,6 +222,16 @@ different mode raises, dispatching through the wrong mode raises
 a producer/consumer matrix from the registry rather than a hand-kept list
 (`events.py:105-112`).
 
+**The consumer half needs a mount, and did not work until P6-02.** A `declare`
+runs at import, so producers are knowable from the import alone; `ctx.on` runs
+when a row *activates*, so who listens is a property of the profile rather than
+of the code — which is why `ph events` now takes `--profile` and mounts one.
+Before that it printed a producer matrix under a producer/consumer heading:
+`note_consumer` guards on `if module`, `Context._module` was only ever set by
+`Context.scope`, and nothing in the mount path set it, so every scope inherited
+the root's empty string and no listener was recorded in any profile. `ForkScope`
+now stamps the plugin's own `apply.__module__` onto the activation scope.
+
 The 36 declared events, by mode: 17 `emit`, 16 `waterfall`, 2 `serial`, 1
 `parallel`. The `waterfall` majority is the design working — most extension
 points in pH are *policy interceptions* (`tools/pre-execute`, `agent/request`,
@@ -1056,12 +1066,12 @@ The invariant is about the *harness*, not the external state.
 
 ### I3 — Model-visible means logged
 
-**Mechanism.** `Session.derive_messages()` (`session/session.py:310-333`) projects
+**Mechanism.** `Session.derive_messages()` (`session/session.py:380-403`) projects
 the ordered *surface* into the LLM history. Anything reaching a model request must
 be exactly that projection.
 
 **Enforced at runtime, not only in tests.** `agent-loop-invariant`
-(`agent_loop/invariant.py:29-53`) registers a `llm/stream` listener that compares
+(`agent_loop/invariant.py:34-60`) registers a `llm/stream` listener that compares
 `request.messages` against `session.derive_messages()` — *identically*, not
 "equivalently", not "a superset" — and raises `ModelVisibleNotLoggedError` naming
 both counts. It is **prepended**, so it sees what the loop built before any
@@ -1079,6 +1089,20 @@ invariant has to be a declaration the union can enumerate".
 **Where it bites.** Compaction, offloading and context injection cannot take a
 shortcut through the request builder — they must append events, or the assertion
 fires on the next step.
+
+**And enforcement is a property of the profile, which `ctx.invariants` is what
+says.** Every invariant here is enforced by a *row*, and every row is optional —
+so "pH enforces I3" was never true of pH, only of a deployment that mounted
+`agent-loop-invariant`, and nothing said which those were. P6-01's registry
+(`seams/invariants.py`) makes the enforced set enumerable and gives `ph doctor` a
+section for it, so a deployment promising less than this document is
+distinguishable from one promising all of it. It draws one distinction the
+report depends on: an invariant enforced *inline* (I3, which refuses on the path
+it governs) is reported as **enforced inline** and never as "holds", because
+there is no state between requests to poll and a check answering `[]` there
+would read as verified while verifying nothing. The pollable ones — I6's
+`harness_state.json`, the surface fold, the tool view cache, and I2's scope tree
+— answer about now.
 
 ### I4 — The log is append-only; the surface is what changes
 
