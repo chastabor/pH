@@ -43,7 +43,12 @@ from ph.llm.types import (
 )
 from ph.seams.credentials import CredentialService
 from ph_app.adapters._http import failure_from_status
-from ph_app.adapters.anthropic import AnthropicAdapter
+from ph_app.adapters.anthropic import (
+    CACHE_BREAKPOINTS,
+    CHECKPOINT_EVERY,
+    AnthropicAdapter,
+    _checkpoints,
+)
 from ph_app.adapters.anthropic import Config as AnthropicConfig
 from ph_app.adapters.openai_compatible import (
     OpenAiCompatibleAdapter,
@@ -507,3 +512,126 @@ def test_each_adapter_declares_what_it_accepts() -> None:
     assert "image/png" in openai.accepts
     assert "application/pdf" not in openai.accepts, "this wire needs the Files API (P7-03)"
     assert anthropic.max_attachment_bytes and openai.max_attachment_bytes
+
+
+# ------------------------------------------------------- P6-13 cache markers --
+
+
+def _markers(body: dict[str, Any]) -> list[str]:
+    """Where this body carries `cache_control`, as readable labels."""
+    found: list[str] = []
+    for index, tool in enumerate(body.get("tools") or []):
+        if "cache_control" in tool:
+            found.append(f"tools[{index}]")
+    system = body.get("system")
+    if isinstance(system, list):
+        found.extend(f"system[{i}]" for i, block in enumerate(system) if "cache_control" in block)
+    for index, message in enumerate(body.get("messages") or []):
+        for inner, block in enumerate(message["content"]):
+            if "cache_control" in block:
+                found.append(f"messages[{index}].content[{inner}]")
+    return found
+
+
+def _options(count: int, *, tools: int = 2, system: str | None = "sys") -> GenerateOptions:
+    return GenerateOptions(
+        provider="anthropic",
+        model="m",
+        messages=tuple(
+            create_user_message(
+                content=[{"type": "text", "text": f"turn {i}"}], source={"kind": "user"}
+            )
+            for i in range(count)
+        ),
+        system=system,
+        tools=tuple(ToolSchema(name=f"t{i}", description="d", parameters={}) for i in range(tools)),
+    )
+
+
+async def test_cache_breakpoints_land_on_the_stable_boundaries() -> None:
+    """P6-13. The wire order is tools → system → messages, and so is the budget.
+
+    Anthropic's caching is opt-in: before this, every prefix-stability decision
+    in the harness paid off on the routes that cache implicitly and nowhere here.
+    The markers go on the *last* tool and the system block — one prefix each —
+    and on two quantized message checkpoints.
+    """
+    adapter = AnthropicAdapter(ctx=Context(), config=AnthropicConfig())
+
+    body = await adapter._body(_options(9))
+
+    assert _markers(body) == [
+        "tools[1]",  # the last tool: everything through the tool list
+        "system[0]",
+        "messages[4].content[0]",
+        "messages[8].content[0]",
+    ]
+    # The system prompt has to be a block to carry one, so the string form goes.
+    assert body["system"] == [
+        {"type": "text", "text": "sys", "cache_control": {"type": "ephemeral"}}
+    ]
+
+
+async def test_the_breakpoint_budget_is_never_exceeded() -> None:
+    """Four is Anthropic's limit, and a fifth marker is a request error.
+
+    Asserted across the shapes a session actually sends — with and without
+    tools, with and without a system prompt, at every length up to several turns
+    — because the budget is spent by four independent decisions and nothing else
+    would notice a fifth.
+    """
+    adapter = AnthropicAdapter(ctx=Context(), config=AnthropicConfig())
+
+    for count in range(1, 24):
+        for tools in (0, 3):
+            for system in ("sys", None):
+                body = await adapter._body(_options(count, tools=tools, system=system))
+                found = _markers(body)
+                assert len(found) <= CACHE_BREAKPOINTS, (count, tools, system, found)
+
+
+def test_consecutive_requests_mark_a_checkpoint_in_common() -> None:
+    """The property the whole placement exists for, and the one a naive one fails.
+
+    A marker is *read* only where a request marks a prefix an earlier request
+    also marked. Marking "the newest message" puts the marker at a different
+    index every time, so it is written once and never read — the slot buys
+    nothing. Quantizing makes consecutive requests agree.
+
+    Checked for every way a conversation grows: a turn adds a user message and an
+    assistant message, a tool round trip adds one at a time, so any step from one
+    to `CHECKPOINT_EVERY` messages has to keep a checkpoint in common.
+    """
+    for count in range(1, 60):
+        for step in range(1, CHECKPOINT_EVERY + 1):
+            shared = set(_checkpoints(count)) & set(_checkpoints(count + step))
+            assert shared, f"{count} → {count + step} shares no checkpoint"
+
+
+def test_a_checkpoint_survives_the_request_that_advances_it() -> None:
+    """Why there are two, not one.
+
+    A single quantized marker goes dark exactly when it moves: the first request
+    to mark index 8 would carry nothing at index 4, so the conversation it just
+    cached would be re-read from scratch. The previous checkpoint is what makes
+    the step cost one request's tail instead of the whole prefix.
+    """
+    # 9 messages is the first request whose latest checkpoint is 8.
+    assert _checkpoints(8) == (0, 4)
+    assert _checkpoints(9) == (4, 8)
+    assert _checkpoints(1) == (0,), "a first request marks what it can"
+    assert _checkpoints(0) == (), "and an empty conversation marks nothing"
+
+
+async def test_caching_off_sends_the_shapes_the_route_always_sent() -> None:
+    """A gateway that does not implement this rejects the field rather than ignoring it.
+
+    So `cacheControl: false` is not "mark nothing" — it is the body from before
+    P6-13, system string included.
+    """
+    adapter = AnthropicAdapter(ctx=Context(), config=AnthropicConfig(cache_control=False))
+
+    body = await adapter._body(_options(9))
+
+    assert _markers(body) == []
+    assert body["system"] == "sys"

@@ -25,6 +25,12 @@ previous request's prefix: the longest common run of messages, and only when the
 system prompt is byte-identical. *uncached* is the remainder — what is billed at
 full rate.
 
+*Could* serve, and that is load-bearing: this measures pH's own prompt assembly,
+not any provider's cache. An OpenAI-compatible route caches implicitly and gets
+this for free; Anthropic's does not, which is why P6-13 sends `cache_control`
+markers and asserts the read as a number rather than trusting this table to
+imply one.
+
 ## The workload, and what it is not
 
 **There is no recorded RLM session to replay, and that is worth stating before

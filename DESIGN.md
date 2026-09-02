@@ -1256,6 +1256,17 @@ the property it protects: without stabilization, every request's cacheable
 prefix is its predecessor in full — 74.9 % of everything sent — and it is
 compaction's surface `replace`, not any provider swap, that breaks it.
 
+**Whether a provider *bills* it as a prefix is a second question, and on
+Anthropic it is opt-in** (P6-13). The OpenAI-compatible routes cache implicitly;
+Anthropic's does nothing without `cache_control` markers, so until they were sent
+every stability decision above paid off on one wire and nowhere on the other.
+`adapters/anthropic.py` spends the four markers a request may carry on `tools`,
+`system`, and **two quantized message checkpoints** — quantized because a marker
+on the newest message sits at a different index in every request, so it is
+written once and read never. `tests/test_prompt_cache.py` holds that as a number
+rather than a shape: the second request of a session reads a prefix, and so does
+P4-03's replayed summarize call.
+
 **The decline/fail distinction (§3.4) is part of this invariant.** A seam must
 be able to say *"I could not serve this, and here is the code for why"* without
 that being an error — otherwise every optional tier becomes a startup failure.

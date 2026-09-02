@@ -15,7 +15,12 @@ The two mappings worth naming:
   what it was only considering;
 * **`cache_creation_input_tokens` / `cache_read_input_tokens`** are already
   disjoint from `input_tokens` here, so they map across directly (unlike
-  DeepSeek, which needs subtraction).
+  DeepSeek, which needs subtraction);
+* **`cache_control` markers** — Anthropic's caching is opt-in, and every
+  prefix-stability decision above this file (A12, P4-03's replayed summarize
+  envelope) pays off on the OpenAI-compatible routes, which cache implicitly, and
+  nowhere here until the markers are sent. `_checkpoints` is where they go and
+  why.
 
 @module ph_app.adapters.anthropic
 """
@@ -74,6 +79,43 @@ instead of in the content-block union."""
 MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024
 """The default per-attachment ceiling, declared so a caller can act on it."""
 
+CACHE_BREAKPOINTS = 4
+"""How many blocks one request may mark `cache_control`. Anthropic's limit, and
+the whole design constraint: placing four markers well is the work.
+
+The budget is spent `tools` (1) + `system` (1) + two message checkpoints (2),
+which is all four. A fifth marker is a request error, so anything added here has
+to take a slot from something else."""
+
+CHECKPOINT_EVERY = 4
+"""How often the moving message breakpoint advances, in messages.
+
+**Why a breakpoint does not go on the last message.** A cache *read* happens
+where a request marks a prefix that an earlier request also marked; a mark on
+"the newest message" is at a different index in every request, so it is written
+once and never read again — a slot spent on a prefix nobody asks for. Quantizing
+makes consecutive requests agree: with a step of four, requests whose message
+count is 5, 6, 7 and 8 all mark index 4, so the second and every later one read
+what the first wrote.
+
+Two of them, `latest` and the one before it, because a single quantized mark goes
+dark exactly when it advances — the request that first marks index 8 would carry
+no mark at 4 and re-read nothing. Keeping the previous checkpoint means the step
+is paid once, not on every request that crosses a boundary.
+
+Four is the smallest step that still spans an assistant turn (a user message, an
+assistant message with a tool call, a tool result, the next assistant message),
+so a checkpoint rarely lands mid-turn. The cost of a larger step is a longer
+uncached tail; the cost of a smaller one is a shorter-lived cache entry."""
+
+MIN_CACHEABLE_TOKENS = 1024
+"""Anthropic's floor for a cache *write* (2048 on the smaller models).
+
+Not enforced here, and worth saying why: a marker on a shorter prefix is ignored
+rather than refused, so the cost of marking `tools` in a deployment with two
+small tools is nothing, while a check would need a tokenizer this adapter does
+not have and would disagree with the provider's."""
+
 _WIRE_SHAPES: dict[str, str] = {
     "image/png": "image",
     "image/jpeg": "image",
@@ -102,6 +144,39 @@ class Config(WireModel):
     in front of a text-only model sets `accepts: []` and gets honest pointers
     instead of requests the far end rejects."""
     max_attachment_bytes: int = MAX_ATTACHMENT_BYTES
+    cache_control: bool = True
+    """Send `cache_control` breakpoints (P6-13).
+
+    Row config for `accepts`' reason: this adapter serves whatever `base_url`
+    points at, and a gateway that does not implement Anthropic's caching rejects
+    the field rather than ignoring it. Default on, because the shipped route is
+    Anthropic's own and the markers are what make A12 worth anything there."""
+
+
+def _breakpoint() -> dict[str, str]:
+    """One `cache_control` marker. A fresh dict per call: these are handed to a
+    JSON encoder inside a body a caller may edit, and a shared literal would make
+    two markers one object."""
+    return {"type": "ephemeral"}
+
+
+def _checkpoints(count: int) -> tuple[int, ...]:
+    """Which message indices carry a breakpoint, oldest first (P6-13).
+
+    Quantized to `CHECKPOINT_EVERY` so that consecutive requests mark the *same*
+    index — which is the only way a marker is ever read rather than merely
+    written — and two of them so the cache does not go dark on the request where
+    the checkpoint advances. `CHECKPOINT_EVERY` carries the reasoning.
+
+    The empty tuple when there are no messages: nothing to mark beats an index
+    guessed for a list that has none. Every shape that reaches this has at least
+    one — compaction's `direct` sends a single instruction message — so the guard
+    is for the caller this file does not know about.
+    """
+    if count <= 0:
+        return ()
+    latest = ((count - 1) // CHECKPOINT_EVERY) * CHECKPOINT_EVERY
+    return tuple(index for index in (latest - CHECKPOINT_EVERY, latest) if index >= 0)
 
 
 def _is_overflow(body: str) -> bool:
@@ -128,16 +203,31 @@ class AnthropicAdapter:
 
     async def _body(self, options: GenerateOptions) -> dict[str, Any]:
         media = await load_media(self.ctx.get("attachments"), options.messages)
+        caching = self.config.cache_control
+        messages = [_to_anthropic(message, media) for message in options.messages]
+        if caching:
+            for index in _checkpoints(len(messages)):
+                # On the message's last block, which is what "cache everything
+                # through here" means on this wire. `_to_anthropic` never returns
+                # an empty content list, so there is always a block to mark.
+                messages[index]["content"][-1]["cache_control"] = _breakpoint()
         body: dict[str, Any] = {
             "model": options.model,
             "max_tokens": options.max_tokens or self.config.default_max_tokens,
             "stream": True,
-            "messages": [_to_anthropic(message, media) for message in options.messages],
+            "messages": messages,
         }
         if options.system:
-            body["system"] = options.system
+            # A block list rather than the plain string, because only a block can
+            # carry a marker. Left as a string when caching is off, so a gateway
+            # that never wanted any of this sees the shape it always saw.
+            body["system"] = (
+                [{"type": "text", "text": options.system, "cache_control": _breakpoint()}]
+                if caching
+                else options.system
+            )
         if options.tools:
-            body["tools"] = [
+            tools: list[dict[str, Any]] = [
                 {
                     "name": tool.name,
                     "description": tool.description,
@@ -145,6 +235,15 @@ class AnthropicAdapter:
                 }
                 for tool in options.tools
             ]
+            if caching:
+                # Its own breakpoint rather than relying on `system`'s, and it
+                # earns the slot: the wire order is tools → system → messages, so
+                # a system prompt that changes mid-session — pH composes a `todos`
+                # section into it whenever the list changes — invalidates every
+                # marker after it. The tools survive that; without this they would
+                # not.
+                tools[-1]["cache_control"] = _breakpoint()
+            body["tools"] = tools
         if options.temperature is not None:
             body["temperature"] = options.temperature
         if options.stop:
