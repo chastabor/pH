@@ -119,6 +119,42 @@ async def test_an_event_arriving_on_both_routes_is_folded_once() -> None:
     assert folded == [1, 2], "seq 2 came down both routes and was folded once"
 
 
+async def test_a_caught_up_page_is_folded_as_history_and_a_frame_as_live(
+    tmp_path: Path,
+) -> None:
+    """Which phase an event arrived in, told to the fold rather than assumed.
+
+    `TuiEventAdapter` has taken `Frame(live=…)` since P3 because a transcript
+    being *rebuilt* is not one being *streamed*: a page of history holds a turn's
+    `assistant/chunk` records and the `assistant/message` that superseded them,
+    so a fold told they were live builds a streaming row and then replaces it
+    inside a single pass — which in Textual is a widget mount inside a widget
+    mount, and surfaced as `MountError` from an unrelated test.
+
+    Asserted on the contract rather than on the symptom, because the symptom is a
+    race: the burst has to be big enough and the frame boundary has to fall in
+    the wrong place. Sabotage: pass `True` from `catch_up`, and this fails every
+    time while the resume test passes most of the time.
+    """
+    async with running(tmp_path) as daemon:
+        seen: list[bool] = []
+        await daemon.root("phases")
+        client = await daemon.client()
+        feed = Followed(
+            session_id="phases",
+            on_events=lambda pairs, live: seen.append(live),
+            on_status=lambda params: None,
+        )
+
+        await feed.catch_up(client, None)
+        assert seen == [False], "a snapshot page is history"
+
+        feed.live()
+        feed("session.event", {"sessionId": "phases", "event": {"seq": 99, "type": "turn/end"}})
+
+        assert seen == [False, True], "and a notification is not"
+
+
 async def test_the_second_front_end_sees_the_first_ones_prompt(tmp_path: Path) -> None:
     """The multiplex rule: a submitted prompt is a log entry everyone sees.
 
@@ -269,21 +305,30 @@ async def test_the_screens_offered_are_the_ones_this_client_can_draw(
             assert built is not None, screen_id
 
 
-async def test_the_picker_is_pointed_at_the_daemons_sessions(tmp_path: Path) -> None:
-    """The *daemon* knows where sessions live, because it mounted the profile.
+async def test_the_picker_reads_no_session_file(tmp_path: Path) -> None:
+    """The list is folded on the daemon; this client touches no disk.
 
-    A client deriving the path again would agree only for as long as the two
-    processes saw the same environment — and a UI started from a shell with a
-    different `$PH_HOME` would list a directory with none of the daemon's
-    sessions in it, which looks exactly like data loss.
+    Both halves come back from one call: the session this front end is on is
+    *live*, so its row carries the status the daemon calls it and the `cwd` from
+    its own header — the repo it belongs to — even though its log is still in a
+    write buffer and has never been on disk.
+
+    That is what makes the client filesystem-free. Before this, the daemon handed
+    over a *directory* and the client walked it, which held only while the two
+    shared a machine and let them disagree about which `$PH_HOME` they meant.
+
+    Sabotage: fold the live roots out of `browse_of` and a person cannot find the
+    session they are sitting in.
     """
     async with running(tmp_path) as daemon:
-        front, _ = await _front(daemon)
+        front, _ = await _front(daemon, "browsed", cwd=Path("/repos/thing"), trust="once")
 
-        directory = front.sessions_directory(Path("/nowhere"))
+        rows = await front.browse_sessions()
 
-        assert directory != Path("/nowhere"), "the daemon answered"
-        assert directory.name == "sessions"
+        row = next(one for one in rows if one.session_id == "browsed")
+        assert row.state == "idle", "a live root reports what the daemon calls it"
+        assert row.cwd == "/repos/thing", "and which repo it belongs to"
+        assert not hasattr(front, "sessions_directory"), "no path crosses the wire any more"
 
 
 # ------------------------------------------------------------------- the asks --

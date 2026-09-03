@@ -13,9 +13,11 @@ before `serve()` is listening, which is exactly the window a poll would land in.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+import threading
+from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager, contextmanager, suppress
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -27,7 +29,7 @@ from ph.cordis import Profile
 from ph.paths import resolve_roots
 from ph_app.daemon import DaemonClient, serve
 
-__all__ = ["PROFILE", "Daemon", "running", "shut_down", "until"]
+__all__ = ["PROFILE", "Daemon", "daemon_in_thread", "running", "shut_down", "until"]
 
 PROFILE = Profile.from_paths([BASE, HEADLESS])
 
@@ -57,6 +59,24 @@ class _Daemon:
     async def root(self, session_id: str = "root") -> Any:
         """One live root, started the way `session/attach` starts one."""
         return await self.server.supervisor.start(session_id)
+
+    def held(self, session_id: str) -> Any:
+        """The root this daemon is *already* holding, or `KeyError`.
+
+        Sync, and raising, which is what makes it a different question from
+        `root()`: a test asserting on the harness behind a client that has
+        attached wants to know it is there, not to start one if it is not.
+
+        Here rather than in each test file because `server.supervisor.roots` is
+        this helper's own internals — it was reaching out of three files."""
+        return self.server.supervisor.roots[session_id]
+
+    def holds(self, session_id: str) -> bool:
+        return session_id in self.server.supervisor.roots
+
+    async def sweep(self, *, after: float = 0.0) -> list[str]:
+        """Release every root quiet longer than `after`. Returns their ids."""
+        return await self.server.supervisor.sweep(after=after)
 
 
 Daemon = _Daemon
@@ -124,6 +144,54 @@ async def running(
             yield _Daemon(path=socket, tasks=tasks, server=started[0])
         finally:
             tasks.cancel_scope.cancel()
+
+
+@contextmanager
+def daemon_in_thread(tmp_path: Path, *, profile: Profile | None = None) -> Iterator[Path]:
+    """A daemon on its own event loop, in its own thread. Yields its socket.
+
+    For a **sync** test — the snapshot suite's `snap_compare` drives its own
+    loop, so it cannot await a fixture and cannot share one. The socket is the
+    whole boundary, which is what makes this work at all and is also the thing
+    under test: a client on one loop talking to a supervisor on another is
+    strictly closer to production than the in-process fixture, where both share
+    a loop.
+
+    What it cannot do is hand back a `Root`: those objects belong to the
+    daemon's loop. A test that wants the harness uses the async `tui_daemon`
+    fixture instead.
+    """
+    socket = tmp_path / "thread" / "daemon.sock"
+    socket.parent.mkdir(parents=True, exist_ok=True)
+    ready = threading.Event()
+
+    def run() -> None:
+        # `started` rather than `ready`: it is a plain sync callback, invoked
+        # once the listener is bound, so it crosses to this thread's `Event`
+        # without a task group to bridge two loops' primitives.
+        anyio.run(
+            partial(
+                serve,
+                profile or PROFILE,
+                path=socket,
+                started=lambda _server: ready.set(),
+                passivate_after=None,
+            )
+        )
+
+    thread = threading.Thread(target=run, daemon=True, name="ph-daemon-under-test")
+    thread.start()
+    if not ready.wait(timeout=30):
+        raise AssertionError(f"the daemon thread never listened on {socket}")
+    try:
+        yield socket
+    finally:
+        # Through the socket, because `stop` belongs to the other loop. A daemon
+        # thread would die with the process anyway; stopping it releases the
+        # session leases this test took, which the next one may want.
+        with suppress(Exception):
+            anyio.run(shut_down, socket)
+        thread.join(timeout=10)
 
 
 async def shut_down(path: Path) -> None:

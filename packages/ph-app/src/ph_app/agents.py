@@ -337,7 +337,9 @@ class _Follow:
             session_id=self.session_id, on_events=self._events, on_status=self._status
         )
 
-    def _events(self, pairs: Sequence[tuple[Mapping[str, Any], Any]]) -> None:
+    def _events(self, pairs: Sequence[tuple[Mapping[str, Any], Any]], _live: bool) -> None:
+        # The phase is not a distinction a follower draws: it prints records, and
+        # a record read from a page reads the same as one that just arrived.
         self.write(event for event, _view in pairs)
 
     def _status(self, params: Mapping[str, Any]) -> None:
@@ -476,7 +478,10 @@ def attach(
         attached = await client.call("session/attach", sessionId=session, cursor=None)
         cursor = {**obj(attached["cursor"]), "sequence": since}
         try:
-            follow.feed.seen = since
+            # `since` is the sequence to start *at*, so what has been "seen" is
+            # everything below it — `- 1`, because seq 0 is a real event and
+            # `--since 0` must still print it.
+            follow.feed.seen = since - 1
             await follow.feed.catch_up(client, cursor)
             follow.feed.live()
             if until_idle and not follow.done.is_set():

@@ -7,34 +7,52 @@ to choose between. So this reads the header line and stops at the first
 `user/message`: both live at the top of the file, and the first thing the person
 typed is the best title a session has.
 
-@module ph_app.tui.sessions
+**Out of `tui/` because the reader moved.** Before P5-14 the terminal was the
+harness, so listing its own logs was reading its own files. Now the daemon holds
+them: it answers `sessions/browse`, and this is the fold it answers with. A
+client reads no session file at all — which is what makes a front end that is
+not on the daemon's machine possible at all, and what stops a client and a
+daemon disagreeing about which `$PH_HOME` they meant.
+
+Rule 6, unchanged by the move: the fold is **filesystem-shaped**. It walks
+`<sessions>/<family>/*.jsonl` and peeks their headers, so a backend that keeps
+sessions anywhere else — Turso's one-database-per-session — answers `directory()`
+with `None` and contributes no stored rows. `SessionPersistence.stored()` is the
+backend-agnostic listing and deliberately carries neither `title` nor `size`,
+because those mean different things per backend; a picker without titles is the
+thing this module exists to avoid.
+
+@module ph_app.sessions
 """
 
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 
 from pydantic import ValidationError
 
 from ph.persistence import MAX_DEPTH
-from ph.persistence.jsonl import HEADER_LINE_TYPE, family_log, session_logs
+from ph.persistence.jsonl import HEADER_LINE_TYPE, family_log, locate_session, session_logs
 from ph.session import SessionHeader
+from ph.wire import WireModel
 
-from ..wire import obj, text_of_wire
+from .wire import obj, text_of_wire
 
-__all__ = ["SessionSummary", "session_summaries"]
+__all__ = ["SessionSummary", "recorded_cwd", "session_summaries"]
 
 TITLE_SCAN_LIMIT = 40
 """Events to look through for a title before giving up. A session that opens
 with forty non-user events has no title worth waiting for."""
 
 
-@dataclass(frozen=True, slots=True)
-class SessionSummary:
-    """Enough about a stored session to choose it from a list."""
+class SessionSummary(WireModel):
+    """Enough about a stored session to choose it from a list.
+
+    A `WireModel` because it crosses a socket now: `sessions/browse` folds these
+    on the daemon and `to_wire()`/`model_validate` carry them, so a field added
+    here reaches every front end with nothing edited at either edge (P7-11)."""
 
     session_id: str
     modified: float
@@ -46,6 +64,22 @@ class SessionSummary:
 
     kind: str = ""
     """`"fork"`, `"segment"`, or empty for a root — which has no parent to qualify."""
+
+    state: str = "stored"
+    """`running` or `stored` — whether a daemon is holding this session now.
+
+    The distinction is new with P5-14: before it, the only session that could be
+    live was the one this terminal was hosting. Picking a running one means
+    joining a turn that may be in flight somewhere else, which is worth saying
+    on the row.
+
+    **Two states, not three.** A `passivated` one — a root the sweep released —
+    was planned and dropped: telling it from `stored` means reading the *tail* of
+    every log for a `supervisor/passivated` record, and this module exists
+    precisely because reading whole logs makes the picker slow where a person has
+    many. Nothing the person then does differs: picking either mounts the session
+    from its log. So the cost bought a label and no decision.
+    """
 
     family: str = ""
     """The lineage directory this log sits in — every ancestor is a sibling in it.
@@ -81,8 +115,8 @@ def session_summaries(sessions_dir: Path, *, limit: int = 50) -> list[SessionSum
     known = {summary.session_id: summary for summary in summaries}
     for index, summary in enumerate(summaries):
         if not summary.title and summary.parent is not None:
-            summaries[index] = replace(
-                summary, title=_inherited_title(sessions_dir, summary, known)
+            summaries[index] = summary.model_copy(
+                update={"title": _inherited_title(sessions_dir, summary, known)}
             )
     return summaries
 
@@ -174,3 +208,43 @@ def _header(raw: object) -> SessionHeader | None:
         return SessionHeader.model_validate(raw)
     except ValidationError:
         return None
+
+
+def recorded_cwd(sessions_dir: Path, session_id: str) -> str:
+    """Where a stored session says it was worked in, or `""`.
+
+    **Read without mounting anything**, which is the whole reason it exists: a
+    root's profile has to be mounted *with* its working directory — the fs seam
+    fixes its root at row-apply time and `workspace-lifecycle` reads it there to
+    discover provisioning — so the answer is needed before there is a `Context`
+    to ask a store for it. One `locate` and one header line.
+
+    Filesystem-shaped, like `session_summaries` above and for the same reason
+    stated there: a backend that keeps sessions elsewhere answers `""` and the
+    root mounts where the deployment's profile says, which is today's behaviour.
+    """
+    path = locate_session(sessions_dir, session_id)
+    if path is None or not path.is_file():
+        return ""
+    header = _header_line(path)
+    return "" if header is None else (header.cwd or "")
+
+
+def _header_line(path: Path) -> SessionHeader | None:
+    """The log's header, from its first line. `None` when it has none this build reads."""
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                text = line.strip()
+                if not text:
+                    continue
+                try:
+                    record = json.loads(text)
+                except json.JSONDecodeError:
+                    return None
+                if record.get("type") == HEADER_LINE_TYPE:
+                    return _header(record.get("header"))
+                return None
+    except OSError:
+        return None
+    return None

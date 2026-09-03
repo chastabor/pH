@@ -421,8 +421,9 @@ async def test_a_cursor_from_another_log_reads_from_the_start(tmp_path: Path) ->
 
     Refusing would strand a client that did nothing wrong; honouring it would
     skip events it never saw. So a stale generation reads as "you have seen
-    nothing of *this* log" — and `session/attach` says where it actually
-    resumed, so the client is not left inferring it from sequence numbers.
+    nothing of *this* log" — and the reply names the generation it *does* count
+    against, which is what a client pages from rather than from the cursor it
+    sent.
     """
     async with running(tmp_path) as daemon:
         client = await daemon.client()
@@ -434,7 +435,7 @@ async def test_a_cursor_from_another_log_reads_from_the_start(tmp_path: Path) ->
         attached = await client.call("session/attach", sessionId="eta", cursor=stale)
 
         assert len(history) == settled["cursor"]["sequence"], "a stale cursor skipped events"
-        assert attached["from"] == 0, "attach did not say it was resuming from the start"
+        assert attached["cursor"]["generation"] != stale["generation"], "the reply names this log"
         await client.notify("shutdown")
 
 

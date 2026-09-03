@@ -11,47 +11,11 @@ and the answer is remembered under `$PH_HOME`.
 
 from __future__ import annotations
 
-import json
-from dataclasses import dataclass
 from pathlib import Path
-
-from ph.paths import write_text_under
 
 from .base import Action, ConfirmModal
 
-__all__ = ["TrustStore", "plan_review_modal", "project_trust_modal"]
-
-
-@dataclass(slots=True)
-class TrustStore:
-    """Which project roots the user has trusted, kept outside the project.
-
-    Deliberately not stored in the project: a file inside the repository could
-    declare the repository trustworthy, which is the one thing the prompt is
-    supposed to prevent.
-    """
-
-    path: Path
-
-    def trusted(self, root: Path) -> bool:
-        return str(root.resolve()) in self._load()
-
-    def trust(self, root: Path) -> None:
-        roots = self._load()
-        roots.add(str(root.resolve()))
-        write_text_under(self.path, json.dumps({"trusted": sorted(roots)}, indent=2) + "\n")
-
-    def _load(self) -> set[str]:
-        try:
-            record = json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return set()
-        trusted = record.get("trusted")
-        return (
-            {item for item in trusted if isinstance(item, str)}
-            if isinstance(trusted, list)
-            else set()
-        )
+__all__ = ["plan_review_modal", "project_trust_modal"]
 
 
 def project_trust_modal(root: Path) -> ConfirmModal:
@@ -66,7 +30,7 @@ def project_trust_modal(root: Path) -> ConfirmModal:
         title="trust this project?",
         body=body,
         actions=[
-            Action("trust", "Trust this project", "success"),
+            Action("always", "Trust this project", "success"),
             Action("once", "This session only", "primary"),
             Action("no", "Don't load it", "error"),
         ],

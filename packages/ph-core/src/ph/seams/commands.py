@@ -14,9 +14,10 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from functools import partial
 from typing import Any
 
-from ..cordis import Context, Disposer, Running, maybe_await, plugin, running
+from ..cordis import Context, Disposer, Running, events, maybe_await, plugin, running
 from ..session import Session
 from ..wire import WireModel, declarable
 from ._registry import claim_key
@@ -30,6 +31,13 @@ __all__ = [
 ]
 
 log = logging.getLogger("ph.seams.commands")
+
+events.declare(
+    "commands/change",
+    "emit",
+    owner="ph.seams.commands",
+    doc="The command set changed; consumers re-read list().",
+)
 
 
 class CommandSchema(WireModel):
@@ -113,14 +121,25 @@ class CommandRegistry:
     _commands: dict[str, _Registered] = field(default_factory=dict)
 
     def register(self, definition: CommandDefinition, *, scope: Context | None = None) -> Disposer:
+        """Register one command. Emits `commands/change` on both edges.
+
+        The announcement is `claim_key`'s `then` rather than a wrapper around the
+        disposer it returns, because a scope unwinding runs what `add_disposer`
+        was given: wrapping means unloading a row takes its verb away and tells
+        nobody, which is the edge a remote palette most needs to hear about.
+        """
         by = self.ctx.running_for(scope)
-        return claim_key(
+        changed = partial(self.ctx.emit, "commands/change")
+        released = claim_key(
             by.owner,
             self._commands,
             definition.name,
             _Registered(definition, by),
             label="command",
+            then=changed,
         )
+        changed()
+        return released
 
     def list(self) -> list[CommandDefinition]:
         return [self._commands[name].definition for name in sorted(self._commands)]

@@ -20,18 +20,20 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from daemon_helpers import until as settled
 from textual.widgets import Input
-from tui_helpers import running, turn_done, until
+from tui_helpers import root_of, running, turn_done, until
 
 from ph.seams.approval import ApprovalRequest, Edited, Responded
 from ph.seams.commands import CommandDefinition
 from ph.seams.user_questions import UserQuestion
 from ph.testing import StubAgent, simple_tool
+from ph_app.trust import TrustStore
 from ph_app.tui.app import PHTuiApp
 from ph_app.tui.modals.approval import ApprovalModal
 from ph_app.tui.modals.ask_user import AskUserModal
 from ph_app.tui.modals.base import Choice, ChoicePicker, ConfirmModal
-from ph_app.tui.modals.trust import TrustStore, plan_review_modal, project_trust_modal
+from ph_app.tui.modals.trust import plan_review_modal, project_trust_modal
 from ph_app.tui.widgets.prompt import PromptInput
 
 pytestmark = pytest.mark.anyio
@@ -46,10 +48,11 @@ def _command(name: str = "compact") -> CommandDefinition:
 # ------------------------------------------------------------------- prompt --
 
 
-async def test_typing_and_submitting_runs_a_turn(make_tui_app: MakeApp) -> None:
+async def test_typing_and_submitting_runs_a_turn(make_tui_app: MakeApp, tui_daemon: Any) -> None:
     async with running(make_tui_app()) as (app, pilot):
+        root = root_of(tui_daemon)
         assert app.front is not None
-        app.front.ctx.tools.register(simple_tool("ping"))
+        root.ctx.tools.register(simple_tool("ping"))
         await pilot.press(*"hello")
         await pilot.press(app.keys.submit)
         await until(pilot, turn_done(app))
@@ -125,14 +128,19 @@ async def test_a_global_key_does_not_also_edit_the_prompt(make_tui_app: MakeApp)
 # ----------------------------------------------------------------- approval --
 
 
-async def _decide(app: Any, pilot: Any, front: Any, *, arguments: Any = None) -> list[Any]:
-    """Put one approval on screen and hand back the list the answer lands in."""
+async def _decide(app: Any, pilot: Any, root: Any, *, arguments: Any = None) -> list[Any]:
+    """Put one approval on screen and hand back the list the answer lands in.
+
+    Takes the daemon-side `root`, not the front end: the approval is raised where
+    the harness is, and the modal appears where the person is — which after P5-14
+    is the two ends of a socket. That separation is the thing under test.
+    """
     answers: list[Any] = []
 
     async def ask() -> None:
         answers.append(
-            await front.ctx.approval.request(
-                agent=StubAgent(ctx=front.ctx, session=front.session),
+            await root.ctx.approval.request(
+                agent=StubAgent(ctx=root.ctx, session=root.session),
                 tool_name="write",
                 call_id="c1",
                 reason="writes outside the workspace",
@@ -145,16 +153,16 @@ async def _decide(app: Any, pilot: Any, front: Any, *, arguments: Any = None) ->
     return answers
 
 
-async def test_the_modal_answers_in_the_tools_voice(make_tui_app: MakeApp) -> None:
+async def test_the_modal_answers_in_the_tools_voice(make_tui_app: MakeApp, tui_daemon: Any) -> None:
     """`respond` (P4-05): the body never runs and the model reads an answer.
 
     A person who knows the answer should not have to reject a call and then
     explain — the round trip is the cost this decision removes.
     """
     async with running(make_tui_app()) as (app, pilot):
-        front = app.front
-        assert front is not None
-        answers = await _decide(app, pilot, front)
+        root = root_of(tui_daemon)
+        assert app.front is not None
+        answers = await _decide(app, pilot, root)
 
         await pilot.click("#approval-respond")
         await pilot.pause()
@@ -166,12 +174,13 @@ async def test_the_modal_answers_in_the_tools_voice(make_tui_app: MakeApp) -> No
 
         assert isinstance(answers[0], Responded)
         assert answers[0].message == "the port is 8080"
-        decided = next(e for e in front.session.events if e.type == "approval/decided")
+        decided = next(e for e in root.session.events if e.type == "approval/decided")
         assert decided.data["outcome"] == "responded"
 
 
 async def test_the_modal_corrects_the_call_rather_than_refusing_it(
     make_tui_app: MakeApp,
+    tui_daemon: Any,
 ) -> None:
     """`edit` (P4-05), opening on the call as it stands.
 
@@ -180,9 +189,9 @@ async def test_the_modal_corrects_the_call_rather_than_refusing_it(
     own request, which they need to see.
     """
     async with running(make_tui_app()) as (app, pilot):
-        front = app.front
-        assert front is not None
-        answers = await _decide(app, pilot, front, arguments={"path": "/etc/hosts"})
+        root = root_of(tui_daemon)
+        assert app.front is not None
+        answers = await _decide(app, pilot, root, arguments={"path": "/etc/hosts"})
 
         await pilot.click("#approval-edit")
         await pilot.pause()
@@ -194,21 +203,21 @@ async def test_the_modal_corrects_the_call_rather_than_refusing_it(
 
         assert isinstance(answers[0], Edited)
         assert answers[0].arguments == {"path": "notes.md"}
-        decided = next(e for e in front.session.events if e.type == "approval/decided")
+        decided = next(e for e in root.session.events if e.type == "approval/decided")
         assert decided.data["arguments"]["path"] == "notes.md"
         # The ask itself does not carry them: `tool/call` already did, and two
         # copies of one fact in the log are two that can disagree.
-        asked = next(e for e in front.session.events if e.type == "approval/asked")
+        asked = next(e for e in root.session.events if e.type == "approval/asked")
         assert "arguments" not in asked.data
 
 
-async def test_a_mistyped_edit_keeps_the_box_open(make_tui_app: MakeApp) -> None:
+async def test_a_mistyped_edit_keeps_the_box_open(make_tui_app: MakeApp, tui_daemon: Any) -> None:
     """Not a refusal: the person meant to edit and mistyped, and rejecting the
     call on a stray comma would be the harness deciding for them."""
     async with running(make_tui_app()) as (app, pilot):
-        front = app.front
-        assert front is not None
-        answers = await _decide(app, pilot, front, arguments={"path": "a"})
+        root = root_of(tui_daemon)
+        assert app.front is not None
+        answers = await _decide(app, pilot, root, arguments={"path": "a"})
 
         await pilot.click("#approval-edit")
         await pilot.pause()
@@ -220,22 +229,22 @@ async def test_a_mistyped_edit_keeps_the_box_open(make_tui_app: MakeApp) -> None
         assert isinstance(app.screen, ApprovalModal)
 
 
-async def test_approval_round_trips_through_the_log(make_tui_app: MakeApp) -> None:
+async def test_approval_round_trips_through_the_log(make_tui_app: MakeApp, tui_daemon: Any) -> None:
     """The P2-04 gate: asked, decided, and both in the log."""
     async with running(make_tui_app()) as (app, pilot):
-        front = app.front
-        assert front is not None
-        outcomes = await _decide(app, pilot, front)
+        root = root_of(tui_daemon)
+        assert app.front is not None
+        outcomes = await _decide(app, pilot, root)
         assert isinstance(app.screen, ApprovalModal)
         assert app.screen.request.tool_name == "write"
         await pilot.click("#approval-approve")
         await until(pilot, lambda: bool(outcomes))
 
         assert outcomes == ["allowed-once"]
-        types = [event.type for event in front.session.events]
+        types = [event.type for event in root.session.events]
         assert types.count("approval/asked") == 1
         assert types.count("approval/decided") == 1
-        decided = next(e for e in front.session.events if e.type == "approval/decided")
+        decided = next(e for e in root.session.events if e.type == "approval/decided")
         assert decided.data["outcome"] == "allowed-once"
 
 
@@ -333,10 +342,18 @@ async def test_ask_user_without_options_takes_free_text(make_tui_app: MakeApp) -
 # ------------------------------------------------------------------ pickers --
 
 
-async def test_the_command_palette_inserts_a_command(make_tui_app: MakeApp) -> None:
+async def test_the_command_palette_inserts_a_command(
+    make_tui_app: MakeApp, tui_daemon: Any
+) -> None:
     async with running(make_tui_app()) as (app, pilot):
-        assert app.front is not None
-        app.front.ctx.commands.register(_command())
+        root = root_of(tui_daemon)
+        front = app.front
+        assert front is not None
+        root.ctx.commands.register(_command())
+        # A command registered on the daemon reaches this palette as a
+        # `session.commands` notification, so it is there a frame later rather
+        # than at once — the honest cost of the list living one socket away.
+        await until(pilot, lambda: any(one.name == "compact" for one in front.commands()))
         await pilot.press(app.keys.command_palette)
         await pilot.pause()
         assert isinstance(app.screen, ChoicePicker)
@@ -388,8 +405,11 @@ async def test_dismissing_the_theme_picker_restores_the_setting(make_tui_app: Ma
         assert app.theme == before
 
 
-async def test_the_permission_picker_records_the_posture(make_tui_app: MakeApp) -> None:
+async def test_the_permission_picker_records_the_posture(
+    make_tui_app: MakeApp, tui_daemon: Any
+) -> None:
     async with running(make_tui_app()) as (app, pilot):
+        root = root_of(tui_daemon)
         front = app.front
         assert front is not None
         await pilot.press(app.keys.permission_picker)
@@ -398,7 +418,7 @@ async def test_the_permission_picker_records_the_posture(make_tui_app: MakeApp) 
         await pilot.press("down")
         await pilot.press("enter")
         await pilot.pause()
-        presets = [e for e in front.session.events if e.type == "permission/preset"]
+        presets = [e for e in root.session.events if e.type == "permission/preset"]
         assert presets, "the service records the posture, not the front-end"
         assert front.state.preset == presets[-1].data["preset"]
 
@@ -455,7 +475,7 @@ async def test_an_untrusted_project_is_not_mounted_until_answered(make_tui_app: 
         await pilot.pause()
         assert app.front is None, "nothing may be mounted before the answer"
         assert isinstance(app.screen, ConfirmModal)
-        await pilot.click("#act-trust")
+        await pilot.click("#act-always")
         await until(pilot, lambda: app.front is not None)
         assert app.trust.trusted(app.project) is True
 
@@ -527,11 +547,14 @@ async def test_a_picker_filters_on_typed_text(make_tui_app: MakeApp) -> None:
 # -------------------------------------------------------------- completions --
 
 
-async def test_typing_a_slash_offers_registered_commands(make_tui_app: MakeApp) -> None:
+async def test_typing_a_slash_offers_registered_commands(
+    make_tui_app: MakeApp, tui_daemon: Any
+) -> None:
     """Completion sources are pH's registries, not a second list (I7)."""
     async with running(make_tui_app()) as (app, pilot):
+        root = root_of(tui_daemon)
         assert app.front is not None
-        app.front.ctx.commands.register(_command())
+        root.ctx.commands.register(_command())
         prompt = app.query_one(PromptInput)
         await pilot.press(*"/comp")
         await pilot.pause()
@@ -542,10 +565,13 @@ async def test_typing_a_slash_offers_registered_commands(make_tui_app: MakeApp) 
         assert not prompt.has_class("-completing")
 
 
-async def test_a_disposed_command_leaves_the_completion_list(make_tui_app: MakeApp) -> None:
+async def test_a_disposed_command_leaves_the_completion_list(
+    make_tui_app: MakeApp, tui_daemon: Any
+) -> None:
     async with running(make_tui_app()) as (app, pilot):
+        root = root_of(tui_daemon)
         assert app.front is not None
-        dispose = app.front.ctx.commands.register(_command())
+        dispose = root.ctx.commands.register(_command())
         prompt = app.query_one(PromptInput)
         await pilot.press(*"/comp")
         await pilot.pause()
@@ -558,10 +584,13 @@ async def test_a_disposed_command_leaves_the_completion_list(make_tui_app: MakeA
         assert not prompt.has_class("-completing")
 
 
-async def test_escape_closes_the_completion_list_before_interrupting(make_tui_app: MakeApp) -> None:
+async def test_escape_closes_the_completion_list_before_interrupting(
+    make_tui_app: MakeApp, tui_daemon: Any
+) -> None:
     async with running(make_tui_app()) as (app, pilot):
+        root = root_of(tui_daemon)
         assert app.front is not None
-        app.front.ctx.commands.register(_command())
+        root.ctx.commands.register(_command())
         prompt = app.query_one(PromptInput)
         await pilot.press(*"/comp")
         await pilot.pause()
@@ -575,45 +604,64 @@ async def test_escape_closes_the_completion_list_before_interrupting(make_tui_ap
 # ----------------------------------------------------------------- commands --
 
 
-async def test_a_slash_line_dispatches_instead_of_prompting(make_tui_app: MakeApp) -> None:
-    """A command spends no model turn, and the log says who decided."""
+async def test_a_slash_line_dispatches_instead_of_prompting(
+    make_tui_app: MakeApp, tui_daemon: Any
+) -> None:
+    """A command spends no model turn, and the log says who decided.
+
+    A **harness** verb, deliberately. A client-side one — `/theme`, `/model` —
+    changes this terminal's own display and is not an act in the session, so it
+    is dispatched here and appears in no log: another attached UI rendering
+    "somebody opened a theme picker" would be reporting a fact about a screen it
+    cannot see. What the log records is what the *session* did, and that is what
+    this asserts.
+    """
     async with running(make_tui_app()) as (app, pilot):
+        root = root_of(tui_daemon)
         front = app.front
         assert front is not None
-        await pilot.press(*"/theme")
+        root.ctx.commands.register(_command())
+        await until(pilot, lambda: any(one.name == "compact" for one in front.commands()))
+        await pilot.press(*"/compact")
         await pilot.pause()
         # The completion popup claims enter first; tab accepts, then submit.
         await pilot.press(app.keys.accept_completion)
         await pilot.press(app.keys.submit)
-        await until(pilot, lambda: isinstance(app.screen, ChoicePicker))
+        await until(pilot, lambda: "command/run" in [e.type for e in root.session.events])
 
-        types = [event.type for event in front.session.events]
-        assert "command/run" in types
+        types = [event.type for event in root.session.events]
         assert "command/done" in types
         assert not any(kind.startswith("turn/") for kind in types), "a command is not a turn"
-        await pilot.press(app.keys.cancel)
 
 
-async def test_an_unknown_command_is_reported_not_prompted(make_tui_app: MakeApp) -> None:
+async def test_an_unknown_command_is_reported_not_prompted(
+    make_tui_app: MakeApp, tui_daemon: Any
+) -> None:
     async with running(make_tui_app()) as (app, pilot):
-        front = app.front
-        assert front is not None
+        root = root_of(tui_daemon)
+        assert app.front is not None
         app.query_one(PromptInput).area.insert("/nonsense")
         await pilot.press(app.keys.submit)
         await pilot.pause()
-        types = [event.type for event in front.session.events]
+        types = [event.type for event in root.session.events]
         assert not any(kind.startswith("turn/") for kind in types)
         assert "user/message" not in types
 
 
-async def test_every_verb_is_a_command_an_action_and_maybe_a_key(make_tui_app: MakeApp) -> None:
+async def test_every_verb_is_a_command_an_action_and_maybe_a_key(
+    make_tui_app: MakeApp,
+) -> None:
     """One table, three routes: a verb missing any of them is a half-wired verb."""
     from ph_app.tui.commands import TUI_VERBS
 
     async with running(make_tui_app()) as (app, _pilot):
         front = app.front
         assert front is not None
-        registered = {definition.name for definition in front.ctx.commands.list()}
+        # `front.commands()`, not the daemon's registry: after P5-14 a verb that
+        # changes *this* client's display is built client-side and never
+        # registered anywhere, so the list a person sees is the merge of both
+        # ends — which is the thing "reachable as a command" has to mean now.
+        registered = {definition.name for definition in front.commands()}
         bound = {binding.id for binding in app.BINDINGS if hasattr(binding, "id")}
         for verb in TUI_VERBS:
             assert verb.name in registered
@@ -623,12 +671,14 @@ async def test_every_verb_is_a_command_an_action_and_maybe_a_key(make_tui_app: M
                 assert hasattr(app.keys, verb.key), verb.key
 
 
-async def test_login_stores_a_secret_without_logging_it(make_tui_app: MakeApp) -> None:
+async def test_login_stores_a_secret_without_logging_it(
+    make_tui_app: MakeApp, tui_daemon: Any
+) -> None:
     from ph_app.tui.modals.login import LoginModal
 
     async with running(make_tui_app()) as (app, pilot):
-        front = app.front
-        assert front is not None
+        root = root_of(tui_daemon)
+        assert app.front is not None
         await app.run_action("open_login")
         await pilot.pause()
         # No adapter row declares a key in the headless profile, so the name is
@@ -640,13 +690,23 @@ async def test_login_stores_a_secret_without_logging_it(make_tui_app: MakeApp) -
         await pilot.press("enter")
         await pilot.pause()
 
-        credentials = front.ctx.credentials
+        credentials = root.ctx.credentials
         resolved = credentials.resolve(credentials.reference("PH_TEST_KEY"))
         assert resolved is not None
         assert resolved.reveal() == "s3cret"
         # The secret is in the process and nowhere else.
-        assert "s3cret" not in repr([event.data for event in front.session.events])
+        assert "s3cret" not in repr([event.data for event in root.session.events])
         assert "s3cret" not in repr(resolved)
+
+        # **And the picker knows it is set now.** `credential_held` is a
+        # synchronous member answered from the last `credentials/held` reply, so
+        # something has to have asked — which is why `action_open_login` is
+        # async. Without that the remote front end answered `False` for every
+        # credential and a deployment with all of them set looked like one with
+        # none: no test noticed, because nothing asserted the marker.
+        assert app.front is not None
+        await app.front.refresh_credentials(["PH_TEST_KEY"])
+        assert app.front.credential_held("PH_TEST_KEY"), "the front end cannot see its own store"
 
 
 # ------------------------------------------------------------------- status --
@@ -673,7 +733,9 @@ async def test_the_context_gauge_warns_from_the_compaction_threshold(
 # ------------------------------------------------------------------- resume --
 
 
-async def test_resuming_rebuilds_the_transcript_from_the_log(make_tui_app: MakeApp) -> None:
+async def test_resuming_rebuilds_the_transcript_from_the_log(
+    make_tui_app: MakeApp, tui_daemon: Any
+) -> None:
     """The P2-01 gate at the app level: a stored session comes back readable.
 
     The adapter test proves live and replay agree. This proves the app actually
@@ -688,16 +750,32 @@ async def test_resuming_rebuilds_the_transcript_from_the_log(make_tui_app: MakeA
         await app.front.flush()
         before = [(item.role, item.text) for item in app.front.state.visible_items()]
 
-    async with running(make_tui_app(session_id=None, resume="pilot")) as (resumed, _pilot):
+    # **Released before reopening**, which is what makes this a resume at all.
+    # The daemon keeps the root, so attaching again would otherwise just find it
+    # still there — the P5-01 promise, and the opposite of what this test is
+    # about. Passivated, the next attach mounts from the log and the harness
+    # appends `session/resumed`, which is the notice asserted below.
+    #
+    # The wait is for the *subscription* to go: a watcher is its own claim on a
+    # root's life, and the closed terminal's socket tears down a moment after
+    # the `async with` above returns.
+    root = root_of(tui_daemon)
+    await settled(lambda: not root.subscribers, what="the first terminal to detach")
+    await tui_daemon.sweep()
+    assert not tui_daemon.holds("pilot")
+
+    async with running(make_tui_app(session_id="pilot")) as (resumed, _pilot):
         assert resumed.front is not None
         after = [(item.role, item.text) for item in resumed.front.state.visible_items()]
 
-    # The conversation comes back whole, plus one line saying it is a
-    # continuation — a person who did not know a previous run existed should not
-    # have to infer that from the scrollback (P5-01's resume notice).
-    notices = [item for item in after if item[0] == "notice" and "Resumed" in item[1]]
-    assert len(notices) == 1, "a resumed transcript did not say it was resumed"
-    assert [item for item in after if item not in notices] == before
+    # The conversation comes back whole, plus two lines accounting for the gap:
+    # the release and the resume. A person who did not know a previous run
+    # existed should not have to infer either from the scrollback — and the
+    # *released* notice is new here, because before P5-14 nothing but this
+    # terminal could have let the session go.
+    assert [item for item in after if item[0] != "notice"] == before
+    assert sum("Resumed" in text for role, text in after if role == "notice") == 1
+    assert sum("Released" in text for role, text in after if role == "notice") == 1
     assert ("user", "remember this") in after
 
 
@@ -723,3 +801,79 @@ async def test_a_typed_attach_reaches_the_verb_with_its_argument(
 
         staged = front._staged.refs  # type: ignore[attr-defined]
         assert [one.name for one in staged] == ["diagram.png"]
+
+
+# ------------------------------------------------- the harness is elsewhere --
+
+
+async def test_a_turn_started_in_the_tui_finishes_after_the_tui_is_gone(
+    make_tui_app: MakeApp, tui_daemon: Any
+) -> None:
+    """**The gate this whole plan is named for** (P5-01, P5-14).
+
+    A person submits a prompt, closes the terminal, and the work carries on —
+    because the harness is not in the terminal any more. Then a second terminal
+    opens the same session and finds the finished turn in the transcript it
+    rebuilds from the log.
+
+    Driven through `PHTuiApp` rather than through `DaemonSession`, which is the
+    difference from `test_tui_remote.py`'s version: what is asserted here is that
+    the *app* takes that path — that closing it detaches rather than ending
+    anything.
+
+    Sabotage: have the app's `on_unmount` shut the daemon down, or have
+    `DaemonSession.close` cancel the turn, and the second terminal finds no
+    assistant message.
+    """
+    async with running(make_tui_app()) as (app, pilot):
+        assert app.front is not None
+        await pilot.press(*"keep going")
+        # Submitted and then left. **Not** waited on: the fake provider answers
+        # in microseconds, so waiting for `busy` is a race a test cannot win —
+        # and what is being pinned is not who wins it. It is that the root and
+        # its work are not this terminal's to end.
+        await pilot.press(app.keys.submit)
+        await pilot.pause()
+
+    assert tui_daemon.holds("pilot"), "closing a terminal is not a shutdown"
+    root = root_of(tui_daemon)
+    await settled(lambda: root.status == "idle", what="the turn to finish with nobody watching")
+
+    async with running(make_tui_app()) as (second, _pilot):
+        assert second.front is not None
+        rows = [(item.role, item.text) for item in second.front.state.visible_items()]
+
+    assert ("user", "keep going") in rows
+    assert any(role == "assistant" for role, _text in rows), "the turn finished, and it is readable"
+
+
+async def test_two_terminals_on_one_session_share_the_log_and_not_the_composer(
+    make_tui_app: MakeApp, tui_daemon: Any
+) -> None:
+    """The multiplex rule, through two real apps on one root.
+
+    Un-submitted text never leaves the client — it is not an act in the session —
+    but pressing enter is, so it reaches the other terminal by the one route
+    everything else does. That asymmetry is the whole of the decision that
+    replaced the takeover/demotion design.
+    """
+    async with (
+        running(make_tui_app()) as (first, first_pilot),
+        running(make_tui_app()) as (second, second_pilot),
+    ):
+        assert first.front is not None and second.front is not None
+
+        # Typed and *not* sent: the other terminal must not see it.
+        await second_pilot.press(*"a draft")
+        await second_pilot.pause()
+        assert "a draft" not in first.query_one(PromptInput).area.text
+
+        await first_pilot.press(*"shared")
+        await first_pilot.press(first.keys.submit)
+        await until(first_pilot, turn_done(first))
+        await until(
+            second_pilot,
+            lambda: any(item.text == "shared" for item in second.front.state.visible_items()),
+        )
+
+        assert second.query_one(PromptInput).area.text == "a draft", "the draft is still theirs"

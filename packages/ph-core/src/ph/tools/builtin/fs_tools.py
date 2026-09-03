@@ -162,7 +162,9 @@ async def apply(ctx: Context, config: Any) -> None:
             args.path, args.content, agent=run.agent, scope=run.scope, session=run.session
         )
         return {
-            "path": str(target),
+            # The name the workspace knows it by, never the machine's — see
+            # `FsService.named`.
+            "path": fs.named(target, agent=run.agent),
             "bytes": len(args.content.encode("utf-8")),
             "created": not existed,
         }
@@ -177,7 +179,7 @@ async def apply(ctx: Context, config: Any) -> None:
             scope=run.scope,
             session=run.session,
         )
-        return {"path": str(fs.resolve(args.path, agent=run.agent)), "replacements": count}
+        return {"path": fs.named(args.path, agent=run.agent), "replacements": count}
 
     async def glob_tool(args: GlobArgs, run: ToolRunContext) -> Any:
         paths = await fs.glob(

@@ -1,10 +1,10 @@
 """The terminal as a daemon client — the same screen, a harness elsewhere (P5-14).
 
-`HarnessSession` mounts pH in the terminal's own process, so closing the terminal
-ends the turn. This is the other implementation of the same `FrontSession`: every
-method answers by asking the daemon, and the app above it cannot tell which one it
-has. That equality is the point — one layout, one fold, one set of verbs, whether
-the person is at a tty or in a browser tab.
+The terminal used to mount pH in its own process, which is why closing it ended
+the turn. This is what replaced that: a `FrontSession` whose every member answers
+by asking the daemon. The app above it reads only the protocol, which is what
+lets one layout, one fold and one set of verbs serve a tty and a browser tab
+alike.
 
 Four things here are decisions rather than plumbing.
 
@@ -43,15 +43,17 @@ from __future__ import annotations
 import logging
 from base64 import b64encode
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import suppress
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
 from typing import Any
 
 import anyio
+from textual.binding import Binding
 
 from ph.llm.types import AttachmentRef
-from ph.seams.approval import ApprovalRequest
+from ph.seams.approval import ApprovalRequest, answer_to_wire
 from ph.seams.attachments import read_for_attach
 from ph.seams.commands import CommandDefinition, CommandSchema, parse_command_line
 from ph.seams.tui_screens import ScreenDefinition, ScreenSchema
@@ -62,10 +64,13 @@ from ph.session import Session, SessionEvent
 from ..attach import Tray
 from ..daemon.client import DaemonClient
 from ..daemon.follow import Followed, first_of
+from ..protocol import DaemonGone
+from ..sessions import SessionSummary
 from ..wire import obj, seq, view_of
 from .adapter import Frame, TuiEventAdapter
-from .commands import local_commands
+from .commands import action_command, local_commands
 from .frontend import ModalHost
+from .screens import open_screen_action
 from .state import TuiState
 from .trajectory_screen import CLIENT_SIDE as TRAJECTORY
 
@@ -89,14 +94,16 @@ class DaemonSession:
     config_rows: tuple[Any, ...] = ()
     remote_commands: list[CommandDefinition] = field(default_factory=list)
     screens: dict[str, ScreenDefinition] = field(default_factory=dict)
-    directory: str = ""
     held: dict[str, bool] = field(default_factory=dict)
     feed: Followed = field(init=False)
     app: Any = None
     """The Textual app, once `attach_surfaces` has been given it — so a local verb
     has something to dispatch into and async work has an owner. `None` until then,
     which is the state a headless test drives this in."""
-    _local: list[CommandDefinition] = field(default_factory=list)
+    _verbs: list[CommandDefinition] = field(default_factory=list)
+    _keys: list[Callable[[], Any]] = field(default_factory=list)
+    _unreadable: int = 0
+    """Frames this client could not rebuild. Counted so the warning is one."""
     _log: list[SessionEvent] = field(default_factory=list)
     _session: Session | None = None
     _built_from: int = -1
@@ -131,20 +138,37 @@ class DaemonSession:
         assert self._session is not None
         return self._session
 
-    def _apply(self, events: Sequence[tuple[Mapping[str, Any], Any]]) -> None:
-        """Fold a run of wire events into the transcript and this client's log."""
+    def _apply(self, events: Sequence[tuple[Mapping[str, Any], Any]], live: bool) -> None:
+        """Fold a run of wire events into the transcript and this client's log.
+
+        `live` is passed through rather than assumed; `Followed.Sink` says why.
+        """
         for wire, sidecar in events:
             try:
                 event = SessionEvent.from_wire(wire)
             except Exception:
-                log.debug("ph_app.tui: a frame would not rebuild as an event", exc_info=True)
+                # **Loud once, then quiet.** A frame that will not rebuild is a
+                # protocol mismatch between this client and its daemon, and twice
+                # now the silent version of this line hid a real defect — an
+                # extra key `_EventWire` forbids, and a dropped seq — by turning
+                # "the transcript is wrong" into "the transcript is empty" with
+                # nothing to say why. But a mismatch is *systematic*: it fails
+                # for every chunk of a streaming turn, and formatting a traceback
+                # per chunk on the read loop that also drives redraws costs more
+                # than the diagnosis is worth. One is the diagnosis.
+                log.log(
+                    logging.WARNING if not self._unreadable else logging.DEBUG,
+                    "ph_app.tui: a frame would not rebuild as an event",
+                    exc_info=not self._unreadable,
+                )
+                self._unreadable += 1
                 continue
             self._log.append(event)
             try:
                 # `view_of` at the wire edge, so the fold is handed a type rather
                 # than a mapping it would have to distrust; `tools` stays `None`
                 # because the registry that renders a card is in the daemon.
-                self.adapter.apply(event, Frame(live=True, view=view_of(event.type, sidecar)))
+                self.adapter.apply(event, Frame(live=live, view=view_of(event.type, sidecar)))
             except Exception:
                 log.exception("ph_app.tui: the adapter refused an event")
         self.host.state_changed()
@@ -156,27 +180,52 @@ class DaemonSession:
         moment worth re-reading them is the moment the agent moved. The TUI's own
         30 Hz tick stays client-local: it exists for the spinner.
         """
+        # Read what the frame carries and leave what it does not. Both shapes
+        # reach here — the attach reply and a `session.status` notification — and
+        # they differ honestly: the reply states the route once, and a root
+        # announcing `passivated` or a retry has no footer to send.
+        self.state.provider = str(params.get("provider") or self.state.provider)
+        self.state.model = str(params.get("model") or self.state.model)
+        if "readings" in params:
+            self._readings = [
+                StatusReading.model_validate(obj(one)) for one in seq(params.get("readings"))
+            ]
         status = str(params.get("status") or "")
         if status:
             self.state.status = status
             self._moved.set()
             self._moved = anyio.Event()
-        self._readings = [
-            StatusReading.model_validate(obj(one)) for one in seq(params.get("readings"))
-        ]
         self.host.state_changed()
 
     def dispatch(self, method: str, params: dict[str, Any]) -> None:
         """Every notification this front end reads, in one place.
 
-        The feed owns the two it buffers; `session.staged` is a *snapshot* of the
-        tray rather than a delta, so it is correct whatever order it arrives in
-        and needs no buffer of its own.
+        The feed owns the two it buffers; the rest are *snapshots* rather than
+        deltas — the whole tray, the whole command list — so each is correct
+        whatever order it arrives in and needs no buffer of its own.
         """
         if method in ("session.event", "session.status"):
             self.feed(method, params)
             return
-        if method == "session.staged" and params.get("sessionId") == self.session_id:
+        if params.get("sessionId") != self.session_id:
+            return
+        if method == "session.commands":
+            self.remote_commands = [
+                _remote_command(self.client, self.session_id, obj(one))
+                for one in seq(params.get("commands"))
+            ]
+            self.host.state_changed()
+            return
+        if method == "session.screens":
+            # Re-wired rather than merged: a screen's routes are a verb *and* a
+            # key binding, and the key is registered on the app — so the old
+            # ones have to be released before the new list is built.
+            self.screens = _screens_of(seq(params.get("screens")))
+            if self.app is not None:
+                self._wire_screens(self.app)
+            self.host.state_changed()
+            return
+        if method == "session.staged":
             self._staged = Tray()
             for wire in seq(params.get("staged")):
                 self._staged.stage(AttachmentRef.model_validate(obj(wire)))
@@ -188,7 +237,7 @@ class DaemonSession:
         return list(self._readings)
 
     def commands(self) -> list[Any]:
-        return [*self._local, *self.remote_commands]
+        return [*self._verbs, *self.remote_commands]
 
     def screen(self, screen_id: str) -> Any:
         return self.screens.get(screen_id)
@@ -199,12 +248,15 @@ class DaemonSession:
         front end offers no `/model` choices. In process it lists them."""
         return []
 
-    def sessions_directory(self, fallback: Path) -> Path:
-        return Path(self.directory) if self.directory else fallback
+    async def browse_sessions(self) -> list[SessionSummary]:
+        """The daemon's own list — stored logs and its live roots, already merged."""
+        reply = await self.client.call("sessions/browse")
+        return [SessionSummary.model_validate(obj(one)) for one in seq(reply.get("sessions"))]
 
     def credential_held(self, name: str) -> bool:
         """From the last `credentials/held` answer — a fact about the *daemon's*
-        store, fetched with the other projections at attach time."""
+        store, and empty until `refresh_credentials` has asked. The login screen
+        asks, because it is the only thing that reads this."""
         return bool(self.held.get(name))
 
     async def refresh_credentials(self, names: Sequence[str]) -> None:
@@ -316,19 +368,47 @@ class DaemonSession:
         """Take the app, and build the local verbs that dispatch into it.
 
         Built once here rather than per `commands()` call, which the completion
-        source makes on every keystroke. There is nothing to register into — the
-        remote verbs belong to the daemon's registry and unwind with the row that
-        made them — so the disposer only puts this back.
+        source makes on every keystroke. The daemon's own verbs belong to its
+        registry and unwind with the row that made them; what unwinds here is
+        what this client made — the local verbs and each screen's key binding.
+
+        Imported inside, because `screens.py` is the Textual-shaped half of the
+        front end and this module is driven headless by tests with no terminal.
         """
         self.app = app
-        self._local = local_commands(app)
+        self._wire_screens(app)
         self.host.state_changed()
 
         def release() -> None:
+            self._release_screens()
             self.app = None
-            self._local = []
+            self._verbs = []
 
         return [release]
+
+    def _wire_screens(self, app: Any) -> None:
+        """Build this client's verbs: the table's, plus one per drawable screen.
+
+        A screen buys a verb, a palette entry and a key — the three routes it
+        buys in process too — and the key is a binding on the app, so replacing
+        the set means releasing the old bindings first. Called again whenever
+        `session.screens` says the deployment's list changed.
+        """
+        self._release_screens()
+        self._verbs = local_commands(app)
+        for screen in self.screens.values():
+            action = open_screen_action(screen.id)
+            self._verbs.append(action_command(app, screen.id, screen.label, action))
+            if screen.key:
+                binding = Binding(
+                    screen.key, action, screen.label, priority=True, id=screen.id, show=False
+                )
+                self._keys.append(app.add_binding(binding))
+
+    def _release_screens(self) -> None:
+        for key in self._keys:
+            key()
+        self._keys = []
 
     def set_preset(self, name: str) -> None:
         self._spawn(self.client.mutate("session/preset", self.session_id, preset=name))
@@ -353,10 +433,18 @@ class DaemonSession:
 
         No flush and no shutdown: this front end is leaving, not ending the
         session. What happens to the root afterwards is the daemon's business.
+
+        **The detach is a courtesy, so its failure is not one.** The daemon drops
+        a connection's subscriptions when the socket closes either way — that is
+        `_Connection.serve`'s `finally` — and this only lets it happen a moment
+        earlier, which matters to a client that keeps one connection across
+        several sessions. So a connection already gone is a detach already done:
+        checking `closed` cannot close the race, because the pump can stop
+        between the check and the reply, and Textual cancelling its workers at
+        shutdown is exactly when it does.
         """
-        if not self.client.closed.is_set():
-            with anyio.move_on_after(2.0):
-                await self.client.call("session/detach", sessionId=self.session_id)
+        with suppress(DaemonGone), anyio.move_on_after(2.0):
+            await self.client.call("session/detach", sessionId=self.session_id)
 
 
 async def attach_session(
@@ -365,7 +453,7 @@ async def attach_session(
     *,
     host: ModalHost,
     cwd: Path | None = None,
-    credentials: Sequence[str] = (),
+    trust: str = "",
 ) -> DaemonSession:
     """Start or resume a session on the daemon and catch this client up on it.
 
@@ -373,7 +461,13 @@ async def attach_session(
     this client can answer, start the root, read its projections, subscribe, page
     the history from the cursor the attach reply named, then go live. The
     projections are independent reads of a mounted root and are fetched together;
-    the attach follows them only so `front` can be built whole.
+    the attach follows them only so `front` can be built whole, and its reply is
+    what seeds the status, the route and the footer.
+
+    Credentials are deliberately not among them: which names a deployment *has*
+    comes from `daemon/config`, which is fetched here, so a caller could not name
+    them yet — and whether one is held can change while a session is open. The
+    login screen asks for them when it opens, which is where the answer is read.
     """
     state = TuiState()
     client.handlers["approval/ask"] = _asking_approval(host)
@@ -381,7 +475,11 @@ async def attach_session(
     # `asks` **before** the attach: the desk joins a front end as it attaches, and
     # a client that declared nothing is never asked.
     await client.initialize("asks")
-    await client.call("session/new", sessionId=session_id, cwd=str(cwd) if cwd else None)
+    # `trust` is the person's answer, which this client asked for and the daemon
+    # enforces — it refuses a `cwd` nobody has vouched for (P5-14).
+    await client.call(
+        "session/new", sessionId=session_id, cwd=str(cwd) if cwd else None, trust=trust
+    )
 
     replies: dict[str, dict[str, Any]] = {}
 
@@ -390,12 +488,8 @@ async def attach_session(
 
     async with anyio.create_task_group() as tasks:
         tasks.start_soon(fetch, "daemon/config")
-        for method in ("commands/list", "screens/list", "session/readings"):
+        for method in ("commands/list", "screens/list"):
             tasks.start_soon(partial(fetch, method, sessionId=session_id))
-        if credentials:
-            tasks.start_soon(
-                partial(fetch, "credentials/held", sessionId=session_id, names=list(credentials))
-            )
 
     config = replies["daemon/config"]
     front = DaemonSession(
@@ -407,20 +501,25 @@ async def attach_session(
         adapter=TuiEventAdapter(state=state),
         host=host,
         config_rows=tuple(seq(config.get("rows"))),
-        directory=str(config.get("sessionsDirectory") or ""),
         remote_commands=[
             _remote_command(client, session_id, obj(one))
             for one in seq(replies["commands/list"].get("commands"))
         ],
         screens=_screens_of(seq(replies["screens/list"].get("screens"))),
-        held={
-            str(k): bool(v) for k, v in obj(replies.get("credentials/held", {}).get("held")).items()
-        },
     )
     client.peer.on_notify = front.dispatch
+    # The attach reply carries the status, the route and the footer, so this is
+    # the one frame the front end starts from.
     attached = await client.call("session/attach", sessionId=session_id)
-    front._status({**attached, "readings": replies["session/readings"].get("readings")})
-    await front.feed.catch_up(client, attached.get("from"))
+    front._status(attached)
+    # The attach reply's **cursor**, wound back to the start — not its `from`,
+    # which is the *index* the live stream begins at and is not a cursor at all.
+    # Passing it as one cost the client seq 0 of every session: `session/snapshot`
+    # read a bare int as "no cursor", paged from 1, and the loss was invisible
+    # until `Session(seed=…)` refused a log that did not start at 0 — which only
+    # happens when somebody opens a screen. `ph agents attach` builds the same
+    # shape for `--since`.
+    await front.feed.catch_up(client, {**obj(attached.get("cursor")), "sequence": 0})
     front.feed.live()
     return front
 
@@ -479,7 +578,11 @@ def _asking_approval(host: ModalHost) -> Any:
     async def ask(params: dict[str, Any]) -> dict[str, Any]:
         request = ApprovalRequest.model_validate(obj(params.get("request")))
         outcome, reason = await host.ask_approval(request)
-        return {"answer": outcome, "reason": reason}
+        # Through the seam's own encoder: `Edited` and `Responded` are frozen
+        # dataclasses, and putting one in a frame unencoded is a `TypeError`
+        # inside the task group that answers the ask — which the desk reads as
+        # "this front end cannot answer" and drops it for.
+        return {"answer": answer_to_wire(outcome), "reason": reason}
 
     return ask
 

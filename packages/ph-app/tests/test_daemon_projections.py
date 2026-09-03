@@ -27,6 +27,7 @@ from ph.session import SessionEvent
 from ph.testing import RecordedStep, ReplayAdapter, simple_tool, text_chunks, tool_call_chunks
 from ph.tools import ToolCallView, ToolResultView
 from ph_app.protocol import DaemonError
+from ph_app.trust import TrustStore, trust_path
 from ph_app.tui.adapter import Frame, TuiEventAdapter
 from ph_app.wire import view_of
 
@@ -109,11 +110,22 @@ async def test_readings_ride_the_status_notification(tmp_path: Any) -> None:
         # The turn runs in the root's own task, so the notification arrives on
         # its schedule rather than this one's. Waiting on the fact beats sleeping
         # for a guess.
-        await until(lambda: bool(seen), what="a session.status notification")
+        # Waits for a frame that *carries* readings, not merely for a frame.
+        # Not every `session.status` does: `passivated`, `retry` and
+        # `recovered` are the root announcing something about itself rather than
+        # the agent moving, and they have no footer to send. Waiting on `seen`
+        # alone therefore raced — one of those arriving first satisfied the wait
+        # and then failed the assertion, which is a flake that only shows under
+        # a slow run.
+        await until(
+            lambda: any("readings" in one for one in seen), what="a status frame with readings"
+        )
         with_readings = [one for one in seen if "readings" in one]
 
         assert with_readings, "no status notification carried readings"
-        assert all({"text": "probe", "level": "warning"} in one["readings"] for one in with_readings)
+        assert all(
+            {"text": "probe", "level": "warning"} in one["readings"] for one in with_readings
+        )
 
 
 # ------------------------------------------------------- the palette et al --
@@ -270,7 +282,9 @@ async def test_a_new_session_records_the_clients_cwd_in_its_header(tmp_path: Any
     async with running(tmp_path) as daemon:
         client = await daemon.client()
 
-        await client.call("session/new", sessionId="homed", cwd=str(tmp_path))
+        # `trust="once"`: the daemon refuses a `cwd` nobody has vouched for
+        # (P5-14), and this test's subject is the header rather than the gate.
+        await client.call("session/new", sessionId="homed", cwd=str(tmp_path), trust="once")
 
         root = daemon.server.supervisor.roots["homed"]
         assert root.session.header.cwd == str(tmp_path)
@@ -505,3 +519,92 @@ async def test_a_method_whose_seam_is_absent_says_so_and_is_not_unknown(
             "the client must be able to branch on this without matching message text"
         )
         assert refused.value.reason != "unknown_method"
+
+
+async def test_the_daemon_refuses_to_mount_an_untrusted_project(tmp_path: Any) -> None:
+    """The daemon mounts, so the daemon enforces (P5-14) — `ph_app.trust` says why.
+
+    Sabotage: enforce it client-side only, and `ph agents send` naming a new
+    session in a checkout nobody has vouched for loads it silently.
+    """
+    async with running(tmp_path) as daemon:
+        client = await daemon.client()
+        project = tmp_path / "somebody-elses-repo"
+        project.mkdir()
+
+        with pytest.raises(DaemonError) as raised:
+            await client.call("session/new", sessionId="untrusted", cwd=str(project))
+
+        assert raised.value.reason == "untrusted_project"
+        assert "untrusted" not in daemon.server.supervisor.roots
+
+        # Answered, and it mounts — and `always` is the answer that is recorded,
+        # so the next client is not asked again.
+        await client.call("session/new", sessionId="untrusted", cwd=str(project), trust="always")
+        assert "untrusted" in daemon.server.supervisor.roots
+        assert TrustStore(path=trust_path()).trusted(project)
+
+
+# ------------------------------------------------ a root works in its own repo --
+
+
+async def test_a_root_works_in_the_directory_its_session_names(tmp_path: Any) -> None:
+    """One daemon, many repositories — each root mounted in its own (P5-14).
+
+    The daemon is per *user*, not per repository: one socket under `$PH_RUNTIME`,
+    many roots, and a root's working directory is whatever its own session says.
+    Before this the fs seam rooted every mount at `Path.cwd()` — the *daemon's*
+    directory — so two sessions in two checkouts read and wrote the same tree
+    and the header that recorded where each belonged was decoration. It was
+    right by accident while the terminal was the harness, because then the
+    process really was in the repo.
+
+    Sabotage: drop `project=` from the mount and both roots land in the daemon's
+    own directory, which is neither person's repository.
+    """
+    one, two = tmp_path / "repo-one", tmp_path / "repo-two"
+    for repo in (one, two):
+        repo.mkdir()
+    async with running(tmp_path) as daemon:
+        client = await daemon.client()
+
+        await client.call("session/new", sessionId="a", cwd=str(one), trust="once")
+        await client.call("session/new", sessionId="b", cwd=str(two), trust="once")
+
+        first, second = daemon.held("a"), daemon.held("b")
+        assert first.ctx.fs.root_for(first.agent) == one
+        assert second.ctx.fs.root_for(second.agent) == two
+        # And a relative path — the only kind a tool should be asked for —
+        # resolves inside the right one.
+        assert first.ctx.fs.resolve("x.py", agent=first.agent) == one / "x.py"
+
+
+async def test_a_resumed_root_returns_to_its_own_repo(tmp_path: Any) -> None:
+    """Read off the *header*, because there is no client to ask on a resume.
+
+    A session picked from the list — or woken by its own schedule with nobody
+    attached — is mounted by the daemon alone, and the only record of where it
+    belongs is the header its log carries. So the directory is resolved from
+    disk before the mount: the fs seam fixes its root while applying, and
+    `workspace-lifecycle` reads that root there to discover the project's
+    provisioning, so a root mounted first and moved afterwards has already
+    branched from the wrong tree.
+
+    Sabotage: resolve the directory only from the client's parameter, and every
+    resumed session lands in the daemon's own cwd.
+    """
+    repo = tmp_path / "somewhere"
+    repo.mkdir()
+    async with running(tmp_path) as daemon:
+        client = await daemon.client()
+        await client.call("session/new", sessionId="c", cwd=str(repo), trust="once")
+        await daemon.server.supervisor._flush(daemon.held("c"))
+        await daemon.sweep()
+        assert not daemon.holds("c")
+
+        # Resumed with no `cwd` at all, which is what `session/attach` sends.
+        await client.call("session/attach", sessionId="c")
+
+        root = daemon.held("c")
+        assert root.session.header.cwd == str(repo)
+        assert root.ctx.fs.root_for(root.agent) == repo

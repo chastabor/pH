@@ -27,11 +27,16 @@ from .client import DaemonClient
 
 __all__ = ["Followed", "first_of"]
 
-Sink = Callable[[Sequence[tuple[Mapping[str, Any], Any]]], None]
-"""Called with `(event, view)` pairs — the card the daemon rendered kept *beside*
-the event, never merged into it: `_EventWire` forbids extras, so an event carrying
-a `presentation` key fails validation and is dropped by the `except` that exists
-for genuinely unreadable frames."""
+Sink = Callable[[Sequence[tuple[Mapping[str, Any], Any]], bool], None]
+"""Called with `(event, view)` pairs and whether they are arriving **live**.
+
+The pairs keep the card the daemon rendered *beside* the event, never merged into
+it: `_EventWire` forbids extras, so an event carrying a `presentation` key fails
+validation and is dropped by the `except` that exists for unreadable frames.
+
+The flag says whether they are arriving live or being rebuilt — a distinction
+`TuiEventAdapter.Frame(live=…)` has drawn since P3, and one a consumer must not
+assume. `test_a_caught_up_page_is_folded_as_history_and_a_frame_as_live` is why."""
 
 
 @dataclass(slots=True)
@@ -47,7 +52,12 @@ class Followed:
     on_events: Sink
     on_status: Callable[[Mapping[str, Any]], None]
     """The raw `session.status` params; the caller reads what it wants from them."""
-    seen: int = 0
+    seen: int = -1
+    """The highest seq already shown. **`-1`, not `0`**: a log's first event *is*
+    seq 0, so a zero sentinel conflated "nothing seen" with "seen the first one"
+    and silently dropped the opening event of every session that had none before
+    the attach — which is every new one. It surfaced only where the log was later
+    rebuilt as a `Session`, whose seed must be contiguous from 0."""
     pending: list[tuple[str, dict[str, Any]]] | None = field(default_factory=list)
 
     def __call__(self, method: str, params: dict[str, Any]) -> None:
@@ -70,7 +80,7 @@ class Followed:
             # sources idempotent against each other.
             return
         self.seen = at
-        self.on_events([(event, params.get("presentation"))])
+        self.on_events([(event, params.get("presentation"))], True)
 
     def live(self) -> None:
         """Catch-up is done: go live, then release what arrived during it."""
@@ -93,7 +103,7 @@ class Followed:
             # Sparse and keyed by seq, which is how the daemon sends it: a page
             # is 2048 events and a turn contributes a handful of cards.
             views = obj(page.get("presentations"))
-            self.on_events([(one, views.get(str(one.get("seq")))) for one in events])
+            self.on_events([(one, views.get(str(one.get("seq")))) for one in events], False)
             for event in events:
                 self.seen = max(self.seen, int(event.get("seq", self.seen)))
             if not page.get("more"):

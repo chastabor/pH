@@ -38,12 +38,20 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
+from functools import partial
 from typing import Any, TypeAlias
 
-from ..cordis import Context, Disposer, plugin
+from ..cordis import Context, Disposer, events, plugin
 from ..wire import WireModel, declarable
 from ._names import require_slug
 from ._registry import claim_entry, claim_key
+
+events.declare(
+    "screens/change",
+    "emit",
+    owner="ph.seams.tui_screens",
+    doc="The screen set changed; consumers re-read list().",
+)
 
 __all__ = [
     "ScreenDefinition",
@@ -159,9 +167,11 @@ class TuiScreenRegistry:
         require_slug(screen.id, maximum=ID_MAX, kind="screen id")
         owner = self.ctx.owner_for(scope)
         entry = _Entry(screen=screen, owner=owner)
-        release = claim_key(owner, self._entries, screen.id, entry, label="screen")
+        changed = partial(self.ctx.emit, "screens/change")
+        release = claim_key(owner, self._entries, screen.id, entry, label="screen", then=changed)
         for front_end in self._front_ends:
             self._draw(front_end, entry)
+        changed()
         return release
 
     def present_with(self, present: ScreenPresenter, *, scope: Context | None = None) -> Disposer:

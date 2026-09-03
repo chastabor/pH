@@ -16,6 +16,14 @@ All of it unwinds with the *registration*: the presenter hands its teardown to
 the seam, which owns it on the registering row's scope (I2). Unloading the row
 takes the verb and the key with it, and there is no second list to keep in step.
 
+**The verb and the key are built by the front end, not by this module's
+presenter.** There used to be one: `present_screens` attached an in-process app
+to `ctx.tui_screens` and turned each registration into a command and a binding.
+The harness moved into the daemon (P5-14), so there is no in-process front end
+left to attach — a client is *told* which screens exist over the wire — and the
+presenter, its `_Presenter` and `register_tui_commands` went with it.
+`ph_app.tui.remote` builds the two routes from the wire's list.
+
 **Cross-navigation is two halves and one join.** `RevealSeq` is a screen asking
 its host to show the transcript row for a log seq; `Revealing` is a screen
 accepting the same number on the way in. `RevealHost` is the mirror a screen
@@ -28,18 +36,11 @@ where it is. All three read `source_seq`/`seq`, which the log already carries.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any, Protocol, runtime_checkable
+from typing import Protocol, runtime_checkable
 
-from textual.binding import Binding
 from textual.message import Message
 
-from ph.cordis import Context, Disposer
-from ph.seams.tui_screens import ScreenDefinition
-
-from .commands import action_command
-
-__all__ = ["RevealHost", "RevealSeq", "Revealing", "open_screen_action", "present_screens"]
+__all__ = ["RevealHost", "RevealSeq", "Revealing", "open_screen_action"]
 
 
 class RevealSeq(Message):
@@ -90,41 +91,3 @@ def open_screen_action(screen_id: str) -> str:
     verb cannot come to mean different things.
     """
     return f"open_screen({screen_id!r})"
-
-
-def present_screens(ctx: Context, app: Any) -> Disposer | None:
-    """Attach this app to `ctx.tui_screens`. `None` when the seam is absent."""
-    registry = ctx.get("tui_screens")
-    if registry is None:
-        return None
-    detach: Disposer = registry.present_with(_Presenter(ctx=ctx, app=app))
-    return detach
-
-
-@dataclass(frozen=True, slots=True)
-class _Presenter:
-    """One screen in, a verb and a key out.
-
-    A dataclass rather than a closure because it is *stored* — the seam holds it
-    for as long as this front end is attached, and an object that outlives its
-    call is clearer holding named fields than free variables.
-    """
-
-    ctx: Context
-    app: Any
-
-    def __call__(self, screen: ScreenDefinition) -> Disposer:
-        action = open_screen_action(screen.id)
-        command: Disposer = self.ctx.commands.register(
-            action_command(self.app, screen.id, screen.label, action)
-        )
-        if not screen.key:
-            return command
-        binding = Binding(screen.key, action, screen.label, priority=True, id=screen.id, show=False)
-        key = self.app.add_binding(binding)
-
-        def undo() -> None:
-            key()
-            command()
-
-        return undo

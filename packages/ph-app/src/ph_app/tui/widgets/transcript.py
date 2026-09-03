@@ -28,6 +28,7 @@ from __future__ import annotations
 from contextlib import suppress
 from typing import Any
 
+import anyio
 from textual.app import ComposeResult
 from textual.containers import Vertical, VerticalScroll
 from textual.content import Content
@@ -410,15 +411,43 @@ class TranscriptView(VerticalScroll):
         super().__init__(**kwargs)
         self._rows: dict[str, Any] = {}
         self._followed = False
+        self._mounting = anyio.Lock()
+        """Serialises `sync`, because Textual refuses a mount while one is pending.
+
+        Two draws can overlap: `_draw` clears its coalescing timer before it
+        awaits, so a change arriving mid-draw schedules the next one — and the
+        second `sync` then calls `mount()` on a node whose previous child is
+        still mounting, which raises `MountError: Can't mount widget(s) before
+        … is mounted`. It surfaced as an unrelated test failing under coverage,
+        where everything is slow enough for the windows to overlap.
+
+        The lock belongs here rather than at the caller: the ordering constraint
+        is this widget's, and a caller that had to know about it is one that will
+        eventually forget."""
 
     async def sync(self, items: list[ChatItem]) -> None:
         """Bring the view in line with `items`. Idempotent and cheap when nothing changed."""
+        async with self._mounting:
+            # **A queued draw may land after this view is gone.** Serialising
+            # `sync` means a second one can begin later than it used to — after
+            # the app started unmounting, which is the same hazard `on_unmount`
+            # stops the timers for. Mounting into a detached node raises, so a
+            # draw that arrives too late renders nothing instead.
+            if self.is_mounted:
+                await self._sync(items)
+
+    async def _sync(self, items: list[ChatItem]) -> None:
         for item in items:
             widget = self._rows.get(item.key)
             if widget is None:
                 widget = self._build(item)
                 self._rows[item.key] = widget
                 await self.mount(widget)
+            if not widget.is_mounted:
+                # Mounted a moment ago and detached since — the view is coming
+                # apart around this loop. Its content would go into a node
+                # nothing is rendering, and `Markdown.append` refuses it.
+                continue
             await self._update(widget, item)
         # Stick to the bottom while rows arrive; release when the reader scrolls
         # up. Textual's `anchor()` does that from one call — but engaged only

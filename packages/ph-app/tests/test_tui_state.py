@@ -41,6 +41,7 @@ import pytest
 
 from ph.persistence.jsonl import session_path
 from ph.testing import write_reference_fork
+from ph_app.sessions import session_summaries
 from ph_app.tui.autocomplete import (
     PathCompleter,
     build_completion_state,
@@ -54,7 +55,6 @@ from ph_app.tui.config import (
 )
 from ph_app.tui.modals.login import credential_choices, credential_names
 from ph_app.tui.modals.pickers import session_choices
-from ph_app.tui.sessions import session_summaries
 from ph_app.tui.themes import (
     BUILTIN_THEME_NAMES,
     ThemeError,
@@ -276,14 +276,17 @@ def test_a_segment_cycle_still_lists_every_session(tmp_path: Path) -> None:
     write_reference_fork(tmp_path, "s0", "s1", boundary=4, kind="segment", family="s0")
     write_reference_fork(tmp_path, "s1", "s0", boundary=4, kind="segment", family="s0")
 
-    assert sorted(choice.value for choice in session_choices(tmp_path)) == ["s0", "s1"]
+    assert sorted(choice.value for choice in session_choices(session_summaries(tmp_path))) == [
+        "s0",
+        "s1",
+    ]
 
 
 def test_forked_sessions_are_listed_under_their_parent(tmp_path: Path) -> None:
     """The header records the fork; the picker shows it as one."""
     _write_session(tmp_path, "root", "the original")
     _write_session(tmp_path, "branch", "a fork", parentSession="root")
-    labels = [choice.label for choice in session_choices(tmp_path)]
+    labels = [choice.label for choice in session_choices(session_summaries(tmp_path))]
     assert labels == ["the original", "  ↳ a fork"]
 
 
@@ -299,7 +302,7 @@ def test_a_rolled_session_is_one_row_with_no_indent(tmp_path: Path) -> None:
     write_reference_fork(tmp_path, "s1", "s0", boundary=4, kind="segment")
     write_reference_fork(tmp_path, "s2", "s1", boundary=8, kind="segment", family="s0")
 
-    rows = session_choices(tmp_path)
+    rows = session_choices(session_summaries(tmp_path))
     assert [choice.label for choice in rows] == ["the conversation"]
     assert [choice.value for choice in rows] == ["s2"], "the tip is what a resume opens"
 
@@ -309,7 +312,7 @@ def test_a_fork_still_indents_under_its_parent(tmp_path: Path) -> None:
     _write_session(tmp_path, "s0", "the original")
     write_reference_fork(tmp_path, "b1", "s0", boundary=4, kind="fork")
 
-    assert [choice.label for choice in session_choices(tmp_path)] == [
+    assert [choice.label for choice in session_choices(session_summaries(tmp_path))] == [
         "the original",
         "  ↳ the original",
     ]
@@ -327,7 +330,7 @@ def test_a_branch_of_a_rolled_session_lands_under_the_surviving_row(tmp_path: Pa
     write_reference_fork(tmp_path, "s1", "s0", boundary=4, kind="segment")
     write_reference_fork(tmp_path, "b1", "s0", boundary=2, kind="fork")
 
-    rows = session_choices(tmp_path)
+    rows = session_choices(session_summaries(tmp_path))
     assert [(choice.value, choice.label) for choice in rows] == [
         ("s1", "the conversation"),
         ("b1", "  ↳ the conversation"),

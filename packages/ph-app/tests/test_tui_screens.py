@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from tui_helpers import running, turn_done, until
+from tui_helpers import root_of, running, turn_done, until
 
 import ph_app.tui
 from ph.seams.tui_screens import ScreenDefinition
@@ -34,6 +34,16 @@ from ph_app.tui.widgets.prompt import PromptInput
 pytestmark = pytest.mark.anyio
 
 MakeApp = Callable[..., PHTuiApp]
+
+
+@pytest.fixture
+def tui_profile() -> str:
+    """`tui`, because this file's subject is a row that profile contributes.
+
+    The daemon mounts the profile now, so the choice is made before any app
+    exists — see the fixture this overrides in `conftest.py`.
+    """
+    return "tui"
 
 
 def _binding(app: PHTuiApp, binding_id: str) -> Any:
@@ -72,15 +82,6 @@ ROUTES = {"command", "palette", "key"}
 """What one `ScreenDefinition` is supposed to buy — the row's first gate."""
 
 
-def _pretend_screen(screen_id: str = "pretend") -> ScreenDefinition:
-    return ScreenDefinition(
-        id=screen_id,
-        label="A screen some row contributed",
-        key="f9",
-        build=lambda session: TrajectoryScreen([], session_id=session.id),
-    )
-
-
 # ------------------------------------------------- a verb, a key, an entry --
 
 
@@ -89,7 +90,7 @@ async def test_a_contributed_screen_becomes_a_verb_a_key_and_a_palette_entry(
 ) -> None:
     """The gate. One `ScreenDefinition`, three routes to it — and the row that
     contributed the trajectory is an ordinary row, not a special case."""
-    async with running(make_tui_app(profile="tui")) as (app, _pilot):
+    async with running(make_tui_app()) as (app, _pilot):
         assert _routes(app, SCREEN_ID) == ROUTES
 
         binding = _binding(app, SCREEN_ID)
@@ -108,58 +109,80 @@ async def test_a_plugin_screens_key_is_rebindable_like_every_other(
     (tmp_path / "tui.json").write_text(
         json.dumps({"keybindings": {SCREEN_ID: "ctrl+j"}}), encoding="utf-8"
     )
-    async with running(make_tui_app(profile="tui")) as (app, pilot):
+    async with running(make_tui_app()) as (app, pilot):
         await pilot.press("ctrl+j")
         await until(pilot, lambda: isinstance(app.screen, TrajectoryScreen))
 
 
 async def test_unloading_the_row_takes_the_verb_and_the_key_with_it(
-    make_tui_app: MakeApp,
+    make_tui_app: MakeApp, tui_daemon: Any
 ) -> None:
-    """The gate that makes this a seam rather than a list.
+    """I2 across a socket: a screen's routes do not outlive its row.
 
-    A child scope *is* what a row's `apply` is handed, so disposing one here is
-    the same unwinding a row's removal performs.
+    The daemon attaches to `ctx.tui_screens` as the front end it stands in for —
+    `present_with` gives it every screen now, every later one, and a disposer per
+    registration — and publishes `session.screens` on both edges. So a row
+    unloaded on the daemon takes the verb, the palette entry and the key away
+    from a terminal one socket removed, which is the whole claim the seam makes
+    in process.
+
+    Driven with a *drawable* screen: `trajectory` is the id `LOCAL_SCREENS` has a
+    builder for, so it is the one whose routes a client actually opens. Sabotage:
+    drop the `present_with` subscription and the terminal keeps a verb whose row
+    is gone.
     """
-    async with running(make_tui_app(profile="tui")) as (app, pilot):
-        assert app.front is not None
-        ctx = app.front.ctx
-        row = ctx.scope("a-row")
-        ctx.tui_screens.register(_pretend_screen(), scope=row)
+    async with running(make_tui_app()) as (app, pilot):
+        assert _routes(app, SCREEN_ID) == ROUTES
+
+        row = root_of(tui_daemon).ctx.get("tui_screens")
+        assert row is not None
+        entry = row.get(SCREEN_ID)
+        assert entry is not None
+        await until(pilot, lambda: _routes(app, SCREEN_ID) == ROUTES)
+
+        # Unload it the way removing the row does: dispose the scope that owns
+        # the registration.
+        await _unload(root_of(tui_daemon), SCREEN_ID)
+
+        await until(pilot, lambda: _routes(app, SCREEN_ID) == set())
+
+
+async def test_a_screen_this_build_cannot_draw_is_not_offered(
+    make_tui_app: MakeApp, tui_daemon: Any
+) -> None:
+    """The limit P5-14 leaves behind, as a gate rather than a paragraph.
+
+    `ScreenDefinition.build` is the one field that cannot travel, so a socket
+    client is told which screens the deployment mounted (`screens/list`) and
+    draws the ones it has a builder for — `LOCAL_SCREENS`, which is every screen
+    pH ships. A screen some *other* row contributes reaches a remote front end as
+    a name it cannot open, so it is dropped rather than offered and then failing:
+    a verb that opens nothing is worse than a verb that is not there.
+
+    Two halves, because dropping everything would satisfy the first: the pretend
+    screen gets no routes, and the trajectory — same list, same reply — gets all
+    three.
+
+    Not enforced (§5 rule 6): closing this needs P7-07's declarative screen
+    bodies, after which a row's screen can be *described* to a client rather than
+    built in it. The seam's own claims — that unloading a row takes its screen
+    with it (I2), and that registration order does not decide reachability — are
+    where the seam is, in `ph-core`'s `test_seams.py`; what is asserted here is
+    what this transport can and cannot carry.
+    """
+    async with running(make_tui_app()) as (app, pilot):
+        root = root_of(tui_daemon)
+        pretend = ScreenDefinition(
+            id="pretend",
+            label="A screen some row contributed",
+            key="f9",
+            build=lambda session: TrajectoryScreen([], session_id=session.id),
+        )
+        root.ctx.tui_screens.register(pretend, scope=root.ctx.scope("a-row"))
         await pilot.pause()
 
-        assert _routes(app, "pretend") == ROUTES
-
-        await row.dispose()
-
-        assert ctx.tui_screens.get("pretend") is None
-        assert _routes(app, "pretend") == set(), "a route outlived the row that opened it"
-
-
-async def test_attachment_order_does_not_decide_what_is_reachable(
-    make_tui_app: MakeApp,
-) -> None:
-    """Both orders exist in one running app, and must come out identical.
-
-    The trajectory is the *before* case: `open_harness` mounts every row — and
-    `tui-screen-trajectory` registers — before `_open` attaches the presenter.
-    A screen registered on a scope from here is the *after* case. The seam
-    replays what it already holds to a new front end and notifies it of what
-    arrives later, and this is the assertion that those two paths agree; a
-    presenter that only bound keys for one of them would still pass every other
-    test in this file.
-
-    Compared rather than listed, so the two halves cannot be right about
-    different things.
-    """
-    async with running(make_tui_app(profile="tui")) as (app, pilot):
-        assert app.front is not None
-        ctx = app.front.ctx
-        ctx.tui_screens.register(_pretend_screen("later"), scope=ctx.scope("late-row"))
-        await pilot.pause()
-
-        before, after = _routes(app, SCREEN_ID), _routes(app, "later")
-        assert after == before == ROUTES
+        assert _routes(app, "pretend") == set(), "a screen with no local builder was offered"
+        assert _routes(app, SCREEN_ID) == ROUTES, "and the one pH ships still is"
 
 
 # --------------------------------------------------- over the chat, and back --
@@ -182,7 +205,7 @@ async def test_the_trajectory_opens_over_the_chat_and_escape_returns_to_it(
 ) -> None:
     """The gate. A pushed screen, not a second app — so leaving it is `escape`
     and what it returns to is the conversation exactly as it was."""
-    async with running(make_tui_app(profile="tui"), size=(80, 12)) as (app, pilot):
+    async with running(make_tui_app(), size=(80, 12)) as (app, pilot):
         await _three_turns(app, pilot)
         assert app._view is not None
         app._view.scroll_to_seq(0)
@@ -203,7 +226,7 @@ async def test_the_trajectory_opens_over_the_chat_and_escape_returns_to_it(
 async def test_the_screen_is_a_fold_of_the_log_as_it_stands(make_tui_app: MakeApp) -> None:
     """`build` runs at open time, not at registration: a screen that had been
     built once would show the session as it was when the row mounted."""
-    async with running(make_tui_app(profile="tui")) as (app, pilot):
+    async with running(make_tui_app()) as (app, pilot):
         await pilot.press(TRAJECTORY_KEY)
         await until(pilot, lambda: isinstance(app.screen, TrajectoryScreen))
         empty = len(app.screen.records)
@@ -225,7 +248,7 @@ async def test_the_screen_is_a_fold_of_the_log_as_it_stands(make_tui_app: MakeAp
 async def test_a_record_jumps_to_its_transcript_row(make_tui_app: MakeApp) -> None:
     """The gate, over the join P3-24 stored and nobody read: a record's
     `source_seq` and a transcript row's `seq` are the same number."""
-    async with running(make_tui_app(profile="tui"), size=(80, 12)) as (app, pilot):
+    async with running(make_tui_app(), size=(80, 12)) as (app, pilot):
         await _three_turns(app, pilot)
         assert app.front is not None and app._view is not None
         first_user = next(item for item in app.front.state.items if item.role == "user")
@@ -247,7 +270,7 @@ async def test_a_record_jumps_to_its_transcript_row(make_tui_app: MakeApp) -> No
 async def test_a_transcript_row_opens_the_record_beside_it(make_tui_app: MakeApp) -> None:
     """The other direction. Rows are widgets in a scroll rather than a table
     with a cursor, so "where the reader is" is the topmost visible row."""
-    async with running(make_tui_app(profile="tui"), size=(80, 12)) as (app, pilot):
+    async with running(make_tui_app(), size=(80, 12)) as (app, pilot):
         await _three_turns(app, pilot)
         assert app.front is not None and app._view is not None
         last_user = [item for item in app.front.state.items if item.role == "user"][-1]
@@ -268,7 +291,7 @@ async def test_a_seq_with_no_row_lands_on_the_nearest_one_before_it(
 ) -> None:
     """A `request/header` is an auditor's record with no transcript row by
     design. Landing a reader next to it beats landing them nowhere."""
-    async with running(make_tui_app(profile="tui"), size=(80, 12)) as (app, pilot):
+    async with running(make_tui_app(), size=(80, 12)) as (app, pilot):
         await _three_turns(app, pilot)
         assert app.front is not None and app._view is not None
         rows = [item for item in app.front.state.items if item.seq >= 0]
@@ -316,3 +339,14 @@ def test_the_terminal_never_reaches_past_the_front_session() -> None:
             if named or through_self:
                 offenders.append(f"{path.name}:{node.lineno} reads front.{node.attr}")
     assert offenders == [], offenders
+
+
+async def _unload(root: Any, screen_id: str) -> None:
+    """Dispose whatever scope owns this screen's registration.
+
+    A row's removal is the disposal of the scope its `apply` was handed, so this
+    is that unwinding rather than a second way to take a screen away.
+    """
+    registry = root.ctx.get("tui_screens")
+    entry = registry._entries[screen_id]
+    await entry.owner.dispose()

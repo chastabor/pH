@@ -38,7 +38,7 @@ import logging
 from collections.abc import Callable, Sequence
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any, ClassVar, cast
 
 from textual import work
 from textual.app import App, ComposeResult
@@ -46,21 +46,24 @@ from textual.binding import Binding, BindingType
 from textual.containers import Horizontal, Vertical
 from textual.timer import Timer
 
-from ph.cordis import Profile
 from ph.paths import resolve_roots
 from ph.seams.approval import ApprovalAnswer, ApprovalRequest
 from ph.seams.permission_presets import PRESETS
 from ph.seams.tui_status import StatusReading
 from ph.seams.user_questions import UserQuestion
+from ph.session import new_session_id
 
+from ..daemon.client import DaemonClient
+from ..daemon.launch import ensure_daemon
+from ..trust import TrustAnswer, TrustStore, trust_path
 from .autocomplete import PathCompleter
 from .commands import app_bindings
 from .config import TuiKeybindings, TuiSettings, load_tui_settings, save_tui_settings
-from .frontend import FrontSession, open_harness
+from .frontend import FrontSession
 from .modals.approval import ApprovalModal
 from .modals.ask_user import AskUserModal
 from .modals.base import Choice, ChoicePicker
-from .modals.login import LoginModal, credential_choices
+from .modals.login import LoginModal, credential_choices, credential_names
 from .modals.pickers import (
     command_choices,
     model_choices,
@@ -68,7 +71,8 @@ from .modals.pickers import (
     session_choices,
     theme_choices,
 )
-from .modals.trust import TrustStore, project_trust_modal
+from .modals.trust import project_trust_modal
+from .remote import attach_session
 from .screens import Revealing, RevealSeq
 from .terminal import TerminalTitle
 from .themes import ThemeCatalog, fallback_variables, load_catalog
@@ -109,26 +113,41 @@ class PHTuiApp(App[str | None]):
 
     def __init__(
         self,
-        profile: Profile,
         *,
-        provider: str = "fake",
-        model: str = "fake-1",
+        daemon_argv: Sequence[str] = (),
         session_id: str | None = None,
-        resume: str | None = None,
         home: Path | None = None,
+        spawn: bool = True,
     ) -> None:
         super().__init__()
-        self.profile = profile
-        self.provider = provider
-        self.model = model
+        self.daemon_argv = tuple(daemon_argv)
+        """What to run when no daemon is listening.
+
+        Handed in rather than built here, because it is the *CLI's* command line
+        — `ph_app.cli.spawn_command` spells the options — and a terminal that
+        composed it would be a terminal that knows what a profile is. After
+        P5-14 it does not: the daemon mounts, and this app reads a socket."""
+        self.spawn = spawn
+        """Whether to start a daemon when none is listening (P7-08).
+
+        `--no-spawn` turns it off, for a deployment running `ph daemon` under an
+        init system where a UI-started one would be a second supervisor
+        competing for the same session leases."""
         self.session_id = session_id
-        self.resume = resume
+        """The session to open, or `None` for a new one.
+
+        One field, not two: `--resume <id>` and `--session <id>` were separate
+        because mounting a stored session and creating one were different code
+        paths. Over the daemon they are the same call — `session/new` resumes an
+        existing id and `session/attach` pages its log — so a resume is an id and
+        nothing else."""
         self.home = home or resolve_roots().home
         self.settings: TuiSettings = load_tui_settings(self.home)
         self.catalog: ThemeCatalog = load_catalog(self.home)
         self.project = Path.cwd()
-        self.trust = TrustStore(path=self.home / "trust.json")
+        self.trust = TrustStore(path=trust_path(self.home))
         self.front: FrontSession | None = None
+        self._client: DaemonClient | None = None
         self.title_writer = TerminalTitle()
         self._paths = PathCompleter(root=str(self.project))
         self._dirty = True
@@ -235,34 +254,54 @@ class PHTuiApp(App[str | None]):
         self.state_changed()
         self._prompt.area.focus()
         if self.trust.trusted(self.project):
-            self.run_worker(self._open(), group="open")
+            self.run_worker(self._open(""), group="open")
             return
         # Asked before mounting, because mounting is what reads the project's
         # AGENTS.md, its hooks and its configured plugins. `push_screen` with a
         # callback, never awaited: this runs on the message pump.
         self.push_screen(project_trust_modal(self.project), self._answer_trust)
 
-    def _answer_trust(self, answer: str | None) -> None:
-        if answer == "trust":
-            self.trust.trust(self.project)
-        if answer in ("trust", "once"):
-            self.run_worker(self._open(), group="open")
+    def _answer_trust(self, answer: TrustAnswer | str | None) -> None:
+        """Carry the person's answer to the daemon, which is what enforces it.
+
+        Not written down here — the file has one writer, on the side that
+        mounts. `ph_app.trust` says why.
+        """
+        if answer in ("always", "once"):
+            # Narrowed by the check above; `push_screen`'s callback is typed by
+            # the modal's result, which is any of its action names.
+            self.run_worker(self._open(cast("TrustAnswer", answer)), group="open")
             return
         self.exit()
 
-    async def _open(self) -> None:
-        """Mount the harness. In a worker, so the shell paints first."""
+    async def _open(self, trust: TrustAnswer) -> None:
+        """Get a daemon, attach to a session on it, and read it. In a worker.
+
+        The harness is in the daemon now (P5-14), so this connects rather than
+        mounts — and starts one first if nothing is listening, because making a
+        person run `ph daemon` before `ph` would put a second command in front
+        of the ordinary case.
+
+        The pump is a worker of its own and outlives this one: `attach_session`
+        makes calls that only complete once something is reading replies.
+        """
         try:
-            self.front = await open_harness(
-                self.profile,
+            started = await ensure_daemon(
+                argv=self.daemon_argv,
+                spawn=self.spawn,
+            )
+            client = await DaemonClient.connect(started.path)
+            self._client = client
+            self.run_worker(client.pump(), group="pump", exclusive=False)
+            self.front = await attach_session(
+                client,
+                self.session_id or new_session_id(),
                 host=self,
-                provider=self.provider,
-                model=self.model,
-                session_id=self.session_id,
-                resume=self.resume,
+                cwd=self.project,
+                trust=trust,
             )
         except Exception as error:
-            log.exception("ph_app.tui: the harness would not mount")
+            log.exception("ph_app.tui: could not attach to a daemon")
             self.notify(str(error), title="pH could not start", severity="error", markup=False)
             return
         # A screen a row contributed gets its verb, its key and its palette
@@ -286,6 +325,15 @@ class PHTuiApp(App[str | None]):
         self._command_disposers.clear()
         if self.front is not None:
             await self.front.close()
+        if self._client is not None:
+            # **This app opened the connection, so this app closes it.** The
+            # front end only detaches: a host that kept one connection across
+            # several sessions — a browser tab per session, say — must not have
+            # one closing the socket the others are on. Without this the daemon
+            # keeps the subscription, and a subscriber is its own claim on a
+            # root's life, so nothing the sweep does can ever release it.
+            await self._client.aclose()
+            self._client = None
         self.title_writer.clear()
 
     # ---------------------------------------------------------------- frames --
@@ -564,17 +612,20 @@ class PHTuiApp(App[str | None]):
         self.notify(f"{front.state.provider}/{front.state.model}", title="model", markup=False)
         self.state_changed()
 
-    def action_open_sessions(self) -> None:
+    async def action_open_sessions(self) -> None:
+        """Which sessions exist — one question, asked of the harness.
+
+        The stored logs and the live roots are folded where both are known, so
+        this terminal reads no session file and needs no directory: it used to be
+        handed a path and walk it, which worked only while it and the harness
+        shared a machine.
+        """
         front = self.front
         if front is None:
             return
-        # A backend with no per-session file answers the fallback, and the
-        # picker lists nothing — honest until P5-14 moves this onto `stored()`.
-        # `FrontSession.sessions_directory` carries the rest of the reasoning.
-        directory = front.sessions_directory(self.home / "sessions")
         self._pick(
             "sessions",
-            session_choices(directory, current=front.session_id),
+            session_choices(await front.browse_sessions(), current=front.session_id),
             self._resume_session,
             free_text="session id",
         )
@@ -613,10 +664,19 @@ class PHTuiApp(App[str | None]):
         front.set_preset(chosen)
         self.state_changed()
 
-    def action_open_login(self) -> None:
+    async def action_open_login(self) -> None:
+        """Ask the harness what it holds, then offer the list.
+
+        `async` for the reason `action_attach` is: the answer is a wire call when
+        the harness is a daemon, and `credential_held` is synchronous — so the
+        asking has to happen before the picker is built, and only an awaiting
+        caller can do it.
+        """
         front = self.front
         if front is None:
             return
+        names = credential_names(front.config_rows)
+        await front.refresh_credentials(names)
         self._pick(
             "credential",
             credential_choices(front.config_rows, front.credential_held),
@@ -673,23 +733,20 @@ class PHTuiApp(App[str | None]):
 
 
 async def run_tui(
-    profile: Profile,
-    *,
-    provider: str,
-    model: str,
-    session_id: str | None = None,
-    resume: str | None = None,
+    *, daemon_argv: Sequence[str], session_id: str | None = None, spawn: bool = True
 ) -> None:
     """Entry point for `--mode tui`.
 
-    Loops so that choosing a session from the picker reopens it: the app exits
-    with the id, everything it mounted has unwound, and a fresh app resumes.
+    Takes no profile and no route: the daemon mounts the one `daemon_argv` names,
+    and reports the provider and model it chose on attach. Loops so that choosing
+    a session from the picker reopens it — the app exits with the id, everything
+    it attached has detached, and a fresh app attaches to the chosen session. The
+    *root* is untouched by that, which is the difference from before: switching
+    sessions in the picker no longer ends the turn you were watching.
     """
     while True:
-        app = PHTuiApp(
-            profile, provider=provider, model=model, session_id=session_id, resume=resume
-        )
-        resume = await app.run_async()
-        if resume is None:
+        app = PHTuiApp(daemon_argv=daemon_argv, session_id=session_id, spawn=spawn)
+        chosen = await app.run_async()
+        if chosen is None:
             return
-        session_id = None
+        session_id = chosen

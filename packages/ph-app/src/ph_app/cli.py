@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import json
 import sys
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from functools import partial
 from pathlib import Path
 from typing import Annotated, Any, Literal, TypeAlias
@@ -120,6 +120,13 @@ def default(
     resume: Annotated[
         str | None, typer.Option("--resume", help="Session id to reopen (tui only).")
     ] = None,
+    no_spawn: Annotated[
+        bool,
+        typer.Option(
+            "--no-spawn",
+            help="Refuse rather than start a daemon when none is listening (tui only).",
+        ),
+    ] = False,
     dump_config: Annotated[
         bool,
         typer.Option(
@@ -148,6 +155,33 @@ def default(
             fail(f"[red]{error}[/red]", code=2, cause=error)
         return
 
+    if mode == "tui":
+        # **Before any profile work**, like the trajectory branch above and for
+        # the same reason: the terminal does not mount one. The daemon composes
+        # the profile, and `spawn_command` is the command line that says which —
+        # so composing one here was a full plugin import per TUI start, thrown
+        # away.
+        #
+        # Imported here because the TUI pulls in Textual, and `ph -p` in a
+        # script should not pay for a terminal UI it will never draw.
+        from .tui.app import run_tui
+
+        anyio.run(
+            partial(
+                run_tui,
+                # The *name*, not the composed profile: the daemon composes it,
+                # and this is the command line that tells it which.
+                daemon_argv=spawn_command(
+                    profile=profile, provider=provider, model=model, patch=patch
+                ),
+                # `--resume <id>` is `--session <id>`: the daemon resumes an
+                # existing id through the same call that creates a new one.
+                session_id=session_id or resume,
+                spawn=not no_spawn,
+            )
+        )
+        return
+
     composed = profile_or_exit(profile, patch)
 
     if dump_config:
@@ -157,23 +191,6 @@ def default(
     if mode == "rpc":
         # No prompt: the peer drives the session over stdio.
         anyio.run(partial(run_rpc, composed, provider=provider, model=model))
-        return
-
-    if mode == "tui":
-        # Imported here because the TUI pulls in Textual, and `ph -p` in a
-        # script should not pay for a terminal UI it will never draw.
-        from .tui.app import run_tui
-
-        anyio.run(
-            partial(
-                run_tui,
-                composed,
-                provider=provider,
-                model=model,
-                session_id=session_id,
-                resume=resume,
-            )
-        )
         return
 
     if prompt is None:
@@ -419,11 +436,16 @@ def daemon(
         fail(f"[red]{error}[/red]", cause=error)
 
 
-def spawn_command(*, profile: str, provider: str, model: str) -> list[str]:
+def spawn_command(
+    *, profile: str, provider: str, model: str, patch: Sequence[str] = ()
+) -> list[str]:
     """The argv for a daemon a UI starts on its own behalf (P7-08).
 
     Beside the `daemon` command whose options it spells, so renaming one is one
     edit; `ensure_daemon` takes the argv and knows nothing about profiles.
+
+    Also: a patch the person passed to `ph` must reach the daemon, since the
+    daemon is what composes the profile.
 
     `sys.executable -m ph_app` rather than a bare `ph`: the UI may be running
     from a virtualenv that is not on `PATH`, or from a checkout with no console
@@ -432,7 +454,7 @@ def spawn_command(*, profile: str, provider: str, model: str) -> list[str]:
     `--ephemeral` because this daemon was nobody's decision, so it leaves when
     nobody needs it.
     """
-    return [
+    argv = [
         sys.executable,
         "-m",
         "ph_app",
@@ -445,6 +467,13 @@ def spawn_command(*, profile: str, provider: str, model: str) -> list[str]:
         "--model",
         model,
     ]
+    # `--patch` reaches the daemon because the daemon is what composes: a patch
+    # accepted here and dropped would silently ignore `ph --mode tui --patch
+    # '{id: tool-ask-user, disabled: false}'`, which is the documented way to arm
+    # a row anywhere.
+    for one in patch:
+        argv += ["--patch", one]
+    return argv
 
 
 @app.command()

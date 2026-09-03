@@ -26,6 +26,7 @@ one re-export away.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -37,7 +38,13 @@ __all__ = ["claim_entry", "claim_key", "claim_slot"]
 
 
 def claim_key[T](
-    owner: Context | Running, table: dict[str, T], key: str, value: T, *, label: str
+    owner: Context | Running,
+    table: dict[str, T],
+    key: str,
+    value: T,
+    *,
+    label: str,
+    then: Callable[[], None] | None = None,
 ) -> Disposer:
     """Put `value` under `key`; the disposer removes it only while it is still there.
 
@@ -46,6 +53,14 @@ def claim_key[T](
     registry threads its element type through its own bucket and its `_register`,
     and then handed both to a helper that would take either from anywhere. Free
     at every call site, because `T` is inferred from the table.
+
+    `then` runs **after** the removal and **inside** the disposer the owner
+    holds, which is the only placement that works: a registry that announces its
+    own changes has to announce the one an unwinding scope makes, and a scope
+    unwinds by running what `add_disposer` was given. Composing the pair outside
+    — wrapping the returned disposer — leaves the scope holding the bare
+    removal, so unloading a row took its command away and told nobody. It is the
+    shape `ToolRuntime._claim` already uses for `tools/change`.
     """
     if key in table:
         raise ValueError(f"{label}: {key!r} is already registered")
@@ -54,6 +69,8 @@ def claim_key[T](
     def release() -> None:
         if table.get(key) is value:
             del table[key]
+        if then is not None:
+            then()
 
     return owner.add_disposer(release, label=f"{label}({key})")
 

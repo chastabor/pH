@@ -45,6 +45,7 @@ __all__ = [
     "Responded",
     "answer_from_wire",
     "answer_kind",
+    "answer_to_wire",
     "apply",
     "denial_reason",
     "pending_approvals",
@@ -168,6 +169,26 @@ def answer_from_wire(raw: Any) -> ApprovalAnswer:
         if kind == "responded":
             return Responded(message=str(raw.get("message", "")))
     return "unavailable"
+
+
+def answer_to_wire(answer: ApprovalAnswer) -> Any:
+    """One answer on its way *out* of the process that decided it.
+
+    `answer_from_wire`'s inverse, and the pair has to be a pair: four of the six
+    answers are bare strings and travel as themselves, but `Edited` and
+    `Responded` carry data and are frozen dataclasses — so a front end that put
+    one straight into a JSON frame produced `TypeError: Object of type Responded
+    is not JSON serializable`, and P4-05's whole point (answer in the tool's
+    voice rather than refusing) simply could not cross a socket.
+
+    Beside its inverse rather than at the transport, for the reason stated
+    there: what `{"kind": "edited"}` means is this seam's to say once.
+    """
+    if isinstance(answer, str):
+        return answer
+    if isinstance(answer, Edited):
+        return {"kind": answer.kind, "arguments": answer.arguments}
+    return {"kind": answer.kind, "message": answer.message}
 
 
 def answer_kind(answer: ApprovalAnswer) -> str:

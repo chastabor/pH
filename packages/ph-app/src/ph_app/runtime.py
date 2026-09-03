@@ -23,15 +23,29 @@ __all__ = ["mounted", "prompted"]
 
 
 @asynccontextmanager
-async def mounted(profile: Profile) -> AsyncIterator[Context]:
+async def mounted(profile: Profile, *, project: Path | None = None) -> AsyncIterator[Context]:
     """Mount a composed profile, and unwind the whole tree on exit.
 
     A `Profile`, composed once at `profile_or_exit`: nothing is read or composed
     here, and repeated mounts of one profile never share a `Context`. What this
     one became is `ctx.mount`.
+
+    `project` is **where this mount works** — the directory a session's own
+    header names — and it is provided before the first row for the reason
+    `Profile.mount` provides `ctx.mount` there: it is a fact about *this* mount
+    that a row needs while applying. `fs-local` reads it as its root, and
+    `workspace-lifecycle` then branches its worktrees from it and discovers that
+    project's provisioning.
+
+    A per-mount value and not a profile setting, because one daemon mounts one
+    composition many times, once per session, and those sessions are in
+    different repositories (P5-14). Composing a profile per root instead would
+    re-import every plugin to change one path.
     """
     ctx = Context()
     try:
+        if project is not None:
+            ctx.provide("project_root", project)
         await profile.mount(ctx)
         yield ctx
     finally:

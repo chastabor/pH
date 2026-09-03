@@ -18,14 +18,13 @@ with one node, and the list reads the same either way.
 from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
-from pathlib import Path
 from typing import Any
 
 from rich.filesize import decimal
 
 from ph.seams.permission_presets import PRESETS
 
-from ..sessions import SessionSummary, session_summaries
+from ...sessions import SessionSummary
 from ..themes import ThemeCatalog
 from .base import Choice
 
@@ -102,7 +101,7 @@ def model_choices(
     ]
 
 
-def session_choices(sessions_dir: Path, *, current: str = "") -> list[Choice]:
+def session_choices(sessions: Sequence[SessionSummary], *, current: str = "") -> list[Choice]:
     """Stored sessions, newest first, **branches** indented under their parent.
 
     Two kinds of parent link reach this list and they must not render alike. A
@@ -116,8 +115,12 @@ def session_choices(sessions_dir: Path, *, current: str = "") -> list[Choice]:
 
     A child whose parent is not on disk is shown at the root rather than hidden:
     losing a session from the list is worse than showing it in the wrong place.
+
+    Takes rows rather than anything to read them from: `sessions/browse` folds
+    them on the harness — stored logs and live roots in one list, each row
+    carrying the `state` the daemon calls it — so this function only arranges.
     """
-    summaries = {summary.session_id: summary for summary in session_summaries(sessions_dir)}
+    summaries = {summary.session_id: summary for summary in sessions}
     under = _contract_segments(summaries)
     children: dict[str, list[str]] = {}
     roots: list[str] = []
@@ -200,7 +203,12 @@ def _contract_segments(summaries: dict[str, SessionSummary]) -> dict[str, str | 
 
 def _session_row(summary: SessionSummary, depth: int, *, marked: bool) -> Choice:
     indent = f"{'  ' * depth}{'↳ ' if depth else ''}"
-    detail = f"{summary.when} · {decimal(summary.size)}"
+    # A running session's size and mtime are whatever the last flush left, so
+    # they would describe the file rather than the conversation. The state is
+    # what a person is choosing on.
+    detail = (
+        "running" if summary.state == "running" else f"{summary.when} · {decimal(summary.size)}"
+    )
     if summary.cwd:
         detail = f"{detail} · {summary.cwd}"
     return Choice(

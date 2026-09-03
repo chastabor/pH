@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Any
 
 import pytest
+from daemon_helpers import daemon_socket, running
 
 from ph.paths import resolve_roots
 from ph_app.profiles import compose_profile
@@ -14,46 +15,51 @@ from ph_app.tui.app import PHTuiApp
 
 
 @pytest.fixture
-def make_tui_app(tmp_path: Path) -> Callable[..., PHTuiApp]:
-    """`make_tui_app(**overrides)` → a TUI over the headless profile, homed in `tmp_path`.
+def tui_profile() -> str:
+    """Which profile the daemon behind the TUI mounts.
 
-    Trusted by default: the trust prompt is a startup gate, so every test that
-    is *not* about it would otherwise open a modal before the app exists.
-
-    `$PH_HOME` comes from the root conftest's autouse `_isolated_home`; the copy
-    that used to be here set the same variable to the same value and made one
-    rule read as three.
+    `headless` because most of the TUI is not about the posture. A file whose
+    subject *is* a row the interactive profile contributes — a screen, the
+    question tool — overrides this fixture with `"tui"`, which is why it is a
+    fixture rather than an argument to the factory: the daemon mounts before any
+    app exists, so the choice has to be made before `make_tui_app` is called.
     """
+    return "headless"
 
-    def make(
-        *,
-        trusted: bool = True,
-        profile: str = "headless",
-        project: Path | None = None,
-        **overrides: Any,
-    ) -> PHTuiApp:
-        options: dict[str, Any] = {
-            "provider": "fake",
-            "model": "fake-1",
-            "session_id": "pilot",
-            "home": tmp_path,
-        }
-        options.update(overrides)
-        # `headless` by default because most of the TUI is not about the
-        # posture; `profile="tui"` is what a test asking about a row the
-        # interactive profile contributes — a screen, say — passes.
-        app = PHTuiApp(compose_profile(profile), **options)
-        if project is not None:
-            # `PHTuiApp.project` is `Path.cwd()`, and the sidebar prints it. A
-            # snapshot taken here therefore embedded the developer's checkout —
-            # `~/Projects/pH` — and could never match CI, whose cwd is
-            # `~/work/pH/pH`. Set *before* `trust`, because trust is keyed on
-            # this path and a mismatch opens the trust modal over the frame
-            # under test.
-            app.project = project
-        if trusted:
-            app.trust.trust(app.project)
-        return app
+
+@pytest.fixture
+async def tui_daemon(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tui_profile: str
+) -> AsyncIterator[Any]:
+    """The daemon the TUI attaches to, in this process and on a real socket.
+
+    After P5-14 the terminal is a protocol client, so a pilot test needs a
+    supervisor to talk to — and `$PH_RUNTIME` is pinned here so `ensure_daemon`
+    resolves *this* socket, finds it listening, and never spawns a process.
+
+    In-process rather than spawned so a test can still reach the harness: what
+    used to be `app.front.ctx` is now `root_of(tui_daemon).ctx`, one side of a
+    socket away from the screen asserting on it.
+    """
+    monkeypatch.setenv("PH_RUNTIME", str(tmp_path / "run"))
+    async with running(tmp_path, path=daemon_socket(), profile=compose_profile(tui_profile)) as (
+        daemon
+    ):
+        yield daemon
+
+
+@pytest.fixture
+async def make_tui_app(tmp_path: Path, tui_daemon: Any) -> Callable[..., PHTuiApp]:
+    """`make_tui_app(**overrides)` → a TUI attached to `tui_daemon`.
+
+    The construction itself is `tui_helpers.tui_app`, shared with the snapshot
+    suite; what this fixture adds is the daemon to attach to. `$PH_HOME` comes
+    from the root conftest's autouse `_isolated_home`.
+    """
+    from tui_helpers import tui_app
+
+    def make(**overrides: Any) -> PHTuiApp:
+        return tui_app(home=tmp_path, **overrides)
 
     return make
 

@@ -21,7 +21,7 @@ than a cached one that was true when somebody last wrote it down.
 
 **Absence is normal and is not an error.** A profile need not mount `commands`,
 `tui_screens`, `tui_status` or `credentials`, and a projection of a seam that is
-not there is the empty list — the same answer `HarnessSession` gives in process,
+not there is the empty list — the answer the in-process front end gave too,
 where each of these is a `ctx.get(...)` that may return `None`. A daemon that
 refused instead would make "this deployment has no screens" indistinguishable
 from "this deployment is broken".
@@ -35,7 +35,10 @@ from typing import Any
 
 from ph.cordis import DEPLOYMENT
 
+from ..sessions import SessionSummary, session_summaries
+
 __all__ = [
+    "browse_of",
     "commands_of",
     "credentials_of",
     "readings_of",
@@ -115,3 +118,46 @@ def credentials_of(root: Any, names: list[str]) -> dict[str, bool]:
     if service is None:
         return dict.fromkeys(names, False)
     return {name: bool(service.has(service.reference(name))) for name in names}
+
+
+def browse_of(supervisor: Any) -> list[dict[str, Any]]:
+    """Every session a person could open, stored and live, folded here (P5-14).
+
+    **One list from the one process that can see both halves.** The logs are on
+    the daemon's disk under the daemon's `$PH_HOME`, and which roots are *mounted*
+    is a fact only the supervisor holds — so a client that asked for them
+    separately had to be handed a directory path and read the files itself. It
+    does not any more: a front end on another machine, or one with no filesystem
+    at all, gets the same rows.
+
+    A live root's `status` is its own — `running`, `waiting`, `retrying` — because
+    that is what a person is choosing on: joining a session parked on somebody
+    else's approval modal is a different act from joining one that is working.
+    A stored row keeps `stored`.
+
+    A live root the disk has not seen yet — its log still in a write buffer —
+    gets a row of its own, built from what the supervisor knows: the header's
+    `cwd`, so the repo it belongs to is on the row even before the file exists.
+    """
+    directory = supervisor.sessions_directory()
+    stored = session_summaries(directory) if directory is not None else []
+    held = {root.id: root for root in supervisor.roots.values()}
+    rows = [
+        summary.model_copy(update={"state": held[summary.session_id].status})
+        if summary.session_id in held
+        else summary
+        for summary in stored
+    ]
+    known = {summary.session_id for summary in stored}
+    rows.extend(
+        SessionSummary(
+            session_id=root.id,
+            modified=0.0,
+            size=0,
+            cwd=root.session.header.cwd or "",
+            state=root.status,
+        )
+        for root_id, root in sorted(held.items())
+        if root_id not in known
+    )
+    return [row.to_wire() for row in rows]

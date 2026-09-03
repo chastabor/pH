@@ -54,10 +54,18 @@ from ..protocol import (
     resume_at,
 )
 from ..shell import shell_of
+from ..trust import TrustStore, trust_path
 from .cards import CARD_EVENTS, presentation_of
 from .duplex import Peer
 from .launch import listening
-from .projections import commands_of, credentials_of, readings_of, screens_of, tools_of
+from .projections import (
+    browse_of,
+    commands_of,
+    credentials_of,
+    readings_of,
+    screens_of,
+    tools_of,
+)
 from .recovery import EPHEMERAL_QUIET, PASSIVATE_AFTER, WAKE_WITHIN
 from .supervisor import NON_GUARANTEES, Supervisor
 
@@ -148,6 +156,7 @@ CAPABILITIES = (
     "cursors",
     "snapshots",
     "asks",
+    "browse",
     "projections",
     "attachments",
     "staging",
@@ -205,6 +214,18 @@ class AttachmentUnknown(Refusal):
     """
 
     code = "attachment_unknown"
+
+
+class UntrustedProject(Refusal):
+    """This `cwd` has not been trusted, and mounting it would read its config.
+
+    Its own type because the client's next move is specific: *ask*. A front end
+    catching this shows the trust modal and retries with `trust`; one that has
+    no person to ask — `ph agents send` naming a new session in a checkout
+    nobody has vouched for — stops, which is the point.
+    """
+
+    code = "untrusted_project"
 
 
 class NoSuchSession(Refusal):
@@ -314,9 +335,17 @@ class _Connection:
             # `cwd` is the client's, and the daemon is the one that mounts — so
             # it is said here rather than assumed from the daemon's own process,
             # which is somewhere neither the person nor their files are.
-            root = await supervisor.start(
-                str(params["sessionId"]), cwd=str(params["cwd"]) if params.get("cwd") else None
-            )
+            cwd = str(params["cwd"]) if params.get("cwd") else None
+            # The daemon mounts, so the daemon enforces — `ph_app.trust` says
+            # why. Only for a session created here: resuming one that exists is
+            # not a new decision about a new directory.
+            answered = str(params.get("trust") or "")
+            self._check_trust(cwd, answered)
+            root = await supervisor.start(str(params["sessionId"]), cwd=cwd)
+            if answered == "always" and cwd is not None:
+                # After the mount, not before: a directory is only worth
+                # recording once its profile has actually composed.
+                TrustStore(path=trust_path()).trust(Path(cwd))
             return root.describe()
         # --- mutations --------------------------------------------------------
         # Every method that changes a root goes through one wrapper: resolve the
@@ -365,16 +394,15 @@ class _Connection:
             key, fold = projection
             root = self._root(str(params["sessionId"]))
             return {"sessionId": root.id, key: fold(root)}
+        if method == "sessions/browse":
+            # Daemon-level, not a `PROJECTIONS` row: it is not about one root.
+            # Every root mounts the same profile and so the same store, and which
+            # roots are held is the supervisor's own answer.
+            return {"sessions": browse_of(supervisor)}
         if method == "daemon/config":
-            # Properties of the *daemon*, not of any root: every root mounts the
-            # same composition and so the same store. `sessionsDirectory` is here
-            # rather than a per-root projection for that reason — and because a
-            # client deriving the path itself agrees only while both processes
-            # see the same `$PH_HOME`.
-            return {
-                "rows": list(supervisor.profile.dump()),
-                "sessionsDirectory": str(supervisor.sessions_directory() or ""),
-            }
+            # The composed profile, which is a property of the *daemon* and not
+            # of any root: every root mounts the same composition.
+            return {"rows": list(supervisor.profile.dump())}
         # `credentials/held` and `credentials/store`, not `session/credential`
         # and `session/credentials`: those were two names one letter apart for
         # opposite kinds, and the one that writes a secret is the last method
@@ -591,6 +619,24 @@ class _Connection:
             raise AttachmentUnknown(f"no attachment {ref.attachment_id} is stored here")
         return ref
 
+    def _check_trust(self, cwd: str | None, answer: str) -> None:
+        """Refuse a `cwd` nobody has vouched for. `ph_app.trust` says why.
+
+        `"once"` mounts without recording; `"always"` is recorded by the caller,
+        after the mount has actually succeeded.
+        """
+        if cwd is None or answer == "once":
+            return
+        store = TrustStore(path=trust_path())
+        project = Path(cwd)
+        if answer == "always":
+            # Recorded by the *caller*, once the mount has actually succeeded:
+            # writing here would vouch for a directory whose profile then failed
+            # to compose, and the next client would walk straight in.
+            return
+        if not store.trusted(project):
+            raise UntrustedProject(f"{cwd} has not been trusted; ask, then send trust")
+
     def _root(self, session_id: str) -> Any:
         root = self.server.supervisor.roots.get(session_id)
         if root is None:
@@ -623,11 +669,11 @@ class _Connection:
             root.desk.join(self)
         return {
             **root.describe(),
-            # Where this client is being resumed from, said out loud: a stale
-            # generation silently means "from the beginning", and a client
-            # should not have to infer that from sequence numbers arriving in
-            # an order it did not expect.
-            "from": resume_at(root.session, cursor),
+            # The footer, with the status it belongs to — the same pairing
+            # `session.status` makes, so a client that has just attached draws a
+            # complete one without a second call and without assembling a frame
+            # shape no wire message has.
+            "readings": readings_of(root),
         }
 
     def _snapshot(self, session_id: str, cursor: Any) -> dict[str, Any]:

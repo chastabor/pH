@@ -53,10 +53,11 @@ from ph.tools.errors import error_message
 from ..attach import Tray, prompt_message
 from ..protocol import Refusal, cursor_of
 from ..runtime import mounted
+from ..sessions import recorded_cwd
 from ..shell import run_shell
 from .cards import CARD_EVENTS, presentation_of
 from .frontend import AskDesk
-from .projections import readings_of
+from .projections import commands_of, readings_of, screens_of
 from .recovery import (
     FAILED,
     PASSIVATE_AFTER,
@@ -459,11 +460,20 @@ class Root:
         *is* its session here) and `events` was `cursor.sequence`, which left a
         client picking which of two spellings was authoritative.
         """
+        options = getattr(self.agent, "options", None)
         return {
             "sessionId": self.session.id,
             "status": self.status,
             "watchers": len(self.subscribers),
             "cursor": cursor_of(self.session),
+            # Which route this root is on. A client could otherwise not know
+            # until the first turn, because the only other statement of it is
+            # `request/context` — appended when a request is *built*. A front end
+            # that has just attached has a footer to draw now, and "no model"
+            # over a socket where the in-process one said `fake-1` was the whole
+            # of a snapshot diff nobody could read.
+            "provider": getattr(options, "provider", "") or "",
+            "model": getattr(options, "model", "") or "",
         }
 
     def detail(self) -> dict[str, Any]:
@@ -548,7 +558,17 @@ class Supervisor:
         if root_id in self.roots:
             return self.roots[root_id]
         async with AsyncExitStack() as exits:
-            ctx = await exits.enter_async_context(mounted(self.profile))
+            # **Where this root works, decided before the mount.** The fs seam
+            # fixes its root while applying, and `workspace-lifecycle` reads it
+            # there to discover the project's provisioning — so a root mounted
+            # first and rebased after would have already branched its worktree
+            # from the wrong tree. A new session's directory is the client's; a
+            # resumed one's is what its own header recorded, read off disk
+            # because there is no store to ask until this mount exists.
+            where = cwd or recorded_cwd(resolve_roots().sessions_dir(), root_id)
+            ctx = await exits.enter_async_context(
+                mounted(self.profile, project=Path(where) if where else None)
+            )
             session = await self._session_for(ctx, root_id, cwd=cwd)
             options = AgentOptions(provider=self.provider, model=self.model)
             agent = ctx.agents.create(session, options)
@@ -606,6 +626,36 @@ class Supervisor:
                         payload["presentation"] = view
                 root.publish("session.event", payload)
 
+            def verbs() -> None:
+                """The command set changed, so say so. See `announce` above."""
+                if root.subscribers:
+                    root.publish(
+                        "session.commands",
+                        {"sessionId": root.id, "commands": commands_of(root)},
+                    )
+
+            def drew() -> None:
+                """The screen set changed, so say so.
+
+                `screens/change` and not the seam's `present_with`, which looks
+                like the right hook and is not: its per-screen undo is a disposer
+                on the *registering row's* scope, added after `claim_key`'s
+                removal and therefore unwinding **before** it — so a presenter
+                told "this screen is going" reads a table that still contains it
+                and publishes the list unchanged. `claim_key`'s `then` runs after
+                the removal, which is the only placement that can be right.
+
+                The whole list rather than the one screen, because
+                `ScreenDefinition.build` cannot travel: a client keeps only the
+                ids it can draw, so it re-reads the projection rather than
+                applying a delta.
+                """
+                if root.subscribers:
+                    root.publish(
+                        "session.screens",
+                        {"sessionId": root.id, "screens": screens_of(root)},
+                    )
+
             def announce(agent_: Any, status: str) -> None:
                 # Guarded like `relay` above, and for the same reason: reading
                 # the footer folds every registered status field over the log,
@@ -632,6 +682,8 @@ class Supervisor:
             # here means never receiving them rather than receiving and discarding.
             exits.callback(session.observe(relay))
             ctx.on("agent/status", announce)
+            ctx.on("commands/change", verbs)
+            ctx.on("screens/change", drew)
             self.tasks.start_soon(self._run, root)
             # Ours now: the `async with` unwinds a stack that has been emptied,
             # so a failure anywhere above disposes everything it entered and a

@@ -1,7 +1,7 @@
 """The two waits every pilot test needs, written once.
 
-`running` opens an app and waits for the harness to mount — which happens in a
-worker, so a single `pause()` is not enough. `until` polls a predicate through
+`running` opens an app and waits for it to attach to a daemon — which happens
+in a worker, so a single `pause()` is not enough. `until` polls a predicate through
 the pilot instead of sleeping, so a test waits exactly as long as the app takes
 and fails loudly rather than hanging when it never does.
 """
@@ -10,12 +10,64 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
+from pathlib import Path
+from typing import Any
 
 from textual.pilot import Pilot
 
 from ph.seams.approval import ApprovalRequest
 from ph.seams.user_questions import UserQuestion
 from ph_app.tui.app import PHTuiApp
+
+
+def tui_app(
+    *, home: Path, project: Path | None = None, trusted: bool = True, **overrides: Any
+) -> PHTuiApp:
+    """One `PHTuiApp` wired for a test, built in the one place.
+
+    Two callers: the async `make_tui_app` fixture, and the snapshot suite, which
+    cannot use a fixture because `snap_compare` drives its own event loop. They
+    were two copies of the app's construction contract, and this diff had to edit
+    both when it added `daemon_argv`.
+
+    `spawn=False`: a test must never start a supervisor. The fixture's socket is
+    already answering, so `ensure_daemon` returns without spawning, and a
+    regression that tried fails as a named `DaemonAbsent`.
+
+    `trusted` writes the file the *daemon* reads — `session/new` is what enforces
+    trust — so trusting here is what lets the mount happen at all. `project` is
+    set before it, because trust is keyed on that path.
+    """
+    options: dict[str, Any] = {
+        "session_id": "pilot",
+        "home": home,
+        "daemon_argv": (),
+        "spawn": False,
+    }
+    options.update(overrides)
+    app = PHTuiApp(**options)
+    if project is not None:
+        # `PHTuiApp.project` is `Path.cwd()`, and the sidebar prints it. A
+        # snapshot taken here therefore embedded the developer's checkout and
+        # could never match CI, whose cwd differs.
+        app.project = project
+    if trusted:
+        app.trust.trust(app.project)
+    return app
+
+
+def root_of(daemon: Any, session_id: str = "pilot") -> Any:
+    """The daemon-side root a pilot app is attached to.
+
+    What `app.front.ctx` used to be. It is deliberately not reachable *through*
+    the front end any more — a socket client has no `ctx`, and the AST gate in
+    `test_tui_screens.py` holds the terminal to that — so a test whose subject is
+    the harness asks the daemon it is attached to instead.
+
+    A name for the default session id; the lookup is `_Daemon.held`, which owns
+    the supervisor's internals.
+    """
+    return daemon.held(session_id)
 
 
 async def until(pilot: Pilot[object], predicate: Callable[[], bool], *, tries: int = 400) -> None:
@@ -60,8 +112,8 @@ def turn_done(app: PHTuiApp) -> Callable[[], bool]:
 class StubHost:
     """A `ModalHost` that answers every prompt without drawing anything.
 
-    One double for both front ends — the in-process `HarnessSession` and the
-    socket `DaemonSession` — so a member added to `ModalHost` is added here once.
+    The one `ModalHost` double in the tree, so a member added to that protocol is
+    added here once.
     """
 
     def __init__(self) -> None:

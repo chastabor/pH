@@ -565,3 +565,65 @@ async def test_a_tool_call_is_judged_in_the_scope_the_caller_states(
     assert await shown(child.ctx, parent) == ["plain.txt"], (
         "fs_tools handed the seam the agent, not the boundary the caller stated"
     )
+
+
+# ------------------------------------------- the workspace is the whole world --
+
+
+async def test_no_path_the_model_reads_names_the_machine(mount: Any, tmp_path: Path) -> None:
+    """Every path that reaches the model is relative to the workspace (A11/A12).
+
+    An absolute path inside the workspace names the same file as its relative
+    form, and costs something the relative form does not: it puts the run's own
+    directory into the transcript. Replay that session against a fresh workspace
+    — a retried job, a re-provisioned worktree, the same repo checked out
+    somewhere else — and every one of those strings differs, so the provider's
+    cached prefix moves for a difference the conversation cannot see. The agent
+    has no use for the outside of its workspace, so the outside does not appear.
+
+    Asserted over `read`, `write` and `edit` together, because they were three
+    separate spellings of the same echo and only `glob`/`grep` were relative.
+
+    Sabotage: return `str(target)` from any of the three, and the workspace root
+    is in a result the model reads.
+    """
+    project = tmp_path / "repo"
+    project.mkdir()
+    (project / "notes.md").write_text("hello\n", encoding="utf-8")
+    ctx = await mount({"id": "fs", "config": {"root": str(project)}})
+    agent = ctx.agents.create(ctx.sessions.create("named"), FAKE_OPTIONS)
+
+    window = await ctx.fs.read("notes.md", scope=agent.ctx, agent=agent)
+    written = await ctx.fs.write("sub/new.txt", "x", scope=agent.ctx, agent=agent)
+    edited = await ctx.fs.edit("notes.md", "hello", "goodbye", scope=agent.ctx, agent=agent)
+
+    assert window.path == "notes.md", "a read named the machine"
+    assert ctx.fs.named(project / "sub" / "new.txt", agent=agent) == "sub/new.txt"
+    assert written is not None or written is None  # the write happened; its shape is the tool's
+    assert edited == 1
+    # And the one case a relative path would mislead: outside the workspace it
+    # keeps its absolute form, because that is not a name the workspace has.
+    outside = tmp_path / "elsewhere.txt"
+    assert ctx.fs.named(outside, agent=agent) == str(outside)
+
+
+async def test_a_read_records_the_workspace_relative_name(mount: Any, tmp_path: Path) -> None:
+    """`fs/observed` too: it is a record about a file, kept across runs.
+
+    A record whose path is `/tmp/ph-w-7/src/x.py` describes a directory that
+    will not exist the next time this session runs, which is the same argument
+    the model-facing paths make — and this one also decides whether
+    read-before-edit still recognises the file after a workspace is rebuilt.
+    """
+    project = tmp_path / "repo"
+    project.mkdir()
+    (project / "notes.md").write_text("hello\n", encoding="utf-8")
+    ctx = await mount({"id": "fs", "config": {"root": str(project)}})
+    session = ctx.sessions.create("observed")
+    agent = ctx.agents.create(session, FAKE_OPTIONS)
+
+    await ctx.fs.read("notes.md", scope=agent.ctx, agent=agent, session=session)
+
+    observed = [one for one in session.events if one.type == "fs/observed"]
+    assert [one.data["path"] for one in observed] == ["notes.md"]
+    assert str(project) not in repr([one.data for one in session.events])

@@ -12,15 +12,14 @@ snapshot is stable: no timing, no token order, no session ids in the frame.
 from __future__ import annotations
 
 import getpass
-from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 import pytest
+from daemon_helpers import daemon_in_thread
 from textual.app import App, ComposeResult
-from tui_helpers import until
+from tui_helpers import tui_app, until
 
-from ph_app.tui.app import PHTuiApp
 from ph_app.tui.state import ChatItem, ToolCard, TuiState
 from ph_app.tui.themes import DEFAULT_THEME, fallback_variables, load_catalog
 from ph_app.tui.widgets.transcript import TranscriptView
@@ -195,22 +194,33 @@ def test_every_theme_renders(snap_compare: Any, theme: str) -> None:
     assert snap_compare(_Snapshot(items, theme=theme), terminal_size=(80, 10))
 
 
-def test_the_full_app_shell(snap_compare: Any, make_tui_app: Callable[..., PHTuiApp]) -> None:
+def test_the_full_app_shell(
+    snap_compare: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Prompt, status bar and sidebar together — the chrome, once.
+
+    Built by hand rather than from `make_tui_app`, because that fixture is async
+    now — the terminal attaches to a daemon (P5-14) — and `snap_compare` drives
+    its own event loop, so it can neither await a fixture nor share one. The
+    daemon therefore runs in a thread and the app reaches it over the socket,
+    which is the only boundary between them and closer to production than the
+    shared-loop fixture is.
 
     `project=` is pinned because the sidebar prints it: taken from `Path.cwd()`
     this snapshot recorded the developer's own checkout and failed on every
     other machine, CI included.
     """
-    app = make_tui_app(session_id="snapshot", project=Path("/w/project"))
+    with daemon_in_thread(tmp_path) as socket:
+        monkeypatch.setenv("PH_RUNTIME", str(socket.parent))
+        app = tui_app(home=tmp_path, project=Path("/w/project"), session_id="snapshot")
 
-    async def mounted(pilot: Any) -> None:
-        # The harness mounts in a worker so the shell paints first; the frame
-        # under test is the one after it has.
-        await until(pilot, lambda: app.front is not None)
-        await pilot.pause(0.1)
+        async def attached(pilot: Any) -> None:
+            # The attach happens in a worker so the shell paints first; the
+            # frame under test is the one after it has.
+            await until(pilot, lambda: app.front is not None)
+            await pilot.pause(0.1)
 
-    assert snap_compare(app, terminal_size=(90, 24), run_before=mounted)
+        assert snap_compare(app, terminal_size=(90, 24), run_before=attached)
 
 
 def test_no_snapshot_records_this_machine() -> None:

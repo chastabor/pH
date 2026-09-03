@@ -317,6 +317,35 @@ class FsService:
             return self.root
         return resolved or self.root
 
+    def named(self, path: str | Path, *, agent: Any = None) -> str:
+        """How a path should be *written down* — relative to this agent's root.
+
+        `resolve`'s inverse, and the form every path that reaches the model or
+        the log takes. An absolute path inside the workspace names the same file
+        as its relative form, but it also puts the machine and the run into the
+        conversation: a read echoing `/tmp/ph-w-7/src/x.py` makes that string
+        part of the transcript, so replaying the session against a fresh
+        workspace — a retried job, a re-provisioned worktree, the same repo
+        checked out elsewhere — changes every one of them and moves the
+        provider's cached prefix (A11/A12) for a difference the conversation
+        cannot see. The agent has no use for the outside of its workspace, so
+        the outside does not appear.
+
+        A path *outside* the workspace keeps its absolute form. It is not a name
+        the workspace can express, and the approval that let it through is what
+        made it legible in the first place — hiding it would be the one case
+        where a relative path would mislead.
+
+        `glob` and `grep` already answer this way, by slicing the walk's own
+        prefix off; this is the same answer for the paths that arrive one at a
+        time.
+        """
+        resolved = self.resolve(path, agent=agent)
+        try:
+            return resolved.relative_to(self.root_for(agent)).as_posix()
+        except ValueError:
+            return str(resolved)
+
     def resolve(self, path: str | Path, *, agent: Any = None) -> Path:
         """Resolve against the agent's workspace root.
 
@@ -426,9 +455,9 @@ class FsService:
         )
         all_lines = text.splitlines()
         window = all_lines[offset:] if limit is None else all_lines[offset : offset + limit]
-        self._observe(target, session)
+        self._observe(target, session, agent)
         return FileSlice(
-            path=str(target),
+            path=self.named(target, agent=agent),
             text="\n".join(window),
             offset=offset,
             lines=len(window),
@@ -436,13 +465,21 @@ class FsService:
             truncated=limit is not None and offset + len(window) < len(all_lines),
         )
 
-    def _observe(self, target: Path, session: Session | None) -> None:
+    def _observe(self, target: Path, session: Session | None, agent: Any = None) -> None:
+        """Remember this file's mtime, and record the read.
+
+        The dict is keyed by the resolved `Path` because it answers a question
+        about *this process* — has this file changed since we read it — and the
+        log gets the workspace-relative name for the reason `named` gives: a
+        record whose path is `/tmp/ph-w-7/...` describes a directory that will
+        not exist the next time this session runs.
+        """
         try:
             self._observed[target] = target.stat().st_mtime
         except OSError:  # pragma: no cover - raced deletion
             return
         if session is not None:
-            session.append("fs/observed", {"path": str(target)})
+            session.append("fs/observed", {"path": self.named(target, agent=agent)})
 
     def observed_mtime(self, path: str | Path) -> float | None:
         return self._observed.get(self.resolve(path))
@@ -766,7 +803,20 @@ class Config(WireModel):
 @plugin("fs-local", config=Config)
 async def apply(ctx: Context, config: Config) -> None:
     """Mount the local filesystem provider, and its one built-in screen."""
-    root = Path(config.root).expanduser() if config.root else Path.cwd()
+    # Three answers, most specific first. `config.root` is a deployment saying
+    # "always work here" and wins. `project_root` is *this mount's* working
+    # directory, provided before the first row by whoever mounted — a daemon
+    # mounts one composition once per session, and those sessions live in
+    # different repositories, so the directory cannot come from the profile
+    # (P5-14). `Path.cwd()` is the process's own, which is right for a mode that
+    # is *in* the project and was silently wrong for every root a daemon held.
+    provided = ctx.get("project_root")
+    if config.root:
+        root = Path(config.root).expanduser()
+    elif provided is not None:
+        root = Path(provided).expanduser()
+    else:
+        root = Path.cwd()
     service = FsService(ctx=ctx, root=root)
     ctx.provide("fs", service)
     ignored = frozenset(_IGNORED_PARTS if config.ignore is None else config.ignore)
