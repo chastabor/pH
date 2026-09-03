@@ -92,6 +92,24 @@ to correlate it with. Cheaper than the sweep it sits beside: one `lstat`, no
 roots walked.
 """
 
+
+@dataclass(frozen=True, slots=True)
+class Mutation:
+    """One method that changes a root: how to validate it, then how to do it.
+
+    Two halves rather than one body, and the seam is the idempotence key. The
+    daemon claims the key *between* them — after `prepare` has had its chance to
+    refuse, before `act` has had its chance to do anything — so a refusal never
+    consumes a retry and a crash never loses one. Both halves receive the
+    connection, the root and the raw params; `prepare` hands `act` whatever it
+    resolved, so a seam is looked up once and a refusal happens before any
+    record is written.
+    """
+
+    prepare: Callable[[Any, Any, dict[str, Any]], Awaitable[Any]]
+    act: Callable[[Any, Any, dict[str, Any], Any], Awaitable[dict[str, Any]]]
+
+
 PROJECTIONS: dict[str, tuple[str, Any]] = {
     "session/readings": ("readings", readings_of),
     "commands/list": ("commands", commands_of),
@@ -312,18 +330,22 @@ class _Connection:
                 str(params["sessionId"]), cwd=str(params["cwd"]) if params.get("cwd") else None
             )
             return root.describe()
-        if method == "session/prompt":
-            root = await supervisor.prompt(
-                str(params["sessionId"]),
-                str(params.get("prompt", "")),
-                command=_command_key(params),
-                attachments=self._attachments(str(params["sessionId"]), params.get("attachments")),
-            )
-            return root.describe()
+        # --- mutations --------------------------------------------------------
+        # Every method that changes a root goes through one wrapper: resolve the
+        # root (through `start`, so acting on a passivated one brings it back),
+        # validate, claim the idempotence key, act. See `MUTATIONS`.
+        mutation = MUTATIONS.get(method)
+        if mutation is not None:
+            root = await supervisor.start(str(params["sessionId"]))
+            plan = await mutation.prepare(self, root, params)
+            if not root.once(_command_key(params)):
+                return {**root.describe(), "repeated": True}
+            return await mutation.act(self, root, params, plan)
         if method == "attachment/put":
+            # Not a `MUTATIONS` row on purpose: content-addressed, so a retry is
+            # already a no-op — and its reply *is* the reference the client came
+            # for, which a `repeated` envelope would withhold.
             return await self._put(params)
-        if method == "session/stage":
-            return self._stage(params)
         if method == "session/attach":
             # Through `start`, so attaching to a *passivated* root brings it
             # back rather than reporting it gone (P5-05). `start` returns the
@@ -352,15 +374,6 @@ class _Connection:
             # The composed profile, which is a property of the *daemon* and not
             # of any root: every root mounts the same composition.
             return {"rows": list(supervisor.profile.dump())}
-        if method == "session/command":
-            return await self._command(params)
-        if method == "session/preset":
-            root = self._root(str(params["sessionId"]))
-            presets = root.ctx.get("permission_presets")
-            if presets is None:
-                raise SeamAbsent("this deployment has no permission presets")
-            applied = presets.apply_preset(str(params["preset"]), session=root.session)
-            return {"sessionId": root.id, "preset": applied.name}
         # `credentials/held` and `credentials/store`, not `session/credential`
         # and `session/credentials`: those were two names one letter apart for
         # opposite kinds, and the one that writes a secret is the last method
@@ -369,16 +382,6 @@ class _Connection:
             root = self._root(str(params["sessionId"]))
             names = [str(one) for one in params.get("names") or ()]
             return {"sessionId": root.id, "held": credentials_of(root, names)}
-        if method == "credentials/store":
-            root = self._root(str(params["sessionId"]))
-            service = root.ctx.get("credentials")
-            if service is None:
-                raise SeamAbsent("this deployment stores no credentials")
-            # **The value is used and not kept.** It is never logged, never
-            # echoed in the reply, and never reaches `describe()` — the reply is
-            # the name and a boolean, which is everything a UI needs to redraw.
-            service.provide_value(str(params["name"]), str(params["value"]))
-            return {"sessionId": root.id, "name": str(params["name"]), "stored": True}
         if method == "session/detach":
             return self._detach(str(params["sessionId"]))
         if method == "session/snapshot":
@@ -450,7 +453,25 @@ class _Connection:
         )
         return {"sessionId": root.id, "attachment": ref.to_wire()}
 
-    def _stage(self, params: dict[str, Any]) -> dict[str, Any]:
+    # --- the mutation halves --------------------------------------------------
+    # `prepare` validates and may refuse; nothing it does is an effect. `act` is
+    # the effect. The wrapper claims the idempotence key between them, which is
+    # what makes a refusal *not* consume a retry: a prompt refused for an unknown
+    # attachment, re-sent with a known one under the same key, must act.
+
+    async def _prepare_prompt(self, root: Any, params: dict[str, Any]) -> list[AttachmentRef]:
+        return self._attachments(root, params.get("attachments"))
+
+    async def _act_prompt(self, root: Any, params: dict[str, Any], refs: Any) -> dict[str, Any]:
+        root = await self.server.supervisor.prompt(
+            root.id, str(params.get("prompt", "")), attachments=refs
+        )
+        return dict(root.describe())
+
+    async def _prepare_stage(self, root: Any, params: dict[str, Any]) -> AttachmentRef:
+        return self._known(self._store(root), params["attachment"])
+
+    async def _act_stage(self, root: Any, params: dict[str, Any], ref: Any) -> dict[str, Any]:
         """Put an attachment in the composer's tray, for every attached UI.
 
         Not appended: un-submitted intent is not an act in the session, which is
@@ -458,13 +479,60 @@ class _Connection:
         because the tray is shared — a chip only the uploader can see is a
         composer nobody else can reason about.
         """
-        root = self._root(str(params["sessionId"]))
-        ref = self._known(self._store(root), params["attachment"])
         staged = [one.to_wire() for one in root.staged.stage(ref)]
         root.publish("session.staged", {"sessionId": root.id, "staged": staged})
         return {"sessionId": root.id, "staged": staged}
 
-    def _attachments(self, session_id: str, raw: Any) -> list[AttachmentRef]:
+    async def _prepare_command(self, root: Any, params: dict[str, Any]) -> Any:
+        registry = root.ctx.get("commands")
+        if registry is None:
+            raise SeamAbsent("this deployment has no commands")
+        return registry
+
+    async def _act_command(
+        self, root: Any, params: dict[str, Any], registry: Any
+    ) -> dict[str, Any]:
+        """Run one `/name argument` line in the root's own context.
+
+        **In the daemon, not the client**, because a command body reaches for
+        seams that only exist where the profile is mounted — and because the
+        record of having run it belongs in this session's log, where every other
+        attached UI will see it.
+        """
+        shown = await registry.dispatch(
+            str(params.get("line", "")),
+            scope=root.agent.ctx,
+            session=root.session,
+            agent=root.agent,
+        )
+        return {"sessionId": root.id, "shown": shown}
+
+    async def _prepare_preset(self, root: Any, params: dict[str, Any]) -> Any:
+        presets = root.ctx.get("permission_presets")
+        if presets is None:
+            raise SeamAbsent("this deployment has no permission presets")
+        return presets
+
+    async def _act_preset(self, root: Any, params: dict[str, Any], presets: Any) -> dict[str, Any]:
+        applied = presets.apply_preset(str(params["preset"]), session=root.session)
+        return {"sessionId": root.id, "preset": applied.name}
+
+    async def _prepare_credential(self, root: Any, params: dict[str, Any]) -> Any:
+        service = root.ctx.get("credentials")
+        if service is None:
+            raise SeamAbsent("this deployment stores no credentials")
+        return service
+
+    async def _act_credential(
+        self, root: Any, params: dict[str, Any], service: Any
+    ) -> dict[str, Any]:
+        # **The value is used and not kept.** It is never logged, never echoed
+        # in the reply, and never reaches `describe()` — the reply is the name
+        # and a boolean, which is everything a UI needs to redraw.
+        service.provide_value(str(params["name"]), str(params["value"]))
+        return {"sessionId": root.id, "name": str(params["name"]), "stored": True}
+
+    def _attachments(self, root: Any, raw: Any) -> list[AttachmentRef]:
         """The refs a prompt named, checked against what this deployment holds.
 
         Refused rather than dropped: a reference from another machine, or to a
@@ -473,7 +541,7 @@ class _Connection:
         """
         if not raw:
             return []
-        store = self._store(self._root(session_id))
+        store = self._store(root)
         return [self._known(store, one) for one in raw]
 
     def _store(self, root: Any) -> Any:
@@ -495,35 +563,6 @@ class _Connection:
         if not store.exists(ref):
             raise AttachmentUnknown(f"no attachment {ref.attachment_id} is stored here")
         return ref
-
-    async def _command(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Run one `/name argument` line in the root's own context.
-
-        **In the daemon, not the client**, because a command body reaches for
-        seams that only exist where the profile is mounted — and because the
-        record of having run it belongs in this session's log, where every other
-        attached UI will see it.
-
-        Idempotent through `root.remember`, the way `session/prompt` is: a client
-        that retries after a reconnect must not run `/compact` twice, and it
-        cannot tell from a dropped reply whether the first one landed.
-        """
-        root = self._root(str(params["sessionId"]))
-        registry = root.ctx.get("commands")
-        if registry is None:
-            raise SeamAbsent("this deployment has no commands")
-        # `once` is the write-ahead guard `prompt` uses; the seam check comes
-        # first so a command this deployment cannot run is never remembered as
-        # having been asked for.
-        if not root.once(_command_key(params)):
-            return {"sessionId": root.id, "shown": None, "repeated": True}
-        shown = await registry.dispatch(
-            str(params.get("line", "")),
-            scope=root.agent.ctx,
-            session=root.session,
-            agent=root.agent,
-        )
-        return {"sessionId": root.id, "shown": shown}
 
     def _root(self, session_id: str) -> Any:
         root = self.server.supervisor.roots.get(session_id)
@@ -613,6 +652,30 @@ class _Connection:
         # client does while tidying up, often twice, and a teardown path that
         # raises is one nobody can write correctly.
         return {"sessionId": session_id, "detached": was_attached}
+
+
+MUTATIONS: dict[str, Mutation] = {
+    "session/prompt": Mutation(_Connection._prepare_prompt, _Connection._act_prompt),
+    "session/command": Mutation(_Connection._prepare_command, _Connection._act_command),
+    "session/stage": Mutation(_Connection._prepare_stage, _Connection._act_stage),
+    "session/preset": Mutation(_Connection._prepare_preset, _Connection._act_preset),
+    "credentials/store": Mutation(_Connection._prepare_credential, _Connection._act_credential),
+}
+"""Every method that changes a root, and the one place their idempotence lives.
+
+A client's `clientId`/`commandId` names a request; a reconnecting client that
+cannot know whether its last one landed re-sends it, and the same key must not
+run the effect twice. That rule used to be applied per handler by memory — two
+handlers spelled it, the third forgot — so it is applied here by construction:
+a method in this table gets the write-ahead guard whether its author thought of
+it or not, and one that is not in it cannot claim to be idempotent by key.
+
+The repeat reply has one shape, `{**describe(), "repeated": True}`, so a client
+branches on one field for every verb. Deliberately absent: `attachment/put`
+(content-addressed, so a retry is a no-op already, and its reply *is* the
+reference a repeat must still return) and `session/new` (`start` is idempotent
+by id).
+"""
 
 
 @dataclass(slots=True)

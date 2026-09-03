@@ -324,9 +324,9 @@ class Root:
     def once(self, command: str) -> bool:
         """Claim this command, or say it was already claimed. `True` means act.
 
-        The write-ahead ordering, next to the two halves it orders, because there
-        are two mutating verbs now — `session/prompt` and `session/command` — and
-        each spelling it out is one that can drift. The record is written
+        The write-ahead ordering, next to the two halves it orders. Called from
+        one place — the daemon's `MUTATIONS` wrapper — for every mutating method,
+        so no handler spells it and none can forget it. The record is written
         **before** the act, so a crash between them re-runs the command rather
         than losing it: the same reasoning A10 applies to blobs, and a duplicated
         turn is visible in the transcript where a dropped one is not.
@@ -1068,12 +1068,7 @@ class Supervisor:
         return True
 
     async def prompt(
-        self,
-        root_id: str,
-        text: str,
-        *,
-        command: str = "",
-        attachments: Sequence[AttachmentRef] = (),
+        self, root_id: str, text: str, *, attachments: Sequence[AttachmentRef] = ()
     ) -> Root:
         """Splice a turn into the agent's inbox and wake its task.
 
@@ -1082,13 +1077,12 @@ class Supervisor:
         working" is a thing a watcher learns from `agent/status` rather than
         from a reply that never came.
 
-        `command` is the client's idempotence key, already joined at the wire
-        edge — one join, in the module that owns the wire, rather than the same
-        f-string in two places that have to stay in step.
+        **No idempotence here any more.** The write-ahead guard is applied by the
+        daemon's `MUTATIONS` table for every mutating method at once, before this
+        is called; the scheduler reaches this directly and carries no key, which
+        is why the parameter is gone rather than optional.
         """
         root = await self.start(root_id)
-        if not root.once(command):
-            return root
         # The client's own list comes first because it is what that person just
         # named; the tray follows in the order it was filled, and `take` drains
         # it — see `Tray`.
