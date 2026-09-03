@@ -528,13 +528,13 @@ async def test_the_follower_shows_each_event_once_and_in_the_log_s_order(
     later = {"sessionId": "s", "event": {"seq": 4, "type": "turn/start"}}
     other = {"sessionId": "elsewhere", "event": {"seq": 9, "type": "turn/end"}}
 
-    follow("session.event", live)
-    follow("session.event", other)
+    follow.feed("session.event", live)
+    follow.feed("session.event", other)
     assert capsys.readouterr().out == "", "nothing prints before catch-up is done"
 
-    follow.seen = 3
-    follow.start()
-    follow("session.event", later)
+    follow.feed.seen = 3
+    follow.feed.live()
+    follow.feed("session.event", later)
     printed = capsys.readouterr().out
     assert "turn/end" not in printed, "seq 3 was already in a snapshot page"
     assert printed.count("turn/start") == 1

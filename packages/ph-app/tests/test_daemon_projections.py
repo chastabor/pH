@@ -44,7 +44,7 @@ async def _furnished(daemon: Any, session_id: str = "projected") -> Any:
     """
     root = await daemon.root(session_id)
     root.ctx.tui_status.register(
-        StatusField(id="probe", read=lambda session: StatusReading(text="probe", level="warn"))
+        StatusField(id="probe", read=lambda session: StatusReading(text="probe", level="warning"))
     )
     root.ctx.commands.register(
         CommandDefinition(
@@ -80,7 +80,7 @@ async def test_status_readings_over_the_wire_equal_the_seams_readings(
 
         seam = root.ctx.get("tui_status").readings(root.session)
         assert reply["readings"] == [one.to_wire() for one in seam]
-        assert {"text": "probe", "level": "warn"} in reply["readings"], (
+        assert {"text": "probe", "level": "warning"} in reply["readings"], (
             "the contributed field must survive the projection, level included"
         )
 
@@ -113,7 +113,7 @@ async def test_readings_ride_the_status_notification(tmp_path: Any) -> None:
         with_readings = [one for one in seen if "readings" in one]
 
         assert with_readings, "no status notification carried readings"
-        assert all({"text": "probe", "level": "warn"} in one["readings"] for one in with_readings)
+        assert all({"text": "probe", "level": "warning"} in one["readings"] for one in with_readings)
 
 
 # ------------------------------------------------------- the palette et al --

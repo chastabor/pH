@@ -94,7 +94,7 @@ class StatusBar(Vertical):
             "[$ph-muted]·[/] $preset",
         ]
         values: dict[str, Any] = {
-            "glyph": self.glyph if state.status == "running" else "●",
+            "glyph": self.glyph if state.busy else "●",
             "model": state.model or "no model",
             "preset": state.preset,
         }

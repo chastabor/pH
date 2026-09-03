@@ -10,34 +10,14 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from tui_helpers import StubHost
 
-from ph.seams.approval import ApprovalRequest
 from ph.seams.user_questions import UserQuestion
 from ph.testing import StubAgent, stored_log
 from ph_app.profiles import compose_profile
 from ph_app.tui.frontend import open_harness
 
 pytestmark = pytest.mark.anyio
-
-
-class StubHost:
-    """Answers every prompt without drawing anything."""
-
-    def __init__(self) -> None:
-        self.approvals: list[ApprovalRequest] = []
-        self.questions: list[UserQuestion] = []
-        self.redraws = 0
-
-    async def ask_approval(self, request: ApprovalRequest) -> tuple[str, str]:
-        self.approvals.append(request)
-        return "allowed-once", ""
-
-    async def ask_question(self, question: UserQuestion) -> str | None:
-        self.questions.append(question)
-        return "42"
-
-    def state_changed(self) -> None:
-        self.redraws += 1
 
 
 async def test_the_frontend_answers_both_seams_through_a_stub(

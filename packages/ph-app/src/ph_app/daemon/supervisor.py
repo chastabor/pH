@@ -43,7 +43,7 @@ from ph.llm.types import AttachmentRef
 from ph.paths import resolve_roots
 from ph.persistence import resume_session, resumption_of
 from ph.seams.schedule import Schedule, state_to_wire
-from ph.seams.schedule_index import ScheduleIndex
+from ph.seams.schedule_index import Appointment, ScheduleIndex
 from ph.seams.subagents import child_is_live
 from ph.seams.workspace import workspace_of
 from ph.seams.workspace_git import latest_checkpoint, restore
@@ -401,12 +401,17 @@ class Root:
 
         From the log's own last event, so it means "nothing has happened" rather
         than "no client called us", survives a restart, and cannot drift from
-        what the transcript shows. A log with no events yet is treated as busy:
-        a root that has just been created has not been idle for ninety minutes,
-        whatever the clock says.
+        what the transcript shows.
+
+        **A log with no events measures from the header's `created_at`** — still
+        the log, and a clock that runs. Reading "no last event" as zero made an
+        *unused* session eternal: `session/new` followed by a client that vanished
+        left a root nothing could ever release, holding a mounted profile for the
+        life of the daemon and, under P7-08, the process with it.
         """
         last = self.session.last_event
-        return 0 if last is None else max(0, now - int(last.time))
+        since = self.session.header.created_at if last is None else int(last.time)
+        return max(0, now - since)
 
     def passivated(self, idle_ms: int) -> None:
         """Say in the log that this root is being released, before releasing it.
@@ -895,12 +900,9 @@ class Supervisor:
         Failures are per root and logged: a session the index names but that will
         not mount costs its own appointment, not the pass.
         """
-        index = self._index()
-        if index is None:
-            return []
         stamp = now if now is not None else now_ms()
         woken: list[str] = []
-        for entry in sorted(index.read().values(), key=lambda one: one.next_at):
+        for entry in sorted(self.appointments().values(), key=lambda one: one.next_at):
             if entry.session_id in self.roots or entry.next_at > stamp:
                 continue
             if self.wake_within is not None and stamp - entry.updated > self.wake_within * 1000:
@@ -938,6 +940,40 @@ class Supervisor:
         except Exception:
             log.warning("ph_app.daemon: no schedule index; nothing will be woken", exc_info=True)
             return None
+
+    def appointments(self) -> dict[str, Appointment]:
+        """Every appointment on record, or empty when nothing indexes."""
+        index = self._index()
+        return index.read() if index is not None else {}
+
+    def sessions_directory(self) -> Path | None:
+        """Where this daemon's store keeps sessions, or `None` when nothing does.
+
+        Every root mounts the same profile, so any live root's store answers for
+        the daemon; with none mounted there is no store to ask, and `None` is
+        the honest reply rather than a path derived from an environment the
+        store may not have read.
+        """
+        for root in self.roots.values():
+            store = root.ctx.get("session_persistence")
+            if store is not None:
+                found: Path | None = store.directory()
+                return found
+        return None
+
+    def unwanted(self, *, now: int, after: float) -> bool:
+        """Whether nothing this supervisor holds still needs to be held (P7-08).
+
+        Every root releasable by P5-05's own predicate, and nothing on the books.
+        `all()` over no roots is `True`, so an empty supervisor is the degenerate
+        case rather than a branch. The supervisor answers this rather than the
+        server iterating `roots` itself, for the reason `appointments` is public:
+        a supervisor-level fact re-derived one layer up is two answers.
+        """
+        return (
+            all(self.passivatable(root, now=now, after=after) for root in self.roots.values())
+            and not self.appointments()
+        )
 
     async def wake_and_tick(self, *, now: int | None = None) -> list[str]:
         """One scheduler pass: mount what is due, then fire what is mounted.

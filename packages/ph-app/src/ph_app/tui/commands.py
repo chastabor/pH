@@ -30,7 +30,14 @@ from ph.seams.commands import CommandDefinition
 
 from .config import TuiKeybindings
 
-__all__ = ["TUI_VERBS", "TuiVerb", "action_command", "app_bindings", "register_tui_commands"]
+__all__ = [
+    "TUI_VERBS",
+    "TuiVerb",
+    "action_command",
+    "app_bindings",
+    "local_commands",
+    "register_tui_commands",
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,14 +91,22 @@ def app_bindings(keys: TuiKeybindings) -> list[BindingType]:
     return bindings
 
 
-def register_tui_commands(ctx: Context, app: Any) -> list[Callable[[], Any]]:
-    """Register one slash command per verb. Returns their disposers."""
+def local_commands(app: Any) -> list[CommandDefinition]:
+    """The table as definitions, each dispatching into `app`.
+
+    Two front ends want this list: the in-process one registers it into
+    `ctx.commands`, and the socket one has no registry to register into and
+    offers it beside the daemon's. One constructor, so a verb behaves the same
+    whichever end owns the harness."""
     return [
-        ctx.commands.register(
-            action_command(app, verb.name, verb.summary, verb.action, verb.argument_hint)
-        )
+        action_command(app, verb.name, verb.summary, verb.action, verb.argument_hint)
         for verb in TUI_VERBS
     ]
+
+
+def register_tui_commands(ctx: Context, app: Any) -> list[Callable[[], Any]]:
+    """Register one slash command per verb. Returns their disposers."""
+    return [ctx.commands.register(definition) for definition in local_commands(app)]
 
 
 def action_command(

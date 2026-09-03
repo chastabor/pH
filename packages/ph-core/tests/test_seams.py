@@ -406,8 +406,8 @@ async def test_a_status_field_reads_and_orders() -> None:
     """The footer's registration seam: `order`, then id, and nothing else."""
     registry = TuiStatusRegistry(ctx=Context())
     session = Session("footer")
-    registry.register(StatusField(id="second", read=lambda _s: StatusReading("b"), order=10))
-    registry.register(StatusField(id="first", read=lambda _s: StatusReading("a"), order=1))
+    registry.register(StatusField(id="second", read=lambda _s: StatusReading(text="b"), order=10))
+    registry.register(StatusField(id="first", read=lambda _s: StatusReading(text="a"), order=1))
 
     assert [one.text for one in registry.readings(session)] == ["a", "b"]
 
@@ -429,7 +429,7 @@ async def test_a_field_that_raises_does_not_take_the_footer_down() -> None:
         raise RuntimeError("no")
 
     registry.register(StatusField(id="broken", read=explode))
-    registry.register(StatusField(id="fine", read=lambda _s: StatusReading("still here")))
+    registry.register(StatusField(id="fine", read=lambda _s: StatusReading(text="still here")))
 
     assert [one.text for one in registry.readings(Session("footer"))] == ["still here"]
 
@@ -439,7 +439,7 @@ async def test_a_field_unwinds_with_the_row_that_registered_it() -> None:
     root = Context()
     registry = TuiStatusRegistry(ctx=root)
     row = root.scope("row")
-    registry.register(StatusField(id="owned", read=lambda _s: StatusReading("x")), scope=row)
+    registry.register(StatusField(id="owned", read=lambda _s: StatusReading(text="x")), scope=row)
     assert registry.readings(Session("footer"))
 
     await row.dispose()

@@ -166,6 +166,16 @@ class SessionPersistence(Protocol):
         """Where a person would find this log, or `None` if it is not a file."""
         ...
 
+    def directory(self) -> Path | None:
+        """Where this store keeps every session, or `None` if not on a filesystem.
+
+        The picker's question, and a store-level one: a log lives at
+        `<directory>/<family>/<id>.jsonl`, and a picker that only knew one log's
+        path had to walk up two levels to find the rest — which was a rule about
+        this backend's layout written into a front end.
+        """
+        ...
+
 
 def lineage_faults_of(
     store: SessionPersistence, *, limit: int = SURVEY_LIMIT

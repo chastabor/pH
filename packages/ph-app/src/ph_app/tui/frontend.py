@@ -97,6 +97,14 @@ class FrontSession(Protocol):
     session: Session
     config_rows: tuple[Any, ...]
 
+    @property
+    def session_id(self) -> str:
+        """The id on its own, because it is read on every redraw and `session` is
+        not free everywhere: a remote front end rebuilds its `Session` from the
+        log it has, and a sidebar asking for `.session.id` thirty times a second
+        would rebuild it thirty times a second during a streaming turn."""
+        ...
+
     def status_readings(self) -> list[StatusReading]: ...
     async def submit(self, text: str) -> None: ...
 
@@ -178,6 +186,10 @@ class HarnessSession:
     the same tray. One `Tray` class for both, so the rule has one author."""
     _stack: AsyncExitStack = field(default_factory=AsyncExitStack)
     _disposers: list[Callable[[], Any]] = field(default_factory=list)
+
+    @property
+    def session_id(self) -> str:
+        return self.session.id
 
     def status_readings(self) -> list[StatusReading]:
         """What the rows want the footer to say (P4-04's budget, and later ones).
@@ -297,18 +309,10 @@ class HarnessSession:
         return llm.list_providers() if llm is not None else []
 
     def sessions_directory(self, fallback: Path) -> Path:
-        """The family directory this session lives beside, or `fallback`.
-
-        Through `locate`, not `store.root`: that attribute is the JSONL backend's
-        and reading it raised `AttributeError` on any other — a picker that
-        crashes is not a deferral. **Up past the family directory**, because a log
-        lives at `<sessions>/<family>/<id>.jsonl`, so `located.parent` is one
-        conversation and its branches and a picker showing only that lists
-        everything except what a person opened it to find.
-        """
+        """Where the picker lists from: the store's own answer, or `fallback`."""
         store = self.ctx.get("session_persistence")
-        located = store.locate(self.session.id) if store is not None else None
-        return located.parent.parent if located is not None else fallback
+        found = store.directory() if store is not None else None
+        return found if found is not None else fallback
 
     def set_preset(self, name: str) -> None:
         presets = self.ctx.get("permission_presets")

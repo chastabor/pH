@@ -15,8 +15,6 @@ rather than in front of a person.
 
 from __future__ import annotations
 
-import dataclasses
-
 import pytest
 
 from ph.seams.commands import CommandDefinition, CommandSchema
@@ -55,18 +53,22 @@ def test_what_cannot_travel_is_derived_not_listed() -> None:
 
 
 def test_a_reading_is_its_own_wire_form() -> None:
-    """Pure data, so the mixin is the whole change — and `level` survives.
+    """Pure data, so `WireModel` is the whole change — and `level` survives both ways.
 
     The projection that this replaced was one line, and the one-line sabotage
     that motivated the row was dropping `level` from it: every reading rendered
-    `normal`, and a warning stopped looking like one.
+    `normal`, and a warning stopped looking like one. A `WireModel` rather than a
+    dataclass so the *reader* is derived too: a remote front end rebuilds a
+    reading with `model_validate`, and a field added here reaches it with no edit
+    at either edge. It also validates, which the dataclass did not — this test
+    used to construct a reading with `level="warn"`, a level the seam has never
+    had, and nothing said so.
     """
-    reading = StatusReading(text="context 86%", level="warn")
+    reading = StatusReading(text="context 86%", level="warning")
 
-    assert reading.to_wire() == {"text": "context 86%", "level": "warn"}
-    assert set(reading.to_wire()) == {
-        wire_alias(field.name) for field in dataclasses.fields(StatusReading)
-    }
+    assert reading.to_wire() == {"text": "context 86%", "level": "warning"}
+    assert StatusReading.model_validate(reading.to_wire()) == reading
+    assert set(reading.to_wire()) == {wire_alias(name) for name in StatusReading.model_fields}
 
 
 def test_the_schema_is_what_the_definition_says_it_is() -> None:

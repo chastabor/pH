@@ -48,7 +48,14 @@ from ..llm.types import AttachmentRef
 from ..paths import default_home_path
 from ..wire import WireModel
 
-__all__ = ["ENCODED_CACHE_BYTES", "EXTENSIONS", "AttachmentStore", "apply", "digest_of"]
+__all__ = [
+    "ENCODED_CACHE_BYTES",
+    "EXTENSIONS",
+    "AttachmentStore",
+    "apply",
+    "digest_of",
+    "read_for_attach",
+]
 
 log = logging.getLogger("ph.seams.attachments")
 
@@ -90,6 +97,23 @@ A cap rather than an unbounded dict: base64 is a third larger than the bytes it
 encodes, so a session with a handful of PDFs would otherwise hold tens of
 megabytes of `str` for as long as the process lives.
 """
+
+
+async def read_for_attach(source: Path | str) -> tuple[str, str, bytes]:
+    """`(name, mime, content)` for a file a *person* is attaching.
+
+    The human door (I-9), as one function: reads with the caller's own
+    permissions, no policy check, mime by name with `application/octet-stream`
+    as the honest fallback. Exported because two front ends read a file this way
+    — the in-process one through `save_path`, the socket one before
+    `attachment/put` — and a rule about how a person's file is classified must
+    have one author, or the same PNG is a document in one terminal and an image
+    in another.
+    """
+    path = Path(source).expanduser()
+    content = await anyio.to_thread.run_sync(path.read_bytes)
+    mime = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+    return path.name, mime, content
 
 
 @dataclass(slots=True)
@@ -171,10 +195,8 @@ class AttachmentStore:
         gap that lands with P7-01's tool producer rather than being papered over
         here.
         """
-        path = Path(source).expanduser()
-        content = await anyio.to_thread.run_sync(path.read_bytes)
-        resolved = mime or mimetypes.guess_type(path.name)[0] or "application/octet-stream"
-        return await self.save_bytes(content=content, mime=resolved, name=path.name)
+        name, guessed, content = await read_for_attach(source)
+        return await self.save_bytes(content=content, mime=mime or guessed, name=name)
 
     async def load_bytes(self, ref: AttachmentRef) -> bytes:
         return await anyio.to_thread.run_sync(self.path_for(ref).read_bytes)

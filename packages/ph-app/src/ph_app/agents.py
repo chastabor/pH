@@ -44,6 +44,7 @@ from ph.selectors import Selector, matches_any
 
 from .console import TypeOption, console, fail, section, selectors_or_exit
 from .daemon.client import DaemonClient
+from .daemon.follow import Followed, first_of
 from .protocol import DaemonError, DaemonGone
 from .wire import describe, message_of, obj, one_line, result_block, seq, text_of_wire
 
@@ -316,17 +317,11 @@ the silent omission the fallback in `_summary` exists to prevent.
 
 @dataclass(slots=True)
 class _Follow:
-    """One attached session: what has been printed, and what ends the follow.
+    """One attached session as the CLI prints it, over `Followed`.
 
-    **Buffered until catch-up finishes, then replayed.** `session/attach`
-    subscribes before the history is fetched — deliberately, since the other
-    order drops everything that happens in between — so live frames arrive while
-    `session/snapshot` is still paging. Holding them and replaying after, with
-    `seen` discarding anything the pages already showed, is what stops one event
-    printing twice and a later one printing first.
-
-    `pending` is the buffer *and* the phase: `None` means live. A separate flag
-    beside it was a second copy of one fact, and the two could be set apart.
+    The buffering, the `seq` dedupe and the paging live in `daemon/follow.py`,
+    which the TUI's socket client is built on too; what is here is what is the
+    CLI's own — a console, the `--type` filter, and the `until_idle` stop.
     """
 
     session_id: str
@@ -335,35 +330,20 @@ class _Follow:
     selectors: Sequence[Selector] = ()
     """Namespace selectors from `--type`; empty means no filter (P6-33)."""
     done: anyio.Event = field(default_factory=anyio.Event)
-    seen: int = 0
-    pending: list[tuple[str, dict[str, Any]]] | None = field(default_factory=list)
+    feed: Followed = field(init=False)
 
-    def __call__(self, method: str, params: dict[str, Any]) -> None:
-        """The client's notification callback. Sync, because the pump is."""
-        if self.pending is not None:
-            self.pending.append((method, params))
-            return
-        if params.get("sessionId") != self.session_id:
-            return
-        if method == "session.status":
-            console.print(f"[dim]· {params.get('status')}[/dim]", soft_wrap=True)
-            if self.until_idle and params.get("status") == "idle":
-                self.done.set()
-            return
-        if method != "session.event":
-            return
-        event = obj(params.get("event"))
-        seq = int(event.get("seq", -1))
-        if seq <= self.seen:
-            return
-        self.seen = seq
-        self.write([event])
+    def __post_init__(self) -> None:
+        self.feed = Followed(
+            session_id=self.session_id, on_events=self._events, on_status=self._status
+        )
 
-    def start(self) -> None:
-        """Catch-up is done: go live, then replay what arrived during it."""
-        held, self.pending = self.pending or [], None
-        for method, params in held:
-            self(method, params)
+    def _events(self, pairs: Sequence[tuple[Mapping[str, Any], Any]]) -> None:
+        self.write(event for event, _view in pairs)
+
+    def _status(self, params: Mapping[str, Any]) -> None:
+        console.print(f"[dim]· {params.get('status')}[/dim]", soft_wrap=True)
+        if self.until_idle and params.get("status") == "idle":
+            self.done.set()
 
     def write(self, events: Iterable[Mapping[str, Any]]) -> None:
         """Render a run of events as one write.
@@ -401,43 +381,6 @@ class _Follow:
         if self.selectors:
             return matches_any(kind, self.selectors)
         return self.everything or kind not in NOISE
-
-
-async def _catch_up(client: DaemonClient, session_id: str, follow: _Follow, cursor: Any) -> int:
-    """Print everything from `cursor` to the head, and return the last seq seen.
-
-    Paged, because `session/snapshot` is the only mechanism that catches up:
-    `session/attach` deliberately does not replay, since streaming a gap of
-    unknown size into a bounded outbox fails at exactly the moment it matters.
-    A page at a time is also one write at a time, which is what keeps a resumed
-    root's whole log from being rendered a line at a time.
-    """
-    seen = 0
-    while True:
-        page = await client.call("session/snapshot", sessionId=session_id, cursor=cursor)
-        events = [obj(wire) for wire in page["events"]]
-        follow.write(events)
-        for event in events:
-            seen = max(seen, int(event.get("seq", seen)))
-        if not page["more"]:
-            return seen
-        cursor = page["cursor"]
-
-
-async def _until(*events: anyio.Event) -> None:
-    """Wait for whichever of these happens first.
-
-    Two ways a follow ends — the root went idle, or the daemon went away — and
-    waiting on only the first is a hang whenever it is the second that happens.
-    """
-    async with anyio.create_task_group() as tasks:
-
-        async def stop_on(event: anyio.Event) -> None:
-            await event.wait()
-            tasks.cancel_scope.cancel()
-
-        for event in events:
-            tasks.start_soon(stop_on, event)
 
 
 # ------------------------------------------------------------------- commands --
@@ -523,9 +466,8 @@ def attach(
             everything=everything,
             selectors=selectors,
         )
-        # On the peer, which is where the read loop looks. Set after `connect`
-        # because `_Follow` needs the client to build itself against.
-        client.peer.on_notify = follow
+        # On the peer, which is where the read loop looks.
+        client.peer.on_notify = follow.feed
         # Subscribed *before* the history is read, so nothing that happens in
         # between is lost; `_Follow` holds those frames until the pages are done.
         # No cursor: the generation a snapshot cursor needs is what this reply
@@ -534,8 +476,9 @@ def attach(
         attached = await client.call("session/attach", sessionId=session, cursor=None)
         cursor = {**obj(attached["cursor"]), "sequence": since}
         try:
-            follow.seen = max(since, await _catch_up(client, session, follow, cursor))
-            follow.start()
+            follow.feed.seen = since
+            await follow.feed.catch_up(client, cursor)
+            follow.feed.live()
             if until_idle and not follow.done.is_set():
                 # One check, after the replay: a root that went idle *during*
                 # catch-up announced it into `pending` and has just been drained,
@@ -544,7 +487,7 @@ def attach(
                 current = await client.call("session/status", sessionId=session)
                 if current["status"] == "idle":
                     follow.done.set()
-            await _until(follow.done, client.closed)
+            await first_of(follow.done, client.closed)
         finally:
             # Only while there is somebody to tell. A daemon that shut down under
             # us has already dropped every subscription, and asking it to would

@@ -205,6 +205,9 @@ class JsonlSessionStore:
             raise FileNotFoundError(f"no stored session {session_id!r}")
         return read_session(path, upto=upto)
 
+    def directory(self) -> Path | None:
+        return self.root
+
     def locate(self, session_id: str) -> Path | None:
         """This backend writes files, so it can always say where.
 

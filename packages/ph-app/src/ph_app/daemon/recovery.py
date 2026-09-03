@@ -178,6 +178,28 @@ from what the transcript shows.
 """
 
 
+EPHEMERAL_QUIET = 60.0
+"""Seconds of quiet before an *auto-started* daemon releases a root — and, one
+sweep later, before it exits (P7-08).
+
+The same number for both because it is the same question asked twice: "is anyone
+still using this?" A minute, against `PASSIVATE_AFTER`'s ninety, and the
+difference is a difference of intent rather than of tuning. A service daemon
+holds a warm root *because* holding it is the point — a person who stepped away
+comes back to a mounted profile and a live kernel. A daemon a UI spawned behind
+somebody's back has no such mandate: it exists for as long as the UI does, and
+the cheapest honest thing it can do afterwards is leave.
+
+**This is the interaction that decides the whole design.** Left at ninety
+minutes, an ephemeral daemon could not reach an empty `roots` — and so could not
+satisfy its own exit predicate — until ninety minutes after the last turn, which
+would make "ephemeral" a word with no behaviour behind it for an hour and a half.
+
+Reattaching afterwards costs a mount plus resuming the log, which is why this is
+not smaller: a person flipping between two terminals should not pay a rehydrate
+for the pause between them.
+"""
+
 WAKE_WITHIN: float | None = None
 """How stale an indexed appointment may be and still wake its root, or `None`.
 

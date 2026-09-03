@@ -36,6 +36,7 @@ from typing import Any
 import anyio
 from anyio.abc import ByteStream
 
+from ph.agent.types import AgentCancelCause
 from ph.cordis import Profile
 from ph.lingering import RuntimeLifetime, lifetime, socket_identity
 from ph.llm.types import AttachmentRef
@@ -55,8 +56,9 @@ from ..protocol import (
 from ..shell import shell_of
 from .cards import CARD_EVENTS, presentation_of
 from .duplex import Peer
+from .launch import listening
 from .projections import commands_of, credentials_of, readings_of, screens_of, tools_of
-from .recovery import PASSIVATE_AFTER, WAKE_WITHIN
+from .recovery import EPHEMERAL_QUIET, PASSIVATE_AFTER, WAKE_WITHIN
 from .supervisor import NON_GUARANTEES, Supervisor
 
 __all__ = ["DaemonServer", "serve"]
@@ -343,6 +345,13 @@ class _Connection:
             )
         if method == "session/status":
             return self._status(str(params["sessionId"]))
+        if method == "session/cancel":
+            # Not a `MUTATIONS` row: cancel is idempotent by construction, and a
+            # key would make an honest retry answer `repeated` and leave the turn
+            # running. `_root`, not `start`: nothing to stop on a passivated one.
+            root = self._root(str(params["sessionId"]))
+            root.agent.cancel(AgentCancelCause(kind="user"), keep_inbox=True)
+            return root.describe()
         # --- projections (P5-14) -------------------------------------------
         # What a front end used to read straight off `ctx`. Each is a fold
         # computed now, so a reconnecting client gets today's answer rather than
@@ -357,9 +366,15 @@ class _Connection:
             root = self._root(str(params["sessionId"]))
             return {"sessionId": root.id, key: fold(root)}
         if method == "daemon/config":
-            # The composed profile, which is a property of the *daemon* and not
-            # of any root: every root mounts the same composition.
-            return {"rows": list(supervisor.profile.dump())}
+            # Properties of the *daemon*, not of any root: every root mounts the
+            # same composition and so the same store. `sessionsDirectory` is here
+            # rather than a per-root projection for that reason — and because a
+            # client deriving the path itself agrees only while both processes
+            # see the same `$PH_HOME`.
+            return {
+                "rows": list(supervisor.profile.dump()),
+                "sessionsDirectory": str(supervisor.sessions_directory() or ""),
+            }
         # `credentials/held` and `credentials/store`, not `session/credential`
         # and `session/credentials`: those were two names one letter apart for
         # opposite kinds, and the one that writes a secret is the last method
@@ -704,6 +719,28 @@ class DaemonServer:
     talking to" is the first question anyone debugging two daemons asks, and an
     answer derived a second time on the client side would agree with the server
     by assumption rather than by evidence."""
+    ephemeral: bool = False
+    """Whether this daemon should exit once nothing needs it (P7-08).
+
+    **Decided by who started it, and that is the whole rule.** `ph daemon` typed
+    at a prompt is a service: somebody chose to run a supervisor, and a service
+    that exits when idle is a service that is not there when the next client
+    arrives. One a UI spawned because the socket was absent was nobody's
+    decision, and leaving a process resident on a person's machine after they
+    closed the thing that started it is the kind of accretion nobody attributes
+    to the right cause a week later.
+
+    A flag rather than a subclass or a second `serve`: every other behaviour is
+    identical, and the difference is one predicate on a cadence that already
+    runs."""
+    open_connections: int = 0
+    """How many clients are connected right now — *connected*, not attached.
+
+    The exit predicate reads this, and the distinction is deliberate: a
+    `ph agents doctor` mid-call has no subscription and no root, so an
+    attachment-based count would hang up on it between the request and the
+    reply. Counted rather than a set of connections, because the only question
+    asked of it is whether it is zero."""
     tick_every: float = TICK_EVERY
     sweep_every: float = SWEEP_EVERY
     heartbeat_every: float = HEARTBEAT_EVERY
@@ -854,9 +891,59 @@ class DaemonServer:
         await self.supervisor.announce_unreachable(note)
         return reason
 
+    def spent(self, *, now: int | None = None) -> bool:
+        """Whether there is anything left for this daemon to be up for (P7-08).
+
+        Auto-started, nobody connected, and nothing the supervisor holds is
+        wanted. **Connected, not attached**: see `open_connections`. And the
+        supervisor's half asks P5-05's own `passivatable` with a window of its own
+        (`EPHEMERAL_QUIET`) rather than waiting for the sweep to empty `roots` —
+        the obvious version quietly made the exit depend on `--passivate-after`,
+        so `off` pinned an ephemeral daemon forever and `90` held it ninety
+        minutes, neither of which is what either flag says.
+
+        A predicate, with a `now`, for the reason `passivatable` is: a test asks
+        the question rather than waiting out a cadence.
+        """
+        if not self.ephemeral or self.open_connections:
+            return False
+        stamp = now if now is not None else now_ms()
+        return self.supervisor.unwanted(now=stamp, after=EPHEMERAL_QUIET)
+
+    async def sweep(self) -> list[str]:
+        """The passivation sweep, and then — if this daemon is spent — the exit.
+
+        One cadence rather than a fourth timer: both halves ask "is anyone still
+        using this", one about a root and one about the process, and a second
+        timer for the second question would be a second answer to when to ask it.
+
+        The sweep runs first, and no longer because the exit depends on it — see
+        `spent` — but because releasing a root this daemon is about to stop
+        anyway is what flushes its log and drops its lease on the ordinary path,
+        rather than in teardown's shielded window.
+
+        Teardown already unlinks the socket, so the next client sees an *absent*
+        one and starts a daemon of its own rather than hitting the
+        present-but-refusing diagnosis, which is the aftermath of a crash and
+        says something quite different.
+        """
+        released = await self.supervisor.sweep()
+        if self.spent():
+            log.info("ph_app.daemon: nothing left to serve; stopping (auto-started)")
+            self.stop.set()
+        return released
+
     async def _handle(self, stream: ByteStream) -> None:
-        async with stream:
-            await _Connection(stream=stream, server=self).serve()
+        self.open_connections += 1
+        try:
+            async with stream:
+                await _Connection(stream=stream, server=self).serve()
+        finally:
+            # In `finally`, because the count is a claim on the *process* now: a
+            # connection that ended by crashing and was never subtracted would
+            # keep an ephemeral daemon resident forever, and the symptom — a
+            # daemon that will not leave — points nowhere near here.
+            self.open_connections -= 1
 
 
 async def _every(
@@ -896,13 +983,9 @@ async def _clear_stale(path: Path) -> None:
     """
     if not path.exists():
         return
-    try:
-        stream = await anyio.connect_unix(str(path))
-    except (ConnectionRefusedError, FileNotFoundError, OSError):
-        path.unlink(missing_ok=True)
-        return
-    await stream.aclose()
-    raise DaemonUnavailable(f"a daemon is already listening on {path}")
+    if await listening(path):
+        raise DaemonUnavailable(f"a daemon is already listening on {path}")
+    path.unlink(missing_ok=True)
 
 
 async def serve(
@@ -912,6 +995,7 @@ async def serve(
     model: str = "fake-1",
     passivate_after: float | None = PASSIVATE_AFTER,
     wake_within: float | None = WAKE_WITHIN,
+    ephemeral: bool = False,
     sweep_every: float = SWEEP_EVERY,
     tick_every: float = TICK_EVERY,
     heartbeat_every: float = HEARTBEAT_EVERY,
@@ -964,6 +1048,7 @@ async def serve(
                 sweep_every=sweep_every,
                 heartbeat_every=heartbeat_every,
                 watch_every=watch_every,
+                ephemeral=ephemeral,
                 # Taken here, immediately after the bind and before anything can
                 # have replaced it — the one moment at which "the socket at this
                 # path" and "the socket this daemon is listening on" are the
@@ -973,8 +1058,14 @@ async def serve(
             # Four cadences, four tasks, one primitive: a cadence riding another's
             # counter advances only when that one *succeeds*, so a run of failing
             # ticks would starve an unrelated record.
-            if passivate_after is not None:
-                tasks.start_soon(_every, sweep_every, server.stop, supervisor.sweep, "the sweep")
+            if passivate_after is not None or ephemeral:
+                # `server.sweep`, not `supervisor.sweep`: the pass now ends with
+                # "and is there anything left to be up for", and the answer can
+                # set `stop` — which belongs to the server. Started for an
+                # ephemeral daemon even with passivation off, because the two
+                # questions are separate: `--passivate-after off` says keep the
+                # roots, not stay resident after the last one is gone.
+                tasks.start_soon(_every, sweep_every, server.stop, server.sweep, "the sweep")
             if tick_every > 0:
                 # Woken before fired, and on the tick's own cadence rather than
                 # once at boot: a session can gain an appointment at any moment

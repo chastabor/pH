@@ -314,8 +314,8 @@ class PHTuiApp(App[str | None]):
         status.show(front.state, self._readings)
         await view.sync(self._rows(front))
         if self._sidebar is not None and self._sidebar.display:
-            self._sidebar.show(front.state, session_id=front.session.id, cwd=str(self.project))
-        self._spin(front.state.status == "running")
+            self._sidebar.show(front.state, session_id=front.session_id, cwd=str(self.project))
+        self._spin(front.state.busy)
 
     def _spin(self, running: bool) -> None:
         """Start or stop the frame clock, so it exists only while a turn does."""
@@ -337,7 +337,7 @@ class PHTuiApp(App[str | None]):
         is the failure mode of every animation loop ever written.
         """
         front, status = self.front, self._status
-        if front is None or status is None or front.state.status != "running":
+        if front is None or status is None or not front.state.busy:
             self._spin(False)
             return
         status.tick()
@@ -366,7 +366,7 @@ class PHTuiApp(App[str | None]):
             # a turn and make the log say the model chose it.
             await self._dispatch_command(front, message.text)
             return
-        if message.queue or front.state.status == "running":
+        if message.queue or front.state.busy:
             # The driver refuses a second concurrent `run()`, and a person
             # typing mid-turn means "also this", not "instead of that".
             front.queue(message.text)
@@ -424,7 +424,7 @@ class PHTuiApp(App[str | None]):
         self.state_changed()
 
     async def on_prompt_input_cancelled(self, _message: PromptInput.Cancelled) -> None:
-        if self.front is not None and self.front.state.status == "running":
+        if self.front is not None and self.front.state.busy:
             self.front.cancel()
 
     async def _dispatch_command(self, front: FrontSession, line: str) -> None:
@@ -574,13 +574,13 @@ class PHTuiApp(App[str | None]):
         directory = front.sessions_directory(self.home / "sessions")
         self._pick(
             "sessions",
-            session_choices(directory, current=front.session.id),
+            session_choices(directory, current=front.session_id),
             self._resume_session,
             free_text="session id",
         )
 
     def _resume_session(self, chosen: str | None) -> None:
-        if chosen is not None and (self.front is None or chosen != self.front.session.id):
+        if chosen is not None and (self.front is None or chosen != self.front.session_id):
             self.exit(chosen)
 
     def action_open_themes(self) -> None:

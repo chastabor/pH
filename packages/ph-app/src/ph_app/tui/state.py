@@ -125,7 +125,12 @@ class TuiState:
     """The whole front-end model: rows, live status, and the current posture."""
 
     items: list[ChatItem] = field(default_factory=list)
-    status: Literal["idle", "running"] = "idle"
+    status: str = "idle"
+    """The root's own word: `idle`, `running`, `waiting`, `retrying`,
+    `passivated`. A `str` rather than a two-valued literal because a daemon's
+    session has more states than a spinner does, and the alternative — a second
+    status field on the remote front end, kept in step by hand — was three
+    writers of one fact. Widgets read `busy`, which is the bool they wanted."""
     turn: int = 0
     queued: int = 0
     preset: str = "read-only"
@@ -166,6 +171,16 @@ class TuiState:
             row.deleted = bool(entry.get("deleted"))
 
     # ------------------------------------------------------------------ rows --
+
+    @property
+    def busy(self) -> bool:
+        """Whether the spinner should turn: work is in flight, or about to be.
+
+        `retrying` counts: a root in P5-04's backoff is between attempts, not
+        done. `waiting` does not: a root parked on a person is waiting for the
+        screen, and a spinner over a modal says the wrong thing.
+        """
+        return self.status in ("running", "retrying")
 
     def reset(self) -> None:
         """Clear everything the log determines, in place.

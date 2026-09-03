@@ -363,6 +363,10 @@ def daemon(
             "--passivate-after", help='Minutes of quiet before a root is released, or "off".'
         ),
     ] = _DEFAULT_PASSIVATION,
+    ephemeral: Annotated[
+        bool,
+        typer.Option("--ephemeral", help="Exit once no client, root or appointment needs this."),
+    ] = False,
 ) -> None:
     """Run the supervisor: roots that outlive the clients watching them (P5-01).
 
@@ -401,6 +405,9 @@ def daemon(
                 provider=provider,
                 model=model,
                 passivate_after=_passivation(passivate_after),
+                # Off here, on in `spawn_command`: `DaemonServer.ephemeral` says
+                # why the lifetime is decided by who started it (P7-08).
+                ephemeral=ephemeral,
                 path=socket_path,
             )
         )
@@ -410,6 +417,34 @@ def daemon(
         # `RuntimeError`, and the comment in `doctor` above records this file
         # having been bitten by that already.
         fail(f"[red]{error}[/red]", cause=error)
+
+
+def spawn_command(*, profile: str, provider: str, model: str) -> list[str]:
+    """The argv for a daemon a UI starts on its own behalf (P7-08).
+
+    Beside the `daemon` command whose options it spells, so renaming one is one
+    edit; `ensure_daemon` takes the argv and knows nothing about profiles.
+
+    `sys.executable -m ph_app` rather than a bare `ph`: the UI may be running
+    from a virtualenv that is not on `PATH`, or from a checkout with no console
+    script installed at all, and a daemon started from a *different* pH than the
+    UI is one whose profile, event vocabulary and wire version nobody chose.
+    `--ephemeral` because this daemon was nobody's decision, so it leaves when
+    nobody needs it.
+    """
+    return [
+        sys.executable,
+        "-m",
+        "ph_app",
+        "daemon",
+        "--ephemeral",
+        "--profile",
+        profile,
+        "--provider",
+        provider,
+        "--model",
+        model,
+    ]
 
 
 @app.command()

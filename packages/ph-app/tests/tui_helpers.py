@@ -13,6 +13,8 @@ from contextlib import asynccontextmanager
 
 from textual.pilot import Pilot
 
+from ph.seams.approval import ApprovalRequest
+from ph.seams.user_questions import UserQuestion
 from ph_app.tui.app import PHTuiApp
 
 
@@ -53,3 +55,27 @@ def turn_done(app: PHTuiApp) -> Callable[[], bool]:
         )
 
     return check
+
+
+class StubHost:
+    """A `ModalHost` that answers every prompt without drawing anything.
+
+    One double for both front ends — the in-process `HarnessSession` and the
+    socket `DaemonSession` — so a member added to `ModalHost` is added here once.
+    """
+
+    def __init__(self) -> None:
+        self.approvals: list[ApprovalRequest] = []
+        self.questions: list[UserQuestion] = []
+        self.redraws = 0
+
+    async def ask_approval(self, request: ApprovalRequest) -> tuple[str, str]:
+        self.approvals.append(request)
+        return "allowed-once", ""
+
+    async def ask_question(self, question: UserQuestion) -> str | None:
+        self.questions.append(question)
+        return "42"
+
+    def state_changed(self) -> None:
+        self.redraws += 1

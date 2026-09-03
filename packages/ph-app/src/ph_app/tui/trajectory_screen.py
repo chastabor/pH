@@ -36,7 +36,7 @@ from .screens import RevealHost, RevealSeq
 from .trajectory import TrajectoryRecord, build_trajectory
 from .widgets.trajectory import TrajectoryPanel
 
-__all__ = ["SCREEN_ID", "TRAJECTORY_KEY", "TrajectoryScreen", "apply"]
+__all__ = ["CLIENT_SIDE", "SCREEN_ID", "TRAJECTORY_KEY", "TrajectoryScreen", "apply"]
 
 SCREEN_ID = "trajectory"
 """Its id in `ctx.tui_screens`, and so `/trajectory` and the binding id."""
@@ -229,6 +229,25 @@ class _BuildTrajectory:
         return TrajectoryScreen(
             build_trajectory(session), session_id=session.id, sessions=self.sessions
         )
+
+
+CLIENT_SIDE = ScreenDefinition(
+    id=SCREEN_ID,
+    label="Trajectory",
+    order=10,
+    key=TRAJECTORY_KEY,
+    build=_BuildTrajectory(sessions=None),
+)
+"""This screen as a front end *without* a harness can draw it (P5-14).
+
+`build` is the one field of a `ScreenDefinition` that cannot travel, so a remote
+front end needs a builder of its own for each screen the daemon lists — and the
+place that knows how to build the trajectory is this module, not the socket
+client. `sessions=None` is a state the screen already supports ("`None` when
+reading a file"); what it costs is the fork action, exactly as `ph trajectory
+<file>` already costs it. The daemon's `screens/list` supplies `label` and
+`order` at attach time, so the copies here are defaults, not a second truth.
+"""
 
 
 @plugin("tui-screen-trajectory", inject=["tui_screens", "sessions"])

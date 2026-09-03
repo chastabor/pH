@@ -34,7 +34,7 @@ from typing import Literal, TypeAlias
 
 from ..cordis import Context, Disposer, Running, plugin, running
 from ..session import Session
-from ..wire import WireDataclass
+from ..wire import WireModel
 from ._names import require_slug
 from ._registry import claim_key
 
@@ -63,15 +63,15 @@ footer can express without becoming a legend; a third would be a breaking
 change for every front end, which is the right amount of friction."""
 
 
-@dataclass(frozen=True, slots=True)
-class StatusReading(WireDataclass):
+class StatusReading(WireModel):
     """What one field currently says.
 
-    A `WireDataclass`, so it reaches a front end that is not in this process as
-    `to_wire()` rather than as a dict somebody spelled out at the socket (P7-11).
-    The distinction matters in one direction only: a field added *here* then
-    reaches a browser tab with no projection edited, where a hand-written dict
-    would have dropped it silently.
+    A `WireModel`, so it crosses a socket in both directions with nothing spelled
+    at the edge (P7-11): `to_wire()` out, `model_validate` back. A field added
+    here reaches a browser tab with no projection edited and no reader edited,
+    where a hand-written dict would have dropped it silently on one side or the
+    other. The same mechanism every other type a remote front end rebuilds uses,
+    so there is one extras policy rather than two.
     """
 
     text: str

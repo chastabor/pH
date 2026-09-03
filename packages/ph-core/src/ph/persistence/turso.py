@@ -259,6 +259,9 @@ class TursoSessionStore:
             return session_db(self.root, session_id, family)
         return locate_db(self.root, session_id) or session_db(self.root, session_id, session_id)
 
+    def directory(self) -> Path | None:
+        return self.root
+
     def locate(self, session_id: str) -> Path | None:
         """One database per session, so there is always a path to point at.
 

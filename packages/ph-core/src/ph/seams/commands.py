@@ -26,6 +26,7 @@ __all__ = [
     "CommandRegistry",
     "CommandSchema",
     "apply",
+    "parse_command_line",
 ]
 
 log = logging.getLogger("ph.seams.commands")
@@ -92,6 +93,18 @@ class _Registered:
     by: Running
 
 
+def parse_command_line(line: str) -> tuple[str, str]:
+    """`/name the rest` → `("name", "the rest")`. The one spelling of the split.
+
+    Exported because a front end that routes a line *before* dispatching it — the
+    TUI over a socket decides which end owns a verb — has to tokenise the same
+    way this registry will, or a leading space and a doubled one read as two
+    different commands on the two ends.
+    """
+    name, _, argument = line.strip().lstrip("/").partition(" ")
+    return name, argument.strip()
+
+
 @dataclass(slots=True)
 class CommandRegistry:
     """The service published as `ctx.commands`."""
@@ -149,7 +162,7 @@ class CommandRegistry:
         is widened by failing to read an agent, so nothing is worth refusing a
         human's slash command over.
         """
-        name, _, argument = line.lstrip("/").partition(" ")
+        name, argument = parse_command_line(line)
         entry = self._commands.get(name)
         if entry is None:
             raise KeyError(f'unknown command "/{name}"')

@@ -27,7 +27,7 @@ from ph.cordis import Profile
 from ph.paths import resolve_roots
 from ph_app.daemon import DaemonClient, serve
 
-__all__ = ["PROFILE", "Daemon", "running"]
+__all__ = ["PROFILE", "Daemon", "running", "shut_down", "until"]
 
 PROFILE = Profile.from_paths([BASE, HEADLESS])
 
@@ -124,6 +124,22 @@ async def running(
             yield _Daemon(path=socket, tasks=tasks, server=started[0])
         finally:
             tasks.cancel_scope.cancel()
+
+
+async def shut_down(path: Path) -> None:
+    """Stop a daemon that is *not* in this process, through its only handle.
+
+    Connect, pump, `initialize`, `shutdown`, wait for the close: the sequence a
+    spawned daemon leaves a test no alternative to, written once rather than in
+    every test that spawns one.
+    """
+    client = await DaemonClient.connect(path)
+    async with anyio.create_task_group() as tasks:
+        tasks.start_soon(client.pump)
+        await client.call("initialize")
+        await client.notify("shutdown")
+        with anyio.fail_after(20):
+            await client.closed.wait()
 
 
 def daemon_socket() -> Path:

@@ -90,23 +90,32 @@ class DaemonClient:
         """
         return await self.call("initialize", capabilities=list(capabilities))
 
-    async def prompt(self, session_id: str, text: str) -> dict[str, Any]:
-        """Queue a turn, idempotently, without the caller minting ids.
+    async def mutate(self, method: str, session_id: str, **params: Any) -> dict[str, Any]:
+        """One mutating call, stamped with this client's idempotence key.
 
-        Idempotence was a pair of parameters a caller had to remember, which
-        means it held for the test that hand-rolled them and for nothing else.
-        A client knows its own identity and can count its own commands, so it
-        does both — and a retry after a reconnect is safe by default rather
-        than by discipline.
+        Every method in the daemon's `MUTATIONS` table needs a
+        `clientId`/`commandId` pair, and a caller that forgot one silently lost
+        the write-ahead guard: a reconnecting client re-sends what it cannot know
+        landed, and an unkeyed retry runs the effect twice. So the stamp is
+        applied here, once, rather than at each verb — `prompt` was the only verb
+        that had it, and `session/command`, `session/shell`, `session/stage`,
+        `session/preset` and `credentials/store` are all in the same table.
+
+        The counter is this client's own, which is what makes a retry after a
+        reconnect safe by default rather than by discipline.
         """
         self._commands += 1
         return await self.call(
-            "session/prompt",
+            method,
             sessionId=session_id,
-            prompt=text,
             clientId=self.id,
             commandId=str(self._commands),
+            **params,
         )
+
+    async def prompt(self, session_id: str, text: str) -> dict[str, Any]:
+        """Queue a turn. Keyed by `mutate`, which says why."""
+        return await self.mutate("session/prompt", session_id, prompt=text)
 
     async def call(self, method: str, **params: Any) -> dict[str, Any]:
         """One request, awaited to its reply. Raises what the server refused."""
