@@ -149,13 +149,19 @@ class _Connection:
     `asks` is the name in both directions — the daemon offering to ask, and a
     client offering to answer — because it is one feature, and half of it is
     useless without the other half."""
-    _peer: Peer | None = None
+    peer: Peer = field(init=False)
 
-    @property
-    def peer(self) -> Peer:
-        if self._peer is None:
-            self._peer = Peer(stream=self.stream, dispatch=self._dispatch, id_prefix="s")
-        return self._peer
+    def __post_init__(self) -> None:
+        # Eagerly: `_Connection` is only ever built inside `serve`'s accept loop,
+        # which is already in a running event loop — which is what `anyio.Event`
+        # needs. A lazy property bought nothing and left `peer` reachable in a
+        # half-built state.
+        self.peer = Peer(
+            stream=self.stream,
+            dispatch=self._dispatch,
+            dispatch_notifications=True,
+            id_prefix="s",
+        )
 
     def notify(self, method: str, params: dict[str, Any]) -> None:
         """Queue a notification, or *raise* so the root drops this watcher.
@@ -199,8 +205,18 @@ class _Connection:
             # not vary by which session it is watching, and a per-attach flag let
             # the same client claim it for one root and not another — two answers
             # to a question with one true answer.
-            declared = params.get("capabilities") or ()
-            self.declared = frozenset(str(name) for name in declared)
+            self.declared = frozenset(str(name) for name in params.get("capabilities") or ())
+            # Named, because the failure is otherwise invisible: a client that
+            # declares `"ask"` is never joined to any desk, and every question
+            # its person should have answered is simply never asked.
+            unknown = self.declared - set(CAPABILITIES)
+            if unknown:
+                log.warning(
+                    "ph_app.daemon: a client declared %s, which this daemon does not serve; "
+                    "it serves %s",
+                    ", ".join(sorted(unknown)),
+                    ", ".join(CAPABILITIES),
+                )
             return capabilities(*CAPABILITIES)
         if method == "sessions/list":
             return {"sessions": supervisor.describe()}

@@ -35,7 +35,7 @@ from typing import Any, Protocol
 
 from ph.agent.types import AgentCancelCause, AgentOptions
 from ph.cordis import Context, Profile
-from ph.llm.types import create_user_message
+from ph.llm.types import user_text
 from ph.seams.approval import ApprovalAnswer, ApprovalRequest
 from ph.seams.tui_status import StatusReading
 from ph.seams.user_questions import UserQuestion
@@ -200,7 +200,7 @@ class HarnessSession:
         adding to the conversation, not interrupting this step. Steering is a
         separate, explicit act.
         """
-        self.agent.followup(_user_text(text))
+        self.agent.followup(user_text(text))
         self.state.queued += 1
         self.host.state_changed()
 
@@ -237,7 +237,9 @@ class HarnessSession:
 
     def commands(self) -> list[Any]:
         registry = self.ctx.get("commands")
-        return list(registry.list()) if registry is not None else []
+        # `list()` already returns a fresh list, and this is read on every
+        # keystroke through the completion source.
+        return registry.list() if registry is not None else []
 
     def screen(self, screen_id: str) -> Any:
         registry = self.ctx.get("tui_screens")
@@ -245,7 +247,7 @@ class HarnessSession:
 
     def providers(self) -> list[Any]:
         llm = self.ctx.get("llm")
-        return list(llm.list_providers()) if llm is not None else []
+        return llm.list_providers() if llm is not None else []
 
     def sessions_directory(self, fallback: Path) -> Path:
         """The family directory this session lives beside, or `fallback`.
@@ -362,7 +364,7 @@ def _attach(ctx: Context, front: HarnessSession) -> list[Callable[[], Any]]:
             # at the next step boundary — rather than as a new event type: the
             # log's vocabulary is fixed (`KNOWN_SESSION_EVENT_TYPES`), and a
             # front-end inventing a type writes a log this build cannot read.
-            front.agent.steer(_user_text(reason))
+            front.agent.steer(user_text(reason))
         return outcome
 
     async def answer_question(question: UserQuestion, _next: Any = None) -> str | None:
@@ -379,7 +381,3 @@ def _attach(ctx: Context, front: HarnessSession) -> list[Callable[[], Any]]:
     if questions is not None:
         disposers.append(questions.register_answerer(answer_question))
     return disposers
-
-
-def _user_text(text: str) -> Any:
-    return create_user_message(content=[{"type": "text", "text": text}], source={"kind": "user"})

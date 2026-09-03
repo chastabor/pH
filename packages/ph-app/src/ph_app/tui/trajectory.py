@@ -364,6 +364,8 @@ HANDLERS: Mapping[str, Handler] = {
     "request/context": _on_harness_event,
     "approval/asked": _on_harness_event,
     "approval/decided": _on_harness_event,
+    "question/asked": _on_harness_event,
+    "question/answered": _on_harness_event,
     "approval/mode": _on_harness_event,
     "approval/policy": _on_harness_event,
     "workspace/acquired": _on_harness_event,

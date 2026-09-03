@@ -11,7 +11,7 @@ protocol grows.
 from __future__ import annotations
 
 import secrets
-from dataclasses import dataclass, field
+from dataclasses import InitVar, dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -35,7 +35,10 @@ class DaemonClient:
     """
 
     stream: ByteStream
-    on_notify: Notification | None = None
+    on_notify: InitVar[Notification | None] = None
+    """What to call for a notification the daemon sends. **Init-only**: the
+    `Peer` is the one place it lives, so `client.peer.on_notify = ...` is how a
+    caller changes it later and there is no second copy to go stale."""
     handlers: dict[str, Handler] = field(default_factory=dict)
     """What this client will answer when the *daemon* asks it something (P5-13).
 
@@ -47,28 +50,19 @@ class DaemonClient:
     """This connection's identity, for idempotence. Minted rather than asked for:
     a caller that had to supply one would supply the same one twice."""
     _commands: int = 0
-    _peer: Peer | None = None
+    peer: Peer = field(init=False)
+    """This connection's duplex end. Built eagerly — `connect` is the only way
+    to make one, and it is already inside a running loop."""
+
+    def __post_init__(self, on_notify: Notification | None) -> None:
+        self.peer = Peer(
+            stream=self.stream, dispatch=self._answer, on_notify=on_notify, id_prefix="c"
+        )
 
     @classmethod
     async def connect(cls, path: Path, on_notify: Notification | None = None) -> DaemonClient:
         stream: ByteStream = await anyio.connect_unix(str(path))
         return cls(stream=stream, on_notify=on_notify)
-
-    @property
-    def peer(self) -> Peer:
-        """This connection's duplex end, built on first use.
-
-        Lazily, because a `DaemonClient` is constructed in places that are not yet
-        inside a running loop, and `Peer` holds an `anyio.Event`.
-        """
-        if self._peer is None:
-            self._peer = Peer(
-                stream=self.stream,
-                dispatch=self._answer,
-                on_notify=self.on_notify,
-                id_prefix="c",
-            )
-        return self._peer
 
     @property
     def closed(self) -> anyio.Event:

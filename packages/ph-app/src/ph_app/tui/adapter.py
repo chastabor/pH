@@ -384,6 +384,20 @@ class TuiEventAdapter:
         role: ItemRole = "notice" if outcome == "allowed-once" else "error"
         self._row("decided", role, f"{event.data.get('toolName')}: {outcome}", event)
 
+    def _on_question_asked(self, event: SessionEvent, live: bool) -> None:
+        header = str(event.data.get("header") or "").strip()
+        label = f"{header}: " if header else ""
+        self._row("asked", "notice", f"{label}{event.data.get('question')}", event)
+
+    def _on_question_answered(self, event: SessionEvent, live: bool) -> None:
+        if event.data.get("declined"):
+            # Asked and not answered. A row rather than silence: the transcript
+            # otherwise shows a question and then the model carrying on, which
+            # reads as the person having answered something invisible.
+            self._row("answered", "notice", "No answer given.", event)
+            return
+        self._row("answered", "user", str(event.data.get("answer", "")), event)
+
     def _on_permission_preset(self, event: SessionEvent, live: bool) -> None:
         self.state.preset = str(event.data.get("preset", self.state.preset))
 
@@ -827,6 +841,8 @@ HANDLERS: Mapping[str, Handler] = {
     "request/context": TuiEventAdapter._on_request_context,
     "approval/asked": TuiEventAdapter._on_approval_asked,
     "approval/decided": TuiEventAdapter._on_approval_decided,
+    "question/asked": TuiEventAdapter._on_question_asked,
+    "question/answered": TuiEventAdapter._on_question_answered,
     "permission/preset": TuiEventAdapter._on_permission_preset,
     "sandbox/mode": TuiEventAdapter._on_sandbox_mode,
     "command/run": TuiEventAdapter._on_command_run,

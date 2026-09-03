@@ -42,7 +42,7 @@ from typing import Any, Protocol
 
 import anyio
 
-from ph.llm.types import create_user_message
+from ph.llm.types import user_text
 from ph.seams.approval import ApprovalAnswer, ApprovalRequest, answer_from_wire
 from ph.seams.user_questions import UserQuestion
 
@@ -82,7 +82,6 @@ class AskDesk:
     root: Any
     front_ends: set[FrontEnd] = field(default_factory=set)
     asks: dict[str, PendingAsk] = field(default_factory=dict)
-    asked: int = 0
 
     # ------------------------------------------------------------- wiring --
 
@@ -99,7 +98,16 @@ class AskDesk:
             disposers.append(approval.register_answerer(self.answer_approval))
         questions = self.root.ctx.get("user_questions")
         if questions is not None:
-            disposers.append(questions.register_answerer(self.answer_question))
+            # `reachable`, unlike the approval seam's registration, because the
+            # two failure modes differ: an unanswerable approval must fail closed
+            # and *deny*, while an unanswerable question must not be asked at
+            # all. A daemon with no front end attached is exactly the case the
+            # seam declines to log, and this probe is how it finds out.
+            disposers.append(
+                questions.register_answerer(
+                    self.answer_question, reachable=lambda: bool(self.front_ends)
+                )
+            )
         return disposers
 
     def join(self, who: FrontEnd) -> None:
@@ -109,6 +117,14 @@ class AskDesk:
         than an outcome: the turn parked, the person turned up, and the question
         is still the one the model asked.
         """
+        if who in self.front_ends:
+            # **Attaching twice is an expected call** — `session/attach` is how a
+            # client resumes, and `_attach` already guards `subscribe` against it.
+            # Without the same guard here a re-attach starts a *second* delivery
+            # of every open ask to the same connection: a second frame, a second
+            # slot of that client's in-flight budget, and a second modal in front
+            # of one person, whose two answers then race for one question.
+            return
         self.front_ends.add(who)
         for pending in list(self.asks.values()):
             if pending.tasks is not None:
@@ -149,17 +165,22 @@ class AskDesk:
             # boundary — rather than as a new event type, because the log's
             # vocabulary is fixed and a front end inventing one writes a log this
             # build cannot read.
-            self.root.agent.steer(
-                create_user_message(
-                    content=[{"type": "text", "text": reason}], source={"kind": "user"}
-                )
-            )
+            self.root.agent.steer(user_text(reason))
         return answer_from_wire(result.get("answer"))
 
     async def answer_question(self, question: UserQuestion, _next: Any = None) -> str | None:
-        """`ctx.user_questions`' answerer, over the socket."""
-        self.asked += 1
-        result = await self._ask("question/ask", f"q{self.asked}", {"question": question.to_wire()})
+        """`ctx.user_questions`' answerer, over the socket.
+
+        Keyed by the question's own `ask_id`, which `UserQuestionService.ask`
+        fills in before any answerer sees it — so the frame a front end answers
+        and the record a resume would re-pose from are the same string rather
+        than two that happen to line up. Minting a fallback here would be a
+        second, weaker id scheme (a counter that restarts at 1 after a resume)
+        for a value the seam already mints so that it cannot collide.
+        """
+        result = await self._ask(
+            "question/ask", str(question.ask_id), {"question": question.to_wire()}
+        )
         answer = result.get("answer")
         return answer if isinstance(answer, str) else None
 

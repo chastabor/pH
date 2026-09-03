@@ -39,7 +39,7 @@ from filelock import FileLock, Timeout
 
 from ph.agent.types import AgentOptions
 from ph.cordis import Context, Profile
-from ph.llm.types import create_user_message
+from ph.llm.types import user_text
 from ph.paths import resolve_roots
 from ph.persistence import resume_session, resumption_of
 from ph.seams.schedule import Schedule, state_to_wire
@@ -126,6 +126,15 @@ NON_GUARANTEES: tuple[tuple[str, str], ...] = (
         "catches up, one run per missed window. For work that must happen whether or "
         "not the daemon is up, start it from cron, anacron or a systemd timer — pH "
         "schedules inside a conversation and does not replace them",
+    ),
+    (
+        "a question a person walked away from",
+        "re-posed only while this daemon runs. `AskDesk` holds an open ask in memory "
+        "and puts it to whoever attaches next; the log keeps the question either way "
+        "(`question/asked` with no `question/answered`, which `pending_questions` "
+        "folds), but nothing reads that fold on resume yet — so a daemon that stopped "
+        "mid-question does not re-ask by itself, and the turn that was waiting is gone "
+        "(P7-09)",
     ),
     (
         "per user",
@@ -1006,9 +1015,7 @@ class Supervisor:
             # applies to blobs. A duplicated turn is visible in the transcript;
             # a dropped one is not.
             root.remember(command)
-        root.agent.followup(
-            create_user_message(content=[{"type": "text", "text": text}], source={"kind": "user"})
-        )
+        root.agent.followup(user_text(text))
         # A full channel means the task has wakes pending and has not reached
         # them yet, so it will drain this message too — the inbox is the queue,
         # and this is only the doorbell.

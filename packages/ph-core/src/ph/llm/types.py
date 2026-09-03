@@ -320,6 +320,18 @@ def create_user_message(*, content: list[Any], source: Any) -> Message:
     return create_message(role="user", content=content, source=source)
 
 
+def user_text(text: str) -> Message:
+    """One plain-text message from the person — the commonest user message there is.
+
+    The three-key incantation it replaces was written out verbatim at four sites
+    across three packages: a prompt from the TUI, a prompt over the socket, an
+    approval's redirecting `reason`. Each is the same claim — *this text came from
+    a human, at a step boundary* — and `source={"kind": "user"}` is the part that
+    makes it true, so it is the part worth having one copy of.
+    """
+    return create_user_message(content=[{"type": "text", "text": text}], source={"kind": "user"})
+
+
 def create_assistant_message(
     *, content: list[Any], provider: str, model: str, replay_state: Any = None
 ) -> Message:

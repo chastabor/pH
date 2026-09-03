@@ -557,7 +557,7 @@ def test_the_tui_profile_layers_onto_headless() -> None:
 
 
 def test_the_tui_profile_makes_the_workspace_writable() -> None:
-    """The only row that differs, and the reason a `tui` profile exists.
+    """The first of the rows that differ, and the reason a `tui` profile exists.
 
     `read-only` is right unattended — nothing can answer an approval prompt. In
     the TUI a person is present, so the workspace is writable and everything
@@ -574,6 +574,31 @@ def test_the_tui_profile_makes_the_workspace_writable() -> None:
     rows = yaml.safe_load(headless.stdout)
     unattended = next(row for row in rows if row["id"] == "sandbox")
     assert unattended["config"]["defaultMode"] == "read-only"
+
+
+def test_only_a_profile_with_a_screen_offers_the_model_ask_user() -> None:
+    """The same fact as above from the other side: somebody is there to *ask*.
+
+    Read off `--dump-config` rather than off a mounted context, because the claim
+    is about what a *deployment* composes: `ph -p --profile headless` must never
+    put a question tool in the prompt, and the only thing standing between it and
+    one is which layer last spoke about this row. The layer is asserted too — a
+    row that came out enabled because somebody deleted it from `base.yaml` would
+    satisfy the flag and lose the disarmed default everywhere else.
+
+    Sabotage: drop the patch from `tui.yaml`, and an interactive session can no
+    longer ask; drop `disabled: true` from `base.yaml`, and every headless run
+    starts paying for a tool whose only possible answer is "nobody is there".
+    """
+    headless = yaml.safe_load(runner.invoke(app, ["--dump-config", "--profile", "headless"]).stdout)
+    tui = yaml.safe_load(runner.invoke(app, ["--dump-config", "--profile", "tui"]).stdout)
+
+    unattended = next(row for row in headless if row["id"] == "tool-ask-user")
+    assert unattended["disabled"] is True
+    assert unattended["layer"].endswith("base.yaml")
+    attended = next(row for row in tui if row["id"] == "tool-ask-user")
+    assert not attended.get("disabled")
+    assert attended["layer"].endswith("tui.yaml"), "the profile with a modal is what arms it"
 
 
 def test_tui_is_an_accepted_mode() -> None:

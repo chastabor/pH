@@ -95,6 +95,17 @@ KNOWN_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         "approval/asked",
         "approval/decided",
         "approval/policy",
+        # The model asking the person something that is not an approval (P7-09,
+        # emitted by `tool-ask-user`). Two events for the reason approvals have
+        # two: the ask is appended before the waterfall runs, so a crash while
+        # somebody was deciding leaves the question in the log rather than losing
+        # it — which is what `pending_questions` folds.
+        #
+        # Only a question that was actually *delivered* appears at all. An
+        # unattended ask resolves to "no answer" without appending, so a log
+        # never claims a person was asked and declined when no person was there.
+        "question/asked",
+        "question/answered",
         # The gating *posture* (P4-05; emitted by ph-stabilize's `hitl`). Its own
         # type rather than a field on `approval/policy`, which `permission-presets`
         # also writes: one last-write-wins fold with two writers, one of which
@@ -282,6 +293,15 @@ IGNORABLE_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         "schedule/cancelled",
         "schedule/tick",
         "schedule/heartbeat",
+        # What the model asked a person and what they said. Ignorable, unlike
+        # `approval/*`: an approval's decision can carry substituted arguments
+        # and so changes what ran, while a question's answer reaches the model
+        # only as the `ask_user` tool result — which is a `tool/result` either
+        # way. A reader that skips these loses the account of the exchange, not
+        # the conversation. And a build that does not know these types has no
+        # `ask_user` to re-pose them with.
+        "question/asked",
+        "question/answered",
         # Goal bookkeeping: a reader skipping these loses why the loop went
         # round again, which is accounting — the turns themselves are all there.
         "goal/continued",

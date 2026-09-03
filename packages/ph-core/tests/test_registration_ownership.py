@@ -1410,6 +1410,10 @@ UNBOUND: dict[str, str] = {
     "_FrontEnd.drawn": "TUI presentation, outside the pipeline",
     "_FrontEnd.present": "TUI presentation, outside the pipeline",
     "_Layer.guards": "a monotonic policy answer, read on the deny path",
+    # Asked "is anyone there?" at the moment a question is about to be put, and
+    # answers yes or no. Nothing to register — and it is consulted *before* the
+    # ask is committed, so there is no execution for it to belong to yet.
+    "UserQuestionService._reachable": "a policy answer read before the ask; nothing to register",
     "SpillClaim.owners": "a policy answer read by the sweep; nothing to register",
     "SpillClaim.owner": "a policy answer read by the sweep; nothing to register",
     "SpillClaim.locator": "a policy answer read by the sweep; nothing to register",

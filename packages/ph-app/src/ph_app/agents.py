@@ -523,7 +523,9 @@ def attach(
             everything=everything,
             selectors=selectors,
         )
-        client.on_notify = follow
+        # On the peer, which is where the read loop looks. Set after `connect`
+        # because `_Follow` needs the client to build itself against.
+        client.peer.on_notify = follow
         # Subscribed *before* the history is read, so nothing that happens in
         # between is lost; `_Follow` holds those frames until the pages are done.
         # No cursor: the generation a snapshot cursor needs is what this reply

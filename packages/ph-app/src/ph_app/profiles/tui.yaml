@@ -1,6 +1,6 @@
 # ph-tui: the interactive posture.
 #
-# Two rows differ from `headless`.
+# Three rows differ from `headless`.
 #
 # The first is attendance. `read-only` is right for an unattended run: no one
 # is there to answer an approval prompt, so nothing should be writable without
@@ -22,3 +22,15 @@
 - insert:
     - id: tui-screen-trajectory
       name: tui-screen-trajectory
+
+# The third is the other direction of the same fact: somebody is there to *ask*.
+# `tool-ask-user` ships disabled in `ph-base` because a question with nobody to
+# answer it is a turn spent on nothing, and this is the profile that has a modal
+# to put it in. Armed here rather than in the core bundle so that a deployment
+# which layers `ph-base` for a headless run never sees the tool in its prompt.
+#
+# The row still declines to log a question nobody is attending — a `/autonomous`
+# run inside this profile is sandboxed and alone — so arming it is a statement
+# about the *posture*, not a promise that someone is looking right now.
+- id: tool-ask-user
+  disabled: false

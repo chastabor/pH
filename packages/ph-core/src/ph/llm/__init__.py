@@ -43,6 +43,7 @@ from .types import (
     create_user_message,
     is_token_delta,
     new_message_id,
+    user_text,
 )
 
 __all__ = [
@@ -90,4 +91,5 @@ __all__ = [
     "create_user_message",
     "is_token_delta",
     "new_message_id",
+    "user_text",
 ]

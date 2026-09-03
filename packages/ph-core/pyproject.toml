@@ -83,6 +83,7 @@ session-telemetry = "ph.seams.telemetry:apply"
 # model-facing tools
 tool-fs = "ph.tools.builtin.fs_tools:apply"
 tool-bash = "ph.tools.builtin.bash_tool:apply"
+tool-ask-user = "ph.tools.builtin.ask_user:apply"
 subagent-task = "ph.tools.builtin.subagent_task:apply"
 # durability and resilience
 session-telemetry-otel = "ph.seams.telemetry_otel:apply"

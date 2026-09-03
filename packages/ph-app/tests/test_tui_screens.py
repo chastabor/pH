@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import ast
 import json
-import pathlib
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -301,7 +300,7 @@ def test_the_terminal_never_reaches_past_the_front_session() -> None:
     implementation, and resolving seams is its whole job.
     """
     allowed = set(dir(FrontSession)) | set(getattr(FrontSession, "__annotations__", {}))
-    root = pathlib.Path(ph_app.tui.__path__[0])
+    root = Path(ph_app.tui.__path__[0])
     watched = [root / "app.py", *sorted((root / "widgets").rglob("*.py"))]
     offenders: list[str] = []
     for path in watched:

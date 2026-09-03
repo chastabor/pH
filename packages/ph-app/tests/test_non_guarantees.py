@@ -59,6 +59,7 @@ CLAIMED = {
     "CPU": "shared",
     "restart": "not rolling",
     "while the daemon is down": "nothing fires",
+    "a question a person walked away from": "re-posed only while this daemon runs",
     "per user": "one daemon per $PH_RUNTIME",
 }
 """Every N5 row, and the phrase that carries it.

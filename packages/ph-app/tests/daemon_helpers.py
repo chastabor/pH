@@ -41,10 +41,12 @@ class _Daemon:
     """The `DaemonServer` behind the socket, for the tests whose subject is the
     supervisor itself rather than the wire."""
 
-    async def client(self, on_notify: Any = None, *capabilities: str) -> DaemonClient:
+    async def client(self, *capabilities: str, on_notify: Any = None) -> DaemonClient:
         """One connected, pumping client. `capabilities` are what it declares.
 
-        Passing `"asks"` is what makes it a front end — see `AskDesk`."""
+        Passing `"asks"` is what makes it a front end — see `AskDesk`. The
+        observer is keyword-only because almost nothing passes one, and leading
+        with it made every front end in the suite open with a `None` placeholder."""
         client = await DaemonClient.connect(self.path, on_notify)
         self.tasks.start_soon(client.pump)
         if capabilities:

@@ -97,13 +97,28 @@ class Peer:
     so a handler that raises becomes an error frame and the asker is settled
     either way."""
     on_notify: Notification | None = None
+    dispatch_notifications: bool = False
+    """Whether an id-less frame is a *method to run* on this end.
+
+    **The one thing the two ends genuinely disagree about, said rather than
+    sniffed.** To a client a notification is an event to watch — `session.event`,
+    `session.status` — with no body to run. To the daemon it is a method whose
+    answer nobody wants: `shutdown` carries no id by contract, because a reply
+    would have the caller waiting on a frame the daemon is losing the ability to
+    write.
+
+    Inferring it from `on_notify is not None` read the same way and failed
+    quietly in one direction: a client built without an observer — `ph agents
+    attach` follows a log and needs no callback — then *dispatched* every
+    `session.event` into a handler table that has none, spending a task and one
+    of `IN_FLIGHT` per event to raise a `LookupError` that `respond` swallows
+    because there is no id to answer. Declared, that client drops them for free.
+    """
     id_prefix: str = ""
     """What this end's ids start with, so a frame log says which side asked.
 
     Both ends mint ids now, and they must not collide: the client uses `c`, the
     daemon `s`."""
-    outbox_size: int = OUTBOX
-    in_flight: int = IN_FLIGHT
     closed: anyio.Event = field(default_factory=anyio.Event)
     """Set when the loop stops, whichever end stopped it.
 
@@ -114,8 +129,6 @@ class Peer:
     _pending: dict[str, _Pending] = field(default_factory=dict)
     _outbox: Any = None
     _inbox: Any = None
-    _tasks: Any = None
-    _limit: anyio.Semaphore | None = None
 
     # ------------------------------------------------------------- outbound --
 
@@ -127,12 +140,12 @@ class Peer:
         task has had a turn, and the frame has to have somewhere to go. The queue
         is part of what this end *is*; draining it is what `serve` does.
         """
-        if self._outbox is None and self._inbox is None:
-            self._outbox, self._inbox = anyio.create_memory_object_stream[dict[str, Any]](
-                max_buffer_size=self.outbox_size
-            )
-        if self._outbox is None:
+        if self.closed.is_set():
             raise DaemonGone
+        if self._outbox is None:
+            self._outbox, self._inbox = anyio.create_memory_object_stream[dict[str, Any]](
+                max_buffer_size=OUTBOX
+            )
         return self._outbox
 
     def tell(self, method: str, params: dict[str, Any]) -> None:
@@ -144,7 +157,10 @@ class Peer:
         The subscriber list belongs to whoever owns it, so this only has to fail
         loudly enough to be noticed.
         """
-        self._queue().send_nowait(notification(method, params))
+        # The relay calls this once per event per watcher, so the built queue is
+        # read straight off the field and `_queue()` is only the first time.
+        outbox = self._outbox or self._queue()
+        outbox.send_nowait(notification(method, params))
 
     async def send(self, frame: dict[str, Any]) -> None:
         """Queue any frame, waiting for room. For an end with nobody to drop."""
@@ -180,10 +196,9 @@ class Peer:
     async def serve(self) -> None:
         """Read until the socket closes, answering and settling as frames arrive."""
         send, receive = self._queue(), self._inbox
-        self._limit = anyio.Semaphore(self.in_flight)
+        limit = anyio.Semaphore(IN_FLIGHT)
         try:
             async with anyio.create_task_group() as tasks:
-                self._tasks = tasks
                 tasks.start_soon(self._write, receive)
                 # Suppressed *inside* the group, and that is load-bearing: anyio
                 # wraps even a single exception leaving a task group into an
@@ -191,7 +206,7 @@ class Peer:
                 with suppress(
                     anyio.ClosedResourceError, anyio.BrokenResourceError, anyio.EndOfStream
                 ):
-                    await self._read()
+                    await self._read(tasks, limit)
                 # A handler still parked on a person is the one thing expected to
                 # be in flight: the socket is gone, so its answer has nowhere to
                 # go and the question belongs to whoever owns it.
@@ -216,7 +231,7 @@ class Peer:
                 except (anyio.BrokenResourceError, anyio.ClosedResourceError):
                     return
 
-    async def _read(self) -> None:
+    async def _read(self, tasks: Any, limit: anyio.Semaphore) -> None:
         """Route each frame by direction, and never handle one inline.
 
         `method` is the discriminator, not `id` — see `protocol.request`. Both
@@ -230,37 +245,38 @@ class Peer:
                 if "method" not in frame:
                     self._settle(frame)
                     continue
-                if frame.get("id") is None and self.on_notify is not None:
-                    # **An id-less frame means different things to the two ends,
-                    # and `on_notify` is which end this is.** To a client a
-                    # notification is an event to watch — `session.event`,
-                    # `session.status` — with no body to run. To the daemon it is
-                    # a *method whose answer nobody wants*: `shutdown` carries no
-                    # id by contract, because a reply would have the caller
-                    # waiting on a frame the daemon is losing the ability to
-                    # write. So an end with an observer observes, and an end
-                    # without one dispatches — and `respond` returns `None` for
-                    # an id-less frame, so the body runs and nothing is written
-                    # back.
-                    self.on_notify(str(frame.get("method") or ""), frame.get("params") or {})
+                if frame.get("id") is None and not self.dispatch_notifications:
+                    # An event to watch, and nothing to run — see
+                    # `dispatch_notifications`. An end with no observer drops it
+                    # here rather than spending a task to find out it has no body.
+                    if self.on_notify is not None:
+                        self.on_notify(str(frame.get("method") or ""), frame.get("params") or {})
                     continue
-                assert self._limit is not None and self._tasks is not None
-                await self._limit.acquire()
-                self._tasks.start_soon(self._handle, frame)
+                # `respond` returns `None` for an id-less frame, so a dispatched
+                # notification runs its body and writes nothing back.
+                await limit.acquire()
+                tasks.start_soon(self._handle, frame, limit)
         except FramingError as error:
             # Unreadable framing ends the connection: after a bad frame there is
             # no way to know where the next one starts.
             log.info("ph_app.daemon: closing a connection — %s", error)
 
-    async def _handle(self, frame: dict[str, Any]) -> None:
+    async def _handle(self, frame: dict[str, Any], limit: anyio.Semaphore) -> None:
         try:
             reply = await respond(frame, self.dispatch)
         finally:
-            if self._limit is not None:
-                self._limit.release()
-        if reply is not None and self._outbox is not None:
-            with suppress(anyio.WouldBlock, anyio.ClosedResourceError):
-                self._outbox.send_nowait(reply)
+            limit.release()
+        if reply is None:
+            return
+        # **Through `send`, so a reply waits for room rather than being dropped.**
+        # A full outbox is a slow *reader*, and discarding a reply strands the
+        # asker on the other end until the connection closes — the one frame
+        # where dropping is least defensible, and the only one nobody chose to
+        # drop. Blocking here is the backpressure working: this task holds one of
+        # `IN_FLIGHT`, so a peer that stops reading stops being served rather
+        # than being quietly lied to.
+        with suppress(DaemonGone, anyio.ClosedResourceError, anyio.BrokenResourceError):
+            await self.send(reply)
 
     def _settle(self, frame: dict[str, Any]) -> None:
         """An answer to something this end asked.

@@ -221,6 +221,17 @@
 - id: tool-bash
   name: tool-bash
 
+# Asking the person a question (P7-09). `disabled` here and enabled by `tui.yaml`
+# — the `tool-todo` idiom — because a row that stops the work to wait for a human
+# has no meaning in a posture with no human: headless, `ph -p`, a scheduled tick.
+# Disabled rather than merely unanswerable, so an unattended run pays nothing for
+# it at all: the model is never offered the tool, so no turn is spent calling it
+# and no prompt tokens describe it. `--patch '{id: tool-ask-user, disabled: false}'`
+# arms it anywhere.
+- id: tool-ask-user
+  name: tool-ask-user
+  disabled: true
+
 # Delegation the model can await (P4-13). The seam has no provider in `ph-base`,
 # and this row registers nothing until one is mounted — a tool advertised in
 # every prompt and refused on every call teaches the model a capability the

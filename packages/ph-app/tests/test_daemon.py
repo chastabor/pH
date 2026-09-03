@@ -229,7 +229,7 @@ async def test_attaching_streams_events_and_detaching_stops_them(tmp_path: Path)
     """
     async with running(tmp_path) as daemon:
         seen: list[str] = []
-        client = await daemon.client(lambda method, params: seen.append(method))
+        client = await daemon.client(on_notify=lambda method, params: seen.append(method))
         await client.call("session/new", sessionId="beta")
         await client.call("session/attach", sessionId="beta")
         await client.call("session/prompt", sessionId="beta", prompt="first")
@@ -784,7 +784,7 @@ async def test_the_ladder_gives_up_after_its_last_attempt_and_reports(
     """
     seen: list[dict[str, Any]] = []
     async with running(tmp_path) as daemon:
-        client = await daemon.client(lambda method, params: seen.append(params))
+        client = await daemon.client(on_notify=lambda method, params: seen.append(params))
         await client.call("session/new", sessionId="doomed")
         await client.call("session/attach", sessionId="doomed")
         root = daemon.server.supervisor.roots["doomed"]

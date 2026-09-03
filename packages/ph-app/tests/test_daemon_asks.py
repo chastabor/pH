@@ -25,6 +25,7 @@ import anyio
 import pytest
 from daemon_helpers import running
 
+from ph.seams.user_questions import UserQuestion
 from ph.testing import StubAgent
 
 pytestmark = pytest.mark.anyio
@@ -35,19 +36,29 @@ async def _root(daemon: Any, session_id: str = "asked") -> Any:
     return await daemon.server.supervisor.start(session_id)
 
 
-async def _ask(root: Any, call_id: str = "c1") -> Any:
+async def _ask(root: Any) -> Any:
     """Fire one approval through the seam, exactly as a gated tool does."""
     return await root.ctx.approval.request(
-        agent=StubAgent(ctx=root.ctx, session=root.session),
-        tool_name="write",
-        call_id=call_id,
+        agent=StubAgent(ctx=root.ctx, session=root.session), tool_name="write", call_id="c1"
     )
 
 
-def _answering(answer: str, seen: list[dict[str, Any]], reason: str = "") -> Any:
+async def _front_end(daemon: Any, root: Any, handler: Any, method: str = "approval/ask") -> Any:
+    """One client that declares `asks`, answers `method`, and is attached.
+
+    The four lines this replaces appeared at every front end in the file, which
+    made the one line that actually differs — the handler — the hardest to see.
+    """
+    client = await daemon.client("asks")
+    client.handlers[method] = handler
+    await client.call("session/attach", sessionId=root.id)
+    return client
+
+
+def _answering(answer: str, seen: list[dict[str, Any]]) -> Any:
     async def handler(params: dict[str, Any]) -> dict[str, Any]:
         seen.append(params)
-        return {"answer": answer, "reason": reason}
+        return {"answer": answer}
 
     return handler
 
@@ -61,10 +72,8 @@ async def test_a_gated_call_under_the_daemon_reaches_a_person(tmp_path: Any) -> 
     """
     async with running(tmp_path) as daemon:
         seen: list[dict[str, Any]] = []
-        client = await daemon.client(None, "asks")
-        client.handlers["approval/ask"] = _answering("allowed-once", seen)
         root = await _root(daemon)
-        await client.call("session/attach", sessionId=root.id)
+        await _front_end(daemon, root, _answering("allowed-once", seen))
 
         outcome = await _ask(root)
 
@@ -87,8 +96,8 @@ async def test_every_attached_front_end_is_asked_and_the_first_answer_wins(
         fast: list[dict[str, Any]] = []
         slow: list[dict[str, Any]] = []
         settled: list[tuple[str, dict[str, Any]]] = []
-        first = await daemon.client(None, "asks")
-        second = await daemon.client(lambda m, p: settled.append((m, p)), "asks")
+        first = await daemon.client("asks")
+        second = await daemon.client("asks", on_notify=lambda m, p: settled.append((m, p)))
         first.handlers["approval/ask"] = _answering("allowed-once", fast)
 
         async def dawdle(params: dict[str, Any]) -> dict[str, Any]:
@@ -122,11 +131,9 @@ async def test_a_watcher_that_is_not_a_front_end_is_never_asked(tmp_path: Any) -
         asked: list[dict[str, Any]] = []
         watcher = await daemon.client()  # declares nothing
         watcher.handlers["approval/ask"] = _answering("allowed-once", asked)
-        answerer = await daemon.client(None, "asks")
-        answerer.handlers["approval/ask"] = _answering("rejected", [])
         root = await _root(daemon)
         await watcher.call("session/attach", sessionId=root.id)
-        await answerer.call("session/attach", sessionId=root.id)
+        await _front_end(daemon, root, _answering("rejected", []))
 
         outcome = await _ask(root)
 
@@ -159,9 +166,7 @@ async def test_an_ask_with_nobody_attached_waits_for_whoever_arrives(
             assert outcome == [], "an unattended ask must not resolve itself"
             assert root.status == "waiting", "and the root says it is parked on a person"
 
-            late = await daemon.client(None, "asks")
-            late.handlers["approval/ask"] = _answering("allowed-once", [])
-            await late.call("session/attach", sessionId=root.id)
+            await _front_end(daemon, root, _answering("allowed-once", []))
 
         assert outcome == ["allowed-once"]
 
@@ -213,9 +218,7 @@ async def test_a_front_end_that_vanishes_mid_ask_is_dropped_not_answered_for(
             return {"answer": "rejected"}
 
         async with anyio.create_task_group() as tasks:
-            leaver = await daemon.client(None, "asks")
-            leaver.handlers["approval/ask"] = never
-            await leaver.call("session/attach", sessionId=root.id)
+            leaver = await _front_end(daemon, root, never)
 
             async def approve() -> None:
                 outcome.append(await _ask(root))
@@ -228,9 +231,7 @@ async def test_a_front_end_that_vanishes_mid_ask_is_dropped_not_answered_for(
             assert outcome == [], "a vanished client must not have answered for anyone"
             assert root.status == "waiting", "the question is still open"
 
-            late = await daemon.client(None, "asks")
-            late.handlers["approval/ask"] = _answering("allowed-once", [])
-            await late.call("session/attach", sessionId=root.id)
+            await _front_end(daemon, root, _answering("allowed-once", []))
 
         assert outcome == ["allowed-once"]
 
@@ -252,7 +253,7 @@ async def test_answering_is_declared_once_for_a_connection_not_per_attach(
     """
     async with running(tmp_path) as daemon:
         seen: list[dict[str, Any]] = []
-        client = await daemon.client(None, "asks")
+        client = await daemon.client("asks")
         client.handlers["approval/ask"] = _answering("allowed-once", seen)
         one, two = await _root(daemon, "one"), await _root(daemon, "two")
         for root in (one, two):
@@ -265,3 +266,125 @@ async def test_answering_is_declared_once_for_a_connection_not_per_attach(
             assert await _ask(one) == "allowed-once"
             assert await _ask(two) == "allowed-once"
         assert len(seen) == 2, "both roots reached the same declared front end"
+
+
+# --------------------------------------------------------------- questions --
+
+
+async def _ask_question(root: Any) -> Any:
+    """One question through the seam, exactly as `ask_user` puts it."""
+    return await root.ctx.user_questions.ask(
+        UserQuestion(question="which port?", ask_id="call-1"), session=root.session
+    )
+
+
+async def test_a_question_over_the_socket_reaches_a_front_end(tmp_path: Any) -> None:
+    """The second ask direction, and the one that had no producer until P7-09.
+
+    Same desk, same fan-out, different failure mode — so it is worth its own
+    exercise over a real socket rather than being assumed from the approval
+    tests: the answer travels back as a string, and the log keeps both halves.
+    """
+    async with running(tmp_path) as daemon:
+        seen: list[dict[str, Any]] = []
+
+        async def answer(params: dict[str, Any]) -> dict[str, Any]:
+            seen.append(params)
+            return {"answer": "8080"}
+
+        root = await _root(daemon, "asked-a-question")
+        await _front_end(daemon, root, answer, "question/ask")
+
+        assert await _ask_question(root) == "8080"
+        assert [one["question"]["question"] for one in seen] == ["which port?"]
+        types = [one.type for one in root.session.events]
+        assert types.count("question/asked") == 1
+        assert types.count("question/answered") == 1
+
+
+async def test_the_wire_ask_id_is_the_one_the_log_wrote(tmp_path: Any) -> None:
+    """One identity for one question, not two that happen to agree.
+
+    The front end answers a frame keyed by `askId`, and a resume would re-pose
+    from a log record keyed by `askId`. If the desk minted its own counter those
+    are different strings, and the re-posed question could never be recognised as
+    the one already open — which is the whole point of holding it in the log.
+    """
+    async with running(tmp_path) as daemon:
+        posed: list[dict[str, Any]] = []
+
+        async def answer(params: dict[str, Any]) -> dict[str, Any]:
+            posed.append(params)
+            return {"answer": "8080"}
+
+        root = await _root(daemon, "keyed")
+        await _front_end(daemon, root, answer, "question/ask")
+
+        await _ask_question(root)
+
+        asked = root.session.latest("question/asked")
+        assert asked is not None
+        assert [one["askId"] for one in posed] == [asked.data["askId"]] == ["call-1"]
+
+
+async def test_a_daemon_with_no_front_end_does_not_log_a_question(tmp_path: Any) -> None:
+    """Attached-but-watching is not attended, and neither is nobody at all.
+
+    A root's desk registers its question answerer the moment the root starts, so
+    without the reachability probe the seam would see a registered answerer,
+    believe somebody was there, append the ask, and park the turn on a fan-out
+    with no recipients — forever, since a question is not supposed to fail
+    closed. Both halves are asserted: nothing logged, and no parking.
+
+    Sabotage: register the answerer without `reachable`.
+    """
+    async with running(tmp_path) as daemon:
+        root = await _root(daemon, "nobody-attending")
+        watcher = await daemon.client()  # declares nothing; can only follow
+        await watcher.call("session/attach", sessionId=root.id)
+
+        with anyio.fail_after(5):
+            assert await _ask_question(root) is None
+
+        assert [one.type for one in root.session.events if one.type.startswith("question/")] == []
+        assert root.status != "waiting", "an unattended question must not park a root"
+
+
+async def test_re_attaching_while_a_question_is_open_does_not_ask_twice(
+    tmp_path: Any,
+) -> None:
+    """Attaching again is an ordinary call, not a second front end.
+
+    `session/attach` is how a client resumes, and `_attach` has always guarded
+    `subscribe` against being called twice — the desk needed the same guard.
+    Without it a re-attach starts a second delivery of every *open* ask to the
+    same connection: a second frame, a second slot of that client's in-flight
+    budget, and a second modal in front of one person, whose two answers then
+    race for a question that can only have one.
+
+    Sabotage: drop the `who in self.front_ends` early return in `AskDesk.join`,
+    and `posed` holds two copies of the same `askId`.
+    """
+    async with running(tmp_path) as daemon:
+        posed: list[dict[str, Any]] = []
+        answer = anyio.Event()
+
+        async def wait(params: dict[str, Any]) -> dict[str, Any]:
+            posed.append(params)
+            await answer.wait()
+            return {"answer": "allowed-once"}
+
+        root = await _root(daemon, "re-attached")
+        client = await _front_end(daemon, root, wait)
+
+        async with anyio.create_task_group() as tasks:
+            tasks.start_soon(_ask, root)
+            with anyio.fail_after(5):
+                while not posed:
+                    await anyio.sleep(0.01)
+
+            await client.call("session/attach", sessionId=root.id)
+            await anyio.sleep(0.05)
+            answer.set()
+
+        assert [one["askId"] for one in posed] == ["c1"], "one person, one question, once"
