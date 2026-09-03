@@ -277,21 +277,39 @@ class Session:
             self._events_snapshot = tuple(self._log)
         return self._events_snapshot
 
-    def events_from(self, index: int) -> tuple[SessionEvent, ...]:
-        """The events appended at or after `index`.
+    def events_from(self, index: int, limit: int | None = None) -> tuple[SessionEvent, ...]:
+        """The events appended at or after `index`, at most `limit` of them.
 
         The accessor an incremental fold wants. `events` caches one snapshot of
         the *whole* log and rebuilds it whenever the log grew — right for a
         reader that wants all of it, and quadratic for one that runs per event
         and only ever looks at the tail. A `SessionFoldCache` extender reads
         through here.
+
+        `limit` exists because slicing the result copies the tail *first*: a
+        pager taking 2048 events from a 50 000-event log built a 50 000-element
+        tuple to discard 48 000 of it, once per page, which is quadratic in the
+        length of the session it is paging.
         """
-        return tuple(self._log[index:])
+        stop = len(self._log) if limit is None else index + limit
+        return tuple(self._log[index:stop])
 
     @property
     def seq(self) -> int:
         """The next event's sequence number — always the log length (A1)."""
         return len(self._log)
+
+    def at(self, seq: int) -> SessionEvent | None:
+        """The event with this sequence number, or `None` if there is none.
+
+        A1 is what makes this a lookup rather than a search: `seq` is assigned as
+        the log length at append, so it *is* the index. The accessor exists
+        because the two obvious spellings are both wrong for a caller running
+        once per event — `events[seq]` rebuilds the whole-log cache, and
+        `events_from(seq)` copies the entire tail — and `source_event_seqs` is a
+        link readers are meant to follow.
+        """
+        return self._log[seq] if 0 <= seq < len(self._log) else None
 
     @property
     def surface(self) -> SurfaceManager:

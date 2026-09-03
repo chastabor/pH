@@ -12,10 +12,22 @@ an id. `priority=True` puts them ahead of the prompt's `TextArea`, which
 binds `ctrl+k`, `ctrl+y` and others for editing and would otherwise fire as well
 as, or instead of, the app. `check_action` keeps them quiet while a modal is up.
 
-Redrawing is on a timer rather than per event. A streaming turn commits an
-`assistant/chunk` every few tokens, and syncing the view on each one spends more
-time laying out than rendering; the adapter marks the state dirty and the frame
-tick — 30 a second — draws whatever arrived. Only the spinner is per-frame.
+Redrawing is **coalesced, not polled**. A streaming turn commits an
+`assistant/chunk` every few tokens, and `view.sync` reconciles a widget list
+rather than repainting — Textual's own compositor coalescing does not cover it —
+so drawing per event spends more time laying out than rendering. Instead the
+first change schedules one draw a frame later and every change until then rides
+it: same bounded latency, and **nothing runs while nothing happens.**
+
+That last part is the reason it is not a 30 Hz interval any more. Per terminal a
+polled flag costs thirty no-op wakeups a second, which is nothing; but
+`ph --mode web` runs *one Textual subprocess per browser tab*, and ten idle tabs
+polling a flag they will find unchanged is thirty times ten processes waking to
+do nothing.
+
+The spinner is the one thing that genuinely wants a clock, because it advances on
+wall-clock time rather than on anything arriving — so it gets its own interval,
+started when a turn starts and stopped when it ends.
 
 @module ph_app.tui.app
 """
@@ -23,7 +35,7 @@ tick — 30 a second — draws whatever arrived. Only the spinner is per-frame.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, ClassVar
@@ -32,11 +44,13 @@ from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding, BindingType
 from textual.containers import Horizontal, Vertical
+from textual.timer import Timer
 
 from ph.cordis import Profile
 from ph.paths import resolve_roots
 from ph.seams.approval import ApprovalAnswer, ApprovalRequest
 from ph.seams.permission_presets import PRESETS
+from ph.seams.tui_status import StatusReading
 from ph.seams.user_questions import UserQuestion
 
 from .autocomplete import PathCompleter
@@ -118,6 +132,20 @@ class PHTuiApp(App[str | None]):
         self.title_writer = TerminalTitle()
         self._paths = PathCompleter(root=str(self.project))
         self._dirty = True
+        self._draw_timer: Timer | None = None
+        """The one scheduled draw, or `None` when none is pending.
+
+        Its presence *is* the coalescing: a burst of appends schedules one draw
+        and then finds it already scheduled."""
+        self._spinner: Timer | None = None
+        """The frame clock, alive only while a turn is."""
+        self._readings: Sequence[StatusReading] = ()
+        """The footer as of the last draw, re-rendered by the spinner.
+
+        Cached because a reading is a *fold of the log* and the log only changes
+        on an append — which marks the view dirty and draws. Recomputing them per
+        frame ran every registered status field over the whole session thirty
+        times a second to get the same answer."""
         self._command_disposers: list[Callable[[], Any]] = []
         # Held rather than queried. `App.query_one` searches the *top* screen,
         # so every lookup would fail while a modal is up — and the frame timer
@@ -202,7 +230,9 @@ class PHTuiApp(App[str | None]):
         self._sidebar = self.query_one(Sidebar)
         self._prompt = self.query_one(PromptInput)
         self._sidebar.display = self.settings.sidebar != "off"
-        self.set_interval(FRAME_INTERVAL, self._tick)
+        # The first draw is scheduled like every other one. `__init__` cannot:
+        # `set_timer` needs a running app.
+        self.state_changed()
         self._prompt.area.focus()
         if self.trust.trusted(self.project):
             self.run_worker(self._open(), group="open")
@@ -239,7 +269,7 @@ class PHTuiApp(App[str | None]):
         # entry from here — but each of those unwinds with the *row*, not with
         # this list, which is what makes unloading one take all three with it.
         self._command_disposers = self.front.attach_surfaces(self)
-        self._dirty = True
+        self.state_changed()
 
     async def on_unmount(self) -> None:
         for dispose in reversed(self._command_disposers):
@@ -252,25 +282,58 @@ class PHTuiApp(App[str | None]):
     # ---------------------------------------------------------------- frames --
 
     def state_changed(self) -> None:
-        self._dirty = True
+        """Something the view renders has changed. Draw soon, and once.
 
-    async def _tick(self) -> None:
+        **The single entry point**, and every local mutation goes through it too
+        rather than setting the flag: the flag alone was enough while a poll was
+        watching it, and is a permanently stale pane now that nothing is. That is
+        the one thing this change makes worse if it is got wrong, so there is one
+        place to get right.
+        """
+        self._dirty = True
+        if self._draw_timer is None:
+            self._draw_timer = self.set_timer(FRAME_INTERVAL, self._draw)
+
+    async def _draw(self) -> None:
+        """Render what has arrived since the last draw."""
+        self._draw_timer = None
         front, status, view = self.front, self._status, self._view
         if front is None or status is None or view is None:
             return
-        running = front.state.status == "running"
-        if running:
-            status.tick()
-            self.title_writer.set(f"{status.glyph} working")
-        if not (running or self._dirty):
-            return
-        status.show(front.state, front.status_readings())
-        if not self._dirty:
-            return
         self._dirty = False
+        self._readings = front.status_readings()
+        status.show(front.state, self._readings)
         await view.sync(self._rows(front))
         if self._sidebar is not None and self._sidebar.display:
             self._sidebar.show(front.state, session_id=front.session.id, cwd=str(self.project))
+        self._spin(front.state.status == "running")
+
+    def _spin(self, running: bool) -> None:
+        """Start or stop the frame clock, so it exists only while a turn does."""
+        if running and self._spinner is None:
+            self._spinner = self.set_interval(FRAME_INTERVAL, self._advance)
+        elif not running and self._spinner is not None:
+            self._spinner.stop()
+            self._spinner = None
+
+    def _advance(self) -> None:
+        """One spinner frame: the glyph, the title, and the line they sit in.
+
+        Re-renders the status line rather than the transcript, because the glyph
+        is a value `show` composes — and with the *cached* readings, so a frame
+        costs a string build rather than a fold of the log.
+
+        It also stops itself if the turn ended without a draw noticing. Belt and
+        braces: `_draw` is what normally stops it, and a spinner nobody can stop
+        is the failure mode of every animation loop ever written.
+        """
+        front, status = self.front, self._status
+        if front is None or status is None or front.state.status != "running":
+            self._spin(False)
+            return
+        status.tick()
+        self.title_writer.set(f"{status.glyph} working")
+        status.show(front.state, self._readings)
 
     def _rows(self, front: FrontSession) -> list[Any]:
         return front.state.visible_items(
@@ -312,7 +375,7 @@ class PHTuiApp(App[str | None]):
             return
         if shown:
             self.notify(shown, title=name, markup=False)
-        self._dirty = True
+        self.state_changed()
 
     @work(exclusive=True, group="turn")
     async def _run_turn(self, text: str) -> None:
@@ -325,7 +388,7 @@ class PHTuiApp(App[str | None]):
         except Exception:
             log.exception("ph_app.tui: a turn failed")
         finally:
-            self._dirty = True
+            self.state_changed()
             self.title_writer.set("")
             if self.settings.turn_notification == "bell":
                 self.bell()
@@ -434,7 +497,7 @@ class PHTuiApp(App[str | None]):
         front.state.provider = provider
         front.state.model = model or front.state.model
         self.notify(f"{front.state.provider}/{front.state.model}", title="model", markup=False)
-        self._dirty = True
+        self.state_changed()
 
     def action_open_sessions(self) -> None:
         front = self.front
@@ -483,7 +546,7 @@ class PHTuiApp(App[str | None]):
         if chosen is None or front is None or chosen not in PRESETS:
             return
         front.set_preset(chosen)
-        self._dirty = True
+        self.state_changed()
 
     def action_open_login(self) -> None:
         front = self.front
@@ -524,7 +587,7 @@ class PHTuiApp(App[str | None]):
     def action_toggle_sidebar(self) -> None:
         if self._sidebar is not None:
             self._sidebar.display = not self._sidebar.display
-            self._dirty = True
+            self.state_changed()
 
     def _save(self, settings: TuiSettings) -> None:
         """Adopt new settings and persist them. A write failure costs the memory, not the change."""

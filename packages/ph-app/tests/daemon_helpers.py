@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 import anyio
+import pytest
 
 from ph.bundles import BASE, HEADLESS
 from ph.cordis import Profile
@@ -53,19 +54,50 @@ class _Daemon:
             await client.initialize(*capabilities)
         return client
 
+    async def root(self, session_id: str = "root") -> Any:
+        """One live root, started the way `session/attach` starts one."""
+        return await self.server.supervisor.start(session_id)
+
 
 Daemon = _Daemon
 
 
+async def until(done: Any, *, what: str, seconds: float = 10.0) -> None:
+    """Poll until `done()`, or fail saying what was being waited for.
+
+    Here rather than in one test file because four of them wrote the loop out —
+    and this module's own docstring makes the argument: a copy that gets missed
+    fails as a *hang*, which is the least legible failure a suite has. The
+    message matters as much as the wait: `fail_after` raises a bare
+    `TimeoutError`, so a call site's `what=` reached nothing without this.
+    """
+    try:
+        with anyio.fail_after(seconds):
+            while not done():
+                await anyio.sleep(0.01)
+    except TimeoutError:
+        pytest.fail(f"timed out waiting for {what}")
+
+
 @asynccontextmanager
 async def running(
-    tmp_path: Path, *, name: str = "", path: Path | None = None, **options: Any
+    tmp_path: Path,
+    *,
+    name: str = "",
+    path: Path | None = None,
+    profile: Profile | None = None,
+    **options: Any,
 ) -> AsyncIterator[_Daemon]:
     """A daemon, started and accepting, torn down when the block ends.
 
     Teardown is a cancel; tests that want the real path send `shutdown` through
     the socket themselves, so that path is exercised by the tests whose subject
     it is rather than by every one of them.
+
+    `profile` composes a different deployment — for a test whose subject is what
+    happens when a row is *absent*, which cannot be reached by taking a seam off
+    a mounted root (`ctx.provide` refuses a second claim in the same realm, and
+    rightly).
 
     `name` is how a test runs *two* daemons over one `$PH_HOME` — the only way
     to reach P5-03's question, since `_clear_stale` makes one socket refuse a
@@ -83,7 +115,9 @@ async def running(
         # racing its assertions. P5-05's own tests opt in.
         options.setdefault("passivate_after", None)
         tasks.start_soon(
-            lambda: serve(PROFILE, path=socket, ready=ready, started=started.append, **options)
+            lambda: serve(
+                profile or PROFILE, path=socket, ready=ready, started=started.append, **options
+            )
         )
         await ready.wait()
         try:

@@ -48,7 +48,9 @@ from ..protocol import (
     cursor_of,
     resume_at,
 )
+from .cards import CARD_EVENTS, presentation_of
 from .duplex import Peer
+from .projections import commands_of, credentials_of, readings_of, screens_of, tools_of
 from .recovery import PASSIVATE_AFTER, WAKE_WITHIN
 from .supervisor import NON_GUARANTEES, Supervisor
 
@@ -87,7 +89,15 @@ to correlate it with. Cheaper than the sweep it sits beside: one `lstat`, no
 roots walked.
 """
 
-CAPABILITIES = ("roots", "attach", "cursors", "snapshots", "asks")
+PROJECTIONS: dict[str, tuple[str, Any]] = {
+    "session/readings": ("readings", readings_of),
+    "commands/list": ("commands", commands_of),
+    "screens/list": ("screens", screens_of),
+    "tools/list": ("tools", tools_of),
+}
+"""Method → (reply key, fold). Every one is `{sessionId, <key>: <fold(root)>}`."""
+
+CAPABILITIES = ("roots", "attach", "cursors", "snapshots", "asks", "projections")
 """What this transport adds to the two both of them have.
 
 A constant because two callers say it now — `initialize`, and the `daemon/status`
@@ -115,6 +125,23 @@ class UnknownMethod(Refusal):
     """This server does not serve that name."""
 
     code = "unknown_method"
+
+
+class SeamAbsent(Refusal):
+    """This root's profile did not mount the seam that method needs.
+
+    Its own code, because `unknown_method` is a different sentence: that one
+    means "this daemon is older than you think" and a client responds by
+    disabling the feature everywhere. This one means "this deployment does not
+    do that", which is a per-root fact and the right thing to grey out one
+    button over.
+
+    The read-side projections answer absence with an empty list for the same
+    reason stated the other way round — see `projections.py` — so the two halves
+    agree that a missing seam is a fact about the profile, not a fault.
+    """
+
+    code = "seam_absent"
 
 
 class NoSuchSession(Refusal):
@@ -221,7 +248,12 @@ class _Connection:
         if method == "sessions/list":
             return {"sessions": supervisor.describe()}
         if method == "session/new":
-            root = await supervisor.start(str(params["sessionId"]))
+            # `cwd` is the client's, and the daemon is the one that mounts — so
+            # it is said here rather than assumed from the daemon's own process,
+            # which is somewhere neither the person nor their files are.
+            root = await supervisor.start(
+                str(params["sessionId"]), cwd=str(params["cwd"]) if params.get("cwd") else None
+            )
             return root.describe()
         if method == "session/prompt":
             # Joined here, at the wire edge, so the key has one construction.
@@ -244,6 +276,50 @@ class _Connection:
             )
         if method == "session/status":
             return self._status(str(params["sessionId"]))
+        # --- projections (P5-14) -------------------------------------------
+        # What a front end used to read straight off `ctx`. Each is a fold
+        # computed now, so a reconnecting client gets today's answer rather than
+        # one cached when somebody last wrote it down. See `projections.py`.
+        #
+        # A table rather than four more branches, because these four differ only
+        # in a key and a function: the next projection is a row here instead of
+        # three lines of chain, and the *set* of them is a value a test can hold.
+        projection = PROJECTIONS.get(method)
+        if projection is not None:
+            key, fold = projection
+            root = self._root(str(params["sessionId"]))
+            return {"sessionId": root.id, key: fold(root)}
+        if method == "daemon/config":
+            # The composed profile, which is a property of the *daemon* and not
+            # of any root: every root mounts the same composition.
+            return {"rows": list(supervisor.profile.dump())}
+        if method == "session/command":
+            return await self._command(params)
+        if method == "session/preset":
+            root = self._root(str(params["sessionId"]))
+            presets = root.ctx.get("permission_presets")
+            if presets is None:
+                raise SeamAbsent("this deployment has no permission presets")
+            applied = presets.apply_preset(str(params["preset"]), session=root.session)
+            return {"sessionId": root.id, "preset": applied.name}
+        # `credentials/held` and `credentials/store`, not `session/credential`
+        # and `session/credentials`: those were two names one letter apart for
+        # opposite kinds, and the one that writes a secret is the last method
+        # that should be easy to reach by typo.
+        if method == "credentials/held":
+            root = self._root(str(params["sessionId"]))
+            names = [str(one) for one in params.get("names") or ()]
+            return {"sessionId": root.id, "held": credentials_of(root, names)}
+        if method == "credentials/store":
+            root = self._root(str(params["sessionId"]))
+            service = root.ctx.get("credentials")
+            if service is None:
+                raise SeamAbsent("this deployment stores no credentials")
+            # **The value is used and not kept.** It is never logged, never
+            # echoed in the reply, and never reaches `describe()` — the reply is
+            # the name and a boolean, which is everything a UI needs to redraw.
+            service.provide_value(str(params["name"]), str(params["value"]))
+            return {"sessionId": root.id, "name": str(params["name"]), "stored": True}
         if method == "session/detach":
             return self._detach(str(params["sessionId"]))
         if method == "session/snapshot":
@@ -279,6 +355,40 @@ class _Connection:
             self.server.stop.set()
             return {"ok": True}
         raise UnknownMethod(f'unknown method "{method}"')
+
+    async def _command(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Run one `/name argument` line in the root's own context.
+
+        **In the daemon, not the client**, because a command body reaches for
+        seams that only exist where the profile is mounted — and because the
+        record of having run it belongs in this session's log, where every other
+        attached UI will see it.
+
+        Idempotent through `root.remember`, the way `session/prompt` is: a client
+        that retries after a reconnect must not run `/compact` twice, and it
+        cannot tell from a dropped reply whether the first one landed.
+        """
+        root = self._root(str(params["sessionId"]))
+        command_id = str(params.get("commandId", ""))
+        client_id = str(params.get("clientId", ""))
+        key = f"{client_id}:{command_id}" if command_id else ""
+        if key and root.accepted(key):
+            return {"sessionId": root.id, "shown": None, "repeated": True}
+        registry = root.ctx.get("commands")
+        if registry is None:
+            raise SeamAbsent("this deployment has no commands")
+        # Remembered *before* it runs, the same write-ahead ordering `prompt`
+        # uses: a daemon that dies mid-command must come back knowing it was
+        # asked, or a retry runs it a second time.
+        if key:
+            root.remember(key)
+        shown = await registry.dispatch(
+            str(params.get("line", "")),
+            scope=root.agent.ctx,
+            session=root.session,
+            agent=root.agent,
+        )
+        return {"sessionId": root.id, "shown": shown}
 
     def _root(self, session_id: str) -> Any:
         root = self.server.supervisor.roots.get(session_id)
@@ -323,12 +433,25 @@ class _Connection:
         """One bounded page of a session's history, and the cursor for the next."""
         root = self._root(session_id)
         start = resume_at(root.session, cursor)
-        events = [
-            event.to_wire(thaw=False) for event in root.session.events_from(start)[:SNAPSHOT_EVENTS]
-        ]
+        page = root.session.events_from(start, SNAPSHOT_EVENTS)
+        tools = root.ctx.get("tools")
+        events = [event.to_wire(thaw=False) for event in page]
+        # **The same sidecar the relay attaches**, because a client must not see
+        # one transcript live and a different one on replay. Keyed by seq and
+        # **sparse**, because a page is 2048 events and a turn contributes a
+        # handful of cards: the positional list this replaced serialized two
+        # thousand `null`s — twelve kilobytes of nothing — on every attach,
+        # reconnect and page-forward.
+        presentations = {
+            str(event.seq): view
+            for event in page
+            if event.type in CARD_EVENTS
+            and (view := presentation_of(tools, root.session, event)) is not None
+        }
         return {
             "sessionId": session_id,
             "events": events,
+            "presentations": presentations,
             "cursor": cursor_of(root.session, start + len(events)),
             "more": start + len(events) < root.session.seq,
         }

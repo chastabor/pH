@@ -23,7 +23,6 @@ result for each `tool/call`, or the pairing every provider requires is broken.
 
 from __future__ import annotations
 
-import json
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -36,6 +35,7 @@ from ..cordis import Context
 from ..llm.types import Message, ToolCallBlock, new_message_id
 from ..session import Session, SurfaceIntent
 from .definition import ToolExecutionInput, ToolExecutionResult, aborted_result
+from .json_schema import parse_arguments
 from .registry import PreparedCall, ToolRuntime
 
 __all__ = ["BatchOutcome", "execute_tool_calls", "parse_arguments"]
@@ -60,21 +60,6 @@ class _GroupOutcome:
     consumed: int
     aborted: bool
     concluded: bool
-
-
-def parse_arguments(raw: str) -> Any:
-    """Parse model arguments, preserving invalid JSON as text.
-
-    A malformed argument string is the *tool's* problem to report, not the
-    loop's to crash on: the tool sees the raw text and fails with a message the
-    model can act on.
-    """
-    if not raw:
-        return {}
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError:
-        return raw
 
 
 async def execute_tool_calls(

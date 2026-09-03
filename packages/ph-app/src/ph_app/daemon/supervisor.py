@@ -52,7 +52,9 @@ from ph.tools.errors import error_message
 
 from ..protocol import Refusal, cursor_of
 from ..runtime import mounted
+from .cards import CARD_EVENTS, presentation_of
 from .frontend import AskDesk
+from .projections import readings_of
 from .recovery import (
     FAILED,
     PASSIVATE_AFTER,
@@ -302,6 +304,29 @@ class Root:
         self.session.append(COMMAND_ACCEPTED, {"command": command})
         self.commands.add(command)
 
+    def once(self, command: str) -> bool:
+        """Claim this command, or say it was already claimed. `True` means act.
+
+        The write-ahead ordering, next to the two halves it orders, because there
+        are two mutating verbs now — `session/prompt` and `session/command` — and
+        each spelling it out is one that can drift. The record is written
+        **before** the act, so a crash between them re-runs the command rather
+        than losing it: the same reasoning A10 applies to blobs, and a duplicated
+        turn is visible in the transcript where a dropped one is not.
+
+        An empty key means the caller offered no identity and wants no
+        deduplication; it always acts.
+        """
+        if not command:
+            return True
+        if self.accepted(command):
+            # The retry a reconnecting client cannot avoid sending: it does not
+            # know whether the first one landed. Answering "yes, that one" is
+            # what makes asking twice safe.
+            return False
+        self.remember(command)
+        return True
+
     def retry(self, *, reason: str, restored: bool) -> None:
         """Record that a failed turn is being run again (P5-04).
 
@@ -445,7 +470,7 @@ class Supervisor:
     roots: dict[str, Root] = field(default_factory=dict)
     _starting: anyio.Lock = field(default_factory=anyio.Lock)
 
-    async def start(self, root_id: str) -> Root:
+    async def start(self, root_id: str, *, cwd: str | None = None) -> Root:
         """Take the lease for this root, then mount it (I-5).
 
         **Serialized per id**, because the check-then-mount below spans two awaits: two
@@ -467,9 +492,9 @@ class Supervisor:
         if root is not None:
             return root
         async with self._starting:
-            return await self._start(root_id)
+            return await self._start(root_id, cwd=cwd)
 
-    async def _start(self, root_id: str) -> Root:
+    async def _start(self, root_id: str, *, cwd: str | None = None) -> Root:
         """Mount a profile, create its agent, and give it its own task.
 
         Through `runtime.mounted`, so a mode cannot drift from the profile semantics —
@@ -487,7 +512,7 @@ class Supervisor:
             return self.roots[root_id]
         async with AsyncExitStack() as exits:
             ctx = await exits.enter_async_context(mounted(self.profile))
-            session = await self._session_for(ctx, root_id)
+            session = await self._session_for(ctx, root_id, cwd=cwd)
             options = AgentOptions(provider=self.provider, model=self.model)
             agent = ctx.agents.create(session, options)
             wake, waiting = anyio.create_memory_object_stream[None](max_buffer_size=WAKE_SLOTS)
@@ -525,17 +550,45 @@ class Supervisor:
                 # watchers is work thrown away per event.
                 if not root.subscribers:
                     return
-                root.publish(
-                    "session.event",
+                payload: dict[str, Any] = {
+                    "sessionId": root.id,
                     # `thaw=False`: this payload's only destination is `dumps`,
                     # which handles the frozen forms, and thawing deep-copies the
                     # tree for nobody.
-                    {"sessionId": root.id, "event": event.to_wire(thaw=False)},
-                )
+                    "event": event.to_wire(thaw=False),
+                }
+                # Beside the event, never inside it: a rendered card is derived
+                # from the definitions mounted right now, and an event is what
+                # the log said. Gated *here* rather than inside `presentation_of`
+                # because this runs per appended event — every streamed chunk —
+                # and Python evaluates `ctx.get("tools")` before the function
+                # that would have rejected the event anyway.
+                if event.type in CARD_EVENTS:
+                    view = presentation_of(ctx.get("tools"), source, event)
+                    if view is not None:
+                        payload["presentation"] = view
+                root.publish("session.event", payload)
 
             def announce(agent_: Any, status: str) -> None:
-                if agent_ is agent:
-                    root.publish("session.status", {"sessionId": root.id, "status": status})
+                # Guarded like `relay` above, and for the same reason: reading
+                # the footer folds every registered status field over the log,
+                # and doing that for nobody is the work this check exists to
+                # skip.
+                if agent_ is agent and root.subscribers:
+                    root.publish(
+                        "session.status",
+                        {
+                            "sessionId": root.id,
+                            "status": status,
+                            # Beside the status because they change together and
+                            # for the same reason: every reading is a fold of
+                            # this log, so the moment worth re-reading them is
+                            # the moment the agent moved. A client polling them
+                            # on its own clock would ask constantly and learn
+                            # nothing between turns.
+                            "readings": readings_of(root),
+                        },
+                    )
 
             # The session's own feed, not the store-wide `session/event` bus: a
             # child agent's events belong to its own transcript, and subscribing
@@ -597,7 +650,7 @@ class Supervisor:
 
         await ctx.effect(acquire, label=f"session-lease({root_id})")
 
-    async def _session_for(self, ctx: Context, root_id: str) -> Session:
+    async def _session_for(self, ctx: Context, root_id: str, *, cwd: str | None = None) -> Session:
         """The root's session — resumed from disk when there is one to resume.
 
         **Creating unconditionally corrupted the log.** `sessions.create` mints a fresh
@@ -646,7 +699,13 @@ class Supervisor:
                 " — the previous run was interrupted" if resumed.get("interrupted") else "",
             )
             return session
-        fresh: Session = ctx.sessions.create(root_id)
+        # `cwd` reaches the *header*, which is storage metadata beside the log
+        # rather than an event in it — so it describes where this conversation
+        # happened without becoming something the model reads or a replay has to
+        # re-apply. `SessionHeader` validates that it is absolute, so a relative
+        # path is refused here rather than resolved against the daemon's own
+        # working directory, which is not the client's and never was.
+        fresh: Session = ctx.sessions.create(root_id, meta={"cwd": cwd} if cwd else None)
         return fresh
 
     async def _run(self, root: Root) -> None:
@@ -1004,17 +1063,8 @@ class Supervisor:
         f-string in two places that have to stay in step.
         """
         root = await self.start(root_id)
-        if command:
-            if root.accepted(command):
-                # The retry a reconnecting client cannot avoid sending: it does
-                # not know whether the first one landed. Answering "yes, that
-                # one" is what makes asking twice safe.
-                return root
-            # Written *before* the splice, so a crash between the two re-runs a
-            # command rather than losing it — the same write-ahead ordering A10
-            # applies to blobs. A duplicated turn is visible in the transcript;
-            # a dropped one is not.
-            root.remember(command)
+        if not root.once(command):
+            return root
         root.agent.followup(user_text(text))
         # A full channel means the task has wakes pending and has not reached
         # them yet, so it will drain this message too — the inbox is the queue,

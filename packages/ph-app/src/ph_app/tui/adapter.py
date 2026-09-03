@@ -34,7 +34,6 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from ph.cordis import DEPLOYMENT
 from ph.seams.subagents import downgrade_text, fold_subagent_event
 from ph.session import (
     Session,
@@ -46,12 +45,29 @@ from ph.session import (
 )
 from ph.session.request_header import parse_request_context
 from ph.text import count_of
-from ph.tools import ToolResult, ToolResultView, parse_arguments
+from ph.tools import ToolCallView, ToolResult, ToolResultView
+from ph.tools.presentation import render_call_view, render_result_view
 
 from ..wire import media_labels, obj, one_line, result_block, seq, text_of_wire
 from .state import ChatItem, ItemRole, ToolCard, TuiState
 
 __all__ = ["HANDLERS", "RECORDLESS", "TuiEventAdapter"]
+
+
+def _arrived[View: (ToolCallView, ToolResultView)](model: type[View], sidecar: Any) -> View | None:
+    """The daemon's rendered view, validated rather than trusted.
+
+    The sidecar is JSON off a socket, and the two view models are what say which
+    fields a card may set. One that does not parse renders as the generic card,
+    which is what a front end with no daemon already does — a plain card is not a
+    regression, a wrong one would be.
+    """
+    if not isinstance(sidecar, Mapping):
+        return None
+    try:
+        return model.model_validate(dict(sidecar))
+    except ValidationError:
+        return None
 
 
 @dataclass(slots=True)
@@ -60,9 +76,18 @@ class TuiEventAdapter:
 
     state: TuiState = field(default_factory=TuiState)
     tools: Any = None
-    """`ctx.tools`, when available, so a card can use the tool's own
-    `present_call`/`present_result`. Absent is fine: the generic card renders
-    from the log alone."""
+    """`ctx.tools`, when the harness is in this process, so a card can use the
+    tool's own `present_call`/`present_result`. `None` over a socket, where the
+    daemon renders the same views and sends them instead — see `_sidecar`."""
+    _sidecar: Any = None
+    """The view the daemon rendered for the event being applied, if any.
+
+    **The sidecar wins when there is one**, and there is one exactly when there
+    is no registry to ask, so the two sources never compete. Held on the adapter
+    for the duration of one `apply` rather than threaded through: `HANDLERS` is a
+    table of `(self, event, live)` bodies, and widening every one of forty-eight
+    of them to carry a value two of them read would put the cost of this feature
+    everywhere it is not used."""
     _fragment: int = 0
 
     # --------------------------------------------------------------- entry --
@@ -75,10 +100,20 @@ class TuiEventAdapter:
             self.apply(event, live=False)
         return self.state
 
-    def apply(self, event: SessionEvent, *, live: bool = True) -> None:
+    def apply(self, event: SessionEvent, *, live: bool = True, presentation: Any = None) -> None:
+        """Fold one event in, with whatever the daemon rendered for it.
+
+        `presentation` is `None` for every in-process caller and for every event
+        that is not a tool card, which is nearly all of them.
+        """
         handler = HANDLERS.get(event.type)
-        if handler is not None:
+        if handler is None:
+            return
+        self._sidecar = presentation
+        try:
             handler(self, event, live)
+        finally:
+            self._sidecar = None
 
     # ---------------------------------------------------------------- rows --
 
@@ -245,14 +280,10 @@ class TuiEventAdapter:
         )
 
     def _present_call(self, card: ToolCard) -> None:
-        """Ask the tool how its pending state looks, if it is registered here."""
-        definition = self._definition(card.name)
-        view = None
-        if definition is not None and definition.present_call is not None:
-            try:
-                view = definition.present_call(parse_arguments(card.arguments))
-            except Exception:
-                view = None
+        """How this pending call looks — as rendered, or as the tool would."""
+        view = _arrived(ToolCallView, self._sidecar) or render_call_view(
+            self.tools, card.name, card.arguments
+        )
         if view is None:
             card.subtitle = one_line(card.arguments)
             return
@@ -279,45 +310,18 @@ class TuiEventAdapter:
         self._present_result(card, event.data.get("meta"))
 
     def _present_result(self, card: ToolCard, meta: Any) -> None:
-        definition = self._definition(card.name)
-        if definition is None or definition.present_result is None:
-            return
-        try:
-            view: ToolResultView | None = definition.present_result(
-                parse_arguments(card.arguments),
-                ToolResult(content=(), is_error=card.is_error, meta=meta),
-            )
-        except Exception:
-            view = None
+        view = _arrived(ToolResultView, self._sidecar) or render_result_view(
+            self.tools,
+            card.name,
+            card.arguments,
+            ToolResult(content=(), is_error=card.is_error, meta=meta),
+        )
         if view is None:
             return
         card.title = view.title
         card.subtitle = view.subtitle or card.subtitle
         card.card = view.card
         card.details = dict(view.meta or {})
-
-    def _definition(self, name: str) -> Any:
-        """The definition behind a card, for presentation only.
-
-        `DEPLOYMENT` and not an agent's scope (P6-32): this renders a call the *log*
-        already recorded, and `tool/call` events carry no agent, so "which agent's
-        presentation" is unanswerable from what the log holds.
-
-        **Best available, not exact, in two ways** (§5 rule 6): a name that was
-        agent-*shadowed* at execution time renders under the global definition — a wrong
-        card, not a blank one — and an agent-*scoped* tool renders with no definition at
-        all, because `DEPLOYMENT` is the mount's chain, not a union over agents. Both are
-        presentation-only, and both have the same real fix: record the executing agent on
-        `tool/call`, which is a log-schema row rather than a boundary choice here.
-
-        Nothing is gated on the answer; it supplies a title and a renderer.
-        """
-        if self.tools is None:
-            return None
-        try:
-            return self.tools.get(name, scope=DEPLOYMENT)
-        except Exception:
-            return None
 
     def _on_tool_code_dispatch_start(self, event: SessionEvent, live: bool) -> None:
         parent = self.state.card(str(event.data.get("parentCallId")))

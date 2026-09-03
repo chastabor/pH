@@ -18,6 +18,7 @@ skipped so a caller can refuse a schema pH cannot fully enforce.
 
 from __future__ import annotations
 
+import json
 import math
 import re
 from typing import Any
@@ -244,3 +245,23 @@ def _validate(schema: Any, value: Any, path: str, root: dict[str, Any], out: lis
                     root,
                     out,
                 )
+
+
+def parse_arguments(raw: str) -> Any:
+    """Parse model arguments, preserving invalid JSON as text.
+
+    A malformed argument string is the *tool's* problem to report, not the
+    loop's to crash on: the tool sees the raw text and fails with a message the
+    model can act on.
+
+    Here, in the package's leaf module, because `presentation.py` needs it too
+    and `batch` is three imports above it — `presentation` → `batch` →
+    `definition` → `presentation` is a cycle. It was never a batch concern: it
+    is `json.loads` with one documented fallback.
+    """
+    if not raw:
+        return {}
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return raw
