@@ -52,6 +52,7 @@ from ph.tools.errors import error_message
 
 from ..protocol import Refusal, cursor_of
 from ..runtime import mounted
+from .frontend import AskDesk
 from .recovery import (
     FAILED,
     PASSIVATE_AFTER,
@@ -200,6 +201,12 @@ class Root:
     """Attached connections. A set of bound methods, which compare by
     `(__self__, __func__)`, so attaching and detaching are symmetric without a
     token table to keep in step."""
+    desk: AskDesk | None = None
+    """This root's `AskDesk` — who gets asked when a turn needs a person (P5-13).
+
+    On the root rather than on a connection because the *question* outlives any
+    client: nobody attached means the ask waits, and the log holds it either
+    way."""
 
     def subscribe(self, subscriber: Subscriber) -> None:
         self.subscribers.add(subscriber)
@@ -230,6 +237,11 @@ class Root:
         own `await` would be true only at that call boundary, and a steer, a
         cancel or an inbox wake between turns would move one and not the other.
         """
+        # Parked on a person outranks what the agent says: it reports `running`
+        # while an approval is open, which is true and not useful. See
+        # `test_a_root_parked_on_a_person_may_be_released`.
+        if self.desk is not None and self.desk.waiting:
+            return "waiting"
         live = str(self.agent.status)
         # `retrying` is derived here too, not only published. Announcing it as a
         # notification while `sessions/list` still said "idle" gave a client
@@ -479,6 +491,13 @@ class Supervisor:
                 waiting=waiting,
                 exits=exits,
             )
+            # The one thing standing between a gated tool call and a person
+            # (P5-13). Registered here rather than by a row: the answerers are
+            # this *deployment's* front-end channel, not a capability a profile
+            # contributes, and they unwind with the root that owns them.
+            root.desk = AskDesk(root=root)
+            for dispose in root.desk.attach():
+                exits.callback(dispose)
             # Both folds are read back from this session's own log, once, here:
             # what it already did (so a retry after a restart is not a second
             # turn) and how far up the retry ladder it got (so a root resumed
@@ -1024,7 +1043,8 @@ class Supervisor:
         not a claim on the root's life. What keeps a scheduled root mounted is the
         schedule.
         """
-        if root.status != "idle":
+        # `waiting` joins `idle`, which is the whole reason that status exists.
+        if root.status not in ("idle", "waiting"):
             return False
         if root.subscribers:
             return False

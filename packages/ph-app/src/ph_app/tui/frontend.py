@@ -30,6 +30,7 @@ import logging
 from collections.abc import Callable
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Protocol
 
 from ph.agent.types import AgentCancelCause, AgentOptions
@@ -44,7 +45,7 @@ from ..runtime import mounted
 from .adapter import TuiEventAdapter
 from .state import TuiState
 
-__all__ = ["HarnessSession", "ModalHost", "open_harness"]
+__all__ = ["FrontSession", "HarnessSession", "ModalHost", "open_harness"]
 
 log = logging.getLogger("ph_app.tui.frontend")
 
@@ -62,6 +63,76 @@ class ModalHost(Protocol):
 
     def state_changed(self) -> None:
         """The state was mutated; redraw when convenient."""
+        ...
+
+
+class FrontSession(Protocol):
+    """What the terminal needs from a harness — wherever that harness is.
+
+    **The terminal may not reach past this.** `PHTuiApp` used to read
+    `front.ctx` in nine places — the command registry, the screen registry, the
+    llm routes, the persistence store, the permission presets, the credentials —
+    and every one of them is a service lookup that exists only when the harness
+    is in *this process*. Once a front end can be a socket client (P5-14) those
+    reads have no answer, so each becomes a method here and each implementation
+    answers it however it can: in-process by resolving the seam, remotely by
+    asking the daemon.
+
+    So the protocol is deliberately shaped around **what the screen needs**
+    rather than which service supplies it: `providers()` and not `ctx.llm`,
+    `credential_held(name)` and not `ctx.credentials`. A member that handed back
+    a service would be a `ctx` reach-through wearing a different name, and the
+    remote implementation could not satisfy it.
+
+    `session` stays, and is not a leak: both implementations have a real
+    `Session` — in-process it is the live one, and a remote front end rebuilds
+    one from the snapshot pages it already needs for the transcript. A screen is
+    a fold of a log (`ScreenDefinition.build(session)`), which is exactly what
+    survives the move.
+    """
+
+    state: TuiState
+    session: Session
+    config_rows: tuple[Any, ...]
+
+    def status_readings(self) -> list[StatusReading]: ...
+    async def submit(self, text: str) -> None: ...
+    async def run_command(self, line: str) -> str | None: ...
+    def queue(self, text: str) -> None: ...
+    def cancel(self) -> None: ...
+    async def flush(self) -> None: ...
+    async def close(self) -> None: ...
+
+    def attach_surfaces(self, app: Any) -> list[Callable[[], Any]]:
+        """Register this front end's own verbs and screens; return their disposers."""
+        ...
+
+    def commands(self) -> list[Any]:
+        """Every slash command a person may run here."""
+        ...
+
+    def screen(self, screen_id: str) -> Any:
+        """One registered screen definition, or `None`."""
+        ...
+
+    def providers(self) -> list[Any]:
+        """The model routes this deployment can reach."""
+        ...
+
+    def sessions_directory(self, fallback: Path) -> Path:
+        """Where the picker should list stored sessions from."""
+        ...
+
+    def set_preset(self, name: str) -> None:
+        """Switch the permission preset. The service records it; the log carries it."""
+        ...
+
+    def credential_held(self, name: str) -> bool:
+        """Whether this credential is already available to the harness."""
+        ...
+
+    def store_credential(self, name: str, value: str) -> bool:
+        """Provide a secret for this session. `False` when there is nowhere to put it."""
         ...
 
 
@@ -141,6 +212,73 @@ class HarnessSession:
         await self.ctx.sessions.flush(self.session)
 
     # ------------------------------------------------------------- lifecycle --
+
+    # ------------------------------------------- what the screen may ask for --
+    #
+    # Each of these was a `front.ctx.get(...)` in `app.py`. They resolve a seam
+    # and answer with data, so the terminal never holds a service — see
+    # `FrontSession`.
+
+    def attach_surfaces(self, app: Any) -> list[Callable[[], Any]]:
+        """Register this front end's verbs and screens against the live context.
+
+        Imported here rather than at module scope: `commands` and `screens` are
+        the Textual-shaped half of the front end, and this module is driven
+        headless by `test_tui_frontend.py` with no terminal in the loop.
+        """
+        from .commands import register_tui_commands
+        from .screens import present_screens
+
+        disposers = register_tui_commands(self.ctx, app)
+        attached = present_screens(self.ctx, app)
+        if attached is not None:
+            disposers.append(attached)
+        return disposers
+
+    def commands(self) -> list[Any]:
+        registry = self.ctx.get("commands")
+        return list(registry.list()) if registry is not None else []
+
+    def screen(self, screen_id: str) -> Any:
+        registry = self.ctx.get("tui_screens")
+        return registry.get(screen_id) if registry is not None else None
+
+    def providers(self) -> list[Any]:
+        llm = self.ctx.get("llm")
+        return list(llm.list_providers()) if llm is not None else []
+
+    def sessions_directory(self, fallback: Path) -> Path:
+        """The family directory this session lives beside, or `fallback`.
+
+        Through `locate`, not `store.root`: that attribute is the JSONL backend's
+        and reading it raised `AttributeError` on any other — a picker that
+        crashes is not a deferral. **Up past the family directory**, because a log
+        lives at `<sessions>/<family>/<id>.jsonl`, so `located.parent` is one
+        conversation and its branches and a picker showing only that lists
+        everything except what a person opened it to find.
+        """
+        store = self.ctx.get("session_persistence")
+        located = store.locate(self.session.id) if store is not None else None
+        return located.parent.parent if located is not None else fallback
+
+    def set_preset(self, name: str) -> None:
+        presets = self.ctx.get("permission_presets")
+        if presets is not None:
+            # The service appends `permission/preset`; the adapter picks it up
+            # from the log like any other event, so the display follows the
+            # record rather than being set beside it.
+            presets.apply_preset(name, self.session)
+
+    def credential_held(self, name: str) -> bool:
+        credentials = self.ctx.get("credentials")
+        return bool(credentials is not None and credentials.has(credentials.reference(name)))
+
+    def store_credential(self, name: str, value: str) -> bool:
+        credentials = self.ctx.get("credentials")
+        if credentials is None:
+            return False
+        credentials.provide_value(name, value)
+        return True
 
     async def close(self) -> None:
         """Flush the log, unregister the front-end, unmount the harness.

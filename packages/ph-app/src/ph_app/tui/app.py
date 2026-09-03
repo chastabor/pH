@@ -40,9 +40,9 @@ from ph.seams.permission_presets import PRESETS
 from ph.seams.user_questions import UserQuestion
 
 from .autocomplete import PathCompleter
-from .commands import app_bindings, register_tui_commands
+from .commands import app_bindings
 from .config import TuiKeybindings, TuiSettings, load_tui_settings, save_tui_settings
-from .frontend import HarnessSession, open_harness
+from .frontend import FrontSession, open_harness
 from .modals.approval import ApprovalModal
 from .modals.ask_user import AskUserModal
 from .modals.base import Choice, ChoicePicker
@@ -55,7 +55,7 @@ from .modals.pickers import (
     theme_choices,
 )
 from .modals.trust import TrustStore, project_trust_modal
-from .screens import Revealing, RevealSeq, present_screens
+from .screens import Revealing, RevealSeq
 from .terminal import TerminalTitle
 from .themes import ThemeCatalog, fallback_variables, load_catalog
 from .widgets.prompt import PromptInput
@@ -114,7 +114,7 @@ class PHTuiApp(App[str | None]):
         self.catalog: ThemeCatalog = load_catalog(self.home)
         self.project = Path.cwd()
         self.trust = TrustStore(path=self.home / "trust.json")
-        self.front: HarnessSession | None = None
+        self.front: FrontSession | None = None
         self.title_writer = TerminalTitle()
         self._paths = PathCompleter(root=str(self.project))
         self._dirty = True
@@ -235,13 +235,10 @@ class PHTuiApp(App[str | None]):
             log.exception("ph_app.tui: the harness would not mount")
             self.notify(str(error), title="pH could not start", severity="error", markup=False)
             return
-        self._command_disposers = register_tui_commands(self.front.ctx, self)
         # A screen a row contributed gets its verb, its key and its palette
         # entry from here — but each of those unwinds with the *row*, not with
         # this list, which is what makes unloading one take all three with it.
-        attached = present_screens(self.front.ctx, self)
-        if attached is not None:
-            self._command_disposers.append(attached)
+        self._command_disposers = self.front.attach_surfaces(self)
         self._dirty = True
 
     async def on_unmount(self) -> None:
@@ -275,7 +272,7 @@ class PHTuiApp(App[str | None]):
         if self._sidebar is not None and self._sidebar.display:
             self._sidebar.show(front.state, session_id=front.session.id, cwd=str(self.project))
 
-    def _rows(self, front: HarnessSession) -> list[Any]:
+    def _rows(self, front: FrontSession) -> list[Any]:
         return front.state.visible_items(
             thinking=self.settings.show_thinking, tool_results=self.settings.show_tool_results
         )
@@ -302,7 +299,7 @@ class PHTuiApp(App[str | None]):
         if self.front is not None and self.front.state.status == "running":
             self.front.cancel()
 
-    async def _dispatch_command(self, front: HarnessSession, line: str) -> None:
+    async def _dispatch_command(self, front: FrontSession, line: str) -> None:
         name = line.split()[0]
         try:
             shown = await front.run_command(line)
@@ -406,12 +403,11 @@ class PHTuiApp(App[str | None]):
     def _screen(self, screen_id: str) -> Any:
         """The registered screen with this id, or `None`."""
         front = self.front
-        registry = front.ctx.get("tui_screens") if front is not None else None
-        return registry.get(screen_id) if registry is not None else None
+        return front.screen(screen_id) if front is not None else None
 
     def action_open_commands(self) -> None:
         if self.front is not None:
-            self._pick("commands", command_choices(self.front.ctx.commands), self._insert_command)
+            self._pick("commands", command_choices(self.front.commands()), self._insert_command)
 
     def _insert_command(self, chosen: str | None) -> None:
         if chosen is not None and self._prompt is not None:
@@ -422,8 +418,7 @@ class PHTuiApp(App[str | None]):
         front = self.front
         if front is None:
             return
-        llm = front.ctx.get("llm")
-        providers = llm.list_providers() if llm is not None else []
+        providers = front.providers()
         self._pick(
             "model",
             model_choices(providers, front.state.provider, front.state.model),
@@ -445,20 +440,10 @@ class PHTuiApp(App[str | None]):
         front = self.front
         if front is None:
             return
-        # Through `locate`, not `store.root`: that attribute is the JSONL
-        # backend's and reading it raised `AttributeError` on any other — a
-        # picker that crashes is not a deferral. A backend with no per-session
-        # file answers `None`, and the picker falls back to the default
-        # directory and lists nothing, which is honest until P5-14 moves it onto
-        # `stored()`.
-        store = front.ctx.get("session_persistence")
-        located = store.locate(front.session.id) if store is not None else None
-        # **Up past the family directory.** A log lives at
-        # `<sessions>/<family>/<id>.jsonl`, so `located.parent` is the lineage
-        # this session belongs to — one conversation and its branches — and a
-        # picker showing only that lists everything except what a person opened
-        # it to find.
-        directory = located.parent.parent if located is not None else self.home / "sessions"
+        # A backend with no per-session file answers the fallback, and the
+        # picker lists nothing — honest until P5-14 moves this onto `stored()`.
+        # `FrontSession.sessions_directory` carries the rest of the reasoning.
+        directory = front.sessions_directory(self.home / "sessions")
         self._pick(
             "sessions",
             session_choices(directory, current=front.session.id),
@@ -497,22 +482,16 @@ class PHTuiApp(App[str | None]):
         front = self.front
         if chosen is None or front is None or chosen not in PRESETS:
             return
-        presets = front.ctx.get("permission_presets")
-        if presets is None:
-            return
-        # The service appends `permission/preset`; the adapter picks it up from
-        # the log like any other event, so the display follows the record.
-        presets.apply_preset(chosen, front.session)
+        front.set_preset(chosen)
         self._dirty = True
 
     def action_open_login(self) -> None:
         front = self.front
         if front is None:
             return
-        credentials = front.ctx.get("credentials")
         self._pick(
             "credential",
-            credential_choices(front.config_rows, credentials),
+            credential_choices(front.config_rows, front.credential_held),
             self._ask_for_secret,
             free_text="environment variable",
         )
@@ -523,12 +502,10 @@ class PHTuiApp(App[str | None]):
 
     def _store(self, name: str, value: str | None) -> None:
         front = self.front
-        credentials = front.ctx.get("credentials") if front is not None else None
-        if value is None or credentials is None:
-            return
         # In-process only, and never written down: `notify` names the credential
         # and never the secret.
-        credentials.provide_value(name, value)
+        if value is None or front is None or not front.store_credential(name, value):
+            return
         self.notify(f"{name} set for this session", title="login", markup=False)
 
     async def action_toggle_thinking(self) -> None:
@@ -563,7 +540,7 @@ class PHTuiApp(App[str | None]):
         front = self.front
         commands: list[tuple[str, str]] = []
         if front is not None:
-            commands = [(d.name, d.summary) for d in front.ctx.commands.list()]
+            commands = [(d.name, d.summary) for d in front.commands()]
         return {"commands": commands, "paths": self._paths}
 
 

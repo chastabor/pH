@@ -35,6 +35,7 @@ __all__ = [
     "notification",
     "request",
     "respond",
+    "result_of",
     "resume_at",
 ]
 
@@ -137,9 +138,33 @@ def notification(method: str, params: dict[str, Any]) -> dict[str, Any]:
     return {"jsonrpc": "2.0", "method": method, "params": params}
 
 
-def request(request_id: int, method: str, params: dict[str, Any]) -> dict[str, Any]:
-    """A frame that expects a reply. The client's half of the envelope."""
+def request(request_id: int | str, method: str, params: dict[str, Any]) -> dict[str, Any]:
+    """A frame that expects a reply — from either side.
+
+    `int | str` because both ends mint ids now (P5-13): a client counts its own
+    calls, and the daemon mints `"s<n>"` for the questions it puts *to* a client.
+    Strings and ints cannot collide, which is what lets a reader of a frame log
+    tell at a glance which side asked.
+
+    **Which means `id` cannot say which direction a frame is going, and `method`
+    can.** A frame carrying one is somebody asking; a frame without one is an
+    answer. Both pumps route on that, and both were written assuming the
+    opposite — the reason it is stated here rather than twice over there.
+    """
     return {"jsonrpc": "2.0", "id": request_id, "method": method, "params": params}
+
+
+def result_of(frame: dict[str, Any]) -> dict[str, Any]:
+    """One reply frame as its result, raising whatever the peer refused.
+
+    Both directions unwrap a reply the same way, so this is the one place that
+    knows an `error` member outranks a `result` — written twice, the two copies
+    disagreed about what an empty frame meant.
+    """
+    if "error" in frame:
+        raise DaemonError.of(frame["error"])
+    result: dict[str, Any] = frame.get("result") or {}
+    return result
 
 
 def cursor_of(session: Any, sequence: int | None = None) -> dict[str, Any]:

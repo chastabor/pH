@@ -16,7 +16,7 @@ plugin shows up without this module changing (I7).
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from typing import Any
 
 from textual.app import ComposeResult
@@ -96,12 +96,17 @@ def _walk(value: Any) -> Iterable[str]:
             yield from _walk(item)
 
 
-def credential_choices(rows: Iterable[Any], credentials: Any) -> list[Choice]:
-    """The credentials pH could use, marked with the ones it already has."""
+def credential_choices(rows: Iterable[Any], held: Callable[[str], bool]) -> list[Choice]:
+    """The credentials pH could use, marked with the ones it already has.
+
+    A predicate rather than the `CredentialService`: "is this one set" is the
+    only question this asks of it, and a predicate is answerable by a front end
+    that reaches its harness over a socket.
+    """
     choices: list[Choice] = []
     for name in credential_names(rows):
-        held = bool(credentials is not None and credentials.has(credentials.reference(name)))
+        is_held = held(name)
         choices.append(
-            Choice(value=name, label=name, detail="set" if held else "not set", marked=held)
+            Choice(value=name, label=name, detail="set" if is_held else "not set", marked=is_held)
         )
     return choices

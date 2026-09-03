@@ -11,7 +11,6 @@ protocol grows.
 from __future__ import annotations
 
 import secrets
-from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -19,81 +18,83 @@ from typing import Any
 import anyio
 from anyio.abc import ByteStream
 
-from ..protocol import DaemonError, DaemonGone, notification, request
-from .framing import read_frames, write_frame
+from ..protocol import notification
+from .duplex import Handler, Notification, Peer
 
 __all__ = ["DaemonClient"]
-
-Notification = Callable[[str, dict[str, Any]], None]
 
 
 @dataclass(slots=True)
 class DaemonClient:
-    """One connection, with replies matched to requests by id."""
+    """One connection to the daemon, and what this end can answer back.
+
+    The framing, the pending table and the write ordering all live in `Peer`,
+    which the daemon's own connection object is built from too. What is left here
+    is pH's client vocabulary: the identity a command is idempotent under, and
+    the two verbs a caller actually says.
+    """
 
     stream: ByteStream
     on_notify: Notification | None = None
+    handlers: dict[str, Handler] = field(default_factory=dict)
+    """What this client will answer when the *daemon* asks it something (P5-13).
+
+    The protocol was one-directional for anything expecting a reply, but a front
+    end's whole contract is two calls that wait for a person — an approval and a
+    question — so the daemon has to be able to ask. A method here is how this
+    client says it can answer one."""
     id: str = field(default_factory=lambda: f"client-{secrets.token_hex(6)}")
-    """This connection's identity, for idempotence. Minted rather than asked
-    for: a caller that had to supply one would supply the same one twice."""
-    closed: anyio.Event = field(default_factory=anyio.Event)
-    """Set when the pump stops, whichever end ended it.
-
-    "The daemon went away" is a thing a client has to be able to *wait for*,
-    not only notice: `ph agents shutdown` sends a notification by contract —
-    no id, so no reply — and the only honest confirmation that it landed is
-    the connection the daemon closes on its way out. Polling for the socket
-    file to vanish would answer a different question a beat later.
-
-    Constructed here rather than in `connect` because every construction path
-    is already inside a running event loop, which `anyio.Event()` requires.
-    """
+    """This connection's identity, for idempotence. Minted rather than asked for:
+    a caller that had to supply one would supply the same one twice."""
     _commands: int = 0
-    _next_id: int = 0
-    _replies: dict[int, dict[str, Any]] = field(default_factory=dict)
-    _events: dict[int, anyio.Event] = field(default_factory=dict)
+    _peer: Peer | None = None
 
     @classmethod
     async def connect(cls, path: Path, on_notify: Notification | None = None) -> DaemonClient:
         stream: ByteStream = await anyio.connect_unix(str(path))
         return cls(stream=stream, on_notify=on_notify)
 
-    async def pump(self) -> None:
-        """Read frames until the socket closes. Run this in a task group.
+    @property
+    def peer(self) -> Peer:
+        """This connection's duplex end, built on first use.
 
-        A closed stream ends the pump rather than raising: closing the client is
-        how a caller says it is done, and a teardown that reports the thing it
-        asked for as an error is one every caller has to write a `try` around.
+        Lazily, because a `DaemonClient` is constructed in places that are not yet
+        inside a running loop, and `Peer` holds an `anyio.Event`.
         """
-        try:
-            await self._pump()
-        except (anyio.ClosedResourceError, anyio.BrokenResourceError, anyio.EndOfStream):
-            return
-        finally:
-            # In `finally`, so a caller waiting on `closed` is woken by a
-            # cancellation and a crash as well as by an orderly end. A wait that
-            # only completes on the happy path is a hang wearing a timeout.
-            self.closed.set()
-            # And everyone waiting on a reply that is now never coming. Nothing
-            # else can wake them: the event a `call` waits on is set by the pump
-            # reading its frame, so a connection that ends mid-request left every
-            # in-flight caller parked forever — `ph agents attach` detaching from
-            # a daemon that just shut down hit exactly that.
-            for waiting in self._events.values():
-                waiting.set()
-            self._events.clear()
+        if self._peer is None:
+            self._peer = Peer(
+                stream=self.stream,
+                dispatch=self._answer,
+                on_notify=self.on_notify,
+                id_prefix="c",
+            )
+        return self._peer
 
-    async def _pump(self) -> None:
-        async for frame in read_frames(self.stream):
-            reply_id = frame.get("id")
-            if reply_id is None:
-                if self.on_notify is not None:
-                    self.on_notify(str(frame.get("method", "")), frame.get("params") or {})
-                continue
-            self._replies[int(reply_id)] = frame
-            waiting = self._events.pop(int(reply_id), None)
-            if waiting is not None:
-                waiting.set()
+    @property
+    def closed(self) -> anyio.Event:
+        """Set when the pump stops, whichever end ended it."""
+        return self.peer.closed
+
+    async def _answer(self, method: str, params: dict[str, Any]) -> Any:
+        handler = self.handlers.get(method)
+        if handler is None:
+            raise LookupError(f'this client cannot answer "{method}"')
+        return await handler(params)
+
+    async def pump(self) -> None:
+        """Read frames until the socket closes. Run this in a task group."""
+        await self.peer.serve()
+
+    async def initialize(self, *capabilities: str) -> dict[str, Any]:
+        """Trade capability blocks: what the daemon serves, what this end answers.
+
+        Both directions in one call, because they are one negotiation. A client
+        that can put a question in front of a person says `asks` here — once, for
+        the connection — and every root it attaches to afterwards may ask it. The
+        alternative, a flag on each `session/attach`, let one client answer for
+        one session and not another, which is not a thing a UI can be.
+        """
+        return await self.call("initialize", capabilities=list(capabilities))
 
     async def prompt(self, session_id: str, text: str) -> dict[str, Any]:
         """Queue a turn, idempotently, without the caller minting ids.
@@ -115,31 +116,19 @@ class DaemonClient:
 
     async def call(self, method: str, **params: Any) -> dict[str, Any]:
         """One request, awaited to its reply. Raises what the server refused."""
-        self._next_id += 1
-        request_id = self._next_id
-        waiting = anyio.Event()
-        self._events[request_id] = waiting
-        await write_frame(self.stream, request(request_id, method, params))
-        await waiting.wait()
-        frame = self._replies.pop(request_id, {})
-        if not frame:
-            # Woken by the pump ending rather than by an answer. Named, because an
-            # empty `{}` reads as a successful reply with no fields in it — and
-            # named as a *disconnection*, because no server said no.
-            raise DaemonGone
-        if "error" in frame:
-            raise DaemonError.of(frame["error"])
-        result: dict[str, Any] = frame.get("result") or {}
-        return result
+        return await self.peer.ask(method, params)
 
     async def notify(self, method: str, **params: Any) -> None:
         """Send a request that expects no reply.
 
         `shutdown` is the one that matters: a request-with-reply would have the
-        caller waiting on a frame the daemon is in the middle of tearing down
-        the ability to send. "Stop" is not a question, so it does not get an id.
+        caller waiting on a frame the daemon is in the middle of tearing down the
+        ability to send. "Stop" is not a question, so it does not get an id.
+
+        Waits for room rather than refusing, unlike the daemon's `tell`: a client
+        that cannot write has nobody to drop but itself.
         """
-        await write_frame(self.stream, notification(method, params))
+        await self.peer.send(notification(method, params))
 
     async def aclose(self) -> None:
         await self.stream.aclose()

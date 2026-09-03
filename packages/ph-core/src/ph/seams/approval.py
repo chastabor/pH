@@ -43,6 +43,7 @@ __all__ = [
     "Edited",
     "PendingApproval",
     "Responded",
+    "answer_from_wire",
     "answer_kind",
     "apply",
     "denial_reason",
@@ -143,6 +144,30 @@ ApprovalAnswer: TypeAlias = "ApprovalOutcome | Edited | Responded"
 The four bare outcomes stay strings so the fail-closed reading is unchanged and
 every existing answerer keeps working; the two that carry data are objects
 because they have data to carry."""
+
+
+def answer_from_wire(raw: Any) -> ApprovalAnswer:
+    """One answer as it arrives from a front end that is not in this process.
+
+    `answer_kind`'s inverse, and here rather than in whatever transport happens
+    to need it first: the four bare outcomes and the two that carry data are this
+    seam's vocabulary, so a second decoder in `ph_app` would be a second opinion
+    about what `{"kind": "edited"}` means.
+
+    **Anything unrecognised is `unavailable`**, never a denial and never a pass.
+    The outcomes are distinct on purpose — a model told "the user rejected this"
+    can re-plan, one told "there is no approval channel" knows the deployment is
+    misconfigured — and a garbled frame is the second of those, not the first.
+    """
+    if isinstance(raw, str):
+        return cast(ApprovalAnswer, raw) if raw in get_args(ApprovalOutcome) else "unavailable"
+    if isinstance(raw, dict):
+        kind = raw.get("kind")
+        if kind == "edited":
+            return Edited(arguments=raw.get("arguments"))
+        if kind == "responded":
+            return Responded(message=str(raw.get("message", "")))
+    return "unavailable"
 
 
 def answer_kind(answer: ApprovalAnswer) -> str:

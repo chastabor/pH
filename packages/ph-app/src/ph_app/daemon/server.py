@@ -46,11 +46,9 @@ from ..protocol import (
     Refusal,
     capabilities,
     cursor_of,
-    notification,
-    respond,
     resume_at,
 )
-from .framing import FramingError, read_frames, write_frame
+from .duplex import Peer
 from .recovery import PASSIVATE_AFTER, WAKE_WITHIN
 from .supervisor import NON_GUARANTEES, Supervisor
 
@@ -89,7 +87,7 @@ to correlate it with. Cheaper than the sweep it sits beside: one `lstat`, no
 roots walked.
 """
 
-CAPABILITIES = ("roots", "attach", "cursors", "snapshots")
+CAPABILITIES = ("roots", "attach", "cursors", "snapshots", "asks")
 """What this transport adds to the two both of them have.
 
 A constant because two callers say it now — `initialize`, and the `daemon/status`
@@ -126,73 +124,65 @@ class NoSuchSession(Refusal):
     code = "no_such_session"
 
 
-@dataclass(slots=True)
+@dataclass(slots=True, eq=False)
 class _Connection:
     """One client, and the roots it is watching.
 
-    The attachment table is per connection so a disconnect can undo exactly what
-    that client did — a root keeps running, and stops sending to a socket nobody
-    is reading.
+    `eq=False` so identity is identity: a connection goes into the ask desk's set
+    of front ends, and a dataclass's generated `__eq__` takes `__hash__` away with
+    it. Two clients are never the same client, whatever their fields hold.
+
+    The framing, the pending table, the write ordering and the in-flight bound
+    all live in `Peer`, which the *client* is built from too — see
+    `duplex.py` for why one object rather than two.
     """
 
     stream: ByteStream
     server: DaemonServer
     attached: set[str] = field(default_factory=set)
-    outbox: Any = None
+    declared: frozenset[str] = frozenset()
+    """What this *client* said it can do, at `initialize`.
+
+    Capabilities go both ways for the same reason they go one way: a client
+    reads the server's block rather than inferring from which socket it opened,
+    and the server reads this rather than inferring from which method arrived.
+    `asks` is the name in both directions — the daemon offering to ask, and a
+    client offering to answer — because it is one feature, and half of it is
+    useless without the other half."""
+    _peer: Peer | None = None
+
+    @property
+    def peer(self) -> Peer:
+        if self._peer is None:
+            self._peer = Peer(stream=self.stream, dispatch=self._dispatch, id_prefix="s")
+        return self._peer
+
+    def notify(self, method: str, params: dict[str, Any]) -> None:
+        """Queue a notification, or *raise* so the root drops this watcher.
+
+        Raising is the point: catching `WouldBlock` here and logging "dropped"
+        drops nothing, and the watcher that cannot keep up re-pays the whole
+        fan-out for every later event. The subscriber list belongs to the root,
+        so the root is what removes from it; this only has to fail loudly enough
+        to be noticed.
+        """
+        self.peer.tell(method, params)
+
+    async def ask(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+        """Put a question to this client and wait for the person behind it."""
+        return await self.peer.ask(method, params)
 
     async def serve(self) -> None:
-        send, receive = anyio.create_memory_object_stream[dict[str, Any]](max_buffer_size=1024)
-        self.outbox = send
         try:
-            async with anyio.create_task_group() as group:
-                # Writes go through one task, so a notification arriving while a
-                # reply is half-written cannot interleave two frames on the wire.
-                group.start_soon(self._pump, receive)
-                await self._read()
-                group.cancel_scope.cancel()
+            await self.peer.serve()
         finally:
             for root_id in self.attached:
                 root = self.server.supervisor.roots.get(root_id)
                 if root is not None:
                     root.unsubscribe(self.notify)
+                    if root.desk is not None:
+                        root.desk.leave(self)
             self.attached.clear()
-            await send.aclose()
-
-    async def _pump(self, receive: Any) -> None:
-        async with receive:
-            async for payload in receive:
-                try:
-                    await write_frame(self.stream, payload)
-                except (anyio.BrokenResourceError, anyio.ClosedResourceError):
-                    return
-
-    async def _read(self) -> None:
-        try:
-            async for request in read_frames(self.stream):
-                await self._handle(request)
-        except FramingError as error:
-            # Unreadable framing ends the connection: after a bad frame there is
-            # no way to know where the next one starts.
-            log.info("ph_app.daemon: closing a connection — %s", error)
-        except (anyio.BrokenResourceError, anyio.ClosedResourceError):
-            return
-
-    def notify(self, method: str, params: dict[str, Any]) -> None:
-        """Queue a notification, or *raise* so the root drops this watcher.
-
-        **Raising is the point.** Catching `WouldBlock` here and logging "dropped"
-        drops nothing, and the watcher that cannot keep up re-pays the whole fan-out
-        for every later event. The subscriber list belongs to the root, so the root
-        is what removes from it; this only has to fail loudly enough to be noticed.
-        """
-        if self.outbox is None:
-            raise RuntimeError("this connection is closed")
-        self.outbox.send_nowait(notification(method, params))
-
-    async def _handle(self, request: dict[str, Any]) -> None:
-        reply = await respond(request, self._dispatch)
-        if reply is not None and self.outbox is not None:
-            self.outbox.send_nowait(reply)
 
     async def _dispatch(self, method: str, params: dict[str, Any]) -> Any:
         """The daemon's half of the vocabulary — dsh's names (P5-02).
@@ -204,6 +194,13 @@ class _Connection:
         """
         supervisor = self.server.supervisor
         if method in ("initialize", "daemon/hello"):
+            # A property of the *client*, so it is said once here rather than
+            # per-attach: whether a UI can put a modal in front of a person does
+            # not vary by which session it is watching, and a per-attach flag let
+            # the same client claim it for one root and not another — two answers
+            # to a question with one true answer.
+            declared = params.get("capabilities") or ()
+            self.declared = frozenset(str(name) for name in declared)
             return capabilities(*CAPABILITIES)
         if method == "sessions/list":
             return {"sessions": supervisor.describe()}
@@ -291,6 +288,12 @@ class _Connection:
         if root.id not in self.attached:
             self.attached.add(root.id)
             root.subscribe(self.notify)
+        # Watching and answering are different claims, and the second is the
+        # client's `asks` capability rather than anything about this attach: a
+        # follower like `ph agents attach` watches without ever declaring it, and
+        # is never asked. See `test_a_watcher_that_is_not_a_front_end_is_never_asked`.
+        if "asks" in self.declared and root.desk is not None:
+            root.desk.join(self)
         return {
             **root.describe(),
             # Where this client is being resumed from, said out loud: a stale

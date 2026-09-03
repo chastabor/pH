@@ -374,5 +374,9 @@ def test_credential_choices_mark_what_is_already_set(monkeypatch: pytest.MonkeyP
         {"id": "a", "config": {"apiKeyEnv": "PH_PRESENT_KEY"}},
         {"id": "b", "config": {"apiKeyEnv": "PH_ABSENT_KEY"}},
     ]
-    marked = {choice.value: choice.marked for choice in credential_choices(rows, credentials)}
+
+    def held(name: str) -> bool:
+        return credentials.has(credentials.reference(name))
+
+    marked = {choice.value: choice.marked for choice in credential_choices(rows, held)}
     assert marked == {"PH_PRESENT_KEY": True, "PH_ABSENT_KEY": False}

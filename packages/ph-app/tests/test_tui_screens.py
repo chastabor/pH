@@ -14,7 +14,9 @@ that needs a terminal.
 
 from __future__ import annotations
 
+import ast
 import json
+import pathlib
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -22,8 +24,10 @@ from typing import Any
 import pytest
 from tui_helpers import running, turn_done, until
 
+import ph_app.tui
 from ph.seams.tui_screens import ScreenDefinition
 from ph_app.tui.app import PHTuiApp
+from ph_app.tui.frontend import FrontSession
 from ph_app.tui.modals.pickers import command_choices
 from ph_app.tui.trajectory_screen import SCREEN_ID, TRAJECTORY_KEY, TrajectoryScreen
 from ph_app.tui.widgets.prompt import PromptInput
@@ -54,11 +58,11 @@ def _routes(app: PHTuiApp, screen_id: str) -> set[str]:
     which is the shape of gate this project has been bitten by twice.
     """
     assert app.front is not None
-    commands = app.front.ctx.commands
+    definitions = app.front.commands()
     found: set[str] = set()
-    if commands.get(screen_id) is not None:
+    if any(one.name == screen_id for one in definitions):
         found.add("command")
-    if f"/{screen_id}" in {choice.value for choice in command_choices(commands)}:
+    if f"/{screen_id}" in {choice.value for choice in command_choices(definitions)}:
         found.add("palette")
     if _binding(app, screen_id) is not None:
         found.add("key")
@@ -275,3 +279,41 @@ async def test_a_seq_with_no_row_lands_on_the_nearest_one_before_it(
         assert app._view.scroll_to_seq(between)
         await pilot.pause()
         assert app._view.seq_in_view() == rows[1].seq
+
+
+def test_the_terminal_never_reaches_past_the_front_session() -> None:
+    """`app.py` and the widgets may only touch what `FrontSession` declares.
+
+    Every member the terminal reads off its harness has to be one a *remote*
+    harness can answer. `front.ctx` was the obvious offender — nine service
+    lookups that only exist while the harness is in this process — but it is the
+    class of thing that matters, not the name: `front.agent`, `front.ctx`,
+    `front._stack` all fail the same way, and only over a socket, which is why no
+    amount of running the terminal today would catch one.
+
+    So the check is **membership**, not a banned word: whatever is read off
+    `front` must be in the Protocol. That makes the test self-updating — adding a
+    member to `FrontSession` licenses it here — and strictly stronger than
+    forbidding `.ctx`, which both missed every other reach-through and would have
+    flagged an unrelated `event.ctx`.
+
+    `frontend.py` is deliberately out of scope: it *is* the in-process
+    implementation, and resolving seams is its whole job.
+    """
+    allowed = set(dir(FrontSession)) | set(getattr(FrontSession, "__annotations__", {}))
+    root = pathlib.Path(ph_app.tui.__path__[0])
+    watched = [root / "app.py", *sorted((root / "widgets").rglob("*.py"))]
+    offenders: list[str] = []
+    for path in watched:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Attribute) or node.attr in allowed:
+                continue
+            # `front.x` and `self.front.x` — the two spellings the terminal uses
+            # to reach its harness.
+            base = node.value
+            named = isinstance(base, ast.Name) and base.id == "front"
+            through_self = isinstance(base, ast.Attribute) and base.attr == "front"
+            if named or through_self:
+                offenders.append(f"{path.name}:{node.lineno} reads front.{node.attr}")
+    assert offenders == [], offenders

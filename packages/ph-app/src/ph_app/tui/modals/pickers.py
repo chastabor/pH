@@ -17,7 +17,7 @@ with one node, and the list reads the same either way.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -38,15 +38,20 @@ __all__ = [
 ]
 
 
-def command_choices(commands: Any) -> list[Choice]:
-    """Every registered slash command."""
+def command_choices(definitions: Iterable[Any]) -> list[Choice]:
+    """Every registered slash command.
+
+    Definitions rather than the registry: the terminal asks its `FrontSession`
+    for them, which is what lets a front end in another process answer with a
+    list off the wire instead of a service it cannot hold.
+    """
     return [
         Choice(
             value=f"/{definition.name}",
             label=f"/{definition.name} {definition.argument_hint}".rstrip(),
             detail=definition.summary,
         )
-        for definition in commands.list()
+        for definition in definitions
     ]
 
 

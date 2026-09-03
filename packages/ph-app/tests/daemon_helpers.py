@@ -41,9 +41,14 @@ class _Daemon:
     """The `DaemonServer` behind the socket, for the tests whose subject is the
     supervisor itself rather than the wire."""
 
-    async def client(self, on_notify: Any = None) -> DaemonClient:
+    async def client(self, on_notify: Any = None, *capabilities: str) -> DaemonClient:
+        """One connected, pumping client. `capabilities` are what it declares.
+
+        Passing `"asks"` is what makes it a front end — see `AskDesk`."""
         client = await DaemonClient.connect(self.path, on_notify)
         self.tasks.start_soon(client.pump)
+        if capabilities:
+            await client.initialize(*capabilities)
         return client
 
 
