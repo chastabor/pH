@@ -38,14 +38,14 @@ from typing import Any
 
 from ph.session import Session, SessionEvent
 from ph.tools import ToolResult
-from ph.tools.presentation import render_call_view, render_result_view
+from ph.tools.presentation import CARD_VIEWS, render_call_view, render_result_view
 
 from ..wire import obj, result_block
 
 __all__ = ["CARD_EVENTS", "presentation_of"]
 
-CARD_EVENTS = frozenset({"tool/call", "tool/result"})
-"""The event types that carry a view.
+CARD_EVENTS = frozenset(CARD_VIEWS)
+"""The event types that carry a view — derived from the one table that says which.
 
 **Checked by the callers**, not only in here: the relay runs once per appended
 event — every streamed assistant chunk included — and an argument is evaluated

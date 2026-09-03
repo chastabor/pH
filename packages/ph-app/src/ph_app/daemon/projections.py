@@ -6,6 +6,13 @@ credentials — because the harness was in its own process. Over a socket none o
 that is reachable, and the alternative to projecting it is a UI that quietly does
 less when it is remote, which is the split this whole plan exists to avoid.
 
+**Nothing here spells a field.** Each seam describes its own wire form —
+`StatusReading.to_wire()`, `CommandDefinition.schema()`, `ScreenDefinition.schema()`
+— the way `ToolSchema` already did for tools (P7-11), so a field added to a seam
+reaches a browser tab with no edit here. The alternative was a dict per item
+written at this edge, whose failure is the quiet kind: add `danger: bool` to a
+command and the terminal shows it, the browser does not, and nothing fails.
+
 **Every function here is a fold, not a fact.** Nothing is stored, nothing is
 appended, and a projection is computed from the root as it stands at the moment
 it is asked for. That is what makes them safe to send repeatedly and safe to
@@ -48,8 +55,7 @@ def readings_of(root: Any) -> list[dict[str, Any]]:
     registry = root.ctx.get("tui_status")
     if registry is None:
         return []
-    readings = registry.readings(root.session)
-    return [{"text": one.text, "level": one.level} for one in readings]
+    return [one.to_wire() for one in registry.readings(root.session)]
 
 
 def commands_of(root: Any) -> list[dict[str, Any]]:
@@ -63,10 +69,7 @@ def commands_of(root: Any) -> list[dict[str, Any]]:
     registry = root.ctx.get("commands")
     if registry is None:
         return []
-    return [
-        {"name": one.name, "summary": one.summary, "argumentHint": one.argument_hint}
-        for one in registry.list()
-    ]
+    return [one.schema().to_wire() for one in registry.list()]
 
 
 def screens_of(root: Any) -> list[dict[str, Any]]:
@@ -81,10 +84,7 @@ def screens_of(root: Any) -> list[dict[str, Any]]:
     registry = root.ctx.get("tui_screens")
     if registry is None:
         return []
-    return [
-        {"id": one.id, "label": one.label, "order": one.order, "key": one.key}
-        for one in registry.list()
-    ]
+    return [one.schema().to_wire() for one in registry.list()]
 
 
 def tools_of(root: Any) -> list[dict[str, Any]]:

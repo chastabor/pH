@@ -35,7 +35,7 @@ from ph.llm.types import (
 from ph.session import Session, SessionEvent, SurfaceIntent, SurfaceReplace
 from ph.session.known_event_types import KNOWN_SESSION_EVENT_TYPES
 from ph.testing import assistant_payload, plugin_payload, simple_tool, user_payload
-from ph_app.tui.adapter import HANDLERS, RECORDLESS, TuiEventAdapter
+from ph_app.tui.adapter import HANDLERS, RECORDLESS, REPLAY, TuiEventAdapter
 from ph_app.tui.state import TuiState
 
 pytestmark = pytest.mark.anyio
@@ -178,7 +178,7 @@ async def test_compaction_marks_what_it_replaced_and_keeps_it(mount: Any) -> Non
     )
     adapter = TuiEventAdapter()
     for event in session.events:
-        adapter.apply(event, live=False)
+        adapter.apply(event, REPLAY)
 
     roles = [(item.role, item.shadowed) for item in adapter.state.visible_items()]
     assert ("user", True) in roles, "the replaced row must survive, marked"
@@ -216,7 +216,7 @@ async def test_an_argument_truncation_does_not_add_a_second_assistant_row(
     )
     adapter = TuiEventAdapter()
     for event in session.events:
-        adapter.apply(event, live=False)
+        adapter.apply(event, REPLAY)
 
     rows = [(item.role, item.shadowed) for item in adapter.state.visible_items()]
     assert rows == [("assistant", False)], "the replacement drew a second row"
@@ -251,7 +251,7 @@ async def test_a_truncation_replacement_does_not_reset_the_token_footer(
     )
     adapter = TuiEventAdapter()
     for event in session.events:
-        adapter.apply(event, live=False)
+        adapter.apply(event, REPLAY)
 
     assert adapter.state.tokens == 900
 
@@ -267,7 +267,7 @@ async def test_truncated_arguments_are_announced(mount: Any) -> None:
     )
     adapter = TuiEventAdapter()
     for event in session.events:
-        adapter.apply(event, live=False)
+        adapter.apply(event, REPLAY)
 
     (row,) = [item for item in adapter.state.visible_items() if item.role == "notice"]
     assert "2 messages" in row.text
@@ -290,7 +290,7 @@ async def test_a_declined_compaction_is_a_notice(mount: Any) -> None:
     )
     adapter = TuiEventAdapter()
     for event in session.events:
-        adapter.apply(event, live=False)
+        adapter.apply(event, REPLAY)
 
     (row,) = [item for item in adapter.state.visible_items() if item.role == "notice"]
     assert "the summarize call failed" in row.text
@@ -324,7 +324,7 @@ async def test_a_plugins_replacement_is_not_called_a_compaction(mount: Any) -> N
     )
     adapter = TuiEventAdapter()
     for event in session.events:
-        adapter.apply(event, live=False)
+        adapter.apply(event, REPLAY)
 
     roles = [(item.role, item.shadowed) for item in adapter.state.visible_items()]
     assert ("context", False) in roles, "a plugin's notice is that plugin's row"

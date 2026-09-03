@@ -272,6 +272,15 @@ class PHTuiApp(App[str | None]):
         self.state_changed()
 
     async def on_unmount(self) -> None:
+        # **Before anything else unwinds.** Both timers call into widgets, and a
+        # frame that lands after the status bar has been taken apart queries a
+        # node that is no longer there. The old single interval was stopped for
+        # free when the app shut its own timers down; two timers this class owns
+        # are two this class stops.
+        self._spin(False)
+        if self._draw_timer is not None:
+            self._draw_timer.stop()
+            self._draw_timer = None
         for dispose in reversed(self._command_disposers):
             dispose()
         self._command_disposers.clear()
@@ -357,6 +366,40 @@ class PHTuiApp(App[str | None]):
             front.queue(message.text)
             return
         self._run_turn(message.text)
+
+    async def action_attach(self, argument: str = "") -> None:
+        """`/attach <path> …` — stage files for the next prompt.
+
+        **Client-side, and that is the whole point** (I-9): the front end reads
+        the bytes with the person's own permissions and hands the harness
+        content, never a path. In process that reads this machine; over a socket
+        it reads the *client's* machine, which is the only thing a browser tab
+        could do and the reason a remote terminal can attach a file the daemon
+        has never seen.
+
+        The one verb that takes an argument, so it is the one whose body reads
+        one — `_RunAction` forwards what followed the name. Chosen from the
+        palette there is nothing to attach, so it says how it is used rather
+        than doing nothing.
+        """
+        front = self.front
+        paths = argument.split()
+        if front is None:
+            return
+        if not paths:
+            self.notify("type `/attach <path> …` to attach files", title="attach", markup=False)
+            return
+        try:
+            staged = await front.attach(paths)
+        except Exception as error:
+            # Loud: a person who attached a diagram and got a plain text turn
+            # would have no way to tell it was never sent (P7-01).
+            log.exception("ph_app.tui: attaching failed")
+            self.notify(str(error), title="attach", severity="error", markup=False)
+            return
+        named = ", ".join(one.name or one.attachment_id[:15] for one in staged)
+        self.notify(f"staged for the next prompt: {named}", title="attach", markup=False)
+        self.state_changed()
 
     async def on_prompt_input_cancelled(self, _message: PromptInput.Cancelled) -> None:
         if self.front is not None and self.front.state.status == "running":

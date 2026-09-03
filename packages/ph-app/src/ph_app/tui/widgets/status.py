@@ -16,6 +16,7 @@ from typing import Any
 from textual.app import ComposeResult
 from textual.containers import Vertical
 from textual.content import Content
+from textual.css.query import NoMatches
 from textual.widgets import Static
 
 from ph.seams.tui_status import StatusReading
@@ -77,6 +78,16 @@ class StatusBar(Vertical):
         self._frame += 1
 
     def show(self, state: TuiState, readings: Sequence[StatusReading] = ()) -> None:
+        # A frame may land while this widget is mounted and its child is not —
+        # compose is asynchronous, and so is teardown. A widget owns its
+        # children's lifetime, so it is the widget that says "nothing to draw
+        # into yet" rather than every caller guessing at the moment. Checked
+        # first, so the string work below is not done for a line that is gone;
+        # `query_one` by id is the cheap path, ~45x a generic `query`.
+        try:
+            line = self.query_one("#status-line", Static)
+        except NoMatches:
+            return
         parts = [
             "[$ph-accent]$glyph[/]",
             "[$ph-muted]$model[/]",
@@ -104,9 +115,7 @@ class StatusBar(Vertical):
             style = "$ph-warning" if reading.level == "warning" else "$ph-muted"
             parts.append(f"[$ph-muted]·[/] [{style}]$field{index}[/]")
             values[f"field{index}"] = reading.text
-        self.query_one("#status-line", Static).update(
-            Content.from_markup("  ".join(parts), **values)
-        )
+        line.update(Content.from_markup("  ".join(parts), **values))
 
 
 class Sidebar(Vertical):
@@ -163,10 +172,18 @@ class Sidebar(Vertical):
         if (facts, todos, children) == self._shown:
             return
         self._shown = (facts, todos, children)
-        self.query_one("#session-facts", Static).update(Content(facts))
-        self.query_one("#todo-list", Static).update(Content(todos))
-        self.query_one("#children-title", Static).display = bool(children)
-        panel = self.query_one("#children", Static)
+        try:
+            facts_panel = self.query_one("#session-facts", Static)
+            todo_panel = self.query_one("#todo-list", Static)
+            children_title = self.query_one("#children-title", Static)
+            panel = self.query_one("#children", Static)
+        except NoMatches:
+            # Same reason as `StatusBar.show`: composed asynchronously, torn
+            # down asynchronously, and a frame in either gap has nowhere to go.
+            return
+        facts_panel.update(Content(facts))
+        todo_panel.update(Content(todos))
+        children_title.display = bool(children)
         panel.display = bool(children)
         panel.update(Content(children))
 

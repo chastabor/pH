@@ -12,7 +12,7 @@ never from live execution state — because a UI renders these during streaming
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any, Literal, TypeAlias, TypedDict
 
 from ..cordis import DEPLOYMENT
@@ -22,6 +22,7 @@ from .json_schema import parse_arguments
 log = logging.getLogger("ph.tools.presentation")
 
 __all__ = [
+    "CARD_VIEWS",
     "CardKind",
     "ToolCallView",
     "ToolResultView",
@@ -131,6 +132,17 @@ def _presentable(tools: Any, name: str) -> Any:
         return tools.get(name, scope=DEPLOYMENT)
     except Exception:
         return None
+
+
+CARD_VIEWS: Mapping[str, type[ToolCallView] | type[ToolResultView]] = {
+    "tool/call": ToolCallView,
+    "tool/result": ToolResultView,
+}
+"""Which session event types carry a card view, and which model each carries.
+
+One table because it was three spellings: a set of event types in the daemon,
+an `if` in the daemon's renderer, and an `if/elif` in the client's reader. A
+third card event was three edits and a silent miss if one was forgotten."""
 
 
 class ToolViews(TypedDict):

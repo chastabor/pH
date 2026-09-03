@@ -25,11 +25,13 @@ a 200-row transcript re-rendered 200 widgets per frame while streaming.
 
 from __future__ import annotations
 
+from contextlib import suppress
 from typing import Any
 
 from textual.app import ComposeResult
 from textual.containers import Vertical, VerticalScroll
 from textual.content import Content
+from textual.css.query import NoMatches
 from textual.widgets import Collapsible, Markdown, Static
 from textual.widgets.markdown import MarkdownStream
 
@@ -125,7 +127,13 @@ class TranscriptRow(Vertical):
             return
         self._shown = current
         self.set_class(self.item.shadowed, "-shadowed")
-        self.query_one(".row-body", Static).update(Content(self.item.text))
+        # Mounted, not yet composed — a row that was added and changed inside one
+        # frame, which a `/command` that logs `run` and `done` around an await
+        # does deterministically. `compose` reads `self.item` when it runs, so
+        # the latest text is what it will draw; there is nothing to update yet.
+        # The widget owns its children's lifetime, so the widget is what says so.
+        with suppress(NoMatches):
+            self.query_one(".row-body", Static).update(Content(self.item.text))
 
 
 class StreamingMessage(Markdown):
@@ -271,8 +279,13 @@ class ToolCardWidget(Vertical):
             card = self.item.tool
             self.set_class(bool(card and card.settled), "-settled")
             self.set_class(bool(card and card.is_error), "-error")
-            self.query_one(".tool-header", Static).update(self._header())
-            self.query_one(".tool-body", Static).update(Content(self._body()))
+            try:
+                self.query_one(".tool-header", Static).update(self._header())
+                self.query_one(".tool-body", Static).update(Content(self._body()))
+            except NoMatches:
+                # Same gap as `TranscriptRow.refresh_text`; compose draws from
+                # `self.item` when it runs.
+                return changed
         await self._sync_dispatches()
         return changed
 
@@ -280,7 +293,10 @@ class ToolCardWidget(Vertical):
         card = self.item.tool
         if card is None or not card.dispatches:
             return
-        collapsible = self.query_one(Collapsible)
+        try:
+            collapsible = self.query_one(Collapsible)
+        except NoMatches:
+            return
         collapsible.display = True
         collapsible.title = count_of(len(card.dispatches), "governed call")
         for dispatch in card.dispatches:

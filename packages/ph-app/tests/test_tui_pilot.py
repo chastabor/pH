@@ -699,3 +699,27 @@ async def test_resuming_rebuilds_the_transcript_from_the_log(make_tui_app: MakeA
     assert len(notices) == 1, "a resumed transcript did not say it was resumed"
     assert [item for item in after if item not in notices] == before
     assert ("user", "remember this") in after
+
+
+async def test_a_typed_attach_reaches_the_verb_with_its_argument(
+    make_tui_app: MakeApp, tmp_path: Path
+) -> None:
+    """`/attach <path>` goes through the one route every verb takes, argument included.
+
+    The verb used to be caught by name ahead of the command table — the string
+    re-dispatch `commands.py` forbids — because `_RunAction` dropped what
+    followed the name. It forwards it now, so the argument arrives at
+    `action_attach` through `run_command` like any other verb's body, and this
+    pins that it does: the file ends up staged.
+    """
+    picture = tmp_path / "diagram.png"
+    picture.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 32)
+    async with running(make_tui_app()) as (app, pilot):
+        front = app.front
+        assert front is not None
+
+        await app._dispatch_command(front, f"/attach {picture}")
+        await pilot.pause()
+
+        staged = front._staged.refs  # type: ignore[attr-defined]
+        assert [one.name for one in staged] == ["diagram.png"]

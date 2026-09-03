@@ -18,12 +18,13 @@ of the question entirely.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from ph.llm.types import AttachmentRef, MediaBlock, Message, create_user_message
 
-__all__ = ["AttachmentUnavailable", "ingest", "prompt_message"]
+__all__ = ["AttachmentUnavailable", "Tray", "ingest", "prompt_message"]
 
 
 class AttachmentUnavailable(RuntimeError):
@@ -49,6 +50,44 @@ async def ingest(ctx: Any, paths: Sequence[Path | str]) -> tuple[AttachmentRef, 
             "this profile mounts no attachment store, so files cannot be attached"
         )
     return tuple([await store.save_path(path) for path in paths])
+
+
+@dataclass(slots=True)
+class Tray:
+    """Attachments waiting for the next prompt — the composer's tray.
+
+    **Keyed by digest, so staging one file twice is one chip.** That is what
+    makes `session/stage` safe to retry without an idempotence key: a client that
+    reconnects and re-sends cannot double a file, for the same reason `attachment/
+    put` cannot double a blob — the identity is the content.
+
+    One class for the two places a tray lives — a daemon root, shared by every
+    attached front end, and the in-process session that increment 2c deletes —
+    so the stage/drain rule has one author. `take` drains: a staged attachment
+    rides *one* prompt, and leaving it would silently re-attach the same file to
+    every later turn.
+    """
+
+    _refs: dict[str, AttachmentRef] = field(default_factory=dict)
+
+    def stage(self, ref: AttachmentRef) -> list[AttachmentRef]:
+        self._refs[ref.attachment_id] = ref
+        return self.refs
+
+    def take(self) -> list[AttachmentRef]:
+        refs = self.refs
+        self._refs.clear()
+        return refs
+
+    @property
+    def refs(self) -> list[AttachmentRef]:
+        return list(self._refs.values())
+
+    def __bool__(self) -> bool:
+        return bool(self._refs)
+
+    def __len__(self) -> int:
+        return len(self._refs)
 
 
 def prompt_message(text: str, attachments: Sequence[AttachmentRef] = ()) -> Message:

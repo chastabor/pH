@@ -23,6 +23,11 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import Any
 
+from pydantic import ValidationError
+
+from ph.tools import ToolCallView, ToolResultView
+from ph.tools.presentation import CARD_VIEWS
+
 __all__ = [
     "describe",
     "first",
@@ -37,6 +42,7 @@ __all__ = [
     "source_of",
     "split_terms",
     "text_of_wire",
+    "view_of",
 ]
 
 
@@ -91,6 +97,26 @@ def message_of(event: Any) -> Mapping[str, Any]:
     """
     payload = obj(getattr(event, "data", event))
     return obj(payload.get("message")) if "message" in payload else payload
+
+
+def view_of(event_type: str, sidecar: Any) -> ToolCallView | ToolResultView | None:
+    """The card view a daemon sent beside an event, validated **here** (P7-12).
+
+    Here because this is the wire edge: every other frame a client reads is
+    validated in this module or its callers, and a fold two layers down should be
+    handed a type, not a `Mapping` it has to distrust. The event type chooses the
+    model — a `tool/call` carries a `ToolCallView`, a `tool/result` a
+    `ToolResultView` — and anything else, or anything that does not parse,
+    is `None`: the adapter then draws the generic card it draws with no daemon at
+    all, which is a plain card and not a wrong one.
+    """
+    model = CARD_VIEWS.get(event_type)
+    if model is None or not isinstance(sidecar, Mapping):
+        return None
+    try:
+        return model.model_validate(dict(sidecar))
+    except ValidationError:
+        return None
 
 
 def result_block(message: Any) -> Mapping[str, Any]:

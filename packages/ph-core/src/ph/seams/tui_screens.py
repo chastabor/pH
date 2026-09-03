@@ -41,6 +41,7 @@ from dataclasses import dataclass, field
 from typing import Any, TypeAlias
 
 from ..cordis import Context, Disposer, plugin
+from ..wire import WireModel, declarable
 from ._names import require_slug
 from ._registry import claim_entry, claim_key
 
@@ -48,6 +49,7 @@ __all__ = [
     "ScreenDefinition",
     "ScreenFactory",
     "ScreenPresenter",
+    "ScreenSchema",
     "TuiScreenRegistry",
     "apply",
 ]
@@ -71,6 +73,21 @@ ScreenPresenter: TypeAlias = Callable[["ScreenDefinition"], "Disposer | None"]
 disposer it returns undoes all of that."""
 
 
+class ScreenSchema(WireModel):
+    """What a palette needs to list a screen — everything but how to draw it.
+
+    `build` is a callable and stays where the session it draws from is; the
+    declarative body a browser could render is P7-07's work. Until then this is
+    what travels, and it is derived from the definition rather than spelled out
+    at the daemon edge so a field added there arrives here (P7-11).
+    """
+
+    id: str
+    label: str
+    order: int = 100
+    key: str | None = None
+
+
 @dataclass(frozen=True, slots=True)
 class ScreenDefinition:
     """One screen a plugin contributes to the front end."""
@@ -87,6 +104,10 @@ class ScreenDefinition:
     key: str | None = None
     """A default key, when the screen wants one. The binding carries `id` as its
     binding id, so a user rebinds it like any other."""
+
+    def schema(self) -> ScreenSchema:
+        """The wire-facing half. `build` is the one thing that cannot travel."""
+        return ScreenSchema.model_validate(declarable(self))
 
 
 @dataclass(frozen=True, slots=True)

@@ -45,6 +45,9 @@ class TuiVerb:
     key: str | None = None
     """The `TuiKeybindings` field that binds it, if any. Doubles as the binding
     id, which is what `App.set_keymap` remaps."""
+    argument_hint: str = ""
+    """What follows the name, when the verb takes something — shown in the
+    palette row, and the reason `_RunAction` forwards the typed argument."""
 
 
 TUI_VERBS: tuple[TuiVerb, ...] = (
@@ -61,6 +64,7 @@ TUI_VERBS: tuple[TuiVerb, ...] = (
     ),
     TuiVerb("tools", "Show or hide tool results.", "toggle_tool_results", "toggle_tool_results"),
     TuiVerb("sidebar", "Show or hide the sidebar.", "toggle_sidebar", "toggle_sidebar"),
+    TuiVerb("attach", "Attach files to the next prompt.", "attach", argument_hint="<path> …"),
     TuiVerb("quit", "Leave pH.", "quit", "quit"),
 )
 
@@ -83,12 +87,16 @@ def app_bindings(keys: TuiKeybindings) -> list[BindingType]:
 def register_tui_commands(ctx: Context, app: Any) -> list[Callable[[], Any]]:
     """Register one slash command per verb. Returns their disposers."""
     return [
-        ctx.commands.register(action_command(app, verb.name, verb.summary, verb.action))
+        ctx.commands.register(
+            action_command(app, verb.name, verb.summary, verb.action, verb.argument_hint)
+        )
         for verb in TUI_VERBS
     ]
 
 
-def action_command(app: Any, name: str, summary: str, action: str) -> CommandDefinition:
+def action_command(
+    app: Any, name: str, summary: str, action: str, argument_hint: str = ""
+) -> CommandDefinition:
     """A slash command whose whole body is one Textual action.
 
     The one spelling of that, because there are two sources of verbs — this
@@ -98,7 +106,9 @@ def action_command(app: Any, name: str, summary: str, action: str) -> CommandDef
     does so with a callback and returns, the same constraint every key handler
     already lives under.
     """
-    return CommandDefinition(name=name, summary=summary, run=_RunAction(app, action))
+    return CommandDefinition(
+        name=name, summary=summary, run=_RunAction(app, action), argument_hint=argument_hint
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,5 +119,11 @@ class _RunAction:
     app: Any
     action: str
 
-    async def __call__(self, _argument: str, _context: Any) -> None:
-        await self.app.run_action(self.action)
+    async def __call__(self, argument: str, _context: Any) -> None:
+        # Forwarded as a Python literal, which is what Textual's action parser
+        # reads (`ast.literal_eval`), so a path with spaces round-trips. An
+        # action that takes no argument is called bare, as before.
+        if argument:
+            await self.app.run_action(f"{self.action}({argument!r})")
+        else:
+            await self.app.run_action(self.action)

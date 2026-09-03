@@ -27,7 +27,7 @@ that logged its own answer would give one decision two authors.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -35,12 +35,13 @@ from typing import Any, Protocol
 
 from ph.agent.types import AgentCancelCause, AgentOptions
 from ph.cordis import Context, Profile
-from ph.llm.types import user_text
+from ph.llm.types import AttachmentRef, user_text
 from ph.seams.approval import ApprovalAnswer, ApprovalRequest
 from ph.seams.tui_status import StatusReading
 from ph.seams.user_questions import UserQuestion
 from ph.session import Session, SessionEvent
 
+from ..attach import Tray, ingest, prompt_message
 from ..runtime import mounted
 from .adapter import TuiEventAdapter
 from .state import TuiState
@@ -97,6 +98,17 @@ class FrontSession(Protocol):
 
     def status_readings(self) -> list[StatusReading]: ...
     async def submit(self, text: str) -> None: ...
+
+    async def attach(self, paths: Sequence[str]) -> list[AttachmentRef]:
+        """Stage these files for the next prompt; return everything now staged.
+
+        **The front end reads the bytes**, wherever it is: in process that is
+        this machine's filesystem, and over a socket it is the client's, which is
+        the only thing a browser tab could do and the only reading I-9 lets a
+        person's own attach do. The daemon never learns a path.
+        """
+        ...
+
     async def run_command(self, line: str) -> str | None: ...
     def queue(self, text: str) -> None: ...
     def cancel(self) -> None: ...
@@ -150,6 +162,10 @@ class HarnessSession:
     """The composed configuration, as `Profile.dump()` reports it. Kept so the
     front-end can read what the profile declared — which credentials exist, for
     instance — instead of maintaining a second list of what pH supports."""
+    _staged: Tray = field(default_factory=Tray)
+    """The composer's tray. In-process it is per-session because there is one
+    front end; under the daemon the *root* holds one, so every attached UI sees
+    the same tray. One `Tray` class for both, so the rule has one author."""
     _stack: AsyncExitStack = field(default_factory=AsyncExitStack)
     _disposers: list[Callable[[], Any]] = field(default_factory=list)
 
@@ -175,11 +191,28 @@ class HarnessSession:
         """
         self.state.status = "running"
         self.host.state_changed()
+        # Unconditionally through `prompt_message`, which is what `agent.prompt`
+        # builds when nothing is attached — its docstring says so, and a branch
+        # here would be two code paths for one act.
         try:
-            await self.agent.prompt(text)
+            self.agent.followup(prompt_message(text, self._staged.take()))
+            await self.agent.run()
         finally:
             self.state.status = "idle"
             self.host.state_changed()
+
+    async def attach(self, paths: Sequence[str]) -> list[AttachmentRef]:
+        """Read and store these files, and stage them for the next prompt.
+
+        `ingest` is the human door (I-9): it reads paths directly with the
+        harness's own permissions, which is right for a person attaching
+        something they can already open and is exactly what a model-initiated
+        attach may not do.
+        """
+        for ref in await ingest(self.ctx, list(paths)):
+            self._staged.stage(ref)
+        self.host.state_changed()
+        return self._staged.refs
 
     async def run_command(self, line: str) -> str | None:
         """Dispatch a `/name` line. Spends no model turn, and says so in the log.

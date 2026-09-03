@@ -18,11 +18,31 @@ from typing import Any
 
 from ..cordis import Context, Disposer, Running, maybe_await, plugin, running
 from ..session import Session
+from ..wire import WireModel, declarable
 from ._registry import claim_key
 
-__all__ = ["CommandDefinition", "CommandRegistry", "apply"]
+__all__ = [
+    "CommandDefinition",
+    "CommandRegistry",
+    "CommandSchema",
+    "apply",
+]
 
 log = logging.getLogger("ph.seams.commands")
+
+
+class CommandSchema(WireModel):
+    """What a front end needs to *offer* a command — everything but its body.
+
+    The declarable half of a `CommandDefinition`, split from the callable the
+    way `ToolSchema` is split from `ToolDefinition` (P7-11). A palette and a
+    completer need these three fields and nothing else; the body runs where the
+    profile is mounted, which over a socket is not where the palette is.
+    """
+
+    name: str
+    summary: str
+    argument_hint: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,6 +54,10 @@ class CommandDefinition:
     run: Callable[..., Any]
     """`run(argument: str, ctx: CommandContext) -> str | None` — the line to show."""
     argument_hint: str = ""
+
+    def schema(self) -> CommandSchema:
+        """The wire-facing half. Nothing else about the command reaches a front end."""
+        return CommandSchema.model_validate(declarable(self))
 
 
 @dataclass(frozen=True, slots=True)

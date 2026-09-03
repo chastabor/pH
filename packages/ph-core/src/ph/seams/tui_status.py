@@ -34,6 +34,7 @@ from typing import Literal, TypeAlias
 
 from ..cordis import Context, Disposer, Running, plugin, running
 from ..session import Session
+from ..wire import WireDataclass
 from ._names import require_slug
 from ._registry import claim_key
 
@@ -63,8 +64,15 @@ change for every front end, which is the right amount of friction."""
 
 
 @dataclass(frozen=True, slots=True)
-class StatusReading:
-    """What one field currently says."""
+class StatusReading(WireDataclass):
+    """What one field currently says.
+
+    A `WireDataclass`, so it reaches a front end that is not in this process as
+    `to_wire()` rather than as a dict somebody spelled out at the socket (P7-11).
+    The distinction matters in one direction only: a field added *here* then
+    reaches a browser tab with no projection edited, where a hand-written dict
+    would have dropped it silently.
+    """
 
     text: str
     level: ReadingLevel = "normal"

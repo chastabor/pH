@@ -26,6 +26,8 @@ from __future__ import annotations
 
 import logging
 import os
+from base64 import b64decode
+from binascii import Error as BinasciiError
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -36,6 +38,7 @@ from anyio.abc import ByteStream
 
 from ph.cordis import Profile
 from ph.lingering import RuntimeLifetime, lifetime, socket_identity
+from ph.llm.types import AttachmentRef
 from ph.paths import resolve_roots
 from ph.resources import GRACE_SECONDS
 from ph.seams.schedule import Schedule
@@ -97,7 +100,36 @@ PROJECTIONS: dict[str, tuple[str, Any]] = {
 }
 """Method → (reply key, fold). Every one is `{sessionId, <key>: <fold(root)>}`."""
 
-CAPABILITIES = ("roots", "attach", "cursors", "snapshots", "asks", "projections")
+MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024
+"""The largest attachment one frame may carry.
+
+Under `MAX_LINE` (8 MiB) with room to spare, because the frame also carries the
+method, the session id and base64's own 4/3 expansion — a limit set at the frame
+size would refuse *after* the client had already sent it, as a framing error with
+no name."""
+
+
+def _command_key(params: dict[str, Any]) -> str:
+    """A client's idempotence key, joined at the wire edge and only here.
+
+    Two mutating methods take one now — `session/prompt` and `session/command` —
+    and the f-string was written in both, which is what a comment three lines
+    above one of them already claimed was not the case."""
+    command_id = str(params.get("commandId", ""))
+    client_id = str(params.get("clientId", ""))
+    return f"{client_id}:{command_id}" if command_id else ""
+
+
+CAPABILITIES = (
+    "roots",
+    "attach",
+    "cursors",
+    "snapshots",
+    "asks",
+    "projections",
+    "attachments",
+    "staging",
+)
 """What this transport adds to the two both of them have.
 
 A constant because two callers say it now — `initialize`, and the `daemon/status`
@@ -125,6 +157,31 @@ class UnknownMethod(Refusal):
     """This server does not serve that name."""
 
     code = "unknown_method"
+
+
+class AttachmentTooLarge(Refusal):
+    """One frame cannot carry this file.
+
+    Its own refusal because the caller's next move is specific and knowable: this
+    is not "too big to attach", it is "too big to attach *in one frame*", and the
+    limit is named so a client can say so rather than guessing. Chunked upload is
+    the fix and it is not built (§5 rule 6) — a browser dropping a 40 MB video
+    gets a sentence, not a truncated blob.
+    """
+
+    code = "attachment_too_large"
+
+
+class AttachmentUnknown(Refusal):
+    """A prompt referenced an attachment this deployment has never stored.
+
+    Refused rather than dropped, because the alternative is the silent failure
+    P7-01 exists to end: a person attaches a diagram, the reference is stale or
+    from another machine, and the turn goes out as plain text with nothing saying
+    the picture was never sent.
+    """
+
+    code = "attachment_unknown"
 
 
 class SeamAbsent(Refusal):
@@ -256,15 +313,17 @@ class _Connection:
             )
             return root.describe()
         if method == "session/prompt":
-            # Joined here, at the wire edge, so the key has one construction.
-            command_id = str(params.get("commandId", ""))
-            client_id = str(params.get("clientId", ""))
             root = await supervisor.prompt(
                 str(params["sessionId"]),
                 str(params.get("prompt", "")),
-                command=f"{client_id}:{command_id}" if command_id else "",
+                command=_command_key(params),
+                attachments=self._attachments(str(params["sessionId"]), params.get("attachments")),
             )
             return root.describe()
+        if method == "attachment/put":
+            return await self._put(params)
+        if method == "session/stage":
+            return self._stage(params)
         if method == "session/attach":
             # Through `start`, so attaching to a *passivated* root brings it
             # back rather than reporting it gone (P5-05). `start` returns the
@@ -356,6 +415,87 @@ class _Connection:
             return {"ok": True}
         raise UnknownMethod(f'unknown method "{method}"')
 
+    async def _put(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Store bytes a client read, and answer with the reference to them.
+
+        **The client reads the file, not the daemon** — I-9's human door. A person
+        may attach anything they can already open, and their permissions are the
+        only ones that should decide; it is also the only path a browser has,
+        since the bytes reach the page before they reach anything else. The
+        daemon never learns a path, which is the property that makes this the
+        same method for a terminal on this machine and a tab on another.
+
+        Content-addressed, so putting a file twice stores it once and the second
+        put is a cheap way to *learn* the reference.
+        """
+        root = self._root(str(params["sessionId"]))
+        store = self._store(root)
+        encoded = str(params.get("contentB64", ""))
+        # Checked before decoding, on the encoded length: base64 is 4/3 of the
+        # bytes, so decoding first to measure would be the allocation this
+        # refusal exists to avoid. Off by the two padding bytes, immaterial here.
+        if len(encoded) * 3 // 4 > MAX_ATTACHMENT_BYTES:
+            raise AttachmentTooLarge(
+                f"an attachment must be at most {MAX_ATTACHMENT_BYTES // (1024 * 1024)} MiB "
+                "in one frame; chunked upload is not implemented"
+            )
+        try:
+            content = b64decode(encoded, validate=True)
+        except BinasciiError as error:
+            raise Refusal(f"contentB64 is not valid base64: {error}") from error
+        ref = await store.save_bytes(
+            content=content,
+            mime=str(params.get("mime") or "application/octet-stream"),
+            name=str(params["name"]) if params.get("name") else None,
+        )
+        return {"sessionId": root.id, "attachment": ref.to_wire()}
+
+    def _stage(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Put an attachment in the composer's tray, for every attached UI.
+
+        Not appended: un-submitted intent is not an act in the session, which is
+        the same rule that keeps a half-typed prompt off the log. Broadcast,
+        because the tray is shared — a chip only the uploader can see is a
+        composer nobody else can reason about.
+        """
+        root = self._root(str(params["sessionId"]))
+        ref = self._known(self._store(root), params["attachment"])
+        staged = [one.to_wire() for one in root.staged.stage(ref)]
+        root.publish("session.staged", {"sessionId": root.id, "staged": staged})
+        return {"sessionId": root.id, "staged": staged}
+
+    def _attachments(self, session_id: str, raw: Any) -> list[AttachmentRef]:
+        """The refs a prompt named, checked against what this deployment holds.
+
+        Refused rather than dropped: a reference from another machine, or to a
+        blob a `gc` took, would otherwise send the turn as plain text with
+        nothing saying the picture never went.
+        """
+        if not raw:
+            return []
+        store = self._store(self._root(session_id))
+        return [self._known(store, one) for one in raw]
+
+    def _store(self, root: Any) -> Any:
+        """The attachment store, or the one refusal for its absence.
+
+        One resolution for the three methods that need it, so "this deployment
+        stores no attachments" has one author — the two that grew separately had
+        opposite rules for a missing store, one staging anything and one refusing
+        everything.
+        """
+        store = root.ctx.get("attachments")
+        if store is None:
+            raise SeamAbsent("this deployment stores no attachments")
+        return store
+
+    def _known(self, store: Any, raw: Any) -> AttachmentRef:
+        """A reference the client sent, checked against what this deployment holds."""
+        ref = AttachmentRef.model_validate(raw)
+        if not store.exists(ref):
+            raise AttachmentUnknown(f"no attachment {ref.attachment_id} is stored here")
+        return ref
+
     async def _command(self, params: dict[str, Any]) -> dict[str, Any]:
         """Run one `/name argument` line in the root's own context.
 
@@ -369,19 +509,14 @@ class _Connection:
         cannot tell from a dropped reply whether the first one landed.
         """
         root = self._root(str(params["sessionId"]))
-        command_id = str(params.get("commandId", ""))
-        client_id = str(params.get("clientId", ""))
-        key = f"{client_id}:{command_id}" if command_id else ""
-        if key and root.accepted(key):
-            return {"sessionId": root.id, "shown": None, "repeated": True}
         registry = root.ctx.get("commands")
         if registry is None:
             raise SeamAbsent("this deployment has no commands")
-        # Remembered *before* it runs, the same write-ahead ordering `prompt`
-        # uses: a daemon that dies mid-command must come back knowing it was
-        # asked, or a retry runs it a second time.
-        if key:
-            root.remember(key)
+        # `once` is the write-ahead guard `prompt` uses; the seam check comes
+        # first so a command this deployment cannot run is never remembered as
+        # having been asked for.
+        if not root.once(_command_key(params)):
+            return {"sessionId": root.id, "shown": None, "repeated": True}
         shown = await registry.dispatch(
             str(params.get("line", "")),
             scope=root.agent.ctx,

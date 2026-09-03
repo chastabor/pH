@@ -22,14 +22,16 @@ through the same alias function, so there is one casing convention and not two.
 
 from __future__ import annotations
 
+import collections.abc
 import dataclasses
+import typing
 from types import MappingProxyType
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, model_validator
 from pydantic.alias_generators import to_camel
 
-__all__ = ["WireDataclass", "WireModel", "wire_alias"]
+__all__ = ["WireDataclass", "WireModel", "declarable", "declarable_fields", "wire_alias"]
 
 
 def wire_alias(field_name: str) -> str:
@@ -96,6 +98,36 @@ class WireDataclass:
                 continue
             wire[wire_alias(field.name)] = _wire_value(value)
         return wire
+
+
+def declarable_fields(dataclass_type: type) -> tuple[str, ...]:
+    """The fields of a definition that can travel: everything not a callable.
+
+    Derived from the annotations rather than kept in a list, because a list is
+    the thing that drifts: the row this serves (P7-11) began with a hand-kept
+    table of "the one field that cannot travel" per definition, and a table is
+    exactly what silently stops being true when a second callable is added.
+    `get_type_hints` is needed — the seams use `from __future__ import
+    annotations`, so a bare `field.type` is a string.
+    """
+    hints = typing.get_type_hints(dataclass_type)
+    return tuple(
+        field.name
+        for field in dataclasses.fields(dataclass_type)
+        if typing.get_origin(hints.get(field.name)) is not collections.abc.Callable
+    )
+
+
+def declarable(instance: Any) -> dict[str, Any]:
+    """The travelling half of a definition, as the kwargs of its schema.
+
+    A `schema()` built as `Schema.model_validate(declarable(self))` names no
+    field, so a field added to the definition is carried without an edit — and,
+    because `WireModel` forbids extras, one added to the definition and *not* to
+    the schema fails at the first call rather than quietly reaching the wire as
+    the schema's default.
+    """
+    return {name: getattr(instance, name) for name in declarable_fields(type(instance))}
 
 
 def _wire_value(value: Any) -> Any:

@@ -26,7 +26,7 @@ journaling (P5-02), leases against a second daemon (P5-03), crash retries
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from contextlib import AsyncExitStack, suppress
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -39,7 +39,7 @@ from filelock import FileLock, Timeout
 
 from ph.agent.types import AgentOptions
 from ph.cordis import Context, Profile
-from ph.llm.types import user_text
+from ph.llm.types import AttachmentRef
 from ph.paths import resolve_roots
 from ph.persistence import resume_session, resumption_of
 from ph.seams.schedule import Schedule, state_to_wire
@@ -50,6 +50,7 @@ from ph.seams.workspace_git import latest_checkpoint, restore
 from ph.session import Session, SessionEvent, now_ms
 from ph.tools.errors import error_message
 
+from ..attach import Tray, prompt_message
 from ..protocol import Refusal, cursor_of
 from ..runtime import mounted
 from .cards import CARD_EVENTS, presentation_of
@@ -212,6 +213,22 @@ class Root:
     """Attached connections. A set of bound methods, which compare by
     `(__self__, __func__)`, so attaching and detaching are symmetric without a
     token table to keep in step."""
+    staged: Tray = field(default_factory=Tray)
+    """Attachments waiting for the next prompt — **the composer's tray, shared.**
+
+    Not in the log, and the distinction is the same one the private-composer rule
+    draws: text nobody has sent is not an act in the session, and neither is a
+    file nobody has sent. What makes it *shared* rather than per-client is that
+    the person who dropped a PNG on a browser tab and the person watching a
+    terminal are looking at one conversation, and a chip only one of them can see
+    is a composer the other cannot reason about.
+
+    Rule 6, said out loud: **this does not survive the daemon.** A root released
+    by the sweep, or a daemon that exits, loses the staging — while the *blob*
+    remains in the store, because `attachment/put` wrote it. So the cost of the
+    loss is re-dropping the file, not re-finding it, and nothing durable is
+    hiding here.
+    """
     desk: AskDesk | None = None
     """This root's `AskDesk` — who gets asked when a turn needs a person (P5-13).
 
@@ -1050,7 +1067,14 @@ class Supervisor:
             return False
         return True
 
-    async def prompt(self, root_id: str, text: str, *, command: str = "") -> Root:
+    async def prompt(
+        self,
+        root_id: str,
+        text: str,
+        *,
+        command: str = "",
+        attachments: Sequence[AttachmentRef] = (),
+    ) -> Root:
         """Splice a turn into the agent's inbox and wake its task.
 
         Returns as soon as the message is *logged*, not when the turn is done:
@@ -1065,7 +1089,13 @@ class Supervisor:
         root = await self.start(root_id)
         if not root.once(command):
             return root
-        root.agent.followup(user_text(text))
+        # The client's own list comes first because it is what that person just
+        # named; the tray follows in the order it was filled, and `take` drains
+        # it — see `Tray`.
+        taken = root.staged.take()
+        if taken:
+            root.publish("session.staged", {"sessionId": root.id, "staged": []})
+        root.agent.followup(prompt_message(text, [*attachments, *taken]))
         # A full channel means the task has wakes pending and has not reached
         # them yet, so it will drain this message too — the inbox is the queue,
         # and this is only the doorbell.

@@ -27,7 +27,8 @@ from ph.session import SessionEvent
 from ph.testing import RecordedStep, ReplayAdapter, simple_tool, text_chunks, tool_call_chunks
 from ph.tools import ToolCallView, ToolResultView
 from ph_app.protocol import DaemonError
-from ph_app.tui.adapter import TuiEventAdapter
+from ph_app.tui.adapter import Frame, TuiEventAdapter
+from ph_app.wire import view_of
 
 pytestmark = pytest.mark.anyio
 
@@ -78,7 +79,7 @@ async def test_status_readings_over_the_wire_equal_the_seams_readings(
         reply = await client.call("session/readings", sessionId=root.id)
 
         seam = root.ctx.get("tui_status").readings(root.session)
-        assert reply["readings"] == [{"text": one.text, "level": one.level} for one in seam]
+        assert reply["readings"] == [one.to_wire() for one in seam]
         assert {"text": "probe", "level": "warn"} in reply["readings"], (
             "the contributed field must survive the projection, level included"
         )
@@ -132,7 +133,7 @@ async def test_the_command_list_is_the_registrys_own(tmp_path: Any) -> None:
         reply = await client.call("commands/list", sessionId=root.id)
 
         registry = root.ctx.get("commands").list()
-        assert [one["name"] for one in reply["commands"]] == [one.name for one in registry]
+        assert reply["commands"] == [one.schema().to_wire() for one in registry]
         assert {
             "name": "probe",
             "summary": "a command registered by the test",
@@ -157,14 +158,11 @@ async def test_the_screen_list_carries_what_a_palette_needs_and_no_body(
         reply = await client.call("screens/list", sessionId=root.id)
 
         registry = root.ctx.get("tui_screens").list()
-        assert [one["id"] for one in reply["screens"]] == [one.id for one in registry]
-        for wire, screen in zip(reply["screens"], registry, strict=True):
-            assert wire == {
-                "id": screen.id,
-                "label": screen.label,
-                "order": screen.order,
-                "key": screen.key,
-            }
+        # Against the seam's own wire form, not a re-spelled dict: what makes
+        # that form *complete* is `test_wire_forms.py`, and what this pins is
+        # that the daemon sends it rather than something of its own.
+        assert reply["screens"] == [one.schema().to_wire() for one in registry]
+        assert all("build" not in one for one in reply["screens"]), "a callable cannot travel"
 
 
 async def test_the_tool_list_matches_what_the_deployment_offers(tmp_path: Any) -> None:
@@ -438,9 +436,16 @@ def test_the_adapter_prefers_the_daemons_view_and_falls_back_to_the_tool() -> No
     )
 
     rendered = TuiEventAdapter()
-    rendered.apply(event, live=False, presentation={"title": "From the daemon", "card": "terminal"})
+    rendered.apply(
+        event,
+        Frame(
+            live=False, view=view_of("tool/call", {"title": "From the daemon", "card": "terminal"})
+        ),
+    )
     junk = TuiEventAdapter()
-    junk.apply(event, live=False, presentation={"title": 17, "unexpected": True})
+    junk.apply(
+        event, Frame(live=False, view=view_of("tool/call", {"title": 17, "unexpected": True}))
+    )
 
     card = next(item.tool for item in rendered.state.items if item.tool is not None)
     assert card.title == "From the daemon" and card.card == "terminal"
