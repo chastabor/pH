@@ -10,6 +10,7 @@ read without a converter.
 from __future__ import annotations
 
 import json
+import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -693,3 +694,31 @@ def test_events_unfiltered_is_unchanged() -> None:
     """No `--type` is no filter — the default must not have become a query."""
     everything = json.loads(runner.invoke(app, ["events", "--json"]).stdout)
     assert len(everything) > 20
+
+
+def test_pH_reinvokes_itself_one_way() -> None:
+    """Both processes pH starts are built by one function.
+
+    The daemon a UI spawns and the terminal a browser tab runs differ only in
+    their leading verb; the composition tail — profile, provider, model, and
+    every `--patch` — is the same argv every time. It was written twice, and only
+    the daemon's copy was pinned, so a renamed option would have surfaced in a
+    browser tab.
+
+    `sys.executable -m ph_app` because a bare `ph` resolves through `PATH` and may
+    find a different install, an older version, or nothing at all in a checkout
+    with no console script.
+    """
+    from ph_app.cli import reinvoke, spawn_command
+
+    tab = reinvoke("--mode", "tui", "--no-spawn", profile="tui", provider="p", model="m")
+    daemon = spawn_command(profile="tui", provider="p", model="m", patch=["{id: x}"])
+
+    assert tab[:3] == [sys.executable, "-m", "ph_app"]
+    assert daemon[:3] == tab[:3], "one prefix, one rule"
+    assert tab[3:5] == ["--mode", "tui"] and "--no-spawn" in tab
+    assert daemon[3:5] == ["daemon", "--ephemeral"]
+    for argv in (tab, daemon):
+        assert argv[argv.index("--profile") + 1] == "tui"
+        assert argv[argv.index("--provider") + 1] == "p"
+    assert daemon[-2:] == ["--patch", "{id: x}"], "a patch reaches whoever composes"

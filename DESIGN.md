@@ -559,9 +559,12 @@ and returns the process root.
 ```
 ph [--print P] [--profile P] [--provider P] [--model M] [--session ID]
    [--mode MODE] [--attach PATH ...] [--resume ID] [--dump-config]
+   [--no-spawn]                                  # tui: refuse to start a daemon
+   [--host H] [--port N] [--open]                # web: bind, and the token URL
 
 ph doctor      [--profile]
 ph daemon      [--profile] [--provider] [--model] [--passivate-after off|MIN]
+               [--ephemeral]                     # exit once nothing needs it
 ph events      [--json]
 
 ph agents                                     # list running roots
@@ -603,7 +606,8 @@ Everything exits **1** on refusal, except argument errors under
 | `json` | **Not a rendering** — the session log's *own* camelCase envelopes, emitted as each commits, so a pipe consumer and the stored JSONL parse one format |
 | `transcript` | Reads `session.transcript()`, **not** `derive_messages()`, so compaction does not erase what the human saw |
 | `rpc` | JSON-RPC over stdio. Takes no `--print` — the peer drives |
-| `tui` | Textual, imported lazily. Loops so the session picker can reopen in a fresh app |
+| `tui` | Textual, imported lazily. **A daemon client** (P5-14): it attaches, and closing it detaches rather than ending the turn. Silently starts an ephemeral daemon when no socket answers. Loops so the session picker can reopen in a fresh app |
+| `web` | The same `tui` in a browser tab, over `textual-serve` — one subprocess per tab, so each tab is one more front end on the one daemon. Needs the `ph-app[web]` extra; `--mode web` without it prints the install line. Binds `127.0.0.1` unless `--host` says otherwise, and every request needs the per-launch token from the URL |
 | `trajectory` | **Mounts nothing** — no agent, provider, answerers, or plugins. A fold over a stored file |
 
 ### 4.3 Slash commands

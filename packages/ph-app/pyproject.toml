@@ -35,6 +35,13 @@ dependencies = [
     "textual>=8.2.5,<9",
 ]
 
+[project.optional-dependencies]
+# The browser front end (P7-05). An extra rather than a dependency: `ph -p` in a
+# script, `ph daemon` under systemd and `ph --mode tui` all run without a web
+# server, and `textual-serve` brings aiohttp and jinja2 with it. `--mode web`
+# without the extra fails with the install line rather than an ImportError.
+web = ["textual-serve>=1.1.3"]
+
 [project.entry-points."ph.plugins"]
 llm-openai-compatible = "ph_app.adapters.openai_compatible:apply"
 llm-anthropic = "ph_app.adapters.anthropic:apply"

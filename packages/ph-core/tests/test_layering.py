@@ -25,7 +25,18 @@ import pathlib
 
 import ph
 
-FORBIDDEN = {"textual", "rich", "typer", "ph_app"}
+FORBIDDEN = {"textual", "rich", "typer", "ph_app", "aiohttp", "textual_serve", "jinja2"}
+"""Front-end libraries ph-core has no business with, and the app layer above it.
+
+**Not "optional dependencies"** — that rule would be wrong in both directions.
+`opentelemetry` is an extra (`ph-core[otel]`) that ph-core imports deliberately
+and lazily inside `telemetry_otel.py`, and `rich` is not optional at all. What
+these seven share is that they belong to a *presentation* layer: a core module
+reaching for one would make the harness's own imports depend on how somebody
+chose to look at it. `aiohttp`, `textual_serve` and `jinja2` joined with P7-05.
+
+Whether the *app* layer may import them is a different question with a different
+answer, asked by `packages/ph-app/tests/test_app_layering.py`."""
 
 
 def _core_modules() -> list[pathlib.Path]:

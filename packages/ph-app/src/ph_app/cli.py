@@ -23,6 +23,7 @@ addressing is a process rather than this one.
 from __future__ import annotations
 
 import json
+import shlex
 import sys
 from collections.abc import Awaitable, Callable, Sequence
 from functools import partial
@@ -78,7 +79,7 @@ app.add_typer(agents_app, name="agents")
 # for by emitting text.
 app.add_typer(workspaces_app, name="workspaces")
 
-OutputMode = Literal["text", "json", "transcript", "rpc", "tui", "trajectory"]
+OutputMode = Literal["text", "json", "transcript", "rpc", "tui", "web", "trajectory"]
 
 ModeRunner: TypeAlias = Callable[..., Awaitable[Any]]
 """Each mode returns its own result type — `json` reports a count, `text` and
@@ -107,7 +108,9 @@ def default(
     ] = None,
     mode: Annotated[
         OutputMode,
-        typer.Option("--mode", help="text (default), json, transcript, rpc, tui, or trajectory."),
+        typer.Option(
+            "--mode", help="text (default), json, transcript, rpc, tui, web, or trajectory."
+        ),
     ] = "text",
     attach: Annotated[
         list[Path] | None,
@@ -126,6 +129,13 @@ def default(
             "--no-spawn",
             help="Refuse rather than start a daemon when none is listening (tui only).",
         ),
+    ] = False,
+    host: Annotated[
+        str, typer.Option("--host", help="Interface to serve the browser UI on (web only).")
+    ] = "127.0.0.1",
+    port: Annotated[int, typer.Option("--port", help="Port for the browser UI (web only).")] = 8000,
+    open_browser: Annotated[
+        bool, typer.Option("--open", help="Open the browser at the token URL (web only).")
     ] = False,
     dump_config: Annotated[
         bool,
@@ -180,6 +190,43 @@ def default(
                 spawn=not no_spawn,
             )
         )
+        return
+
+    if mode == "web":
+        # Before the profile work, like `tui` above and for the same reason: the
+        # terminal each tab runs is the thing that talks to a daemon, and this
+        # process only serves them.
+        #
+        # Imported here because `textual-serve` is an extra: `ph -p` in a script
+        # must not require aiohttp, and a person who asked for `--mode web`
+        # without it gets the install line rather than a traceback.
+        try:
+            from .web.serve import WebServer, run_web
+        except ImportError as error:
+            fail(
+                "[red]--mode web needs the web extra:[/red] pip install 'ph-app[web]'",
+                cause=error,
+            )
+        # Deliberately **not** `--session`: `textual-serve` fixes the command at
+        # construction and varies nothing per request, so a session id here would
+        # be *every* tab's. Without one each tab opens its own new session, and
+        # the picker is how a person joins somebody else's.
+        tab = reinvoke(
+            "--mode",
+            "tui",
+            *(("--no-spawn",) if no_spawn else ()),
+            profile=profile,
+            provider=provider,
+            model=model,
+            patch=patch,
+        )
+        server = WebServer(command=shlex.join(tab), host=host, port=port)
+        # Printed here, before the bind, the way `ph daemon` prints its socket
+        # and its linger warning: the sentences are the server's, and saying them
+        # is the command's.
+        for notice in server.notices():
+            err.print(notice)
+        anyio.run(partial(run_web, server, open_browser=open_browser))
         return
 
     composed = profile_or_exit(profile, patch)
@@ -436,30 +483,31 @@ def daemon(
         fail(f"[red]{error}[/red]", cause=error)
 
 
-def spawn_command(
-    *, profile: str, provider: str, model: str, patch: Sequence[str] = ()
+def reinvoke(
+    *args: str, profile: str, provider: str, model: str, patch: Sequence[str] = ()
 ) -> list[str]:
-    """The argv for a daemon a UI starts on its own behalf (P7-08).
+    """How pH starts pH: the argv for another process of this one.
 
-    Beside the `daemon` command whose options it spells, so renaming one is one
-    edit; `ensure_daemon` takes the argv and knows nothing about profiles.
+    Two callers ask it — the daemon a UI spawns when no socket answers, and the
+    terminal a browser tab runs — and they differ only in their leading verb. The
+    tail is the same composition every time, so it is written once: an option
+    added here reaches both, where two spellings would silently reach one.
 
-    Also: a patch the person passed to `ph` must reach the daemon, since the
-    daemon is what composes the profile.
-
-    `sys.executable -m ph_app` rather than a bare `ph`: the UI may be running
+    `sys.executable -m ph_app` rather than a bare `ph`: the caller may be running
     from a virtualenv that is not on `PATH`, or from a checkout with no console
-    script installed at all, and a daemon started from a *different* pH than the
-    UI is one whose profile, event vocabulary and wire version nobody chose.
-    `--ephemeral` because this daemon was nobody's decision, so it leaves when
-    nobody needs it.
+    script installed at all, and a pH started from a *different* pH is one whose
+    profile, event vocabulary and wire version nobody chose.
+
+    `--patch` travels because the *other* process is the one that composes: a
+    patch accepted here and dropped would silently ignore `ph --mode tui --patch
+    '{id: tool-ask-user, disabled: false}'`, which is the documented way to arm a
+    row anywhere.
     """
     argv = [
         sys.executable,
         "-m",
         "ph_app",
-        "daemon",
-        "--ephemeral",
+        *args,
         "--profile",
         profile,
         "--provider",
@@ -467,13 +515,23 @@ def spawn_command(
         "--model",
         model,
     ]
-    # `--patch` reaches the daemon because the daemon is what composes: a patch
-    # accepted here and dropped would silently ignore `ph --mode tui --patch
-    # '{id: tool-ask-user, disabled: false}'`, which is the documented way to arm
-    # a row anywhere.
     for one in patch:
         argv += ["--patch", one]
     return argv
+
+
+def spawn_command(
+    *, profile: str, provider: str, model: str, patch: Sequence[str] = ()
+) -> list[str]:
+    """The argv for a daemon a UI starts on its own behalf (P7-08).
+
+    Beside the `daemon` command whose options it spells, so renaming one is one
+    edit. `--ephemeral` because this daemon was nobody's decision, so it leaves
+    when nobody needs it.
+    """
+    return reinvoke(
+        "daemon", "--ephemeral", profile=profile, provider=provider, model=model, patch=patch
+    )
 
 
 @app.command()
