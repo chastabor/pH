@@ -57,6 +57,7 @@ from .profiles import (
     profile_or_exit,
 )
 from .runtime import mounted
+from .web import DEFAULT_HOST, DEFAULT_PORT
 from .workspaces import workspaces_app
 
 __all__ = ["app", "main"]
@@ -128,13 +129,22 @@ def default(
         bool,
         typer.Option(
             "--no-spawn",
-            help="Refuse rather than start a daemon when none is listening (tui only).",
+            help="Refuse rather than start a daemon when none is listening (tui and web).",
+        ),
+    ] = False,
+    keep_daemon: Annotated[
+        bool,
+        typer.Option(
+            "--keep-daemon",
+            help="A daemon this starts is a service, not an ephemeral one (tui and web).",
         ),
     ] = False,
     host: Annotated[
         str, typer.Option("--host", help="Interface to serve the browser UI on (web only).")
-    ] = "127.0.0.1",
-    port: Annotated[int, typer.Option("--port", help="Port for the browser UI (web only).")] = 8000,
+    ] = DEFAULT_HOST,
+    port: Annotated[
+        int, typer.Option("--port", help="Port for the browser UI (web only).")
+    ] = DEFAULT_PORT,
     open_browser: Annotated[
         bool, typer.Option("--open", help="Open the browser at the token URL (web only).")
     ] = False,
@@ -188,7 +198,11 @@ def default(
                 # The *name*, not the composed profile: the daemon composes it,
                 # and this is the command line that tells it which.
                 daemon_argv=spawn_command(
-                    profile=profile, provider=provider, model=model, patch=patch
+                    profile=profile,
+                    provider=provider,
+                    model=model,
+                    patch=patch,
+                    keep=keep_daemon,
                 ),
                 session_id=wanted,
                 spawn=not no_spawn,
@@ -215,21 +229,17 @@ def default(
         # person did not name one — `serve.py`'s module docstring says why a tab
         # cannot have one of its own.
         shared = wanted or new_session_id()
-        tab = reinvoke(
-            "--mode",
-            "tui",
-            "--session",
-            shared,
-            *(("--no-spawn",) if no_spawn else ()),
+        tab = tab_command(
+            session=shared,
             profile=profile,
             provider=provider,
             model=model,
             patch=patch,
+            spawn=not no_spawn,
+            keep=keep_daemon,
         )
         server = WebServer(command=shlex.join(tab), session=shared, host=host, port=port)
-        # Printed here, before the bind, the way `ph daemon` prints its socket
-        # and its linger warning: the sentences are the server's, and saying them
-        # is the command's.
+        # Before the bind, and printed here because `notices()` owns the words.
         for notice in server.notices():
             err.print(notice)
         anyio.run(partial(run_web, server, open_browser=open_browser))
@@ -525,17 +535,62 @@ def reinvoke(
     return argv
 
 
+def tab_command(
+    *,
+    session: str,
+    profile: str,
+    provider: str,
+    model: str,
+    patch: Sequence[str] = (),
+    spawn: bool = True,
+    keep: bool = False,
+) -> list[str]:
+    """The argv for the terminal a browser tab runs (P7-05).
+
+    A declaration beside `spawn_command`, rather than an argv assembled inline in
+    the `--mode web` branch, because the two are the same kind of thing: the two
+    ways pH re-invokes itself. Built inline it had no name to test — the argv
+    gate pinned a composition *it* wrote, which omitted `--session` and
+    `--keep-daemon` because no caller was there to disagree with it — and a
+    launch-level flag that must reach a tab had to be remembered in a branch.
+
+    `--session` is on every tab, which is the whole of P7-06's routing: upstream
+    fixes the command at construction, so a session id here is necessarily every
+    tab's, and a tab that minted its own would leave an upload with nothing to
+    stage into.
+    """
+    return reinvoke(
+        "--mode",
+        "tui",
+        "--session",
+        session,
+        *(() if spawn else ("--no-spawn",)),
+        *(("--keep-daemon",) if keep else ()),
+        profile=profile,
+        provider=provider,
+        model=model,
+        patch=patch,
+    )
+
+
 def spawn_command(
-    *, profile: str, provider: str, model: str, patch: Sequence[str] = ()
+    *, profile: str, provider: str, model: str, patch: Sequence[str] = (), keep: bool = False
 ) -> list[str]:
     """The argv for a daemon a UI starts on its own behalf (P7-08).
 
     Beside the `daemon` command whose options it spells, so renaming one is one
     edit. `--ephemeral` because this daemon was nobody's decision, so it leaves
     when nobody needs it.
+
+    `keep` is `--keep-daemon`, the other half of the rule that **who started it
+    decides**: a person who means the daemon to stay says so, and gets exactly
+    what `ph daemon` would have given them, without typing two commands. It is
+    the mirror of `ph daemon --ephemeral`, and both exist because the lifetime is
+    a decision rather than a property of the process that happened to spawn it.
     """
+    ephemeral = () if keep else ("--ephemeral",)
     return reinvoke(
-        "daemon", "--ephemeral", profile=profile, provider=provider, model=model, patch=patch
+        "daemon", *ephemeral, profile=profile, provider=provider, model=model, patch=patch
     )
 
 

@@ -1,8 +1,8 @@
 # Phase 5 — Long-running
 
-**Status:** the sixteen rows are settled — twelve landed, one dropped after measurement, three deferred with their reasons recorded in the plan.
+**Status:** the sixteen rows are settled — fourteen landed, one dropped after measurement, one landed in half with the other half scoped as P7-07.
 
-**Gate:** `ruff` + `ruff format` + `mypy --strict` across all five packages + 1 396 tests, green.
+**Gate:** `ruff` + `ruff format` + `mypy --strict` across all five packages + 1 984 tests, green.
 
 Every mode before this phase ties an agent's life to a connection. `ph -p` exits
 with the turn, the TUI's root dies with the terminal, `--mode rpc` lives as long
@@ -34,8 +34,10 @@ shape, and the last one is still open — deliberately, and printed.
 | P5-10 | `ph agents` — seven commands, every one a real exchange | `ph_app/agents.py` |
 | P5-11 | Lingering detection: the socket that logout takes with it (I-6) | `ph/lingering.py`, `DaemonServer.check_reachable` |
 | P5-12 | The non-guarantees, printed rather than documented (N5, I-2); these notes | `Supervisor.NON_GUARANTEES` |
+| P5-13 | The ask direction: one `Peer` at both ends, `AskDesk` fanning one ask to every front end | `ph_app/daemon/{duplex,frontend}.py` |
+| P5-14 | The TUI as a daemon client — `PHTuiApp` with a `daemon_argv` and no profile | `ph_app/tui/remote.py`, `ph_app/daemon/{launch,follow,projections}.py` |
+| P5-15 | **Half.** A screen's *schema* travels and its `build()` cannot; declarative bodies are P7-07 | `ScreenSchema`, `screens/list` |
 | P5-16 | **Dropped.** Built, measured, removed — the prompt layer already delivered it | — |
-| P5-13/14/15 | Deferred with reasons: server→client requests, the TUI as a daemon client, a seam for front-end surface | plan §4 |
 
 ---
 
@@ -143,10 +145,29 @@ which is the correct way for a non-guarantee to end.
 
 ## What is left
 
-`P5-13` (server→client requests, so `ModalHost`'s two waiting calls can cross
-the socket), `P5-14` (the TUI as a daemon client rather than its own in-process
-root), and `P5-15` (a seam for a row to contribute front-end *surface*, not just
-front-end text). Each is scoped in the plan with the reasoning that deferred it.
+Nothing in the phase, and two things it started.
+
+**P5-15's other half.** A row contributes a screen's *schema* — id, label, order,
+key — and cannot contribute its body, because `build()` returns a widget and the
+front end may be in another process. So a screen pH ships is drawable by any pH
+client and a screen a third-party row contributes reaches a remote front end as
+nothing at all. That is a gate rather than a note
+(`test_a_screen_this_build_cannot_draw_is_not_offered`), and P7-07's `ScreenData`
+is what closes it.
+
+**`repaired()` still closes a turn parked on a human as interrupted.** The ask is
+in the log and `pending_approvals`/`pending_questions` fold it; nothing reads that
+fold on *resume*, only across an attach. Leaving the turn open is unsafe until
+something does, because a parked turn holds a dangling `tool/call` by
+construction (B4 appends it before the pipeline gates it) and several providers
+reject such a log outright. Closing it is the honest behaviour until the resume
+half lands.
 
 The one open gap, as above, is boot-time rehydration. It is printed in both
 doctors and asserted in a test; it is not hidden.
+
+**Where the phase went next.** Landing P5-13/14/15 made the daemon the only place
+the harness runs, which is what a second front end needs — so `--mode web`
+(P7-05), the browser upload (P7-06), the ephemeral daemon a UI starts for itself
+(P7-08), `ask_user` (P7-09), `!!` (P7-10) and one daemon serving many
+repositories (P7-14) all follow from this phase and are recorded in Phase 7.

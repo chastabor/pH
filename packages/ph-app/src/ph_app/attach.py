@@ -110,8 +110,8 @@ def prompt_message(text: str, attachments: Sequence[AttachmentRef] = ()) -> Mess
 
 
 async def stage_bytes(
-    client: DaemonClient, session_id: str, name: str, mime: str, content: bytes
-) -> str:
+    client: DaemonClient, session_id: str, name: str, mime: str, content: bytes | bytearray
+) -> AttachmentRef:
     """Store these bytes on the daemon and put them on the session's tray.
 
     Two frames, and the pair belongs together: `attachment/put` is not a
@@ -126,8 +126,14 @@ async def stage_bytes(
     above and would move a file's *name* and *type* — the human door's half of
     the decision (I-9) — onto the daemon.
 
-    Returns the attachment id, which is what a caller reporting the outcome
-    wants; the tray it landed on reaches every front end as `session.staged`.
+    Returns the reference the daemon minted — the same object every other pH
+    client reads, rather than the one field a particular caller happened to want,
+    so a browser and the log describe one blob the same way. The tray it landed
+    on reaches every front end as `session.staged`.
+
+    `bytearray` is accepted because a streaming reader builds one, and copying it
+    to `bytes` for a call that only base64-encodes it is a second 5 MiB nobody
+    asked for.
     """
     put = await client.call(
         "attachment/put",
@@ -138,4 +144,4 @@ async def stage_bytes(
     )
     reference = obj(put.get("attachment"))
     await client.mutate("session/stage", session_id, attachment=reference)
-    return str(reference.get("attachmentId", ""))
+    return AttachmentRef.model_validate(reference)

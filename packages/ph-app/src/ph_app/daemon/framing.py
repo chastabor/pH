@@ -25,7 +25,14 @@ from anyio.streams.buffered import BufferedByteReceiveStream
 
 from ph.session import dumps
 
-__all__ = ["MAX_ATTACHMENT_BYTES", "MAX_LINE", "FramingError", "read_frames", "write_frame"]
+__all__ = [
+    "MAX_ATTACHMENT_BYTES",
+    "MAX_ATTACHMENT_SIZE",
+    "MAX_LINE",
+    "FramingError",
+    "read_frames",
+    "write_frame",
+]
 
 MAX_LINE = 8 * 1024 * 1024
 """How long one frame may be — one *frame*, checked by `receive_until`.
@@ -48,6 +55,13 @@ derived from `MAX_LINE` above it, and both ends of that wire need it — the dae
 to refuse a frame, and a front end to refuse an upload before it builds one. A
 front end importing it from the server module would name the supervisor's home to
 read an integer."""
+
+MAX_ATTACHMENT_SIZE = f"{MAX_ATTACHMENT_BYTES // (1024 * 1024)} MiB"
+"""The limit as both doors say it to a person.
+
+The division floors, so a limit that stops being a whole number of MiB would
+otherwise have two doors quietly rounding it down in two sentences.
+"""
 
 
 class FramingError(Exception):

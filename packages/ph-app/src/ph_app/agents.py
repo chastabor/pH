@@ -111,21 +111,6 @@ def _missing_socket(path: Path) -> str:
     )
 
 
-def _alone(raised: BaseException) -> BaseException:
-    """The single exception inside a task group's wrapper, if that is all it holds.
-
-    `connected` runs the exchange inside a task group, and anyio wraps whatever
-    comes out of one in an `ExceptionGroup` — so a `DaemonError` the server sent
-    arrives here as a group of one and matches no `except` clause written for
-    it. Unwrapped rather than handled with `except*` because the two failures
-    below are *alternatives*: a group holding both would want neither of these
-    sentences, and re-raising it whole is the honest answer.
-    """
-    while isinstance(raised, BaseExceptionGroup) and len(raised.exceptions) == 1:
-        raised = raised.exceptions[0]
-    return raised
-
-
 def _ask[T](work: Exchange[T]) -> T:
     """Run one exchange against the daemon, or exit with a reason.
 
@@ -140,21 +125,17 @@ def _ask[T](work: Exchange[T]) -> T:
         fail(f"[red]$PH_RUNTIME check failed:[/red] {error}", cause=error)
     try:
         return anyio.run(partial(connected, path, work))
-    except Exception as raised:
-        # Not `error` again: Python unbinds an `except … as` name at the end of
-        # its block, so reusing it here is a read of a deleted variable.
-        failure = _alone(raised)
-        if isinstance(failure, DaemonGone):
-            fail(f"[yellow]{failure}[/yellow]", cause=failure)
-        if isinstance(failure, DaemonError):
-            fail(f"[red]the daemon refused:[/red] {failure}", cause=failure)
-        if isinstance(failure, OSError):
-            fail(_unreachable(path, failure), cause=failure)
-        # The member, not the wrapper. A bare `raise` re-raises the group, so
-        # anything this does not name reaches the person as an `ExceptionGroup`
-        # traceback instead of the exception inside it — and a `typer.Exit` raised
-        # by a command's own exchange becomes an exit code nothing reads.
-        raise failure from None
+    # Not `error` again: Python unbinds an `except … as` name at the end of its
+    # block, so reusing it here is a read of a deleted variable. And these are
+    # the plain exceptions rather than groups because `connected` unwraps its
+    # own — a `typer.Exit` raised by a command's own exchange would otherwise
+    # reach the shell as an `ExceptionGroup` traceback instead of an exit code.
+    except DaemonGone as gone:
+        fail(f"[yellow]{gone}[/yellow]", cause=gone)
+    except DaemonError as refused:
+        fail(f"[red]the daemon refused:[/red] {refused}", cause=refused)
+    except OSError as unreachable:
+        fail(_unreachable(path, unreachable), cause=unreachable)
 
 
 # ------------------------------------------------------------------ rendering --

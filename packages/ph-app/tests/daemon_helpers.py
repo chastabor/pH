@@ -30,7 +30,16 @@ from ph.paths import resolve_roots
 from ph_app.daemon.client import DaemonClient
 from ph_app.daemon.server import serve
 
-__all__ = ["PROFILE", "Daemon", "daemon_in_thread", "running", "shut_down", "until"]
+__all__ = [
+    "PROFILE",
+    "Daemon",
+    "daemon_in_thread",
+    "private_runtime",
+    "running",
+    "serving",
+    "shut_down",
+    "until",
+]
 
 PROFILE = Profile.from_paths([BASE, HEADLESS])
 
@@ -214,3 +223,32 @@ async def shut_down(path: Path) -> None:
 def daemon_socket() -> Path:
     """Where a client will look, given whatever `$PH_RUNTIME` currently says."""
     return resolve_roots().ensure().daemon_socket()
+
+
+def private_runtime(tmp_path: Path, monkeypatch: Any) -> Path:
+    """Point `$PH_RUNTIME` somewhere this test owns.
+
+    Worth doing in every test, including the ones with no daemon: the fallback is
+    `$XDG_RUNTIME_DIR`, which on a developer's machine is where their *real*
+    daemon listens — a "no daemon is running" test that connected to it would
+    pass for the wrong reason, or worse, shut it down.
+    """
+    runtime = tmp_path / "run"
+    runtime.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("PH_RUNTIME", str(runtime))
+    return runtime
+
+
+@asynccontextmanager
+async def serving(tmp_path: Path, monkeypatch: Any, **options: Any) -> AsyncIterator[Daemon]:
+    """A daemon listening exactly where a client of this `$PH_RUNTIME` will look.
+
+    The pin and the socket in one step, because the *order* is the rule: the
+    socket path has to be derived after the environment moves, and two bare lines
+    at each call site are two lines that can be written the other way round. Both
+    halves are then pinned to one derivation rather than to two that agree by
+    inspection.
+    """
+    private_runtime(tmp_path, monkeypatch)
+    async with running(tmp_path, path=daemon_socket(), **options) as daemon:
+        yield daemon

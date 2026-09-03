@@ -74,6 +74,24 @@ def test_the_spawned_daemon_is_this_python_and_is_ephemeral() -> None:
     assert argv[argv.index("--profile") + 1] == "tui"
 
 
+def test_keep_daemon_starts_a_service_instead() -> None:
+    """The other half of "who started it decides".
+
+    `ph daemon --ephemeral` and `ph --mode tui --keep-daemon` are the two
+    crossings of one rule: the lifetime is a decision, not a property of whichever
+    process happened to spawn it. Without this a person who wants their daemon to
+    stay has to start it in a second terminal — and the UI would silently spawn
+    an ephemeral one first if they forgot.
+
+    Sabotage: ignore `keep`, and `--keep-daemon` reads as accepted and does
+    nothing, which is the failure mode a flag has when nobody tests it.
+    """
+    kept = spawn_command(profile="tui", provider="fake", model="fake-1", keep=True)
+
+    assert "--ephemeral" not in kept
+    assert kept[3] == "daemon", "and it is still a daemon, not a second mode"
+
+
 # ------------------------------------------------------- when one is there --
 
 

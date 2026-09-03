@@ -705,20 +705,41 @@ def test_pH_reinvokes_itself_one_way() -> None:
     the daemon's copy was pinned, so a renamed option would have surfaced in a
     browser tab.
 
-    `sys.executable -m ph_app` because a bare `ph` resolves through `PATH` and may
-    find a different install, an older version, or nothing at all in a checkout
-    with no console script.
+    **Asserted through `tab_command`, not through a composition this test
+    writes.** The first version called `reinvoke` itself and passed for a web
+    branch that had since grown `--session` and `--keep-daemon` — a gate marking
+    its own homework rather than the caller's.
     """
-    from ph_app.cli import reinvoke, spawn_command
+    from ph_app.cli import spawn_command, tab_command
 
-    tab = reinvoke("--mode", "tui", "--no-spawn", profile="tui", provider="p", model="m")
+    tab = tab_command(session="s1", profile="tui", provider="p", model="m", spawn=False)
     daemon = spawn_command(profile="tui", provider="p", model="m", patch=["{id: x}"])
 
     assert tab[:3] == [sys.executable, "-m", "ph_app"]
     assert daemon[:3] == tab[:3], "one prefix, one rule"
-    assert tab[3:5] == ["--mode", "tui"] and "--no-spawn" in tab
+    assert tab[3:5] == ["--mode", "tui"]
+    assert tab[tab.index("--session") + 1] == "s1", "every tab, or an upload has no home"
+    assert "--no-spawn" in tab
     assert daemon[3:5] == ["daemon", "--ephemeral"]
     for argv in (tab, daemon):
         assert argv[argv.index("--profile") + 1] == "tui"
         assert argv[argv.index("--provider") + 1] == "p"
     assert daemon[-2:] == ["--patch", "{id: x}"], "a patch reaches whoever composes"
+
+
+def test_a_launchs_lifetime_choice_reaches_its_tabs() -> None:
+    """`--keep-daemon` is the launch's decision, and a tab is where it lands.
+
+    The web process spawns no daemon — its *tabs* do, one of which wins the race
+    in `ensure_daemon` — so the flag has to travel in the argv every tab shares.
+    Sabotage: drop it from `tab_command`, and a person who asked for a service
+    daemon gets an ephemeral one that leaves when they close the browser.
+    """
+    from ph_app.cli import tab_command
+
+    kept = tab_command(session="s", profile="tui", provider="p", model="m", keep=True)
+    plain = tab_command(session="s", profile="tui", provider="p", model="m")
+
+    assert "--keep-daemon" in kept
+    assert "--keep-daemon" not in plain
+    assert "--no-spawn" not in plain, "spawning is the default; refusing is the flag"

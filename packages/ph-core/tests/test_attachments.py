@@ -32,7 +32,7 @@ import pytest
 
 from ph.cordis import Context
 from ph.llm.types import AttachmentRef, MediaBlock, Message, create_user_message
-from ph.seams.attachments import AttachmentStore, digest_of
+from ph.seams.attachments import OCTET_STREAM, AttachmentStore, digest_of, mime_for
 from ph.seams.token_meter import (
     IMAGE_TOKENS_UNKNOWN,
     MEDIA_TOKENS_UNKNOWN,
@@ -114,6 +114,31 @@ async def test_ingesting_a_path_records_the_name_and_sniffs_the_type(tmp_path: P
     assert ref.mime == "image/png"
     assert ref.name == "diagram.png"
     assert ref.bytes == len(PNG)
+
+
+def test_a_declared_type_that_declares_nothing_loses_to_the_name() -> None:
+    """One ladder for every door, and the browser is the door that needed it.
+
+    A browser sends `Content-Type` with every dropped file — and falls back to
+    `application/octet-stream` for any extension *it* does not recognise. So a
+    literal "the declared type wins" stores such a browser's `.png` as a
+    document: `EXTENSIONS` gives it no suffix and `IMAGE_MIMES` never sees it, so
+    the same picture reaches the model as an image through `--attach` and as a
+    document through a tab. That is exactly the split `mime_of` exists to
+    prevent, arriving through the one door with an opinion to override it with.
+
+    The daemon has the mirror case: a client that sends no `mime` at all still
+    sent a name, and defaulting to octet-stream there threw the name away.
+
+    Sabotage: `declared or mime_of(name)` — the first two assertions flip.
+    """
+    assert mime_for(OCTET_STREAM, "diagram.png") == "image/png", "a browser that shrugged"
+    assert mime_for("", "diagram.png") == "image/png", "a client that said nothing"
+    assert mime_for(None, "notes.md") == "text/markdown"
+    # But a real declaration still wins: the sender opened the file and pH is
+    # reading an extension.
+    assert mime_for("image/webp", "photo.jpg") == "image/webp"
+    assert mime_for(OCTET_STREAM, "blob.unknown") == OCTET_STREAM, "and nothing invents a type"
 
 
 async def test_the_store_never_derives_measurements(tmp_path: Path) -> None:

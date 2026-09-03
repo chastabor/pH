@@ -55,6 +55,7 @@ __all__ = [
     "AttachmentStore",
     "apply",
     "digest_of",
+    "mime_for",
     "mime_of",
     "read_for_attach",
 ]
@@ -105,17 +106,37 @@ megabytes of `str` for as long as the process lives.
 
 
 def mime_of(name: str) -> str:
-    """What pH calls a file of this name.
+    """What pH calls a file of this name, going only by the name.
 
-    The classification rule, as one function, because it decides more than a
-    label: `path_for` derives the stored file's *extension* from the mime, and
-    `IMAGE_MIMES` decides whether a block reaches the model as an image or as a
-    document. A second copy of the ladder is how the same PNG becomes a document
-    in one front end and an image in another — which is what the three callers
-    it now has (a person's `--attach`, a browser upload, the daemon's own
-    default) would each have spelled for themselves.
+    The guess half of the ladder. It decides more than a label: `path_for`
+    derives the stored file's *extension* from the mime, and `IMAGE_MIMES`
+    decides whether a block reaches the model as an image or as a document — so
+    a second copy of it is how the same PNG becomes a document in one front end
+    and an image in another.
     """
     return mimetypes.guess_type(name)[0] or OCTET_STREAM
+
+
+def mime_for(declared: str | None, name: str) -> str:
+    """What pH calls a file somebody has already named a type for.
+
+    **A declared type wins, except when it is the one that says nothing.** A
+    browser sends `Content-Type` with every dropped file and falls back to
+    `application/octet-stream` for any extension *it* does not recognise — so a
+    literal "declared wins" stores a `.png` from such a browser as a document,
+    gives it the wrong extension out of `EXTENSIONS`, and misses `IMAGE_MIMES`.
+    That is exactly the failure `mime_of` exists to prevent, arriving through the
+    one door that has an opinion to override it with.
+
+    Three callers, which is why the combination is a function rather than an
+    `or` at each of them: a person's `--attach` (declared by the caller, guessed
+    from the path), a browser upload (declared by the browser), and
+    `attachment/put`, where a client that sends no `mime` at all still sent a
+    name.
+    """
+    if declared and declared != OCTET_STREAM:
+        return declared
+    return mime_of(name)
 
 
 async def read_for_attach(source: Path | str) -> tuple[str, str, bytes]:
@@ -210,8 +231,8 @@ class AttachmentStore:
         gap that lands with P7-01's tool producer rather than being papered over
         here.
         """
-        name, guessed, content = await read_for_attach(source)
-        return await self.save_bytes(content=content, mime=mime or guessed, name=name)
+        name, _, content = await read_for_attach(source)
+        return await self.save_bytes(content=content, mime=mime_for(mime, name), name=name)
 
     async def load_bytes(self, ref: AttachmentRef) -> bytes:
         return await anyio.to_thread.run_sync(self.path_for(ref).read_bytes)

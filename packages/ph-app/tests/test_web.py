@@ -26,7 +26,7 @@ from typing import Any
 import pytest
 from aiohttp import FormData, web
 from aiohttp.test_utils import TestClient, TestServer
-from daemon_helpers import daemon_socket, running, until
+from daemon_helpers import serving, until
 
 from ph_app.daemon.framing import MAX_ATTACHMENT_BYTES
 from ph_app.web.serve import CLOSING_BODY, COOKIE, TOKEN_QUERY, WebServer
@@ -47,26 +47,22 @@ def server() -> WebServer:
     return a_server()
 
 
-@pytest.fixture
-async def client(server: WebServer) -> AsyncIterator[TestClient[web.Request, web.Application]]:
-    """A client on that server, torn down with the test.
+@asynccontextmanager
+async def browser_on(server: WebServer) -> AsyncIterator[Any]:
+    """A client on this server, torn down with the block.
 
-    A fixture because four tests want the same three lines, and because the
-    server has to be the *same* object the test asserts the token of."""
+    Takes the server rather than making one: the daemon-backed tests need a
+    session id that does not exist until the test has a root, and the token
+    assertions need the *same* object they read `.token` off."""
     async with TestClient(TestServer(server.application())) as opened:
         yield opened
 
 
-@asynccontextmanager
-async def browser_on(session: str) -> AsyncIterator[tuple[WebServer, Any]]:
-    """A server on a *named* session and a client on it.
-
-    The fixture pair above cannot serve the two daemon-backed tests: they need
-    the id the daemon knows, which does not exist until the test has one.
-    """
-    server = a_server(session)
-    async with TestClient(TestServer(server.application())) as opened:
-        yield server, opened
+@pytest.fixture
+async def client(server: WebServer) -> AsyncIterator[TestClient[web.Request, web.Application]]:
+    """The common case as a fixture: a server nobody named, and a client on it."""
+    async with browser_on(server) as opened:
+        yield opened
 
 
 async def drop(
@@ -200,12 +196,12 @@ def test_every_launch_mints_its_own_token() -> None:
 
 
 def test_a_non_loopback_bind_says_what_it_costs() -> None:
-    """One owner for the exposure sentence, and it knows the host.
+    """The exposure sentence knows its own host, and its own session.
 
-    `notices()` holds the words and `cli.py` prints them — the shape `ph daemon`
-    uses for its socket path and its linger warning. It was said in both places,
-    in two styles, on two sides of the bind; and the CLI's copy compared against
-    a `"127.0.0.1"` literal it did not own.
+    Both are facts a person needs *before* the bind and neither is one `cli.py`
+    can be trusted to re-derive — it used to compare against a `"127.0.0.1"`
+    literal it did not own. The session line is the surprise: a second tab is not
+    a second conversation, unlike a second terminal.
     """
     local = list(a_server("shared-id").notices())
     public = list(a_server(host="0.0.0.0").notices())
@@ -300,19 +296,16 @@ async def test_an_upload_before_any_tab_exists_says_what_to_do(
     A daemon is running but nothing has created the session yet — the state a
     person is in between launching `--mode web` and opening a tab, since the tabs
     are what create it. It arrived as a **500** and an `ExceptionGroup`
-    traceback; `_stage`'s docstring says why the obvious `except` saw nothing.
+    traceback; `connected`'s docstring says why the obvious `except` saw nothing.
+
+    The daemon's *own* sentence is asserted, not a sentence this route invents:
+    `_refused` keeps it and adds advice only for this reason.
 
     Sabotage: drop the mapping and this is a 500 whose text tells a person
     nothing.
     """
-    monkeypatch.setenv("PH_RUNTIME", str(tmp_path / "run"))
-    async with (
-        running(tmp_path, path=daemon_socket()),
-        browser_on("not-open-yet") as (
-            server,
-            browser,
-        ),
-    ):
+    server = a_server("not-open-yet")
+    async with serving(tmp_path, monkeypatch), browser_on(server) as browser:
         refused = await drop(server, browser)
 
         assert refused.status == 503
@@ -358,10 +351,10 @@ async def test_a_browser_uploaded_file_reaches_the_model_as_a_media_block(
     Sabotage: stop draining `staged` in `Supervisor.prompt`, and the turn goes as
     plain text with nothing saying the picture never went.
     """
-    monkeypatch.setenv("PH_RUNTIME", str(tmp_path / "run"))
-    async with running(tmp_path, path=daemon_socket()) as daemon:
+    async with serving(tmp_path, monkeypatch) as daemon:
         root = await daemon.root("dropped")
-        async with browser_on(root.id) as (server, browser):
+        server = a_server(root.id)
+        async with browser_on(server) as browser:
             sent = await drop(server, browser)
 
             assert sent.status == 201
@@ -387,6 +380,31 @@ async def test_a_browser_uploaded_file_reaches_the_model_as_a_media_block(
         assert content[1]["attachment"]["attachmentId"] == reference["attachmentId"]
 
 
+async def test_a_browser_that_cannot_name_the_type_still_lands_an_image(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The dropped file is classified the same way `--attach` would classify it.
+
+    Browsers send `application/octet-stream` for any extension they do not know,
+    and a route that took the declared type literally would store a `.png` as a
+    document — wrong extension out of `EXTENSIONS`, missed by `IMAGE_MIMES`, and
+    a picture reaching the model as a file. `mime_for` is the one ladder both
+    doors climb.
+
+    Asserted on the *stored* reference rather than on the reply, because that is
+    what a later turn reads.
+    """
+    async with serving(tmp_path, monkeypatch) as daemon:
+        root = await daemon.root("shrugged")
+        server = a_server(root.id)
+        async with browser_on(server) as browser:
+            sent = await drop(server, browser, mime="application/octet-stream")
+
+            assert sent.status == 201
+            assert (await sent.json())["mime"] == "image/png"
+            assert [one.mime for one in root.staged.refs] == ["image/png"]
+
+
 async def test_the_same_bytes_dropped_twice_are_one_blob(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -397,10 +415,10 @@ async def test_the_same_bytes_dropped_twice_are_one_blob(
     together, a failure here read as a failure of the gate the increment is named
     for.
     """
-    monkeypatch.setenv("PH_RUNTIME", str(tmp_path / "run"))
-    async with running(tmp_path, path=daemon_socket()) as daemon:
+    async with serving(tmp_path, monkeypatch) as daemon:
         root = await daemon.root("twice")
-        async with browser_on(root.id) as (server, browser):
+        server = a_server(root.id)
+        async with browser_on(server) as browser:
             once = await drop(server, browser)
             again = await drop(server, browser)
 

@@ -20,6 +20,7 @@ from ph.persistence.repair import (
     interrupted_turn_closers,
     repaired,
 )
+from ph.seams.approval import pending_approvals
 from ph.session import Session, SurfaceIntent
 from ph.testing import assistant_payload, user_payload
 
@@ -130,6 +131,42 @@ def test_the_turn_ends_as_interrupted() -> None:
     session = _open_turn_with_unstarted_call()
     closers = interrupted_turn_closers(session.events)
     assert closers[-1].data["reason"] == {"kind": "interrupted"}
+
+
+def test_a_turn_parked_on_a_human_is_closed_as_interrupted() -> None:
+    """**The known gap, pinned so it cannot go quietly false** (DESIGN §8, P5-13).
+
+    A turn suspended on `ctx.approval.request(...)` has an `approval/asked` with
+    no `approval/decided` — which `pending_approvals` folds, and which the design
+    says *is* the pending state. Repair does not read that fold: it closes the
+    turn interrupted like any other, so the answer a person eventually gives has
+    no turn to return into.
+
+    **That is deliberate, and the reason is in the log this test builds.** A
+    parked turn holds a dangling `tool/call` by construction — B4 appends the
+    call before the pipeline gates it, and `approval/asked` comes after — so a
+    turn left open around one is a log several providers reject outright. Leaving
+    it open is only safe once something re-poses the ask on resume, and nothing
+    does: `AskDesk` re-poses across an *attach*, not across a restart.
+
+    So this is a gate on a **non-guarantee**. When P5-13's resume half lands it
+    will fail, which is the point: the DESIGN row and the docs both say repair
+    closes a parked turn, and a sentence nothing tests is one that outlives the
+    code it describes.
+    """
+    session = _open_turn_with_unstarted_call()
+    session.append("tool/call", {"turn": 1, "step": 1, "callId": "c1", "name": "edit"})
+    session.append("approval/asked", {"toolName": "edit", "callId": "c1"})
+
+    assert [one.call_id for one in pending_approvals(session)] == ["c1"], "the ask is pending"
+
+    closers = interrupted_turn_closers(session.events)
+
+    assert [event.type for event in closers] == ["tool/result", "step/end", "turn/end"]
+    assert closers[-1].data["reason"]["kind"] == "interrupted", "parked reads as interrupted"
+    # And the dangling call is what forces it: the synthesized result is what
+    # keeps the rebuilt log something a provider will accept.
+    assert closers[0].data["message"]["source"]["callId"] == "c1"
 
 
 def test_a_repaired_log_seeds_a_resumable_session() -> None:

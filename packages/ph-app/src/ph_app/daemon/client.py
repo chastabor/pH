@@ -152,19 +152,39 @@ async def connected[T](path: Path, work: Exchange[T]) -> T:
 
     Here rather than in `ph agents`, because a one-shot exchange is not a CLI
     shape: `ph_app.web.serve` stages a browser's upload this way too, and the
-    copy it started with re-derived every subtlety below. **What leaves this
-    function is wrapped**: a refusal the daemon sent crosses a task group, so a
-    caller wanting the `DaemonError` inside it needs `except*` or `_alone`. The
-    `OSError` from the connect does not — it is raised before the group.
+    copy it started with re-derived every subtlety below.
+
+    **What leaves this function is the exception, not the wrapper.** anyio wraps
+    whatever comes out of a task group, so a `DaemonError` the server sent would
+    reach a caller as a group of one and match no `except` written for it — a
+    hazard every caller was solving for itself, one with `_alone` and one with
+    `except*`. The group is *this* function's, so unwrapping it is too, and a
+    caller writes the plain `except DaemonError` it meant. A group holding more
+    than one is re-raised whole: two simultaneous failures want neither caller's
+    sentence.
     """
     client = await DaemonClient.connect(path)
-    async with anyio.create_task_group() as tasks:
-        tasks.start_soon(client.pump)
-        try:
-            outcome = await work(client)
-        finally:
-            await client.aclose()
+    try:
+        async with anyio.create_task_group() as tasks:
+            tasks.start_soon(client.pump)
+            try:
+                outcome = await work(client)
+            finally:
+                await client.aclose()
+    except BaseExceptionGroup as group:
+        raise _alone(group) from None
     # Assigned inside the group and returned outside it: a task group's
     # `__aexit__` is typed as one that may suppress, so a `return` in the block
     # leaves the function with a path that falls off the end.
     return outcome
+
+
+def _alone(raised: BaseException) -> BaseException:
+    """The single exception inside a task group's wrapper, if that is all it holds.
+
+    Nested groups are unwrapped too — a task group inside a task group is two
+    layers of one exception, and a caller cares about neither.
+    """
+    while isinstance(raised, BaseExceptionGroup) and len(raised.exceptions) == 1:
+        raised = raised.exceptions[0]
+    return raised

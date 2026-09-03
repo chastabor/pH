@@ -42,7 +42,7 @@ from ph.lingering import RuntimeLifetime, lifetime, socket_identity
 from ph.llm.types import AttachmentRef
 from ph.paths import resolve_roots
 from ph.resources import GRACE_SECONDS
-from ph.seams.attachments import OCTET_STREAM
+from ph.seams.attachments import mime_for
 from ph.seams.schedule import Schedule
 from ph.session import now_ms
 
@@ -58,7 +58,7 @@ from ..shell import shell_of
 from ..trust import TrustStore, trust_path
 from .cards import CARD_EVENTS, presentation_of
 from .duplex import Peer
-from .framing import MAX_ATTACHMENT_BYTES
+from .framing import MAX_ATTACHMENT_BYTES, MAX_ATTACHMENT_SIZE
 from .launch import listening
 from .projections import (
     browse_of,
@@ -462,17 +462,21 @@ class _Connection:
         # refusal exists to avoid. Off by the two padding bytes, immaterial here.
         if len(encoded) * 3 // 4 > MAX_ATTACHMENT_BYTES:
             raise AttachmentTooLarge(
-                f"an attachment must be at most {MAX_ATTACHMENT_BYTES // (1024 * 1024)} MiB "
+                f"an attachment must be at most {MAX_ATTACHMENT_SIZE} "
                 "in one frame; chunked upload is not implemented"
             )
         try:
             content = b64decode(encoded, validate=True)
         except BinasciiError as error:
             raise Refusal(f"contentB64 is not valid base64: {error}") from error
+        name = str(params["name"]) if params.get("name") else None
         ref = await store.save_bytes(
             content=content,
-            mime=str(params.get("mime") or OCTET_STREAM),
-            name=str(params["name"]) if params.get("name") else None,
+            # A client that sent no `mime` still sent a name, and `mime_for` is
+            # the one ladder both doors climb — an octet-stream default here made
+            # a `.png` a document while `--attach` called it an image.
+            mime=mime_for(str(params.get("mime") or ""), name or ""),
+            name=name,
         )
         return {"sessionId": root.id, "attachment": ref.to_wire()}
 

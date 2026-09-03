@@ -76,7 +76,7 @@ import secrets
 import threading
 import webbrowser
 from collections.abc import Awaitable, Callable, Iterator
-from dataclasses import KW_ONLY, dataclass, field
+from dataclasses import dataclass, field
 from functools import partial
 from typing import cast
 
@@ -87,14 +87,16 @@ from aiohttp import web
 from aiohttp.multipart import BodyPartReader
 from textual_serve.server import Server
 
+from ph.llm.types import AttachmentRef
 from ph.paths import resolve_roots
 from ph.resources import GRACE_SECONDS
-from ph.seams.attachments import mime_of
+from ph.seams.attachments import mime_for
 
 from ..attach import stage_bytes
 from ..daemon.client import DaemonClient, connected
-from ..daemon.framing import MAX_ATTACHMENT_BYTES
+from ..daemon.framing import MAX_ATTACHMENT_BYTES, MAX_ATTACHMENT_SIZE
 from ..protocol import DaemonError
+from . import DEFAULT_HOST, DEFAULT_PORT
 
 __all__ = ["CLOSING_BODY", "COOKIE", "TOKEN_QUERY", "WebServer", "run_web"]
 
@@ -144,11 +146,24 @@ asset inside the package's own tree — so this travels with the page it is
 inserted into. It posts to `/api/attachments` same-origin, which is what lets it
 carry the token cookie without ever seeing the token."""
 
-DROPPABLE = _DROP_ZONE + CLOSING_BODY
-"""The insertion, joined once rather than per page load."""
-
-EXPECTED = "an upload is one multipart part named 'file'"
+EXPECTED = "pH: an upload is one multipart part named 'file'\n"
 """What the route takes, said the one way, to whoever got it wrong."""
+
+TITLE = "pH"
+"""What the browser calls the app.
+
+Not a knob, which is why it is not a field: upstream falls back to
+`title or command`, so leaving it unset would put the whole `python -m ph_app
+--mode tui …` line in the page's own intro dialog."""
+
+NO_SESSION = "no_such_session"
+"""The daemon's own name for the one refusal that has a next step.
+
+`DaemonError.reason` is `Refusal.code` after a round trip, so this is the wire's
+vocabulary rather than a second one invented at the HTTP edge — matching on the
+message text is the contract nobody writes down and every rewording breaks.
+Advice is attached to this reason alone: telling somebody to open a tab is help
+when there is no session and noise when their file was simply too big."""
 
 TOKEN_QUERY = "token"
 """The query parameter the launch URL carries the secret in."""
@@ -208,25 +223,17 @@ async def _refuse_untokened(
     return response
 
 
-@dataclass(slots=True)
+@dataclass(slots=True, kw_only=True)
 class WebServer:
     """The composed application, its token, and where it is listening."""
 
     command: str
     """What `textual-serve` runs per tab — one `ph --mode tui`, one subprocess."""
-    _: KW_ONLY
     session: str
     """The session every tab of this launch is on, and where an upload stages.
-
-    Known here because this process built the command that carries it — which is
-    the only reason an upload can be routed at all: nothing upstream
-    distinguishes one tab from another."""
-    host: str = "127.0.0.1"
-    port: int = 8000
-    title: str = "pH"
-    """What the browser calls the app. Not a knob: upstream falls back to
-    `title or command`, which would put the whole `python -m ph_app --mode tui …`
-    line in the page's own intro dialog."""
+    The module docstring says why it cannot be a tab's own."""
+    host: str = DEFAULT_HOST
+    port: int = DEFAULT_PORT
     token: str = field(default_factory=lambda: secrets.token_urlsafe(32), init=False)
     """Minted per launch, so closing the process ends the grant — there is no
     session store to revoke one in."""
@@ -285,36 +292,34 @@ class WebServer:
             # would say it — a `replace` that matches nothing is silent.
             log.warning("ph_app.web: no %s in the page; no drop zone added", CLOSING_BODY)
             return rendered
-        rendered.text = body.replace(CLOSING_BODY, DROPPABLE)
+        rendered.text = body.replace(CLOSING_BODY, _DROP_ZONE + CLOSING_BODY)
         return rendered
 
     async def _upload(self, request: web.Request) -> web.StreamResponse:
         """Bytes from the browser onto this session's tray.
 
-        Read in chunks against the same ceiling the daemon enforces, so a
-        too-large file is refused before it is buffered whole rather than after
-        `attachment/put` has already had it. Nothing else applies that ceiling on
-        this path: aiohttp checks `client_max_size` in `read()` and `post()`, and
-        `read_chunk` — the only reader here — is deliberately not one of them.
-
-        The declared `Content-Type` wins over the name, because the browser knows
-        what it picked up and pH is guessing from an extension; `mime_of` is that
-        guess, shared with `--attach` so one file is one kind of thing whichever
-        door it came through.
-
         **A malformed body is answered, not raised through.** The only producer
         is the drop zone above, so the first part is taken rather than scanned
         for — but the caller might also be a person with `curl`, and
         `request.multipart()` *asserts* on a body that is not multipart, which
-        reaches them as a 500 and an `AssertionError`. The same class of defect
-        as a daemon refusal arriving as one: an authorised person getting it
-        slightly wrong is not a server error.
+        would reach them as a 500 and an `AssertionError`. The same class of
+        defect as a daemon refusal arriving as one: an authorised person getting
+        it slightly wrong is not a server error.
+
+        **Two ceilings, and both are load-bearing.** `Content-Length` is refused
+        before a byte of the body is read, which is what stops a 40 MB drop
+        crossing the wire to be thrown away; the chunk loop is the backstop for a
+        chunked body, which has no length to check. Nothing else applies the
+        limit here — aiohttp consults `client_max_size` in `read()` and `post()`
+        and never in `read_chunk`, the only reader on this path.
         """
         if not request.content_type.startswith("multipart/"):
-            raise web.HTTPUnsupportedMediaType(text=f"pH: {EXPECTED}\n")
+            raise web.HTTPUnsupportedMediaType(text=EXPECTED)
+        if request.content_length and request.content_length > MAX_ATTACHMENT_BYTES:
+            raise self._too_large("the upload", request.content_length)
         part = await (await request.multipart()).next()
         if not isinstance(part, BodyPartReader) or part.name != "file":
-            raise web.HTTPBadRequest(text=f"pH: {EXPECTED}\n")
+            raise web.HTTPBadRequest(text=EXPECTED)
         name = part.filename or "upload"
         content = bytearray()
         # 64 KiB rather than the 8 KiB default: a 5 MiB drop is 80 awaits on the
@@ -322,24 +327,35 @@ class WebServer:
         while chunk := await part.read_chunk(1 << 16):
             content += chunk
             if len(content) > MAX_ATTACHMENT_BYTES:
-                raise web.HTTPRequestEntityTooLarge(
-                    max_size=MAX_ATTACHMENT_BYTES,
-                    actual_size=len(content),
-                    text=(
-                        f"pH: {name} is over the {MAX_ATTACHMENT_BYTES // (1024 * 1024)} MiB "
-                        "an attachment frame carries\n"
-                    ),
-                )
+                raise self._too_large(name, len(content))
 
-        mime = part.headers.get("Content-Type") or mime_of(name)
-        # `attachmentId` is the reference's own wire field — echoed rather than
-        # renamed, so a browser and the log call one blob by one name.
-        return web.json_response(
-            {"attachmentId": await self._stage(name, mime, bytes(content)), "name": name},
-            status=201,
+        # The browser knows what it picked up and pH is guessing from a name, so
+        # a declared type wins — except the one that declares nothing, which is
+        # what a browser sends for an extension it does not know. `mime_for` is
+        # that rule, and `--attach` climbs the same ladder.
+        mime = mime_for(part.headers.get("Content-Type"), name)
+        try:
+            reference = await self._stage(name, mime, content)
+        except OSError as gone:
+            raise web.HTTPServiceUnavailable(
+                text="pH: no daemon is running; open a tab first\n"
+            ) from gone
+        except DaemonError as refused:
+            raise self._refused(refused, name, len(content)) from refused
+        # The reference's own wire form, not a subset of it: a browser and the
+        # log then describe one blob the same way, down to the field names.
+        return web.json_response(reference.to_wire(), status=201)
+
+    @staticmethod
+    def _too_large(what: str, size: int) -> web.HTTPRequestEntityTooLarge:
+        """One sentence for the limit, wherever it is noticed."""
+        return web.HTTPRequestEntityTooLarge(
+            max_size=MAX_ATTACHMENT_BYTES,
+            actual_size=size,
+            text=f"pH: {what} is over the {MAX_ATTACHMENT_SIZE} an attachment frame carries\n",
         )
 
-    async def _stage(self, name: str, mime: str, content: bytes) -> str:
+    async def _stage(self, name: str, mime: str, content: bytes | bytearray) -> AttachmentRef:
         """Put the blob on the daemon and on this session's tray, or say why not.
 
         **A fresh connection per request, not a held one**: an upload is rare and
@@ -348,38 +364,36 @@ class WebServer:
         passivates or an ephemeral one exits — a staleness this route would then
         have to detect and repair for no gain.
 
-        **A daemon refusal is not a server error.** Every reachable one here says
-        the same thing to a person — no daemon, or no session yet, because the
-        *tabs* are what start both — and the daemon's own sentence is better than
-        anything this route could invent. Without the mapping they arrived as a
-        500 and an `ExceptionGroup` traceback in the log, which is what happens
-        when a person uploads before opening a tab.
-
-        `except*`, because `connected` runs the calls inside a task group — the
-        pump has to be reading for a reply to arrive — and anyio wraps whatever
-        leaves one, so an `except DaemonError` here would see nothing (the
-        `_alone` hazard). The `OSError` is raised before that group and so is not
-        wrapped, which is why the two are nested rather than side by side.
+        **Raises what the daemon refused**, plainly: `connected` unwraps its own
+        task group, so a caller is no longer the place that has to know a frame
+        crossed one. `_refused` is what turns that into an answer.
         """
 
-        async def stage(client: DaemonClient) -> str:
+        async def stage(client: DaemonClient) -> AttachmentRef:
             return await stage_bytes(client, self.session, name, mime, content)
 
-        try:
-            try:
-                return await connected(resolve_roots().daemon_socket(), stage)
-            except OSError as gone:
-                raise web.HTTPServiceUnavailable(
-                    text="pH: no daemon is running; open a tab first\n"
-                ) from gone
-        except* DaemonError as refused:
-            raise web.HTTPServiceUnavailable(
-                text=f"pH: {refused.exceptions[0]}; open a tab first\n"
-            ) from refused
+        return await connected(resolve_roots().daemon_socket(), stage)
+
+    def _refused(self, refused: DaemonError, name: str, size: int) -> web.HTTPException:
+        """The daemon's "no", as the answer a browser understands.
+
+        **Its own sentence, and its own status.** Uploading before opening a tab
+        is the ordinary state between launching and using it, and it first
+        arrived as a 500 with an `ExceptionGroup` traceback; answering *every*
+        refusal with one status and one sentence was the next version of the same
+        mistake. A file of exactly `MAX_ATTACHMENT_BYTES` reaches
+        `attachment_too_large` here — this route's ceiling is on the raw bytes
+        and the daemon's is on their base64 expansion, which is a hair larger —
+        and "open a tab first" is advice about the wrong problem.
+        """
+        if refused.reason == "attachment_too_large":
+            return self._too_large(name, size)
+        advice = "; open a tab first" if refused.reason == NO_SESSION else ""
+        return web.HTTPServiceUnavailable(text=f"pH: {refused}{advice}\n")
 
     def application(self) -> web.Application:
         """`Server._make_app`, re-stated with our gate. See the module docstring."""
-        server = Server(command=self.command, host=self.host, port=self.port, title=self.title)
+        server = Server(command=self.command, host=self.host, port=self.port, title=TITLE)
         # A backstop, not the gate: aiohttp applies `client_max_size` to
         # `read()`/`post()` and never to the `read_chunk` loop `_upload` uses, so
         # the refusal a person sees is that loop's. One number rather than two,
@@ -414,9 +428,9 @@ async def run_web(server: WebServer, *, open_browser: bool = False) -> None:
     thing", and `web.run_app` would be a second — it installs its own signal
     handlers and owns the loop.
 
-    `GRACE_SECONDS` and not aiohttp's own 60: two budgets for one shutdown is how
-    the inner one silently becomes dead code, and a hung tab must not hold this
-    process six times longer than every other pH teardown allows.
+    `GRACE_SECONDS` and not aiohttp's own 60, by the rule `application()` states:
+    a second budget is how the first becomes dead code. A hung tab must not hold
+    this process six times longer than every other pH teardown allows.
     """
     runner = web.AppRunner(server.application(), shutdown_timeout=GRACE_SECONDS)
     await runner.setup()

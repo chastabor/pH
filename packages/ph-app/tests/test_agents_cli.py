@@ -39,7 +39,7 @@ from typing import Any
 
 import anyio
 import pytest
-from daemon_helpers import Daemon, daemon_socket, running
+from daemon_helpers import Daemon, private_runtime, serving
 from typer.testing import CliRunner
 
 from ph_app.cli import app
@@ -65,23 +65,8 @@ async def _daemon(tmp_path: Path, monkeypatch: Any, **options: Any) -> AsyncIter
     The socket is the one `$PH_RUNTIME` derives, and it is handed to `serve` so
     the two halves are pinned to *the same* derivation rather than to two.
     """
-    _runtime(tmp_path, monkeypatch)
-    async with running(tmp_path, path=daemon_socket(), **options) as daemon:
+    async with serving(tmp_path, monkeypatch, **options) as daemon:
         yield daemon
-
-
-def _runtime(tmp_path: Path, monkeypatch: Any) -> Path:
-    """Point `$PH_RUNTIME` somewhere private.
-
-    Explicit in every test, including the ones with no daemon: the fallback is
-    `$XDG_RUNTIME_DIR`, which on a developer's machine is where their *real*
-    daemon listens — a "no daemon is running" test that connected to it would
-    pass for the wrong reason, or worse, shut it down.
-    """
-    runtime = tmp_path / "run"
-    runtime.mkdir(parents=True, exist_ok=True)
-    monkeypatch.setenv("PH_RUNTIME", str(runtime))
-    return runtime
 
 
 async def _watchers(client: Any, session_id: str) -> int:
@@ -349,7 +334,7 @@ async def test_a_follow_ends_when_the_daemon_goes_away(tmp_path: Path, monkeypat
 async def test_no_daemon_names_the_socket_and_how_to_start_one(
     tmp_path: Path, monkeypatch: Any
 ) -> None:
-    _runtime(tmp_path, monkeypatch)
+    private_runtime(tmp_path, monkeypatch)
     for command in (
         ["agents"],
         ["agents", "send", "x", "hi"],
@@ -375,7 +360,7 @@ async def test_a_socket_nobody_answers_is_told_apart_from_no_socket(
     clears a stale socket on its way up, so saying so is what stops a reader
     deleting a file by hand.
     """
-    runtime = _runtime(tmp_path, monkeypatch)
+    runtime = private_runtime(tmp_path, monkeypatch)
     (runtime / "daemon.sock").write_text("not a socket")
     result = await _ph("agents", "doctor")
     assert result.exit_code == 1

@@ -442,6 +442,20 @@ compaction *notes*.
 as `ctx.on(...)` listeners, deliberately: "sugar over `ctx.on`; there is one
 routing mechanism" (`seams/approval.py:229-238`).
 
+> **These two now have a transport, and it changed the seam rather than sitting
+> beside it** (P5-13). An answerer used to be a screen in this process; under the
+> daemon it is a socket away, and `AskDesk` registers one answerer that fans the
+> ask to *every* attached front end — first answer wins, later ones are refused
+> `ask_settled`. Two consequences are visible in the seam itself. `register_answerer`
+> takes a **`reachable`** callable, because whether anyone is there to ask is no
+> longer knowable from the fact that a listener registered: the desk is reachable
+> only while a front end is attached, and `user_questions.ask` appends nothing at
+> all when nothing is `attended` (P7-09). And an answer has to be **serialisable** —
+> `Edited` and `Responded` are frozen dataclasses, so `answer_to_wire` is the
+> inverse of the decoder the seam already had. With nobody attached, an approval
+> does *not* resolve: the ask parks, which is what the log already described —
+> `approval/asked` with no `approval/decided` **is** the pending state.
+
 **Service-only** — no third-party registration surface: `attachments`,
 `containment`, `credentials`, `goals`, `jobs`, `permission_presets`, `schedule`,
 `settings`, `shell`, `spill_store`, `subagent_presets`, `subprocess`,
@@ -559,7 +573,8 @@ and returns the process root.
 ```
 ph [--print P] [--profile P] [--provider P] [--model M] [--session ID]
    [--mode MODE] [--attach PATH ...] [--resume ID] [--dump-config]
-   [--no-spawn]                                  # tui: refuse to start a daemon
+   [--no-spawn]                                  # tui/web: refuse to start a daemon
+   [--keep-daemon]                               # tui/web: start a service one, not ephemeral
    [--host H] [--port N] [--open]                # web: bind, and the token URL
 
 ph doctor      [--profile]
@@ -606,7 +621,7 @@ Everything exits **1** on refusal, except argument errors under
 | `json` | **Not a rendering** — the session log's *own* camelCase envelopes, emitted as each commits, so a pipe consumer and the stored JSONL parse one format |
 | `transcript` | Reads `session.transcript()`, **not** `derive_messages()`, so compaction does not erase what the human saw |
 | `rpc` | JSON-RPC over stdio. Takes no `--print` — the peer drives |
-| `tui` | Textual, imported lazily. **A daemon client** (P5-14): it attaches, and closing it detaches rather than ending the turn. Silently starts an ephemeral daemon when no socket answers. Loops so the session picker can reopen in a fresh app |
+| `tui` | Textual, imported lazily. **A daemon client** (P5-14): it attaches, and closing it detaches rather than ending the turn. Silently starts an ephemeral daemon when no socket answers — `--keep-daemon` makes the one it starts a service instead, and `--no-spawn` refuses to start one at all |
 | `web` | The same `tui` in a browser tab, over `textual-serve` — one subprocess per tab, so each tab is one more front end on the one daemon, and **all tabs of a launch share one session** (the multiplex: private composers, one log). Drop a file on the page to attach it. Needs the `ph-app[web]` extra; `--mode web` without it prints the install line. Binds `127.0.0.1` unless `--host` says otherwise, and every request needs the per-launch token from the URL |
 | `trajectory` | **Mounts nothing** — no agent, provider, answerers, or plugins. A fold over a stored file |
 
@@ -1316,6 +1331,10 @@ Stated here rather than left to be discovered, per the codebase's own rule.
 | `_enforce`'s containment refusal (a scope outside the parent's) has **no test**; the no-scope branch does | untested |
 | Tool-call limit with `exit: "error"` — the "one failed `tool/result`, not a turn stop" reading is traced, not tested | untested |
 | Kernel-namespace rehydration: `kernel/snapshot` / `kernel/restored` exist as types but nothing wires them into the resume path | unwired |
+| **A staged attachment is not durable.** `session/stage` puts a reference on the root's shared tray so an upload becomes a chip in every attached composer — composer state, shared but transient, deliberately not in the log. A daemon restart loses the tray with the blob still in the store, so a person who dropped a file and then reopened has to drop it again | by decision, P7-06 |
+| **No chunked upload.** `attachment/put` carries the whole file in one frame, capped at 5 MiB; a larger one is refused by name rather than truncated. Both doors say so — the browser gets a sentence, `/attach` gets `attachment_too_large` | P7-06, stated |
+| **A screen a third-party row contributes is invisible to a remote front end.** `ScreenDefinition.build()` cannot travel, so `screens/list` is intersected with what the client can draw and everything else is silently not offered. Every screen pH ships is drawable; a row's own is not | P5-15, gated by `test_a_screen_this_build_cannot_draw_is_not_offered`; P7-07 closes it |
+| **`repaired()` closes a turn parked on a human as interrupted.** The ask is in the log (`approval/asked` with no decision) and `pending_approvals`/`pending_questions` fold it, but nothing reads that fold on *resume* — only `AskDesk.join` re-poses, across an attach. Leaving the turn open is unsafe until something does, because a parked turn holds a dangling `tool/call` (B4 appends it before the pipeline gates it) and several providers reject such a log outright | P5-13, deferred; gated by `test_a_turn_parked_on_a_human_is_closed_as_interrupted` so it cannot go quietly false |
 | `LlmRuntime.register_adapter` uses no claiming helper and takes no `scope=` — the one provider slot outside the ownership sweep | documented in place |
 | **Per-service isolation is implemented** (`isolate:` on a row, §2.7 — dsh's `isolate.fs`), but a realm's provider cannot be **swapped mid-session**: dsh's example — "we start processing sensitive data, so we swap the filesystem to read-only and the agent still sees the same filesystem" — has no pH spelling. `fs.rebase` is a `claim_slot`, so the *root* can change under a stable `ctx.fs`; read-only is a `permissions-fs` rule or the `readonly-scratch` workspace kind, both fixed at mount. The mechanism a swap needs (`claim_slot` releasing to a new claimant) exists; no row drives it and nothing has asked for it. **Deferred by decision, not by omission**: it will be built when a use case shows up, and the use case will decide whether the answer is a provider swap, a rule, or a new realm | deferred until a use case |
 

@@ -55,6 +55,20 @@ supervisor holding leases the first one owns.
 """
 
 
+def _dragged_in(entry: str, forbidden: tuple[str, ...]) -> str:
+    """Import `entry` in a fresh interpreter and report which of `forbidden` came.
+
+    A subprocess because the promise is about a *cold* import: this interpreter
+    has already imported half the tree to collect the tests, so `sys.modules`
+    here answers a question nobody asked.
+    """
+    probe = f"import sys, {entry}; print([n for n in {forbidden!r} if n in sys.modules])"
+    found = subprocess.run(
+        [sys.executable, "-c", probe], capture_output=True, text=True, check=True
+    )
+    return found.stdout.strip()
+
+
 def test_the_cli_imports_nothing_optional() -> None:
     """Import the CLI in a fresh interpreter and ask what came with it.
 
@@ -62,12 +76,9 @@ def test_the_cli_imports_nothing_optional() -> None:
     `cli.py`, and `ph -p` starts paying for a UI it will not draw — and fails
     outright wherever the extra is absent.
     """
-    probe = f"import sys, ph_app.cli; print([n for n in {OPTIONAL!r} if n in sys.modules])"
-    found = subprocess.run(
-        [sys.executable, "-c", probe], capture_output=True, text=True, check=True
-    )
+    dragged = _dragged_in("ph_app.cli", OPTIONAL)
 
-    assert found.stdout.strip() == "[]", f"importing ph_app.cli dragged in {found.stdout.strip()}"
+    assert dragged == "[]", f"importing ph_app.cli dragged in {dragged}"
 
 
 def test_a_front_end_imports_the_daemons_client_and_not_its_server() -> None:
@@ -77,12 +88,20 @@ def test_a_front_end_imports_the_daemons_client_and_not_its_server() -> None:
     is what it did until this test — and importing `ph_app.web.serve` loads the
     supervisor, every seam and a `Profile`, for the sake of `DaemonClient`.
     """
-    probe = (
-        "import sys, ph_app.web.serve; "
-        f"print([n for n in {FRONT_END_FORBIDS!r} if n in sys.modules])"
-    )
-    found = subprocess.run(
-        [sys.executable, "-c", probe], capture_output=True, text=True, check=True
-    )
+    dragged = _dragged_in("ph_app.web.serve", FRONT_END_FORBIDS)
 
-    assert found.stdout.strip() == "[]", f"ph_app.web.serve dragged in {found.stdout.strip()}"
+    assert dragged == "[]", f"ph_app.web.serve dragged in {dragged}"
+
+
+def test_the_human_door_needs_no_daemon_at_all() -> None:
+    """`ph_app.attach` reads a person's file and builds a message; that is all.
+
+    It gained `stage_bytes`, which takes a `DaemonClient` — under `TYPE_CHECKING`,
+    so the annotation costs no import and the module stays usable by anything
+    that has a client rather than only by things that live beside one. Nothing
+    tested that guard, and a guard nobody tests is a guard somebody deletes while
+    tidying imports.
+    """
+    dragged = _dragged_in("ph_app.attach", ("ph_app.daemon.client", *FRONT_END_FORBIDS))
+
+    assert dragged == "[]", f"ph_app.attach dragged in {dragged}"
