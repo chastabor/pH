@@ -30,6 +30,7 @@ __all__ = [
     "DaemonGone",
     "Dispatch",
     "Refusal",
+    "SeamAbsent",
     "capabilities",
     "cursor_of",
     "notification",
@@ -80,6 +81,28 @@ class Refusal(Exception):
     """
 
     code = ""
+
+
+class SeamAbsent(Refusal):
+    """This deployment did not mount the seam that method needs.
+
+    Its own code, because `unknown_method` is a different sentence: that one
+    means "this daemon is older than you think" and a client responds by
+    disabling the feature everywhere. This one means "this deployment does not
+    do that", which is a per-root fact and the right thing to grey out one
+    button over.
+
+    The read-side projections answer absence with an empty list for the same
+    reason stated the other way round — see `projections.py` — so the two halves
+    agree that a missing seam is a fact about the profile, not a fault.
+
+    **Here rather than in the daemon**, because the in-process front end refuses
+    for the same reason and cannot import from `daemon` without a cycle. A
+    fourth refusal class per absent seam is the accumulation this one was
+    generalized to stop.
+    """
+
+    code = "seam_absent"
 
 
 class DaemonError(RuntimeError):

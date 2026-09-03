@@ -48,6 +48,7 @@ from ph.text import count_of
 from ph.tools import ToolCallView, ToolResult, ToolResultView
 from ph.tools.presentation import render_call_view, render_result_view
 
+from ..shell import shell_body
 from ..wire import media_labels, obj, one_line, result_block, seq, text_of_wire
 from .state import ChatItem, ItemRole, ToolCard, TuiState
 
@@ -254,22 +255,17 @@ class TuiEventAdapter:
     # --------------------------------------------------------------- tools --
 
     def _on_tool_call(self, event: SessionEvent, frame: Frame) -> None:
-        call_id = str(event.data.get("callId"))
         name = str(event.data.get("name"))
-        card = self.state.register_card(
+        card = self._card_row(
             ToolCard(
-                call_id=call_id,
+                call_id=str(event.data.get("callId")),
                 name=name,
                 arguments=str(event.data.get("arguments", "")),
                 title=name,
-            )
+            ),
+            event,
         )
         self._present_call(card, frame.view)
-        self.state.add(
-            ChatItem(
-                key=f"tool-{call_id}", role="tool", tool=card, turn=self.state.turn, seq=event.seq
-            )
-        )
 
     def _present_call(self, card: ToolCard, arrived: ToolCallView | ToolResultView | None) -> None:
         """How this pending call looks — as the daemon rendered it, or as the tool would.
@@ -393,6 +389,60 @@ class TuiEventAdapter:
         outcome = str(event.data.get("outcome"))
         role: ItemRole = "notice" if outcome == "allowed-once" else "error"
         self._row("decided", role, f"{event.data.get('toolName')}: {outcome}", event)
+
+    def _card_row(self, card: ToolCard, event: SessionEvent) -> ToolCard:
+        """Register a card and place its row. The one spelling of that pair.
+
+        The `tool-` key convention is what `state.card()` looks cards up by, so
+        two authors of it are two chances for a lookup to miss."""
+        registered = self.state.register_card(card)
+        self.state.add(
+            ChatItem(
+                key=f"tool-{card.call_id}",
+                role="tool",
+                tool=registered,
+                turn=self.state.turn,
+                seq=event.seq,
+            )
+        )
+        return registered
+
+    def _on_shell_command(self, event: SessionEvent, frame: Frame) -> None:
+        """A person's own shell command, as a card that has not settled.
+
+        Rendered as a `ToolCard` with the `terminal` kind Code Mode already
+        draws, so `!!ls` looks like what it is in both front ends — and keyed by
+        the event's own seq, because a person may run the same command twice and
+        two cards is the truthful account of that.
+        """
+        command = str(event.data.get("command", ""))
+        self._card_row(
+            ToolCard(
+                call_id=f"shell-{event.seq}",
+                name="shell",
+                arguments="",
+                title="Shell",
+                subtitle=command,
+                card="terminal",
+                input_text=command,
+            ),
+            event,
+        )
+
+    def _on_shell_result(self, event: SessionEvent, frame: Frame) -> None:
+        """Settle the command this cites, the way every other pair here does.
+
+        Through `commandSeq` in the event data — the same shape as `tool/result`'s
+        `callId` and `question/answered`'s `askId`. An adapter field holding "the
+        one in flight" would be wrong on a multiplexed session, where two
+        attached UIs can each be running one.
+        """
+        card = self.state.card(f"shell-{event.data.get('commandSeq')}")
+        if card is None:
+            return
+        card.settled = True
+        card.is_error = not event.data.get("ok", False)
+        card.body = shell_body(event.data)
 
     def _on_question_asked(self, event: SessionEvent, frame: Frame) -> None:
         header = str(event.data.get("header") or "").strip()
@@ -851,6 +901,8 @@ HANDLERS: Mapping[str, Handler] = {
     "request/context": TuiEventAdapter._on_request_context,
     "approval/asked": TuiEventAdapter._on_approval_asked,
     "approval/decided": TuiEventAdapter._on_approval_decided,
+    "shell/command": TuiEventAdapter._on_shell_command,
+    "shell/result": TuiEventAdapter._on_shell_result,
     "question/asked": TuiEventAdapter._on_question_asked,
     "question/answered": TuiEventAdapter._on_question_answered,
     "permission/preset": TuiEventAdapter._on_permission_preset,

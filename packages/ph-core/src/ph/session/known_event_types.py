@@ -106,6 +106,18 @@ KNOWN_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         # never claims a person was asked and declined when no person was there.
         "question/asked",
         "question/answered",
+        # A shell command a *person* ran from the composer, and what it printed
+        # (P7-10, emitted by `ph-app`'s `session/shell`). Two events for the
+        # reason `tool/call`/`tool/result` are two: the command is appended
+        # before it runs, so one that hangs — or that takes the daemon down with
+        # it — still shows in the log what was started, which is exactly the
+        # command worth knowing about.
+        #
+        # Invisible to the model by not being one of the three surface-eligible
+        # types — see `SURFACE_EVENT_TYPES`, which is where that mechanism is
+        # defined and explained.
+        "shell/command",
+        "shell/result",
         # The gating *posture* (P4-05; emitted by ph-stabilize's `hitl`). Its own
         # type rather than a field on `approval/policy`, which `permission-presets`
         # also writes: one last-write-wins fold with two writers, one of which
@@ -293,6 +305,12 @@ IGNORABLE_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         "schedule/cancelled",
         "schedule/tick",
         "schedule/heartbeat",
+        # What a person poked at from the composer. Ignorable: a reader skipping
+        # these loses the account of what someone ran beside the conversation,
+        # and never the conversation — the model was not shown it either way,
+        # which is the whole point of the type.
+        "shell/command",
+        "shell/result",
         # What the model asked a person and what they said. Ignorable, unlike
         # `approval/*`: an approval's decision can carry substituted arguments
         # and so changes what ran, while a question's answer reaches the model

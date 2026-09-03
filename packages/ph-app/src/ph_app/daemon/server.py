@@ -47,10 +47,12 @@ from ph.session import now_ms
 from ..protocol import (
     SNAPSHOT_EVENTS,
     Refusal,
+    SeamAbsent,
     capabilities,
     cursor_of,
     resume_at,
 )
+from ..shell import shell_of
 from .cards import CARD_EVENTS, presentation_of
 from .duplex import Peer
 from .projections import commands_of, credentials_of, readings_of, screens_of, tools_of
@@ -147,6 +149,7 @@ CAPABILITIES = (
     "projections",
     "attachments",
     "staging",
+    "shell",
 )
 """What this transport adds to the two both of them have.
 
@@ -200,23 +203,6 @@ class AttachmentUnknown(Refusal):
     """
 
     code = "attachment_unknown"
-
-
-class SeamAbsent(Refusal):
-    """This root's profile did not mount the seam that method needs.
-
-    Its own code, because `unknown_method` is a different sentence: that one
-    means "this daemon is older than you think" and a client responds by
-    disabling the feature everywhere. This one means "this deployment does not
-    do that", which is a per-root fact and the right thing to grey out one
-    button over.
-
-    The read-side projections answer absence with an empty list for the same
-    reason stated the other way round — see `projections.py` — so the two halves
-    agree that a missing seam is a fact about the profile, not a fault.
-    """
-
-    code = "seam_absent"
 
 
 class NoSuchSession(Refusal):
@@ -507,6 +493,32 @@ class _Connection:
         )
         return {"sessionId": root.id, "shown": shown}
 
+    async def _prepare_shell(self, root: Any, params: dict[str, Any]) -> tuple[Any, str]:
+        """Resolve the seam and the command **before** the key is claimed.
+
+        The seam check used to happen inside `act`, which is after `once()` has
+        recorded the request — so a `!!` sent to a deployment with no shell burnt
+        the client's retry on a refusal. That is precisely what the two halves
+        are for.
+        """
+        command = str(params.get("command", "")).strip()
+        if not command:
+            raise Refusal("a shell command cannot be empty")
+        return shell_of(root.ctx), command
+
+    async def _act_shell(
+        self, root: Any, params: dict[str, Any], prepared: tuple[Any, str]
+    ) -> dict[str, Any]:
+        """`!!<command>` — the person's own shell, in the session's workspace.
+
+        The reply is the exit code; the *output* arrives as `shell/command` and
+        `shell/result` events, so every attached UI reads it by the one route
+        they all already watch and the person who typed it reads it back off the
+        same event as everybody else.
+        """
+        shell, command = prepared
+        return await self.server.supervisor.shell(root.id, shell, command)
+
     async def _prepare_preset(self, root: Any, params: dict[str, Any]) -> Any:
         presets = root.ctx.get("permission_presets")
         if presets is None:
@@ -658,6 +670,7 @@ MUTATIONS: dict[str, Mutation] = {
     "session/prompt": Mutation(_Connection._prepare_prompt, _Connection._act_prompt),
     "session/command": Mutation(_Connection._prepare_command, _Connection._act_command),
     "session/stage": Mutation(_Connection._prepare_stage, _Connection._act_stage),
+    "session/shell": Mutation(_Connection._prepare_shell, _Connection._act_shell),
     "session/preset": Mutation(_Connection._prepare_preset, _Connection._act_preset),
     "credentials/store": Mutation(_Connection._prepare_credential, _Connection._act_credential),
 }

@@ -355,6 +355,12 @@ class PHTuiApp(App[str | None]):
         front = self.front
         if front is None:
             return
+        if message.text.startswith("!!"):
+            # The person's own shell, not a turn: `!!` spends no tokens and the
+            # model never sees it. Logged all the same — pressing enter is an act
+            # in the session, so every attached UI renders it from the event.
+            self.run_worker(self._shell(front, message.text[2:].strip()), group="shell")
+            return
         if message.text.startswith("/"):
             # A command is the human's verb. Sending it as a prompt would spend
             # a turn and make the log say the model chose it.
@@ -366,6 +372,22 @@ class PHTuiApp(App[str | None]):
             front.queue(message.text)
             return
         self._run_turn(message.text)
+
+    async def _shell(self, front: FrontSession, command: str) -> None:
+        """Run `!!<command>` and let the log do the rendering.
+
+        Nothing is drawn here: the command and its output arrive as `shell/*`
+        events like everything else, which is what keeps `TuiState` entirely
+        event-derived and lets the browser and the terminal share one fold.
+        """
+        if not command:
+            self.notify("type `!!<command>` to run a shell command", title="shell", markup=False)
+            return
+        try:
+            await front.shell(command)
+        except Exception as error:
+            log.exception("ph_app.tui: a shell command failed to start")
+            self.notify(str(error), title="shell", severity="error", markup=False)
 
     async def action_attach(self, argument: str = "") -> None:
         """`/attach <path> …` — stage files for the next prompt.

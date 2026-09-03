@@ -57,6 +57,16 @@ log-only records — is trace and replay data. Only these three may carry
 `surfaceOp` and `sourceEventSeqs`.
 """
 
+# Why this set is a *whitelist* and not a flag: surface membership is a property
+# of the **type**, which is what makes a type like `shell/*` — a person's own
+# shell command, logged in full — invisible to the model by construction rather
+# than by a filter every writer has to remember. `_surface_op_of` enforces both
+# directions: an eligible type must carry a `surfaceOp`, an ineligible one may
+# not, so "log it as a `tool/result` and filter it out of the context" is not
+# expressible. It would be wrong anyway — a tool result with no `tool_use` block
+# to pair with is an orphan several providers reject, which is why tau's `!`
+# splices a *user message* carrying the output as text.
+
 Seq: TypeAlias = Annotated[StrictInt, Field(ge=0)]
 """A non-negative event sequence number. Strict, so `True` is not a seq."""
 

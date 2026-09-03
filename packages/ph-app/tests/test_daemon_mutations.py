@@ -63,6 +63,10 @@ async def _stage(client: Any, root: Any) -> dict[str, Any]:
     return {"attachment": reply["attachment"]}
 
 
+async def _shell(client: Any, root: Any) -> dict[str, Any]:
+    return {"command": "echo hi"}
+
+
 async def _preset(client: Any, root: Any) -> dict[str, Any]:
     return {"preset": "workspace-write"}
 
@@ -79,6 +83,7 @@ CASES: dict[str, Case] = {
     "session/prompt": (_prompt, _events("user/message")),
     "session/command": (_command, _events("command/run")),
     "session/stage": (_stage, lambda root: len(root.staged)),
+    "session/shell": (_shell, _events("shell/command")),
     "session/preset": (_preset, _events("permission/preset")),
     "credentials/store": (_credential, None),
 }

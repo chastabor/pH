@@ -43,6 +43,7 @@ from ph.session import Session, SessionEvent
 
 from ..attach import Tray, ingest, prompt_message
 from ..runtime import mounted
+from ..shell import run_shell, shell_of
 from .adapter import TuiEventAdapter
 from .state import TuiState
 
@@ -110,6 +111,15 @@ class FrontSession(Protocol):
         ...
 
     async def run_command(self, line: str) -> str | None: ...
+
+    async def shell(self, command: str) -> None:
+        """Run the person's own shell command in the session's workspace.
+
+        Nothing is returned: the command and its output reach every attached
+        front end as `shell/*` events, so the person who typed it reads it back
+        off the same log as everybody else — one rendering path, not two."""
+        ...
+
     def queue(self, text: str) -> None: ...
     def cancel(self) -> None: ...
     async def flush(self) -> None: ...
@@ -200,6 +210,10 @@ class HarnessSession:
         finally:
             self.state.status = "idle"
             self.host.state_changed()
+
+    async def shell(self, command: str) -> None:
+        """`!!` in process, through the same body the daemon runs."""
+        await run_shell(shell_of(self.ctx), self.session, self.agent, command)
 
     async def attach(self, paths: Sequence[str]) -> list[AttachmentRef]:
         """Read and store these files, and stage them for the next prompt.

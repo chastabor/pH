@@ -32,6 +32,14 @@ class ShellResult:
     stdout: str
     stderr: str
     argv: tuple[str, ...]
+    cwd: str = ""
+    """Where the child actually ran.
+
+    Reported rather than re-derived, because a caller that wants to *record*
+    where a command ran had only one way to find out — repeat this seam's own
+    `fs.root_for(agent)` derivation and hope the two never diverge. `run`
+    honours a `cwd` override and a workspace redirection, so the copy could
+    disagree with the fact it claimed to describe."""
     confined_by: str | None = None
     """The backend that bounded this run; `None` means nothing did."""
 
@@ -106,7 +114,12 @@ class ShellService:
         )
         code, out, err = await self.ctx.subprocess.run(spec, scope=scope)
         return ShellResult(
-            exit_code=code, stdout=out, stderr=err, argv=argv, confined_by=confined_by
+            exit_code=code,
+            stdout=out,
+            stderr=err,
+            argv=argv,
+            cwd=str(cwd),
+            confined_by=confined_by,
         )
 
 

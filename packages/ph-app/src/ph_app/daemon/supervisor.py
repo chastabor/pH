@@ -53,6 +53,7 @@ from ph.tools.errors import error_message
 from ..attach import Tray, prompt_message
 from ..protocol import Refusal, cursor_of
 from ..runtime import mounted
+from ..shell import run_shell
 from .cards import CARD_EVENTS, presentation_of
 from .frontend import AskDesk
 from .projections import readings_of
@@ -129,6 +130,20 @@ NON_GUARANTEES: tuple[tuple[str, str], ...] = (
         "catches up, one run per missed window. For work that must happen whether or "
         "not the daemon is up, start it from cron, anacron or a systemd timer — pH "
         "schedules inside a conversation and does not replace them",
+    ),
+    (
+        "what `!!` puts in the log",
+        "whatever the command printed. The environment is scrubbed — `ctx.shell` drops every "
+        "name matching KEY|SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL, and pH reads provider keys "
+        "through `ctx.credentials` rather than the child's environment — so `!!env` prints no "
+        "harness secret. A command that reads one from somewhere pH does not know about, a file "
+        "or a keychain or a fetched token, logs it like any other output: `!!` is the person's "
+        "own shell with the person's own reach (P7-10)",
+    ),
+    (
+        "who may run `!!`",
+        "anyone holding the web token, deliberately — the same authority a terminal already "
+        "grants, where a person can approve any tool call the model makes",
     ),
     (
         "a question a person walked away from",
@@ -1096,6 +1111,24 @@ class Supervisor:
         with suppress(anyio.WouldBlock):
             root.wake.send_nowait(None)
         return root
+
+    async def shell(self, root_id: str, shell: Any, command: str) -> dict[str, Any]:
+        """Run a person's own shell command in the session's workspace (P7-10).
+
+        **In the root, not the client.** `ctx.shell` resolves the working
+        directory and the containment tier from the agent, so `!!` lands where
+        the session lives and is bounded the way the session is. A browser tab
+        has no shell, and "the session's shell" is the honest meaning of the
+        verb in both front ends.
+
+        The output travels as *events*, not in the reply, so every attached UI
+        learns what happened by the one route they all already watch. The seam is
+        passed in because the caller resolved it before claiming the idempotence
+        key — see `shell_of`.
+        """
+        root = await self.start(root_id)
+        result = await run_shell(shell, root.session, root.agent, command)
+        return {"sessionId": root.id, "exitCode": result.exit_code, "ok": result.exit_code == 0}
 
     def describe(self) -> list[dict[str, Any]]:
         return [root.describe() for root in self.roots.values()]

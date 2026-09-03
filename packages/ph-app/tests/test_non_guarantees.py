@@ -59,6 +59,8 @@ CLAIMED = {
     "CPU": "shared",
     "restart": "not rolling",
     "while the daemon is down": "nothing fires",
+    "what `!!` puts in the log": "whatever the command printed",
+    "who may run `!!`": "anyone holding the web token",
     "a question a person walked away from": "re-posed only while this daemon runs",
     "per user": "one daemon per $PH_RUNTIME",
 }
