@@ -15,6 +15,8 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+import anyio
+
 from ..agent.types import AgentOptions
 from ..cordis import DEPLOYMENT, Boundary, Context
 from ..llm.types import ContextForm, PluginSource
@@ -36,6 +38,7 @@ __all__ = [
     "FAKE_OPTIONS",
     "StubAgent",
     "assistant_payload",
+    "parked_gate",
     "plugin_payload",
     "raising",
     "reference_fork",
@@ -112,6 +115,30 @@ def boundary_for(scope: Boundary | None, agent: Any) -> Boundary:
             "deployment-wide view, on purpose)"
         )
     return own
+
+
+def parked_gate(ctx: Any, *, only: str | None = None) -> tuple[anyio.Event, anyio.Event]:
+    """A `tools/pre-execute` gate that stops and waits to be let go.
+
+    Returns `(reached, release)`: the listener sets the first when a call arrives
+    at the gate and awaits the second before letting it through. `only` names
+    the one tool it parks; anything else passes untouched, which is what a test
+    of one call among several wants.
+
+    For the tests that observe the log *mid-flight* — what has been written while
+    a call is still parked on its gate (P7-15). Written out in three test modules
+    before this.
+    """
+    reached, release = anyio.Event(), anyio.Event()
+
+    async def parked(execution: Any, next_: Any) -> Any:
+        if only is None or execution.name == only:
+            reached.set()
+            await release.wait()
+        return await next_(execution)
+
+    ctx.on("tools/pre-execute", parked)
+    return reached, release
 
 
 async def run_tool(

@@ -28,6 +28,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import anyio
 import pytest
 from stabilize_helpers import (
     PROFILE,
@@ -328,14 +329,47 @@ async def test_reject_stops_it_and_says_who(mount: Any) -> None:
     assert "hello" not in result_text(session, "c1")
 
 
-async def test_edit_runs_the_humans_arguments_and_logs_both(mount: Any) -> None:
-    """The correction path, and the reason both versions are in the log.
+async def test_a_call_parked_on_a_human_leaves_no_record_of_an_act(mount: Any) -> None:
+    """The real gate, through the real seam: the ask is in the log, the act is not.
 
-    `tool/call` is appended before the pipeline runs (B4), so it already records
-    what the *model* asked for. Rewriting it would attribute the human's
-    arguments to the model — the falsehood this codebase refuses everywhere — so
-    the substitution lands on `approval/decided` and a reader sees both, each
-    attributed to whoever made it.
+    While a person looks at the modal, the log holds `approval/asked` — which
+    *is* the pending state — and nothing else.
+    """
+    ctx = await mount(_gated(bash={}), profile=PROFILE)
+    session = ctx.sessions.create("parked")
+    reached, release = anyio.Event(), anyio.Event()
+
+    async def eventually() -> str:
+        reached.set()
+        await release.wait()
+        return "allowed-once"
+
+    answer_approvals(ctx, eventually)
+
+    async with anyio.create_task_group() as tasks:
+        tasks.start_soon(run_tool_calls, ctx, session, bash_call("c1", "echo later"))
+        await reached.wait()
+        assert [e.type for e in session.events] == ["assistant/message", "approval/asked"]
+        release.set()
+
+    assert [e.type for e in session.events] == [
+        "assistant/message",
+        "approval/asked",
+        "approval/decided",
+        "tool/call",
+        "tool/result",
+    ]
+    assert "later" in result_text(session, "c1")
+
+
+async def test_edit_runs_the_humans_arguments_and_logs_all_three(mount: Any) -> None:
+    """The correction path: three records, each attributed to whoever made it.
+
+    The *assistant message* holds what the model asked for; `approval/decided`
+    carries the human's substitution; and `tool/call`, written after the gate
+    (P7-15), records what actually **ran** — the record named "call" says what
+    was called. Nothing is attributed to the wrong author: the model's own words
+    are still in the log, in the message it sent.
     """
     ctx = await mount(_gated(bash={}), profile=PROFILE)
     answer_approvals(ctx, Edited(arguments={"command": "echo corrected"}))
@@ -344,11 +378,14 @@ async def test_edit_runs_the_humans_arguments_and_logs_both(mount: Any) -> None:
     await run_tool_calls(ctx, session, bash_call("c1", "echo original"))
 
     assert "corrected" in result_text(session, "c1")
+    (asked,) = events_of(session, "assistant/message")
+    (block,) = [b for b in asked.data["message"]["content"] if b["type"] == "tool-call"]
+    assert "original" in block["arguments"], "the model's own request, where the model put it"
     (call,) = events_of(session, "tool/call")
-    assert "original" in str(call.data["arguments"]), "the model's own request was rewritten"
+    assert json.loads(call.data["arguments"]) == {"command": "echo corrected"}, "what ran"
     (decided,) = events_of(session, "approval/decided")
     assert decided.data["outcome"] == "edited"
-    assert decided.data["arguments"]["command"] == "echo corrected"
+    assert decided.data["arguments"]["command"] == "echo corrected", "who changed it"
 
 
 async def test_respond_skips_the_body_and_answers_in_its_place(mount: Any) -> None:

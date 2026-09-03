@@ -158,10 +158,14 @@ is what closes it.
 **`repaired()` still closes a turn parked on a human as interrupted.** The ask is
 in the log and `pending_approvals`/`pending_questions` fold it; nothing reads that
 fold on *resume*, only across an attach. Leaving the turn open is unsafe until
-something does, because a parked turn holds a dangling `tool/call` by
-construction (B4 appends it before the pipeline gates it) and several providers
-reject such a log outright. Closing it is the honest behaviour until the resume
-half lands.
+something does, because the model's `tool_use` block is still unanswered: it
+rides the *assistant message*, and a message carrying one with no matching
+`tool_result` is a log several providers reject. (`tool/call` is **not**
+surface-eligible — it produces no `Message` and no provider ever sees it, which
+an earlier draft of this paragraph got wrong. P7-15 moved that record to after
+the gate, so a parked turn now has no `tool/call` at all and repairs as
+`TOOL_NOT_STARTED` rather than "outcome unknown".) Closing the turn is the honest
+behaviour until the resume half lands.
 
 The one open gap, as above, is boot-time rehydration. It is printed in both
 doctors and asserted in a test; it is not hidden.

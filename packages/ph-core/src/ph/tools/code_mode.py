@@ -59,7 +59,7 @@ from .definition import (
     text_content,
 )
 from .errors import FailureKind, HarnessError
-from .registry import RUN_CODE, ToolRuntime
+from .registry import RUN_CODE, PreparedCall, ToolRuntime
 from .sdk import code_only_rule, render_python_sdk, render_typescript_sdk
 
 __all__ = [
@@ -214,7 +214,11 @@ class DispatchBridge:
         # accepts the frozen form directly, so it is not thawed again for the call.
         snapshot = freeze_json_value(arguments, frozen_input=True)
 
-        async with self._limiter:
+        def write_ahead(prepared: PreparedCall) -> None:
+            # Once the pipeline has decided and before the binding's body runs
+            # (B4, P7-15) — the same point `execute_tool_calls` writes `tool/call`.
+            # A dispatch parked on an approval is not yet something the program
+            # did, and `/revert` reads these records as the list of what it did.
             if self.session is not None:
                 self.session.append(
                     "tool/code-dispatch-start",
@@ -223,9 +227,18 @@ class DispatchBridge:
                         "parentCallId": self.execution.call_id,
                         "subCallId": sub_call_id,
                         "name": binding.name,
-                        "arguments": thaw_json(snapshot),
+                        # The program's own arguments unless approval substituted
+                        # them — the same rule `tool/call` follows, and the same
+                        # bytes as before for every dispatch nobody edited.
+                        "arguments": thaw_json(
+                            prepared.run.execution.arguments
+                            if prepared.run.execution.substituted
+                            else snapshot
+                        ),
                     },
                 )
+
+        async with self._limiter:
             result = await self.tools.execute(
                 ToolExecutionInput(
                     call_id=sub_call_id,
@@ -237,7 +250,8 @@ class DispatchBridge:
                     agent=self.execution.agent,
                     parent=self.execution.token,
                     cancel=self.token,
-                )
+                ),
+                write_ahead=write_ahead,
             )
             await self._log_settle(sub_call_id, binding.name, result)
 

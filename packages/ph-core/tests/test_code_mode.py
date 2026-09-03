@@ -13,15 +13,17 @@ evaluation. So:
 
 from __future__ import annotations
 
+from functools import partial
 from types import SimpleNamespace
 from typing import Any
 
+import anyio
 import pytest
 
 from ph.cordis import DEPLOYMENT, Context
 from ph.seams.code_runtime import CodeBindingNamespace
 from ph.system_prompt.assembly import render_prompt
-from ph.testing import FAKE_OPTIONS, raising, run_tool, simple_tool
+from ph.testing import FAKE_OPTIONS, parked_gate, raising, run_tool, simple_tool
 from ph.tools import Deny, ToolExecutionInput, text_content
 from ph.tools.code_mode import ToolCallError, governed_binding
 from ph.tools.definition import ToolOutput, TransportPresentation
@@ -575,3 +577,39 @@ async def test_a_namespace_owns_the_tools_it_presents(mount: Any) -> None:
     result, _session = await _run(ctx, "owned", program)
     assert result.is_error is False
     assert calls == ["spawn_child:still works"]
+
+
+async def test_a_dispatch_parked_on_its_gate_has_no_start_record(mount: Any) -> None:
+    """The second instance of P7-15: `tool/code-dispatch-start` is a write-ahead too.
+
+    A binding re-enters the pipeline (C1), so a dispatch can park on a human
+    exactly as a model-direct call can — and `/revert` reads the start records as
+    the list of what the program *did*. A start written before the gate said the
+    program did something while a person was still deciding whether it could.
+    """
+    ctx = await _code_ctx(mount)
+    calls: list[str] = []
+    ctx.tools.register(_recorder("touch", calls))
+    reached, release = parked_gate(ctx, only="touch")
+
+    async def program(ns: Any, emit: Any) -> str:
+        await ns["tools"].touch(n=1)
+        return "done"
+
+    # `_run` creates its own session; this needs the handle mid-flight.
+    ctx.code_runtime_stub.register_program("parked", program)
+    session = ctx.sessions.create("s-parked")
+    agent = ctx.agents.create(session, FAKE_OPTIONS)
+
+    async with anyio.create_task_group() as tasks:
+        tasks.start_soon(
+            partial(run_tool, ctx, RUN_CODE, {"program": "parked"}, agent=agent, session=session)
+        )
+        await reached.wait()
+        starts = [e for e in session.events if e.type == "tool/code-dispatch-start"]
+        assert starts == [], "parked: the program has not done this yet"
+        release.set()
+
+    kinds = [e.type for e in session.events]
+    assert kinds.index("tool/code-dispatch-start") < kinds.index("tool/code-dispatch")
+    assert calls == ["touch:1"]

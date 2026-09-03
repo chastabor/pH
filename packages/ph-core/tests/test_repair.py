@@ -42,6 +42,19 @@ def _open_turn_with_unstarted_call() -> Session:
     return session
 
 
+def _parked_turn(*, recorded_call: bool) -> Session:
+    """A turn stopped on an unanswered approval.
+
+    `recorded_call` is the one difference between a log written before P7-15,
+    when `tool/call` preceded the gate, and one written after, when it does not.
+    """
+    session = _open_turn_with_unstarted_call()
+    if recorded_call:
+        session.append("tool/call", {"turn": 1, "step": 1, "callId": "c1", "name": "edit"})
+    session.append("approval/asked", {"toolName": "edit", "callId": "c1"})
+    return session
+
+
 def test_a_balanced_log_needs_no_repair() -> None:
     session = Session("s")
     session.append("turn/start", {"turn": 1})
@@ -142,21 +155,20 @@ def test_a_turn_parked_on_a_human_is_closed_as_interrupted() -> None:
     turn interrupted like any other, so the answer a person eventually gives has
     no turn to return into.
 
-    **That is deliberate, and the reason is in the log this test builds.** A
-    parked turn holds a dangling `tool/call` by construction — B4 appends the
-    call before the pipeline gates it, and `approval/asked` comes after — so a
-    turn left open around one is a log several providers reject outright. Leaving
-    it open is only safe once something re-poses the ask on resume, and nothing
-    does: `AskDesk` re-poses across an *attach*, not across a restart.
+    **That is deliberate, and the reason is in the log this test builds.** The
+    model's `tool_use` block is unanswered, and it rides the *assistant message* —
+    a message carrying one with no matching `tool_result` is a log several
+    providers reject outright. Leaving the turn open is only safe once something
+    re-poses the ask on resume, and nothing does: `AskDesk` re-poses across an
+    *attach*, not across a restart. With no `tool/call` written (P7-15), the
+    result repair synthesizes says **not started**, which is the truth.
 
     So this is a gate on a **non-guarantee**. When P5-13's resume half lands it
     will fail, which is the point: the DESIGN row and the docs both say repair
     closes a parked turn, and a sentence nothing tests is one that outlives the
     code it describes.
     """
-    session = _open_turn_with_unstarted_call()
-    session.append("tool/call", {"turn": 1, "step": 1, "callId": "c1", "name": "edit"})
-    session.append("approval/asked", {"toolName": "edit", "callId": "c1"})
+    session = _parked_turn(recorded_call=False)
 
     assert [one.call_id for one in pending_approvals(session)] == ["c1"], "the ask is pending"
 
@@ -164,9 +176,25 @@ def test_a_turn_parked_on_a_human_is_closed_as_interrupted() -> None:
 
     assert [event.type for event in closers] == ["tool/result", "step/end", "turn/end"]
     assert closers[-1].data["reason"]["kind"] == "interrupted", "parked reads as interrupted"
-    # And the dangling call is what forces it: the synthesized result is what
-    # keeps the rebuilt log something a provider will accept.
+    # Not started — because nothing was. The synthesized result is what keeps the
+    # rebuilt log something a provider will accept.
+    assert closers[0].data["error"]["code"] == TOOL_NOT_STARTED
     assert closers[0].data["message"]["source"]["callId"] == "c1"
+
+
+def test_a_log_parked_before_p7_15_still_repairs_honestly() -> None:
+    """Old logs have the old shape, and repair must read both.
+
+    Before P7-15 a parked call had already written its `tool/call`, so a log on
+    disk from then holds `tool/call` → `approval/asked` and stops. Repair cannot
+    know from that log alone that the call never ran, and it does not pretend to:
+    `TOOL_OUTCOME_UNKNOWN` is the honest word for a record with no result. The
+    new shape gets the better answer; the old one keeps the safe one.
+    """
+    closers = interrupted_turn_closers(_parked_turn(recorded_call=True).events)
+
+    assert closers[0].data["error"]["code"] == TOOL_OUTCOME_UNKNOWN
+    assert closers[0].source_event_seqs is not None, "and it cites the record it found"
 
 
 def test_a_repaired_log_seeds_a_resumable_session() -> None:

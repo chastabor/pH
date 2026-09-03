@@ -86,6 +86,11 @@ KNOWN_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         "goal/settled",
         "step/end",
         "step/start",
+        # Appended once the pipeline's gate has decided and before the body runs
+        # (B4, P7-15): after the *wait*, before the *act*. A call still parked on
+        # a human when the process dies therefore has no record — nothing
+        # happened — and repair reads that as `TOOL_NOT_STARTED`. Its arguments
+        # are what ran; the model's own are in the assistant message.
         "tool/call",
         "tool/result",
         "turn/end",

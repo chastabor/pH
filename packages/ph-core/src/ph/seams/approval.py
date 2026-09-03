@@ -113,12 +113,12 @@ class Edited:
     wrong, and stopping the turn to say so costs a round trip that changing it
     does not.
 
-    **Both versions end up in the log, and they have to.** `tool/call` is
-    appended before the pipeline runs (B4), so it already records what the
-    *model* asked for; the substitution is recorded on `approval/decided`. A
-    reader sees the request, the correction, and who made it — where quietly
-    rewriting the call's own record would have attributed the human's arguments
-    to the model, which is the falsehood this codebase refuses everywhere else.
+    **Every version ends up in the log, attributed.** The assistant message
+    holds what the *model* asked for; the substitution is recorded here, on
+    `approval/decided`; and `tool/call`, written after the gate (P7-15), records
+    what ran. A reader sees the request, the correction, and who made it — where
+    rewriting one record in place would have put the human's arguments in the
+    model's mouth, which is the falsehood this codebase refuses everywhere else.
     """
 
     arguments: Any
@@ -221,10 +221,9 @@ class ApprovalRequest(WireModel):
     arguments: Any = None
     """The call as it stands, so a human can correct it rather than only refuse.
 
-    **Deliberately not recorded on `approval/asked`.** `tool/call` is appended
-    before the pipeline runs (B4) and already holds them; a second copy in the
-    log is two statements of one fact that can disagree, and this one is here to
-    be *shown*, not stored."""
+    **Deliberately not recorded on `approval/asked`.** The assistant message
+    already holds them; a second copy in the log is two statements of one fact
+    that can disagree, and this one is here to be *shown*, not stored."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -362,8 +361,8 @@ class ApprovalService:
         diff preview, a risk label — and every one of them would otherwise land
         in the log by default, silently, with the filter needing to be remembered
         at each new serialization site. The arguments themselves stay out because
-        `tool/call` recorded them before the pipeline ran (B4); two statements of
-        one fact are two that can disagree.
+        the assistant message holds them; two statements of one fact are two that
+        can disagree.
         """
         data: dict[str, Any] = {"toolName": request.tool_name}
         if request.call_id is not None:
@@ -386,8 +385,8 @@ class ApprovalService:
     ) -> None:
         data: dict[str, Any] = {"toolName": request.tool_name, "outcome": answer_kind(outcome)}
         if isinstance(outcome, Edited):
-            # The substitution itself, because `tool/call` already recorded what
-            # the model asked for and the model is about to run something else.
+            # The substitution itself: the assistant message holds what the model
+            # asked for, and `tool/call` will record what ran (P7-15).
             data["arguments"] = outcome.arguments
         elif isinstance(outcome, Responded):
             data["message"] = outcome.message

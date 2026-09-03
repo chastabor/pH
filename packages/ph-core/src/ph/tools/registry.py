@@ -719,9 +719,14 @@ class ToolRuntime:
 
     # --------------------------------------------------------------- pipeline --
 
-    async def execute(self, call: ToolExecutionInput) -> ToolExecutionResult:
-        """Run one call through the whole pipeline."""
-        prepared = await self.prepare(call)
+    async def execute(
+        self,
+        call: ToolExecutionInput,
+        *,
+        write_ahead: Callable[[PreparedCall], None] | None = None,
+    ) -> ToolExecutionResult:
+        """Run one call through the whole pipeline. `prepare` says what `write_ahead` is."""
+        prepared = await self.prepare(call, write_ahead=write_ahead)
         if prepared.result is None:
             prepared = await self.dispatch(prepared.run)
         assert prepared.result is not None
@@ -789,13 +794,37 @@ class ToolRuntime:
         by = view.by.get(call.name) or Running(execution.scope, execution.scope)
         return ToolRunContext(execution=execution, definition=definition, by=by)
 
-    async def prepare(self, call: ToolExecutionInput) -> PreparedCall:
-        """Ordered pre-policy: pre-execute, approval, guards.
+    async def prepare(
+        self,
+        call: ToolExecutionInput,
+        *,
+        write_ahead: Callable[[PreparedCall], None] | None = None,
+    ) -> PreparedCall:
+        """Ordered pre-policy — pre-execute, approval, guards — then the record.
 
-        Everything here is awaited in model order by the batch scheduler; only
-        `dispatch` overlaps. That is what keeps policy decisions deterministic
-        while still letting two slow tools run at once.
+        *Started* in model order by the batch scheduler, but a parallel group's
+        prepares overlap: each slot awaits its own gate, and one parked on a
+        human does not hold the others. What stays in model order is what the
+        model sees — `commit_ready` appends results in slot order whatever order
+        they settled in.
+
+        `write_ahead` runs once the gate has decided and before anything does —
+        **the** place a durable record of the act belongs (B4, P7-15). Not
+        earlier: a call parked on a human approval has done nothing yet, and a
+        record written there says an act was attempted when it was only asked
+        about. Not later: the body's effect has escaped by then, and a crash
+        inside it would leave no evidence the action was tried. Here, the record
+        is true whichever way the run ends, and it is written for a denial too so
+        the call/result pair every reader relies on stays a pair. On `prepare`
+        rather than `execute` because "the gate decided" is this method's fact,
+        and a caller that drives the stages itself needs the same hook.
         """
+        prepared = await self._gate(call)
+        if write_ahead is not None:
+            write_ahead(prepared)
+        return prepared
+
+    async def _gate(self, call: ToolExecutionInput) -> PreparedCall:
         try:
             run = self.create_execution(call)
         except Exception as error:
@@ -838,6 +867,7 @@ class ToolRuntime:
                 # execution — after every `tools/pre-execute` listener has seen
                 # the call the model actually made.
                 execution.arguments = freeze_json_value(gate.arguments, frozen_input=True)
+                execution.substituted = True
             if is_cancelled(execution.signal):
                 return PreparedCall(run=run, result=aborted_result(started=False))
             # Guards run last and only on an allow: a denial already decided,
@@ -886,10 +916,8 @@ class ToolRuntime:
         if outcome == "allowed-once":
             return Allow()
         if isinstance(outcome, Edited):
-            # The human corrected the call rather than refusing it. `tool/call`
-            # already recorded what the model asked for and `approval/decided`
-            # carries the substitution, so the log holds both and attributes each
-            # to whoever made it.
+            # The human corrected the call rather than refusing it; see
+            # `Allow.arguments` for where each version of it is recorded.
             return Allow(arguments=outcome.arguments, has_arguments=True)
         if isinstance(outcome, Responded):
             return Respond(message=outcome.message)

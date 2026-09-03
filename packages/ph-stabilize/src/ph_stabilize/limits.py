@@ -17,11 +17,10 @@ runs) and per *run* (one invocation). pH's equivalents are the **session** and
 the **turn**, and the rename happens here rather than in each message so a diff
 against `model_call_limit.py` stays readable.
 
-**`>` and not `>=`, and the reason is pH's ordering.** Upstream checks a counter
-it has not yet incremented, so it asks `count >= limit`. pH appends `tool/call`
-*before* the pipeline runs (B4, so an action that crashes still leaves its
-record), which means the fold already includes the call being judged. The two
-comparisons are the same statement about the same call.
+**`>=`, like upstream.** Both folds hold every call *before* the one being
+judged — `step/start` and `tool/call` are appended after their gates decide
+(P7-15) — so the comparison is upstream's. (It was `>` while `tool/call` preceded
+the gate; the plan row has the story.)
 
 **Ending a turn is a step-boundary decision, not a reach into the batch.**
 Upstream's `end` jumps to the graph's end and synthesizes results for the calls
@@ -290,40 +289,30 @@ def counts_of(session: Session) -> Counts:
 # ------------------------------------------------------------- the breaches --
 
 
-def _exceeded(
-    budget: CallBudget | None, turn: int, session: int, *, inclusive: bool
-) -> list[tuple[str, int, int]]:
-    """`(scope, used, limit)` for every ceiling these counts pass.
-
-    `inclusive` is the one real difference between the two callers, and it is
-    nameable: whether the fold already counts the thing being judged. A model
-    call is checked *before* `step/start` is appended, so its comparison is
-    `>=`; a tool call is checked after `tool/call` is (B4), so its is `>`. Both
-    say the same thing about the same call.
-    """
+def _exceeded(budget: CallBudget | None, turn: int, session: int) -> list[tuple[str, int, int]]:
+    """`(scope, used, limit)` for every ceiling the call being judged would pass."""
     if budget is None:
         return []
     pairs = (("turn", turn, budget.turn_limit), ("session", session, budget.session_limit))
     return [
-        (scope, used, limit)
-        for scope, used, limit in pairs
-        if limit is not None and (used >= limit if inclusive else used > limit)
+        (scope, used, limit) for scope, used, limit in pairs if limit is not None and used >= limit
     ]
 
 
 def _breaches(budget: CallBudget, turn: int, session: int) -> list[str]:
     """`ModelCallLimitMiddleware`'s phrasing: `turn limit (3/3)`."""
     return [
-        f"{scope} limit ({used}/{limit})"
-        for scope, used, limit in _exceeded(budget, turn, session, inclusive=True)
+        f"{scope} limit ({used}/{limit})" for scope, used, limit in _exceeded(budget, turn, session)
     ]
 
 
 def _over(budget: CallBudget | None, turn: int, session: int) -> list[str]:
-    """`ToolCallLimitMiddleware`'s: `turn limit exceeded (4/3 calls)`."""
+    """`ToolCallLimitMiddleware`'s: `turn limit exceeded (4/3 calls)`.
+
+    `used + 1`: the sentence counts the call being refused, as upstream's does."""
     return [
-        f"{scope} limit exceeded ({used}/{limit} calls)"
-        for scope, used, limit in _exceeded(budget, turn, session, inclusive=False)
+        f"{scope} limit exceeded ({used + 1}/{limit} calls)"
+        for scope, used, limit in _exceeded(budget, turn, session)
     ]
 
 
@@ -387,8 +376,8 @@ async def apply(ctx: Context, config: Config) -> None:
             return Deny(reason=TOOL_DENIAL.format(tool=name))
         if not _is_first_over(settings, current, name):
             # A sibling of the call that breached, told apart by arithmetic
-            # rather than by a latch: the breaching call is the one that put the
-            # count *one* past a ceiling. Upstream's wording, because this call
+            # rather than by a latch: the breaching call is the one that found
+            # the count *at* a ceiling. Upstream's wording, because this call
             # did nothing wrong and the model should not read the denial as
             # being about it.
             return Deny(reason=SIBLING_STOPPED, concludes_turn=True)
@@ -419,7 +408,7 @@ async def apply(ctx: Context, config: Config) -> None:
                 )
             ),
         )
-        return any(limit is not None and used == limit + 1 for limit, used in counted)
+        return any(limit is not None and used == limit for limit, used in counted)
 
     # ----------------------------------------------------------- breaker --
 

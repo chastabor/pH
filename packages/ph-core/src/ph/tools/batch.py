@@ -7,8 +7,8 @@ Two properties have to hold at once, and they pull in opposite directions:
   the model reads next must match the order it asked for, or a later turn
   reasons about a conversation that never happened.
 
-The resolution is dsh's: `prepare` (pre-execute → approval → guards) is awaited
-in model order, only the body overlaps, and results commit through a window that
+The resolution is dsh's: `prepare` (pre-execute → approval → guards) is *started*
+in model order and may overlap — see its docstring — and results commit through a window that
 advances across *contiguous* settled slots. A call that finishes early waits its
 turn.
 
@@ -33,7 +33,7 @@ import anyio
 from ..cancel import CancelToken
 from ..cordis import Context
 from ..llm.types import Message, ToolCallBlock, new_message_id
-from ..session import Session, SurfaceIntent
+from ..session import Session, SurfaceIntent, dumps
 from .definition import ToolExecutionInput, ToolExecutionResult, aborted_result
 from .json_schema import parse_arguments
 from .registry import PreparedCall, ToolRuntime
@@ -157,8 +157,16 @@ async def _run_group(
 
     async def run_one(index: int) -> None:
         nonlocal failure
+        block = group[index].block
+
+        def record(prepared: PreparedCall) -> None:
+            # What will run: the model's own bytes unless approval substituted.
+            ran = prepared.run.execution
+            arguments = dumps(ran.arguments) if ran.substituted else block.arguments
+            call_seqs[index] = _append_call(session, turn, step, block, arguments)
+
         try:
-            prepared = await tools.prepare(group[index].call)
+            prepared = await tools.prepare(group[index].call, write_ahead=record)
             if prepared.result is None:
                 prepared = await tools.dispatch(prepared.run)
             slots[index] = prepared
@@ -183,8 +191,6 @@ async def _run_group(
                 # An exclusive call ends this pool and opens the caller's next
                 # barrier; it must not join a group already in flight.
                 break
-            # The durable record exists before anything can go wrong (B4).
-            call_seqs[started] = _append_call(session, turn, step, group[started].block)
             in_flight.add(started)
             scope.start_soon(run_one, started)
             started += 1
@@ -213,8 +219,18 @@ async def _run_group(
     return _GroupOutcome(consumed=started, aborted=False, concluded=concluded)
 
 
-def _append_call(session: Session, turn: int, step: int, block: ToolCallBlock) -> int:
-    """Log the call before it executes, and return the seq its result must cite."""
+def _append_call(
+    session: Session, turn: int, step: int, block: ToolCallBlock, arguments: str
+) -> int:
+    """Log the call once the gate has decided, and return the seq its result cites.
+
+    `arguments` is the caller's to choose, and the choice is "what will run":
+    the model's own bytes in the ordinary case — re-encoding every call would
+    change the log for a formatting difference, and a malformed string the model
+    sent is preserved as text so the tool can report it (`parse_arguments`) — or
+    the substitution serialised the way the log serialises everything, since
+    there is no model text for it.
+    """
     event = session.append(
         "tool/call",
         {
@@ -222,7 +238,7 @@ def _append_call(session: Session, turn: int, step: int, block: ToolCallBlock) -
             "step": step,
             "callId": block.id,
             "name": block.name,
-            "arguments": block.arguments,
+            "arguments": arguments,
         },
     )
     return event.seq
@@ -267,5 +283,5 @@ def _append_result(
 
 def _append_skipped(session: Session, turn: int, step: int, block: ToolCallBlock) -> None:
     """A call cancellation skipped still gets its durable call/result pair."""
-    call_seq = _append_call(session, turn, step, block)
+    call_seq = _append_call(session, turn, step, block, block.arguments)
     _append_result(session, turn, step, block, aborted_result(started=False), call_seq)

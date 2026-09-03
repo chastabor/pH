@@ -257,6 +257,11 @@ class ToolExecution:
     """The live cancellation view. A `tools/execute` wrapper may replace it for
     its delegated lifetime — with a child token, so it can narrow but never
     widen — but cannot remove it."""
+    substituted: bool = False
+    """Whether `arguments` is what approval put there rather than what the model
+    sent (`Edited`, P4-05). On the execution because it qualifies the field one
+    line above it, and every stage that holds an execution can ask. The
+    write-ahead record reads it to log what will run — see `Allow.arguments`."""
 
 
 @dataclass(slots=True)
@@ -342,9 +347,12 @@ class Allow:
     a listener reaching into `execution.arguments` itself would be writing the
     one field the run's owner has already handed to every listener before it.
 
-    The model's own request is *not* rewritten. `tool/call` is appended before
-    the pipeline runs (B4), so it stands as the record of what the model asked
-    for and whoever substituted says so in their own record.
+    **Three records, three authors, and none of them rewritten.** The assistant
+    message holds what the model asked for; `approval/decided` carries the
+    human's substitution; `tool/call`, written after the gate (P7-15), records
+    what actually ran. A reader sees the request, the correction, and the act,
+    each attributed to whoever made it — where one record overwritten in place
+    would have put the human's arguments in the model's mouth.
     """
     has_arguments: bool = False
     """Whether `arguments` is a substitution. Separate from `None`, because

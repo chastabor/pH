@@ -11,6 +11,7 @@ then shadows with a parameter of the same name.
 
 from __future__ import annotations
 
+import inspect
 import json
 from pathlib import Path
 from typing import Any
@@ -139,7 +140,10 @@ def answer_approvals(ctx: Any, answer: Any) -> list[Any]:
 
     async def respond(request: Any, _next: Any = None) -> Any:
         asked.append(request)
-        return answer() if callable(answer) else answer
+        chosen = answer() if callable(answer) else answer
+        # An awaitable answer is one that waits — for an event a test sets once
+        # it has looked at the log mid-flight, say.
+        return await chosen if inspect.isawaitable(chosen) else chosen
 
     ctx.approval.register_answerer(respond)
     return asked

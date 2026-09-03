@@ -19,8 +19,8 @@ import pytest
 from ph.cancel import CancelToken
 from ph.llm.types import ToolCallBlock, create_user_message
 from ph.session import Session
-from ph.testing import StubAgent, raising, simple_tool, tool_runtime
-from ph.tools import TOOL_ABORTED_BEFORE_DISPATCH, ToolRuntime
+from ph.testing import StubAgent, parked_gate, raising, simple_tool, tool_runtime
+from ph.tools import TOOL_ABORTED_BEFORE_DISPATCH, Deny, ToolRuntime
 from ph.tools.batch import execute_tool_calls, parse_arguments
 
 pytestmark = pytest.mark.anyio
@@ -112,6 +112,90 @@ async def test_every_call_is_logged_before_it_executes() -> None:
     assert [event.type for event in agent.session.events] == ["tool/call", "tool/result"]
     # The result cites its call, so a reader can pair them without guessing.
     assert agent.session.events[1].source_event_seqs == (0,)
+
+
+async def test_a_parked_call_has_no_record_until_the_gate_decides() -> None:
+    """**P7-15's gate.** Between asking and being answered, nothing has happened.
+
+    A database rolls an unfinished transaction back because it *owns* the effect;
+    a tool call's effect escapes, so its record has to precede execution (B4).
+    But it does not have to precede the *wait*: a call parked on a human has done
+    nothing yet, and a `tool/call` written there says an act was attempted when
+    it was only asked about. So the record is written after the gate decides —
+    whichever way — and before the body runs.
+
+    Observed mid-flight rather than by comparing two events' order, because the
+    obvious form passes for the old ordering too. Sabotage: move `_append_call`
+    back into `fill_pool`, and the log holds a call while the gate is still open.
+    """
+    root, tools, agent, trace = _setup()
+    tools.register(_slow("a", trace, 0.0, safe=True))
+    reached, release = parked_gate(root)
+
+    async with anyio.create_task_group() as tasks:
+        tasks.start_soon(_run, root, agent, "a")
+        await reached.wait()
+        assert [e.type for e in agent.session.events] == [], "parked: nothing has happened"
+        release.set()
+
+    assert [e.type for e in agent.session.events] == ["tool/call", "tool/result"]
+    assert agent.session.events[1].source_event_seqs == (0,), "and the pair still pairs"
+
+
+async def test_a_denied_call_still_logs_its_pair() -> None:
+    """The record is written for a "no" too, or the pair stops being a pair.
+
+    `_append_skipped` exists to keep call/result paired; `ph-stabilize`'s limits
+    fold counts `tool/call`; `cards.py` finds a result's arguments through the
+    call it cites. Sabotage: write the record only on allow — a model that spams
+    denied calls never reaches the tool-call limit that exists to bound exactly
+    that, and every denial card loses its arguments.
+    """
+    root, tools, agent, trace = _setup()
+    tools.register(_slow("a", trace, 0.0, safe=True))
+    root.on("tools/pre-execute", lambda _execution, _next: Deny(reason="not today"))
+
+    await _run(root, agent, "a")
+
+    assert [e.type for e in agent.session.events] == ["tool/call", "tool/result"]
+    assert agent.session.events[1].data["failureKind"] == "denied"
+    assert agent.session.events[1].source_event_seqs == (0,)
+    assert "a:start" not in trace
+
+
+async def test_results_keep_model_order_when_the_gate_settles_out_of_order() -> None:
+    """What the model reads is unchanged by where the record moved.
+
+    Slot 0 is parked on its gate while slot 1 sails through, so slot 1's
+    `tool/call` lands first — the log records what became runnable in the order
+    it did, and every reader of `tool/call` keys by `callId` or `seq`, never by
+    position. What must not move is the *surface*: results commit in model order
+    through `commit_ready`, each citing its own call, so `derive_messages()` and
+    the provider's cached prefix (A12) are byte-identical to a run where slot 0
+    was never parked.
+    """
+    root, tools, agent, trace = _setup()
+    tools.register(_slow("slow", trace, 0.0, safe=True))
+    _reached, release = parked_gate(root, only="slow")
+
+    async def fast_body(_args: Any, _run: Any) -> str:
+        release.set()  # slot 1 has run before slot 0 was even allowed to
+        return "fast"
+
+    tools.register(simple_tool("fast", fast_body, safe=True))
+
+    await _run(root, agent, "slow", "fast")
+
+    events = agent.session.events
+    calls = [e for e in events if e.type == "tool/call"]
+    results = [e for e in events if e.type == "tool/result"]
+    assert [c.data["name"] for c in calls] == ["fast", "slow"], "recorded as they became runnable"
+    assert [r.data["message"]["source"]["callId"] for r in results] == ["call-0", "call-1"], (
+        "committed as the model asked"
+    )
+    by_id = {c.data["callId"]: c.seq for c in calls}
+    for result in results:
+        assert result.source_event_seqs == (by_id[result.data["message"]["source"]["callId"]],)
 
 
 async def test_a_crashing_body_still_leaves_its_call_and_a_result() -> None:
