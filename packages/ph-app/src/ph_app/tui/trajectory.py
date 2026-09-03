@@ -424,6 +424,8 @@ HANDLERS: Mapping[str, Handler] = {
     "compaction/declined": _on_harness_event,
     "compaction/args-truncated": _on_harness_event,
     "attachment/degraded": _on_harness_event,
+    "attachment/oversized": _on_harness_event,
+    "attachment/uploaded": _on_harness_event,
     "limits/exceeded": _on_harness_event,
     "limits/breaker-tripped": _on_harness_event,
     "session/end-seed": _on_harness_event,

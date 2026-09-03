@@ -41,11 +41,65 @@ __all__ = [
     "apply",
     "degrade_media",
     "media_pointer_text",
+    "oversized_notices",
     "record_degraded",
+    "record_oversized",
     "unusable_reason",
 ]
 
 log = logging.getLogger("ph.llm.media")
+
+
+def _longest_edge(attachment: AttachmentRef) -> int | None:
+    """The larger of an image's two sides, or `None` if it was never measured.
+
+    Both limits below are stated per *edge* rather than per pixel count because
+    that is how providers state them, and because it is the number a person can
+    act on: "your screenshot is 3840 wide" is a fact about the file they made.
+    """
+    if attachment.width is None or attachment.height is None:
+        return None
+    return max(attachment.width, attachment.height)
+
+
+def oversized_notices(messages: Sequence[Message], route: ResolvedModel) -> list[dict[str, Any]]:
+    """Images that will be *sent* and then scaled down at the far end (P7-03).
+
+    Not a degradation and deliberately not on the same path: nothing is replaced,
+    the model sees the picture, and the turn is exactly as correct as it would
+    have been. What is wrong is the bill — every request of the session re-uploads
+    pixels the provider throws away — and the only thing that fixes it is a person
+    knowing, because the row that could resize is optional (P7-02) and may not be
+    mounted.
+
+    Read after degradation rather than before: an image over the *accept* limit is
+    already gone, and telling someone their unsent file is also too detailed would
+    be two answers to one problem.
+    """
+    if route.usable_image_edge is None:
+        return []
+    notices: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for message in messages:
+        for block in message.content:
+            attachment = attachment_of(block)
+            if attachment is None or attachment.attachment_id in seen:
+                continue
+            edge = _longest_edge(attachment)
+            if edge is None or edge <= route.usable_image_edge:
+                continue
+            seen.add(attachment.attachment_id)
+            notices.append(
+                {
+                    "attachmentId": attachment.attachment_id,
+                    "mime": attachment.mime,
+                    "name": attachment.name,
+                    "width": attachment.width,
+                    "height": attachment.height,
+                    "usableEdge": route.usable_image_edge,
+                }
+            )
+    return notices
 
 
 def unusable_reason(attachment: AttachmentRef, store: Any, route: ResolvedModel) -> str | None:
@@ -62,6 +116,12 @@ def unusable_reason(attachment: AttachmentRef, store: Any, route: ResolvedModel)
         return f"this route does not accept {attachment.mime}"
     if route.max_attachment_bytes is not None and attachment.bytes > route.max_attachment_bytes:
         return f"{attachment.bytes} bytes is over the {route.max_attachment_bytes}-byte limit"
+    edge = _longest_edge(attachment)
+    if route.max_image_edge is not None and edge is not None and edge > route.max_image_edge:
+        return (
+            f"{attachment.width}x{attachment.height} is over this route's "
+            f"{route.max_image_edge}-pixel limit"
+        )
     if not store.exists(attachment):
         return "the stored bytes are gone"
     return None
@@ -117,26 +177,44 @@ def degrade_media(
     return (tuple(rewritten) if changed else tuple(messages)), degraded
 
 
-def record_degraded(session: Session, provider: str, degraded: list[dict[str, Any]]) -> None:
-    """Append the notice, but only when it says something new.
+def _record_once(
+    session: Session, event_type: str, provider: str, items: list[dict[str, Any]]
+) -> bool:
+    """Append a media notice, but only when it says something new.
 
-    Read through `Session.latest`, which is the incremental fold rather than a
-    scan: this runs on every request, and the answer it is comparing against is
-    almost always the one it just wrote.
+    One fold for both notices, because the *mechanism* is what they share and the
+    event name is all that differs: every request re-derives the same history, so
+    an attachment refused — or sent too large — is refused again on every step for
+    the life of the session, and appending per request would bury the
+    conversation in one repeated sentence.
+
+    Read through `Session.latest`, the incremental fold rather than a scan: this
+    runs on every request and the answer it compares against is almost always the
+    one it just wrote. Returns whether it appended, which is also the right
+    condition for logging — a warning per request is the same flood in the
+    operator's channel.
     """
-    if not degraded:
-        return
-    ids = [item["attachmentId"] for item in degraded]
-    previous = session.latest("attachment/degraded")
+    if not items:
+        return False
+    ids = [item["attachmentId"] for item in items]
+    previous = session.latest(event_type)
     if (
         previous is not None
         and [str(one) for one in previous.data.get("attachmentIds") or ()] == ids
     ):
-        return
-    session.append(
-        "attachment/degraded",
-        {"provider": provider, "attachmentIds": ids, "attachments": degraded},
-    )
+        return False
+    session.append(event_type, {"provider": provider, "attachmentIds": ids, "attachments": items})
+    return True
+
+
+def record_degraded(session: Session, provider: str, degraded: list[dict[str, Any]]) -> bool:
+    """Media a route would not take at all."""
+    return _record_once(session, "attachment/degraded", provider, degraded)
+
+
+def record_oversized(session: Session, provider: str, notices: list[dict[str, Any]]) -> bool:
+    """Media that was sent and is larger than the route can use (P7-03)."""
+    return _record_once(session, "attachment/oversized", provider, notices)
 
 
 @plugin("media-degrade", inject=["llm", "sessions"])
@@ -147,18 +225,36 @@ async def apply(ctx: Context, config: Any) -> None:
         store = ctx.get("attachments")
         route = ctx.llm.resolve_model(options.provider, options.model)
         messages, degraded = degrade_media(options.messages, store, route)
+        oversized = oversized_notices(messages, route)
+        if not degraded and not oversized:
+            return await next_()
+        raw = ctx.sessions.get(options.session_id) if options.session_id else None
+        session = raw if isinstance(raw, Session) else None
+        # Logged only when the notice was *new*, which is the same condition the
+        # append is under: a warning repeated on every step for the life of the
+        # session is the flood the fold exists to prevent, moved into the
+        # operator's channel where nobody would notice it was a duplicate.
+        if session is None or record_degraded(session, options.provider, degraded):
+            for item in degraded:
+                log.warning(
+                    "ph.llm.media: %s is sending %s as a pointer: %s",
+                    options.provider,
+                    item["name"] or item["attachmentId"],
+                    item["reason"],
+                )
+        if session is None or record_oversized(session, options.provider, oversized):
+            for notice in oversized:
+                log.warning(
+                    'ph.llm.media: "%s" is %sx%s; %s uses at most %s pixels on the long edge, '
+                    "so the rest is uploaded on every request and discarded",
+                    notice["name"] or notice["attachmentId"],
+                    notice["width"],
+                    notice["height"],
+                    options.provider,
+                    notice["usableEdge"],
+                )
         if not degraded:
             return await next_()
-        for item in degraded:
-            log.warning(
-                "ph.llm.media: %s is sending %s as a pointer: %s",
-                options.provider,
-                item["name"] or item["attachmentId"],
-                item["reason"],
-            )
-        session = ctx.sessions.get(options.session_id) if options.session_id else None
-        if isinstance(session, Session):
-            record_degraded(session, options.provider, degraded)
         return await next_(replace(options, messages=messages))
 
     ctx.on("llm/stream", degrade)

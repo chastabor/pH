@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from .anthropic_wire import anthropic_reply
 from .builders import (
     FAKE_OPTIONS,
     StubAgent,
@@ -55,6 +56,7 @@ __all__ = [
     "StubSubagentProvider",
     "StubWorkspaceProvider",
     "acquire_for_role",
+    "anthropic_reply",
     "assistant_payload",
     "boundary_for",
     "git",

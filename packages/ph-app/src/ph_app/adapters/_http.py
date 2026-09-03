@@ -23,7 +23,7 @@ import httpx
 
 from ph.cordis import Context
 from ph.llm.adapter import LlmError
-from ph.llm.types import CONTEXT_WINDOW_EXCEEDED, LlmFailure
+from ph.llm.types import CONTEXT_WINDOW_EXCEEDED, FILE_EXPIRED, LlmFailure
 
 from .sse import iter_sse
 
@@ -53,15 +53,29 @@ def resolve_secret(ctx: Context, env_name: str, provider: str) -> str:
     return value
 
 
-def failure_from_status(status: int, body: str, *, is_overflow: Callable[[str], bool]) -> LlmError:
+def failure_from_status(
+    status: int,
+    body: str,
+    *,
+    is_overflow: Callable[[str], bool],
+    is_missing_file: Callable[[str], bool] | None = None,
+) -> LlmError:
     """Classify an HTTP error into the codes the retry policy routes on.
 
-    `is_overflow` is the one wire-specific judgement: each provider phrases
-    "your prompt is too long" differently, and getting it wrong in either
-    direction is expensive — a missed overflow retries forever, a false one
-    compacts a conversation that fit.
+    The wire-specific judgements are callbacks because each provider phrases them
+    differently, and both are expensive to get wrong in either direction: a missed
+    overflow retries forever, a false one compacts a conversation that fit.
+
+    `is_missing_file` is the second of them (P7-03), here rather than in an
+    adapter because a body classified once must not be re-read into a different
+    code further up — and because both wires have a file API, so the next one
+    inherits this instead of writing its own parser. Whether the missing file was
+    *ours* is a separate question only the caller can answer, and it answers it
+    against the code rather than the prose.
     """
     code = _STATUS_CODES.get(status, "SERVER_ERROR" if status >= 500 else "REQUEST_FAILED")
+    if is_missing_file is not None and is_missing_file(body):
+        code = FILE_EXPIRED
     if is_overflow(body):
         code = CONTEXT_WINDOW_EXCEEDED
     detail = body[:400] or f"HTTP {status}"
@@ -88,6 +102,37 @@ class HttpClient:
             await self._client.aclose()
             self._client = None
 
+    async def post_multipart(
+        self,
+        url: str,
+        *,
+        headers: dict[str, str],
+        field: str,
+        filename: str,
+        content: bytes,
+        mime: str,
+        is_overflow: Callable[[str], bool],
+    ) -> dict[str, Any]:
+        """POST one file as multipart form data and return the parsed reply.
+
+        Here rather than in an adapter for `stream_sse`'s reason: a file API is
+        one more thing both wires have, and the status→code classification is
+        the part that must not be written twice. `Content-Type` is left to
+        `httpx`, which has to compute the multipart boundary anyway.
+        """
+        sending = {name: value for name, value in headers.items() if name != "Content-Type"}
+        response = await self._get().post(
+            url, headers=sending, files={field: (filename, content, mime)}
+        )
+        if response.status_code >= 400:
+            raise failure_from_status(
+                response.status_code,
+                response.text,
+                is_overflow=is_overflow,
+            )
+        parsed: dict[str, Any] = response.json()
+        return parsed
+
     async def stream_sse(
         self,
         url: str,
@@ -95,6 +140,7 @@ class HttpClient:
         headers: dict[str, str],
         json: dict[str, Any],
         is_overflow: Callable[[str], bool],
+        is_missing_file: Callable[[str], bool] | None = None,
     ) -> AsyncIterator[tuple[str, dict[str, Any]]]:
         """POST and yield `(event, payload)` for every JSON SSE payload.
 
@@ -104,7 +150,12 @@ class HttpClient:
         async with self._get().stream("POST", url, headers=headers, json=json) as response:
             if response.status_code >= 400:
                 body = (await response.aread()).decode("utf-8", errors="replace")
-                raise failure_from_status(response.status_code, body, is_overflow=is_overflow)
+                raise failure_from_status(
+                    response.status_code,
+                    body,
+                    is_overflow=is_overflow,
+                    is_missing_file=is_missing_file,
+                )
             async for event, payload in iter_sse(response):
                 if isinstance(payload, dict):
                     yield event, payload

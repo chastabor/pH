@@ -43,6 +43,7 @@ from pathlib import Path
 import anyio
 
 from ..cordis import Context, plugin
+from ..llm.dimensions import IMAGE_MIMES, image_dimensions
 from ..llm.types import AttachmentRef
 from ..paths import default_home_path
 from ..wire import WireModel
@@ -124,12 +125,26 @@ class AttachmentStore:
     ) -> AttachmentRef:
         """Store `content` and return the reference a `MediaBlock` carries.
 
-        Idempotent by construction: identical bytes produce one file. The
-        measurement arguments are facts a caller *already knows* — an ingester
-        that parsed a PNG header, a page count a PDF reader reported — and are
-        never derived here, because deriving them is the optional dependency
-        `media-transform` exists to keep optional.
+        Idempotent by construction: identical bytes produce one file.
+
+        **Pixel dimensions are measured here when the caller did not supply
+        them** (P7-03). Every other measurement argument stays a fact a caller
+        already knows — a page count a PDF reader reported, a duration a
+        container parsed — but an image's size is four integers at a fixed offset
+        in its own header, which `ph.llm.dimensions` reads with no dependency.
+        The argument still wins when given: an ingester that has already decoded
+        the image knows at least as much as its header does.
+
+        Not enforced (§5 rule 6): this fills in an attachment as it is *stored*,
+        so a reference already in a log written before P7-03 keeps `width: None`
+        for ever, and neither pixel ceiling can fire for it. Backfilling would
+        mean rewriting stored references, which A1 does not allow, or measuring
+        at read time, which puts a file read on the request path.
         """
+        if width is None and height is None and mime in IMAGE_MIMES:
+            measured = image_dimensions(content)
+            if measured is not None:
+                width, height = measured
         ref = AttachmentRef(
             attachment_id=digest_of(content),
             mime=mime,

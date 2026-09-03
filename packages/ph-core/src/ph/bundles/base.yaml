@@ -150,6 +150,14 @@
 - id: attachments
   name: attachments-local
 
+# A provider's own copy of an attachment, and the handle to reference it by
+# (P7-03). A cache under `$PH_CACHE`, not the log: a handle is a prediction with
+# an expiry and the log cannot take one back, while the *upload* is a fact and is
+# recorded. Mounted with no uploader — each adapter row registers its own — so a
+# profile with no file API pays nothing and every route sends bytes inline.
+- id: uploads
+  name: uploads-local
+
 - id: token-meter
   name: token-meter
 

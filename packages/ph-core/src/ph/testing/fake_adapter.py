@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import itertools
 from collections.abc import AsyncIterator, Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from ..cordis import Context, plugin
@@ -50,6 +50,14 @@ class FakeAdapter:
     respond: Callable[[GenerateOptions], str] = field(default_factory=lambda: text_script("ok"))
     chunk_size: int = 8
     context_window: int | None = 8192
+    route: ResolvedModel | None = None
+    """What `resolve_model` answers, for a test that needs this route to declare
+    media (P7-01, P7-03).
+
+    `None` — the default — is text-only, which is what a provider that has said
+    nothing declares and the safe answer `media-degrade` exists to give for free.
+    A whole `ResolvedModel` rather than a field per capability, so a route
+    capability added there needs no second declaration here."""
     requests: list[GenerateOptions] = field(default_factory=list)
 
     async def stream(self, options: GenerateOptions) -> AsyncIterator[Any]:
@@ -71,7 +79,12 @@ class FakeAdapter:
         yield Finish(reason=FinishReason(kind="stop"))
 
     def resolve_model(self, provider: str, model: str) -> ResolvedModel:
-        return ResolvedModel(context_window=self.context_window)
+        if self.route is None:
+            return ResolvedModel(context_window=self.context_window)
+        # The window stays this adapter's unless the override names one: it is
+        # what every limits and compaction test is sized against, and a route set
+        # to declare an image should not silently move it.
+        return replace(self.route, context_window=self.route.context_window or self.context_window)
 
 
 def _estimate_tokens(options: GenerateOptions) -> int:

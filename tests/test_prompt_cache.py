@@ -33,6 +33,7 @@ import pytest
 from ph.agent.types import AgentOptions
 from ph.bundles import BASE, HEADLESS
 from ph.session import Session
+from ph.testing import anthropic_reply
 from ph_app.adapters._http import HttpClient
 from ph_app.adapters.anthropic import MIN_CACHEABLE_TOKENS
 from ph_stabilize import BUNDLE
@@ -148,31 +149,7 @@ class _PromptCache:
         }
 
     def events(self, body: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
-        return [
-            ("message_start", {"type": "message_start", "message": {"usage": self.usage(body)}}),
-            (
-                "content_block_start",
-                {"type": "content_block_start", "index": 0, "content_block": {"type": "text"}},
-            ),
-            (
-                "content_block_delta",
-                {
-                    "type": "content_block_delta",
-                    "index": 0,
-                    "delta": {"type": "text_delta", "text": self.reply},
-                },
-            ),
-            ("content_block_stop", {"type": "content_block_stop", "index": 0}),
-            (
-                "message_delta",
-                {
-                    "type": "message_delta",
-                    "delta": {"stop_reason": "end_turn"},
-                    "usage": {"output_tokens": 8},
-                },
-            ),
-            ("message_stop", {"type": "message_stop"}),
-        ]
+        return anthropic_reply(self.reply, usage=self.usage(body))
 
 
 @pytest.fixture

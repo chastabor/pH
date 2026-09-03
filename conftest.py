@@ -53,6 +53,12 @@ def _isolated_home(tmp_path: Path) -> Iterator[None]:
     """
     with pytest.MonkeyPatch.context() as patch:
         patch.setenv("PH_HOME", str(tmp_path))
+        # `$PH_CACHE` for the same reason, added when P7-03 put a *writer* behind
+        # it: the upload handle cache lives there, so without this every test that
+        # mounted the row would write into the developer's real `~/.cache/ph`.
+        # That is the sixth appearance of this class in this suite, and the first
+        # one caught before it happened rather than after.
+        patch.setenv("PH_CACHE", str(tmp_path / "cache"))
         yield
 
 

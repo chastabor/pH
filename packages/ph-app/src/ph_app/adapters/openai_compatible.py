@@ -96,6 +96,15 @@ class ProviderProfile(WireModel):
     images and a 20 MB ceiling, so a text-only local model was promised
     capabilities it does not have. A route that takes none sets `accepts: []`."""
     max_attachment_bytes: int = MAX_ATTACHMENT_BYTES
+    max_image_edge: int | None = None
+    usable_image_edge: int | None = None
+    """Pixel limits, when this route publishes them (P7-03).
+
+    `None` on both by default, and that is the honest value: unlike `accepts`,
+    where a wrong guess silently drops a block, an unknown pixel ceiling has no
+    safe assumption — one route scales at 2048, another not at all, and a profile
+    that invented a number would warn a person about an overpayment that is not
+    happening. A deployment that knows its route sets them."""
 
 
 class Config(WireModel):
@@ -174,6 +183,8 @@ class OpenAiCompatibleAdapter:
             default_max_tokens=self.profile.default_max_tokens,
             accepts=frozenset(self.profile.accepts),
             max_attachment_bytes=self.profile.max_attachment_bytes,
+            max_image_edge=self.profile.max_image_edge,
+            usable_image_edge=self.profile.usable_image_edge,
         )
 
 

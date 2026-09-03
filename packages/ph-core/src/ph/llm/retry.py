@@ -9,6 +9,9 @@ So the classification is explicit:
 * **transient** (rate limits, 5xx, timeouts, empty responses) → retry with
   exponential backoff, honouring a provider's own `retry_after` when it sent one,
   because the provider knows better than the backoff curve does;
+* **`FILE_EXPIRED`** → retry, and it is the clearest case in the list: the
+  adapter has already dropped the dead handle, so the second attempt is against
+  a freshly uploaded file rather than the same request twice;
 * **`CONTEXT_WINDOW_EXCEEDED`** → **do not retry**. The request cannot fit, and
   it will not fit on the second attempt either. This is the signal compaction
   keys off (G4, Phase 4); consuming it here would hide the one error that has a
@@ -29,7 +32,7 @@ import anyio
 
 from ..cordis import Context, plugin
 from ..wire import WireModel
-from .types import CONTEXT_WINDOW_EXCEEDED, EMPTY_RESPONSE, LlmFailure
+from .types import CONTEXT_WINDOW_EXCEEDED, EMPTY_RESPONSE, FILE_EXPIRED, LlmFailure
 
 __all__ = ["TRANSIENT_CODES", "apply", "is_transient"]
 
@@ -45,6 +48,11 @@ TRANSIENT_CODES: frozenset[str] = frozenset(
         "CONNECTION_ERROR",
         "OVERLOADED",
         EMPTY_RESPONSE,
+        # Transient in the strict sense this module means: the state that caused
+        # it is already gone. An adapter raising this has invalidated the handle
+        # first (P7-03), so the retry rebuilds the request against a fresh
+        # upload rather than repeating the one that failed.
+        FILE_EXPIRED,
     }
 )
 

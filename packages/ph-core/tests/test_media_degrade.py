@@ -16,11 +16,17 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+from test_dimensions import png
 
 from ph.agent.types import AgentOptions
 from ph.cordis import Context
 from ph.llm.adapter import ResolvedModel
-from ph.llm.media import degrade_media, media_pointer_text, unusable_reason
+from ph.llm.media import (
+    degrade_media,
+    media_pointer_text,
+    oversized_notices,
+    unusable_reason,
+)
 from ph.llm.types import AttachmentRef, MediaBlock, TextBlock, create_user_message
 from ph.seams.attachments import AttachmentStore
 
@@ -133,3 +139,132 @@ async def test_the_row_degrades_and_records_once(mount: Any, tmp_path: Any) -> N
     assert notices[0].ignorable
     (request,) = [one for one in ctx.llm_fake.requests if one.is_loop_request][:1]
     assert "was not sent" in str(request.messages[0].content)
+
+
+# ---------------------------------------------------------- pixel limits --
+
+
+def _pixels(*, accepts: int | None = None, uses: int | None = None) -> ResolvedModel:
+    return ResolvedModel(
+        accepts=frozenset({"image/png"}), max_image_edge=accepts, usable_image_edge=uses
+    )
+
+
+def test_an_image_over_the_routes_pixel_limit_is_a_reason() -> None:
+    """The hard ceiling, on the same path as the byte ceiling (P7-03).
+
+    Anthropic refuses over 8000 px, so a request carrying one fails outright —
+    which is precisely the outcome `unusable_reason` exists to convert into a
+    sentence the model can read. The measurement comes from the header, so this
+    is a limit pH can actually check before sending.
+    """
+    big = _ref(width=9000, height=1000)
+
+    reason = unusable_reason(big, _Store(), _pixels(accepts=8000))
+
+    assert reason is not None and "9000x1000" in reason and "8000-pixel" in reason
+    assert unusable_reason(_ref(width=8000, height=8000), _Store(), _pixels(accepts=8000)) is None
+
+
+def test_an_unmeasured_image_is_never_refused_for_its_size() -> None:
+    """`None` dimensions mean "not measured", never "zero".
+
+    A format `ph.llm.dimensions` cannot read — an ingester that supplied nothing,
+    a MIME added to a route before the probe learned it — must keep working
+    exactly as it did before there was a pixel limit at all.
+    """
+    assert unusable_reason(_ref(), _Store(), _pixels(accepts=8000)) is None
+    assert oversized_notices([_message(MediaBlock(attachment=_ref()))], _pixels(uses=1568)) == []
+
+
+def test_a_route_that_publishes_no_pixel_limit_warns_about_nothing() -> None:
+    """The default on every OpenAI-compatible profile, and the honest one.
+
+    Unlike `accepts`, an unknown pixel ceiling has no safe assumption: one
+    gateway scales at 2048 and another not at all, so a guessed number would warn
+    a person about an overpayment that is not happening.
+    """
+    huge = _message(MediaBlock(attachment=_ref(width=4000, height=3000)))
+
+    assert oversized_notices([huge], _takes("image/png")) == []
+
+
+def test_an_image_larger_than_the_route_uses_is_sent_and_flagged() -> None:
+    """The distinction the two limits exist to draw.
+
+    Over `max_image_edge` nothing is sent. Over `usable_image_edge` everything
+    works — the model sees the picture, the turn is correct — and the surplus
+    pixels are uploaded on every request of the session and discarded at the far
+    end. Nothing about the conversation is wrong, which is exactly why it needs
+    saying: the failure otherwise lasts the whole session unannounced.
+    """
+    message = _message(MediaBlock(attachment=_ref(width=4000, height=3000)))
+    route = _pixels(accepts=8000, uses=1568)
+
+    messages, degraded = degrade_media([message], _Store(), route)
+    notices = oversized_notices(messages, route)
+
+    assert degraded == [], "an image the route accepts must still be sent"
+    assert messages[0].content[0].attachment.width == 4000, "and sent unchanged"
+    (notice,) = notices
+    assert (notice["width"], notice["height"], notice["usableEdge"]) == (4000, 3000, 1568)
+    assert notice["name"] == "shot.png", "and names the file a person would recognise"
+
+
+async def test_the_oversized_notice_lands_once_and_names_the_picture(
+    mount: Any, tmp_path: Any
+) -> None:
+    """End to end, and `record_degraded`'s rule applied to its sibling.
+
+    Derived history replays the attachment on every step for the life of the
+    session, so an append per request would bury the conversation in one repeated
+    sentence. The fake route is given pixel limits here because it is the one
+    that runs in a test; the shipped numbers live on the Anthropic row.
+    """
+    ctx: Context = await mount()
+    ctx.llm_fake.route = ResolvedModel(
+        accepts=frozenset({"image/png"}), max_image_edge=8000, usable_image_edge=1568
+    )
+    store: AttachmentStore = ctx.attachments
+    ref = await store.save_bytes(
+        content=PNG, mime="image/png", name="shot.png", width=4000, height=3000
+    )
+    session = ctx.sessions.create("oversized")
+    agent = ctx.agents.create(session, AgentOptions(provider="fake", model="fake-1"))
+
+    agent.followup(_message({"type": "text", "text": "look"}, MediaBlock(attachment=ref)))
+    await agent.run()
+    await agent.prompt("and again")
+
+    notices = [event for event in session.events if event.type == "attachment/oversized"]
+    assert len(notices) == 1
+    assert notices[0].ignorable
+    assert notices[0].data["attachments"][0]["name"] == "shot.png"
+    assert not [one for one in session.events if one.type == "attachment/degraded"]
+
+
+async def test_the_store_measures_an_image_it_is_given(mount: Any) -> None:
+    """P7-03's enabling change: `width` is no longer a fact someone had to know.
+
+    The header carries it, so the store reads it — which is what makes every
+    pixel limit above checkable rather than decorative. A caller that already
+    knows still wins, because an ingester that decoded the image knows at least
+    as much as its header does.
+    """
+    ctx: Context = await mount()
+    store: AttachmentStore = ctx.attachments
+    # `test_dimensions.png` rather than a second hand-rolled header: that module
+    # is where the byte layout is stated and asserted, and a private copy here
+    # would drift from it silently — this test would keep passing against a PNG
+    # the probe had stopped being able to read.
+    real = png(1280, 720)
+
+    measured = await store.save_bytes(content=real, mime="image/png", name="real.png")
+    told = await store.save_bytes(
+        content=real, mime="image/png", name="real.png", width=1, height=2
+    )
+    unreadable = await store.save_bytes(content=PNG, mime="image/png", name="stub.png")
+
+    assert (measured.width, measured.height) == (1280, 720)
+    assert (told.width, told.height) == (1, 2), "a caller that knows is not overruled"
+    assert unreadable.width is None, "and a header that cannot be read stays unmeasured"

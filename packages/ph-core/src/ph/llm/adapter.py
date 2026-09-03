@@ -74,10 +74,25 @@ class ResolvedModel:
     """Per-attachment ceiling, when the route publishes one.
 
     A limit and not just `accepts`, because it is what lets an over-sized block
-    degrade to a pointer here rather than be rejected at the provider. A pixel
-    ceiling belongs beside it and lands with `media-transform` (P7-02), the row
-    that would resize to it — declaring one now would be a knob wired to
-    nothing, which is the shape this codebase declines to ship."""
+    degrade to a pointer here rather than be rejected at the provider."""
+    max_image_edge: int | None = None
+    """Longest edge in pixels the route will *accept*, when it publishes one.
+
+    This docstring's neighbour used to say a pixel ceiling had to wait for
+    `media-transform` (P7-02) because "declaring one now would be a knob wired to
+    nothing". Two things wired it (P7-03): `ph.llm.dimensions` reads an image's
+    size from its header with no dependency, and a limit does not need a resizer
+    to be worth declaring — refusing with a sentence the model can read is an
+    action, and it is the same one `max_attachment_bytes` already takes."""
+    usable_image_edge: int | None = None
+    """Longest edge the route can actually *use*, when it is smaller than it accepts.
+
+    Providers scale a large image down before the model sees it — Anthropic at
+    1568 px, and it accepts up to 8000 — so pixels above this are uploaded, paid
+    for, and discarded at the far end. Separate from `max_image_edge` because the
+    outcomes differ in kind: over that, nothing is sent; over this, everything
+    works and a person is quietly overpaying, which is the failure that lasts for
+    a whole session because nothing announces it."""
 
 
 class LlmAdapter(Protocol):

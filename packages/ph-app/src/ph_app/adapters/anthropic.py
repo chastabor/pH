@@ -34,8 +34,9 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ph.cordis import Context, plugin
-from ph.llm.adapter import ResolvedModel
+from ph.llm.adapter import LlmError, ResolvedModel
 from ph.llm.types import (
+    FILE_EXPIRED,
     BlockEnd,
     BlockStart,
     Finish,
@@ -51,16 +52,24 @@ from ph.llm.types import (
     ToolCallDelta,
     UsageChunk,
 )
+from ph.seams.uploads import FileHandle
+from ph.session import now_ms
 from ph.wire import WireModel
 
 from ._http import HttpClient, resolve_secret
-from ._media import load_media, media_pointer
+from ._media import load_handles, load_media, media_pointer
 
 __all__ = ["AnthropicAdapter", "apply"]
 
 log = logging.getLogger("ph_app.adapters.anthropic")
 
 API_VERSION = "2023-06-01"
+
+FILES_BETA = "files-api-2025-04-14"
+"""The beta header the Files API is behind.
+
+Configurable because a beta name is a date that moves, and a route pinned to an
+older one must not need a new pH release."""
 
 
 ACCEPTED_MEDIA: tuple[str, ...] = (
@@ -78,6 +87,20 @@ instead of in the content-block union."""
 
 MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024
 """The default per-attachment ceiling, declared so a caller can act on it."""
+
+MAX_IMAGE_EDGE = 8_000
+"""Longest edge this provider accepts. Over it the request is refused, so an
+image over it degrades to a pointer here instead (P7-03)."""
+
+USABLE_IMAGE_EDGE = 1_568
+"""Longest edge this provider actually uses; larger images are scaled down before
+the model sees them.
+
+Row config rather than a rule in `ph.llm.media`, for `accepts`' reason: this is a
+fact about a *route*, and a gateway in front of a different model scales
+differently or not at all. Declared with the real number because the shipped
+route is Anthropic's own — a `None` here would be pH declining to say what it
+knows."""
 
 CACHE_BREAKPOINTS = 4
 """How many blocks one request may mark `cache_control`. Anthropic's limit, and
@@ -144,6 +167,20 @@ class Config(WireModel):
     in front of a text-only model sets `accepts: []` and gets honest pointers
     instead of requests the far end rejects."""
     max_attachment_bytes: int = MAX_ATTACHMENT_BYTES
+    uploads: tuple[str, ...] = ()
+    """MIME types to send by *reference* through the Files API rather than inline (P7-03).
+
+    Empty by default, and that is not timidity: the Files API is a beta this
+    account may not have, and a route that referenced a file without the beta
+    header enabled would fail every request carrying one. A deployment that has
+    it writes `uploads: [application/pdf]` — or a video type on a route whose
+    provider takes one — and the handle cache does the rest.
+
+    Worth it where it applies: a 4 MB PDF is 5.5 MB of base64 on *every step* of
+    a session, and the Files API is one upload and an id thereafter."""
+    files_beta: str = FILES_BETA
+    max_image_edge: int = MAX_IMAGE_EDGE
+    usable_image_edge: int = USABLE_IMAGE_EDGE
     cache_control: bool = True
     """Send `cache_control` breakpoints (P6-13).
 
@@ -179,6 +216,33 @@ def _checkpoints(count: int) -> tuple[int, ...]:
     return tuple(index for index in (latest - CHECKPOINT_EVERY, latest) if index >= 0)
 
 
+_MISSING_FILE_PHRASES = ("not_found", "not found", "no such file")
+"""How this provider says a referenced file is gone.
+
+Phrases rather than a status code: a 404 from a gateway in front of the API is
+about the *route*, and retrying that as an expired upload would loop. Matched
+alongside a check that the message names an id this request actually sent, which
+is the half that makes the guess safe."""
+
+
+def _is_missing_file(message: str) -> bool:
+    lowered = message.lower()
+    return any(phrase in lowered for phrase in _MISSING_FILE_PHRASES)
+
+
+def _referenced_files(body: dict[str, Any]) -> list[str]:
+    """Every `file_id` this request carries, in the order they appear."""
+    found: list[str] = []
+    for message in body.get("messages") or []:
+        for block in message.get("content") or []:
+            source = block.get("source") if isinstance(block, dict) else None
+            if isinstance(source, dict) and source.get("type") == "file":
+                handle = str(source.get("file_id") or "")
+                if handle:
+                    found.append(handle)
+    return found
+
+
 def _is_overflow(body: str) -> bool:
     # Only the provider's own phrasing: `max_tokens` also appears in a plain
     # bad-request body, and treating that as an overflow would trigger a
@@ -194,17 +258,61 @@ class AnthropicAdapter:
     config: Config
     http: HttpClient = field(default_factory=HttpClient)
 
-    def _headers(self) -> dict[str, str]:
-        return {
+    def _headers(self, *, files: bool = False) -> dict[str, str]:
+        headers = {
             "x-api-key": resolve_secret(self.ctx, self.config.api_key_env, self.config.provider),
             "anthropic-version": API_VERSION,
             "Content-Type": "application/json",
         }
+        if files:
+            # Per *request*, not per route. Keying it on `config.uploads` made
+            # the beta ride every request a configured route sent, so an account
+            # without it would fail the plain text turns too — a capability the
+            # deployment declared becoming an outage on requests that never used
+            # it.
+            headers["anthropic-beta"] = self.config.files_beta
+        return headers
+
+    async def upload(self, ref: Any, content: bytes) -> FileHandle:
+        """Hand the bytes to the Files API and keep the id it returns.
+
+        The `Uploader` half of `ctx.uploads`. No expiry is recorded: this
+        provider does not publish one per file, and inventing a TTL would be a
+        prediction pH has no basis for — the mid-turn invalidation is what covers
+        a file that goes away, and it does not depend on a guess.
+        """
+        reply = await self.http.post_multipart(
+            f"{self.config.base_url.rstrip('/')}/files",
+            headers=self._headers(files=True),
+            field="file",
+            filename=ref.name or "attachment",
+            content=content,
+            mime=ref.mime,
+            is_overflow=_is_overflow,
+        )
+        handle = str(reply.get("id") or "")
+        if not handle:
+            raise LlmError("the files API returned no id", "REQUEST_FAILED")
+        return FileHandle(
+            provider=self.config.provider,
+            attachment_id=ref.attachment_id,
+            handle=handle,
+            uploaded_at=now_ms(),
+        )
 
     async def _body(self, options: GenerateOptions) -> dict[str, Any]:
-        media = await load_media(self.ctx.get("attachments"), options.messages)
+        handles = await load_handles(
+            self.ctx.get("uploads"),
+            options.messages,
+            provider=self.config.provider,
+            mimes=frozenset(self.config.uploads),
+            session=self._session(options),
+        )
+        # After the handles and skipping them: a referenced file must not also be
+        # read and encoded, which is the cost uploading exists to remove.
+        media = await load_media(self.ctx.get("attachments"), options.messages, skip=handles.keys())
         caching = self.config.cache_control
-        messages = [_to_anthropic(message, media) for message in options.messages]
+        messages = [_to_anthropic(message, media, handles) for message in options.messages]
         if caching:
             for index in _checkpoints(len(messages)):
                 # On the message's last block, which is what "cache everything
@@ -250,18 +358,68 @@ class AnthropicAdapter:
             body["stop_sequences"] = list(options.stop)
         return body
 
+    def _session(self, options: GenerateOptions) -> Any:
+        sessions = self.ctx.get("sessions")
+        if sessions is None or options.session_id is None:
+            return None
+        return sessions.get(options.session_id)
+
     async def stream(self, options: GenerateOptions) -> AsyncIterator[Any]:
         state = _StreamState()
-        async for event, payload in self.http.stream_sse(
-            f"{self.config.base_url.rstrip('/')}/messages",
-            headers=self._headers(),
-            json=await self._body(options),
-            is_overflow=_is_overflow,
-        ):
-            for chunk in state.consume(event, payload):
-                yield chunk
+        body = await self._body(options)
+        referenced = _referenced_files(body)
+        try:
+            async for event, payload in self.http.stream_sse(
+                f"{self.config.base_url.rstrip('/')}/messages",
+                headers=self._headers(files=bool(referenced)),
+                json=body,
+                is_overflow=_is_overflow,
+                is_missing_file=_is_missing_file,
+            ):
+                for chunk in state.consume(event, payload):
+                    yield chunk
+        except LlmError as error:
+            # A handle this request referenced is gone — expired early, deleted
+            # from another session, or never honoured. **Forget it first, then
+            # let it retry**: `FILE_EXPIRED` is in `TRANSIENT_CODES` precisely
+            # because the state that caused it is already cleared by the time the
+            # retry runs, so the next attempt re-uploads rather than repeating a
+            # request that cannot work. Failing the turn here would lose an
+            # hour's conversation over a cache entry.
+            raise self._forget(error, referenced) from error
         for chunk in state.finish():
             yield chunk
+
+    def _forget(self, error: LlmError, referenced: list[str]) -> LlmError:
+        """Drop the one handle this failure named, or leave the failure alone.
+
+        `_http` has already decided the provider is talking about a missing file;
+        what only this side knows is whether it is a file *we* sent. A
+        `not_found` naming no id of ours is somebody else's 404 — a stale route,
+        a gateway — and retrying it would be the "unknown failure billed twice"
+        the retry policy exists to refuse, so it goes back to the code it came
+        with.
+
+        **The named handle, not every handle.** A first draft invalidated all of
+        them on a match, which on a request carrying twenty files threw away
+        nineteen live uploads to re-fetch one dead one.
+        """
+        uploads = self.ctx.get("uploads")
+        message = str(error.failure.message)
+        named = [handle for handle in referenced if handle in message]
+        if uploads is None or not named:
+            return (
+                LlmError(
+                    message,
+                    "REQUEST_FAILED",
+                    error.failure.model_copy(update={"code": "REQUEST_FAILED"}),
+                )
+                if error.code == FILE_EXPIRED
+                else error
+            )
+        for handle in named:
+            uploads.invalidate_handle(self.config.provider, handle)
+        return error
 
     def resolve_model(self, provider: str, model: str) -> ResolvedModel:
         return ResolvedModel(
@@ -269,6 +427,8 @@ class AnthropicAdapter:
             default_max_tokens=self.config.default_max_tokens,
             accepts=frozenset(self.config.accepts),
             max_attachment_bytes=self.config.max_attachment_bytes,
+            max_image_edge=self.config.max_image_edge,
+            usable_image_edge=self.config.usable_image_edge,
         )
 
 
@@ -407,8 +567,13 @@ def _merge_usage(current: TokenUsage | None, raw: dict[str, Any]) -> TokenUsage:
     )
 
 
-def _to_anthropic(message: Any, media: dict[str, str]) -> dict[str, Any]:
+def _to_anthropic(
+    message: Any, media: dict[str, str], handles: dict[str, str] | None = None
+) -> dict[str, Any]:
     """One pH message as an Anthropic message.
+
+    `handles` wins over `media` where both are present: a file the provider
+    already holds is referenced by id, which is the whole point of uploading it.
 
     Tool results are user-role content blocks here rather than their own role, which
     is the main structural difference from the OpenAI wire.
@@ -424,8 +589,12 @@ def _to_anthropic(message: Any, media: dict[str, str]) -> dict[str, Any]:
         if kind == "text":
             blocks.append({"type": "text", "text": block.text})
         elif kind == "media":
+            handle = (handles or {}).get(block.attachment.attachment_id)
             data = media.get(block.attachment.attachment_id)
             shape = _WIRE_SHAPES.get(block.attachment.mime)
+            if handle is not None and shape is not None:
+                blocks.append({"type": shape, "source": {"type": "file", "file_id": handle}})
+                continue
             # Total over its own vocabulary, not a second copy of the accept
             # policy: `media-degrade` decides what may be sent, but this renderer
             # still has to be honest about what it can *express*. Without the
@@ -474,4 +643,13 @@ async def apply(ctx: Context, config: Config) -> None:
     adapter = AnthropicAdapter(ctx=ctx, config=config)
     handle = ctx.llm.register_adapter([config.provider], adapter)
     ctx.add_disposer(handle.dispose, label=f"llm({config.provider})")
+    uploads = ctx.get("uploads")
+    if uploads is not None and config.uploads:
+        # Only when this route references files. Registering an uploader a route
+        # never uses would put a file API behind a provider name that has not
+        # opted into the beta it needs.
+        ctx.add_disposer(
+            uploads.register_uploader(config.provider, adapter),
+            label=f"uploader({config.provider})",
+        )
     ctx.add_disposer(adapter.http.aclose, label=f"http({config.provider})")

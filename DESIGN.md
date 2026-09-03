@@ -1267,6 +1267,28 @@ written once and read never. `tests/test_prompt_cache.py` holds that as a number
 rather than a shape: the second request of a session reads a prefix, and so does
 P4-03's replayed summarize call.
 
+**Media is the same argument at a different layer.** A route declares what it
+takes (`accepts`), how big (`max_attachment_bytes`), how many pixels it will
+*accept* and how many it can actually *use* — and `media-degrade` answers all of
+it above every adapter, so a text-only route silently receiving an image is not a
+shape this tree can express. `ph.llm.dimensions` reads an image's size out of its
+header with **no dependency at all** — no Pillow, no ImageMagick, no `ffmpeg` —
+which is what turned the pixel ceiling from a knob wired to nothing into a
+refusal and a warning (P7-03). Over `max_image_edge` nothing is sent; over
+`usable_image_edge` everything works and `attachment/oversized` says the surplus
+is being uploaded every turn and discarded.
+
+**`ctx.uploads` is the one cache in the tree that is deliberately not in the
+log.** A provider's file API takes bytes once and returns a handle; that handle is
+a *prediction* with an expiry, and an append-only log cannot retract one. So the
+`(provider, digest) → handle` map lives under `$PH_CACHE`, one file per entry,
+reconstructible from blobs the store still holds — while the *fact* that bytes
+left the machine for a named provider is appended as `attachment/uploaded`,
+because that is what a person auditing their data comes for. A handle the
+provider stops honouring is detected mid-request, forgotten, and raised as
+`FILE_EXPIRED`, which `llm-retry` already treats as transient: the retry rebuilds
+against a fresh upload rather than losing the turn.
+
 **The decline/fail distinction (§3.4) is part of this invariant.** A seam must
 be able to say *"I could not serve this, and here is the code for why"* without
 that being an error — otherwise every optional tier becomes a startup failure.

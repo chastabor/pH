@@ -114,6 +114,12 @@ def _sample(model: type[BaseModel]) -> BaseModel | None:
         "ToolResultBlock": {"toolCallId": "c1", "content": [TextBlock(text="out")]},
         "ToolCallBlock": {"id": "c1", "name": "read", "arguments": "{}"},
         "AttachmentRef": {"attachmentId": "sha256:abc", "mime": "image/png", "bytes": 3},
+        "FileHandle": {
+            "provider": "anthropic",
+            "attachmentId": "sha256:abc",
+            "handle": "file_01",
+            "uploadedAt": 1,
+        },
         "MediaBlock": {
             "attachment": {"attachmentId": "sha256:abc", "mime": "image/png", "bytes": 3}
         },

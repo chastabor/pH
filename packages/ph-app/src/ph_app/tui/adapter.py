@@ -678,6 +678,44 @@ class TuiEventAdapter:
         reason = str(items[0].get("reason") or "this model cannot read it")
         self._row("attachment", "notice", f"Not sent to the model: {names} — {reason}.", event)
 
+    def _on_attachment_oversized(self, event: SessionEvent, live: bool) -> None:
+        """Media that *was* sent, and is bigger than the route can use (P7-03).
+
+        Its sibling above says a file never reached the model; this says one did
+        and is costing more than it buys. Both are notices and neither is an
+        error, but a reader must not confuse them — so the wording leads with
+        what happened rather than with the file.
+        """
+        items = [obj(one) for one in seq(event.data.get("attachments"))]
+        if not items:
+            return
+        first = items[0]
+        names = ", ".join(str(one.get("name") or one.get("mime") or "?") for one in items)
+        self._row(
+            "attachment",
+            "notice",
+            f"Sent at more detail than this model uses: {names} — "
+            f"{first.get('width')}x{first.get('height')}, "
+            f"scaled to {first.get('usableEdge')} px on the long edge.",
+            event,
+        )
+
+    def _on_attachment_uploaded(self, event: SessionEvent, live: bool) -> None:
+        """A file this provider now holds a copy of (P7-03).
+
+        Worth a row for one reason and it is not performance: a person should be
+        able to see, in the conversation, that their video was handed to a named
+        third party. The handle is deliberately absent — it is cache state, it
+        expires, and it would read as something to keep.
+        """
+        name = str(event.data.get("name") or event.data.get("attachmentId") or "?")
+        self._row(
+            "attachment",
+            "notice",
+            f"Uploaded to {event.data.get('provider')}: {name}.",
+            event,
+        )
+
     def _on_compaction_declined(self, event: SessionEvent, live: bool) -> None:
         """An automatic compaction that changed nothing, and why (P4-03).
 
@@ -810,6 +848,8 @@ HANDLERS: Mapping[str, Handler] = {
     "offload/input-spilled": TuiEventAdapter._on_offload_spilled,
     "compaction/declined": TuiEventAdapter._on_compaction_declined,
     "attachment/degraded": TuiEventAdapter._on_attachment_degraded,
+    "attachment/oversized": TuiEventAdapter._on_attachment_oversized,
+    "attachment/uploaded": TuiEventAdapter._on_attachment_uploaded,
     "limits/exceeded": TuiEventAdapter._on_limits_exceeded,
     "limits/breaker-tripped": TuiEventAdapter._on_breaker_tripped,
     "compaction/args-truncated": TuiEventAdapter._on_compaction_args_truncated,

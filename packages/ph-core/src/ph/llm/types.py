@@ -101,12 +101,16 @@ class AttachmentRef(WireModel):
     photo share one file and what lets a fork reference its parent's media
     without owning a directory.
 
-    The measurement fields are *optional facts an ingester happened to know*,
-    never something this type goes and computes: reading an image's dimensions
-    means decoding it, and the decoder is exactly the dependency `media-transform`
-    (P7-02) exists to keep optional. Present, they make the token estimate
-    accurate; absent, it falls back to a flat figure — which is still infinitely
-    better than the zero a media block counted for before.
+    The measurement fields stay *optional* — a video's duration and a PDF's page
+    count are still facts an ingester happened to know — but `width` and `height`
+    are no longer among them: `ph.llm.dimensions` reads them out of the file
+    header with no dependency at all, and `AttachmentStore.save_bytes` fills them
+    in. This docstring used to say that measuring an image "means decoding it,
+    and the decoder is exactly the dependency `media-transform` (P7-02) exists to
+    keep optional", which conflated resizing with reading four integers at a
+    fixed offset (P7-03). Present, they make the token estimate accurate and let
+    a route say the picture is larger than it can use; absent, the estimate falls
+    back to a flat figure.
     """
 
     attachment_id: str
@@ -392,6 +396,14 @@ class LlmFailure(WireModel):
 
 CONTEXT_WINDOW_EXCEEDED = "CONTEXT_WINDOW_EXCEEDED"
 EMPTY_RESPONSE = "EMPTY_RESPONSE"
+FILE_EXPIRED = "FILE_EXPIRED"
+"""A request referenced an uploaded file the provider no longer has (P7-03).
+
+Its own code because the remedy is specific and automatic: the handle has already
+been forgotten by the time this is raised, so the next attempt re-uploads and
+succeeds. `CONTEXT_WINDOW_EXCEEDED` is the opposite case and the reason this
+codebase classifies rather than blanket-retries — that one will not fit on the
+second attempt either."""
 
 
 class LlmCallConfig(WireModel):

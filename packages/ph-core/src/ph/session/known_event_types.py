@@ -218,6 +218,21 @@ KNOWN_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         # by, so a reader skipping this loses the account of *why*, not the
         # conversation.
         "attachment/degraded",
+        # Media that was sent and is larger than the route can use (P7-03).
+        # Not a degradation: the model saw the picture and the turn is correct.
+        # What is wrong is the bill — the surplus pixels are re-uploaded on every
+        # request of the session and discarded at the far end — and a person is
+        # the only one who can act on it, which is why it is a record here rather
+        # than a line in a process log. Ignorable for the same reason as its
+        # sibling, and more so: nothing about the conversation changed.
+        "attachment/oversized",
+        # Bytes left this machine for a named provider's file API (P7-03). The
+        # *handle* is a cache under `$PH_CACHE` and deliberately not here — it is
+        # a prediction with an expiry, and an append-only log cannot take one
+        # back — but that a file was uploaded is a fact, it is privacy-relevant,
+        # and it is what a person auditing where their data went comes for.
+        # Ignorable: the model reads the same attachment either way.
+        "attachment/uploaded",
         # The context loader's recipe (P3-17): which corpus a session was told
         # about, and the digest of the sources it was built from. Ignorable — a
         # reader that skips it loses the note, not the conversation.
@@ -243,6 +258,8 @@ IGNORABLE_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         "compaction/declined",
         "compaction/args-truncated",
         "attachment/degraded",
+        "attachment/oversized",
+        "attachment/uploaded",
         # Protocol bookkeeping a reader can skip without misreading anything
         # else: the turn it deduplicated is in the log either way.
         "client/command",

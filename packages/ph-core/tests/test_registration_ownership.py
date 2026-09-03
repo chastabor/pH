@@ -1364,6 +1364,9 @@ BOUND: dict[str, str] = {
     # has no agent" was only ever about the *layer* half, and the owner half
     # needs no agent at all.
     "AdapterHandle.adapter": "LlmRuntime.stream",
+    # A route's file API (P7-03), on `AdapterHandle.adapter`'s terms exactly:
+    # row code the seam invokes later, so it enters the row's binding first.
+    "_Registered.uploader": "UploadRegistry.handle_for",
     "CodeRuntimeSeam.provider": "CodeRuntimeSeam.run",
     "CompactionSeam.engine": "CompactionSeam.compact_if_needed",
     "SandboxSeam.provider": "SandboxSeam.confine",
