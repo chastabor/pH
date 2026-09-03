@@ -17,14 +17,20 @@ of the question entirely.
 
 from __future__ import annotations
 
+from base64 import b64encode
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ph.llm.types import AttachmentRef, MediaBlock, Message, create_user_message
 
-__all__ = ["AttachmentUnavailable", "Tray", "ingest", "prompt_message"]
+from .wire import obj
+
+if TYPE_CHECKING:  # pragma: no cover - a type, not a dependency
+    from .daemon.client import DaemonClient
+
+__all__ = ["AttachmentUnavailable", "Tray", "ingest", "prompt_message", "stage_bytes"]
 
 
 class AttachmentUnavailable(RuntimeError):
@@ -101,3 +107,35 @@ def prompt_message(text: str, attachments: Sequence[AttachmentRef] = ()) -> Mess
     content: list[Any] = [{"type": "text", "text": text}] if text else []
     content.extend(MediaBlock(attachment=one) for one in attachments)
     return create_user_message(content=content, source={"kind": "user"})
+
+
+async def stage_bytes(
+    client: DaemonClient, session_id: str, name: str, mime: str, content: bytes
+) -> str:
+    """Store these bytes on the daemon and put them on the session's tray.
+
+    Two frames, and the pair belongs together: `attachment/put` is not a
+    `MUTATIONS` row — it is content-addressed, so a retry is already a no-op and
+    its reply *is* the reference — while `session/stage` is keyed, because a tray
+    is state. Neither half is useful alone, and both front ends that stage a file
+    send them back to back.
+
+    Here rather than on `DaemonClient`, whose docstring is that every method
+    there is one frame; and here rather than as a third daemon method, which
+    would have to collapse two verbs the protocol keeps apart for the reasons
+    above and would move a file's *name* and *type* — the human door's half of
+    the decision (I-9) — onto the daemon.
+
+    Returns the attachment id, which is what a caller reporting the outcome
+    wants; the tray it landed on reaches every front end as `session.staged`.
+    """
+    put = await client.call(
+        "attachment/put",
+        sessionId=session_id,
+        name=name,
+        mime=mime,
+        contentB64=b64encode(content).decode(),
+    )
+    reference = obj(put.get("attachment"))
+    await client.mutate("session/stage", session_id, attachment=reference)
+    return str(reference.get("attachmentId", ""))

@@ -27,7 +27,8 @@ import pytest
 from ph.bundles import BASE, HEADLESS
 from ph.cordis import Profile
 from ph.paths import resolve_roots
-from ph_app.daemon import DaemonClient, serve
+from ph_app.daemon.client import DaemonClient
+from ph_app.daemon.server import serve
 
 __all__ = ["PROFILE", "Daemon", "daemon_in_thread", "running", "shut_down", "until"]
 

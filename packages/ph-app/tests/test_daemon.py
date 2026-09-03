@@ -144,9 +144,10 @@ from daemon_helpers import PROFILE, running
 
 from ph.seams.schedule import Schedule
 from ph.testing import stored_log
-from ph_app.daemon import DaemonClient, recovery, serve, server
+from ph_app.daemon import recovery, server
 from ph_app.daemon import supervisor as supervisor_module
-from ph_app.daemon.server import DaemonUnavailable
+from ph_app.daemon.client import DaemonClient
+from ph_app.daemon.server import DaemonUnavailable, serve
 from ph_app.daemon.supervisor import Supervisor
 from ph_app.protocol import DaemonError
 

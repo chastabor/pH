@@ -42,6 +42,7 @@ from ph.lingering import lifetime
 from ph.paths import RuntimeDirError, resolve_roots
 from ph.seams.diagnostics import DiagnosticsRegistry
 from ph.selectors import matches_any, unknown_namespaces
+from ph.session import new_session_id
 
 from .agents import agents_app
 from .attach import AttachmentUnavailable
@@ -121,7 +122,7 @@ def default(
         ),
     ] = None,
     resume: Annotated[
-        str | None, typer.Option("--resume", help="Session id to reopen (tui only).")
+        str | None, typer.Option("--resume", help="Session id to reopen (tui and web).")
     ] = None,
     no_spawn: Annotated[
         bool,
@@ -165,6 +166,11 @@ def default(
             fail(f"[red]{error}[/red]", code=2, cause=error)
         return
 
+    # `--resume <id>` is `--session <id>`: the daemon resumes an existing id
+    # through the same call that creates a new one, so the two spellings are one
+    # answer and both interactive modes read it here.
+    wanted = session_id or resume
+
     if mode == "tui":
         # **Before any profile work**, like the trajectory branch above and for
         # the same reason: the terminal does not mount one. The daemon composes
@@ -184,9 +190,7 @@ def default(
                 daemon_argv=spawn_command(
                     profile=profile, provider=provider, model=model, patch=patch
                 ),
-                # `--resume <id>` is `--session <id>`: the daemon resumes an
-                # existing id through the same call that creates a new one.
-                session_id=session_id or resume,
+                session_id=wanted,
                 spawn=not no_spawn,
             )
         )
@@ -207,20 +211,22 @@ def default(
                 "[red]--mode web needs the web extra:[/red] pip install 'ph-app[web]'",
                 cause=error,
             )
-        # Deliberately **not** `--session`: `textual-serve` fixes the command at
-        # construction and varies nothing per request, so a session id here would
-        # be *every* tab's. Without one each tab opens its own new session, and
-        # the picker is how a person joins somebody else's.
+        # **One session for every tab of this launch**, minted here when the
+        # person did not name one — `serve.py`'s module docstring says why a tab
+        # cannot have one of its own.
+        shared = wanted or new_session_id()
         tab = reinvoke(
             "--mode",
             "tui",
+            "--session",
+            shared,
             *(("--no-spawn",) if no_spawn else ()),
             profile=profile,
             provider=provider,
             model=model,
             patch=patch,
         )
-        server = WebServer(command=shlex.join(tab), host=host, port=port)
+        server = WebServer(command=shlex.join(tab), session=shared, host=host, port=port)
         # Printed here, before the bind, the way `ph daemon` prints its socket
         # and its linger warning: the sentences are the server's, and saying them
         # is the command's.
@@ -439,8 +445,7 @@ def daemon(
     for exactly this — and a stale one from a crashed daemon is cleared, while a
     live one is refused rather than stolen.
     """
-    from .daemon import serve
-    from .daemon.server import DaemonUnavailable
+    from .daemon.server import DaemonUnavailable, serve
 
     composed = profile_or_exit(profile)
     try:

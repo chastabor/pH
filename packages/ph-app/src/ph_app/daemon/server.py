@@ -42,6 +42,7 @@ from ph.lingering import RuntimeLifetime, lifetime, socket_identity
 from ph.llm.types import AttachmentRef
 from ph.paths import resolve_roots
 from ph.resources import GRACE_SECONDS
+from ph.seams.attachments import OCTET_STREAM
 from ph.seams.schedule import Schedule
 from ph.session import now_ms
 
@@ -57,6 +58,7 @@ from ..shell import shell_of
 from ..trust import TrustStore, trust_path
 from .cards import CARD_EVENTS, presentation_of
 from .duplex import Peer
+from .framing import MAX_ATTACHMENT_BYTES
 from .launch import listening
 from .projections import (
     browse_of,
@@ -129,14 +131,6 @@ PROJECTIONS: dict[str, tuple[str, Any]] = {
     "tools/list": ("tools", tools_of),
 }
 """Method → (reply key, fold). Every one is `{sessionId, <key>: <fold(root)>}`."""
-
-MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024
-"""The largest attachment one frame may carry.
-
-Under `MAX_LINE` (8 MiB) with room to spare, because the frame also carries the
-method, the session id and base64's own 4/3 expansion — a limit set at the frame
-size would refuse *after* the client had already sent it, as a framing error with
-no name."""
 
 
 def _command_key(params: dict[str, Any]) -> str:
@@ -477,7 +471,7 @@ class _Connection:
             raise Refusal(f"contentB64 is not valid base64: {error}") from error
         ref = await store.save_bytes(
             content=content,
-            mime=str(params.get("mime") or "application/octet-stream"),
+            mime=str(params.get("mime") or OCTET_STREAM),
             name=str(params["name"]) if params.get("name") else None,
         )
         return {"sessionId": root.id, "attachment": ref.to_wire()}

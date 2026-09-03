@@ -25,7 +25,7 @@ from anyio.streams.buffered import BufferedByteReceiveStream
 
 from ph.session import dumps
 
-__all__ = ["MAX_LINE", "FramingError", "read_frames", "write_frame"]
+__all__ = ["MAX_ATTACHMENT_BYTES", "MAX_LINE", "FramingError", "read_frames", "write_frame"]
 
 MAX_LINE = 8 * 1024 * 1024
 """How long one frame may be — one *frame*, checked by `receive_until`.
@@ -34,6 +34,20 @@ Generous, because a frame can carry a session event and an event can carry a
 tool result the spill store has not yet taken. Bounded, because the alternative
 is not "large frames work" but "one peer can exhaust the daemon".
 """
+
+MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024
+"""The largest attachment one frame may carry.
+
+Under `MAX_LINE` (8 MiB) with room to spare, because the frame also carries the
+method, the session id and base64's own 4/3 expansion — a limit set at the frame
+size would refuse *after* the client had already sent it, as a framing error with
+no name.
+
+Here rather than in `server.py` because it is a property of the **wire**: it is
+derived from `MAX_LINE` above it, and both ends of that wire need it — the daemon
+to refuse a frame, and a front end to refuse an upload before it builds one. A
+front end importing it from the server module would name the supervisor's home to
+read an integer."""
 
 
 class FramingError(Exception):

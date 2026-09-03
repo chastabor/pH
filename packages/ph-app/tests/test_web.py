@@ -19,21 +19,32 @@ test is the HTTP surface rather than Textual's frame streaming.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
 import pytest
-from aiohttp import web
+from aiohttp import FormData, web
 from aiohttp.test_utils import TestClient, TestServer
+from daemon_helpers import daemon_socket, running, until
 
-from ph_app.web.serve import COOKIE, TOKEN_QUERY, WebServer
+from ph_app.daemon.framing import MAX_ATTACHMENT_BYTES
+from ph_app.web.serve import CLOSING_BODY, COOKIE, TOKEN_QUERY, WebServer
 
 pytestmark = pytest.mark.anyio
+
+PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
+"""Enough of a header that the store recognises it; the bytes do not matter."""
+
+
+def a_server(session: str = "served", **options: Any) -> WebServer:
+    """A composed server whose tabs would run a command that never runs."""
+    return WebServer(command="/bin/true", session=session, **options)
 
 
 @pytest.fixture
 def server() -> WebServer:
-    """One composed server whose tabs would run a command that never runs."""
-    return WebServer(command="/bin/true")
+    return a_server()
 
 
 @pytest.fixture
@@ -44,6 +55,31 @@ async def client(server: WebServer) -> AsyncIterator[TestClient[web.Request, web
     server has to be the *same* object the test asserts the token of."""
     async with TestClient(TestServer(server.application())) as opened:
         yield opened
+
+
+@asynccontextmanager
+async def browser_on(session: str) -> AsyncIterator[tuple[WebServer, Any]]:
+    """A server on a *named* session and a client on it.
+
+    The fixture pair above cannot serve the two daemon-backed tests: they need
+    the id the daemon knows, which does not exist until the test has one.
+    """
+    server = a_server(session)
+    async with TestClient(TestServer(server.application())) as opened:
+        yield server, opened
+
+
+async def drop(
+    server: WebServer,
+    browser: Any,
+    content: bytes = PNG,
+    name: str = "diagram.png",
+    mime: str = "image/png",
+) -> Any:
+    """One file, dropped on the page. What every upload test does."""
+    body = FormData()
+    body.add_field("file", content, filename=name, content_type=mime)
+    return await browser.post("/api/attachments", params={TOKEN_QUERY: server.token}, data=body)
 
 
 # ------------------------------------------------------- what upstream owes us --
@@ -148,7 +184,7 @@ def test_the_launch_url_carries_the_token_and_the_bind() -> None:
     The token has to be *in* the URL: there is nowhere else to put it, since the
     first request is the one that needs authorising.
     """
-    server = WebServer(command="/bin/true", port=7777)
+    server = a_server(port=7777)
 
     assert server.url == f"http://127.0.0.1:7777/?token={server.token}"
 
@@ -160,7 +196,7 @@ def test_every_launch_mints_its_own_token() -> None:
     run they were not meant to reach — and there is no session store to revoke
     it in.
     """
-    assert WebServer(command="/bin/true").token != WebServer(command="/bin/true").token
+    assert a_server().token != a_server().token
 
 
 def test_a_non_loopback_bind_says_what_it_costs() -> None:
@@ -171,9 +207,202 @@ def test_a_non_loopback_bind_says_what_it_costs() -> None:
     in two styles, on two sides of the bind; and the CLI's copy compared against
     a `"127.0.0.1"` literal it did not own.
     """
-    local = list(WebServer(command="/bin/true").notices())
-    public = list(WebServer(command="/bin/true", host="0.0.0.0").notices())
+    local = list(a_server("shared-id").notices())
+    public = list(a_server(host="0.0.0.0").notices())
 
     assert any("authority" in one for one in local), "the token's cost is always said"
+    assert any("shared-id" in one for one in local), "and which session the tabs land on"
     assert not any("loopback" in one for one in local)
     assert any("loopback" in one for one in public), "and a public bind says more"
+
+
+# ------------------------------------------------------- the browser's bytes --
+
+
+async def test_the_page_offers_somewhere_to_drop_a_file(server: WebServer, client: Any) -> None:
+    """The drop zone is inserted into a page this module does not own.
+
+    The marker is asserted because it is the one thing insertion can break —
+    `_index`'s docstring says why insertion rather than a fork.
+
+    Sabotage: stop inserting, and a person can see the terminal and has no way to
+    give it a file from their own machine.
+    """
+    page = await client.get("/", params={TOKEN_QUERY: server.token})
+    body = await page.text()
+
+    assert CLOSING_BODY in body, "upstream's page no longer ends the way we insert into"
+    assert 'id="ph-drop"' in body
+    assert "/api/attachments" in body, "and the zone knows where to post"
+
+
+async def test_an_upload_needs_the_token_like_everything_else(client: Any) -> None:
+    """The interesting door, again: this one *writes*.
+
+    A route that took bytes from anyone would be worse than a readable shell —
+    it stages a file onto a live session's tray, which the next prompt carries
+    to the model.
+    """
+    assert (await client.post("/api/attachments")).status == 403
+
+
+async def test_a_post_that_is_not_a_dropped_file_is_refused_not_traced(
+    server: WebServer, client: Any
+) -> None:
+    """One multipart part named `file` — anything else gets a sentence.
+
+    The route takes the *first* part rather than scanning for one, because the
+    only producer is the drop zone above it and a scan invents a shape nothing
+    sends. So the narrowing has to be **answered**, not raised through: the
+    caller might be a person with `curl`, and getting it slightly wrong is not a
+    server error.
+
+    The empty-body case is the one that bit, found by hand rather than here:
+    `request.multipart()` *asserts* on a body that is not multipart, so a plain
+    POST arrived as a 500 and an `AssertionError` — the same defect as a daemon
+    refusal arriving as one, one route over.
+
+    Sabotage: drop either guard and this is a 500 whose text is a traceback.
+    """
+    named_wrong = FormData()
+    named_wrong.add_field("upload", PNG, filename="diagram.png", content_type="image/png")
+
+    refused = await client.post(
+        "/api/attachments", params={TOKEN_QUERY: server.token}, data=named_wrong
+    )
+    assert refused.status == 400
+    assert "'file'" in await refused.text()
+
+    # No body at all — `FormData()` with no fields is not even multipart.
+    plain = await client.post("/api/attachments", params={TOKEN_QUERY: server.token})
+    assert plain.status == 415
+    assert "'file'" in await plain.text()
+
+
+async def test_an_upload_with_no_daemon_says_so(server: WebServer, client: Any) -> None:
+    """No daemon means no session to stage onto, and that is a sentence.
+
+    The *tabs* are what start a daemon, so a person who has not opened one has
+    nothing for a file to land on. Starting one here would mount a session
+    nobody is attached to in order to hold a file nobody asked for.
+    """
+    refused = await drop(server, client)
+
+    assert refused.status == 503
+    assert "no daemon" in await refused.text()
+
+
+async def test_an_upload_before_any_tab_exists_says_what_to_do(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A daemon refusal is not a server error, and this is the one that bit.
+
+    A daemon is running but nothing has created the session yet — the state a
+    person is in between launching `--mode web` and opening a tab, since the tabs
+    are what create it. It arrived as a **500** and an `ExceptionGroup`
+    traceback; `_stage`'s docstring says why the obvious `except` saw nothing.
+
+    Sabotage: drop the mapping and this is a 500 whose text tells a person
+    nothing.
+    """
+    monkeypatch.setenv("PH_RUNTIME", str(tmp_path / "run"))
+    async with (
+        running(tmp_path, path=daemon_socket()),
+        browser_on("not-open-yet") as (
+            server,
+            browser,
+        ),
+    ):
+        refused = await drop(server, browser)
+
+        assert refused.status == 503
+        text = await refused.text()
+        assert "not-open-yet" in text, "the daemon's own sentence reaches the person"
+        assert "open a tab" in text
+
+
+async def test_an_oversized_upload_is_refused_before_it_is_buffered(
+    server: WebServer, client: Any
+) -> None:
+    """The same ceiling the daemon enforces, applied where the bytes arrive.
+
+    `attachment/put` refuses over 5 MiB because one frame cannot carry it — and a
+    refusal that arrives *after* the whole file has been read into this process
+    and base64'd is one that spent the memory anyway. So the read is chunked
+    against the limit and stops at it. Nothing else would: aiohttp applies
+    `client_max_size` to `read()` and `post()`, never to `read_chunk`.
+    """
+    refused = await drop(
+        server,
+        client,
+        b"\x00" * (MAX_ATTACHMENT_BYTES + 1024),
+        "big.bin",
+        "application/octet-stream",
+    )
+
+    assert refused.status == 413
+    assert "MiB" in await refused.text()
+
+
+async def test_a_browser_uploaded_file_reaches_the_model_as_a_media_block(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**The gate this increment exists for**, end to end (P7-06).
+
+    Bytes leave a browser, land on the root's shared tray, and the next prompt —
+    from *any* attached front end, here a plain client — carries them to the
+    model as a `media` block. Asserted on the `user/message` the log kept,
+    because that is what `derive_messages` sends: a 201 reply would pass for a
+    server that dropped the file on the floor.
+
+    Sabotage: stop draining `staged` in `Supervisor.prompt`, and the turn goes as
+    plain text with nothing saying the picture never went.
+    """
+    monkeypatch.setenv("PH_RUNTIME", str(tmp_path / "run"))
+    async with running(tmp_path, path=daemon_socket()) as daemon:
+        root = await daemon.root("dropped")
+        async with browser_on(root.id) as (server, browser):
+            sent = await drop(server, browser)
+
+            assert sent.status == 201
+            reference = await sent.json()
+            assert reference["attachmentId"].startswith("sha256:")
+            assert reference["name"] == "diagram.png"
+
+            # On the *root's* tray, which is what every attached UI sees.
+            assert [one.name for one in root.staged.refs] == ["diagram.png"]
+
+        # Any client's next prompt carries it — the tray is the root's, not a
+        # front end's.
+        client = await daemon.client()
+        await client.prompt(root.id, "look at this")
+        await until(
+            lambda: root.session.latest("user/message") is not None,
+            what="the prompt to reach the log",
+        )
+        message = root.session.latest("user/message")
+        assert message is not None
+        content = message.data["content"]
+        assert [one["type"] for one in content] == ["text", "media"]
+        assert content[1]["attachment"]["attachmentId"] == reference["attachmentId"]
+
+
+async def test_the_same_bytes_dropped_twice_are_one_blob(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Content-addressed, so re-dropping a file is cheap rather than a second copy.
+
+    Its own test because it is its own claim: the end-to-end one above is about
+    the *route* — bytes to a model — and this is about the *store*. Folded
+    together, a failure here read as a failure of the gate the increment is named
+    for.
+    """
+    monkeypatch.setenv("PH_RUNTIME", str(tmp_path / "run"))
+    async with running(tmp_path, path=daemon_socket()) as daemon:
+        root = await daemon.root("twice")
+        async with browser_on(root.id) as (server, browser):
+            once = await drop(server, browser)
+            again = await drop(server, browser)
+
+            assert (await once.json())["attachmentId"] == (await again.json())["attachmentId"]
+            assert [one.name for one in root.staged.refs] == ["diagram.png"], "one chip, not two"

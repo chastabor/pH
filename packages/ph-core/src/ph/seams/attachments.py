@@ -51,13 +51,18 @@ from ..wire import WireModel
 __all__ = [
     "ENCODED_CACHE_BYTES",
     "EXTENSIONS",
+    "OCTET_STREAM",
     "AttachmentStore",
     "apply",
     "digest_of",
+    "mime_of",
     "read_for_attach",
 ]
 
 log = logging.getLogger("ph.seams.attachments")
+
+OCTET_STREAM = "application/octet-stream"
+"""What a file pH cannot classify is called."""
 
 EXTENSIONS: dict[str, str] = {
     "image/png": ".png",
@@ -99,21 +104,31 @@ megabytes of `str` for as long as the process lives.
 """
 
 
+def mime_of(name: str) -> str:
+    """What pH calls a file of this name.
+
+    The classification rule, as one function, because it decides more than a
+    label: `path_for` derives the stored file's *extension* from the mime, and
+    `IMAGE_MIMES` decides whether a block reaches the model as an image or as a
+    document. A second copy of the ladder is how the same PNG becomes a document
+    in one front end and an image in another — which is what the three callers
+    it now has (a person's `--attach`, a browser upload, the daemon's own
+    default) would each have spelled for themselves.
+    """
+    return mimetypes.guess_type(name)[0] or OCTET_STREAM
+
+
 async def read_for_attach(source: Path | str) -> tuple[str, str, bytes]:
     """`(name, mime, content)` for a file a *person* is attaching.
 
     The human door (I-9), as one function: reads with the caller's own
-    permissions, no policy check, mime by name with `application/octet-stream`
-    as the honest fallback. Exported because two front ends read a file this way
-    — the in-process one through `save_path`, the socket one before
-    `attachment/put` — and a rule about how a person's file is classified must
-    have one author, or the same PNG is a document in one terminal and an image
-    in another.
+    permissions, no policy check, mime by `mime_of`. Exported because two front
+    ends read a file this way — the in-process one through `save_path`, the
+    socket one before `attachment/put`.
     """
     path = Path(source).expanduser()
     content = await anyio.to_thread.run_sync(path.read_bytes)
-    mime = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
-    return path.name, mime, content
+    return path.name, mime_of(path.name), content
 
 
 @dataclass(slots=True)

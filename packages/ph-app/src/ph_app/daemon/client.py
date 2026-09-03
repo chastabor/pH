@@ -11,6 +11,7 @@ protocol grows.
 from __future__ import annotations
 
 import secrets
+from collections.abc import Awaitable, Callable
 from dataclasses import InitVar, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -21,7 +22,10 @@ from anyio.abc import ByteStream
 from ..protocol import notification
 from .duplex import Handler, Notification, Peer
 
-__all__ = ["DaemonClient"]
+__all__ = ["DaemonClient", "Exchange", "connected"]
+
+type Exchange[T] = Callable[[DaemonClient], Awaitable[T]]
+"""One caller's business with the daemon, given a connected client."""
 
 
 @dataclass(slots=True)
@@ -135,3 +139,32 @@ class DaemonClient:
 
     async def aclose(self) -> None:
         await self.stream.aclose()
+
+
+async def connected[T](path: Path, work: Exchange[T]) -> T:
+    """Connect, run one exchange, and close — with the pump alongside it.
+
+    The pump has to be a task rather than something the caller drives, because
+    replies and notifications arrive on the same stream: a caller that read its
+    own reply directly would consume a `session.event` it had no way to hand
+    back. Closing the stream is what ends the pump, so there is no cancel here —
+    a teardown that cancelled would race the last frame it asked for.
+
+    Here rather than in `ph agents`, because a one-shot exchange is not a CLI
+    shape: `ph_app.web.serve` stages a browser's upload this way too, and the
+    copy it started with re-derived every subtlety below. **What leaves this
+    function is wrapped**: a refusal the daemon sent crosses a task group, so a
+    caller wanting the `DaemonError` inside it needs `except*` or `_alone`. The
+    `OSError` from the connect does not — it is raised before the group.
+    """
+    client = await DaemonClient.connect(path)
+    async with anyio.create_task_group() as tasks:
+        tasks.start_soon(client.pump)
+        try:
+            outcome = await work(client)
+        finally:
+            await client.aclose()
+    # Assigned inside the group and returned outside it: a task group's
+    # `__aexit__` is typed as one that may suppress, so a `return` in the block
+    # leaves the function with a path that falls off the end.
+    return outcome

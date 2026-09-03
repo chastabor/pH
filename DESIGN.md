@@ -607,7 +607,7 @@ Everything exits **1** on refusal, except argument errors under
 | `transcript` | Reads `session.transcript()`, **not** `derive_messages()`, so compaction does not erase what the human saw |
 | `rpc` | JSON-RPC over stdio. Takes no `--print` — the peer drives |
 | `tui` | Textual, imported lazily. **A daemon client** (P5-14): it attaches, and closing it detaches rather than ending the turn. Silently starts an ephemeral daemon when no socket answers. Loops so the session picker can reopen in a fresh app |
-| `web` | The same `tui` in a browser tab, over `textual-serve` — one subprocess per tab, so each tab is one more front end on the one daemon. Needs the `ph-app[web]` extra; `--mode web` without it prints the install line. Binds `127.0.0.1` unless `--host` says otherwise, and every request needs the per-launch token from the URL |
+| `web` | The same `tui` in a browser tab, over `textual-serve` — one subprocess per tab, so each tab is one more front end on the one daemon, and **all tabs of a launch share one session** (the multiplex: private composers, one log). Drop a file on the page to attach it. Needs the `ph-app[web]` extra; `--mode web` without it prints the install line. Binds `127.0.0.1` unless `--host` says otherwise, and every request needs the per-launch token from the URL |
 | `trajectory` | **Mounts nothing** — no agent, provider, answerers, or plugins. A fold over a stored file |
 
 ### 4.3 Slash commands

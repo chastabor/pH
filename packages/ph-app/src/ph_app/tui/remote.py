@@ -41,7 +41,6 @@ bodies are what close that.
 from __future__ import annotations
 
 import logging
-from base64 import b64encode
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field
@@ -61,7 +60,7 @@ from ph.seams.tui_status import StatusReading
 from ph.seams.user_questions import UserQuestion
 from ph.session import Session, SessionEvent
 
-from ..attach import Tray
+from ..attach import Tray, stage_bytes
 from ..daemon.client import DaemonClient
 from ..daemon.follow import Followed, first_of
 from ..protocol import DaemonGone
@@ -350,16 +349,7 @@ class DaemonSession:
         """
         for path in paths:
             name, mime, content = await read_for_attach(path)
-            put = await self.client.call(
-                "attachment/put",
-                sessionId=self.session_id,
-                name=name,
-                mime=mime,
-                contentB64=b64encode(content).decode(),
-            )
-            await self.client.mutate(
-                "session/stage", self.session_id, attachment=obj(put.get("attachment"))
-            )
+            await stage_bytes(self.client, self.session_id, name, mime, content)
         return self._staged.refs
 
     # ------------------------------------------------------------ lifecycle --

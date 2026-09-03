@@ -26,7 +26,7 @@ fails and there is no daemon to ask (P5-11).
 from __future__ import annotations
 
 import secrets
-from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from functools import partial
@@ -43,7 +43,7 @@ from ph.resources import GRACE_SECONDS
 from ph.selectors import Selector, matches_any
 
 from .console import TypeOption, console, fail, section, selectors_or_exit
-from .daemon.client import DaemonClient
+from .daemon.client import DaemonClient, Exchange, connected
 from .daemon.follow import Followed, first_of
 from .protocol import DaemonError, DaemonGone
 from .wire import describe, message_of, obj, one_line, result_block, seq, text_of_wire
@@ -59,35 +59,10 @@ in `cli.py` and on the callback below — and Typer takes those over anything
 passed here, so spelling them twice reads as configuration and is not."""
 
 
-type Exchange[T] = Callable[[DaemonClient], Awaitable[T]]
-"""One command's business with the daemon, given a connected client."""
-
 SESSION_ARGUMENT = typer.Argument(help="The session id of the root.")
 
 
 # ------------------------------------------------------------------ the spine --
-
-
-async def _connected[T](path: Path, work: Exchange[T]) -> T:
-    """Connect, run one exchange, and close — with the pump alongside it.
-
-    The pump has to be a task rather than something the caller drives, because
-    replies and notifications arrive on the same stream: a command that read its
-    own reply directly would consume a `session.event` it had no way to hand
-    back. Closing the stream is what ends the pump, so there is no cancel here —
-    a teardown that cancelled would race the last frame it asked for.
-    """
-    client = await DaemonClient.connect(path)
-    async with anyio.create_task_group() as tasks:
-        tasks.start_soon(client.pump)
-        try:
-            outcome = await work(client)
-        finally:
-            await client.aclose()
-    # Assigned inside the group and returned outside it: a task group's
-    # `__aexit__` is typed as one that may suppress, so a `return` in the block
-    # leaves the function with a path that falls off the end.
-    return outcome
 
 
 def _unreachable(path: Path, error: OSError) -> str:
@@ -139,7 +114,7 @@ def _missing_socket(path: Path) -> str:
 def _alone(raised: BaseException) -> BaseException:
     """The single exception inside a task group's wrapper, if that is all it holds.
 
-    `_connected` runs the exchange inside a task group, and anyio wraps whatever
+    `connected` runs the exchange inside a task group, and anyio wraps whatever
     comes out of one in an `ExceptionGroup` — so a `DaemonError` the server sent
     arrives here as a group of one and matches no `except` clause written for
     it. Unwrapped rather than handled with `except*` because the two failures
@@ -164,7 +139,7 @@ def _ask[T](work: Exchange[T]) -> T:
     except RuntimeDirError as error:
         fail(f"[red]$PH_RUNTIME check failed:[/red] {error}", cause=error)
     try:
-        return anyio.run(partial(_connected, path, work))
+        return anyio.run(partial(connected, path, work))
     except Exception as raised:
         # Not `error` again: Python unbinds an `except … as` name at the end of
         # its block, so reusing it here is a read of a deleted variable.
