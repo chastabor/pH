@@ -32,15 +32,10 @@ from ph_rlm.harness import (
     CONSIDERED,
     REFINED,
     HarnessEdit,
-    PlannerError,
     RefinementProposal,
     due,
 )
-from ph_rlm.harness.planner import (
-    REFINEMENT_SYSTEM_PROMPT,
-    REVIEW_SYSTEM_PROMPT,
-    parse_json_object,
-)
+from ph_rlm.harness.planner import REFINEMENT_SYSTEM_PROMPT, REVIEW_SYSTEM_PROMPT
 
 pytestmark = pytest.mark.anyio
 
@@ -97,18 +92,6 @@ def say(session: Any, text: str, message_id: str = "m1") -> Any:
 
 
 # ------------------------------------------------------------ the JSON --
-
-
-def test_a_fenced_reply_still_parses() -> None:
-    """ "Return only JSON" is an instruction, not a guarantee."""
-    parsed = parse_json_object('Sure!\n```json\n{"summary": "x", "edits": []}\n```\nDone.')
-    assert parsed == {"summary": "x", "edits": []}
-
-
-def test_a_reply_that_is_not_an_object_is_refused() -> None:
-    """A list would otherwise validate as an empty proposal and half-apply."""
-    with pytest.raises(PlannerError, match="JSON object"):
-        parse_json_object("[1, 2, 3]")
 
 
 # ---------------------------------------------------------- the request --
@@ -310,15 +293,48 @@ async def test_a_planner_that_returns_junk_records_it_instead_of_raising(
     refining: Refining,
 ) -> None:
     """The consideration is what advances the cooldown, so a broken planner costs
-    one call rather than one per turn."""
+    a bounded number of calls rather than one per turn.
+
+    **Corrected before it is given up on** (P7-17). The reply is asked for again
+    with the violation named, and only a planner that keeps missing the shape
+    records a consideration — where before, one sentence in front of the document
+    declined the refinement outright.
+    """
     ctx, session, agent = await refining()
-    script(ctx, planner="I'm afraid I can't do that.")
+    requests = script(ctx, planner="I'm afraid I can't do that.")
 
     await ctx.commands.dispatch("/refine", session=session, agent=agent)
     await ctx.drain()
 
     (considered,) = [event for event in session.events if event.type == CONSIDERED]
-    assert "JSON object" in considered.data["reason"]
+    assert "not JSON" in considered.data["reason"]
+    planner_calls = [one for one in requests if one.system == REFINEMENT_SYSTEM_PROMPT]
+    assert len(planner_calls) > 1, "it was asked again with the violation named"
+    assert planner_calls[0].response_schema is not None, "and the shape rode the request"
+
+
+async def test_a_reply_wrapped_in_prose_is_corrected_rather_than_declined(
+    refining: Refining,
+) -> None:
+    """The failure this replaces, end to end.
+
+    "Return only JSON" is an instruction and not a guarantee, and a model that
+    writes a confirmation sentence first used to cost the whole refinement. Now
+    the first reply is read tolerantly and, when that is not enough, asked again
+    with the specific violation — so the ordinary near-miss recovers.
+    """
+    ctx, session, agent = await refining()
+    replies = iter(["Certainly! Here you go.", json.dumps(PROPOSAL)])
+
+    def respond(request: Any) -> str:
+        return NO if request.system == REVIEW_SYSTEM_PROMPT else next(replies)
+
+    ctx.llm_fake.respond = respond
+
+    await ctx.commands.dispatch("/refine", session=session, agent=agent)
+    await ctx.drain()
+
+    assert [event for event in session.events if event.type == REFINED], "the refinement applied"
 
 
 async def test_a_second_pass_is_refused_while_one_is_running(refining: Refining) -> None:

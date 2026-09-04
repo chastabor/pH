@@ -84,6 +84,16 @@ class ResolvedModel:
     size from its header with no dependency, and a limit does not need a resizer
     to be worth declaring — refusing with a sentence the model can read is an
     action, and it is the same one `max_attachment_bytes` already takes."""
+    structured_output: bool = False
+    """Whether this route enforces `GenerateOptions.response_schema` on the wire.
+
+    Declared rather than assumed, and defaulting to *no*, for the reason `accepts`
+    does: the failure it prevents is a caller believing a shape was guaranteed
+    when the provider ignored the field. OpenAI-compatible endpoints take
+    `response_format: {"type": "json_schema", …}`; Anthropic has no equivalent
+    today, so a caller there gets the instruction and the validation and not the
+    guarantee — which is a real difference and one `structured` says out loud
+    rather than papering over."""
     usable_image_edge: int | None = None
     """Longest edge the route can actually *use*, when it is smaller than it accepts.
 

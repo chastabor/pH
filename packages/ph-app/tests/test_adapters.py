@@ -229,6 +229,63 @@ async def test_the_credential_is_read_only_at_the_edge() -> None:
     assert "sk-secret" not in json.dumps(ref.to_wire())
 
 
+async def test_a_response_schema_reaches_the_wire_as_a_constraint() -> None:
+    """P7-17: `strict`, or the field is a hint the server may ignore.
+
+    The shape is the provider's, so it is asserted exactly rather than by
+    substring — a `json_schema` nested one level wrong is accepted by the API and
+    silently constrains nothing, which is the failure the caller's own validation
+    then has to catch on every reply forever.
+    """
+    root = Context()
+    adapter = OpenAiCompatibleAdapter(ctx=root, profile=ProviderProfile(provider="p"))
+    schema = {"type": "object", "properties": {"verdict": {"type": "string"}}}
+
+    body = await adapter._body(
+        GenerateOptions(
+            provider="p",
+            model="m",
+            messages=(
+                create_user_message(
+                    content=[{"type": "text", "text": "?"}], source={"kind": "user"}
+                ),
+            ),
+            response_schema=schema,
+        )
+    )
+
+    assert body["response_format"] == {
+        "type": "json_schema",
+        "json_schema": {"name": "reply", "schema": schema, "strict": True},
+    }
+    assert adapter.resolve_model("p", "m").structured_output is True, "and the route says so"
+
+
+def test_a_route_with_no_wire_support_says_so_rather_than_defaulting_quietly() -> None:
+    """Anthropic has no `response_format`, so a caller there gets the instruction,
+    the validation and the retry — and not the wire's guarantee (P7-17).
+
+    Asserted rather than left to the default, because the whole point of the flag
+    is that a caller can tell the two apart; a route that silently reported
+    enforcement would send `ask_for_shape` down its shorter attempt budget and
+    log an adapter bug that is not one.
+    """
+    adapter = AnthropicAdapter(ctx=Context(), config=AnthropicConfig())
+
+    assert adapter.resolve_model("anthropic", "claude").structured_output is False
+
+
+async def test_a_request_with_no_schema_asks_for_no_format() -> None:
+    """The field is absent, not null: a provider that sees `response_format: null`
+    may reject the call outright."""
+    root = Context()
+    adapter = OpenAiCompatibleAdapter(ctx=root, profile=ProviderProfile(provider="p"))
+
+    body = await adapter._body(GenerateOptions(provider="p", model="m", messages=()))
+
+    assert "response_format" not in body
+
+
 async def test_the_openai_request_body_carries_tools_and_the_system_slot() -> None:
     root = Context()
     adapter = OpenAiCompatibleAdapter(ctx=root, profile=ProviderProfile(provider="p"))

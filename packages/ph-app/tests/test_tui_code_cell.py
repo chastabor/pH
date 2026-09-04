@@ -28,7 +28,7 @@ from ph.seams.subagents import ADMITTED, DELETED, STATUS, USAGE, subagent_roster
 from ph.session import Session
 from ph_app.tui.adapter import TuiEventAdapter
 from ph_app.tui.state import ChatItem, SubagentRow, ToolCard, TuiState
-from ph_app.tui.widgets.status import render_subagents
+from ph_app.tui.widgets.status import NO_WORK_SEEN, _todo_line, render_subagents
 from ph_app.tui.widgets.transcript import (
     CodeCellWidget,
     ToolCardWidget,
@@ -228,3 +228,39 @@ def test_a_revoked_child_stays_listed() -> None:
     state = TuiState()
     state.subagents["r1"] = SubagentRow(run_id="r1", name="scout", status="done", deleted=True)
     assert render_subagents(state).startswith("⊘ scout")
+
+
+# ------------------------------------------------------------- the todo panel --
+
+
+def test_a_tick_with_work_behind_it_and_one_without_look_different() -> None:
+    """The person-facing half of P7-16's receipt.
+
+    `worked` is attached by `tool-todo` when it writes the list — counted from
+    what the harness saw run, never supplied by the model — so a completed entry
+    with a zero in it is a claim with nothing behind it. The tool card says so
+    for one call; this panel is the plan a person watches all session, which is
+    where the difference is worth seeing.
+
+    Read as a *field*, not re-derived: `ph-app` depends on `ph-core` and not on
+    the bundle that owns the tool, so a copy of "what counts as work" on this
+    side is exactly the drift that boundary exists to prevent.
+
+    Sabotage: render every completed entry the same and a model that ticked a box
+    without doing anything is indistinguishable from one that did the work.
+    """
+    worked = _todo_line({"content": "port the row", "status": "completed", "worked": 3})
+    bare = _todo_line({"content": "decide the approach", "status": "completed", "worked": 0})
+
+    assert worked == "● port the row"
+    assert bare == f"● decide the approach{NO_WORK_SEEN}"
+
+
+def test_only_a_completion_carries_the_receipt() -> None:
+    """An unfinished entry has nothing to be evidence *for* yet.
+
+    A pending step has run no tools by definition, and marking it "no work seen"
+    would read as an accusation about work that was never claimed.
+    """
+    assert _todo_line({"content": "gate it", "status": "pending"}) == "○ gate it"
+    assert _todo_line({"content": "wire it", "status": "in_progress"}) == "◐ wire it"

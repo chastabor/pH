@@ -602,6 +602,24 @@ class GenerateOptions:
     temperature: float | None = None
     max_tokens: int | None = None
     stop: tuple[str, ...] = ()
+    response_schema: dict[str, Any] | None = None
+    """A JSON Schema the reply's *text* must satisfy (P7-17).
+
+    For the calls that want a value rather than prose — `rlm-harness`'s review
+    gate and its planner ask for JSON today and then hope, with a tolerant parser
+    whose own docstring concedes that *"return only JSON is an instruction and
+    not a guarantee"*. A schema turns that into something the wire can enforce.
+
+    **Not a `LlmCallConfig` field**, deliberately: that class is what
+    `request/header` snapshots and what header equality compares, so a schema
+    there would put one caller's shape into the cached prefix of a conversation
+    that has nothing to do with it (A12). This is per request, like `tools`.
+
+    **Not combined with tools.** A tool call is not a JSON document in the
+    schema's shape, so a route asked for both would have to break one promise;
+    callers that want structure ask for it on a call that offers no tools, and
+    `structured` refuses the combination rather than letting a provider decide
+    which to honour."""
     session_id: str | None = None
     purpose: Literal["compaction", "session-title", "refine"] | None = None
     """Why an auxiliary call is being made. Ordinary conversation requests leave

@@ -429,6 +429,12 @@ class AnthropicAdapter:
             max_attachment_bytes=self.config.max_attachment_bytes,
             max_image_edge=self.config.max_image_edge,
             usable_image_edge=self.config.usable_image_edge,
+            # `structured_output` stays False, and the silence is deliberate:
+            # Anthropic has no `response_format` equivalent today, so a caller
+            # here gets the instruction, the validation and the retry, and not
+            # the wire's guarantee (P7-17). Declaring it rather than leaving the
+            # default unremarked is what stops the next adapter copying an
+            # omission it thought was an oversight.
         )
 
 

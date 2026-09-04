@@ -26,13 +26,12 @@ raw-namespace path — see `service.render_call_pattern`.
 
 from __future__ import annotations
 
-import json
 import logging
 from dataclasses import dataclass
 from typing import Any
 
 from ph.cordis import Context
-from ph.llm import BlockAssembler
+from ph.llm.structured import SchemaViolation, ask_for_shape
 from ph.llm.types import GenerateOptions, create_message, text_of
 from ph.session import Session
 from ph.wire import WireModel
@@ -54,7 +53,6 @@ __all__ = [
     "PlannerError",
     "RefinementPlanner",
     "ReviewVerdict",
-    "parse_json_object",
 ]
 
 log = logging.getLogger("ph_rlm.harness")
@@ -157,27 +155,6 @@ class ReviewVerdict(WireModel):
     instructions: str = ""
 
 
-def parse_json_object(text: str) -> dict[str, Any]:
-    """The one JSON object in a model reply.
-
-    Tolerant of a fence and of prose around it, because "return only JSON" is an
-    instruction and not a guarantee — and strict about the result being an
-    object, because a planner that returned a list would otherwise half-apply.
-    """
-    candidates = [text.strip()]
-    start, end = text.find("{"), text.rfind("}")
-    if start != -1 and end > start:
-        candidates.append(text[start : end + 1])
-    for candidate in candidates:
-        try:
-            parsed = json.loads(candidate)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(parsed, dict):
-            return parsed
-    raise PlannerError("the model did not return a JSON object")
-
-
 @dataclass(slots=True)
 class RefinementPlanner:
     """Turns a conversation into a `RefinementProposal`."""
@@ -200,16 +177,12 @@ class RefinementPlanner:
             f"{self._state_overview(state)}\n\n# The conversation\n\n{self._conversation(session)}"
         )
         try:
-            reply = await self._complete(agent, session, system=REVIEW_SYSTEM_PROMPT, user=prompt)
-            parsed = parse_json_object(reply)
+            return await self._shaped(
+                agent, session, system=REVIEW_SYSTEM_PROMPT, user=prompt, shape=ReviewVerdict
+            )
         except PlannerError as error:
             log.debug("ph_rlm.harness: review gate declined: %s", error)
             return ReviewVerdict(rationale=str(error))
-        return ReviewVerdict(
-            should_refine=bool(parsed.get("shouldRefine")),
-            rationale=str(parsed.get("rationale") or ""),
-            instructions=str(parsed.get("instructions") or ""),
-        )
 
     # ---------------------------------------------------------- the planner --
 
@@ -227,17 +200,13 @@ class RefinementPlanner:
         the state: whatever it returns still goes through the same validation as
         a proposal typed by hand.
         """
-        reply = await self._complete(
+        return await self._shaped(
             agent,
             session,
             system=REFINEMENT_SYSTEM_PROMPT,
             user=self._planner_prompt(session, scope=scope, instructions=instructions),
+            shape=RefinementProposal,
         )
-        parsed = parse_json_object(reply)
-        try:
-            return RefinementProposal.model_validate(parsed)
-        except Exception as error:
-            raise PlannerError(f"the proposal did not validate: {error}") from error
 
     def _planner_prompt(self, session: Session, *, scope: HarnessScope, instructions: str) -> str:
         state = self.service.state(session)
@@ -307,8 +276,16 @@ class RefinementPlanner:
 
     # ------------------------------------------------------------ the call --
 
-    async def _complete(self, agent: Any, session: Session, *, system: str, user: str) -> str:
-        """One non-loop model call, on the agent's own route; the reply as text.
+    async def _shaped[Shape: WireModel](
+        self, agent: Any, session: Session, *, system: str, user: str, shape: type[Shape]
+    ) -> Shape:
+        """One non-loop model call that must come back as `shape`.
+
+        Through `ph.llm.structured` (P7-17) rather than "ask for JSON and parse":
+        the model is the wire schema *and* the validator, so what comes back is
+        already the typed thing this planner wanted. What changed for a reader is
+        that a confirmation sentence in front of the document is now a corrected
+        call rather than a declined refinement.
 
         `purpose="refine"` is what keeps it out of the conversation: session-bound
         so usage is attributed and a telemetry sink sees it, but not a loop
@@ -340,14 +317,9 @@ class RefinementPlanner:
             session_id=session.id,
             purpose="refine",
         )
-        # `BlockAssembler` is the loop's own assembly — the one algorithm that
-        # decides what a chunk stream said, so the planner cannot disagree with
-        # the transcript about a reply. `text_of` then drops reasoning blocks
-        # rather than handing them to the JSON parser.
-        assembler = BlockAssembler()
-        async for chunk in await self.ctx.llm.stream(request):
-            assembler.push(chunk)
-        if assembler.finish.kind == "error":
-            failure = assembler.finish.failure
-            raise PlannerError(failure.message if failure is not None else "the model call failed")
-        return text_of(assembler.blocks()).strip()
+        try:
+            return await ask_for_shape(
+                self.ctx.llm.stream, request, shape, enforced=resolved.structured_output
+            )
+        except SchemaViolation as violation:
+            raise PlannerError(str(violation)) from violation

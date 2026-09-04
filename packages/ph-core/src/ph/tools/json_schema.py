@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import math
 import re
+from functools import cache
 from typing import Any
 
 from pydantic import BaseModel
@@ -75,8 +76,24 @@ _TYPE_CHECKS: dict[str, Any] = {
 def schema_of(declaration: type[BaseModel] | dict[str, Any]) -> dict[str, Any]:
     """The JSON Schema for a declaration, whichever form it took."""
     if isinstance(declaration, type) and issubclass(declaration, BaseModel):
-        return declaration.model_json_schema()
+        return _model_schema(declaration)
     return declaration
+
+
+@cache
+def _model_schema(model: type[BaseModel]) -> dict[str, Any]:
+    """One model's schema, built once.
+
+    Pydantic does not memoize `model_json_schema()` — measured at 903 µs for
+    `RefinementProposal` and 226 µs for `ReviewVerdict`, every call — and a
+    class's schema is a constant. It matters because `ask_for_shape` asks for one
+    per model request, where it was the largest single cost the structured path
+    introduced.
+
+    Keyed on the class, which is a process-lifetime object, so the cache is
+    bounded by the number of declarations rather than by anything a caller
+    supplies."""
+    return model.model_json_schema()
 
 
 def unsupported_keywords(schema: Any) -> set[str]:

@@ -7,6 +7,17 @@ That decomposition is D12 — a stabilization feature attaches to waterfalls,
 never to the loop — and it is why this is a row a profile opts into rather than
 a parameter on the driver.
 
+**Forked from upstream at P7-16, deliberately and in two places.** `requires`
+declares what a step waits on, which upstream's schema has no room for and its
+*prompt* works around in prose ("When blocked, create a new task describing what
+needs to be resolved") — a dependency graph written as a naming convention that
+nothing can read, order or check. And a completed entry carries `worked`, the
+number of tools the harness saw run in the window it was finished in: the one
+field in the list the model does not write, because a receipt the claimant issues
+is not a receipt. Upstream's prompt text and the parallel-call rule are still
+tracked verbatim and still gated; the schema is no longer theirs, and the
+comparison that produced both is recorded against `sources/OpenMonoAgent.ai`.
+
 **The list lives in the log and nowhere else.** `write_todos` replaces the whole
 list and appends `todo/write {todos}`; the TUI sidebar and the prompt both fold
 that event. There is no side table, which is what makes the list survive a
@@ -58,15 +69,52 @@ from ph.tools.definition import (
 )
 
 __all__ = [
+    "MAX_REQUIRES",
+    "MAX_TODOS",
+    "MAX_TODO_CONTENT",
     "PARALLEL_CALL_ERROR",
     "TOOL_NAME",
     "WRITE_TODOS_SYSTEM_PROMPT",
+    "PlanError",
     "apply",
+    "blocked_by",
     "render_todo_list",
     "todos_of",
+    "unevidenced",
 ]
 
 TOOL_NAME = "write_todos"
+
+MAX_TODO_CONTENT = 500
+"""How long one entry's text may be.
+
+**The list is the one model-written string that rides every later prompt.** It is
+a `context`, materialized fresh each turn and — after compaction has shadowed the
+turns that wrote it — the only surviving statement of the plan. So an entry is
+not a place to paste a diff into: unbounded here is unbounded in every request
+for the rest of the session, which is P7-13's lesson one layer up (a bound
+belongs where the unbounded thing is written, not at each reader).
+
+Generous against what the tool is for — upstream's own examples are phrases like
+"Run the pre-flight check" — and a refusal rather than a clip, because a model
+told its text was accepted when it was truncated would go on believing the list
+says something it does not. The bound reaches the model as `maxLength` in the
+tool's own schema, so it is a stated rule rather than a surprise."""
+
+MAX_REQUIRES = 20
+"""How many entries one entry may declare a dependency on.
+
+Bounded for `MAX_TODO_CONTENT`'s reason — the list rides every later prompt — and
+low because a step waiting on twenty others is a step that has not been broken
+down. The product is what needs bounding: 100 entries with 20 references each is already
+more plan than any of this is for."""
+
+MAX_TODOS = 100
+"""How many entries one list may hold. See `MAX_TODO_CONTENT` for why bounded.
+
+Well past any real plan — upstream's guidance is to skip the tool entirely for
+work that is "a few tool calls" — and it is the count that bounds the product:
+without it, entries inside the length limit still grow the prompt without end."""
 
 GLYPHS = {"pending": "[ ]", "in_progress": "[~]", "completed": "[x]"}
 """How the list renders back to the model. Deliberately the same three-state
@@ -164,7 +212,11 @@ Remember: If you only need to make a few tool calls to complete a task, and it i
 
 ## When You Finish
 
-`write_todos` tracks your work; it does not deliver the answer. Whatever the user asked for — computations, summaries, comparisons, data — must appear as text content in a message after your final `write_todos` call. Marking the last todo complete is not itself an answer to the user."""  # noqa: E501
+`write_todos` tracks your work; it does not deliver the answer. Whatever the user asked for — computations, summaries, comparisons, data — must appear as text content in a message after your final `write_todos` call. Marking the last todo complete is not itself an answer to the user.
+
+## Dependencies
+
+If a step cannot start until another one is done, say so with `requires` rather than in prose: list the exact `content` of the entries it waits on. The list is checked when you write it — a name that is not in the list, a step that waits on itself, a cycle, or a step marked `in_progress` while something it waits on is unfinished are all refused, and nothing is written. `requires` is optional; leave it out when the order does not matter."""  # noqa: E501
 
 PARALLEL_CALL_ERROR = (
     "Error: The `write_todos` tool should never be called multiple times "
@@ -175,25 +227,60 @@ PARALLEL_CALL_ERROR = (
 fragments so a diff against `todo.py` stays readable."""
 
 
-class TodoItem(ToolModel):
-    """One entry. Upstream's `Todo` TypedDict, which is `{content, status}`.
+class PlanError(ValueError):
+    """The plan contradicts itself, so nothing is written.
 
-    Deliberately no `activeForm`: deepagents' own tests carry that field but
-    the pinned `langchain` middleware's schema does not, and pH renders a glyph
-    beside the content in both the sidebar and the prompt — a second phrasing of
-    the same task would be a field with no reader.
+    A refusal the *model* reads and can fix on its next turn, in the shape B5
+    normalizes — a raised error becomes an `is_error` result rather than a
+    denial, because the model did not do anything forbidden: it wrote a plan
+    that does not hold together, and the fix is a corrected plan.
+
+    Refused rather than repaired, and the log left alone, for the reason the
+    parallel-call rule refuses: a list written differently from the one the
+    model asked for is a list it will reason about wrongly for the rest of the
+    session."""
+
+
+class TodoItem(ToolModel):
+    """One entry: what the step is, where it has got to, and what it waits on.
+
+    **This is where the port forks from langchain** (P7-16). Upstream's `Todo` is
+    `{content, status}`, and `requires` is not in it — but the absence is what
+    upstream's own prompt works around in prose ("When blocked, create a new task
+    describing what needs to be resolved"), which is a dependency graph written
+    as a naming convention that nothing can read, order or check. Declared, it is
+    checkable: a reference to nothing, a self-reference and a cycle are all
+    refused, and `blocked_by` answers what is actually startable.
+
+    Still deliberately no `activeForm` — the reason there was never that upstream
+    lacks it but that pH renders a glyph beside the content in both the sidebar
+    and the prompt, so a second phrasing of one task would be a field with no
+    reader. `requires` has three.
     """
 
-    content: str = Field(description="What the step is.")
+    content: str = Field(
+        description="What the step is.",
+        max_length=MAX_TODO_CONTENT,
+    )
     status: Literal["pending", "in_progress", "completed"] = Field(
         "pending", description="Where the step has got to."
+    )
+    requires: list[str] = Field(
+        default_factory=list,
+        description=(
+            "The `content` of entries in THIS list that must be completed first. "
+            "Use it instead of describing a blocker in prose. A name that is not "
+            "in the list, a self-reference, or a cycle is refused."
+        ),
+        max_length=MAX_REQUIRES,
     )
 
 
 class WriteTodosArgs(ToolModel):
     todos: list[TodoItem] = Field(
         description="The ENTIRE list. This call replaces the previous one; there are no "
-        "partial updates and no per-item edits."
+        "partial updates and no per-item edits.",
+        max_length=MAX_TODOS,
     )
 
 
@@ -218,12 +305,173 @@ def todos_of(session: Session | None) -> list[dict[str, Any]]:
     return [item for item in thawed or () if isinstance(item, dict)]
 
 
-def render_todo_list(todos: list[dict[str, Any]]) -> str:
-    """The list as the model sees it between turns."""
-    lines = [
-        f"{GLYPHS.get(str(todo.get('status')), '[ ]')} {todo.get('content', '')}" for todo in todos
+def blocked_by(todos: list[dict[str, Any]]) -> dict[str, list[str]]:
+    """For each entry, the dependencies it declared that are not yet completed.
+
+    The fold `requires` exists for: "what can actually be started now" is a
+    question about the whole list, and before this it was a question only prose
+    could ask. An entry missing from the result is startable.
+    """
+    done = {str(one.get("content")) for one in todos if one.get("status") == "completed"}
+    waiting: dict[str, list[str]] = {}
+    for todo in todos:
+        pending = [str(name) for name in todo.get("requires") or () if str(name) not in done]
+        if pending:
+            waiting[str(todo.get("content"))] = pending
+    return waiting
+
+
+def unevidenced(todos: list[dict[str, Any]]) -> list[str]:
+    """Completed entries the harness saw no work behind.
+
+    `worked` is counted by the tool, never supplied by the model, so this is the
+    one thing in the list the model cannot assert: an entry marked done in a
+    window where the agent called no other tool is a claim with nothing behind
+    it. It does not make the entry wrong — a step can be "decide the approach" —
+    but the difference between a tick with work behind it and a bare tick is
+    exactly what a checklist the model marks itself otherwise hides (P5-16).
+    """
+    return [
+        str(one.get("content"))
+        for one in todos
+        if one.get("status") == "completed" and not one.get("worked")
     ]
+
+
+def render_todo_list(todos: list[dict[str, Any]]) -> str:
+    """The list as the model sees it between turns.
+
+    Blocked entries say what they are waiting on, because the list is the model's
+    own statement and the point of declaring a dependency is to be reminded of it
+    at the moment of choosing what to do next. Nothing else is rendered — the
+    receipt `worked` carries is for a person reading the card, and repeating it
+    here would spend tokens every turn to tell the model something it cannot act
+    on.
+    """
+    waiting = blocked_by(todos)
+    lines = []
+    for todo in todos:
+        content = str(todo.get("content", ""))
+        glyph = GLYPHS.get(str(todo.get("status")), "[ ]")
+        blockers = waiting.get(content) if todo.get("status") != "completed" else None
+        suffix = f" (waiting on: {', '.join(blockers)})" if blockers else ""
+        lines.append(f"{glyph} {content}{suffix}")
     return "## Todo list\n\n" + "\n".join(lines)
+
+
+def _checked(todos: list[dict[str, Any]]) -> None:
+    """Refuse a plan that contradicts itself, before anything is written.
+
+    Three ways it can, and each is a thing the model can only have meant by
+    mistake: a dependency on an entry that is not in the list, a cycle — of which
+    an entry waiting on itself is the one-node case — and an entry claiming to be
+    under way or finished while something it *said* it waits on is not.
+
+    That last one is a check of the model against its own statement rather than
+    a policy imposed on it, which is what keeps this on the right side of
+    P5-16's line. `requires` is optional per entry; a model that finds the rule
+    inconvenient simply does not declare the dependency, and then nothing here
+    has an opinion.
+    """
+    edges: dict[str, list[str]] = {}
+    for todo in todos:
+        content = str(todo.get("content", ""))
+        if content in edges:
+            raise PlanError(
+                f"two entries share the content {content!r}; `requires` names entries by "
+                "their content, so each must be distinct"
+            )
+        edges[content] = [str(name) for name in todo.get("requires") or ()]
+    for content, wants in edges.items():
+        for name in wants:
+            if name not in edges:
+                raise PlanError(f"{content!r} requires {name!r}, which is not in the list")
+
+    # One path, appended and popped, rather than a `walking` set beside a `trail`
+    # list: membership and the cycle's own text are the same question asked twice.
+    path: list[str] = []
+    settled: set[str] = set()
+
+    def visit(node: str) -> None:
+        if node in settled:
+            return
+        if node in path:
+            raise PlanError(
+                f"the plan has a cycle: {' -> '.join([*path[path.index(node) :], node])}"
+            )
+        path.append(node)
+        for nxt in edges[node]:
+            visit(nxt)
+        path.pop()
+        settled.add(node)
+
+    for name in edges:
+        visit(name)
+
+    waiting = blocked_by(todos)
+    for todo in todos:
+        content = str(todo.get("content", ""))
+        if todo.get("status") in ("in_progress", "completed") and content in waiting:
+            raise PlanError(
+                f"{content!r} is {todo.get('status')} but waits on "
+                f"{', '.join(repr(name) for name in waiting[content])}, which is not completed"
+            )
+
+
+def _work_since(session: Session, since: int) -> int:
+    """How many tools the agent called between `since` and now, ignoring this one.
+
+    Counted off `tool/call`, which since P7-15 exists only for a call the
+    pipeline let through and was about to run — so this is work *attempted*,
+    which is the honest thing to count for "did anything happen, or was a box
+    ticked". `write_todos` is excluded or every window would score itself.
+
+    From the tail rather than the whole log: the previous `todo/write` is at most
+    a turn ago, and `events_from` copies what follows it.
+    """
+    return sum(
+        1
+        for event in session.events_from(since + 1)
+        if event.type == "tool/call" and str(event.data.get("name")) != TOOL_NAME
+    )
+
+
+def _witnessed(session: Session, todos: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Attach the receipt to entries that have just been completed.
+
+    **The one field in the list the model does not write.** `worked` is what the
+    harness saw happen in the window before this write; a completion with a zero
+    in it is a claim with nothing behind it, and `unevidenced` is what reads it.
+    Attaching it here rather than accepting it as an argument is the whole point:
+    a receipt the claimant issues is not a receipt.
+
+    Carried forward for entries that were already complete, because a write
+    replaces the whole list and an entry's evidence is about the window it was
+    finished in, not this one. An entry moved *back* out of `completed` loses it
+    — it is no longer a claim, so there is nothing to witness.
+    """
+    previous = session.latest("todo/write")
+    # Read frozen, not thawed. `todos_of` would deep-copy the whole previous
+    # list — measured 12x dearer at the caps, ~95% of it copying `requires`,
+    # which this never looks at — to read two scalars per entry. A
+    # `MappingProxyType` answers `.get` perfectly well, and nothing here mutates
+    # what it read.
+    was: dict[str, tuple[Any, Any]] = {}
+    for one in seq_of(previous.data.get("todos")) if previous else ():
+        if isinstance(one, Mapping):
+            was[str(one.get("content"))] = (one.get("status"), one.get("worked"))
+    worked = _work_since(session, previous.seq if previous else -1)
+    for todo in todos:
+        if todo.get("status") != "completed":
+            continue
+        before = was.get(str(todo.get("content")))
+        todo["worked"] = int(before[1] or 0) if before and before[0] == "completed" else worked
+    return todos
+
+
+def seq_of(value: Any) -> tuple[Any, ...]:
+    """A frozen JSON array as a tuple, without thawing what is inside it."""
+    return tuple(value) if isinstance(value, (list, tuple)) else ()
 
 
 def _parallel_write_todos(session: Session | None) -> bool:
@@ -265,8 +513,10 @@ async def apply(ctx: Context, config: Any) -> None:
 
     async def write_todos(args: WriteTodosArgs, run: ToolRunContext) -> Any:
         todos = [item.model_dump(mode="json") for item in args.todos]
+        _checked(todos)
         session = run.session
         if session is not None:
+            todos = _witnessed(session, todos)
             # Tool-owned event: the tool that changed the list is the one that
             # records it, so "model-visible means logged" holds without the
             # pipeline learning what a todo is (I3).
@@ -283,6 +533,17 @@ async def apply(ctx: Context, config: Any) -> None:
                 # model; a separate `Value` class would differ only by lacking
                 # the field description.
                 schema=WriteTodosArgs,
+                # The receipt reaches the card through the channel built for it:
+                # `presentation_meta` is the tool's own durable payload, so the
+                # rule "a completion with no work behind it" is stated once, in
+                # the package that counts it. `present_result` is handed the
+                # arguments and a `ToolResult` — never the value — so without
+                # this the card would have to re-derive it from the log, in
+                # another package, from a field whose meaning it would then own
+                # a second copy of.
+                presentation_meta=lambda args, value: {
+                    "unevidenced": unevidenced(list(value.get("todos") or ()))
+                },
                 # Upstream's own wording. The evals note a proposed neutral
                 # "Todo list updated."; the pinned release still echoes the
                 # list, and echoing it is what lets a model that batched several
@@ -295,7 +556,10 @@ async def apply(ctx: Context, config: Any) -> None:
             ),
             present_result=lambda args, result: ToolResultView(
                 title="Plan",
-                subtitle=_counts(list(args.get("todos") or ())),
+                subtitle=_counts(
+                    list(args.get("todos") or ()),
+                    bare=len((result.meta or {}).get("unevidenced") or ()),
+                ),
                 is_error=result.is_error,
             ),
         )
@@ -331,8 +595,15 @@ async def apply(ctx: Context, config: Any) -> None:
     ctx.system_prompt.context(PromptContext(name="todos", text=current_list))
 
 
-def _counts(todos: list[Any]) -> str:
-    """`2 done · 1 doing · 3 to do`, in the order work leaves the list."""
+def _counts(todos: list[Any], *, bare: int = 0) -> str:
+    """`2 done · 1 doing · 3 to do`, in the order work leaves the list.
+
+    Plus, when there is one, the thing a person watching a plan most wants to
+    know: an entry ticked in a window where the agent ran nothing. That is
+    `unevidenced`'s reader — the card, not the prompt, because it is a fact about
+    the model that the model has no use for and cannot act on.
+    """
     tally = Counter(str(todo.get("status")) for todo in todos if isinstance(todo, Mapping))
     labelled = (("completed", "done"), ("in_progress", "doing"), ("pending", "to do"))
-    return " · ".join(f"{tally[status]} {label}" for status, label in labelled)
+    line = " · ".join(f"{tally[status]} {label}" for status, label in labelled)
+    return f"{line} · {bare} unevidenced" if bare else line

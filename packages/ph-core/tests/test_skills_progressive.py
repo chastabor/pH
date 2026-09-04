@@ -32,10 +32,14 @@ import pytest
 from ph.cordis import DEPLOYMENT
 from ph.llm.types import text_of
 from ph.seams.skills import (
+    ARGUMENT_HINT_MAX,
+    MAX_ALLOWED_TOOLS,
+    MAX_PARAMETERS,
     MAX_SKILL_BYTES,
     Skill,
     SkillRestriction,
     discover_skills,
+    read_skill,
     render_catalog,
 )
 from ph.system_prompt import render_prompt
@@ -52,6 +56,68 @@ def row(*paths: Path) -> dict[str, Any]:
 
 
 # ------------------------------------------------------------------ the format --
+
+
+def _front(root: Path, name: str, extra: str) -> Path:
+    """A `SKILL.md` with extra frontmatter keys, for the optional half (P7-17)."""
+    return write_skill(root, name, description="does a thing", extra=extra) / "SKILL.md"
+
+
+def test_the_optional_frontmatter_is_read_and_each_field_has_a_reader(tmp_path: Path) -> None:
+    """P7-17's skills half: a `SKILL.md` may say more, and pH must use it.
+
+    Three fields, three readers, which is the bar `Skill` already set when it
+    refused `activeForm` for having none: `argument-hint` goes in the catalog so
+    the model can tell how to *start* a skill rather than guessing; `version` and
+    `allowed-tools` ride the `skill` tool's result, told at the one moment either
+    is worth saying.
+    """
+    found = read_skill(
+        _front(
+            tmp_path,
+            "release",
+            "version: 2.1.0\nargument-hint: '[--dry-run]'\nallowed-tools:\n  - bash\n  - read",
+        )
+    )
+
+    assert found is not None
+    assert found.version == "2.1.0"
+    assert found.argument_hint == "[--dry-run]"
+    assert found.allowed_tools == ["bash", "read"]
+    assert "Usage: `release [--dry-run]`" in render_catalog([found])
+
+
+def test_a_skill_that_says_nothing_extra_is_unchanged(tmp_path: Path) -> None:
+    """Optional means optional — every field defaults to saying nothing, and the
+    catalog line for a plain skill is the line it always was."""
+    found = read_skill(_front(tmp_path, "notes", "# nothing else"))
+
+    assert found is not None
+    assert (found.version, found.argument_hint, found.allowed_tools) == ("", "", [])
+    assert render_catalog([found]).endswith("- **notes** — does a thing")
+
+
+@pytest.mark.parametrize(
+    ("extra", "why"),
+    [
+        ("allowed-tools: bash", "a string is not a list of names"),
+        ("version: 'a version with spaces'", "an unusable version"),
+        (f"argument-hint: '{'x' * (ARGUMENT_HINT_MAX + 1)}'", "a hint longer than the cap"),
+        (
+            "allowed-tools:\n" + "".join(f"  - t{n}\n" for n in range(MAX_ALLOWED_TOOLS + 1)),
+            "more tools than the cap",
+        ),
+    ],
+)
+def test_a_malformed_optional_field_refuses_the_skill(tmp_path: Path, extra: str, why: str) -> None:
+    """Refused, not dropped — the same rule the required fields follow.
+
+    A skill installed with `allowed-tools` silently empty gives its author no way
+    to tell "pH ignored my list" from "pH does not support lists", and the hint
+    and tool caps are bounded for the reason everything model-adjacent is: they
+    reach a prompt.
+    """
+    assert read_skill(_front(tmp_path, "risky", extra)) is None, why
 
 
 def test_a_skill_is_discovered_from_its_frontmatter(tmp_path: Path) -> None:
@@ -142,6 +208,165 @@ async def test_the_tool_hands_over_the_body_when_asked(mount: Any, tmp_path: Pat
     result = await run_tool(ctx, "skill", {"name": "note-taking"}, agent=agent)
 
     assert "Step one: open a file." in text_of(result.content)
+
+
+async def test_reading_a_skill_resolves_the_tools_it_declared(mount: Any, tmp_path: Path) -> None:
+    """`allowed-tools` is answered, not echoed (P7-17).
+
+    An echoed list leaves the model to diff it against its own catalog. Resolved
+    against the same scope the body was fetched with, it answers the question the
+    declaration exists for: can I actually follow these instructions from here?
+
+    Sabotage: return `allowed_tools` alone and a skill that needs a tool this
+    deployment does not mount reads as perfectly followable, until the model is
+    halfway through it.
+    """
+    write_skill(
+        tmp_path,
+        "release",
+        description="cut a release",
+        extra="allowed-tools:\n  - read\n  - deploy",
+    )
+    ctx = await mount(row(tmp_path))
+    agent = ctx.agents.create(ctx.sessions.create("s"), FAKE_OPTIONS)
+
+    result = await run_tool(ctx, "skill", {"name": "release"}, agent=agent)
+
+    assert result.value["allowed_tools"] == ["read", "deploy"]
+    assert result.value["missing_tools"] == ["deploy"], "`read` is mounted; `deploy` is not"
+
+
+# ------------------------------------------------------------- parameters --
+
+RELEASE = """parameters:
+  version-type:
+    type: string
+    required: true
+    enum: [major, minor, patch]
+    hint: which part of the version to bump
+  tag-prefix:
+    type: string
+    default: v"""
+
+
+async def _release(mount: Any, root: Path, body: str = "Bump {{parameters.version-type}}.") -> Any:
+    write_skill(root, "release", description="cut a release", extra=RELEASE, body=body)
+    ctx = await mount(row(root))
+    return ctx, ctx.agents.create(ctx.sessions.create("s"), FAKE_OPTIONS)
+
+
+async def test_a_declared_input_is_filled_into_the_instructions(mount: Any, tmp_path: Path) -> None:
+    """**P7-18's first half.** A skill takes inputs, and the body says so.
+
+    Instructions with the value already in them are what makes a parameter worth
+    declaring: the alternative is generic prose plus a separate sentence about
+    what the model should mentally substitute, which is a step it can get wrong
+    silently. A declared default fills in too, so an author writing
+    `{{parameters.tag-prefix}}` never has to handle the caller who passed none.
+    """
+    ctx, agent = await _release(
+        mount, tmp_path, body="Bump {{parameters.version-type}}, tag {{parameters.tag-prefix}}1.0."
+    )
+
+    result = await run_tool(
+        ctx, "skill", {"name": "release", "arguments": {"version-type": "minor"}}, agent=agent
+    )
+
+    assert "Bump minor, tag v1.0." in text_of(result.content)
+    assert result.value["parameters"] == ["tag-prefix", "version-type"]
+
+
+@pytest.mark.parametrize(
+    ("arguments", "expected"),
+    [
+        ({}, "version-type"),
+        ({"version-type": "mayor"}, "must be one of"),
+        ({"version-type": "minor", "dry-run": True}, "dry-run"),
+        ({"version-type": 3}, "string"),
+    ],
+    ids=["missing-required", "outside-the-enum", "unknown-name", "wrong-type"],
+)
+async def test_arguments_that_do_not_satisfy_the_declaration_are_refused(
+    mount: Any, tmp_path: Path, arguments: dict[str, Any], expected: str
+) -> None:
+    """Refused before the model starts following the instructions.
+
+    The unknown-name case is why declaring is worth anything: an argument the
+    skill never heard of, silently ignored, is how a `--dry-run` misspelled
+    `dry-run` runs for real. `additionalProperties: False` is what makes that a
+    refusal rather than a shrug.
+
+    The refusal names what was wanted, so the second call can be right — which is
+    the trade for keeping parameters out of the catalog, where they would be paid
+    for on every request instead of only by the call that got it wrong.
+    """
+    ctx, agent = await _release(mount, tmp_path)
+
+    result = await run_tool(ctx, "skill", {"name": "release", "arguments": arguments}, agent=agent)
+
+    assert result.is_error
+    assert expected in text_of(result.content)
+
+
+async def test_a_body_naming_an_undeclared_input_is_refused(mount: Any, tmp_path: Path) -> None:
+    """The author's typo, surfaced where both halves are finally in hand.
+
+    G9 keeps the body on disk until something asks for it, so there is no earlier
+    moment that has the frontmatter *and* the prose — a load-time check would
+    have to read the 10 MiB this row exists to defer.
+
+    Sabotage: substitute silently and `{{parameters.verison}}` reaches the model
+    verbatim, as an instruction to fill in something it has no value for.
+    """
+    ctx, agent = await _release(mount, tmp_path, body="Bump {{parameters.verison}}.")
+
+    result = await run_tool(
+        ctx, "skill", {"name": "release", "arguments": {"version-type": "minor"}}, agent=agent
+    )
+
+    assert result.is_error
+    assert "undeclared parameter(s) verison" in text_of(result.content)
+
+
+async def test_a_skill_that_declares_nothing_is_untouched(mount: Any, tmp_path: Path) -> None:
+    """Optional, and the body of a plain skill is returned byte for byte.
+
+    A `SKILL.md` is prose *and* code samples, and code is full of braces — a
+    general template pass would make a skill unable to contain an example of
+    itself."""
+    write_skill(tmp_path, "notes", body="Use `{{mustache}}` and {braces} freely.")
+    ctx = await mount(row(tmp_path))
+    agent = ctx.agents.create(ctx.sessions.create("s"), FAKE_OPTIONS)
+
+    result = await run_tool(ctx, "skill", {"name": "notes"}, agent=agent)
+
+    assert "Use `{{mustache}}` and {braces} freely." in text_of(result.content)
+    assert result.value["parameters"] == []
+
+
+@pytest.mark.parametrize(
+    ("block", "why"),
+    [
+        ("parameters: two", "not a mapping"),
+        ("parameters:\n  ok:\n    type: list", "an unsupported type"),
+        ("parameters:\n  ok: 3", "an entry that is not a mapping"),
+        ("parameters:\n  ok:\n    type: string\n    enum: []", "an empty enum"),
+        (
+            "parameters:\n"
+            + "".join(f"  p{n}:\n    type: string\n" for n in range(MAX_PARAMETERS + 1)),
+            "more parameters than the cap",
+        ),
+    ],
+    ids=["not-a-mapping", "bad-type", "entry-not-a-mapping", "empty-enum", "over-the-cap"],
+)
+async def test_a_malformed_declaration_refuses_the_skill(
+    tmp_path: Path, block: str, why: str
+) -> None:
+    """Refused rather than installed with the block dropped — the rule every
+    other field in this frontmatter follows."""
+    write_skill(tmp_path, "risky", extra=block)
+
+    assert read_skill(tmp_path / "risky" / "SKILL.md") is None, why
 
 
 async def test_an_unknown_skill_names_what_is_installed(mount: Any, tmp_path: Path) -> None:

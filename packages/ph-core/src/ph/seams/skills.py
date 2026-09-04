@@ -52,6 +52,7 @@ from ._registry import claim_entry, claim_key
 from ._restriction import NameFilter
 
 __all__ = [
+    "ARGUMENT_HINT_MAX",
     "FRONTMATTER_MAX",
     "HINT_MAX",
     "MAX_SKILL_BYTES",
@@ -86,6 +87,45 @@ FRONTMATTER_MAX = 64 * 1024
 about a kilobyte, and the body — up to 10 MiB — stays on disk by design, so
 reading it here would pull in exactly the bytes this row exists to defer."""
 
+MAX_ALLOWED_TOOLS = 32
+"""How many tools one skill may name. Bounded for the reason every other
+model-adjacent list is: it reaches a prompt, and a skill naming two hundred is
+one that has not decided what it does."""
+
+ARGUMENT_HINT_MAX = 200
+"""How long `argument-hint` may be. It rides the catalog, which is in the prompt
+every turn — a paragraph here is paid for by every request in the session.
+
+Its own name, not `HINT_MAX`: that one is 40 lines up and bounds `Skill.hint`,
+the clause a *registrar* adds. Redefining it here silently retightened an
+unrelated rule — `SkillService.register` began refusing a 201-character hint it
+had always accepted — which is what a second constant with one name buys."""
+
+MAX_PARAMETERS = 16
+"""How many inputs one skill may declare. A procedure needing more than this has
+not decided what it is for, and every one of them is a name the model must get
+right from one line of `argument-hint`."""
+
+PLACEHOLDER = re.compile(r"\{\{\s*parameters\.([A-Za-z0-9_-]+)\s*\}\}")
+"""What an interpolated input looks like in a body: `{{parameters.version}}`.
+
+Deliberately narrow. A skill body is prose *and* code samples, and code is full
+of braces — so only this one prefix is touched, and anything else the author
+wrote survives verbatim. The alternative, a general template language, would make
+a `SKILL.md` unable to contain an example of itself."""
+
+PARAMETER_TYPES = {"string": "string", "number": "number", "boolean": "boolean"}
+"""What an author may declare, mapped to JSON Schema's own words.
+
+Three, because a skill's input is something a model types into a tool call: a
+list or an object is a shape the `argument-hint` cannot describe in one line, and
+an author who needs one is describing a procedure, not an input."""
+
+VERSION_PATTERN = re.compile(r"\A[0-9A-Za-z][0-9A-Za-z.+_-]{0,31}\Z")
+"""What a `version` may look like. Deliberately looser than semver: pH does not
+compare versions, it *reports* the one that won a shadowing contest, and refusing
+`2024-01-a` would be this seam having an opinion it cannot act on."""
+
 ORDER_SKILLS = ORDER_TOOL_GUIDANCE + 50
 
 FRONTMATTER = re.compile(r"\A---\r?\n(.*?)\r?\n---", re.S)
@@ -107,6 +147,43 @@ class Skill(WireModel):
     description: str
     path: str | None = None
     source: str = "installed"
+    version: str = ""
+    """What the author called this revision. Empty when the file says nothing.
+
+    Reported, never compared: `discover_skills` shadows by *precedence*, so a
+    user's `code-review` wins over their distribution's whatever the versions
+    say — and the question a person then has is which one they are running. It
+    rides the `skill` tool's result rather than the catalog, because the catalog
+    is in the prompt every turn and this is only interesting once."""
+    argument_hint: str = ""
+    """How the skill is invoked, in the shape `CommandDefinition.argument_hint`
+    uses. This one *is* in the catalog: a skill the model cannot tell how to
+    start is a skill it reads and then guesses at."""
+    parameters: dict[str, Any] = Field(default_factory=dict)
+    """The inputs this skill takes, as a JSON Schema object (P7-18).
+
+    Authored in the friendlier per-input form — `type`, `required`, `default`,
+    `enum`, `hint` — and converted here, so the validator is the one
+    `validate_json_schema_value` already is rather than a second checker written
+    for this seam.
+
+    **Not in the catalog**, and that is the G9 trade made deliberately: a
+    parameter list per skill in every prompt is paid for on every request, where
+    a refusal naming the missing input is paid for only by the call that got it
+    wrong. `argument-hint` is the author's one line for the common case; the
+    schema is what makes the refusal exact."""
+    allowed_tools: list[str] = Field(default_factory=list)
+    """The tools this skill expects to use. A declaration, not an enforcement.
+
+    pH already has the enforcing mechanism — `ctx.tools.restrict` — and
+    deliberately does not wire it here: it is a *scope* boundary with a disposer,
+    restrictions intersect, and a turn is not a scope, so two skills read in one
+    turn could narrow to nothing with no moment to widen back. P7-18's executed
+    skill is that scope.
+
+    What it buys instead is `SkillValue.missing_tools`: the reader resolves this
+    list against what the caller can actually see, so the model learns a tool is
+    absent when it reads the skill rather than halfway through following it."""
     hint: str = ""
     """One extra clause the catalog prints after the description.
 
@@ -426,7 +503,178 @@ def read_skill(path: Path, *, source: str = "skills-progressive") -> Skill | Non
     if not description or len(description) > DESCRIPTION_MAX:
         log.warning("ph.seams.skills: %s needs a description of 1..%s chars", path, DESCRIPTION_MAX)
         return None
-    return Skill(name=name, description=description, path=str(path), source=source)
+    # After the required fields, so a skill with a bad name is refused for its
+    # name rather than for whatever the optional half noticed first.
+    optional = _optional_front(front, path)
+    if optional is None:
+        return None
+    return Skill(name=name, description=description, path=str(path), source=source, **optional)
+
+
+def _optional_front(front: dict[str, Any], path: Path) -> dict[str, Any] | None:
+    """The fields a `SKILL.md` may declare, or `None` with a reason logged.
+
+    **Refused rather than dropped**, like the required fields above it: a skill
+    whose `allowed-tools` is a string rather than a list would otherwise be
+    installed with that field silently empty, and the author would have no way to
+    tell the difference between "pH ignored it" and "pH does not support it".
+
+    Kebab-case on the wire and snake_case on the model, which is the convention
+    the format already follows for every multi-word key an author writes.
+    """
+    version = str(front.get("version") or "")
+    if version and VERSION_PATTERN.match(version) is None:
+        log.warning("ph.seams.skills: %s has an unusable version %r", path, version)
+        return None
+
+    hint = str(front.get("argument-hint") or "")
+    if len(hint) > ARGUMENT_HINT_MAX:
+        log.warning(
+            "ph.seams.skills: %s has an argument-hint over %s chars", path, ARGUMENT_HINT_MAX
+        )
+        return None
+
+    schema = _parameter_schema(front.get("parameters"), path)
+    if schema is None:
+        return None
+
+    raw = front.get("allowed-tools")
+    if raw is None:
+        tools: list[str] = []
+    elif isinstance(raw, list) and all(isinstance(one, str) for one in raw):
+        tools = [one.strip() for one in raw if one.strip()]
+    else:
+        log.warning("ph.seams.skills: %s allowed-tools is not a list of names", path)
+        return None
+    if len(tools) > MAX_ALLOWED_TOOLS:
+        log.warning("ph.seams.skills: %s names more than %s tools", path, MAX_ALLOWED_TOOLS)
+        return None
+
+    return {
+        "version": version,
+        "argument_hint": hint,
+        "allowed_tools": tools,
+        "parameters": schema,
+    }
+
+
+def _parameter_schema(declared: Any, path: Path) -> dict[str, Any] | None:
+    """An author's `parameters:` block as a JSON Schema, or `None` if it is not one.
+
+    Playbook's shape on the outside — one entry per input with `type`, `required`,
+    `default`, `enum` — and JSON Schema on the inside, because pH already has a
+    validator for that and a second one written here would be a second answer to
+    "is this input acceptable".
+
+    `additionalProperties: False` is the point of declaring at all: an argument
+    the skill never heard of is a typo the model can fix, and silently ignoring
+    it is how a `--dry-run` that was spelled `--dryrun` runs for real.
+    """
+    if declared is None:
+        return {}
+    if not isinstance(declared, dict):
+        log.warning("ph.seams.skills: %s parameters is not a mapping", path)
+        return None
+    if len(declared) > MAX_PARAMETERS:
+        log.warning("ph.seams.skills: %s declares more than %s parameters", path, MAX_PARAMETERS)
+        return None
+
+    properties: dict[str, Any] = {}
+    required: list[str] = []
+    for name, spec in declared.items():
+        if NAME_PATTERN.match(str(name)) is None:
+            log.warning("ph.seams.skills: %s has an invalid parameter name %r", path, name)
+            return None
+        if not isinstance(spec, dict):
+            log.warning("ph.seams.skills: %s parameter %r is not a mapping", path, name)
+            return None
+        kind = PARAMETER_TYPES.get(str(spec.get("type") or "string"))
+        if kind is None:
+            log.warning(
+                "ph.seams.skills: %s parameter %r has an unsupported type %r",
+                path,
+                name,
+                spec.get("type"),
+            )
+            return None
+        entry: dict[str, Any] = {"type": kind}
+        if spec.get("hint"):
+            entry["description"] = str(spec["hint"])
+        choices = spec.get("enum")
+        if choices is not None:
+            if not isinstance(choices, list) or not choices:
+                log.warning("ph.seams.skills: %s parameter %r has an unusable enum", path, name)
+                return None
+            entry["enum"] = list(choices)
+        if "default" in spec:
+            entry["default"] = spec["default"]
+        elif spec.get("required"):
+            required.append(str(name))
+        properties[str(name)] = entry
+
+    schema: dict[str, Any] = {
+        "type": "object",
+        "properties": properties,
+        "additionalProperties": False,
+    }
+    if required:
+        schema["required"] = required
+    return schema
+
+
+def rendered_body(body: str, skill: Skill, arguments: dict[str, Any]) -> str:
+    """The skill's instructions with its inputs filled in (P7-18).
+
+    Raises `ValueError` — which the `skill` tool's body turns into a result the
+    model reads — when the arguments do not satisfy the declaration, or when the
+    *body* names an input the frontmatter never declared. That second one is an
+    author's typo, and it surfaces here rather than at load because G9 keeps the
+    body on disk until something asks for it: there is no earlier moment that has
+    both halves in hand.
+
+    Defaults are applied before validation so a declared default satisfies a
+    `required`-looking read, and after it the body sees a value for every
+    declared name — an author writing `{{parameters.tag}}` never has to think
+    about whether the caller passed one.
+    """
+    from ..tools.json_schema import validate_json_schema_value
+
+    declared = dict(skill.parameters.get("properties") or {})
+    if not declared and not arguments:
+        return body
+    values = {
+        name: spec["default"]
+        for name, spec in declared.items()
+        if isinstance(spec, dict) and "default" in spec
+    }
+    values.update(arguments)
+    violations = validate_json_schema_value(skill.parameters, values)
+    if violations:
+        # One validator, not two. An unknown argument is `additionalProperties:
+        # False` doing its job — an explicit membership check beside it was a
+        # second answer to one question, and the one that ran first, so the
+        # shared validator's rule was unreachable and untested.
+        raise ValueError(
+            f"skill {skill.name!r} arguments: {'; '.join(violations)}. "
+            f"It declares: {', '.join(sorted(declared)) or 'none'}"
+        )
+
+    missing: list[str] = []
+
+    def fill(found: re.Match[str]) -> str:
+        name = found.group(1)
+        if name not in declared:
+            missing.append(name)
+            return found.group(0)
+        return str(values.get(name, ""))
+
+    filled = PLACEHOLDER.sub(fill, body)
+    if missing:
+        raise ValueError(
+            f"skill {skill.name!r} refers to undeclared parameter(s) "
+            f"{', '.join(sorted(set(missing)))} in its body"
+        )
+    return filled
 
 
 def discover_skills(paths: Sequence[str], *, source: str = "skills-progressive") -> list[Skill]:
@@ -472,18 +720,40 @@ def render_catalog(skills: list[Skill], *, tool: bool = True) -> str:
     ]
     for skill in skills:
         hint = f" {skill.hint}" if skill.hint else ""
-        lines.append(f"- **{skill.name}** — {skill.description}{hint}")
+        usage = f" Usage: `{skill.name} {skill.argument_hint}`." if skill.argument_hint else ""
+        lines.append(f"- **{skill.name}** — {skill.description}{hint}{usage}")
     return "\n".join(lines)
 
 
 class SkillArgs(ToolModel):
     name: str = Field(description="The skill's name, exactly as the catalog spells it.")
+    arguments: dict[str, Any] = Field(
+        default_factory=dict,
+        description=(
+            "Inputs the skill declared, if any. A skill that takes none ignores this; "
+            "one that does refuses an unknown name, a missing required input, or a "
+            "value outside its declared choices, and names what it wanted."
+        ),
+    )
 
 
 class SkillValue(ToolModel):
     name: str
     path: str | None = None
     instructions: str
+    version: str = ""
+    """Which revision these instructions came from, when the file names one."""
+    allowed_tools: list[str] = Field(default_factory=list)
+    """What the skill says it needs, told at the moment the model starts it."""
+    parameters: list[str] = Field(default_factory=list)
+    """The inputs this skill declares, so a caller that guessed wrong the first
+    time can get it right on the second without opening the file."""
+    missing_tools: list[str] = Field(default_factory=list)
+    """Which of those this caller cannot reach — resolved, not just echoed.
+
+    An echoed list leaves the model to diff it against its own catalog. Resolved
+    against `run.scope`, it answers the question the declaration was for: can I
+    actually follow these instructions from here?"""
 
 
 class Config(WireModel):
@@ -547,7 +817,24 @@ async def progressive(ctx: Context, config: Config) -> None:
             # fix from the catalog, the other is a deployment fault it cannot.
             known = ", ".join(one.name for one in ctx.skills.list(scope)) or "none"
             raise ValueError(f"no readable skill named {args.name!r}; available: {known}")
-        return {"name": skill.name, "path": skill.path, "instructions": body}
+        # Rendered, not raw: a declared input is filled in before the model reads
+        # the instruction that uses it, and arguments that do not satisfy the
+        # declaration are refused here rather than discovered three steps into a
+        # procedure that has already changed something.
+        instructions = rendered_body(body, skill, dict(args.arguments))
+        return {
+            "name": skill.name,
+            "path": skill.path,
+            "instructions": instructions,
+            "parameters": sorted(skill.parameters.get("properties") or {}),
+            "version": skill.version,
+            "allowed_tools": list(skill.allowed_tools),
+            # Resolved against the same scope the body was fetched with, so the
+            # catalog, the gate and this answer one question in one voice.
+            "missing_tools": [
+                name for name in skill.allowed_tools if ctx.tools.get(name, scope=scope) is None
+            ],
+        }
 
     def build_tool() -> Any:
         """The tool, or `None` where there is nothing to read.

@@ -160,14 +160,7 @@ class Sidebar(Vertical):
                 f"cwd     {_shorten(cwd)}",
             ]
         )
-        glyphs = {"pending": "○", "in_progress": "◐", "completed": "●"}
-        todos = (
-            "\n".join(
-                f"{glyphs.get(str(todo.get('status')), '○')} {todo.get('content', '')}"
-                for todo in state.todos
-            )
-            or "—"
-        )
+        todos = "\n".join(_todo_line(todo) for todo in state.todos) or "—"
         children = render_subagents(state)
         if (facts, todos, children) == self._shown:
             return
@@ -186,6 +179,31 @@ class Sidebar(Vertical):
         children_title.display = bool(children)
         panel.display = bool(children)
         panel.update(Content(children))
+
+
+TODO_GLYPHS = {"pending": "○", "in_progress": "◐", "completed": "●"}
+
+NO_WORK_SEEN = " (no work seen)"
+"""What a completed entry says when the harness counted no tools in its window.
+
+**A field, not a rule re-derived here.** `worked` is attached by `tool-todo` when
+it writes the list (P7-16), so this reads a number rather than restating what
+counts as work — which it could not do anyway: `ph-app` depends on `ph-core` and
+not on the bundle that owns the tool, and a copy of the rule on this side is the
+drift that boundary exists to prevent.
+
+The sidebar and not only the tool card because the card is one call's and this
+panel is the plan a person watches all session. It is a *signal*, not a verdict:
+"decide the approach" is a real step with no tool calls, and the point is that a
+tick with work behind it and a tick without now look different.
+"""
+
+
+def _todo_line(todo: dict[str, Any]) -> str:
+    """One entry, with the receipt when it is empty."""
+    glyph = TODO_GLYPHS.get(str(todo.get("status")), "○")
+    bare = todo.get("status") == "completed" and not todo.get("worked")
+    return f"{glyph} {todo.get('content', '')}{NO_WORK_SEEN if bare else ''}"
 
 
 def _shorten(path: str, width: int = Sidebar.WIDTH - 10) -> str:

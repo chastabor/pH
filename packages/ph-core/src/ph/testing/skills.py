@@ -24,13 +24,25 @@ def write_skill(
     description: str = "search the web for a query",
     front_name: str | None = None,
     body: str = "Instructions here.",
+    extra: str = "",
 ) -> Path:
-    """One skill directory, returning it. `front_name` writes a disagreeing name."""
+    """One skill directory, returning it. `front_name` writes a disagreeing name.
+
+    `extra` is frontmatter appended after `description` — the optional half
+    (`version`, `argument-hint`, `allowed-tools`). Here rather than in the test
+    that wanted it first, for the reason this module's own docstring gives: a
+    third writer is where "frontmatter looks slightly different" starts.
+    """
     directory = root / name
     directory.mkdir(parents=True, exist_ok=True)
+    front = [
+        f"name: {front_name if front_name is not None else name}",
+        f"description: {description}",
+    ]
+    if extra:
+        front.append(extra)
     (directory / "SKILL.md").write_text(
-        f"---\nname: {front_name if front_name is not None else name}\n"
-        f"description: {description}\n---\n\n# {name}\n\n{body}\n",
+        "---\n" + "\n".join(front) + f"\n---\n\n# {name}\n\n{body}\n",
         encoding="utf-8",
     )
     return directory

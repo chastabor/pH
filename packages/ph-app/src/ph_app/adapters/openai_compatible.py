@@ -162,6 +162,20 @@ class OpenAiCompatibleAdapter:
             body["max_tokens"] = max_tokens
         if options.stop:
             body["stop"] = list(options.stop)
+        if options.response_schema is not None:
+            # `strict` is what makes this a constraint rather than a hint: a
+            # server that supports the field builds a grammar from the schema and
+            # the reply cannot come back any other shape (P7-17). The caller
+            # validates anyway — `structured_output` says whether this route
+            # enforces it, and a caller must not have to know which one it got.
+            body["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "reply",
+                    "schema": options.response_schema,
+                    "strict": True,
+                },
+            }
         return body
 
     async def stream(self, options: GenerateOptions) -> AsyncIterator[Any]:
@@ -185,6 +199,7 @@ class OpenAiCompatibleAdapter:
             max_attachment_bytes=self.profile.max_attachment_bytes,
             max_image_edge=self.profile.max_image_edge,
             usable_image_edge=self.profile.usable_image_edge,
+            structured_output=True,
         )
 
 
