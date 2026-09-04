@@ -25,7 +25,7 @@ from ph.seams.code_runtime import CodeBindingNamespace
 from ph.system_prompt.assembly import render_prompt
 from ph.testing import FAKE_OPTIONS, parked_gate, raising, run_tool, simple_tool
 from ph.tools import Deny, ToolExecutionInput, text_content
-from ph.tools.code_mode import ToolCallError, governed_binding
+from ph.tools.code_mode import CodeDispatchRef, ToolCallError, governed_binding
 from ph.tools.definition import ToolOutput, TransportPresentation
 from ph.tools.registry import RUN_CODE
 
@@ -577,6 +577,42 @@ async def test_a_namespace_owns_the_tools_it_presents(mount: Any) -> None:
     result, _session = await _run(ctx, "owned", program)
     assert result.is_error is False
     assert calls == ["spawn_child:still works"]
+
+
+async def test_a_dispatch_and_its_settle_are_paired_by_one_declaration(mount: Any) -> None:
+    """Both records carry the same identity, spelled by the same type.
+
+    Readers pair them by these four fields and nothing else: the TUI adapter
+    finds the parent card by `parentCallId` and the dispatch card by
+    `subCallId`, and `/revert` reads `parentCallId` and `name` off the start to
+    list what a run did outside the tree it restored.
+
+    The start record used to be a hand-written camelCase dict while the settle
+    went through `to_wire()` — four fields spelled twice. Renaming one, or
+    changing `wire_alias`, would have moved the settle record and left the start
+    record's literals behind: every reader unpaired at once, and nothing failing
+    to say so. `CodeDispatchRef` is the one declaration both now go through.
+
+    Sabotage: hand-write any of the four keys in `_log_start` and the key sets
+    stop matching.
+    """
+    ctx = await _code_ctx(mount)
+    calls: list[str] = []
+    ctx.tools.register(_recorder("touch", calls))
+
+    async def program(ns: Any, emit: Any) -> str:
+        await ns["tools"].touch(n=1)
+        return "done"
+
+    _result, session = await _run(ctx, "paired", program)
+    (start,) = [e for e in session.events if e.type == "tool/code-dispatch-start"]
+    (settle,) = [e for e in session.events if e.type == "tool/code-dispatch"]
+    identity = {info.alias or name for name, info in CodeDispatchRef.model_fields.items()}
+
+    assert set(start.data) == identity | {"arguments"}
+    assert set(settle.data) == identity | {"isError", "content"}
+    # And they agree field for field, which is what a reader pairs on.
+    assert {key: start.data[key] for key in identity} == {key: settle.data[key] for key in identity}
 
 
 async def test_a_dispatch_parked_on_its_gate_has_no_start_record(mount: Any) -> None:

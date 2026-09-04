@@ -142,6 +142,13 @@ NON_GUARANTEES: tuple[tuple[str, str], ...] = (
         "own shell with the person's own reach (P7-10)",
     ),
     (
+        "how long `!!` may run",
+        "without limit. `ctx.subprocess` bounds what a child may *print* (P7-13, 8 MiB per "
+        "stream by default) and `timeout_ms` bounds how long it may run — but `!!` passes "
+        "none, so a command that hangs holds its root until somebody cancels it. A model's "
+        "`bash` call can set one; a person's `!!` cannot, yet",
+    ),
+    (
         "who may run `!!`",
         "anyone holding the web token, deliberately — the same authority a terminal already "
         "grants, where a person can approve any tool call the model makes",

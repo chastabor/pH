@@ -86,10 +86,10 @@ async def _confined_write(ctx: Any, workspace: Any, target: Path) -> tuple[int, 
         (sys.executable, "-c", f"open({str(target)!r}, 'w').write('agent')"),
         workspace_policy(workspace),
     ).argv
-    code, out, err = await ctx.subprocess.run(
+    outcome = await ctx.subprocess.run(
         SubprocessSpawnSpec(argv=argv, cwd=workspace.root, env=scrub_env(extra=workspace.env))
     )
-    return int(code), out + err
+    return outcome.exit_code, outcome.stdout + outcome.stderr
 
 
 # ------------------------------------------------------------- the vocabulary --

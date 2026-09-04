@@ -106,8 +106,8 @@ async def git(
     spec = SubprocessSpawnSpec(
         argv=("git", *args), cwd=cwd, env=scrub_env(extra={"LC_ALL": "C", **(env or {})})
     )
-    result: tuple[int, str, str] = await ctx.subprocess.run(spec)
-    return result
+    outcome = await ctx.subprocess.run(spec)
+    return outcome.exit_code, outcome.stdout, outcome.stderr
 
 
 BRANCH_PREFIX = "ph/"

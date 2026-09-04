@@ -19,6 +19,7 @@ providers were handed a narrowed copy, so a `system-prompt/assemble` listener an
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -47,7 +48,11 @@ from ph.seams.sandbox import SandboxError, SandboxPolicy, SandboxSeam
 from ph.seams.settings import SettingsService
 from ph.seams.skills import NAME_MAX, NAME_PATTERN, Skill, SkillService
 from ph.seams.spill import SpillStore
-from ph.seams.subprocess import SubprocessService, SubprocessSpawnSpec, scrub_env
+from ph.seams.subprocess import (
+    SubprocessService,
+    SubprocessSpawnSpec,
+    scrub_env,
+)
 from ph.seams.tui_screens import ID_MAX, ScreenDefinition, TuiScreenRegistry
 from ph.seams.tui_status import StatusField, StatusReading, TuiStatusRegistry
 from ph.session import Session
@@ -240,12 +245,88 @@ def test_the_environment_is_scrubbed_of_anything_credential_shaped() -> None:
     assert scrubbed == {"PATH": "/usr/bin", "HOME": "/home/x"}
 
 
+async def test_a_flood_is_capped_before_the_buffer_grows(tmp_path: Path) -> None:
+    """**P7-13's gate.** A child decides how much it prints; the seam decides how
+    much is kept.
+
+    The drain used to `extend` without a ceiling and `run` then decoded the whole
+    `bytearray` to `str`, so a 100 MB command cost ~200 MB before any caller saw
+    a byte of it — inside the daemon that hosts every other root. `tool-bash` had
+    no cap of its own at all, so that output went straight into a `tool/result`.
+
+    **The child exiting is half the assertion.** A drain that stopped *reading*
+    at the cap would leave the child blocked on a pipe nothing will empty, and
+    this test would hang rather than fail — so `exit_code == 0` is what proves
+    the overflow was read and counted rather than left in the pipe.
+
+    Sabotage: restore `sink.extend(chunk)` and `len(stdout)` is the whole 8 MB.
+    """
+    service = SubprocessService(ctx=Context())
+    cap = 64 * 1024
+    flood = "import sys; sys.stdout.write('x' * (8 * 1024 * 1024))"
+
+    outcome = await service.run(
+        SubprocessSpawnSpec(
+            argv=(sys.executable, "-c", flood), cwd=tmp_path, max_output=cap, timeout_ms=60_000
+        )
+    )
+
+    assert outcome.exit_code == 0, "the child ran to completion; nothing blocked on a full pipe"
+    assert len(outcome.stdout) == cap, "kept exactly the cap"
+    assert outcome.dropped == 8 * 1024 * 1024 - cap, "and counted the rest"
+    assert outcome.truncated
+
+
+async def test_the_deployments_ceiling_applies_to_a_spec_that_names_none(tmp_path: Path) -> None:
+    """`max_output=None` is the row's number, not "unbounded".
+
+    `ctx.shell` takes no `max_output`, so for `!!`, `tool-bash` and an autonomous
+    gate the row's value is the only ceiling that will ever apply — which is why
+    `subprocess-local` takes one at all rather than leaving `MAX_OUTPUT` a
+    constant only a source edit can change.
+    """
+    service = SubprocessService(ctx=Context(), max_output=4096)
+    flood = "import sys; sys.stdout.write('y' * 20000)"
+
+    outcome = await service.run(
+        SubprocessSpawnSpec(argv=(sys.executable, "-c", flood), cwd=tmp_path)
+    )
+
+    assert len(outcome.stdout) == 4096
+    assert outcome.dropped == 20000 - 4096
+
+
+async def test_a_command_that_outstays_its_timeout_is_killed(tmp_path: Path) -> None:
+    """`timeout_ms` bounds the *run*. It used to be passed as the termination grace.
+
+    `ctx.shell` mapped a caller's `timeout_ms` onto `grace_ms`, so `tool-bash`'s
+    own description — "Kill the command after this long" — described something
+    nothing did: the value only widened the window an already-dying child had to
+    exit. A model given that parameter would have used it to bound a `sleep`.
+
+    Sabotage: drop the `move_on_after` and this hangs for a minute, then fails.
+    """
+    # A shell builtin rather than a fresh interpreter: `python3 -c` needs 30-50 ms
+    # to start before it can print, so the bound had to be 300 ms to leave room.
+    slow = ("/bin/sh", "-c", "printf started; sleep 60")
+
+    with anyio.fail_after(20):
+        outcome = await SubprocessService(ctx=Context()).run(
+            SubprocessSpawnSpec(argv=slow, cwd=tmp_path, timeout_ms=100)
+        )
+
+    assert outcome.timed_out
+    # And what it managed to say is still returned: a command that hung after
+    # printing the useful part should not lose the useful part.
+    assert outcome.stdout == "started"
+
+
 async def test_a_child_does_not_inherit_a_planted_secret(tmp_path: Path) -> None:
     root = Context()
     service = SubprocessService(ctx=root)
     os.environ["PH_TEST_PLANTED_API_KEY"] = "sk-do-not-leak"
     try:
-        code, out, _err = await service.run(
+        outcome = await service.run(
             SubprocessSpawnSpec(
                 argv=(
                     "python3",
@@ -257,8 +338,8 @@ async def test_a_child_does_not_inherit_a_planted_secret(tmp_path: Path) -> None
         )
     finally:
         del os.environ["PH_TEST_PLANTED_API_KEY"]
-    assert code == 0
-    assert out.strip() == "0"
+    assert outcome.exit_code == 0
+    assert outcome.stdout.strip() == "0"
 
 
 async def test_a_spawned_child_is_terminated_and_reaped_on_disposal(tmp_path: Path) -> None:

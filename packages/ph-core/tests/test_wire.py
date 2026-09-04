@@ -160,6 +160,12 @@ def _sample(model: type[BaseModel]) -> BaseModel | None:
             "body": "started",
         },
         "SandboxPolicy": {"mode": "read-only"},
+        "CodeDispatchRef": {
+            "rootCallId": "r",
+            "parentCallId": "p",
+            "subCallId": "p:code:0",
+            "name": "read",
+        },
         "CodeDispatchLog": {
             "rootCallId": "r",
             "parentCallId": "p",

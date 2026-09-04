@@ -116,7 +116,7 @@ async def test_the_output_and_the_exit_code_reach_the_log(tmp_path: Any) -> None
         # the shared default for one that wants a single column.
         assert result.data["stdout"].strip() == "out"
         assert result.data["stderr"].strip() == "err"
-        assert result.data["ok"] is False and result.data["truncated"] is False
+        assert result.data["ok"] is False and result.data["clipped"] is False
         assert result.data["cwd"], "the seam reports where the child actually ran"
         assert "[stderr]" in shell_body(result.data) and "[exit 3]" in shell_body(result.data)
 

@@ -32,6 +32,21 @@ class ShellResult:
     stdout: str
     stderr: str
     argv: tuple[str, ...]
+    dropped: int = 0
+    """Bytes the child printed past the seam's cap and nobody kept (P7-13)."""
+    timed_out: bool = False
+    """Whether `timeout_ms` ended it rather than the command finishing."""
+    cap: int = 0
+    """The per-stream ceiling that did the dropping, for the sentence that says so."""
+
+    @property
+    def truncated(self) -> bool:
+        """Whether what this holds is a prefix of what the command printed.
+
+        Here rather than only on `SubprocessResult`, because this is the record a
+        renderer actually holds — the seam's own property had no reader at all."""
+        return self.dropped > 0
+
     cwd: str = ""
     """Where the child actually ran.
 
@@ -106,17 +121,20 @@ class ShellService:
         spec = SubprocessSpawnSpec(
             argv=argv,
             cwd=cwd,
-            grace_ms=timeout_ms or 5_000,
+            timeout_ms=timeout_ms,
             # Additive, not wholesale: the redirection variables are the only
             # thing being said here, and a command that inherited nothing else
             # would not find its own toolchain.
             env=scrub_env(extra=workspace.env) if workspace and workspace.env else None,
         )
-        code, out, err = await self.ctx.subprocess.run(spec, scope=scope)
+        outcome = await self.ctx.subprocess.run(spec, scope=scope)
         return ShellResult(
-            exit_code=code,
-            stdout=out,
-            stderr=err,
+            exit_code=outcome.exit_code,
+            stdout=outcome.stdout,
+            stderr=outcome.stderr,
+            dropped=outcome.dropped,
+            timed_out=outcome.timed_out,
+            cap=self.ctx.subprocess.max_output,
             argv=argv,
             cwd=str(cwd),
             confined_by=confined_by,

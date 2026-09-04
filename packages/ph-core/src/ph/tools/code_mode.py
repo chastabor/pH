@@ -124,13 +124,32 @@ class CodeRunFailure(HarnessError):
         self.failure_kind = self._FAILURE_KINDS[kind]
 
 
-class CodeDispatchLog(WireModel):
-    """One settled sub-dispatch, as the log waterfall sees it."""
+class CodeDispatchRef(WireModel):
+    """Which dispatch this is — the identity its two records share.
+
+    A dispatch writes twice: `tool/code-dispatch-start` before the binding's body
+    runs (B4, P7-15) and `tool/code-dispatch` once it settles. **Readers pair
+    them by these fields**, and by nothing else — the TUI adapter looks up the
+    parent card by `parentCallId` and the dispatch card by `subCallId`, and
+    `/revert` reads `parentCallId` and `name` off the start record to list what a
+    run did outside the tree it restored.
+
+    One type, so the pairing cannot drift. The start record used to be a
+    hand-written camelCase dict while the settle went through `to_wire()`: four
+    fields spelled twice, where renaming one — or changing `wire_alias` — moves
+    the settle record and silently leaves the start record's literals behind,
+    unpairing every reader at once with nothing failing.
+    """
 
     root_call_id: str
     parent_call_id: str
     sub_call_id: str
     name: str
+
+
+class CodeDispatchLog(CodeDispatchRef):
+    """One settled sub-dispatch, as the log waterfall sees it."""
+
     is_error: bool
 
 
@@ -214,29 +233,12 @@ class DispatchBridge:
         # accepts the frozen form directly, so it is not thawed again for the call.
         snapshot = freeze_json_value(arguments, frozen_input=True)
 
-        def write_ahead(prepared: PreparedCall) -> None:
-            # Once the pipeline has decided and before the binding's body runs
-            # (B4, P7-15) — the same point `execute_tool_calls` writes `tool/call`.
-            # A dispatch parked on an approval is not yet something the program
-            # did, and `/revert` reads these records as the list of what it did.
-            if self.session is not None:
-                self.session.append(
-                    "tool/code-dispatch-start",
-                    {
-                        "rootCallId": self.execution.root_call_id,
-                        "parentCallId": self.execution.call_id,
-                        "subCallId": sub_call_id,
-                        "name": binding.name,
-                        # The program's own arguments unless approval substituted
-                        # them — the same rule `tool/call` follows, and the same
-                        # bytes as before for every dispatch nobody edited.
-                        "arguments": thaw_json(
-                            prepared.run.execution.arguments
-                            if prepared.run.execution.substituted
-                            else snapshot
-                        ),
-                    },
-                )
+        ref = CodeDispatchRef(
+            root_call_id=self.execution.root_call_id,
+            parent_call_id=self.execution.call_id,
+            sub_call_id=sub_call_id,
+            name=binding.name,
+        )
 
         async with self._limiter:
             result = await self.tools.execute(
@@ -251,9 +253,9 @@ class DispatchBridge:
                     parent=self.execution.token,
                     cancel=self.token,
                 ),
-                write_ahead=write_ahead,
+                write_ahead=partial(self._log_start, ref),
             )
-            await self._log_settle(sub_call_id, binding.name, result)
+            await self._log_settle(ref, result)
 
         if result.is_error:
             failure = result.error
@@ -267,17 +269,31 @@ class DispatchBridge:
             raise ToolCallError(binding.name, reason)
         return result.value
 
-    async def _log_settle(self, sub_call_id: str, name: str, result: ToolExecutionResult) -> None:
+    def _log_start(self, ref: CodeDispatchRef, prepared: PreparedCall) -> None:
+        """The dispatch, recorded once the pipeline has decided and before it runs.
+
+        The same point `execute_tool_calls` writes `tool/call` (B4, P7-15): a
+        dispatch parked on an approval is not yet something the program *did*,
+        and `/revert` reads these records as the list of what it did.
+
+        `execution.arguments` unconditionally: `create_execution` sets it from the
+        snapshot this dispatch passed in, and the only thing that ever replaces it
+        is approval's substitution — which is exactly what this should record.
+        (`batch.py`'s ternary is *not* removable for the same shape: there the
+        unsubstituted branch is the model's original bytes, a different object.)
+        """
+        if self.session is None:
+            return
+        self.session.append(
+            "tool/code-dispatch-start",
+            {**ref.to_wire(), "arguments": thaw_json(prepared.run.execution.arguments)},
+        )
+
+    async def _log_settle(self, ref: CodeDispatchRef, result: ToolExecutionResult) -> None:
         async def inner(record: CodeDispatchLog, blocks: Sequence[Any]) -> Sequence[Any]:
             return blocks
 
-        record = CodeDispatchLog(
-            root_call_id=self.execution.root_call_id,
-            parent_call_id=self.execution.call_id,
-            sub_call_id=sub_call_id,
-            name=name,
-            is_error=result.is_error,
-        )
+        record = CodeDispatchLog(**ref.__dict__, is_error=result.is_error)
         # The spill policy replaces an oversized dispatch content *individually*
         # here (C5), so one large read does not melt its siblings into a blob.
         shaped = await self.ctx.waterfall(

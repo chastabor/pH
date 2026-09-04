@@ -249,9 +249,10 @@ async def probe_sandbox(ctx: Context, backend: LocalBackend, scratch: Path) -> S
         confined = backend.confine(
             ("/bin/sh", "-c", f"echo landed > {inside}; echo escaped > {outside}"), policy
         )
-        _, _, err = await ctx.subprocess.run(
+        probe = await ctx.subprocess.run(
             SubprocessSpawnSpec(argv=confined.argv, cwd=work, env=scrub_env())
         )
+        err = probe.stderr
         landed, host = await anyio.to_thread.run_sync(verdict)
         if not landed:
             return SandboxProbe(

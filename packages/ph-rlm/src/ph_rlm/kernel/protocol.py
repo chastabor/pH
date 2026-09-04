@@ -28,6 +28,7 @@ from typing import Any, Final, Literal, TypeAlias
 
 from pydantic import BaseModel
 
+from ph.text import truncation_marker
 from ph.wire import WireModel
 
 __all__ = [
@@ -223,11 +224,8 @@ FRAME_FIELDS: Final[dict[str, tuple[frozenset[str], frozenset[str]]]] = {
 }
 
 
-def truncation_marker(dropped: int, cap: int) -> str:
-    """The text that stands in for output a cap discarded (D4).
-
-    Duplicated from the guest by design and asserted equal by the mirror test:
-    a reader comparing a transcript to a log must not find two different
-    sentences for the same event.
-    """
-    return f"\n[ph: output truncated — {dropped} bytes dropped, cap {cap} bytes]\n"
+# Re-exported, not re-spelled: the sentence moved to `ph.text` when `!!` and
+# `tool-bash` became the third and fourth things that discard output against a
+# cap (P7-13). The mirror test still compares `host.truncation_marker` with the
+# guest's deliberate copy, which is the assertion that matters.
+truncation_marker = truncation_marker

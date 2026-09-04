@@ -31,6 +31,8 @@ from __future__ import annotations
 from typing import Any
 
 from ph.seams.shell import ShellResult
+from ph.text import truncation_marker
+from ph.tools.builtin.bash_tool import TIMED_OUT
 
 from .protocol import SeamAbsent
 
@@ -44,10 +46,12 @@ because the reason a person runs a command is to read what it said. Applied per
 stream, and truncation is recorded on the event rather than left to be inferred
 from a suspiciously round length.
 
-**Not the only bound that should exist.** `ctx.subprocess` drains a child into an
-unbounded buffer and decodes it whole, so this clip is applied to something
-already in memory twice over — the cap belongs in the drain, where `tool-bash`
-would get one too. Recorded as P7-13 rather than half-fixed here.
+**A display clip on top of a bound that already held.** `ctx.subprocess` caps
+what it *keeps* from a child (P7-13), so by the time this runs the string is
+bounded; this decides how much of it a durable log should carry, which is a much
+smaller number and a different question. Both can apply to one command, and the
+event records them apart: `dropped` is what the seam threw away, `clipped` is
+what this kept back.
 """
 
 
@@ -57,9 +61,10 @@ def shell_body(data: Any) -> str:
     **Rendered here, from the event, and not stored on it.** The log keeps the
     two streams apart so a front end can colour them apart; this is the default
     a front end that wants one column uses, and it is shared so the terminal and
-    the browser cannot disagree. `[stderr]` and `[exit N]` follow `tool-bash`'s
-    renderer, so `!!make` and a model's `bash("make")` read alike in one
-    transcript.
+    the browser cannot disagree. `[stderr]`, `[exit N]`, the timeout line and the
+    truncation sentence all follow `tool-bash`'s renderer, so `!!make` and a
+    model's `bash("make")` read alike in one transcript — the last two by
+    calling the same functions, after P7-13 added them to one side only.
     """
     parts: list[str] = []
     stdout = str(data.get("stdout", "")).rstrip()
@@ -68,8 +73,12 @@ def shell_body(data: Any) -> str:
         parts.append(stdout)
     if stderr:
         parts.append(f"[stderr]\n{stderr}")
-    if data.get("truncated"):
-        parts.append("[output truncated]")
+    if data.get("timedOut"):
+        parts.append(TIMED_OUT)
+    if data.get("dropped"):
+        parts.append(truncation_marker(int(data["dropped"]), int(data.get("cap") or 0)).strip())
+    if data.get("clipped"):
+        parts.append(f"[ph: the log keeps {SHELL_OUTPUT} bytes of each stream]")
     code = data.get("exitCode")
     if code:
         parts.append(f"[exit {code}]")
@@ -114,11 +123,17 @@ async def run_shell(shell: Any, session: Any, agent: Any, command: str) -> Shell
             "confinedBy": result.confined_by,
             "stdout": result.stdout[:SHELL_OUTPUT],
             "stderr": result.stderr[:SHELL_OUTPUT],
-            # Compared on the originals, which is O(1), and *before* anything is
+            # **Two bounds, two keys.** A fold that wants to know why a person is
+            # looking at a prefix wants to tell "the seam threw 37 MB away" from
+            # "we kept 64 KiB of what survived" — one `truncated` bool lost that.
+            # Compared on the originals, which is O(1) and *before* anything is
             # concatenated: the first draft joined both streams in full to keep
             # 64 KiB, which on a 50 MB output was three full-size copies and
             # ~100 ms of memcpy inside the daemon's event loop.
-            "truncated": len(result.stdout) > SHELL_OUTPUT or len(result.stderr) > SHELL_OUTPUT,
+            "dropped": result.dropped,
+            "cap": result.cap,
+            "timedOut": result.timed_out,
+            "clipped": len(result.stdout) > SHELL_OUTPUT or len(result.stderr) > SHELL_OUTPUT,
         },
     )
     return result

@@ -278,10 +278,8 @@ async def test_the_verdict_reaches_ph_doctor_either_way(mount: Any) -> None:
 
 async def _run(ctx: Any, argv: tuple[str, ...], cwd: Path) -> tuple[int, str]:
     """One confined argv, run. Code plus output, so a failure says why."""
-    code, out, err = await ctx.subprocess.run(
-        SubprocessSpawnSpec(argv=argv, cwd=cwd, env=scrub_env())
-    )
-    return int(code), out + err
+    outcome = await ctx.subprocess.run(SubprocessSpawnSpec(argv=argv, cwd=cwd, env=scrub_env()))
+    return outcome.exit_code, outcome.stdout + outcome.stderr
 
 
 async def _enforcing(mount: Any, tmp_path: Path) -> tuple[Any, Path]:

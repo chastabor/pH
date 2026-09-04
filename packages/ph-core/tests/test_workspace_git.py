@@ -347,14 +347,14 @@ async def test_the_redirection_env_keeps_a_test_run_out_of_the_tree(
     await git(ctx, workspace.root, "add", "-A")
     await git(ctx, workspace.root, "commit", "-m", "add a test")
 
-    code, out, err = await ctx.subprocess.run(
+    outcome = await ctx.subprocess.run(
         SubprocessSpawnSpec(
             argv=("python", "-m", "pytest", "-q", "test_sample.py"),
             cwd=workspace.root,
             env=scrub_env(extra=workspace.env),
         )
     )
-    assert code == 0, out + err
+    assert outcome.exit_code == 0, outcome.stdout + outcome.stderr
 
     _, status, _ = await git(ctx, workspace.root, "status", "--porcelain", "-uall")
     assert status.strip() == "", f"the test run dirtied the worktree: {status}"

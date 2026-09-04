@@ -17,10 +17,18 @@ from typing import Any
 from pydantic import Field
 
 from ...cordis import Context, plugin
+from ...text import truncation_marker
 from ..definition import ToolModel, ToolOutput, ToolRunContext, define_tool, text_content
 from ..presentation import ToolCallView, ToolResultView
 
 __all__ = ["apply"]
+
+TIMED_OUT = "[ph: timed out; the command was killed and this is what it had printed]"
+"""What a caller's `timeout_ms` looks like to whoever reads the result.
+
+Shared with `!!` through `ph_app.shell`, for the reason the truncation sentence
+is: two renderings of one event is what `shell_body`'s docstring already promises
+not to do."""
 
 DESCRIPTION = """Run a shell command and return its output.
 
@@ -45,6 +53,10 @@ class BashValue(ToolModel):
     stdout: str
     stderr: str
     confined_by: str | None = None
+    dropped: int = 0
+    """Bytes past the seam's cap that nobody kept (P7-13)."""
+    cap: int = 0
+    timed_out: bool = False
 
 
 def _render(args: Any, value: Any) -> Any:
@@ -53,6 +65,13 @@ def _render(args: Any, value: Any) -> Any:
         parts.append(value["stdout"].rstrip())
     if value["stderr"]:
         parts.append(f"[stderr]\n{value['stderr'].rstrip()}")
+    if value["timed_out"]:
+        parts.append(TIMED_OUT)
+    if value["dropped"]:
+        # `truncation_marker`, not a wording of its own: the RLM kernel and the
+        # guest runner already say this sentence for the same event, and a reader
+        # comparing a transcript to a log must not find two of them (D4).
+        parts.append(truncation_marker(value["dropped"], value["cap"]).strip())
     if value["exit_code"] != 0:
         parts.append(f"[exit {value['exit_code']}]")
     return text_content("\n".join(parts) if parts else "(no output)")
@@ -73,6 +92,9 @@ async def apply(ctx: Context, config: Any) -> None:
             "stdout": result.stdout,
             "stderr": result.stderr,
             "confined_by": result.confined_by,
+            "dropped": result.dropped,
+            "cap": result.cap,
+            "timed_out": result.timed_out,
         }
 
     ctx.tools.register(

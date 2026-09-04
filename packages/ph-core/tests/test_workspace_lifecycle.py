@@ -188,6 +188,38 @@ async def test_bash_runs_in_the_agents_workspace(mount: Any, tmp_path: Path) -> 
     assert str(tmp_path / "scratch") in stdout
 
 
+async def test_the_model_is_told_when_its_command_said_more_than_was_kept(
+    mount: Any, tmp_path: Path
+) -> None:
+    """P7-13's model-facing half: a truncated result must not read as a whole one.
+
+    `tool-bash` had no cap at all and put a child's whole output straight into a
+    `tool/result` — the more serious half of the row, because the reader is the
+    model. It inherits the seam's bound now without asking; what it still owes is
+    the *fact*, in the text the model reads, or a prefix taken for the whole
+    output sends it hunting a failure further down that it cannot see.
+
+    The sentence is `truncation_marker`'s, which the RLM kernel and the guest
+    runner already say for this event — "a reader comparing a transcript to a log
+    must not find two different sentences for the same event" (D4).
+
+    Sabotage: drop the marker from `_render` and the model gets 4 KiB of output
+    with nothing saying there was more.
+    """
+    ctx = await mount({"id": "subprocess", "config": {"maxOutputBytes": 4096}})
+    ctx.workspace.register_provider(_tier(tmp_path))
+    agent = await _run(ctx)
+
+    result = await run_tool(
+        ctx, "bash", {"command": f"printf 'x%.0s' $(seq {4096 + 100})"}, agent=agent
+    )
+
+    assert result.value["exit_code"] == 0, "the child finished; nothing blocked on a full pipe"
+    assert len(result.value["stdout"]) == 4096
+    assert result.value["dropped"] == 100
+    assert "100 bytes dropped, cap 4096 bytes" in result.content[0].text
+
+
 # -------------------------------------------------------------- provisioning --
 
 

@@ -148,8 +148,8 @@ async def run(ctx: Context, program: str, cwd: Path, *args: str) -> tuple[int, s
     as in the filesystem they see.
     """
     spec = SubprocessSpawnSpec(argv=(program, *args), cwd=cwd, env=scrub_env(extra={"LC_ALL": "C"}))
-    result: tuple[int, str, str] = await ctx.subprocess.run(spec)
-    return result
+    outcome = await ctx.subprocess.run(spec)
+    return outcome.exit_code, outcome.stdout, outcome.stderr
 
 
 async def agentfs(ctx: Context, cwd: Path, *args: str) -> tuple[int, str, str]:

@@ -50,14 +50,14 @@ async def _write(ctx: Any, workspace: Any, target: str) -> tuple[int, str]:
     applied — which is what anything that is not a pH tool does, and exactly the
     surface the table's first two columns are about.
     """
-    code, out, err = await ctx.subprocess.run(
+    outcome = await ctx.subprocess.run(
         SubprocessSpawnSpec(
             argv=(sys.executable, "-c", f"open({target!r}, 'w').write('written')"),
             cwd=workspace.root,
             env=scrub_env(extra=workspace.env),
         )
     )
-    return code, out + err
+    return outcome.exit_code, outcome.stdout + outcome.stderr
 
 
 # ------------------------------------------------------------------- bounds --
