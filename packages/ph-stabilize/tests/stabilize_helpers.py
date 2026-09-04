@@ -37,6 +37,7 @@ __all__ = [
     "row",
     "run_tool_calls",
     "scoped_agent",
+    "todo_call",
 ]
 
 PROFILE = [BASE, HEADLESS, BUNDLE]
@@ -108,6 +109,19 @@ def row(plugin_id: str, **config: Any) -> dict[str, Any]:
 def bash_call(call_id: str, command: str = "true") -> ToolCallBlock:
     """The one tool every row in this bundle is exercised against."""
     return ToolCallBlock(id=call_id, name="bash", arguments=json.dumps({"command": command}))
+
+
+def todo_call(call_id: str, todos: list[dict[str, Any]]) -> ToolCallBlock:
+    """One `write_todos` call, beside `bash_call` and for the same reason.
+
+    Written out identically in two test modules before this. The tool takes the
+    ENTIRE list in one argument, so a change to how that argument is shaped has
+    to reach both suites at once — and two copies is how one of them keeps
+    passing against a call the harness no longer makes.
+    """
+    from ph_stabilize.todo import TOOL_NAME
+
+    return ToolCallBlock(id=call_id, name=TOOL_NAME, arguments=json.dumps({"todos": todos}))
 
 
 def result_text(session: Any, call_id: str) -> str:

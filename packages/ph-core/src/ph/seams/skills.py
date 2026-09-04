@@ -39,6 +39,7 @@ from ..cordis import (
     boundary_of,
     chain_label,
     drop_dead_chains,
+    events,
     plugin,
     safe_yaml_load,
 )
@@ -66,6 +67,7 @@ __all__ = [
     "progressive",
     "read_skill",
     "render_catalog",
+    "rendered_skill",
 ]
 
 log = logging.getLogger("ph.seams.skills")
@@ -101,6 +103,11 @@ the clause a *registrar* adds. Redefining it here silently retightened an
 unrelated rule — `SkillService.register` began refusing a 201-character hint it
 had always accepted — which is what a second constant with one name buys."""
 
+MAX_STEPS = 32
+"""How many steps one skill may declare. A procedure longer than this is two
+procedures, and every step is an entry the model cannot delete — so the cap is
+also a bound on how much of somebody's plan a skill may commandeer."""
+
 MAX_PARAMETERS = 16
 """How many inputs one skill may declare. A procedure needing more than this has
 not decided what it is for, and every one of them is a name the model must get
@@ -125,6 +132,16 @@ VERSION_PATTERN = re.compile(r"\A[0-9A-Za-z][0-9A-Za-z.+_-]{0,31}\Z")
 """What a `version` may look like. Deliberately looser than semver: pH does not
 compare versions, it *reports* the one that won a shadowing contest, and refusing
 `2024-01-a` would be this seam having an opinion it cannot act on."""
+
+events.declare(
+    "skills/read",
+    "emit",
+    owner="ph.seams.skills",
+    doc="A skill's body was read. Carries the skill, its steps with the "
+    "caller's inputs already filled in, and the session — so a row that turns "
+    "a declared procedure into work can do so without this seam knowing what a "
+    "todo list is, and without a listener needing the arguments to render them.",
+)
 
 ORDER_SKILLS = ORDER_TOOL_GUIDANCE + 50
 
@@ -159,6 +176,23 @@ class Skill(WireModel):
     """How the skill is invoked, in the shape `CommandDefinition.argument_hint`
     uses. This one *is* in the catalog: a skill the model cannot tell how to
     start is a skill it reads and then guesses at."""
+    steps: list[str] = Field(default_factory=list)
+    """An ordered procedure this skill is, rather than advice it gives (P7-18).
+
+    Seeded into the todo list when the skill is read, as entries the model may
+    mark done and may not delete — which is what makes a *skill* a procedure
+    rather than a suggestion, and what a `turn-stopping` listener then steers
+    against.
+
+    **Implicitly sequential**: each step waits on the one before it, expressed
+    through the `requires` that `tool-todo` already has. A step list whose order
+    does not matter is a checklist, and an author who needs a real graph writes
+    the entries themselves — this field is for the common case, which is "do
+    these in order".
+
+    Declared here and consumed in `ph-stabilize`, across a package boundary this
+    seam cannot cross, which is why reading a skill emits `skills/read` rather
+    than reaching for a todo list ph-core knows nothing about."""
     parameters: dict[str, Any] = Field(default_factory=dict)
     """The inputs this skill takes, as a JSON Schema object (P7-18).
 
@@ -538,16 +572,17 @@ def _optional_front(front: dict[str, Any], path: Path) -> dict[str, Any] | None:
     if schema is None:
         return None
 
-    raw = front.get("allowed-tools")
-    if raw is None:
-        tools: list[str] = []
-    elif isinstance(raw, list) and all(isinstance(one, str) for one in raw):
-        tools = [one.strip() for one in raw if one.strip()]
-    else:
-        log.warning("ph.seams.skills: %s allowed-tools is not a list of names", path)
+    steps = _string_list(front, "steps", path, cap=MAX_STEPS)
+    if steps is None:
         return None
-    if len(tools) > MAX_ALLOWED_TOOLS:
-        log.warning("ph.seams.skills: %s names more than %s tools", path, MAX_ALLOWED_TOOLS)
+    if len(set(steps)) != len(steps):
+        # `requires` names entries by their content, and a seeded step is an
+        # entry — two identical steps would be one entry the plan waits on twice.
+        log.warning("ph.seams.skills: %s repeats a step", path)
+        return None
+
+    tools = _string_list(front, "allowed-tools", path, cap=MAX_ALLOWED_TOOLS)
+    if tools is None:
         return None
 
     return {
@@ -555,7 +590,33 @@ def _optional_front(front: dict[str, Any], path: Path) -> dict[str, Any] | None:
         "argument_hint": hint,
         "allowed_tools": tools,
         "parameters": schema,
+        "steps": steps,
     }
+
+
+def _string_list(front: dict[str, Any], key: str, path: Path, *, cap: int) -> list[str] | None:
+    """How a `SKILL.md` declares a list of short strings — once, for both of them.
+
+    `steps` and `allowed-tools` are the same rule (a list of strings, trimmed,
+    capped, else refuse the skill) and were written out twice, which is how they
+    came to disagree about a blank entry: one refused the skill and the other
+    dropped it silently. Refusing is the rule the rest of the block already
+    follows, so it is the one that survived — an empty step is a plan entry with
+    no content, and an empty tool name matches nothing.
+
+    Absent is not malformed: a key nobody wrote is an empty list.
+    """
+    raw = front.get(key)
+    if raw is None:
+        return []
+    if not isinstance(raw, list) or not all(isinstance(one, str) and one.strip() for one in raw):
+        log.warning("ph.seams.skills: %s %s is not a list of non-empty strings", path, key)
+        return None
+    values = [one.strip() for one in raw]
+    if len(values) > cap:
+        log.warning("ph.seams.skills: %s declares more than %s entries in %s", path, cap, key)
+        return None
+    return values
 
 
 def _parameter_schema(declared: Any, path: Path) -> dict[str, Any] | None:
@@ -622,26 +683,47 @@ def _parameter_schema(declared: Any, path: Path) -> dict[str, Any] | None:
     return schema
 
 
-def rendered_body(body: str, skill: Skill, arguments: dict[str, Any]) -> str:
-    """The skill's instructions with its inputs filled in (P7-18).
+def rendered_skill(body: str, skill: Skill, arguments: dict[str, Any]) -> tuple[str, list[str]]:
+    """The skill's instructions *and* its steps, with its inputs filled in (P7-18).
+
+    Both, from one call, because they are one document: `steps:` is the procedure
+    the body explains, and an author who writes `Run {{parameters.gate}}` in a
+    step means the same thing they mean in a paragraph. Rendering only the body
+    would seed the *literal* `{{parameters.gate}}` into somebody's todo list —
+    where, unlike a paragraph, the model cannot go back and read what it stood
+    for.
 
     Raises `ValueError` — which the `skill` tool's body turns into a result the
     model reads — when the arguments do not satisfy the declaration, or when the
-    *body* names an input the frontmatter never declared. That second one is an
+    text names an input the frontmatter never declared. That second one is an
     author's typo, and it surfaces here rather than at load because G9 keeps the
     body on disk until something asks for it: there is no earlier moment that has
     both halves in hand.
 
+    **`body` is the whole file, frontmatter included** (`SkillService.body`), so
+    the undeclared-name scan already covers a `steps:` block without looking at
+    one — which is why there is no separate gate for that case and no separate
+    message naming it. The step *list* still has to be filled in here, because it
+    was parsed at load and is a second copy of the same sentences: unrendered, the
+    todo list and the instructions would spell one procedure two ways.
+
+    **There is no shortcut for a skill that declares nothing**, and there was: an
+    early return handed such a body straight back. It made the scan conditional
+    on something the author cannot see — a skill with no `parameters:` block was
+    checked when the model happened to pass arguments and not otherwise, and a
+    `steps:`-only skill seeded a literal `{{parameters.gate}}` into the plan.
+    Prose with braces in it is unaffected either way, because `PLACEHOLDER` only
+    matches this one prefix; that is what keeps a skill able to contain an example
+    of itself, and it is the whole of the exemption that is needed.
+
     Defaults are applied before validation so a declared default satisfies a
-    `required`-looking read, and after it the body sees a value for every
-    declared name — an author writing `{{parameters.tag}}` never has to think
-    about whether the caller passed one.
+    `required`-looking read, and after it the text sees a value for every declared
+    name — an author writing `{{parameters.tag}}` never has to think about
+    whether the caller passed one.
     """
     from ..tools.json_schema import validate_json_schema_value
 
     declared = dict(skill.parameters.get("properties") or {})
-    if not declared and not arguments:
-        return body
     values = {
         name: spec["default"]
         for name, spec in declared.items()
@@ -669,12 +751,16 @@ def rendered_body(body: str, skill: Skill, arguments: dict[str, Any]) -> str:
         return str(values.get(name, ""))
 
     filled = PLACEHOLDER.sub(fill, body)
+    steps = [PLACEHOLDER.sub(fill, step) for step in skill.steps]
     if missing:
+        # One refusal for both halves, and it does not say which: an author
+        # reading it opens the file, and a model reading it cannot fix either
+        # one. Naming the parameter is what makes it actionable.
         raise ValueError(
             f"skill {skill.name!r} refers to undeclared parameter(s) "
             f"{', '.join(sorted(set(missing)))} in its body"
         )
-    return filled
+    return filled, steps
 
 
 def discover_skills(paths: Sequence[str], *, source: str = "skills-progressive") -> list[Skill]:
@@ -821,7 +907,22 @@ async def progressive(ctx: Context, config: Config) -> None:
         # the instruction that uses it, and arguments that do not satisfy the
         # declaration are refused here rather than discovered three steps into a
         # procedure that has already changed something.
-        instructions = rendered_body(body, skill, dict(args.arguments))
+        instructions, steps = rendered_skill(body, skill, dict(args.arguments))
+        # **Announced, not acted on.** A skill that declares `steps` is a
+        # procedure, and turning one into entries the model must work through
+        # belongs to `tool-todo` — which lives in ph-stabilize, a package this
+        # seam cannot import and a row a deployment may not have mounted. The
+        # event is how the declaration crosses that boundary without ph-core
+        # growing an opinion about plans (P7-18).
+        # `contained`, for the mode's own stated reason: the body is rendered and
+        # about to be returned, so no listener may un-read it — and without this a
+        # raise inside `skill-steps` turns a successful read into a failed tool
+        # call in every deployment that mounts both.
+        ctx.emit(
+            "skills/read",
+            {"skill": skill, "steps": steps, "session": run.session},
+            contained=True,
+        )
         return {
             "name": skill.name,
             "path": skill.path,

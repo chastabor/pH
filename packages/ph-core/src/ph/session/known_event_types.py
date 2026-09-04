@@ -203,7 +203,10 @@ KNOWN_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         # reads, and that is a required `user/message`, so a reader skipping
         # this loses the forwarding address and nothing else.
         "offload/input-spilled",
-        # Planning (P4-01, G1; emitted by `ph-stabilize`'s `tool-todo`). The
+        # Planning (P4-01, G1; emitted by `ph-stabilize`'s `tool-todo`, and by
+        # `skill-steps` when a skill it read declares a procedure — two writers
+        # of one event, deliberately, because both mean "the list is now this").
+        # The
         # list *is* this fold — there is no side table — and it reaches the
         # model through a prompt context, so a reader that skipped it would
         # assemble a different prompt than the session had. Required, not

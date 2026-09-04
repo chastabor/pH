@@ -24,7 +24,9 @@ parent's prompt assembly measured **3.9x slower** for it. Keyed, a read walks
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 
 import pytest
@@ -36,11 +38,13 @@ from ph.seams.skills import (
     MAX_ALLOWED_TOOLS,
     MAX_PARAMETERS,
     MAX_SKILL_BYTES,
+    SKILL_FILE,
     Skill,
     SkillRestriction,
     discover_skills,
     read_skill,
     render_catalog,
+    rendered_skill,
 )
 from ph.system_prompt import render_prompt
 from ph.testing import FAKE_OPTIONS, run_tool, skill, write_skill
@@ -326,6 +330,136 @@ async def test_a_body_naming_an_undeclared_input_is_refused(mount: Any, tmp_path
 
     assert result.is_error
     assert "undeclared parameter(s) verison" in text_of(result.content)
+
+
+async def test_a_step_is_rendered_like_the_prose_around_it(mount: Any, tmp_path: Path) -> None:
+    """A step is part of the document, so it gets the same substitution.
+
+    An author writing `Tag {{parameters.tag-prefix}}1.0` in a step means what they
+    mean in a paragraph — and unlike a paragraph, a step is *seeded into somebody's
+    todo list*, where the model cannot go back and read what a literal
+    `{{parameters.tag-prefix}}` stood for. So the steps ride the `skills/read`
+    payload already filled in: the listener that turns them into work fires after
+    the fact and does not have the arguments to fill them itself.
+
+    Sabotage: emit `skill.steps` instead, and the placeholder reaches the list raw.
+    """
+    write_skill(
+        tmp_path,
+        "release",
+        description="cut a release",
+        extra=RELEASE
+        + '\nsteps:\n  - "Bump the {{parameters.version-type}} version"'
+        + '\n  - "Tag {{parameters.tag-prefix}}1.0"',
+        body="See the steps.",
+    )
+    ctx = await mount(row(tmp_path))
+    agent = ctx.agents.create(ctx.sessions.create("s"), FAKE_OPTIONS)
+    seen: list[Any] = []
+    ctx.on("skills/read", lambda payload: seen.append(payload))
+
+    result = await run_tool(
+        ctx, "skill", {"name": "release", "arguments": {"version-type": "minor"}}, agent=agent
+    )
+
+    assert seen, "reading a skill announces it"
+    assert seen[0]["steps"] == ["Bump the minor version", "Tag v1.0"]
+    for step in seen[0]["steps"]:
+        assert step in text_of(result.content), (
+            "one procedure, not two copies that can disagree: the steps seeded into "
+            "the list are the ones the model was handed"
+        )
+
+
+async def test_a_skill_that_declares_no_inputs_is_still_scanned(mount: Any, tmp_path: Any) -> None:
+    """There is no shortcut for a skill with no `parameters:` block, and there was.
+
+    An early return handed such a body straight back, which made the scan
+    conditional on something no author can see: the same file was checked when
+    the model happened to pass arguments and not otherwise, and a `steps:`-only
+    skill seeded a literal `{{parameters.gate}}` into the plan — the exact failure
+    rendering steps exists to prevent, in the one place the model cannot go back
+    and read what the placeholder stood for.
+
+    Sabotage: restore `if not declared and not arguments: return body, steps` and
+    the call below succeeds, with the placeholder intact in an entry nobody can
+    delete.
+    """
+    write_skill(
+        tmp_path,
+        "port",
+        description="port a row",
+        extra='steps:\n  - "Run {{parameters.gate}}"',
+        body="Follow the steps.",
+    )
+    ctx = await mount(row(tmp_path))
+    agent = ctx.agents.create(ctx.sessions.create("s"), FAKE_OPTIONS)
+
+    result = await run_tool(ctx, "skill", {"name": "port"}, agent=agent)
+
+    assert result.is_error
+    assert "undeclared parameter(s) gate" in text_of(result.content)
+
+
+README = Path(__file__).resolve().parents[3] / "docs" / "skills" / "README.md"
+"""The document that teaches the format, from the package that defines it."""
+
+
+def test_the_readmes_example_is_a_skill_this_build_can_load() -> None:
+    """A worked example that does not parse is worse than none.
+
+    It is the first thing an author copies, and nothing else checks it — the doc
+    is prose to every other test in the tree. The defect this was written after
+    was a *comment* on the opening `---`: perfectly good YAML, refused by
+    `FRONTMATTER`, and invisible to anyone reading the block.
+
+    Asserted on the whole round trip rather than on the load, because "it parses"
+    would pass for a block whose `steps:` had quietly become a scalar. The
+    rendering is the half the example is really about.
+    """
+    if not README.is_file():
+        pytest.skip("docs are not part of an installed distribution")
+    found = re.search(r"```markdown\n(.*?)```", README.read_text(), re.S)
+    assert found is not None, "the format section lost its worked example"
+
+    block = found.group(1)
+    with TemporaryDirectory() as into:
+        home = Path(into) / "port-a-feature"
+        home.mkdir()
+        (home / SKILL_FILE).write_text(block)
+        skill = read_skill(home / SKILL_FILE)
+
+    assert skill is not None, "the documented example is not a skill pH would install"
+    _body, steps = rendered_skill(block, skill, {"upstream": "sources/tau"})
+    assert steps[0].startswith("Read the upstream implementation under sources/tau"), (
+        "a passed input reaches a step"
+    )
+    assert steps[-1].startswith("Run uv run pytest -q"), "and a declared default fills itself in"
+
+
+async def test_a_listener_that_fails_does_not_fail_the_read(mount: Any, tmp_path: Any) -> None:
+    """A skill read cannot be un-read, which is what `contained=` is for.
+
+    The body is rendered and about to be returned by the time the event fires, so
+    no listener may object to it — and without containment a raise inside
+    `skill-steps` turns a successful `skill` call into a failed one in every
+    deployment that mounts both.
+
+    Sabotage: drop `contained=True` and the tool call below is an error.
+    """
+
+    def unhappy(_payload: Any) -> None:
+        raise RuntimeError("this row is having a bad day")
+
+    ctx, agent = await _release(mount, tmp_path)
+    ctx.on("skills/read", unhappy)
+
+    result = await run_tool(
+        ctx, "skill", {"name": "release", "arguments": {"version-type": "minor"}}, agent=agent
+    )
+
+    assert not result.is_error
+    assert "Bump minor." in text_of(result.content)
 
 
 async def test_a_skill_that_declares_nothing_is_untouched(mount: Any, tmp_path: Path) -> None:

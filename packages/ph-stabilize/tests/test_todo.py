@@ -14,11 +14,10 @@ pipeline's answer rather than this module's opinion of it.
 
 from __future__ import annotations
 
-import json
 from typing import Any
 
 import pytest
-from stabilize_helpers import PROFILE, bash_call, result_text, run_tool_calls
+from stabilize_helpers import PROFILE, bash_call, result_text, run_tool_calls, todo_call
 
 from ph.cordis import DEPLOYMENT, Context, Profile, load_profile_documents
 from ph.llm.types import ToolCallBlock
@@ -64,10 +63,6 @@ def _plan(session: Session) -> list[tuple[str, str]]:
     a full-dict equality here would fail every time either of them grows.
     """
     return [(str(one["content"]), str(one["status"])) for one in todos_of(session)]
-
-
-def _call(call_id: str, todos: list[dict[str, str]]) -> ToolCallBlock:
-    return ToolCallBlock(id=call_id, name=TOOL_NAME, arguments=json.dumps({"todos": todos}))
 
 
 async def _run(ctx: Any, session: Session, *calls: ToolCallBlock, step: int = 1) -> None:
@@ -148,7 +143,9 @@ async def test_the_list_is_written_to_the_log_and_nowhere_else(mount: Any) -> No
     ctx = await mount(ENABLED, profile=PROFILE)
     session = ctx.sessions.create("planning")
 
-    await _run(ctx, session, _call("c1", _todos(("survey", "in_progress"), ("port", "pending"))))
+    await _run(
+        ctx, session, todo_call("c1", _todos(("survey", "in_progress"), ("port", "pending")))
+    )
 
     written = [event for event in session.events if event.type == "todo/write"]
     assert len(written) == 1
@@ -160,8 +157,10 @@ async def test_a_second_call_replaces_the_whole_list(mount: Any) -> None:
     ctx = await mount(ENABLED, profile=PROFILE)
     session = ctx.sessions.create("planning")
 
-    await _run(ctx, session, _call("c1", _todos(("survey", "in_progress"))))
-    await _run(ctx, session, _call("c2", _todos(("survey", "completed"), ("port", "in_progress"))))
+    await _run(ctx, session, todo_call("c1", _todos(("survey", "in_progress"))))
+    await _run(
+        ctx, session, todo_call("c2", _todos(("survey", "completed"), ("port", "in_progress")))
+    )
 
     assert _plan(session) == [("survey", "completed"), ("port", "in_progress")]
     assert todos_of(Session("empty")) == [], "a session that never planned has no list"
@@ -189,7 +188,7 @@ async def test_a_runaway_entry_is_refused_and_writes_nothing(mount: Any) -> None
     ctx = await mount(ENABLED, profile=PROFILE)
     session = ctx.sessions.create("runaway")
 
-    await _run(ctx, session, _call("c1", _todos(("x" * (MAX_TODO_CONTENT + 1), "pending"))))
+    await _run(ctx, session, todo_call("c1", _todos(("x" * (MAX_TODO_CONTENT + 1), "pending"))))
 
     assert todos_of(session) == [], "nothing was written"
     result = session.latest("tool/result")
@@ -207,7 +206,7 @@ async def test_a_list_longer_than_the_cap_is_refused(mount: Any) -> None:
     session = ctx.sessions.create("too-many")
 
     over = tuple((f"step {n}", "pending") for n in range(MAX_TODOS + 1))
-    await _run(ctx, session, _call("c1", _todos(*over)))
+    await _run(ctx, session, todo_call("c1", _todos(*over)))
 
     assert todos_of(session) == []
 
@@ -247,7 +246,7 @@ async def test_a_plan_states_its_own_dependencies(mount: Any) -> None:
     await _run(
         ctx,
         session,
-        _call(
+        todo_call(
             "c1",
             [
                 _with("write the seam", "in_progress", []),
@@ -275,7 +274,9 @@ async def test_a_dependency_on_nothing_is_refused(mount: Any) -> None:
     ctx = await mount(ENABLED, profile=PROFILE)
     session = ctx.sessions.create("dangling")
 
-    await _run(ctx, session, _call("c1", [_with("gate it", "pending", ["a step I never wrote"])]))
+    await _run(
+        ctx, session, todo_call("c1", [_with("gate it", "pending", ["a step I never wrote"])])
+    )
 
     assert todos_of(session) == [], "nothing was written"
     assert "not in the list" in result_text(session, "c1")
@@ -295,7 +296,7 @@ async def test_a_cycle_is_refused(mount: Any) -> None:
     await _run(
         ctx,
         session,
-        _call("c1", [_with("a", "pending", ["b"]), _with("b", "pending", ["a"])]),
+        todo_call("c1", [_with("a", "pending", ["b"]), _with("b", "pending", ["a"])]),
     )
 
     assert todos_of(session) == []
@@ -312,7 +313,7 @@ async def test_an_entry_that_waits_on_itself_is_the_one_node_cycle(mount: Any) -
     ctx = await mount(ENABLED, profile=PROFILE)
     session = ctx.sessions.create("ouroboros")
 
-    await _run(ctx, session, _call("c1", [_with("a", "pending", ["a"])]))
+    await _run(ctx, session, todo_call("c1", [_with("a", "pending", ["a"])]))
 
     assert todos_of(session) == []
     assert "cycle: 'a' -> 'a'" in result_text(session, "c1") or "cycle" in result_text(
@@ -335,7 +336,7 @@ async def test_claiming_to_have_started_something_still_blocked_is_refused(mount
     await _run(
         ctx,
         session,
-        _call("c1", [_with("build", "pending", []), _with("ship", "in_progress", ["build"])]),
+        todo_call("c1", [_with("build", "pending", []), _with("ship", "in_progress", ["build"])]),
     )
 
     assert todos_of(session) == []
@@ -359,9 +360,9 @@ async def test_a_completion_carries_what_the_harness_saw(mount: Any) -> None:
     ctx = await mount(ENABLED, profile=PROFILE)
     session = ctx.sessions.create("witnessed")
 
-    await _run(ctx, session, _call("c1", _todos(("survey", "in_progress"))))
+    await _run(ctx, session, todo_call("c1", _todos(("survey", "in_progress"))))
     await _run(ctx, session, bash_call("b1", "true"), step=2)
-    await _run(ctx, session, _call("c2", _todos(("survey", "completed"))), step=3)
+    await _run(ctx, session, todo_call("c2", _todos(("survey", "completed"))), step=3)
 
     (done,) = [one for one in todos_of(session) if one["status"] == "completed"]
     assert done["worked"] == 1, "one bash call happened in the window"
@@ -379,8 +380,8 @@ async def test_a_box_ticked_with_no_work_behind_it_is_visible(mount: Any) -> Non
     ctx = await mount(ENABLED, profile=PROFILE)
     session = ctx.sessions.create("bare")
 
-    await _run(ctx, session, _call("c1", _todos(("port the row", "in_progress"))))
-    await _run(ctx, session, _call("c2", _todos(("port the row", "completed"))), step=2)
+    await _run(ctx, session, todo_call("c1", _todos(("port the row", "in_progress"))))
+    await _run(ctx, session, todo_call("c2", _todos(("port the row", "completed"))), step=2)
 
     assert unevidenced(todos_of(session)) == ["port the row"]
 
@@ -395,14 +396,20 @@ async def test_a_receipt_travels_with_its_entry(mount: Any) -> None:
     ctx = await mount(ENABLED, profile=PROFILE)
     session = ctx.sessions.create("carried")
 
-    await _run(ctx, session, _call("c1", _todos(("first", "in_progress"))))
+    await _run(ctx, session, todo_call("c1", _todos(("first", "in_progress"))))
     await _run(ctx, session, bash_call("b1", "true"), step=2)
     await _run(
-        ctx, session, _call("c2", _todos(("first", "completed"), ("second", "in_progress"))), step=3
+        ctx,
+        session,
+        todo_call("c2", _todos(("first", "completed"), ("second", "in_progress"))),
+        step=3,
     )
     # A later write with no work in its window at all.
     await _run(
-        ctx, session, _call("c3", _todos(("first", "completed"), ("second", "completed"))), step=4
+        ctx,
+        session,
+        todo_call("c3", _todos(("first", "completed"), ("second", "completed"))),
+        step=4,
     )
 
     kept = {one["content"]: one.get("worked") for one in todos_of(session)}
@@ -426,8 +433,8 @@ async def test_two_calls_in_one_message_both_fail_and_write_nothing(mount: Any) 
     await _run(
         ctx,
         session,
-        _call("c1", _todos(("first", "in_progress"))),
-        _call("c2", _todos(("first", "completed"), ("second", "pending"))),
+        todo_call("c1", _todos(("first", "in_progress"))),
+        todo_call("c2", _todos(("first", "completed"), ("second", "pending"))),
     )
 
     results = [event for event in session.events if event.type == "tool/result"]
@@ -452,7 +459,7 @@ async def test_one_call_in_a_message_is_allowed(mount: Any) -> None:
     ctx = await mount(ENABLED, profile=PROFILE)
     session = ctx.sessions.create("single")
 
-    await _run(ctx, session, _call("c1", _todos(("survey", "in_progress"))))
+    await _run(ctx, session, todo_call("c1", _todos(("survey", "in_progress"))))
 
     (result,) = [event for event in session.events if event.type == "tool/result"]
     assert result.data.get("failureKind") is None, str(result.data)
@@ -468,8 +475,8 @@ async def test_two_calls_across_two_messages_are_both_allowed(mount: Any) -> Non
     ctx = await mount(ENABLED, profile=PROFILE)
     session = ctx.sessions.create("sequential")
 
-    await _run(ctx, session, _call("c1", _todos(("survey", "in_progress"))))
-    await _run(ctx, session, _call("c2", _todos(("survey", "completed"))))
+    await _run(ctx, session, todo_call("c1", _todos(("survey", "in_progress"))))
+    await _run(ctx, session, todo_call("c2", _todos(("survey", "completed"))))
 
     assert not [
         event
@@ -518,7 +525,7 @@ async def test_the_list_rides_the_context_and_not_the_cached_prefix(mount: Any) 
         return await ctx.system_prompt.assemble(agent.ctx, agent=agent)
 
     before = await assembled()
-    await _run(ctx, session, _call("c1", _todos(("survey", "in_progress"))))
+    await _run(ctx, session, todo_call("c1", _todos(("survey", "in_progress"))))
     after = await assembled()
 
     assert render_prompt(before) == render_prompt(after), "writing a todo moved the cached prefix"

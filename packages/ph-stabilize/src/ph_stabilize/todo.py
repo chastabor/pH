@@ -57,6 +57,7 @@ from ph.system_prompt.assembly import (
     PromptContext,
     PromptSection,
 )
+from ph.text import count_of
 from ph.tools import ToolCallView, ToolResultView
 from ph.tools.definition import (
     Deny,
@@ -73,11 +74,13 @@ __all__ = [
     "MAX_TODOS",
     "MAX_TODO_CONTENT",
     "PARALLEL_CALL_ERROR",
+    "SKILL",
     "TOOL_NAME",
     "WRITE_TODOS_SYSTEM_PROMPT",
     "PlanError",
     "apply",
     "blocked_by",
+    "outstanding_steps",
     "render_todo_list",
     "todos_of",
     "unevidenced",
@@ -100,6 +103,23 @@ Generous against what the tool is for — upstream's own examples are phrases li
 told its text was accepted when it was truncated would go on believing the list
 says something it does not. The bound reaches the model as `maxLength` in the
 tool's own schema, so it is a stated rule rather than a surprise."""
+
+SKILL = "skill"
+"""What `source` says on an entry a skill put there, rather than the model.
+
+**Harness-issued, like `worked`, and for the same reason**: an entry the model
+could *label* as a skill's is one it could also label as its own and then delete.
+So the model's arguments carry no `source` at all — this is re-attached on every
+write from the list the log already holds, and a write that fails to carry a
+skill's step forward is refused.
+
+The rule it enables is the whole of P7-18: the model may add entries beside a
+seeded step and may mark one done, and may not drop, reorder or reword one. That
+is the difference between a procedure and a suggestion.
+
+One value, not a vocabulary: an entry the model wrote carries no `source` at
+all. There is no `"model"` constant because presence *is* the question every
+reader asks, and a second value would be a field the model could set."""
 
 MAX_REQUIRES = 20
 """How many entries one entry may declare a dependency on.
@@ -305,6 +325,55 @@ def todos_of(session: Session | None) -> list[dict[str, Any]]:
     return [item for item in thawed or () if isinstance(item, dict)]
 
 
+def steps_of(todos: list[dict[str, Any]]) -> list[str]:
+    """The contents of entries a skill seeded, in order.
+
+    Order matters as much as membership: a seeded procedure reordered is a
+    different procedure, and `requires` alone would not notice a swap between two
+    steps that happen not to depend on each other.
+    """
+    return [str(one.get("content")) for one in todos if one.get("source") == SKILL]
+
+
+def startable(todos: list[dict[str, Any]]) -> list[str]:
+    """Entries that are not finished and are waiting on nothing unfinished.
+
+    What a `turn-stopping` listener asks: is there work this plan says can begin
+    right now? An empty answer with entries still pending means everything left
+    is blocked — a different thing from being done, and the listener stands down
+    rather than naming work the plan itself says cannot start.
+    """
+    waiting = blocked_by(todos)
+    return [
+        str(one.get("content"))
+        for one in todos
+        if one.get("status") != "completed" and str(one.get("content")) not in waiting
+    ]
+
+
+def outstanding_steps(session: Session | None) -> set[str]:
+    """The contents of seeded entries that are not finished, read **frozen**.
+
+    The question a `turn-stopping` listener asks once per turn for *every*
+    session in the deployment, including the ones that never read a skill — so it
+    is answered off the frozen payload rather than by thawing a list it is about
+    to throw away. `Session.latest` is an incremental fold (measured 0.08 µs
+    whatever the log length), so a session that never used the tool costs a dict
+    lookup and nothing else.
+
+    Here rather than in `skill-steps`, because "an entry a skill put there" is
+    this module's sentence: `steps_of`, `_carried` and this are the three readers
+    of `source`, and a fourth spelling across a package boundary is how the
+    sidebar and the steer come to disagree about what is outstanding.
+    """
+    previous = session.latest("todo/write") if session is not None else None
+    return {
+        str(one.get("content"))
+        for one in _recorded(previous)
+        if one.get("source") == SKILL and one.get("status") != "completed"
+    }
+
+
 def blocked_by(todos: list[dict[str, Any]]) -> dict[str, list[str]]:
     """For each entry, the dependencies it declared that are not yet completed.
 
@@ -436,7 +505,72 @@ def _work_since(session: Session, since: int) -> int:
     )
 
 
-def _witnessed(session: Session, todos: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _recorded(previous: Any) -> list[Mapping[str, Any]]:
+    """The entries the last `todo/write` holds, read **frozen**.
+
+    The one read both rules take. `todos_of` would deep-copy the whole previous
+    list — measured 12x dearer at the caps, ~95% of it copying `requires` — and
+    between them `_carried` and `_witnessed` want four scalars per entry, so a
+    thaw would be paid twice per write to build something neither of them
+    mutates. A `MappingProxyType` answers `.get` perfectly well.
+    """
+    entries = seq_of(previous.data.get("todos")) if previous else ()
+    return [one for one in entries if isinstance(one, Mapping)]
+
+
+def _carried(
+    recorded: list[Mapping[str, Any]], todos: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Re-attach what a skill seeded, and refuse a write that lost it (P7-18).
+
+    **The model's arguments never carry `source`.** It is read from the list the
+    log already holds and put back here, so a procedure cannot be forged into
+    existence or labelled away — the same shape `worked` uses, and for the same
+    reason: a claim the claimant issues about itself is not evidence.
+
+    Three things are refused: dropping a seeded step, reordering them, and
+    rewording one — the last reads as a drop plus an add, which is what it is.
+    Status is the one thing the model *may* change, because marking progress is
+    the whole point. `requires` on a seeded step is put back too, so the order a
+    skill declared cannot be edited out from underneath it.
+
+    A write that has never seen a skill is untouched, which is every write in a
+    deployment that installs no procedural skills.
+    """
+    seeded = {str(one.get("content")): one for one in recorded if one.get("source") == SKILL}
+    if not seeded:
+        return todos
+    kept = [name for name in (str(one.get("content")) for one in todos) if name in seeded]
+    if kept != list(seeded):
+        # Two refusals, because they are two mistakes and the fix differs. A
+        # reorder that named every step as "dropped" told the model all of them
+        # were wrong when only their order was.
+        lost = [name for name in seeded if name not in kept]
+        if lost:
+            raise PlanError(
+                f"this plan drops {count_of(len(lost), 'step')} a skill set: "
+                f"{', '.join(repr(name) for name in lost)}. Keep them, in order — you "
+                "may add your own entries around them and mark these done."
+            )
+        raise PlanError(
+            f"this plan reorders the {count_of(len(seeded), 'step')} a skill set. Keep "
+            f"them in the order it declared: {', '.join(repr(name) for name in seeded)}. "
+            "You may add your own entries around them and mark these done."
+        )
+    for todo in todos:
+        before = seeded.get(str(todo.get("content")))
+        if before is not None:
+            todo["source"] = SKILL
+            todo["requires"] = list(before.get("requires") or ())
+    return todos
+
+
+def _witnessed(
+    session: Session,
+    previous: Any,
+    recorded: list[Mapping[str, Any]],
+    todos: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
     """Attach the receipt to entries that have just been completed.
 
     **The one field in the list the model does not write.** `worked` is what the
@@ -450,16 +584,7 @@ def _witnessed(session: Session, todos: list[dict[str, Any]]) -> list[dict[str, 
     finished in, not this one. An entry moved *back* out of `completed` loses it
     — it is no longer a claim, so there is nothing to witness.
     """
-    previous = session.latest("todo/write")
-    # Read frozen, not thawed. `todos_of` would deep-copy the whole previous
-    # list — measured 12x dearer at the caps, ~95% of it copying `requires`,
-    # which this never looks at — to read two scalars per entry. A
-    # `MappingProxyType` answers `.get` perfectly well, and nothing here mutates
-    # what it read.
-    was: dict[str, tuple[Any, Any]] = {}
-    for one in seq_of(previous.data.get("todos")) if previous else ():
-        if isinstance(one, Mapping):
-            was[str(one.get("content"))] = (one.get("status"), one.get("worked"))
+    was = {str(one.get("content")): (one.get("status"), one.get("worked")) for one in recorded}
     worked = _work_since(session, previous.seq if previous else -1)
     for todo in todos:
         if todo.get("status") != "completed":
@@ -513,10 +638,19 @@ async def apply(ctx: Context, config: Any) -> None:
 
     async def write_todos(args: WriteTodosArgs, run: ToolRunContext) -> Any:
         todos = [item.model_dump(mode="json") for item in args.todos]
-        _checked(todos)
         session = run.session
+        # One `latest`, one frozen read: both rules below want a few scalars off
+        # the previous list, and folding it twice per write was the deep copy
+        # `_witnessed` had already been written to avoid.
+        previous = session.latest("todo/write") if session is not None else None
+        recorded = _recorded(previous)
+        # Provenance before coherence: a write that lost a skill's step is
+        # refused for *that*, which is actionable, rather than for whatever the
+        # dependency check notices about the wreckage left behind.
+        todos = _carried(recorded, todos)
+        _checked(todos)
         if session is not None:
-            todos = _witnessed(session, todos)
+            todos = _witnessed(session, previous, recorded, todos)
             # Tool-owned event: the tool that changed the list is the one that
             # records it, so "model-visible means logged" holds without the
             # pipeline learning what a todo is (I3).

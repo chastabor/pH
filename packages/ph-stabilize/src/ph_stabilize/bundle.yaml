@@ -18,6 +18,16 @@
   name: tool-todo
   disabled: true
 
+# A skill that declares `steps:` becomes work the model must finish, and a
+# listener on `agent/turn-stopping` objects while any of it is startable (P7-18).
+# `disabled` for `tool-todo`'s reason and one more: this row can keep a turn
+# going, which is a posture a deployment chooses rather than inherits. Useless
+# without `tool-todo` — the list it seeds is that row's — so a profile that
+# enables this enables both.
+- id: skill-steps
+  name: skill-steps
+  disabled: true
+
 # --- context offloading -----------------------------------------------------
 # One oversized tool result can end a session's usefulness on its own, and the
 # model rarely needs all of it (G2/C5). Enabled: unlike planning, this changes

@@ -23,6 +23,7 @@ limits = "ph_stabilize.limits:apply"
 permissions-fs = "ph_stabilize.permissions_fs:apply"
 tool-result-offload = "ph_stabilize.offload:apply"
 tool-todo = "ph_stabilize.todo:apply"
+skill-steps = "ph_stabilize.skill_steps:apply"
 
 [tool.uv.sources]
 ph-core = { workspace = true }
