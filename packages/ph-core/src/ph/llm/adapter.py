@@ -22,7 +22,16 @@ from typing import Any, Protocol
 from ..cordis import Context, Running, events, plugin, running
 from .types import Finish, FinishReason, GenerateOptions, LlmFailure
 
-__all__ = ["AdapterHandle", "LlmAdapter", "LlmError", "LlmRuntime", "ResolvedModel", "apply"]
+__all__ = [
+    "AdapterHandle",
+    "LlmAdapter",
+    "LlmError",
+    "LlmRuntime",
+    "MediaRoute",
+    "ResolvedModel",
+    "apply",
+    "resolved",
+]
 
 log = logging.getLogger("ph.llm")
 
@@ -103,6 +112,72 @@ class ResolvedModel:
     outcomes differ in kind: over that, nothing is sent; over this, everything
     works and a person is quietly overpaying, which is the failure that lasts for
     a whole session because nothing announces it."""
+
+
+class MediaRoute(Protocol):
+    """The route facts a config declares and `ResolvedModel` carries.
+
+    Read-only members on purpose: the three configs disagree about the *types* —
+    Anthropic states a pixel edge as `int` where the other two allow `None` — and
+    a property is covariant where a mutable attribute would not be, so each may
+    narrow its own field and still satisfy this.
+
+    Declared rather than duck-typed, which is what makes `resolved` below more
+    than a shortcut: a config that grows out of step with `ResolvedModel` fails at
+    the call site instead of quietly reporting a default.
+
+    **Beside `ResolvedModel` rather than beside the adapters that satisfy it.**
+    Its member list *is* that dataclass's field list, so the two have to move
+    together — and living in an application package's private module would have
+    meant a third-party adapter importing `ph_app.adapters._media` or writing the
+    seventh copy of the projection, which is the drift this exists to stop. It is
+    also the only side of the boundary where the invariant can be checked at all:
+    a rename here and a matching edit there cannot pass one suite and fail the
+    other.
+    """
+
+    @property
+    def context_window(self) -> int | None: ...
+    @property
+    def default_max_tokens(self) -> int | None: ...
+    @property
+    def accepts(self) -> tuple[str, ...]: ...
+    @property
+    def max_attachment_bytes(self) -> int | None: ...
+    @property
+    def max_image_edge(self) -> int | None: ...
+    @property
+    def usable_image_edge(self) -> int | None: ...
+
+
+def resolved(route: MediaRoute, *, structured_output: bool) -> ResolvedModel:
+    """One route's config as the `ResolvedModel` every layer above reads.
+
+    **The projection, not the values.** What a route accepts, how large a file it
+    takes and what it does with pixels are per-provider facts that stay in each
+    config with the paragraph arguing them; what was copied three times is the
+    *field list* — six lines mapping one name onto the same name — and that list
+    is `ResolvedModel`'s vocabulary rather than any adapter's.
+
+    The cost of the copies was a seventh capability being three edits, where an
+    adapter that missed one reports the default instead of the route's number and
+    `media-degrade` then applies the wrong rule for that provider alone. Now it is
+    one edit here, and a config that has not caught up fails to type-check.
+
+    `structured_output` is passed rather than read, because it is the one field
+    that is not a config value: it is a claim about the *wire*, argued at each
+    call site, and a route that declared it in config could promise a guarantee
+    its adapter does not implement.
+    """
+    return ResolvedModel(
+        context_window=route.context_window,
+        default_max_tokens=route.default_max_tokens,
+        accepts=frozenset(route.accepts),
+        max_attachment_bytes=route.max_attachment_bytes,
+        max_image_edge=route.max_image_edge,
+        usable_image_edge=route.usable_image_edge,
+        structured_output=structured_output,
+    )
 
 
 class LlmAdapter(Protocol):

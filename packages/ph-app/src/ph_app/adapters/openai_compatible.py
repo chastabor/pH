@@ -30,7 +30,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ph.cordis import Context, plugin
-from ph.llm.adapter import LlmError, ResolvedModel
+from ph.llm.adapter import LlmError, ResolvedModel, resolved
 from ph.llm.types import (
     AttachmentRef,
     BlockEnd,
@@ -305,15 +305,10 @@ class OpenAiCompatibleAdapter:
             yield chunk
 
     def resolve_model(self, provider: str, model: str) -> ResolvedModel:
-        return ResolvedModel(
-            context_window=self.profile.context_window,
-            default_max_tokens=self.profile.default_max_tokens,
-            accepts=frozenset(self.profile.accepts),
-            max_attachment_bytes=self.profile.max_attachment_bytes,
-            max_image_edge=self.profile.max_image_edge,
-            usable_image_edge=self.profile.usable_image_edge,
-            structured_output=True,
-        )
+        # This wire takes `response_format: {"type": "json_schema", …}` with
+        # `strict`, so the server builds a grammar and the reply cannot come back
+        # another shape (P7-17).
+        return resolved(self.profile, structured_output=True)
 
 
 @dataclass(slots=True)

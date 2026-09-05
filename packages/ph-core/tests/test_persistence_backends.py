@@ -759,6 +759,7 @@ async def test_a_listing_row_says_the_same_thing_from_either_backend(
         "modified",
         "cwd",
         "parent",
+        "family",
     }, "a new listing field belongs in `stored_row`, where both backends get it"
 
     parent = _session(store, "p", cwd="/work")
@@ -770,6 +771,66 @@ async def test_a_listing_row_says_the_same_thing_from_either_backend(
     rows = {row.session_id: row for row in store.stored()}
     assert rows["p"].parent is None and rows["p"].cwd == "/work"
     assert rows["c"].parent == "p"
+    # A lineage shares one directory, so the child's family is the root's id —
+    # which is what lets a reader build the path instead of searching for it.
+    assert rows["p"].family == rows["c"].family == "p"
+
+
+async def test_reading_a_log_nobody_writes_does_not_hold_it_open(tmp_path: Path) -> None:
+    """**The exhaustion a third caller inherited by not knowing to guard.**
+
+    Turso keeps one database per session and `_connect` caches the handle, while
+    `forget` runs only for sessions this store *buffers* — so a log read by
+    something that does not write it stayed open, with its `-wal` and `-shm`
+    sidecars, for the life of the process. `read` guarded its chained walk and
+    `stored` guarded its header peeks; the fold behind `ph attachments gc` reads
+    one database per stored session at a limit of 100 000 and had neither.
+
+    A rule two callers had to remember was going to be forgotten by the third, so
+    it lives in `_borrow`, under the only thing that opens a handle — and this is
+    the assertion that keeps it there. Both readers are driven: `read_own`, and
+    the header peek behind `stored()`.
+
+    Turso only: JSONL opens a file per read and closes it, so there is no handle
+    to keep and nothing to pin.
+    """
+    from ph.persistence.turso import TursoSessionStore
+
+    store = TursoSessionStore(ctx=None, root=tmp_path)  # type: ignore[arg-type]
+    for index in range(3):
+        session = _session(store, f"s{index}")
+        _append(store, session, "turn/start", {"turn": 0})
+        await store.flush(session)
+        store.forget(session.id)
+    assert store._connections == {}, "the writer's own handles were released by `forget`"
+
+    for index in range(3):
+        store.read_own(f"s{index}")
+    assert store._connections == {}, "a reader left a database open"
+
+    assert len(store.stored()) == 3
+    assert store._connections == {}, "a listing's header peek left a database open"
+
+    # The release has to survive the raise, which is why it is a context manager
+    # and not a line before each return. The refusal that matters is the one
+    # raised *after* the handle is open — a database that exists and holds no
+    # header — where a post-condition on the success path alone leaks it. Built
+    # by connecting and writing nothing, which is what an interrupted first
+    # write leaves behind.
+    store._connect("headerless")
+    store._release("headerless")
+    with pytest.raises(FileNotFoundError, match="has no header"):
+        store.read_own("headerless")
+    assert store._connections == {}, "a read that refused mid-way left its handle open"
+
+    # The exemption, and the reason for it: a live session's handle is the
+    # *writer's*, and closing it mid-session would make the next flush pay a
+    # reconnect and the schema DDL again.
+    live = _session(store, "live")
+    _append(store, live, "turn/start", {"turn": 0})
+    await store.flush(live)
+    store.read_own("live")
+    assert set(store._connections) == {"live"}
 
 
 async def test_a_bounded_read_stops_at_the_boundary(store: SessionPersistence) -> None:

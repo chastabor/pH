@@ -34,7 +34,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ph.cordis import Context, plugin
-from ph.llm.adapter import LlmError, ResolvedModel
+from ph.llm.adapter import LlmError, ResolvedModel, resolved
 from ph.llm.types import (
     BlockEnd,
     BlockStart,
@@ -383,20 +383,12 @@ class AnthropicAdapter:
             yield chunk
 
     def resolve_model(self, provider: str, model: str) -> ResolvedModel:
-        return ResolvedModel(
-            context_window=self.config.context_window,
-            default_max_tokens=self.config.default_max_tokens,
-            accepts=frozenset(self.config.accepts),
-            max_attachment_bytes=self.config.max_attachment_bytes,
-            max_image_edge=self.config.max_image_edge,
-            usable_image_edge=self.config.usable_image_edge,
-            # `structured_output` stays False, and the silence is deliberate:
-            # Anthropic has no `response_format` equivalent today, so a caller
-            # here gets the instruction, the validation and the retry, and not
-            # the wire's guarantee (P7-17). Declaring it rather than leaving the
-            # default unremarked is what stops the next adapter copying an
-            # omission it thought was an oversight.
-        )
+        # `structured_output` is False, and saying so is deliberate: Anthropic
+        # has no `response_format` equivalent today, so a caller here gets the
+        # instruction, the validation and the retry, and not the wire's guarantee
+        # (P7-17). Passing it rather than leaving a default unremarked is what
+        # stops the next adapter copying an omission it thought was an oversight.
+        return resolved(self.config, structured_output=False)
 
 
 @dataclass(slots=True)

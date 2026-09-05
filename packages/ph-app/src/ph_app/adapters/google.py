@@ -43,7 +43,7 @@ from typing import Any
 import anyio
 
 from ph.cordis import Context, plugin
-from ph.llm.adapter import LlmError, ResolvedModel
+from ph.llm.adapter import LlmError, ResolvedModel, resolved
 from ph.llm.types import (
     AttachmentRef,
     BlockEnd,
@@ -133,7 +133,32 @@ file reaches `ACTIVE` is refused — so this is the one uploader of the three th
 is not done when the bytes have landed. Two minutes because that is the scale of
 a few minutes of video being transcoded at the far end, and because the fallback
 when it expires is not a failure: `load_handles` swallows it and the block goes
-inline, which for a video over the inline cap becomes an honest pointer."""
+inline, which for a video over the inline cap becomes an honest pointer.
+
+**Not enforced, and it is the expensive half** (§5 rule 6). Running the budget out
+throws away a transfer that **already completed**: `upload` raises before
+`handle_for` reaches `_store`, so nothing remembers the file, and the next step of
+the same loop re-reads the blob from disk, transfers it again, and waits the
+budget again. A 300 MB clip whose transcode is slower than this number is
+therefore re-sent on *every* step, stalling each request by `upload_ready_ms`
+before it goes out, and each attempt leaves another copy against the account's
+Files quota.
+
+The fix is not a longer budget — it is remembering the `files/<name>` this upload
+already created, so a later attempt *polls* instead of re-POSTing. What that must
+not do is put the pending id in `ctx.uploads`: `FileHandle` is a *usable* id, a
+file still `PROCESSING` is precisely not one, and `cached()` would hand the next
+request a reference the provider refuses — trading a re-upload for a retry loop.
+
+But that constraint is about what crosses the **seam**, and the pending id need
+not. `Uploader.upload` owns the whole transfer-and-wait, and the row registers one
+long-lived adapter as the uploader — so a `dict[attachment_id, files/<name>]` on
+this adapter is enough: record the name when `_ready` gives up, and on the next
+call `GET` it before transferring anything. A process restart loses the memo and
+gets today's behaviour, so it is strictly no worse. That is the change to make,
+and it is deliberately not made here — it is a behaviour change rather than the
+documentation this note is, and the test below pins today's cost so making it is
+a visible decision rather than a silent one."""
 
 
 class Config(WireModel):
@@ -276,6 +301,10 @@ class GoogleAdapter:
         `FAILED` raises rather than waiting out the clock: the provider has said
         this file will never work, and the useful thing to do with that is fall
         back to the bytes now.
+
+        **Giving up here discards a completed transfer** — the cost is stated at
+        `UPLOAD_READY_MS`, next to the number that decides it, because that is
+        where somebody tuning this would assume otherwise.
         """
         name = str(record.get("name") or "")
         waited = 0
@@ -372,18 +401,10 @@ class GoogleAdapter:
             yield chunk
 
     def resolve_model(self, provider: str, model: str) -> ResolvedModel:
-        return ResolvedModel(
-            context_window=self.config.context_window,
-            default_max_tokens=self.config.default_max_tokens,
-            accepts=frozenset(self.config.accepts),
-            max_attachment_bytes=self.config.max_attachment_bytes,
-            max_image_edge=self.config.max_image_edge,
-            usable_image_edge=self.config.usable_image_edge,
-            # See `_body`: this route is asked for JSON and not held to a schema,
-            # so it does not enforce one. Claiming otherwise would make a caller
-            # skip the validation that is actually doing the work.
-            structured_output=False,
-        )
+        # See `_body`: this route is asked for JSON and not held to a schema, so
+        # it does not enforce one. Claiming otherwise would make a caller skip the
+        # validation that is actually doing the work.
+        return resolved(self.config, structured_output=False)
 
 
 def _file_record(payload: dict[str, Any]) -> dict[str, Any]:

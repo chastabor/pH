@@ -55,6 +55,18 @@ class StoredSession:
     modified: float
     cwd: str = ""
     parent: str | None = None
+    family: str = ""
+    """The directory this session's log lives in — its lineage's root id.
+
+    A listing consumer finally needed it, which is the bar the notes below set
+    for adding a field. `read_own` takes `family` and says it is *not* a hint:
+    with it a log is a path, without it a directory search. A fold over every
+    stored session — `ph attachments gc` — read one log per row and paid that
+    search on each, so listing 4 000 sessions across 1 000 families cost a scan
+    per session on top of the listing's own.
+
+    Empty when the header would not parse, and that is the safe direction: the
+    reader falls back to searching, which is what it did for every row before."""
 
     # **No `kind`**, for the reason above. It was added here, filled by one
     # backend, missed by the other, and read by nobody: the picker resolves a
@@ -86,6 +98,12 @@ def stored_row(session_id: str, header: SessionHeader | None, modified: float) -
         modified=modified,
         cwd=(header.cwd or "") if header is not None else "",
         parent=header.parent_session if header is not None else None,
+        # No `or ""` guard, unlike `cwd` above: `SessionHeader.family` is a
+        # `str` with `min_length=1` whose docstring says it is never absent, so
+        # the idiom copied from the nullable line next to it would suggest this
+        # field can be blank when a header parsed. The `else` arm is the one real
+        # source of `""`, and `StoredSession.family` says so.
+        family=header.family if header is not None else "",
     )
 
 

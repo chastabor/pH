@@ -23,6 +23,7 @@ import pytest
 
 from ph.cordis import Context
 from ph.llm.types import AttachmentRef, MediaBlock, create_user_message
+from ph.persistence.protocol import StoredSession
 from ph.seams.attachments import (
     LISTING_LIMIT,
     MIN_AGE,
@@ -53,23 +54,24 @@ class _Store:
         self.sessions = {one.id: one for one in sessions}
         self.broken = broken
         self.truncate = truncate
+        self.asked: dict[str, Any] = {}
+        """What `family` each read was given — the fold's half of "an id plus a
+        family is a path", which nothing else would notice going missing."""
 
     def stored(self, *, limit: int = 50) -> list[Any]:
-        rows = [_Row(one) for one in self.sessions]
+        # Real `StoredSession` rows, not a stand-in with the two fields this test
+        # happened to read: a hand-rolled row went stale the moment the listing
+        # grew `family`, and the fold read the resulting `AttributeError` as an
+        # unreadable log — a stub drifting into a *finding*.
+        rows = [StoredSession(session_id=one, modified=0.0, family=one) for one in self.sessions]
         return rows * limit if self.truncate else rows
 
     def read_own(self, session_id: str, upto: Any = None, family: Any = None) -> Any:
+        self.asked[session_id] = family
         if session_id == self.broken:
             raise ValueError("torn log")
         session = self.sessions[session_id]
         return session.header, session.events
-
-
-class _Row:
-    def __init__(self, session_id: str) -> None:
-        self.session_id = session_id
-        self.modified = 0.0
-        self.parent = None
 
 
 def _session(session_id: str, *events: tuple[str, Any]) -> Session:
@@ -152,6 +154,11 @@ async def test_a_referenced_blob_is_never_collected_however_old(tmp_path: Path) 
 
     survey = survey_attachments(store, logs, now=AGED)
 
+    # The listing's `family` reaches the read, which is what turns a directory
+    # search into a path. Asserted here because nothing else would notice it
+    # going missing: dropping the argument leaves every result identical and
+    # only the cost changes.
+    assert logs.asked == {"old": "old"}
     assert [blob.digest for blob in survey.kept] == [kept.attachment_id]
     assert [blob.digest for blob in survey.collect] == [dead.attachment_id]
     assert survey.safe and survey.sessions == 1

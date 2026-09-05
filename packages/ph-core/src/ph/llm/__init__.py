@@ -2,7 +2,15 @@
 
 from __future__ import annotations
 
-from .adapter import AdapterHandle, LlmAdapter, LlmError, LlmRuntime, ResolvedModel
+from .adapter import (
+    AdapterHandle,
+    LlmAdapter,
+    LlmError,
+    LlmRuntime,
+    MediaRoute,
+    ResolvedModel,
+    resolved,
+)
 from .assembler import BlockAssembler
 from .types import (
     AttachmentRef,
@@ -64,6 +72,7 @@ __all__ = [
     "LlmFailure",
     "LlmRuntime",
     "MediaBlock",
+    "MediaRoute",
     "Message",
     "MessageSource",
     "ModelSource",
@@ -91,5 +100,6 @@ __all__ = [
     "create_user_message",
     "is_token_delta",
     "new_message_id",
+    "resolved",
     "user_text",
 ]

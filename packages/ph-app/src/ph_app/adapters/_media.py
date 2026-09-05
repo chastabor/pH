@@ -12,6 +12,12 @@ how usage is reported, and they do **not** differ in what a dead file handle
 means — so `forget_named_handle` lives here rather than being the third copy of
 twelve lines whose bug would be invisible.
 
+What is *not* here is the route projection (`MediaRoute`, `resolved`), which the
+three adapters also share: its content is `ResolvedModel`'s field list, so it
+belongs beside that dataclass in `ph.llm` rather than in an application
+package — everything in this module needs `ctx.uploads`, the attachment store or
+`FILE_EXPIRED` semantics to mean anything, and that one needed none of them.
+
 @module ph_app.adapters._media
 """
 

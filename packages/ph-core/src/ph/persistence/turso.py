@@ -35,6 +35,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -204,45 +206,41 @@ class TursoSessionStore:
         the point of `materialise` taking a callable: the two backends disagree
         about everything below this line and about nothing above it.
         """
-        held = set(self._connections)
-        try:
-            return materialise(self.read_own, session_id)
-        finally:
-            # `_connect` caches, and `forget` only ever runs for sessions this
-            # store *buffers* — so every ancestor the walk touches would leave an
-            # open database behind for the life of the process. That is precisely
-            # the exhaustion `forget`'s own comment guards against, reintroduced
-            # through a read. Ancestors are immutable and read once; nothing is
-            # gained by keeping them.
-            for ancestor in set(self._connections) - held:
-                self._release(ancestor)
+        # No release loop here any more: `read_own` closes what it opened, which
+        # is where the rule belongs — this walk is not the only caller that reads
+        # a database it does not own. See `read_own`.
+        return materialise(self.read_own, session_id)
 
     def read_own(
         self, session_id: str, upto: int | None = None, family: str | None = None
     ) -> tuple[SessionHeader, list[SessionEvent]]:
-        """This database and nothing else, up to `upto` if one is given."""
+        """This database and nothing else, up to `upto` if one is given.
+
+        Reads through `_borrow`, so the handle it opens does not outlive the
+        call — see that method for the rule and why it is there rather than here.
+        """
         # One resolution, not two: the `exists` gate here searched the store and
         # then `_connect` searched it again for the same id, so a chained read
         # paid two full scans per ancestor.
         path = self._path_for(session_id, family)
         if not path.is_file():
             raise FileNotFoundError(f"no stored session {session_id!r}")
-        cursor = self._connect(session_id, path).cursor()
-        rows = cursor.execute("SELECT wire FROM header WHERE id = ?", (session_id,)).fetchall()
-        if not rows:
-            raise FileNotFoundError(f"session {session_id!r} has no header")
-        header = SessionHeader.model_validate(json.loads(rows[0][0]))
-        # `ORDER BY seq` is the clustered key, so this is the log in the order
-        # it was written — the property an append-only file gives for free.
-        # `seq` is the clustered key, so the bound is a range scan that stops —
-        # not a filter over rows already fetched.
-        rows = (
-            cursor.execute("SELECT wire FROM events ORDER BY seq")
-            if upto is None
-            else cursor.execute("SELECT wire FROM events WHERE seq < ? ORDER BY seq", (upto,))
-        ).fetchall()
-        events = [SessionEvent.from_wire(json.loads(wire)) for (wire,) in rows]
-        return header, events
+        with self._borrow(session_id, path) as connection:
+            cursor = connection.cursor()
+            rows = cursor.execute("SELECT wire FROM header WHERE id = ?", (session_id,)).fetchall()
+            if not rows:
+                raise FileNotFoundError(f"session {session_id!r} has no header")
+            header = SessionHeader.model_validate(json.loads(rows[0][0]))
+            # `ORDER BY seq` is the clustered key, so this is the log in the order
+            # it was written — the property an append-only file gives for free.
+            # `seq` is the clustered key, so the bound is a range scan that stops —
+            # not a filter over rows already fetched.
+            rows = (
+                cursor.execute("SELECT wire FROM events ORDER BY seq")
+                if upto is None
+                else cursor.execute("SELECT wire FROM events WHERE seq < ? ORDER BY seq", (upto,))
+            ).fetchall()
+            return header, [SessionEvent.from_wire(json.loads(wire)) for (wire,) in rows]
 
     def _path_for(self, session_id: str, family: str | None = None) -> Path:
         """This session's database, by what is known before what is on disk.
@@ -278,19 +276,6 @@ class TursoSessionStore:
         way, from the filesystem, rather than one of them from a query whose
         cost grew with total history.
         """
-        # Every `_peek_header` below opens a database, runs the schema DDL and
-        # caches the handle for a single header `SELECT` that never reuses it.
-        # Left cached, a 500-session survey holds 500 open databases and 500
-        # `-wal`/`-shm` sidecars for the life of the process. `read` already
-        # guards its chained reads this way; a listing peeks far more.
-        held = set(self._connections)
-        try:
-            return self._stored(limit=limit)
-        finally:
-            for peeked in set(self._connections) - held:
-                self._release(peeked)
-
-    def _stored(self, *, limit: int) -> list[StoredSession]:
         found = session_dbs(self.root)
         listed: list[StoredSession] = []
         for path, stat in found[:limit]:
@@ -307,11 +292,49 @@ class TursoSessionStore:
 
     def _peek_header(self, session_id: str, path: Path | None = None) -> SessionHeader | None:
         try:
-            cursor = self._connect(session_id, path).cursor()
-            rows = cursor.execute("SELECT wire FROM header WHERE id = ?", (session_id,)).fetchall()
+            with self._borrow(session_id, path) as connection:
+                rows = (
+                    connection.cursor()
+                    .execute("SELECT wire FROM header WHERE id = ?", (session_id,))
+                    .fetchall()
+                )
             return SessionHeader.model_validate(json.loads(rows[0][0])) if rows else None
         except Exception:
             return None
+
+    @contextmanager
+    def _borrow(self, session_id: str, path: Path | None = None) -> Iterator[Any]:
+        """A connection for one read, closed again unless a writer owns it.
+
+        **The rule lives here because `_connect` is the only thing that opens a
+        handle**, and `_connect` caches while `forget` runs only for sessions this
+        store *buffers* — so any database read by something that does not write it
+        stays open, with its `-wal` and `-shm` sidecars, for the life of the
+        process. That leak was guarded twice and differently: `read` wrapped its
+        chained walk, `stored` wrapped its header peeks, and the third reader to
+        arrive — a fold over *every* stored session (`ph attachments gc`) at a
+        limit of 100 000 — inherited neither. Two hand-rolled guards is how the
+        third caller comes to have none, so both were replaced by this.
+
+        The two also **disagreed**, which is the other reason not to keep them: the
+        set-diff version released any handle opened during its block, including a
+        session that is tracked but not yet connected — a live session's handle,
+        which `_release`'s own docstring says this half must never touch.
+
+        A buffered session is therefore exempt: its handle is the writer's, and
+        closing it mid-session makes the next flush pay a reconnect and the schema
+        DDL again.
+
+        A context manager rather than a line at each return, because the release
+        has to survive the raise: `read_own` refuses a database with no header
+        between opening and returning, and a post-condition on the success path
+        alone leaks exactly the handle a failing read opened.
+        """
+        try:
+            yield self._connect(session_id, path)
+        finally:
+            if session_id not in self._buffers:
+                self._release(session_id)
 
     def _connect(self, session_id: str, path: Path | None = None) -> Any:
         connection = self._connections.get(session_id)

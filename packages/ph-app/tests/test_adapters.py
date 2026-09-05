@@ -32,7 +32,7 @@ from typing import Any
 import pytest
 
 from ph.cordis import Context
-from ph.llm.adapter import LlmError
+from ph.llm.adapter import LlmError, MediaRoute
 from ph.llm.assembler import BlockAssembler
 from ph.llm.types import (
     GenerateOptions,
@@ -50,6 +50,8 @@ from ph_app.adapters.anthropic import (
     _checkpoints,
 )
 from ph_app.adapters.anthropic import Config as AnthropicConfig
+from ph_app.adapters.google import Config as GoogleConfig
+from ph_app.adapters.google import GoogleAdapter
 from ph_app.adapters.openai_compatible import (
     OpenAiCompatibleAdapter,
     ProviderProfile,
@@ -492,6 +494,44 @@ async def test_anthropic_sends_a_pdf_as_a_document(tmp_path: Path) -> None:
 
     (entry,) = body["messages"]
     assert any(block["type"] == "document" for block in entry["content"])
+
+
+def test_every_route_capability_reaches_resolve_model() -> None:
+    """One projection, so a capability cannot reach two adapters and miss the third.
+
+    Six lines mapping a config field onto the identically-named `ResolvedModel`
+    field had been written out in each adapter. The cost was not the lines: a
+    seventh capability was three edits, and an adapter that missed one reports the
+    *default* rather than the route's number — after which `media-degrade` applies
+    the wrong rule for that provider alone, silently, because a default is a legal
+    value.
+
+    Driven through **`resolve_model`**, not through `resolved` — asserting on the
+    projection alone would leave the thing it exists to prevent untested, since an
+    adapter that regressed to a hand-rolled `ResolvedModel(...)` missing a field
+    would still pass. All three are here because `google`'s had no test at all.
+
+    The field list comes from `MediaRoute`'s own members rather than being written
+    out here, which would have been the fourth copy of the thing that drifted.
+    """
+    carried = {name for name in vars(MediaRoute) if not name.startswith("_")}
+    routes: list[tuple[Any, Any]] = [
+        (AnthropicConfig(accepts=("image/png",), maxAttachmentBytes=99), AnthropicAdapter),
+        (ProviderProfile(provider="p", accepts=("image/png",), maxAttachmentBytes=99), None),
+        (GoogleConfig(accepts=("image/png",), maxAttachmentBytes=99), GoogleAdapter),
+    ]
+    for route, adapter_type in routes:
+        adapter = (
+            OpenAiCompatibleAdapter(ctx=Context(), profile=route)
+            if adapter_type is None
+            else adapter_type(ctx=Context(), config=route)
+        )
+        model = adapter.resolve_model("p", "m")
+        for name in carried:
+            declared = getattr(route, name)
+            assert getattr(model, name) == (
+                frozenset(declared) if name == "accepts" else declared
+            ), f"{type(route).__name__} declared {name} and it did not reach the resolved model"
 
 
 async def test_a_renderer_with_no_shape_for_a_block_says_so(tmp_path: Path) -> None:

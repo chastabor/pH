@@ -250,6 +250,16 @@ async def test_a_file_that_never_becomes_ready_falls_back_to_the_bytes(
     assert "inlineData" in str(wire.bodies[-1]), "the clip went inline instead"
     assert not [one for one in session.events if one.type == "attachment/uploaded"]
 
+    # **The cost, asserted rather than only described** (§5 rule 6). Giving up
+    # discards a transfer that already completed — nothing reached `_store`, so
+    # the next step re-reads the blob, sends it again and waits the budget again.
+    # A caveat that lives only in a docstring is a defect, so the number this
+    # test pins is the one somebody tuning `uploadReadyMs` needs: two uploads for
+    # one file across two steps. `UPLOAD_READY_MS`' note says what would fix it
+    # and why that is its own change.
+    await agent.prompt("still going?")
+    assert wire.uploaded == ["files/clip1", "files/clip2"], "the transfer was re-paid"
+
 
 async def test_a_revoked_file_is_re_uploaded_rather_than_failing_the_turn(
     mount: Any, wire: _FileApi

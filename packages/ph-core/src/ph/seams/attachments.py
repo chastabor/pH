@@ -506,9 +506,9 @@ def survey_attachments(
     ancestor is missing, which would turn one damaged log into an unreadable
     subtree and refuse a collection that is perfectly safe to make.
 
-    The cost is a listing plus one read per log, and for the JSONL backend a
-    directory search per log on top, since `StoredSession` does not carry the
-    family a direct path would need. That is why nothing calls this on a timer.
+    The cost is a listing plus one read per log, which is why nothing calls this
+    on a timer. It is no longer a *search* per log: `StoredSession` carries the
+    family, so each read is a path.
     """
     moment = time() if now is None else now
     unreadable: list[str] = []
@@ -525,7 +525,12 @@ def survey_attachments(
         )
     for entry in listed:
         try:
-            _header, events = persistence.read_own(entry.session_id)
+            # `family` from the listing row, so a log is a path rather than a
+            # directory search. Without it every non-root session — a fork, a
+            # segment, a subagent's log, which in a busy store is most of them —
+            # re-scanned the store to find itself, and the cost grew with the
+            # size of the store rather than with the number of logs read.
+            _header, events = persistence.read_own(entry.session_id, family=entry.family or None)
         except Exception:
             log.warning(
                 "ph.seams.attachments: could not read session %s", entry.session_id, exc_info=True
