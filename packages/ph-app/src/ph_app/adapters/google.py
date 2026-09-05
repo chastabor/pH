@@ -126,39 +126,51 @@ number is what a block must fit under to go as `inlineData`."""
 
 UPLOAD_POLL_MS = 500
 UPLOAD_READY_MS = 120_000
-"""How long an upload is waited on before the turn gives up on it.
+"""How long one attempt waits for an uploaded file to become usable.
 
 Video is **processed** after it is stored, and a `fileUri` referenced before its
 file reaches `ACTIVE` is refused — so this is the one uploader of the three that
 is not done when the bytes have landed. Two minutes because that is the scale of
-a few minutes of video being transcoded at the far end, and because the fallback
-when it expires is not a failure: `load_handles` swallows it and the block goes
-inline, which for a video over the inline cap becomes an honest pointer.
+a few minutes of video being transcoded at the far end, and because running out
+is not a failure: `load_handles` swallows it and the block goes inline, which for
+a video over the inline cap becomes an honest pointer.
 
-**Not enforced, and it is the expensive half** (§5 rule 6). Running the budget out
-throws away a transfer that **already completed**: `upload` raises before
-`handle_for` reaches `_store`, so nothing remembers the file, and the next step of
-the same loop re-reads the blob from disk, transfers it again, and waits the
-budget again. A 300 MB clip whose transcode is slower than this number is
-therefore re-sent on *every* step, stalling each request by `upload_ready_ms`
-before it goes out, and each attempt leaves another copy against the account's
-Files quota.
+**Running out no longer discards the transfer.** It used to: nothing reached
+`_store`, so the next step of the same loop re-read the blob, re-sent every byte
+and waited the budget again — a 300 MB clip re-transferred per step, each attempt
+leaving another copy against the account's Files quota. `_pending` now remembers
+the `files/<name>`, so the next attempt polls the file this one stored. What the
+memo cannot save is the local read, because `handle_for` loads the blob before
+calling an uploader at all; what it saves is sending it.
 
-The fix is not a longer budget — it is remembering the `files/<name>` this upload
-already created, so a later attempt *polls* instead of re-POSTing. What that must
-not do is put the pending id in `ctx.uploads`: `FileHandle` is a *usable* id, a
-file still `PROCESSING` is precisely not one, and `cached()` would hand the next
-request a reference the provider refuses — trading a re-upload for a retry loop.
+So this number is a **per-attempt** patience, not a total: a file that needs ten
+minutes of processing is reached by whichever step comes after it is ready, and
+the steps in between degrade to a pointer and say so."""
 
-But that constraint is about what crosses the **seam**, and the pending id need
-not. `Uploader.upload` owns the whole transfer-and-wait, and the row registers one
-long-lived adapter as the uploader — so a `dict[attachment_id, files/<name>]` on
-this adapter is enough: record the name when `_ready` gives up, and on the next
-call `GET` it before transferring anything. A process restart loses the memo and
-gets today's behaviour, so it is strictly no worse. That is the change to make,
-and it is deliberately not made here — it is a behaviour change rather than the
-documentation this note is, and the test below pins today's cost so making it is
-a visible decision rather than a silent one."""
+
+MAX_TRANSFERS = 3
+"""How many times one attachment's bytes are sent before this route stops trying.
+
+**Nothing above this bounds an upload.** `load_handles` catches every failure and
+sends the block inline, so an upload never reaches `llm-retry` and its
+`max_attempts` — which governs the model *request*, not this. What is left is one
+attempt per model step, for as long as the attachment is in the conversation, and
+for a hard failure that is a full re-transfer each time: a 300 MB clip a route
+refuses would be sent on every step of a fifty-step session.
+
+It counts **transfers, not attempts**, and that distinction is the whole design.
+A run that timed out with a resumable file remembered costs one `GET` on the next
+step and gets cheaper by waiting — capping that would abandon a legitimately slow
+transcode, which is exactly what `_pending` exists to survive. What is capped is
+paying for the bytes again, which is the cost that does not improve by repeating.
+
+Three because the failures worth retrying at all are transient ones — a 5xx, a
+dropped connection — and a fault that survives three sends is a fact about the
+file or the account. After that the block degrades to a pointer, which is the
+same answer a route with no file API gives and one the model can read.
+
+Per process, and deliberately not persisted: a restart is a new judgement, for
+the reason `_pending`'s own note gives."""
 
 
 class Config(WireModel):
@@ -225,6 +237,22 @@ class GoogleAdapter:
     ctx: Context
     config: Config
     http: HttpClient = field(default_factory=HttpClient)
+    _pending: dict[str, str] = field(default_factory=dict)
+    _spent: dict[str, int] = field(default_factory=dict)
+    """How many transfers each attachment has cost without producing a handle.
+
+    Cleared the moment one succeeds, so it counts *consecutive* failures rather
+    than a lifetime total — an attachment that worked, expired and is uploaded
+    again starts over, which is the ordinary path and not a fault. See
+    `MAX_TRANSFERS`."""
+    """`attachment_id → files/<name>` for a transfer that finished and whose file
+    was not ready in time. See `_resume`.
+
+    Self-limiting rather than capped: an entry is written only when the readiness
+    budget runs out, and removed the moment the file is usable or turns out to be
+    gone — so it holds what this process is still waiting on and nothing else. A
+    restart loses it and pays the transfer again, which is exactly the behaviour
+    this replaced."""
 
     def _headers(self) -> dict[str, str]:
         return {
@@ -251,10 +279,86 @@ class GoogleAdapter:
         one and a destination in `X-Goog-Upload-URL`, the second is the file's
         bytes with no form encoding at all.
 
+        **A transfer that already happened is not paid for twice**, which is what
+        `_pending` is for: running the readiness budget out used to throw the
+        stored file away with it, so the next step re-sent every byte and waited
+        again. Now the name is remembered and the next attempt polls it.
+
         Failure of any kind here is caught by `load_handles` and the attachment
         goes inline — so the worst outcome of a slow provider is the behaviour
         every route had before the row.
         """
+        spent = self._spent.get(ref.attachment_id, 0)
+        if spent >= MAX_TRANSFERS:
+            # Refused before the bytes move, so a route that cannot take this file
+            # costs one dictionary lookup per step rather than a transfer.
+            raise LlmError(
+                f"{ref.name or ref.attachment_id} failed to upload {spent} times; "
+                "sending it inline instead",
+                "REQUEST_FAILED",
+            )
+        resumed = await self._resume(ref)
+        try:
+            record = resumed if resumed is not None else await self._transfer(ref, content)
+            uri = str(record.get("uri") or "")
+            if not uri:
+                raise LlmError("the files API returned no uri", "REQUEST_FAILED")
+            record = await self._ready(record, ref.attachment_id)
+        except Exception:
+            # Counted only when this attempt has nothing to resume from. A
+            # timeout that left a remembered file did *not* pay for the bytes and
+            # the next step will not either, so charging it here would abandon a
+            # slow transcode for being slow.
+            if ref.attachment_id not in self._pending:
+                self._spent[ref.attachment_id] = spent + 1
+            raise
+        # Ready, and about to be cached by the seam, so neither record has
+        # anything left to say about this attachment.
+        self._pending.pop(ref.attachment_id, None)
+        self._spent.pop(ref.attachment_id, None)
+        return FileHandle(
+            provider=self.config.provider,
+            attachment_id=ref.attachment_id,
+            handle=uri,
+            uploaded_at=now_ms(),
+            expires_at=_expiry(record.get("expirationTime")),
+        )
+
+    async def _resume(self, ref: AttachmentRef) -> dict[str, Any] | None:
+        """The file a previous attempt already stored for these bytes, or `None`.
+
+        **The whole point of remembering, and the reason the memo is here rather
+        than in `ctx.uploads`.** That seam caches a `FileHandle`, which is a
+        *usable* id — a file still `PROCESSING` is precisely not one, so storing
+        it would hand the next request a reference the provider refuses and turn
+        a re-upload into a retry loop. What is safe to keep is the weaker fact
+        that a transfer happened, and it never has to cross the seam: `upload`
+        owns the whole transfer-and-wait, and the row registers one long-lived
+        adapter, so this side of the boundary is the one that can hold it.
+
+        Anything other than a readable record drops the entry and returns `None`,
+        which pays the transfer again. That covers a file deleted from elsewhere,
+        an expiry, a revoked key — all of which answer here rather than mid-turn,
+        because this is the request that asks about it first.
+
+        What it does **not** save is the local read: `handle_for` loads the blob
+        before calling an uploader at all, so the bytes are in memory either way.
+        What it saves is sending them, which for the format this exists to serve
+        is the cost that matters.
+        """
+        name = self._pending.get(ref.attachment_id)
+        if name is None:
+            return None
+        try:
+            record = _file_record(await self._file(name))
+        except Exception:
+            log.info("ph_app.adapters.google: %s is no longer there; re-uploading", name)
+            self._pending.pop(ref.attachment_id, None)
+            return None
+        return record
+
+    async def _transfer(self, ref: AttachmentRef, content: bytes) -> dict[str, Any]:
+        """The resumable protocol's two steps: start, then the bytes."""
         base = self.config.base_url.rstrip("/")
         upload_base = base.replace("/v1beta", "/upload/v1beta")
         _body, headers = await self.http.post_raw(
@@ -282,44 +386,36 @@ class GoogleAdapter:
             content=content,
             is_overflow=_is_overflow,
         )
-        record = _file_record(stored)
-        uri = str(record.get("uri") or "")
-        if not uri:
-            raise LlmError("the files API returned no uri", "REQUEST_FAILED")
-        record = await self._ready(record)
-        return FileHandle(
-            provider=self.config.provider,
-            attachment_id=ref.attachment_id,
-            handle=uri,
-            uploaded_at=now_ms(),
-            expires_at=_expiry(record.get("expirationTime")),
+        return _file_record(stored)
+
+    async def _file(self, name: str) -> dict[str, Any]:
+        """One `GET files/<id>`, the only way to ask what state a file is in."""
+        return await self.http.get_json(
+            f"{self.config.base_url.rstrip('/')}/{name}",
+            headers=self._headers(),
+            is_overflow=_is_overflow,
         )
 
-    async def _ready(self, record: dict[str, Any]) -> dict[str, Any]:
+    async def _ready(self, record: dict[str, Any], attachment_id: str) -> dict[str, Any]:
         """Poll until the file is `ACTIVE`, or give up inside the budget.
 
-        `FAILED` raises rather than waiting out the clock: the provider has said
-        this file will never work, and the useful thing to do with that is fall
-        back to the bytes now.
-
-        **Giving up here discards a completed transfer** — the cost is stated at
-        `UPLOAD_READY_MS`, next to the number that decides it, because that is
-        where somebody tuning this would assume otherwise.
+        Giving up **remembers the file** so the next attempt resumes against it
+        rather than re-sending it; `_resume` is the other half. `FAILED` does not,
+        and the asymmetry is the point: the provider has said this file will never
+        work, so the useful thing is to forget it and fall back to the bytes,
+        where a slow one is worth waiting for on the next step.
         """
         name = str(record.get("name") or "")
         waited = 0
         while str(record.get("state") or "ACTIVE") == "PROCESSING":
             if waited >= self.config.upload_ready_ms:
+                self._pending[attachment_id] = name
                 raise LlmError(f"{name} was still processing after the upload budget", "TIMEOUT")
             await anyio.sleep(UPLOAD_POLL_MS / 1000)
             waited += UPLOAD_POLL_MS
-            record = await self.http.get_json(
-                f"{self.config.base_url.rstrip('/')}/{name}",
-                headers=self._headers(),
-                is_overflow=_is_overflow,
-            )
-            record = _file_record(record)
+            record = _file_record(await self._file(name))
         if str(record.get("state") or "") == "FAILED":
+            self._pending.pop(attachment_id, None)
             raise LlmError(f"{name} could not be processed", "REQUEST_FAILED")
         return record
 

@@ -40,6 +40,7 @@ from ph.llm.types import (
 from ph.seams.attachments import digest_of
 from ph_app.adapters._http import HttpClient, failure_from_status
 from ph_app.adapters.google import (
+    MAX_TRANSFERS,
     _call_names,
     _is_missing_file,
     _is_overflow,
@@ -87,6 +88,8 @@ class _FileApi:
         self.bodies: list[dict[str, Any]] = []
         self.starts: list[dict[str, str]] = []
         self.polls = 0
+        self.deleted: set[str] = set()
+        self.fails = False
         self.processing = 0
         """How many polls a fresh upload spends in `PROCESSING` before it is ready."""
         self.state: dict[str, int] = {}
@@ -102,7 +105,7 @@ class _FileApi:
         return {
             "name": name,
             "uri": f"https://files.example/{name}",
-            "state": "PROCESSING" if remaining > 0 else "ACTIVE",
+            "state": "FAILED" if self.fails else "PROCESSING" if remaining > 0 else "ACTIVE",
             "expirationTime": "2033-05-18T03:33:20Z",
         }
 
@@ -143,6 +146,14 @@ def wire(monkeypatch: pytest.MonkeyPatch) -> _FileApi:
     async def get_json(self: HttpClient, url: str, **kwargs: Any) -> dict[str, Any]:
         api.polls += 1
         name = "files/" + url.rsplit("/files/", 1)[-1]
+        if name in api.deleted:
+            raise failure_from_status(
+                403,
+                f'{{"error":{{"code":403,"message":"You do not have permission to access '
+                f'the File {name} or it may not exist.","status":"PERMISSION_DENIED"}}}}',
+                is_overflow=_is_overflow,
+                is_missing_file=_is_missing_file,
+            )
         if api.state.get(name):
             api.state[name] -= 1
         return api.record(name)
@@ -230,15 +241,7 @@ async def test_a_file_that_never_becomes_ready_falls_back_to_the_bytes(
     are better than a turn that fails because a transcoder was slow.
     """
     wire.processing = 1_000  # never ready inside the budget
-    # A budget of one poll rather than the shipped two minutes: what is under test
-    # is what happens when it runs out, and `uploadReadyMs` being row config is
-    # exactly what lets a test say so without waiting.
-    impatient = {
-        "insert": [
-            {**ROUTE["insert"][0], "config": {**ROUTE["insert"][0]["config"], "uploadReadyMs": 600}}
-        ]
-    }
-    ctx: Context = await mount(impatient, profile=PROFILE)
+    ctx: Context = await mount(_impatient(), profile=PROFILE)
     session = ctx.sessions.create("slow")
     agent = ctx.agents.create(session, OPTIONS)
 
@@ -250,15 +253,150 @@ async def test_a_file_that_never_becomes_ready_falls_back_to_the_bytes(
     assert "inlineData" in str(wire.bodies[-1]), "the clip went inline instead"
     assert not [one for one in session.events if one.type == "attachment/uploaded"]
 
-    # **The cost, asserted rather than only described** (§5 rule 6). Giving up
-    # discards a transfer that already completed — nothing reached `_store`, so
-    # the next step re-reads the blob, sends it again and waits the budget again.
-    # A caveat that lives only in a docstring is a defect, so the number this
-    # test pins is the one somebody tuning `uploadReadyMs` needs: two uploads for
-    # one file across two steps. `UPLOAD_READY_MS`' note says what would fix it
-    # and why that is its own change.
-    await agent.prompt("still going?")
-    assert wire.uploaded == ["files/clip1", "files/clip2"], "the transfer was re-paid"
+
+def _impatient(**config: Any) -> dict[str, Any]:
+    """The shipped route with a budget of one poll.
+
+    What is under test around the budget is what happens when it runs out, and
+    `uploadReadyMs` being row config is exactly what lets a test say so without
+    waiting two minutes.
+    """
+    return {
+        "insert": [
+            {
+                **ROUTE["insert"][0],
+                "config": {**ROUTE["insert"][0]["config"], "uploadReadyMs": 600, **config},
+            }
+        ]
+    }
+
+
+async def test_a_transfer_that_ran_out_of_patience_is_resumed_not_re_sent(
+    mount: Any, wire: _FileApi
+) -> None:
+    """**The step after a slow transcode polls the file; it does not re-send it.**
+
+    Running the readiness budget out used to throw away a transfer that had
+    already completed: nothing reached the seam's cache, so the next step of the
+    same loop re-read the blob, sent every byte again and waited the budget
+    again — a 300 MB clip re-transferred per step, each attempt leaving another
+    copy against the account's Files quota.
+
+    The fix is deliberately *not* in `ctx.uploads`: a `FileHandle` is a usable id
+    and a `PROCESSING` file is not one, so caching it there would hand the next
+    request a reference the provider refuses. The adapter remembers the weaker
+    fact — that a transfer happened — and that never crosses the seam.
+    """
+    wire.processing = 3  # ready on the third poll, which is past one budget
+    ctx: Context = await mount(_impatient(), profile=PROFILE)
+    session = ctx.sessions.create("resumed")
+    agent = ctx.agents.create(session, OPTIONS)
+
+    agent.followup(await _attached(ctx))
+    await agent.run()
+    assert wire.uploaded == ["files/clip1"], "one transfer"
+    assert wire.referenced(wire.bodies[-1]) == [], "and it was not ready in time"
+
+    await agent.prompt("is it ready now?")
+
+    assert wire.uploaded == ["files/clip1"], "the second step re-sent nothing"
+    assert wire.referenced(wire.bodies[-1]) == ["https://files.example/files/clip1"]
+    (record,) = [one for one in session.events if one.type == "attachment/uploaded"]
+    assert record.data["mime"] == "video/mp4"
+
+
+async def test_a_remembered_file_that_is_gone_is_uploaded_again(mount: Any, wire: _FileApi) -> None:
+    """The memo is a shortcut, never a source of truth.
+
+    A file deleted from another session, an expiry, a revoked key — each makes the
+    remembered name unusable, and each answers on the request that asks about it
+    first. Anything other than a readable record drops the entry and pays the
+    transfer, so the worst case is exactly the behaviour this replaced. The same
+    is true across a restart, which keeps no memo at all.
+    """
+    wire.processing = 3
+    ctx: Context = await mount(_impatient(), profile=PROFILE)
+    agent = ctx.agents.create(ctx.sessions.create("gone"), OPTIONS)
+
+    agent.followup(await _attached(ctx))
+    await agent.run()
+    assert wire.uploaded == ["files/clip1"]
+
+    wire.deleted.add("files/clip1")
+    wire.processing = 0  # the replacement is ready straight away
+    await agent.prompt("and now?")
+
+    assert wire.uploaded == ["files/clip1", "files/clip2"], "it paid the transfer again"
+    assert wire.referenced(wire.bodies[-1]) == ["https://files.example/files/clip2"]
+
+
+async def test_a_file_the_provider_rejects_is_not_remembered(mount: Any, wire: _FileApi) -> None:
+    """`FAILED` forgets where the budget remembers, and the asymmetry is the point.
+
+    A file that is merely slow is worth waiting for on the next step. One the
+    provider has said will never be processed is not — remembering it would make
+    every later step poll a file that cannot become ready, instead of falling
+    back to the bytes.
+    """
+    ctx: Context = await mount(_impatient(), profile=PROFILE)
+    agent = ctx.agents.create(ctx.sessions.create("failed"), OPTIONS)
+    wire.fails = True
+
+    agent.followup(await _attached(ctx))
+    await agent.run()
+
+    adapter = ctx.llm.adapter_for("google")
+    assert adapter._pending == {}, "a file that will never work was remembered"
+    assert "inlineData" in str(wire.bodies[-1])
+
+
+async def test_a_file_the_route_keeps_refusing_stops_being_sent(mount: Any, wire: _FileApi) -> None:
+    """**The loop nothing above this bounds.**
+
+    `load_handles` catches every upload failure and sends the block inline, so an
+    upload never reaches `llm-retry` and its `max_attempts` — that governs the
+    model *request*. What is left is one attempt per model step for as long as the
+    attachment is in the conversation, and for a hard failure each one is a full
+    re-transfer: a 300 MB clip a route refuses, sent on every step of a fifty-step
+    session.
+
+    After `MAX_TRANSFERS` the route stops paying for the bytes and the block
+    degrades to a pointer — the same answer a route with no file API gives, and
+    one the model can read.
+    """
+    ctx: Context = await mount(_impatient(), profile=PROFILE)
+    agent = ctx.agents.create(ctx.sessions.create("refused"), OPTIONS)
+    wire.fails = True  # every upload lands in `FAILED`
+
+    agent.followup(await _attached(ctx))
+    await agent.run()
+    for _ in range(4):
+        await agent.prompt("try again?")
+
+    assert len(wire.uploaded) == MAX_TRANSFERS, "the transfer was paid on every step"
+    assert "inlineData" in str(wire.bodies[-1]), "and the clip still reaches the model"
+
+
+async def test_a_slow_transcode_is_not_charged_against_the_cap(mount: Any, wire: _FileApi) -> None:
+    """The distinction the cap turns on: transfers, not attempts.
+
+    A step that timed out with a resumable file remembered has not paid for the
+    bytes, and the next one will not either — it polls. Counting those would
+    abandon a legitimately slow transcode for being slow, which is the exact case
+    `_pending` exists to survive, so the budget may run out more times than a file
+    is allowed transfers.
+    """
+    wire.processing = 3 * MAX_TRANSFERS  # ready long after the cap would have fired
+    ctx: Context = await mount(_impatient(), profile=PROFILE)
+    agent = ctx.agents.create(ctx.sessions.create("slow"), OPTIONS)
+
+    agent.followup(await _attached(ctx))
+    await agent.run()
+    for _ in range(MAX_TRANSFERS + 2):
+        await agent.prompt("ready yet?")
+
+    assert wire.uploaded == ["files/clip1"], "one transfer, however many polls"
+    assert wire.referenced(wire.bodies[-1]) == ["https://files.example/files/clip1"]
 
 
 async def test_a_revoked_file_is_re_uploaded_rather_than_failing_the_turn(
