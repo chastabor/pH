@@ -6,14 +6,12 @@ Two claims, and the second is the one the row is really about.
 bytes to a provider's file API and puts an id on the wire, so a 4 MB file is
 uploaded once instead of base64-encoded onto every step of the session.
 
-The worked example here is a PDF through Anthropic's Files API, and that is a
-deliberate narrowing of the row's own framing. Video is what makes
-upload-and-reference *necessary* rather than merely cheaper — but **neither
-provider pH has an adapter for accepts video**, so a route declaring it would be
-a fiction, and this file would be asserting against a wire shape that does not
-exist. The last test below pins what actually happens to one today. The mechanism
-is the same one Gemini's Files API needs; what is missing is that adapter, not
-this path.
+The worked example here is a PDF through Anthropic's Files API, which is a
+deliberate narrowing: video is what makes upload-and-reference *necessary* rather
+than merely cheaper, and this wire has no video content block at all. That half of
+the gate lives in `test_uploads_google.py` now that there is a route which accepts
+one; the last test below pins what still happens to a video declared *here*, which
+is the same honest pointer it always was.
 
 **An expired handle is a retry, not a lost turn.** The cache is a prediction, and
 providers expire files early, delete them from another session, or forget them.
@@ -278,8 +276,9 @@ async def test_a_format_this_wire_cannot_express_degrades_even_when_uploaded(
     dressed as an image. The model is told, the turn survives, and nothing claims
     a capability the provider does not have.
 
-    This is the honest state of the row's video gate: the transport is built and
-    the wire that needs it is a provider pH has no adapter for yet.
+    Which is why the row's video gate is answered by the Google route rather than
+    by declaring the format here: a transport that works over a wire with nowhere
+    to put the id proves the transport and nothing about the format.
     """
     route = {
         "insert": [

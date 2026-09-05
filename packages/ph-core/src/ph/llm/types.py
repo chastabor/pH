@@ -32,6 +32,7 @@ __all__ = [
     "ContextForm",
     "ContextSnapshotSection",
     "Finish",
+    "FinishKind",
     "FinishReason",
     "GenerateOptions",
     "LlmCallConfig",
@@ -460,11 +461,19 @@ class ToolSchema(WireModel):
 # one alias rule.
 
 
+FinishKind: TypeAlias = Literal["stop", "tool-calls", "max-tokens", "aborted", "error"]
+"""Why a response stopped, as the five answers every consumer branches on.
+
+A name rather than an inline literal because an adapter has to *return* one, and
+the third one to be written spelled the union out again to say so — which is the
+same list in a second place, free to grow a sixth member nothing else handles."""
+
+
 @dataclass(frozen=True, slots=True)
 class FinishReason(WireDataclass):
     """Why a model response stopped."""
 
-    kind: Literal["stop", "tool-calls", "max-tokens", "aborted", "error"]
+    kind: FinishKind
     failure: LlmFailure | None = None
 
     @classmethod

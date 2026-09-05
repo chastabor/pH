@@ -46,7 +46,17 @@ from ph.session import new_session_id
 
 from .agents import agents_app
 from .attach import AttachmentUnavailable
-from .console import TypeOption, console, emit, err, fail, section, selectors_or_exit
+from .attachments import attachments_app
+from .console import (
+    TypeOption,
+    console,
+    emit,
+    err,
+    fail,
+    fail_unmounted,
+    section,
+    selectors_or_exit,
+)
 from .daemon.recovery import PASSIVATE_AFTER
 from .modes import run_json, run_print, run_rpc, run_transcript
 from .profiles import (
@@ -80,6 +90,12 @@ app.add_typer(agents_app, name="agents")
 # because collecting checkouts is not something a model should be able to ask
 # for by emitting text.
 app.add_typer(workspaces_app, name="workspaces")
+# The other cross-session accounting command (P7-01). Its own group beside
+# `workspaces` rather than a verb there, because the two sweep different things
+# under different rules — a retained tree is evidence somebody may want, an
+# attachment is content a session cannot open without — and a person reading
+# `--help` should not have to infer which rule applies from a shared verb.
+app.add_typer(attachments_app, name="attachments")
 
 OutputMode = Literal["text", "json", "transcript", "rpc", "tui", "web", "trajectory"]
 
@@ -395,7 +411,7 @@ def doctor(
         # host with no sandbox backend is exactly that (E8) — and a person who
         # ran the command *because* the process will not start is owed the
         # sentence rather than a traceback. The exit code says it failed.
-        fail(f"[red]profile {profile!r} does not mount:[/red] {error}", cause=error)
+        fail_unmounted(profile, error)
 
     console.print(f"\n[bold]profile:[/bold] {profile}")
     for title, rows in before_mount + sections:

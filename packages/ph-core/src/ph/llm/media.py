@@ -38,8 +38,10 @@ from .adapter import ResolvedModel
 from .types import AttachmentRef, GenerateOptions, Message, TextBlock, attachment_of
 
 __all__ = [
+    "ATTACHABLE",
     "apply",
     "degrade_media",
+    "is_attachable",
     "media_pointer_text",
     "oversized_notices",
     "record_degraded",
@@ -48,6 +50,30 @@ __all__ = [
 ]
 
 log = logging.getLogger("ph.llm.media")
+
+
+ATTACHABLE: tuple[str, ...] = ("image/", "audio/", "video/", "application/pdf")
+"""What a `MediaBlock` may carry at all — the question above every route's own.
+
+Prefixes rather than an enumeration, because the exact list is the *route's*
+(`ResolvedModel.accepts`), differs per deployment and is checked per request by
+`degrade_media` below: a closed list here would refuse `image/heic` on a route
+that takes it, and no configuration could lift it. What can be said without
+knowing the route is the coarser thing that is true everywhere — a provider
+ingests pictures, sound, video and documents as content, and does not ingest
+archives.
+
+**Here rather than in the tool that first needed it** (P7-01). It is a statement
+about `MediaBlock`, not about `tool-attach`, and this module already owns that
+vocabulary (`unusable_reason`, `media_pointer_text`). In the tools package it
+would also have sat where this layer cannot import it, so the *other* producer —
+a person's `--attach` — could not have used the same sentence.
+"""
+
+
+def is_attachable(mime: str) -> bool:
+    """Whether this is media a provider could ingest as content."""
+    return mime.startswith(ATTACHABLE)
 
 
 def _longest_edge(attachment: AttachmentRef) -> int | None:

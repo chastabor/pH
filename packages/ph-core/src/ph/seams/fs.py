@@ -52,6 +52,7 @@ from ._registry import claim_entry, claim_slot
 __all__ = [
     "EditIntent",
     "FileSlice",
+    "FileTooLarge",
     "FsService",
     "GrepMatch",
     "ReadIntent",
@@ -230,6 +231,22 @@ class FsDenied(HarnessError, PermissionError):
 
     def __init__(self, message: str) -> None:
         super().__init__(message, "FS_DENIED")
+
+
+class FileTooLarge(HarnessError):
+    """A whole-file read was refused because the file is over the caller's cap (P7-01).
+
+    A **failure, not a denial**, and the distinction is the one `FailureKind`
+    exists to carry: no policy refused anything here — the caller named a bound
+    and the file is bigger than it. A model that reads `denied` looks for
+    permission to ask for; a model that reads this should pick a smaller file, and
+    under Code Mode (C3) the difference decides whether its whole program ends.
+    """
+
+    failure_kind: FailureKind = "failed"
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message, "FILE_TOO_LARGE")
 
 
 @dataclass(slots=True)
@@ -464,6 +481,63 @@ class FsService:
             total_lines=len(all_lines),
             truncated=limit is not None and offset + len(window) < len(all_lines),
         )
+
+    async def read_bytes(
+        self,
+        path: str | Path,
+        *,
+        scope: Boundary,
+        max_bytes: int | None = None,
+        agent: Any = None,
+        session: Session | None = None,
+    ) -> bytes:
+        """Read a whole file as bytes, after `fs/read-intent` allows it (P7-01).
+
+        **The door a model-initiated attach has to go through** (I-9). A person
+        may attach anything they can already open, and `AttachmentStore.save_path`
+        is that door; a *model* may attach only what this seam lets it read, so
+        `permissions-fs`, the workspace tier and every other `fs/read-intent`
+        listener bound this exactly as they bound `read` — one line, and nothing
+        for a policy row to opt into. Without it the tool producer had two bad
+        options: reach around the seam with `Path.read_bytes`, which is the
+        exfiltration primitive I-9 exists to prevent, or push a PNG through
+        `read`'s `errors="replace"` decode, which returns something that is not
+        the file.
+
+        A method rather than a flag on `read`, because almost nothing they share
+        survives the change of unit: `offset`, `limit`, `total_lines` and
+        `truncated` are all statements about *lines*, `FileSlice.text` is `str`,
+        and a `bytes | FileSlice` return would move that branch into every caller.
+        What the two genuinely share is the gate, and that is one call here.
+
+        `max_bytes` is answered from the file's own size **before it is opened**,
+        so refusing a 2 GB video costs a `stat` rather than 2 GB of resident
+        memory. A `stat` that fails is not treated as a refusal — the read below
+        is about to raise the real `OSError`, and inventing a size limit for a
+        file that does not exist would report the wrong thing.
+
+        Recorded through `_observe` like every other read: what the read-before-edit
+        rule and `fs/observed` are about is *this file was seen*, and a binary one
+        was seen just as much.
+        """
+        target = self.resolve(path, agent=agent)
+        await self._gate(
+            "fs/read-intent",
+            ReadIntent(path=target, agent=agent, scope=boundary_of(scope, self.ctx)),
+        )
+        if max_bytes is not None:
+            try:
+                size: int | None = target.stat().st_size
+            except OSError:
+                size = None
+            if size is not None and size > max_bytes:
+                raise FileTooLarge(
+                    f"{self.named(target, agent=agent)} is {size} bytes, over the "
+                    f"{max_bytes}-byte limit for this call"
+                )
+        content = await anyio.to_thread.run_sync(target.read_bytes)
+        self._observe(target, session, agent)
+        return content
 
     def _observe(self, target: Path, session: Session | None, agent: Any = None) -> None:
         """Remember this file's mtime, and record the read.

@@ -76,6 +76,7 @@ PROFILES: dict[str, tuple[Layer, ...]] = {
     # a misconfigured key fails loudly instead of silently answering "ok".
     "deepseek": (BASE, PROFILE_DIR / "deepseek.yaml"),
     "anthropic": (BASE, PROFILE_DIR / "anthropic.yaml"),
+    "google": (BASE, PROFILE_DIR / "google.yaml"),
     "rlm": RLM_LAYERS,
     # Everything, with the gates on (P4-15). `rlm` plus `stabilize`, plus the
     # profile that turns on the two rows those bundles ship disabled — a bundle

@@ -186,7 +186,7 @@ def test_tool_results_become_their_own_wire_role() -> None:
     message = create_tool_result_message(
         call_id="c1", content=[{"type": "text", "text": "output"}], is_error=False
     )
-    (entry,) = _to_openai(message, {})
+    (entry,) = _to_openai(message, {}, {})
     # A tool result cannot be merged into a user message on this wire.
     assert entry["role"] == "tool"
     assert entry["tool_call_id"] == "c1"
@@ -197,7 +197,7 @@ def test_a_plain_user_message_stays_a_user_message() -> None:
     message = create_user_message(
         content=[{"type": "text", "text": "hello"}], source={"kind": "user"}
     )
-    assert _to_openai(message, {}) == [{"role": "user", "content": "hello"}]
+    assert _to_openai(message, {}, {}) == [{"role": "user", "content": "hello"}]
 
 
 async def test_a_missing_credential_fails_before_any_request() -> None:
@@ -241,7 +241,7 @@ async def test_a_response_schema_reaches_the_wire_as_a_constraint() -> None:
     adapter = OpenAiCompatibleAdapter(ctx=root, profile=ProviderProfile(provider="p"))
     schema = {"type": "object", "properties": {"verdict": {"type": "string"}}}
 
-    body = await adapter._body(
+    body, _handles = await adapter._body(
         GenerateOptions(
             provider="p",
             model="m",
@@ -281,7 +281,7 @@ async def test_a_request_with_no_schema_asks_for_no_format() -> None:
     root = Context()
     adapter = OpenAiCompatibleAdapter(ctx=root, profile=ProviderProfile(provider="p"))
 
-    body = await adapter._body(GenerateOptions(provider="p", model="m", messages=()))
+    body, _handles = await adapter._body(GenerateOptions(provider="p", model="m", messages=()))
 
     assert "response_format" not in body
 
@@ -289,7 +289,7 @@ async def test_a_request_with_no_schema_asks_for_no_format() -> None:
 async def test_the_openai_request_body_carries_tools_and_the_system_slot() -> None:
     root = Context()
     adapter = OpenAiCompatibleAdapter(ctx=root, profile=ProviderProfile(provider="p"))
-    body = await adapter._body(
+    body, _handles = await adapter._body(
         GenerateOptions(
             provider="p",
             model="m",
@@ -469,7 +469,7 @@ async def test_anthropic_sends_an_image_as_a_base64_source(tmp_path: Path) -> No
     ref = await _with_attachment(root, tmp_path, "image/png")
     adapter = AnthropicAdapter(ctx=root, config=AnthropicConfig())
 
-    body = await adapter._body(
+    body, _handles = await adapter._body(
         GenerateOptions(provider="anthropic", model="m", messages=(_media_message(ref),))
     )
 
@@ -486,7 +486,7 @@ async def test_anthropic_sends_a_pdf_as_a_document(tmp_path: Path) -> None:
     ref = await _with_attachment(root, tmp_path, "application/pdf")
     adapter = AnthropicAdapter(ctx=root, config=AnthropicConfig())
 
-    body = await adapter._body(
+    body, _handles = await adapter._body(
         GenerateOptions(provider="anthropic", model="m", messages=(_media_message(ref),))
     )
 
@@ -497,24 +497,56 @@ async def test_anthropic_sends_a_pdf_as_a_document(tmp_path: Path) -> None:
 async def test_a_renderer_with_no_shape_for_a_block_says_so(tmp_path: Path) -> None:
     """The renderer is total over its own wire vocabulary.
 
-    Whether a route *may* send a PDF is `media-degrade`'s question, one layer up.
-    This is the narrower one an adapter still owes: it has no `image_url` meaning
-    for a PDF — that wire carries them by `file_id` (P7-03) — so it must not
-    dress one as an image. What must never happen either way is the block
-    vanishing.
+    Whether a route *may* send a video is `media-degrade`'s question, one layer
+    up. This is the narrower one an adapter still owes: it has no `image_url` or
+    `input_audio` meaning for one, so it must not dress it as either. What must
+    never happen is the block vanishing.
+
+    **This used to be asserted with a PDF, and P7-03's second half made that
+    wrong.** The wire has a `file` part with two spellings — a `file_id` for an
+    uploaded document and inline `file_data` for one that was not — so a PDF is
+    now expressible here and rendering it as a pointer would be the silent
+    downgrade, not the honest refusal. Video is the MIME this wire genuinely has
+    no shape for, which is the claim the test was making all along.
+    """
+    root = Context()
+    ref = await _with_attachment(root, tmp_path, "video/mp4")
+    adapter = OpenAiCompatibleAdapter(ctx=root, profile=ProviderProfile(provider="p"))
+
+    body, _handles = await adapter._body(
+        GenerateOptions(provider="p", model="m", messages=(_media_message(ref),))
+    )
+
+    rendered = json.dumps(body["messages"])
+    assert "video/mp4" in rendered and "shot.png" in rendered
+    assert "was not sent" in rendered
+    assert "input_audio" not in rendered and "image_url" not in rendered
+
+
+async def test_the_openai_wire_sends_a_pdf_inline_when_it_was_not_uploaded(
+    tmp_path: Path,
+) -> None:
+    """What makes `load_handles`' fallback contract true on this wire (P7-03).
+
+    An upload that fails for any reason leaves the id out and the attachment goes
+    inline — that is the promise the seam makes, and it can only be kept by a
+    renderer with an inline spelling. Without one, a route whose file API was
+    momentarily down would degrade a document it can perfectly well send, which is
+    a worse outcome than the one the upload exists to improve on.
     """
     root = Context()
     ref = await _with_attachment(root, tmp_path, "application/pdf")
     adapter = OpenAiCompatibleAdapter(ctx=root, profile=ProviderProfile(provider="p"))
 
-    body = await adapter._body(
+    body, _handles = await adapter._body(
         GenerateOptions(provider="p", model="m", messages=(_media_message(ref),))
     )
 
-    rendered = json.dumps(body["messages"])
-    assert "application/pdf" in rendered and "shot.png" in rendered
-    assert "was not sent" in rendered
-    assert "input_audio" not in rendered and "image_url" not in rendered
+    (entry,) = body["messages"]
+    (part,) = [block for block in entry["content"] if block["type"] == "file"]
+    assert part["file"]["filename"] == "shot.png"
+    assert part["file"]["file_data"].startswith("data:application/pdf;base64,")
+    assert "file_id" not in part["file"], "nothing uploaded it"
 
 
 async def test_a_blob_that_is_gone_degrades_rather_than_failing(tmp_path: Path) -> None:
@@ -524,7 +556,7 @@ async def test_a_blob_that_is_gone_degrades_rather_than_failing(tmp_path: Path) 
     root.attachments.path_for(ref).unlink()
     adapter = AnthropicAdapter(ctx=root, config=AnthropicConfig())
 
-    body = await adapter._body(
+    body, _handles = await adapter._body(
         GenerateOptions(provider="anthropic", model="m", messages=(_media_message(ref),))
     )
 
@@ -541,7 +573,7 @@ async def test_openai_keeps_a_plain_user_message_a_string(tmp_path: Path) -> Non
     root = Context()
     adapter = OpenAiCompatibleAdapter(ctx=root, profile=ProviderProfile(provider="p"))
 
-    body = await adapter._body(
+    body, _handles = await adapter._body(
         GenerateOptions(
             provider="p",
             model="m",
@@ -615,7 +647,7 @@ async def test_cache_breakpoints_land_on_the_stable_boundaries() -> None:
     """
     adapter = AnthropicAdapter(ctx=Context(), config=AnthropicConfig())
 
-    body = await adapter._body(_options(9))
+    body, _handles = await adapter._body(_options(9))
 
     assert _markers(body) == [
         "tools[1]",  # the last tool: everything through the tool list
@@ -642,7 +674,7 @@ async def test_the_breakpoint_budget_is_never_exceeded() -> None:
     for count in range(1, 24):
         for tools in (0, 3):
             for system in ("sys", None):
-                body = await adapter._body(_options(count, tools=tools, system=system))
+                body, _handles = await adapter._body(_options(count, tools=tools, system=system))
                 found = _markers(body)
                 assert len(found) <= CACHE_BREAKPOINTS, (count, tools, system, found)
 
@@ -688,7 +720,7 @@ async def test_caching_off_sends_the_shapes_the_route_always_sent() -> None:
     """
     adapter = AnthropicAdapter(ctx=Context(), config=AnthropicConfig(cache_control=False))
 
-    body = await adapter._body(_options(9))
+    body, _handles = await adapter._body(_options(9))
 
     assert _markers(body) == []
     assert body["system"] == "sys"

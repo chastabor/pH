@@ -30,7 +30,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ph.cordis import Context, plugin
-from ph.llm.adapter import ResolvedModel
+from ph.llm.adapter import LlmError, ResolvedModel
 from ph.llm.types import (
     AttachmentRef,
     BlockEnd,
@@ -49,10 +49,12 @@ from ph.llm.types import (
     attachment_of,
     text_of,
 )
+from ph.seams.uploads import FileHandle
+from ph.session import now_ms
 from ph.wire import WireModel
 
 from ._http import HttpClient, resolve_secret
-from ._media import load_media, media_pointer
+from ._media import forget_named_handle, load_handles, load_media, media_pointer
 
 __all__ = ["OpenAiCompatibleAdapter", "apply"]
 
@@ -71,12 +73,23 @@ ACCEPTED_MEDIA: tuple[str, ...] = (
 
 Images as `image_url` data URIs and audio as `input_audio`: two wire shapes for
 two MIME families, which is the branching a per-medium block union would have
-duplicated one layer up. PDFs are deliberately absent — this wire carries them
-by `file_id` through the Files API (P7-03), and claiming them would produce a
-request the provider rejects."""
+duplicated one layer up. **PDFs are expressible and still not claimed here**: this
+wire carries a document either by `file_id` or inline as a `file` part (P7-03), so
+a route that takes one sets `accepts: [application/pdf]` — but one
+`openai-compatible` row serves gateways, local llama.cpp and Groq, and most of
+them do not, so a default that claimed it would produce requests the far end
+rejects for the majority of routes."""
 
 MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024
 """The default per-attachment ceiling."""
+
+UPLOAD_PURPOSE = "user_data"
+"""What this wire's Files API is told the bytes are for.
+
+Row config below rather than a constant at the call site, because `purpose` is
+this API's one required form field and gateways in front of it do not agree about
+the vocabulary — `user_data` is what OpenAI's own chat completions read as an
+input file, and a compatible server may want `assistants` or nothing at all."""
 
 
 class ProviderProfile(WireModel):
@@ -96,6 +109,18 @@ class ProviderProfile(WireModel):
     images and a 20 MB ceiling, so a text-only local model was promised
     capabilities it does not have. A route that takes none sets `accepts: []`."""
     max_attachment_bytes: int = MAX_ATTACHMENT_BYTES
+    uploads: tuple[str, ...] = ()
+    """MIME types to send by *reference* through the Files API rather than inline (P7-03).
+
+    Empty by default like the Anthropic row's, for a reason that is this wire's
+    own rather than a beta header: a route here may be anything that speaks the
+    shape, and most gateways implement `/chat/completions` without implementing
+    `/files` at all. A declared MIME the wire cannot *reference* is intersected
+    away rather than uploaded — see `_body`.
+
+    Worth it where it applies: a 4 MB PDF is 5.5 MB of base64 on every step of a
+    session, and the Files API is one upload and an id thereafter."""
+    upload_purpose: str = UPLOAD_PURPOSE
     max_image_edge: int | None = None
     usable_image_edge: int | None = None
     """Pixel limits, when this route publishes them (P7-03).
@@ -118,6 +143,25 @@ def _is_overflow(body: str) -> bool:
     return "context" in lowered and ("length" in lowered or "window" in lowered)
 
 
+_MISSING_FILE_PHRASES = ("no such file", "file_not_found", "not_found", "not found")
+"""How this provider says a referenced file is gone.
+
+Its own tuple rather than a shared one, even though it currently agrees with the
+Anthropic row's almost word for word: what a provider *says* is a fact about that
+provider's prose, and the moment a third wire is added the shared version would
+have to be the union — which is how a `not_found` about a model name comes to be
+classified as a missing file. What is genuinely shared is what happens next
+(`forget_named_handle`), and that is shared.
+
+Matched alongside a check that the message names an id this request actually
+sent, which is the half that makes the guess safe."""
+
+
+def _is_missing_file(message: str) -> bool:
+    lowered = message.lower()
+    return any(phrase in lowered for phrase in _MISSING_FILE_PHRASES)
+
+
 @dataclass(slots=True)
 class OpenAiCompatibleAdapter:
     """Streams one OpenAI-compatible route."""
@@ -130,13 +174,68 @@ class OpenAiCompatibleAdapter:
         secret = resolve_secret(self.ctx, self.profile.api_key_env, self.profile.provider)
         return {"Authorization": f"Bearer {secret}", "Content-Type": "application/json"}
 
-    async def _body(self, options: GenerateOptions) -> dict[str, Any]:
-        media = await load_media(self.ctx.get("attachments"), options.messages)
+    async def upload(self, ref: Any, content: bytes) -> FileHandle:
+        """Hand the bytes to the Files API and keep the id it returns (P7-03).
+
+        The `Uploader` half of `ctx.uploads` for this wire. `purpose` is the one
+        form field the endpoint requires, which is why `post_multipart` grew a
+        `data` argument rather than this building its own request.
+
+        **The expiry is read when the provider states one**, unlike the Anthropic
+        row which publishes none per file: `expires_at` is unix *seconds* here and
+        `FileHandle` is in milliseconds, and getting that conversion wrong in the
+        cheap direction would treat every handle as expired in 1970 and re-upload
+        on every request. Absent means "no expiry announced" rather than "never
+        expires" — the mid-turn invalidation is what covers a file that goes away,
+        and it does not depend on anyone having told the truth.
+        """
+        reply = await self.http.post_multipart(
+            f"{self.profile.base_url.rstrip('/')}/files",
+            headers=self._headers(),
+            field="file",
+            filename=ref.name or "attachment",
+            content=content,
+            mime=ref.mime,
+            data={"purpose": self.profile.upload_purpose},
+            is_overflow=_is_overflow,
+        )
+        handle = str(reply.get("id") or "")
+        if not handle:
+            raise LlmError("the files API returned no id", "REQUEST_FAILED")
+        expires = reply.get("expires_at")
+        return FileHandle(
+            provider=self.profile.provider,
+            attachment_id=ref.attachment_id,
+            handle=handle,
+            uploaded_at=now_ms(),
+            expires_at=int(expires) * 1000 if isinstance(expires, (int, float)) else None,
+        )
+
+    async def _body(self, options: GenerateOptions) -> tuple[dict[str, Any], dict[str, str]]:
+        """The request, and the provider file ids it was built from — see `anthropic`."""
+        handles = await load_handles(
+            self.ctx.get("uploads"),
+            options.messages,
+            provider=self.profile.provider,
+            # **Intersected with what this renderer can reference**, which is
+            # where this row diverges from the Anthropic one and does so
+            # deliberately. There, a declared MIME with no wire shape (video) is
+            # uploaded and then degrades to a pointer, because Anthropic has no
+            # video content block *at all* — the pointer was the outcome either
+            # way and only the upload was wasted. Here every declarable MIME is
+            # already expressible inline, so uploading one this wire cannot
+            # reference would turn a picture that works today into a pointer,
+            # because `load_media` skips the bytes of anything with a handle. A
+            # configuration mistake must not be able to remove a capability.
+            mimes=frozenset(self.profile.uploads) & _FILE_MIMES,
+            session_id=options.session_id,
+        )
+        media = await load_media(self.ctx.get("attachments"), options.messages, skip=handles.keys())
         messages: list[dict[str, Any]] = []
         if options.system:
             messages.append({"role": "system", "content": options.system})
         for message in options.messages:
-            messages.extend(_to_openai(message, media))
+            messages.extend(_to_openai(message, media, handles))
         body: dict[str, Any] = {
             "model": options.model,
             "messages": messages,
@@ -176,18 +275,32 @@ class OpenAiCompatibleAdapter:
                     "strict": True,
                 },
             }
-        return body
+        return body, handles
 
     async def stream(self, options: GenerateOptions) -> AsyncIterator[Any]:
         state = _StreamState()
-        async for _event, payload in self.http.stream_sse(
-            f"{self.profile.base_url.rstrip('/')}/chat/completions",
-            headers=self._headers(),
-            json=await self._body(options),
-            is_overflow=_is_overflow,
-        ):
-            for chunk in state.consume(payload):
-                yield chunk
+        body, handles = await self._body(options)
+        referenced = list(handles.values())
+        try:
+            async for _event, payload in self.http.stream_sse(
+                f"{self.profile.base_url.rstrip('/')}/chat/completions",
+                headers=self._headers(),
+                json=body,
+                is_overflow=_is_overflow,
+                is_missing_file=_is_missing_file,
+            ):
+                for chunk in state.consume(payload):
+                    yield chunk
+        except LlmError as error:
+            # A handle this request referenced is gone — expired early, deleted
+            # from another session, or never honoured. Forget it first, then let
+            # it retry: `FILE_EXPIRED` is in `TRANSIENT_CODES` precisely because
+            # the state that caused it is already cleared by the time the retry
+            # runs, so the next attempt re-uploads rather than repeating a request
+            # that cannot work.
+            raise forget_named_handle(
+                self.ctx, error, referenced, provider=self.profile.provider
+            ) from error
         for chunk in state.finish():
             yield chunk
 
@@ -330,25 +443,57 @@ def _to_usage(raw: dict[str, Any]) -> TokenUsage:
 
 _AUDIO_FORMATS = {"audio/wav": "wav", "audio/mpeg": "mp3"}
 _IMAGE_MIMES = frozenset({"image/png", "image/jpeg", "image/gif", "image/webp"})
+_FILE_MIMES = frozenset({"application/pdf"})
+"""MIMEs this wire carries as a `file` part — by `file_id`, or inline as `file_data`.
+
+The third shape beside `image_url` and `input_audio`, and the only one with two
+spellings, which is why `uploads` is intersected with it: a `file` part is the
+only place a `file_id` can go on this wire, so a MIME outside this set has no
+reference form however it was configured."""
 
 
-def _media_part(attachment: AttachmentRef, data: str) -> dict[str, Any] | None:
+def _media_part(
+    attachment: AttachmentRef, data: str | None, handle: str | None
+) -> dict[str, Any] | None:
     """One attachment in this wire's shape, or `None` if it has none here.
 
     Total over its own vocabulary rather than a second copy of the accept policy:
     `media-degrade` decides what may be sent, but this renderer still has to be
-    honest about what it can *express*. A PDF reaching here — this wire carries
-    those by `file_id` (P7-03) — must not be dressed as an `image_url`.
+    honest about what it can *express*. A MIME it has no shape for becomes a
+    pointer rather than being dressed as an image.
+
+    `handle` wins over `data` where both are offered, which is the whole point of
+    uploading — and in practice they never both arrive, because `load_media` skips
+    the bytes of anything `load_handles` claimed. `data` is therefore `None` for a
+    referenced file, and the signature says so rather than the caller branching.
     """
+    if handle is not None and attachment.mime in _FILE_MIMES:
+        return {"type": "file", "file": {"file_id": handle}}
+    if data is None:
+        return None
     audio = _AUDIO_FORMATS.get(attachment.mime)
     if audio is not None:
         return {"type": "input_audio", "input_audio": {"data": data, "format": audio}}
     if attachment.mime in _IMAGE_MIMES:
         return {"type": "image_url", "image_url": {"url": f"data:{attachment.mime};base64,{data}"}}
+    if attachment.mime in _FILE_MIMES:
+        # The inline spelling, which is what makes `load_handles`' fallback
+        # contract true here: an upload that fails for any reason leaves the id
+        # out and the attachment goes inline. Without this a route whose file API
+        # was down would degrade a document it can perfectly well send.
+        return {
+            "type": "file",
+            "file": {
+                "filename": attachment.name or "attachment.pdf",
+                "file_data": f"data:{attachment.mime};base64,{data}",
+            },
+        }
     return None
 
 
-def _to_openai(message: Any, media: dict[str, str]) -> list[dict[str, Any]]:
+def _to_openai(
+    message: Any, media: dict[str, str], handles: dict[str, str]
+) -> list[dict[str, Any]]:
     """One pH message as the wire's (sometimes several) messages.
 
     A user message becomes a *content list* as soon as it carries media, and a
@@ -390,8 +535,11 @@ def _to_openai(message: Any, media: dict[str, str]) -> list[dict[str, Any]]:
         attachment = attachment_of(block)
         if attachment is not None:
             carries_media = True
-            data = media.get(attachment.attachment_id)
-            part = None if data is None else _media_part(attachment, data)
+            part = _media_part(
+                attachment,
+                media.get(attachment.attachment_id),
+                handles.get(attachment.attachment_id),
+            )
             parts.append(part if part is not None else media_pointer(attachment))
         elif getattr(block, "type", "") == "text":
             parts.append({"type": "text", "text": block.text})
@@ -410,8 +558,19 @@ def _to_openai(message: Any, media: dict[str, str]) -> list[dict[str, Any]]:
 @plugin("llm-openai-compatible", config=Config, inject=["llm", "credentials"])
 async def apply(ctx: Context, config: Config) -> None:
     """Register every configured OpenAI-compatible route."""
+    uploads = ctx.get("uploads")
     for profile in config.profiles:
         adapter = OpenAiCompatibleAdapter(ctx=ctx, profile=profile)
         handle = ctx.llm.register_adapter([profile.provider], adapter)
         ctx.add_disposer(handle.dispose, label=f"llm({profile.provider})")
+        if uploads is not None and profile.uploads:
+            # Only for a route that references files. Most servers speaking this
+            # shape implement `/chat/completions` and not `/files`, so an uploader
+            # registered for every profile would put a file API behind a provider
+            # name that has none — and the first attachment would spend a failed
+            # round trip discovering it.
+            ctx.add_disposer(
+                uploads.register_uploader(profile.provider, adapter),
+                label=f"uploader({profile.provider})",
+            )
         ctx.add_disposer(adapter.http.aclose, label=f"http({profile.provider})")

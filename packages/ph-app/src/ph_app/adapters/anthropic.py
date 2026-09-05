@@ -36,7 +36,6 @@ from typing import Any
 from ph.cordis import Context, plugin
 from ph.llm.adapter import LlmError, ResolvedModel
 from ph.llm.types import (
-    FILE_EXPIRED,
     BlockEnd,
     BlockStart,
     Finish,
@@ -57,7 +56,7 @@ from ph.session import now_ms
 from ph.wire import WireModel
 
 from ._http import HttpClient, resolve_secret
-from ._media import load_handles, load_media, media_pointer
+from ._media import forget_named_handle, load_handles, load_media, media_pointer
 
 __all__ = ["AnthropicAdapter", "apply"]
 
@@ -230,19 +229,6 @@ def _is_missing_file(message: str) -> bool:
     return any(phrase in lowered for phrase in _MISSING_FILE_PHRASES)
 
 
-def _referenced_files(body: dict[str, Any]) -> list[str]:
-    """Every `file_id` this request carries, in the order they appear."""
-    found: list[str] = []
-    for message in body.get("messages") or []:
-        for block in message.get("content") or []:
-            source = block.get("source") if isinstance(block, dict) else None
-            if isinstance(source, dict) and source.get("type") == "file":
-                handle = str(source.get("file_id") or "")
-                if handle:
-                    found.append(handle)
-    return found
-
-
 def _is_overflow(body: str) -> bool:
     # Only the provider's own phrasing: `max_tokens` also appears in a plain
     # bad-request body, and treating that as an overflow would trigger a
@@ -269,7 +255,8 @@ class AnthropicAdapter:
             # the beta ride every request a configured route sent, so an account
             # without it would fail the plain text turns too — a capability the
             # deployment declared becoming an outage on requests that never used
-            # it.
+            # it. The request's own handles are what answers that now: a turn
+            # that referenced no file sends no beta.
             headers["anthropic-beta"] = self.config.files_beta
         return headers
 
@@ -300,13 +287,22 @@ class AnthropicAdapter:
             uploaded_at=now_ms(),
         )
 
-    async def _body(self, options: GenerateOptions) -> dict[str, Any]:
+    async def _body(self, options: GenerateOptions) -> tuple[dict[str, Any], dict[str, str]]:
+        """The request, and the provider file ids it was built from.
+
+        **The handles come back rather than being parsed out of the body again.**
+        Each wire had grown a `_referenced_files` walker — an independent second
+        model of where a file id can sit in a request — whose only input was the
+        map `load_handles` had just returned. Add a place an id can appear and a
+        walker silently misses it, `forget_named_handle` stops invalidating, and
+        `FILE_EXPIRED` retries the same dead handle until the budget is gone.
+        """
         handles = await load_handles(
             self.ctx.get("uploads"),
             options.messages,
             provider=self.config.provider,
             mimes=frozenset(self.config.uploads),
-            session=self._session(options),
+            session_id=options.session_id,
         )
         # After the handles and skipping them: a referenced file must not also be
         # read and encoded, which is the cost uploading exists to remove.
@@ -356,18 +352,12 @@ class AnthropicAdapter:
             body["temperature"] = options.temperature
         if options.stop:
             body["stop_sequences"] = list(options.stop)
-        return body
-
-    def _session(self, options: GenerateOptions) -> Any:
-        sessions = self.ctx.get("sessions")
-        if sessions is None or options.session_id is None:
-            return None
-        return sessions.get(options.session_id)
+        return body, handles
 
     async def stream(self, options: GenerateOptions) -> AsyncIterator[Any]:
         state = _StreamState()
-        body = await self._body(options)
-        referenced = _referenced_files(body)
+        body, handles = await self._body(options)
+        referenced = list(handles.values())
         try:
             async for event, payload in self.http.stream_sse(
                 f"{self.config.base_url.rstrip('/')}/messages",
@@ -386,40 +376,11 @@ class AnthropicAdapter:
             # retry runs, so the next attempt re-uploads rather than repeating a
             # request that cannot work. Failing the turn here would lose an
             # hour's conversation over a cache entry.
-            raise self._forget(error, referenced) from error
+            raise forget_named_handle(
+                self.ctx, error, referenced, provider=self.config.provider
+            ) from error
         for chunk in state.finish():
             yield chunk
-
-    def _forget(self, error: LlmError, referenced: list[str]) -> LlmError:
-        """Drop the one handle this failure named, or leave the failure alone.
-
-        `_http` has already decided the provider is talking about a missing file;
-        what only this side knows is whether it is a file *we* sent. A
-        `not_found` naming no id of ours is somebody else's 404 — a stale route,
-        a gateway — and retrying it would be the "unknown failure billed twice"
-        the retry policy exists to refuse, so it goes back to the code it came
-        with.
-
-        **The named handle, not every handle.** A first draft invalidated all of
-        them on a match, which on a request carrying twenty files threw away
-        nineteen live uploads to re-fetch one dead one.
-        """
-        uploads = self.ctx.get("uploads")
-        message = str(error.failure.message)
-        named = [handle for handle in referenced if handle in message]
-        if uploads is None or not named:
-            return (
-                LlmError(
-                    message,
-                    "REQUEST_FAILED",
-                    error.failure.model_copy(update={"code": "REQUEST_FAILED"}),
-                )
-                if error.code == FILE_EXPIRED
-                else error
-            )
-        for handle in named:
-            uploads.invalidate_handle(self.config.provider, handle)
-        return error
 
     def resolve_model(self, provider: str, model: str) -> ResolvedModel:
         return ResolvedModel(

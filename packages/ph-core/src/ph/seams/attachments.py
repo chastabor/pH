@@ -36,9 +36,13 @@ import base64
 import hashlib
 import logging
 import mimetypes
+import re
 from collections import OrderedDict
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from time import time
+from typing import Any
 
 import anyio
 
@@ -51,13 +55,20 @@ from ..wire import WireModel
 __all__ = [
     "ENCODED_CACHE_BYTES",
     "EXTENSIONS",
+    "LISTING_LIMIT",
+    "MIN_AGE",
     "OCTET_STREAM",
     "AttachmentStore",
+    "AttachmentSurvey",
+    "Blob",
     "apply",
+    "collect_attachments",
     "digest_of",
     "mime_for",
     "mime_of",
     "read_for_attach",
+    "referenced_digests",
+    "survey_attachments",
 ]
 
 log = logging.getLogger("ph.seams.attachments")
@@ -226,10 +237,10 @@ class AttachmentStore:
         correct for a person attaching a file they can already open and wrong for
         anything the model asked for: a tool that reached this would be an
         exfiltration primitive, attaching a private key as a "document" for a
-        provider to OCR. A model-initiated attach reads through `ctx.fs` and calls
-        `save_bytes` — noting that `ctx.fs` has no binary read today, which is a
-        gap that lands with P7-01's tool producer rather than being papered over
-        here.
+        provider to OCR. A model-initiated attach reads through
+        `ctx.fs.read_bytes` — which is the same `fs/read-intent` gate every other
+        model-driven read passes — and calls `save_bytes` with what comes back.
+        `tool-attach` is that caller, and it is the only one this seam expects.
         """
         name, _, content = await read_for_attach(source)
         return await self.save_bytes(content=content, mime=mime_for(mime, name), name=name)
@@ -287,3 +298,302 @@ async def apply(ctx: Context, config: Config) -> None:
     """Mount the local attachment store."""
     root = default_home_path(config.root, "attachments")
     ctx.provide("attachments", AttachmentStore(ctx=ctx, root=root))
+
+
+# ------------------------------------------------------------- collection --
+#
+# `ph attachments gc` (P7-01). Here rather than in the command for
+# `stored_survivors`' reason: the fold is the part with rules, the command is a
+# way to ask for it, and a second asker — a diagnostic, a daemon sweep somebody
+# later wants — must not re-derive which blobs are safe to remove.
+
+DIGEST_TEXT = re.compile(r"sha256:[0-9a-f]{64}")
+"""How an attachment id is recognised **in a log, by its shape**.
+
+Deliberately not a list of the keys that carry one. Three producers already spell
+it differently — `attachment/uploaded` writes `attachmentId`, the media notices
+write `attachmentIds` as a list, and a `user/message` carries it nested inside a
+content block's `attachment` — and every one of those was written at a different
+time by a different row. A key list here would be a fourth spelling of the same
+fact, maintained in a module none of them import, and the failure when it fell
+behind is the one failure this command may not have: a blob quietly collected
+because the row that referenced it used a name nobody added here.
+
+The value's shape is what all of them share, because `digest_of` produces it. The
+cost of matching too much is that an unrelated string that happens to be a
+SHA-256 digest keeps a blob alive for ever, which is a wasted file; the cost of
+matching too little is a session that will not open again.
+"""
+
+MIN_AGE = 86_400.0
+"""How long a blob must have been on disk before it may be collected, in seconds.
+
+**Not a retention policy, and the difference is the whole design of this
+command.** Age never *authorises* collection here — a blob a stored log
+references is kept however old it is, which is the constraint P7-01 wrote down
+before anything was implemented. What this covers is the window between a blob
+being written and the log that mentions it being written: a person can drop a
+file on the composer and leave it staged for as long as they are composing, and
+during that time the bytes are on disk with no `user/message` referencing them
+anywhere. Collecting it would delete the file out from under the prompt they are
+still typing.
+
+A day, because that is the scale of the thing being waited for — a person's
+attention — and because the cost of waiting is one unreferenced file on disk for
+one more day.
+"""
+
+LISTING_LIMIT = 100_000
+"""How many stored sessions the fold will list.
+
+Every other listing in the harness is a *page* — 50 for the picker, 500 for the
+lineage survey — because they answer "show me the recent ones". This one answers
+"is there anyone at all who still needs this blob", and a bounded answer to that
+question is not a smaller answer, it is a wrong one: the session that fell below
+the cut is exactly the old conversation nobody has opened lately, which is the
+one whose media a person would be most upset to lose.
+
+So it is set high enough not to be reached in practice **and checked**: a survey
+that hits it reports `truncated`, and a truncated survey collects nothing. A cap
+at all, rather than none, because a store with more logs than this has something
+else wrong with it and walking it silently for an hour is not the better failure.
+"""
+
+
+@dataclass(frozen=True, slots=True)
+class Blob:
+    """One stored file, and what the fold needs to decide about it."""
+
+    path: Path
+    digest: str
+    bytes: int
+    age: float
+    """Seconds since it was last written, against the fold's own clock."""
+
+
+@dataclass(frozen=True, slots=True)
+class AttachmentSurvey:
+    """What is stored, what still points at it, and what may go.
+
+    Every count is reported rather than summarised into a verdict, because the
+    person reading it is deciding whether to pass `--remove` and the number that
+    decides it — how much of the store was actually read — is the one a summary
+    would drop.
+    """
+
+    sessions: int
+    """Stored logs whose references were read."""
+    collect: tuple[Blob, ...]
+    """Unreferenced, old enough, and safe to remove — if `safe`."""
+    kept: tuple[Blob, ...]
+    """Referenced by some stored log. Never collected, at any age."""
+    recent: tuple[Blob, ...]
+    """Unreferenced but younger than `MIN_AGE` — a staged file, most likely."""
+    uploads: tuple[Path, ...]
+    """Handle-cache entries for digests nothing references — `ctx.uploads`' answer.
+
+    Asked of that seam rather than derived here, because the layout is its own:
+    a collector that rebuilt `<provider>/<digest>.json` from the outside would
+    report zero, silently and with nothing failing, the day the scheme changed.
+
+    Swept under the same reference set as the blobs but **not for the same
+    reason** — losing an entry costs one upload and losing a blob costs the
+    conversation. That is why these are not aged: an unreferenced digest's cache
+    entry is dead the moment the blob is, and there is no staged-file window to
+    wait out because nothing uploads a file before a session mentions it."""
+    unreadable: tuple[str, ...]
+    """Logs that would not read. Their references are unknown, so nothing is safe."""
+    truncated: bool
+    """The listing hit `LISTING_LIMIT`, so "nothing references this" is unproven."""
+
+    @property
+    def safe(self) -> bool:
+        """Whether the fold saw enough of the store to remove anything.
+
+        **Fail closed, and the asymmetry is the reason.** A log this build cannot
+        parse may reference any digest in the store, and a listing that was cut
+        short hides whole sessions — in both cases "no session mentions this
+        blob" is a statement the fold is not entitled to make. Being wrong in the
+        cautious direction costs disk; being wrong in the other direction makes a
+        conversation permanently unopenable, because after P7-03 the local blob
+        is the last copy — a provider's is behind a handle that expires.
+        """
+        return not self.unreadable and not self.truncated
+
+    @property
+    def collectable_bytes(self) -> int:
+        return sum(blob.bytes for blob in self.collect)
+
+
+def referenced_digests(events: Iterable[Any]) -> set[str]:
+    """Every attachment id mentioned anywhere in these events' payloads.
+
+    Over the *payloads* rather than over a set of event types, for `DIGEST_TEXT`'s
+    reason and one more: the surface layer means a stored log can carry an event
+    type this build does not know (A3), and an unknown event that referenced a
+    blob would otherwise read as no reference at all.
+    """
+    found: set[str] = set()
+    for event in events:
+        _walk(event.data, found)
+    return found
+
+
+def _walk(value: Any, found: set[str]) -> None:
+    """Collect digest-shaped strings from a lossless-JSON payload.
+
+    `Mapping` and `Sequence` rather than `dict` and `list`: the log freezes its
+    payloads into `MappingProxyType` and tuples, which are neither — the same trap
+    P4-05 hit reading a frozen argument tree, and here it would have found nothing
+    at all in a stored log while passing every test written against a live one.
+    """
+    if isinstance(value, str):
+        found.update(DIGEST_TEXT.findall(value))
+    elif isinstance(value, Mapping):
+        for item in value.values():
+            _walk(item, found)
+    elif isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        for item in value:
+            _walk(item, found)
+
+
+def _blobs(root: Path, now: float) -> list[Blob]:
+    """Every file in the store, as the digest it is named for.
+
+    The name *is* the identity — `path_for` derives it and never looks it up — so
+    this is the inverse of that function rather than a scan for metadata. A file
+    whose name is not a digest is not one of ours and is left alone: someone's
+    note in the directory is not this command's to delete.
+    """
+    if not root.is_dir():
+        return []
+    found: list[Blob] = []
+    for path in sorted(root.iterdir()):
+        if not path.is_file():
+            continue
+        digest = f"sha256:{path.name.partition('.')[0]}"
+        if not DIGEST_TEXT.fullmatch(digest):
+            continue
+        try:
+            stat = path.stat()
+        except OSError:  # pragma: no cover - raced deletion
+            continue
+        found.append(
+            Blob(path=path, digest=digest, bytes=stat.st_size, age=max(0.0, now - stat.st_mtime))
+        )
+    return found
+
+
+def survey_attachments(
+    store: Any,
+    persistence: Any,
+    *,
+    uploads: Any = None,
+    min_age: float = MIN_AGE,
+    limit: int = LISTING_LIMIT,
+    now: float | None = None,
+) -> AttachmentSurvey:
+    """Fold every stored session for the digests it still points at.
+
+    Duck-typed on both stores like `stored_survivors`, so the fold has no reason
+    to import a backend and a test can hand it a stub.
+
+    **Unchained reads, one log at a time.** `read_own` rather than `read` is not
+    an optimisation, it is the correct primitive for this question twice over: the
+    union of references over every stored log is the same set as the union over
+    every materialised chain, so following parents would re-read an ancestor once
+    per descendant to learn nothing new — and a chained read *fails* when an
+    ancestor is missing, which would turn one damaged log into an unreadable
+    subtree and refuse a collection that is perfectly safe to make.
+
+    The cost is a listing plus one read per log, and for the JSONL backend a
+    directory search per log on top, since `StoredSession` does not carry the
+    family a direct path would need. That is why nothing calls this on a timer.
+    """
+    moment = time() if now is None else now
+    unreadable: list[str] = []
+    referenced: set[str] = set()
+    try:
+        listed = list(persistence.stored(limit=limit))
+    except Exception:
+        log.warning("ph.seams.attachments: could not list stored sessions", exc_info=True)
+        # An empty listing and `truncated` — the same refusal a cut-short one
+        # gets, because "no sessions" and "could not ask" are indistinguishable
+        # from here and only one of them makes collection safe.
+        return AttachmentSurvey(
+            sessions=0, collect=(), kept=(), recent=(), uploads=(), unreadable=(), truncated=True
+        )
+    for entry in listed:
+        try:
+            _header, events = persistence.read_own(entry.session_id)
+        except Exception:
+            log.warning(
+                "ph.seams.attachments: could not read session %s", entry.session_id, exc_info=True
+            )
+            unreadable.append(entry.session_id)
+            continue
+        referenced |= referenced_digests(events)
+    kept, recent, collect = [], [], []
+    for blob in _blobs(store.root, moment):
+        if blob.digest in referenced:
+            kept.append(blob)
+        elif blob.age < min_age:
+            recent.append(blob)
+        else:
+            collect.append(blob)
+    return AttachmentSurvey(
+        sessions=len(listed) - len(unreadable),
+        collect=tuple(collect),
+        kept=tuple(kept),
+        recent=tuple(recent),
+        uploads=() if uploads is None else tuple(uploads.stale(referenced)),
+        unreadable=tuple(unreadable),
+        truncated=len(listed) >= limit,
+    )
+
+
+def _stale_uploads(uploads: Any, referenced: set[str]) -> tuple[Path, ...]:
+    """Handle-cache entries for blobs nothing points at any more (P7-03).
+
+    The other half of the same question, and the reason `ctx.uploads` says a sweep
+    belongs here: an entry is written per `(provider, digest)` ever uploaded and
+    stays after the provider has forgotten the file, so that directory grows with
+    every distinct attachment a deployment has ever sent.
+
+    Swept under the same reference set but **not for the same reason** — losing an
+    entry costs one upload, losing a blob costs the conversation. That is why
+    these are not aged: an unreferenced digest's cache entry is dead the moment
+    the blob is, and there is no staged-file window to wait out because nothing
+    uploads a file before a session mentions it.
+    """
+    root = getattr(uploads, "root", None)
+    if not isinstance(root, Path) or not root.is_dir():
+        return ()
+    return tuple(
+        path
+        for path in sorted(root.rglob("*.json"))
+        if f"sha256:{path.stem}" not in referenced and DIGEST_TEXT.fullmatch(f"sha256:{path.stem}")
+    )
+
+
+def collect_attachments(survey: AttachmentSurvey, uploads: Any = None) -> tuple[int, int]:
+    """Remove what the survey cleared, and report `(blobs, upload entries)`.
+
+    Refuses everything unless the survey is `safe`, rather than leaving that check
+    to each caller: this is the one function in the harness that deletes
+    conversation, and a guard a caller can forget is not a guard.
+
+    The cache half goes back through `ctx.uploads`, which pairs the unlink with
+    forgetting the entry — unlinking from here would leave that seam's memo
+    answering with a handle whose file this command had just removed.
+    """
+    if not survey.safe:
+        return (0, 0)
+    blobs = 0
+    for blob in survey.collect:
+        try:
+            blob.path.unlink()
+        except OSError:  # pragma: no cover - raced deletion
+            continue
+        blobs += 1
+    return (blobs, 0 if uploads is None else uploads.prune(survey.uploads))

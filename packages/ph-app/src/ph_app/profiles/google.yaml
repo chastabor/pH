@@ -1,0 +1,18 @@
+# A profile for Google's Gemini API.
+#
+# The one shipped route that declares video, which is what P7-03's gate needs a
+# provider for: `uploads` defaults to the video family here rather than to
+# nothing, because this provider's Files API is the documented path for one and
+# a 300 MB clip cannot ride inline under a 20 MB request cap.
+#
+# `apiKeyEnv` is a *name*, never an interpolation: the adapter resolves it at the
+# request edge, so the value never enters a row, an event, or a child process
+# (I-3).
+- insert:
+    - id: llm-google
+      name: llm-google
+      config:
+        provider: google
+        baseUrl: ${env:GEMINI_BASE_URL:-https://generativelanguage.googleapis.com/v1beta}
+        apiKeyEnv: GEMINI_API_KEY
+        contextWindow: 1048576

@@ -38,8 +38,8 @@ import typer
 from ph.cordis import Profile
 from ph.seams.workspace import Collectable, stored_survivors
 
-from .console import emit, fail
-from .profiles import DEFAULT_PROFILE, ProfileOption, profile_or_exit
+from .console import emit, fail_unmounted
+from .profiles import DEFAULT_PROFILE, PatchOption, ProfileOption, profile_or_exit
 from .runtime import mounted
 
 __all__ = ["workspaces_app"]
@@ -132,6 +132,7 @@ async def _collect(profile: Profile, *, older_than: float, remove: bool, family:
 @workspaces_app.command()
 def gc(
     profile: ProfileOption = DEFAULT_PROFILE,
+    patch: PatchOption = [],  # noqa: B006 - typer reads the default as the option's
     older_than: Annotated[
         float,
         typer.Option("--older-than", help="Days a retained tree is kept before collecting."),
@@ -160,7 +161,7 @@ def gc(
     beneath it — **descent, not the messaging family**, since a sibling's
     checkout is not this run's to collect.
     """
-    composed = profile_or_exit(profile)
+    composed = profile_or_exit(profile, patch)
     try:
         report = anyio.run(
             partial(
@@ -172,15 +173,11 @@ def gc(
             )
         )
     except Exception as error:
-        # `doctor`'s reason, verbatim: a profile that refuses to mount is the
-        # most important thing this can report, and a person who ran it *because*
-        # something is wrong is owed the sentence rather than a traceback.
-        #
         # No `except typer.Exit: raise` above it, unlike `doctor`: that guard is
         # there because `typer.Exit` subclasses `RuntimeError`, and it only earns
         # its place where the block can raise one. Resolving the profile happens
         # a line above this `try`, and `_collect` returns its refusals as strings.
-        fail(f"[red]profile {profile!r} does not mount:[/red] {error}", cause=error)
+        fail_unmounted(profile, error)
     # `emit`, not `console.print`: this is a table of paths and reasons, and a
     # console that decides width from the terminal wraps a checkout's path onto
     # a second line and ellipsizes the reason — which is the one column a person

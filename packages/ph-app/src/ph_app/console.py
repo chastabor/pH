@@ -31,7 +31,16 @@ from rich.table import Table
 
 from ph.selectors import Scheme, Selector, SelectorError, parse_all
 
-__all__ = ["TypeOption", "console", "emit", "err", "fail", "section", "selectors_or_exit"]
+__all__ = [
+    "TypeOption",
+    "console",
+    "emit",
+    "err",
+    "fail",
+    "fail_unmounted",
+    "section",
+    "selectors_or_exit",
+]
 
 console = Console(highlight=False)
 err = Console(stderr=True, highlight=False)
@@ -81,6 +90,19 @@ def fail(message: str, *, code: int = 1, cause: BaseException | None = None) -> 
     """
     err.print(message)
     raise typer.Exit(code=code) from cause
+
+
+def fail_unmounted(profile: str, error: BaseException) -> NoReturn:
+    """The refusal every command that mounts a profile owes.
+
+    Three commands had written this sentence — `ph doctor`, `ph workspaces gc`,
+    `ph attachments gc` — each copying the last, which is the count this module's
+    own docstring gives for extracting `section`. The argument is the same one at
+    all three: a profile that refuses to mount is the most important thing the
+    command can report, and a person who ran it *because* something is wrong is
+    owed the sentence rather than a traceback.
+    """
+    fail(f"[red]profile {profile!r} does not mount:[/red] {error}", cause=error)
 
 
 TypeOption: TypeAlias = Annotated[

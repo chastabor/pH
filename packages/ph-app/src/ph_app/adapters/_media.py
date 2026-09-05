@@ -6,6 +6,12 @@ the *policy* question above every adapter: by the time a request reaches one, an
 left to decide — only bytes to fetch and a wire shape to build, and the shape is
 the adapter's own.
 
+Also the *upload* half of that, once a second wire grew one (P7-03). `_http`'s
+own docstring is the argument: the two adapters differ in message shape and in
+how usage is reported, and they do **not** differ in what a dead file handle
+means — so `forget_named_handle` lives here rather than being the third copy of
+twelve lines whose bug would be invisible.
+
 @module ph_app.adapters._media
 """
 
@@ -15,12 +21,52 @@ import logging
 from collections.abc import Collection, Sequence
 from typing import Any
 
+from ph.llm.adapter import LlmError
 from ph.llm.media import media_pointer_text
-from ph.llm.types import Message, attachment_of
+from ph.llm.types import FILE_EXPIRED, Message, attachment_of
 
-__all__ = ["load_handles", "load_media", "media_pointer"]
+__all__ = ["forget_named_handle", "load_handles", "load_media", "media_pointer"]
 
 log = logging.getLogger("ph_app.adapters.media")
+
+
+def forget_named_handle(
+    ctx: Any, error: LlmError, referenced: Sequence[str], *, provider: str
+) -> LlmError:
+    """Drop the one handle this failure named, or leave the failure alone (P7-03).
+
+    `_http` has already decided the provider is talking about a missing file; what
+    only an adapter knows is whether it is a file *we* sent. A `not_found` naming
+    no id of ours is somebody else's 404 — a stale route, a gateway — and retrying
+    it would be the "unknown failure billed twice" the retry policy exists to
+    refuse, so it goes back to the code it came with.
+
+    **The named handle, not every handle.** A first draft invalidated all of them
+    on a match, which on a request carrying twenty files threw away nineteen live
+    uploads to re-fetch one dead one.
+
+    Shared rather than copied because the *classification* is already shared:
+    `failure_from_status` takes each wire's phrases and answers one code, and this
+    is what a caller does with that code. A second adapter writing its own would
+    be free to disagree about which half of the check is load-bearing, which is
+    the half that keeps `FILE_EXPIRED` out of an infinite retry.
+    """
+    uploads = ctx.get("uploads")
+    message = str(error.failure.message)
+    named = [handle for handle in referenced if handle in message]
+    if uploads is None or not named:
+        return (
+            LlmError(
+                message,
+                "REQUEST_FAILED",
+                error.failure.model_copy(update={"code": "REQUEST_FAILED"}),
+            )
+            if error.code == FILE_EXPIRED
+            else error
+        )
+    for handle in named:
+        uploads.invalidate_handle(provider, handle)
+    return error
 
 
 def media_pointer(attachment: Any) -> dict[str, Any]:
@@ -40,7 +86,7 @@ async def load_handles(
     *,
     provider: str,
     mimes: frozenset[str],
-    session: Any = None,
+    session_id: str | None = None,
 ) -> dict[str, str]:
     """Provider file ids for the attachments this route references rather than inlines.
 
@@ -65,7 +111,9 @@ async def load_handles(
             if attachment.mime not in mimes:
                 continue
             try:
-                handle = await uploads.handle_for(attachment, provider=provider, session=session)
+                handle = await uploads.handle_for(
+                    attachment, provider=provider, session_id=session_id
+                )
             except Exception:
                 # Deliberately broad and deliberately not fatal: an upload is an
                 # optimisation, and a route that can take the bytes inline must

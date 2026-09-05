@@ -1,10 +1,11 @@
 """What every HTTP-streaming adapter shares: the client, the credential, the failure.
 
-The two wires pH speaks differ in message shape and in how usage is reported.
-They do **not** differ in how a request is sent, how a secret reaches a header,
-or what an HTTP status means for retry — and when those were written twice the
-copies drifted (one overflow heuristic matched `max_tokens` anywhere in a body,
-turning a bad-request 400 into a compaction trigger). So they live here once.
+The three wires pH speaks differ in message shape, in how usage is reported, and
+— since P7-03 — in how a file API is shaped. They do **not** differ in how a
+request is sent, how a secret reaches a header, or what an HTTP status means for
+retry, and when those were written twice the copies drifted (one overflow
+heuristic matched `max_tokens` anywhere in a body, turning a bad-request 400 into
+a compaction trigger). So they live here once.
 
 One `httpx.AsyncClient` per adapter, not per request: creating a client inside
 `stream()` pays a fresh TCP connect and TLS handshake on every model call and
@@ -16,7 +17,7 @@ client with its scope.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Mapping
 from typing import Any
 
 import httpx
@@ -112,6 +113,7 @@ class HttpClient:
         content: bytes,
         mime: str,
         is_overflow: Callable[[str], bool],
+        data: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         """POST one file as multipart form data and return the parsed reply.
 
@@ -119,10 +121,15 @@ class HttpClient:
         one more thing both wires have, and the status→code classification is
         the part that must not be written twice. `Content-Type` is left to
         `httpx`, which has to compute the multipart boundary anyway.
+
+        `data` is the form fields that ride beside the file. Anthropic's Files API
+        takes none; OpenAI's requires `purpose`, and without a way to send it the
+        second wire's uploader would have had to build its own request and inherit
+        none of the classification above (P7-03).
         """
         sending = {name: value for name, value in headers.items() if name != "Content-Type"}
         response = await self._get().post(
-            url, headers=sending, files={field: (filename, content, mime)}
+            url, headers=sending, files={field: (filename, content, mime)}, data=data or {}
         )
         if response.status_code >= 400:
             raise failure_from_status(
@@ -130,6 +137,49 @@ class HttpClient:
                 response.text,
                 is_overflow=is_overflow,
             )
+        parsed: dict[str, Any] = response.json()
+        return parsed
+
+    async def post_raw(
+        self,
+        url: str,
+        *,
+        headers: dict[str, str],
+        json: dict[str, Any] | None = None,
+        content: bytes | None = None,
+        is_overflow: Callable[[str], bool],
+    ) -> tuple[dict[str, Any], Mapping[str, str]]:
+        """POST a JSON body or raw bytes; return `(parsed body, response headers)`.
+
+        The **headers** are why this exists and why it is not `post_multipart`
+        (P7-03). Google's Files API is a two-step resumable upload whose first
+        step answers with an empty body and the destination in
+        `X-Goog-Upload-URL`, and whose second step is the file's bytes with no
+        form encoding around them at all. Neither shape fits a multipart helper,
+        and both want the same status→code classification, which is the whole
+        reason this module exists.
+
+        A body that is not JSON comes back as `{}` rather than raising: the first
+        step of that upload legitimately returns nothing, and a helper that
+        insisted on JSON would make the caller catch a decode error to discover
+        success.
+        """
+        response = await self._get().post(url, headers=headers, json=json, content=content)
+        if response.status_code >= 400:
+            raise failure_from_status(response.status_code, response.text, is_overflow=is_overflow)
+        try:
+            parsed: dict[str, Any] = response.json()
+        except ValueError:
+            parsed = {}
+        return parsed, response.headers
+
+    async def get_json(
+        self, url: str, *, headers: dict[str, str], is_overflow: Callable[[str], bool]
+    ) -> dict[str, Any]:
+        """GET and parse — the poll half of an upload that finishes asynchronously."""
+        response = await self._get().get(url, headers=headers)
+        if response.status_code >= 400:
+            raise failure_from_status(response.status_code, response.text, is_overflow=is_overflow)
         parsed: dict[str, Any] = response.json()
         return parsed
 

@@ -40,12 +40,20 @@ them from another session, or forget them; that shows up as a failure *mid-turn*
 which `invalidate_handle` plus the retry waterfall turns into one more attempt
 rather than a lost turn.
 
-Not enforced (§5 rule 6): **nothing prunes this directory.** An entry is written
-per `(provider, digest)` ever uploaded and stays after the provider has forgotten
-the file, so the cache grows with the number of distinct attachments a deployment
-has ever sent. Each entry is a few hundred bytes and the directory is safe to
-delete wholesale, but a sweep belongs with `ph attachments gc` (P7-01's loose
-end), which has the same shape of question about the blobs themselves.
+**Pruned by `ph attachments gc`, off the same reference set as the blobs.** An
+entry is written per `(provider, digest)` ever uploaded and stays after the
+provider has forgotten the file, so without a sweep the directory grows with the
+number of distinct attachments a deployment has ever sent. It is swept there
+rather than here because the question is the same one — *does any stored session
+still point at this digest* — and answering it twice would be two folds that can
+disagree. What is **not** shared is the reason: losing an entry costs one upload
+and losing a blob costs the conversation, which is why the blobs are aged and
+guarded by a completeness check and these are not.
+
+Still not enforced (§5 rule 6): **nothing prunes it automatically.** The command
+is manual, like the collection of the blobs it mirrors, so a deployment that never
+runs it keeps every entry it has ever written. Each is a few hundred bytes and the
+directory is safe to delete wholesale.
 
 @module ph.seams.uploads
 """
@@ -55,6 +63,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from collections.abc import Container, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
@@ -224,7 +233,7 @@ class UploadRegistry:
                 return
 
     async def handle_for(
-        self, ref: AttachmentRef, *, provider: str, session: Any = None
+        self, ref: AttachmentRef, *, provider: str, session_id: str | None = None
     ) -> FileHandle | None:
         """The handle to reference these bytes by, uploading them if needed.
 
@@ -232,10 +241,18 @@ class UploadRegistry:
         caller's alternative is to send the bytes inline, which is what every
         route did before this row existed.
 
-        `session` is where the *fact* goes when an upload actually happens.
+        `session_id` is where the *fact* goes when an upload actually happens.
         Recorded here rather than by the caller because this is the one place
         that knows the difference between a cache hit and bytes leaving the
         machine, and it is that difference a person is owed.
+
+        **An id, and this resolves it** — where the first shape took the `Session`
+        itself and made every adapter look one up. Three of them had written the
+        same five lines by the time the third wire landed, and the omission that
+        shape invites is silent in the worst way: an adapter that forgets to pass
+        it loses `attachment/uploaded`, the only record that bytes left the
+        machine, while every request still succeeds. This has the `ctx` those
+        lookups needed, so the rule lives once beside the append it guards.
         """
         cached = self.cached(provider, ref.attachment_id)
         if cached is not None:
@@ -248,9 +265,51 @@ class UploadRegistry:
         with running(entry.by):
             handle = await entry.uploader.upload(ref, content)
         await self._store(handle)
+        session = self._session(session_id)
         if session is not None:
             record_uploaded(session, handle, ref)
         return handle
+
+    def _session(self, session_id: str | None) -> Any:
+        sessions = self.ctx.get("sessions")
+        return None if sessions is None or session_id is None else sessions.get(session_id)
+
+    def stale(self, referenced: Container[str]) -> tuple[Path, ...]:
+        """Cache entries for digests nothing points at any more (P7-01).
+
+        The half of `ph attachments gc` that is this seam's, held here because the
+        layout is: `path_for` decides that an entry is `<provider>/<digest>.json`,
+        and a collector that reconstructed that rule from the outside would keep
+        reporting zero — silently, and with nothing failing — the day the scheme
+        changed. The *reference set* is still the attachment store's to compute;
+        what belongs here is which files answer to it.
+        """
+        if not self.root.is_dir():
+            return ()
+        return tuple(
+            path
+            for path in sorted(self.root.rglob("*.json"))
+            if f"sha256:{path.stem}" not in referenced
+        )
+
+    def prune(self, paths: Iterable[Path]) -> int:
+        """Remove these entries and forget what they said.
+
+        Through the seam rather than by unlinking from the collector, because the
+        memo is the part an outside deleter cannot see: `_memo` would go on
+        answering `cached()` with a handle whose file this command had just
+        removed, for the life of the process. `invalidate_handle` already pairs
+        the two for one entry; this is the same pairing for a sweep.
+        """
+        removed = 0
+        for path in paths:
+            try:
+                path.unlink()
+            except OSError:  # pragma: no cover - raced deletion
+                continue
+            self._memo.pop((path.parent.name, f"sha256:{path.stem}"), None)
+            removed += 1
+        return removed
 
     async def _store(self, handle: FileHandle) -> None:
         self._memo[(handle.provider, handle.attachment_id)] = handle

@@ -232,6 +232,14 @@
   name: tool-ask-user
   disabled: true
 
+# The model door of I-9 (P7-01): a file the model found, read through `ctx.fs`
+# so `permissions-fs` and the workspace tier bound it, and put in front of its
+# own eyes as media. Enabled here rather than `disabled` like `tool-ask-user`,
+# because it needs no human and no screen — and it registers nothing at all
+# without an attachment store, so a profile that mounts none pays nothing.
+- id: tool-attach
+  name: tool-attach
+
 # Delegation the model can await (P4-13). The seam has no provider in `ph-base`,
 # and this row registers nothing until one is mounted — a tool advertised in
 # every prompt and refused on every call teaches the model a capability the
