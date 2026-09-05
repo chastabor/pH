@@ -16,7 +16,7 @@ from __future__ import annotations
 import threading
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager, contextmanager, suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -53,18 +53,50 @@ class _Daemon:
     server: Any = None
     """The `DaemonServer` behind the socket, for the tests whose subject is the
     supervisor itself rather than the wire."""
+    clients: list[DaemonClient] = field(default_factory=list)
+    """Every client handed out, so teardown can close them. See `close_clients`."""
 
     async def client(self, *capabilities: str, on_notify: Any = None) -> DaemonClient:
         """One connected, pumping client. `capabilities` are what it declares.
 
         Passing `"asks"` is what makes it a front end — see `AskDesk`. The
         observer is keyword-only because almost nothing passes one, and leading
-        with it made every front end in the suite open with a `None` placeholder."""
+        with it made every front end in the suite open with a `None` placeholder.
+
+        Recorded, because a test that opened one is not thereby the thing that
+        has to remember to close it: teardown does, and until it did the pumps
+        were cancelled mid-read (see `close_clients`).
+        """
         client = await DaemonClient.connect(self.path, on_notify)
         self.tasks.start_soon(client.pump)
+        self.clients.append(client)
         if capabilities:
             await client.initialize(*capabilities)
         return client
+
+    async def close_clients(self) -> None:
+        """Close every client and wait for its pump to notice, before any cancel.
+
+        **`DaemonClient.connected`'s rule, which this helper was breaking**:
+        "closing the stream is what ends the pump, so there is no cancel here — a
+        teardown that cancelled would race the last frame it asked for." Teardown
+        cancelled the task group with the pumps still reading, and that race
+        surfaced as an `InvalidStateError` from a stray loop callback — collected
+        by the *session-wide* anyio loop and re-raised inside whichever test came
+        next, which is why it looked like a flake in an unrelated one.
+
+        Waiting on `closed` rather than sleeping, because that event is set by
+        the pump itself when the stream ends: the fact, not a guess about how
+        long it takes. Bounded, since a teardown that can hang is one that will —
+        `install_lifecycle` makes the same trade for the same reason.
+        """
+        for client in self.clients:
+            with suppress(Exception):
+                await client.aclose()
+        for client in self.clients:
+            with anyio.move_on_after(5.0), suppress(Exception):
+                await client.closed.wait()
+        self.clients.clear()
 
     async def root(self, session_id: str = "root") -> Any:
         """One live root, started the way `session/attach` starts one."""
@@ -150,9 +182,17 @@ async def running(
             )
         )
         await ready.wait()
+        daemon = _Daemon(path=socket, tasks=tasks, server=started[0])
         try:
-            yield _Daemon(path=socket, tasks=tasks, server=started[0])
+            yield daemon
         finally:
+            # Clients first, then the cancel — the order `serve()` itself uses at
+            # the other end, where the shielded `supervisor.aclose()` runs before
+            # `tasks.cancel_scope.cancel()` and the comment says the cancel is
+            # meant to reach "a listener rather than a turn". The same is true
+            # here: with the pumps still reading, the cancel reached a socket
+            # mid-frame.
+            await daemon.close_clients()
             tasks.cancel_scope.cancel()
 
 

@@ -14,6 +14,14 @@ rather than shipping a listing in the wrong syntax, since a model given
 TypeScript signatures for a Python runtime writes code that cannot run and the
 failure looks like a model problem.
 
+**The TypeScript one is registered and currently unselectable**, because the
+renderer is chosen by the *runtime's* `language` and every runtime pH ships is
+Python. It is kept because the seam's fail-loud lookup only pays off if the
+renderer it finds is correct, and because P6-08 would otherwise re-derive it —
+but nothing in a shipped profile can reach it today.
+`docs/dev-notes/typescript-code-runtime.md` records what would make it live, and
+which of that work is already done.
+
 @module ph.tools.sdk
 """
 
