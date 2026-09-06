@@ -31,6 +31,8 @@ harness could not promise; it says so rather than pretending.
   back to `shared` with a notice.
 * **A workspace is an effect of the scope that took it** (I2). `acquire`
   registers teardown through `ctx.effect`, so a disposed agent scope unwinds it.
+  With no `scope=`, a live agent named by `agent_id` owns it anyway; only an id
+  the registry does not know falls back to the seam's default owner.
   That is the in-process half; the `workspace/acquired` + `workspace/disposed`
   pair is the crash half, reconciled at session open.
 * **`scratch` is always present and always writable**, on every kind and every

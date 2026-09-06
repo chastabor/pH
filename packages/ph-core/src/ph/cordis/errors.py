@@ -7,6 +7,7 @@ __all__ = [
     "EventModeError",
     "InactiveScopeError",
     "LoaderError",
+    "MountRefusal",
     "ServiceConflictError",
     "ServiceNotFoundError",
     "UndeclaredEventError",
@@ -43,3 +44,26 @@ class EventModeError(CordisError):
 
 class LoaderError(CordisError):
     """A profile could not be composed into rows."""
+
+
+class MountRefusal(CordisError, RuntimeError):
+    """A row declined to apply — on purpose, with a sentence for a person (E8).
+
+    Distinct from a *bug* in an `apply`, which stays a traceback. A refusal is a
+    row saying the deployment cannot honour what the profile asked of it:
+    `containment.strict` on a host with no sandbox backend, a telemetry exporter
+    without its extra. Every host that mounts owes the person that sentence and an
+    exit code rather than the stack, and one type is what lets each of them catch
+    it without knowing which row refused. Refuse at mount, not at first use — by
+    then the agent is running and "refuse to start" has already been disobeyed.
+
+    `RuntimeError` stays a base so callers that caught the old spelling still do.
+
+    `code` because the CLI is not the only host that mounts: the daemon mounts a
+    profile per root, and `respond` reads `code` off any raised instance to put
+    it in `data.reason` — so without one a profile that refuses reaches a TUI or
+    an `ph agents` client as a generic failure it cannot tell from a mistyped
+    method. `ph.persistence.lease.SessionBusy` names itself for the same reason.
+    """
+
+    code = "profile_refused"

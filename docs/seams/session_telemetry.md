@@ -52,10 +52,14 @@ first is the one that carries the latency signal.
 
 * It does not trace. See above.
 * It does not decide what is sensitive — a redaction row does, on the waterfall.
-* **Nothing produces ledger records yet beyond the seam's own mirroring**, so what
-  an operator sees is what the session log already says, and the `ops` channel has
-  no producer at all. Stated because a telemetry seam that looked wired but
-  reported nothing would be worse than one that is off.
+* **Ledger records are the seam's own mirroring of the session log**, so what an
+  operator sees there is what the log already says. The `ops` channel has three
+  producers, all through the module's `ops_record` helper, which is a no-op
+  without the seam: a session open refused because another process holds it, a
+  store that cannot take the I-5 lease, and a workspace provider that failed and
+  left an agent uncontained. It is never called from inside the sink loop, where
+  a failing sink reporting itself would recurse. Stated because a telemetry seam
+  that looked wired but reported nothing would be worse than one that is off.
 
 ## The row
 

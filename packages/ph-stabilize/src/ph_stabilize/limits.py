@@ -44,6 +44,8 @@ from pydantic import Field
 from ph.agent.types import PreStepDecision
 from ph.cordis import Context, plugin
 from ph.llm.types import ToolResultBlock
+from ph.seams._registry import contribute_via
+from ph.seams.subagents import ADMITTED, SubagentRequest
 from ph.seams.tui_status import StatusField, StatusReading
 from ph.session import (
     Session,
@@ -91,6 +93,11 @@ model has no notion of.
 
 Its `tool_name=None` sibling is not ported: nothing here denies "all tools"
 without naming one, and an unreachable constant is a claim nobody can check."""
+
+CHILD_DENIAL = "Subagent limit reached: {limits}. No child was created."
+"""The child caps' refusal. No upstream wording to copy — the middleware pair
+this module ports has no notion of a child — so it says the two things a model
+can act on: which ceiling, and that nothing was made."""
 
 SIBLING_STOPPED = (
     "Execution stopped before this tool call could run because another tool "
@@ -158,6 +165,21 @@ class ToolCallLimits(CallBudget):
     exit: Literal["continue", "end", "error"] = "continue"
 
 
+class ChildLimits(CallBudget):
+    """How many children an agent may spawn, per turn and per session.
+
+    Folded from the parent's own `subagent/admitted` records, so a resumed
+    session keeps its count, and enforced as a `ctx.subagents.guard` before the
+    provider is asked, so a refused spawn creates nothing. Every ceiling is unset
+    by default, for the reason the others are.
+
+    **No live ceiling, deliberately.** How many children *run at once* is a
+    question about resources, not about what the parent may ask for, and a
+    refusal is the wrong instrument for it: the parent asked for nine. The
+    subagent provider answers it with a queue (`rlm-subagent-provider`'s
+    `maxConcurrent`), and this row keeps to the totals."""
+
+
 class BreakerConfig(WireModel):
     """The consecutive-failure breaker."""
 
@@ -172,6 +194,7 @@ class Config(WireModel):
 
     model_calls: ModelCallLimits = ModelCallLimits()
     tool_calls: ToolCallLimits = ToolCallLimits()
+    children: ChildLimits = ChildLimits()
     breaker: BreakerConfig = BreakerConfig()
 
 
@@ -186,6 +209,8 @@ class Counts:
     turn_steps: int = 0
     session_tools: int = 0
     turn_tools: int = 0
+    session_children: int = 0
+    turn_children: int = 0
     per_tool_session: Mapping[str, int] = field(default_factory=dict)
     per_tool_turn: Mapping[str, int] = field(default_factory=dict)
     consecutive_failures: Mapping[str, int] = field(default_factory=dict)
@@ -197,9 +222,26 @@ class Counts:
     find out would be the fold done twice."""
 
 
-_COUNTED = frozenset({"turn/start", "step/start", "tool/call", "tool/result"})
+_COUNTED = frozenset(
+    {
+        "turn/start",
+        "step/start",
+        "tool/call",
+        "tool/result",
+        "tool/code-dispatch-start",
+        "tool/code-dispatch",
+        ADMITTED,
+    }
+)
 """The only event types this fold reads. Named so the slice can be filtered
-before anything is copied."""
+before anything is copied.
+
+**A Code Mode dispatch is a tool call** (C1, C2). A `tools.x(...)` from inside a
+cell logs `tool/code-dispatch-start` rather than `tool/call`, and the fold read
+only the latter — so every dispatch was *judged* at `tools/pre-execute` against a
+count that never moved, and a per-tool budget or the breaker could not bind on
+the door P3-21 (b) said Phase 4 would count. Both records land after the gate
+decides, as `tool/call` does since P7-15, so the two doors share one arithmetic."""
 
 
 def _extend(previous: Counts, session: Session, from_seq: int) -> Counts:
@@ -222,6 +264,7 @@ def _extend(previous: Counts, session: Session, from_seq: int) -> Counts:
         return previous
     session_steps, turn_steps = previous.session_steps, previous.turn_steps
     session_tools, turn_tools = previous.session_tools, previous.turn_tools
+    session_children, turn_children = previous.session_children, previous.turn_children
     per_session = dict(previous.per_tool_session)
     per_turn = dict(previous.per_tool_turn)
     failures = dict(previous.consecutive_failures)
@@ -231,32 +274,47 @@ def _extend(previous: Counts, session: Session, from_seq: int) -> Counts:
         if event.type == "turn/start":
             turn_steps = 0
             turn_tools = 0
+            turn_children = 0
             per_turn = {}
+            # A call id from a finished turn can never be answered, so the map
+            # that carries a name from a call to its settle is a turn's. Left to
+            # the settle alone it is not bounded: `_log_settle` is not a
+            # `finally`, so a dispatch that raises writes its start and never its
+            # end, and that entry is then copied on every fold for the session's
+            # life (~4.7 µs at zero, ~8.8 µs at two thousand).
+            names = {}
         elif event.type == "step/start":
             session_steps += 1
             turn_steps += 1
-        elif event.type == "tool/call":
+        elif event.type in ("tool/call", "tool/code-dispatch-start"):
             name = str(event.data.get("name") or "")
-            call_id = str(event.data.get("callId") or "")
+            # `callId` for a model's call, `subCallId` for a dispatch: the id the
+            # settling record will cite, so the breaker can pair them.
+            call_id = str(event.data.get("callId") or event.data.get("subCallId") or "")
             if call_id:
                 names[call_id] = name
             session_tools += 1
             turn_tools += 1
             per_session[name] = per_session.get(name, 0) + 1
             per_turn[name] = per_turn.get(name, 0) + 1
-        elif event.type == "tool/result":
+        elif event.type in ("tool/result", "tool/code-dispatch"):
             call_id, is_error = _result_facts(event)
-            # Popped, not read: the map exists to carry a name from a `tool/call`
-            # to the result that answers it, and both are in the same batch. Left
-            # in, it grows for the session's life and is copied on every fold.
+            # Popped, not read: the map exists to carry a name from a call to
+            # the settle that answers it, and both are in the same turn — which
+            # is also the reset above, for the dispatch that never settles.
             name = names.pop(call_id, "")
             if name:
                 failures[name] = failures.get(name, 0) + 1 if is_error else 0
+        elif event.type == ADMITTED:
+            session_children += 1
+            turn_children += 1
     return Counts(
         session_steps=session_steps,
         turn_steps=turn_steps,
         session_tools=session_tools,
         turn_tools=turn_tools,
+        session_children=session_children,
+        turn_children=turn_children,
         per_tool_session=per_session,
         per_tool_turn=per_turn,
         consecutive_failures=failures,
@@ -265,14 +323,21 @@ def _extend(previous: Counts, session: Session, from_seq: int) -> Counts:
 
 
 def _result_facts(event: SessionEvent) -> tuple[str, bool]:
-    """The call a result answers, and whether it failed.
+    """The call a settled call answers, and whether it failed — both doors.
 
     Through `derive_event_message` — THE projection — rather than by indexing
     the payload. This module was the *fourth* reader of that shape and reached
     the call id by a different route than the other three, so a change to
     `_append_result` would have left the breaker silently counting nothing.
-    Paid once per `tool/result`, because the fold visits each event once.
+    Paid once per settle, because the fold visits each event once.
+
+    A Code Mode dispatch settles as `tool/code-dispatch`, which is its own shape
+    and not a `ToolResultBlock` — so the branch is here, where this module's one
+    reader of "what did a settle say" already lives, rather than in the fold. The
+    start branch unified the same way, on `callId or subCallId`.
     """
+    if event.type == "tool/code-dispatch":
+        return str(event.data.get("subCallId") or ""), bool(event.data.get("isError"))
     message = derive_event_message(event)
     block = next(
         (one for one in (message.content if message else ()) if isinstance(one, ToolResultBlock)),
@@ -306,12 +371,13 @@ def _breaches(budget: CallBudget, turn: int, session: int) -> list[str]:
     ]
 
 
-def _over(budget: CallBudget | None, turn: int, session: int) -> list[str]:
+def _over(budget: CallBudget | None, turn: int, session: int, *, noun: str = "calls") -> list[str]:
     """`ToolCallLimitMiddleware`'s: `turn limit exceeded (4/3 calls)`.
 
-    `used + 1`: the sentence counts the call being refused, as upstream's does."""
+    `used + 1`: the sentence counts the call being refused, as upstream's does.
+    `noun` because the same arithmetic bounds children (P4-04)."""
     return [
-        f"{scope} limit exceeded ({used + 1}/{limit} calls)"
+        f"{scope} limit exceeded ({used + 1}/{limit} {noun})"
         for scope, used, limit in _exceeded(budget, turn, session)
     ]
 
@@ -468,3 +534,35 @@ async def apply(ctx: Context, config: Config) -> None:
 
     ctx.on("agent/pre-step", on_pre_step)
     ctx.on("tools/pre-execute", on_pre_execute)
+
+    # ----------------------------------------------------------- children --
+
+    def refuse_child(request: SubagentRequest) -> str | None:
+        """The child caps, asked before every admission (P4-04)."""
+        settings = config.children
+        session = getattr(request.parent, "session", None)
+        if not isinstance(session, Session):
+            return None
+        current = counts.read(session)
+        exceeded = _over(settings, current.turn_children, current.session_children, noun="children")
+        if not exceeded:
+            return None
+        message = CHILD_DENIAL.format(limits=" and ".join(exceeded))
+        _record(
+            session,
+            "children",
+            {
+                "turn": current.turn_children,
+                "session": current.session_children,
+                "message": message,
+            },
+        )
+        return message
+
+    # `contribute_via`, which carries the wait-for-the-key rule and its reason:
+    # a profile that mounts no subagent seam has nothing to cap and must not lose
+    # its call limits for want of one, and either mount order has to work. Not
+    # registered at all when nothing is capped, so a spawn pays no guard for a
+    # ceiling nobody chose.
+    if not config.children.unlimited:
+        contribute_via(ctx, "subagents", refuse_child, label="limits-children", method="guard")

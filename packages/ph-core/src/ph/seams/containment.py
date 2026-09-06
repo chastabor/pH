@@ -39,7 +39,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
-from ..cordis import Context, plugin
+from ..cordis import Context, MountRefusal, plugin
 from ..wire import WireModel
 from .diagnostics import Diagnostic, contribute
 from .sandbox import enforcement_of
@@ -138,12 +138,15 @@ lands has one thing to check rather than two things to reconcile.
 """
 
 
-class ContainmentUnavailableError(RuntimeError):
+class ContainmentUnavailableError(MountRefusal):
     """`strict` was set and the deployment cannot honour it.
 
     A refusal to start, raised where the profile is composed rather than at the
     first call that would have been unconfined: by then the agent is running and
-    "refuse to start" has already been disobeyed.
+    "refuse to start" has already been disobeyed. A `MountRefusal`, so every
+    command that mounts prints it as the sentence it is — it was a bare
+    `RuntimeError`, and `ph -p` under `strict` answered with a traceback while
+    only doctor caught it (P4-12).
     """
 
 

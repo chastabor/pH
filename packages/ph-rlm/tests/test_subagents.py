@@ -32,13 +32,15 @@ than a degradation.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
+import anyio
 import pytest
 
 from ph.seams.subagents import (
+    STATUS,
     SubagentRequest,
     SubagentSpawnError,
     default_child_name,
@@ -285,6 +287,24 @@ async def test_a_profile_with_no_workspace_row_refuses_to_promise_one(mount: Any
 # ------------------------------------------------------- what the parent hears --
 
 
+@pytest.fixture
+def gate(monkeypatch: pytest.MonkeyPatch) -> Iterator[_Gate]:
+    """A held model, released whatever the test does — see `_Gate`."""
+    held = _Gate()
+    held.patch(monkeypatch)
+    yield held
+    held.release_all()
+
+
+def _statuses(session: Any, run_id: str) -> list[str]:
+    """Every status this child reached, in order. One spelling, three readers."""
+    return [
+        str(event.data["status"])
+        for event in session.events
+        if event.type == STATUS and event.data.get("runId") == run_id
+    ]
+
+
 def _notices(session: Any) -> list[str]:
     """Notices delivered to the parent's inbox but not yet claimed by a step.
 
@@ -345,11 +365,7 @@ async def test_a_child_that_replied_is_not_announced_as_silent(delegating: Mount
 
     assert _notices(session) == [], "a child that replied was announced as silent"
     # The status record still lands: only the redundant notice is suppressed.
-    assert [
-        event.data["status"]
-        for event in session.events
-        if event.type == "subagent/status" and event.data["runId"] == run.id
-    ][-1] == "done"
+    assert _statuses(session, run.id)[-1] == "done"
 
 
 async def test_the_child_status_reaches_the_parents_log(delegating: Mounted) -> None:
@@ -357,11 +373,7 @@ async def test_the_child_status_reaches_the_parents_log(delegating: Mounted) -> 
     run = await _spawn(ctx, parent)
     await ctx.drain()
 
-    statuses = [
-        event.data["status"]
-        for event in session.events
-        if event.type == "subagent/status" and event.data["runId"] == run.id
-    ]
+    statuses = _statuses(session, run.id)
     assert statuses[0] == "running"
     assert statuses[-1] in {"done", "error"}
 
@@ -723,3 +735,152 @@ async def test_a_child_with_no_tree_is_announced_without_naming_one(
     (told,) = _notices(session)
     assert "failed" in told
     assert "workspace is kept" not in told
+
+
+# ---------------------------------------------------------------- the queue --
+
+
+class _Gate:
+    """Holds every child's model call until the test lets one through.
+
+    Patched over the fake adapter's `stream`, so a child is "running" for as long
+    as the test says and no timing is guessed. `arrived` counts calls, since the
+    held list shrinks as they are released.
+
+    The `gate` fixture below is what opens it again, and that is not tidiness: a
+    child left parked here makes the mount's `drain()` wait forever, so one failed
+    assertion becomes a hung suite. Written as a `finally` in each test, that is a
+    rule the fourth test has to remember.
+    """
+
+    def __init__(self) -> None:
+        self.held: list[anyio.Event] = []
+        self.arrived = 0
+        self.open = False
+
+    def release_one(self) -> None:
+        self.held.pop(0).set()
+
+    def release_all(self) -> None:
+        self.open = True
+        for event in self.held:
+            event.set()
+        self.held.clear()
+
+    def patch(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from ph.testing.fake_adapter import FakeAdapter
+
+        original = FakeAdapter.stream
+        gate = self
+
+        async def gated(self: Any, options: Any) -> Any:
+            gate.arrived += 1
+            if not gate.open:
+                event = anyio.Event()
+                gate.held.append(event)
+                await event.wait()
+            async for chunk in original(self, options):
+                yield chunk
+
+        monkeypatch.setattr(FakeAdapter, "stream", gated)
+
+
+async def _until(predicate: Callable[[], bool], what: str) -> None:
+    """Poll until `predicate()`, or fail saying what was being waited for.
+
+    The `except` is the point, and `daemon_helpers.until` makes the same argument
+    for its own copy: `fail_after` raises a bare `TimeoutError`, so a call site's
+    `what` reaches nobody without this — and a wedged queue is exactly the failure
+    that arrives as a timeout with no other evidence.
+    """
+    try:
+        with anyio.fail_after(5):
+            while not predicate():
+                await anyio.sleep(0.005)
+    except TimeoutError:
+        pytest.fail(f"timed out waiting for {what}")
+
+
+async def test_a_full_parent_queues_the_next_child_until_a_slot_frees(
+    delegating: Mounted, gate: _Gate
+) -> None:
+    """`maxConcurrent` is a queue: the parent gets every child it asked for, one
+    slot at a time, in admission order — and never a refusal."""
+    ctx, session, parent = await delegating(maxConcurrent=1)
+    first = await _spawn(ctx, parent, "first")
+    second = await _spawn(ctx, parent, "second")
+    await _until(lambda: gate.arrived == 1, "the first child to reach the model")
+
+    roster = ctx.subagents.roster(session)
+    assert roster[first.id]["status"] == "running"
+    assert roster[second.id]["status"] == "queued", "admitted, not refused — and waiting"
+    assert _statuses(session, second.id) == ["queued"], "the wait is in the log"
+
+    gate.release_one()
+    await _until(lambda: gate.arrived == 2, "the second child to take the freed slot")
+    assert ctx.subagents.roster(session)[first.id]["status"] == "done"
+    assert _statuses(session, second.id) == ["queued", "running"]
+
+    gate.release_one()
+    assert (await second.result()).status == "done"
+    assert _statuses(session, first.id) == ["running", "done"], "no wait, no queued record"
+
+
+async def test_a_child_that_failed_frees_its_slot(
+    delegating: Mounted, gate: _Gate, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The queue cannot wedge on a failure: the provider's `error` path releases
+    the slot exactly as `done` does.
+
+    The failure is the child's *run* raising — the provider's own error path —
+    rather than a model call failing, which the agent loop contains as a turn that
+    ended in error and the provider records as `done`.
+    """
+    from ph.agent_loop.driver import ReactLoopAgent
+
+    original_run = ReactLoopAgent.run
+    failed: list[str] = []
+
+    async def run(self: Any) -> None:
+        # The parent is never run in this test, so the first `run()` is the first
+        # child's; every later one is genuine.
+        if not failed:
+            failed.append(self.id)
+            raise RuntimeError("the child fell over")
+        await original_run(self)
+
+    monkeypatch.setattr(ReactLoopAgent, "run", run)
+    ctx, session, parent = await delegating(maxConcurrent=1)
+    first = await _spawn(ctx, parent, "first")
+    second = await _spawn(ctx, parent, "second")
+
+    assert (await first.result()).status == "error"
+    await _until(lambda: gate.arrived == 1, "the second child to run after the failure")
+    gate.release_one()
+
+    assert (await second.result()).status == "done"
+    assert _statuses(session, first.id) == ["running", "error"]
+    assert _statuses(session, second.id)[-2:] == ["running", "done"]
+
+
+async def test_deleting_a_queued_child_stops_its_wait_and_takes_no_slot(
+    delegating: Mounted, gate: _Gate
+) -> None:
+    """A child revoked before it ran is cancelled where it waits, and the slot it
+    never held is not leaked — the next child still gets it."""
+    ctx, session, parent = await delegating(maxConcurrent=1)
+    provider = ctx.subagents.require(PROVIDER_NAME).provider
+    first = await _spawn(ctx, parent, "first")
+    second = await _spawn(ctx, parent, "second")
+    await _until(lambda: gate.arrived == 1, "the first child to reach the model")
+
+    assert await provider.delete(session, second.id, reason="user") is True
+    assert _statuses(session, second.id) == ["queued", "cancelled"]
+
+    third = await _spawn(ctx, parent, "third")
+    gate.release_one()
+    await _until(lambda: gate.arrived == 2, "the third child to take the slot the first freed")
+    gate.release_one()
+    assert (await first.result()).status == "done"
+    assert (await third.result()).status == "done"
+    assert _statuses(session, third.id) == ["queued", "running", "done"]

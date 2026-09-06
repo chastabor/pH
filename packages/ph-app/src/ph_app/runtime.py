@@ -16,7 +16,8 @@ from pathlib import Path
 
 from ph.agent.types import AgentOptions
 from ph.cordis import Context, Profile
-from ph.persistence import ClaimingStore, resume_session
+from ph.persistence import ClaimingStore, SessionBusy, resume_session
+from ph.seams.telemetry import ops_record
 from ph.session import Session, new_session_id
 
 from .attach import ingest, prompt_message
@@ -88,12 +89,30 @@ async def open_session(
     resolved = session_id or new_session_id()
     store = ctx.get("session_persistence")
     if isinstance(store, ClaimingStore):
-        await store.claim(resolved, scope=ctx)
+        try:
+            await store.claim(resolved, scope=ctx)
+        except SessionBusy:
+            # An `ops` fact, not a session one: the session it concerns is the
+            # one this process was just refused, so its log is not ours to write.
+            await ops_record(
+                ctx,
+                "session refused: already active in another process",
+                severity="warn",
+                session_id=resolved,
+            )
+            raise
     elif store is not None:
         log.warning(
             "ph_app.runtime: %s cannot claim a session; I-5 is not enforced for %s",
             type(store).__name__,
             resolved,
+        )
+        await ops_record(
+            ctx,
+            "I-5 is not enforced: this session store cannot claim a session",
+            severity="warn",
+            session_id=resolved,
+            store=type(store).__name__,
         )
     if store is not None and store.exists(resolved):
         session: Session = await resume_session(ctx, resolved)

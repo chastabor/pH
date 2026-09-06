@@ -31,6 +31,7 @@ from typing import Any, get_args
 
 import pytest
 
+from ph.cordis import MountRefusal
 from ph.seams.telemetry import SessionTelemetryRecord
 
 pytestmark = pytest.mark.anyio
@@ -101,7 +102,7 @@ async def test_the_row_refuses_rather_than_shipping_nowhere(
     from ph.seams.telemetry_otel import MISSING
 
     monkeypatch.setitem(sys.modules, "opentelemetry.exporter.otlp.proto.http._log_exporter", None)
-    with pytest.raises(RuntimeError, match="ph-core\\[otel\\]") as refusal:
+    with pytest.raises(MountRefusal, match="ph-core\\[otel\\]") as refusal:
         await mount(OTEL_ROW)
     assert str(refusal.value) == MISSING
 

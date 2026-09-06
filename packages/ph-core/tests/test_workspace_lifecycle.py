@@ -76,6 +76,26 @@ async def test_the_workspace_is_taken_once_not_once_per_turn(mount: Any) -> None
     assert len(acquired) == 1
 
 
+async def test_an_acquire_that_names_a_live_agent_unwinds_with_it(mount: Any) -> None:
+    """P4-16's note, closed: `agent_id` already says whose workspace this is.
+
+    A hand-rolled `acquire` with no `scope=` handed the seam a checkout that
+    outlived the agent by the whole process — the footgun the containment-ladder
+    module had to remember by hand. For an agent the registry knows, the agent's
+    own scope is the owner whether or not the caller said so.
+    """
+    ctx = await mount()
+    session = ctx.sessions.create("s")
+    agent = ctx.agents.create(session, FAKE_OPTIONS)
+
+    await ctx.workspace.acquire(session_id=session.id, agent_id=agent.id, base=ctx.fs.root)
+    assert ctx.workspace.of(agent.id) is not None
+
+    await ctx.agents.dispose(agent.id)
+
+    assert ctx.workspace.of(agent.id) is None
+
+
 async def test_disposing_the_agent_releases_its_workspace(mount: Any) -> None:
     """I2, end to end: the agent's scope owns the checkout, so an agent that
     goes away does not leave one behind for a reconciler to find."""

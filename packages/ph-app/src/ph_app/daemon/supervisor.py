@@ -54,6 +54,7 @@ from ..protocol import Refusal, cursor_of
 from ..runtime import mounted, open_session
 from ..sessions import recorded_cwd
 from ..shell import run_shell
+from ..wire import obj
 from .cards import CARD_EVENTS, presentation_of
 from .frontend import AskDesk
 from .projections import commands_of, readings_of, screens_of
@@ -300,6 +301,29 @@ class Root:
         return "retrying" if self.recovery.attempts else live
 
     @property
+    def last_turn(self) -> str | None:
+        """How the most recent turn ended, in the agent's own words.
+
+        `status` is deliberately the agent's and stays `idle` after a turn that
+        ended in error — the ladder does not count turn failures, and a second
+        status invented here would be the supervisor's opinion of the agent's
+        work. But a client polling `sessions/list` could not tell a root that
+        answered from one whose last answer was an error, and `--until-idle`
+        treated both as done. So the agent's own `turn/end` rides beside the
+        status: `completed`, `error`, `aborted`, `blocked`, `max-tokens` or
+        `interrupted`, read from the log rather than kept in a field (P5-04).
+
+        Through `wire.obj`, which is where the frozen-vs-plain payload rule lives
+        — the session freezes payloads to `mappingproxy`, so a reader testing for
+        `dict` works live and silently sees nothing on resume, which is the guard
+        P5-04's own fold got wrong. The TUI's two `turn/end` readers already go
+        through it; a fourth spelling here is the copy that gets missed.
+        """
+        event = self.session.latest("turn/end")
+        kind = obj(event.data.get("reason")).get("kind") if event is not None else None
+        return str(kind) if kind else None
+
+    @property
     def generation(self) -> str:
         """Which incarnation of this session a cursor belongs to.
 
@@ -460,6 +484,7 @@ class Root:
         return {
             "sessionId": self.session.id,
             "status": self.status,
+            "lastTurn": self.last_turn,
             "watchers": len(self.subscribers),
             "cursor": cursor_of(self.session),
             # Which route this root is on. A client could otherwise not know
@@ -664,6 +689,10 @@ class Supervisor:
                         {
                             "sessionId": root.id,
                             "status": status,
+                            # The agent's own account of the turn that just ended
+                            # (P5-04): `idle` alone reads as success, and this is
+                            # the moment a client waiting on idle decides.
+                            "lastTurn": root.last_turn,
                             # Beside the status because they change together and
                             # for the same reason: every reading is a fold of
                             # this log, so the moment worth re-reading them is

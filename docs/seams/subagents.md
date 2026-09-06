@@ -88,6 +88,17 @@ walks the parent scope rather than trusting a claim on the request.
 The `task` tool refuses to widen rather than silently narrowing, so a parent
 asking for more than it has gets an error it can act on.
 
+## Guards: a policy asked before the child exists
+
+`ctx.subagents.guard(check)` registers a deny-only policy the seam asks on every
+admission, before the provider is: `check(request)` returns a reason to refuse or
+`None`. A refused spawn raises `SubagentSpawnError` with that reason and produces
+no session, no log and no artifact. The same shape `ctx.tools.guard` has, and
+monotonic for the same reason: a guard can narrow what a deployment allows and
+never widen it. The limits row's child caps are the first registrant. How many
+children a turn or a session may spawn is a count the seam can *ask* and a policy
+row must *decide*, which is why it is a registration here rather than a field.
+
 ## Providing one
 
 ```python
@@ -135,13 +146,22 @@ The roster is a **fold over these events**, not a table — `roster(session)` �
 passivation and rehydration need no second source of truth, and a crash leaves a
 roster that still reconstructs.
 
+`queued` is a child admitted and waiting for a slot. The rlm provider caps how
+many of one parent's children run at once (`maxConcurrent`, four in the shipped
+`rlm` bundle), and the rest wait in admission order rather than being refused:
+the parent asked for them, and a refusal answers a question about resources with
+one about intent. A queued child is live to the roster, so a parent is not
+passivated while it waits, and a slot is freed on `done`, `error` or `cancelled`
+alike. Deleting a queued child cancels its wait and takes no slot.
+
 ## What it does not do
 
 * It does not run the child. That is the provider's, and `ph-base` has none.
 * It does not deliver replies. Those arrive as inbox messages through the
   messaging row; addressing a settled child fails with the `agent_observe` route
   named.
-* It does not bound spend by itself — `ctx.goals` and the limits row do.
+* It does not bound spend or fan-out by itself — `ctx.goals` and the limits row
+  do, the latter through `guard`.
 
 ## See also
 

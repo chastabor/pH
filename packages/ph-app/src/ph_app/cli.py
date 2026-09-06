@@ -35,7 +35,7 @@ import typer
 import yaml
 from rich.table import Table
 
-from ph.cordis import LoaderError, Profile, import_plugin_modules
+from ph.cordis import LoaderError, MountRefusal, Profile, import_plugin_modules
 from ph.cordis.catalog import config_catalog
 from ph.cordis.events import events as event_registry
 from ph.lingering import lifetime
@@ -271,7 +271,10 @@ def default(
 
     if mode == "rpc":
         # No prompt: the peer drives the session over stdio.
-        anyio.run(partial(run_rpc, composed, provider=provider, model=model))
+        try:
+            anyio.run(partial(run_rpc, composed, provider=provider, model=model))
+        except MountRefusal as error:
+            fail_unmounted(profile, error)
         return
 
     if prompt is None:
@@ -293,6 +296,13 @@ def default(
 
     try:
         outcome = anyio.run(route)
+    except MountRefusal as error:
+        # A row that *declined* — `containment.strict` with no backend (E8) — is
+        # the sentence doctor prints, with doctor's exit code, and not the
+        # traceback a bug in an `apply` still gets. Before this the run path had
+        # no name for the difference and printed 191 lines for the one case a
+        # person most needs to read (P4-12).
+        fail_unmounted(profile, error)
     except (AttachmentUnavailable, LoaderError, OSError, SessionBusy) as error:
         # A file that cannot be read fails the *command*: `prompted` ingests
         # before the agent exists, so nothing was logged and there is no partial

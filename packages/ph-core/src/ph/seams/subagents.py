@@ -40,7 +40,7 @@ from ..session import Session, SessionFoldCache
 from ..system_prompt.assembly import PromptSection
 from ..tools.registry import ToolRestriction
 from ..wire import WireModel
-from ._registry import claim_key
+from ._registry import claim_entry, claim_key
 from .skills import ORDER_SKILLS, SkillRestriction
 
 __all__ = [
@@ -52,6 +52,7 @@ __all__ = [
     "Access",
     "FamilyRole",
     "RehydratableProvider",
+    "SpawnGuard",
     "StatusCause",
     "SubagentPreset",
     "SubagentPresetService",
@@ -365,6 +366,20 @@ class _Registered:
     by: Running
 
 
+SpawnGuard: TypeAlias = Callable[[SubagentRequest], str | None]
+"""A policy asked before a child exists: a reason to refuse, or `None` to allow.
+
+Deny-only and asked before the provider is, so a refusal produces no session, no
+log and no artifact — `SubagentSpawnError`'s contract. The limits row's child caps
+are the first registrant (P4-04)."""
+
+
+@dataclass(frozen=True, slots=True)
+class _SpawnGuard:
+    check: SpawnGuard
+    by: Running
+
+
 @dataclass(slots=True)
 class SubagentService:
     """The service published as `ctx.subagents`.
@@ -377,6 +392,7 @@ class SubagentService:
     ctx: Context
     _providers: dict[str, _Registered] = field(default_factory=dict)
     _runs: dict[str, SubagentRun] = field(default_factory=dict)
+    _guards: list[_SpawnGuard] = field(default_factory=list)
     _rosters: SessionFoldCache[dict[str, dict[str, Any]]] = field(
         default_factory=lambda: SessionFoldCache(subagent_roster)
     )
@@ -395,6 +411,18 @@ class SubagentService:
         return claim_key(
             by.owner, self._providers, name, _Registered(provider, by), label="subagent-provider"
         )
+
+    def guard(self, check: SpawnGuard, *, scope: Context | None = None) -> Disposer:
+        """Register a deny-only policy asked before every admission (P4-04).
+
+        The shape `ToolRuntime.guard` has, for the same reasons: monotonic — a guard
+        can refuse and never widen — and asked *before* the provider is, so a refused
+        spawn produces nothing to clean up. A count of children is the seam's business
+        to *ask* and a policy row's to *decide*, which is why the child caps are a
+        registration here rather than a field on this seam's config.
+        """
+        by = self.ctx.running_for(scope)
+        return claim_entry(by.owner, self._guards, _SpawnGuard(check, by), label="subagent-guard")
 
     def provider_names(self) -> list[str]:
         return sorted(self._providers)
@@ -626,6 +654,14 @@ class SubagentService:
     async def start(self, name: str, request: SubagentRequest) -> SubagentRun:
         """Admit a child and return its handle. Does not wait for an answer."""
         request = self.resolve_preset(request)
+        # Guards first: a refusal here has nothing to unwind, which is the
+        # contract `SubagentSpawnError` states. Bound to the registering row, as
+        # every registry-invoked body is (P6-29).
+        for guard in list(self._guards):
+            with running(guard.by):
+                reason = guard.check(request)
+            if reason is not None:
+                raise SubagentSpawnError(reason)
         # Once, then threaded — the ceiling, the brief and the containment
         # check must be answers to the *same* boundary, and one resolution
         # makes that true by construction (the `held` argument one line down

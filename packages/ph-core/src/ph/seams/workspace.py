@@ -52,6 +52,7 @@ from ._registry import claim_entry, claim_slot
 from .diagnostics import Diagnostic, contribute
 from .sandbox import SandboxPolicy
 from .subagents import descendants
+from .telemetry import ops_record
 from .workspace_provision import ProvisionEntry, ProvisionReport
 
 __all__ = [
@@ -684,7 +685,10 @@ class WorkspaceSeam:
 
         `scope` bounds the workspace's life — the agent's own scope. Disposing it
         releases the workspace and writes the closing event, so an error path that never
-        reaches an explicit `dispose` is not a leak.
+        reaches an explicit `dispose` is not a leak. **Omitted, it is still the agent's**
+        when `ctx.agents` knows `agent_id` (P4-16): the caller has already said whose
+        workspace this is, and the only lifetime that can own a live agent's checkout is
+        that agent's. An id the registry has never seen keeps `owner_for`'s fallback.
         """
         scratch = await self._scratch_for(session_id, agent_id)
         chosen = self._chosen_tier(session) if tier is None else tier
@@ -716,6 +720,15 @@ class WorkspaceSeam:
                 # `workspace/acquired` says `shared`.
                 declined = "provider-failed"
                 log.exception("ph.seams.workspace: provider failed; falling back to shared")
+                # An operator's fact as much as the log's (E1): an agent that
+                # was meant to be contained and is not.
+                await ops_record(
+                    self.ctx,
+                    "workspace provider failed; the agent is not contained",
+                    severity="error",
+                    agent_id=agent_id,
+                    base=str(base),
+                )
             else:
                 if workspace is None:
                     # No reason is fabricated: a provider that declined without
@@ -738,6 +751,8 @@ class WorkspaceSeam:
         # thousands of syscalls, and running it before the `ctx.effect`
         # registration would leave the worktree existing with nothing to unwind
         # it — against I2, in the module that argues I2.
+        if scope is None:
+            scope = self._agent_scope(agent_id)
         held = await self._track(workspace, agent_id, scope)
         held.workspace = await self._provision(workspace, base)
         self._log(held.workspace, agent_id, session, declined)
@@ -797,6 +812,21 @@ class WorkspaceSeam:
         child = session is not None and session.header.origin == "subagent"
         chosen: ContainmentTier | None = containment.for_role(child=child)
         return chosen
+
+    def _agent_scope(self, agent_id: str) -> Context | None:
+        """The live agent's own scope for `agent_id`, or `None` when nobody knows it.
+
+        `acquire` with no `scope=` used to fall straight through to `owner_for(None)`,
+        which outside a row's `apply` is the seam itself — a worktree taken for a real
+        agent then outlived that agent by the whole process, and the containment-ladder
+        tests had to remember `scope=agent.ctx` by hand (P4-16). The registry already
+        knows the answer, so the seam asks it. A disposed scope is declined for
+        `owner_for`'s reason: a registration on a dead lifetime is one nothing unwinds.
+        """
+        agents = self.ctx.get("agents")
+        agent = agents.get(agent_id) if agents is not None else None
+        owner = getattr(agent, "ctx", None)
+        return owner if isinstance(owner, Context) and owner.active else None
 
     async def _track(self, workspace: Workspace, agent_id: str, scope: Context | None) -> _Held:
         """Register the teardown as an effect, so the workspace has an owner.

@@ -137,7 +137,9 @@ def claim_slot(by: Running, holder: Any, attribute: str, value: Any, *, label: s
     return by.owner.add_disposer(release, label=label)
 
 
-def contribute_via(ctx: Context, key: str, item: Any, *, label: str) -> None:
+def contribute_via(
+    ctx: Context, key: str, item: Any, *, label: str, method: str = "register"
+) -> None:
     """Register `item` on the service at `key` once it exists — mounted yet or not.
 
     **Through `ctx.inject` rather than a `ctx.get` at `apply` time**, which is the
@@ -157,10 +159,13 @@ def contribute_via(ctx: Context, key: str, item: Any, *, label: str) -> None:
 
     Here beside `claim_key` for the same reason it is: this rule was written by
     hand in two seams with a paragraph of prose each explaining why, and a third
-    seam wanting it would copy whichever it read first.
+    seam wanting it would copy whichever it read first — and a fourth then wrote
+    it in a *downstream package*, where the next reader finds the copy before the
+    rule. `method` is what lets that one back in: a registry whose door is not
+    called `register` — `ctx.subagents.guard` — needed nothing else.
     """
 
     def register(scope: Context) -> None:
-        getattr(scope, key).register(item, scope=scope)
+        getattr(getattr(scope, key), method)(item, scope=scope)
 
     ctx.inject([key], register, label=label)

@@ -197,6 +197,37 @@ async def _settled(client: DaemonClient, root_id: str, *, events: int) -> dict[s
             await anyio.sleep(0.01)
 
 
+async def test_a_failed_turn_is_named_beside_an_idle_status(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """P5-04's deferral, closed without a second opinion from the supervisor.
+
+    `status` stays the agent's — `idle` after a turn that ended in error, since
+    the ladder does not count turn failures — but the agent's own `turn/end`
+    rides beside it, so a client polling the list can tell "answered" from "the
+    last answer was an error", which `--until-idle` could not.
+    """
+    from ph.testing.fake_adapter import FakeAdapter
+
+    async def exploding(self: Any, options: Any) -> Any:
+        raise RuntimeError("provider is down")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(FakeAdapter, "stream", exploding)
+    async with running(tmp_path) as daemon:
+        client = await daemon.client()
+        await client.call("session/new", sessionId="sour")
+        await client.call("session/prompt", sessionId="sour", prompt="hello")
+
+        row = await _settled(client, "sour", events=3)
+
+        assert row["status"] == "idle"
+        assert row["lastTurn"] == "error"
+        assert daemon.server.supervisor.roots["sour"].recovery.attempts == 0, (
+            "a failed turn is not a crashed task; the ladder must not have moved"
+        )
+
+
 # ------------------------------------------------------------------ the gate --
 
 

@@ -47,6 +47,7 @@ from functools import partial
 from typing import Any
 
 import anyio
+from pydantic import Field
 
 from ph.agent.types import AgentCancelCause, AgentOptions
 from ph.cordis import Context, Disposer, plugin
@@ -99,6 +100,24 @@ class Config(WireModel):
     """Row config for `rlm-subagent-provider`."""
 
     max_depth: int = RLM_MAX_DEPTH
+    max_concurrent: int | None = Field(default=None, ge=1)
+    """How many of one parent's children run at once. `None` is no cap.
+
+    **Per parent, so it bounds *fairness*, not host load**: ten roots at four
+    apiece is forty children. It exists so one agent's fan-out cannot starve
+    another root's children, and a deployment that needs to bound the host wants
+    a cap on the work seam rather than a number here.
+
+    **A queue, not a refusal.** A parent that delegates nine tasks asked for nine,
+    and refusing the ninth because eight are running answers a question about
+    resources with a refusal about intent. So admission is unchanged — the handle
+    still returns at once, the record is written, the roster shows the child — and
+    the *drive* waits for a slot: a child with none free is `queued` in the roster,
+    runs in admission order when one opens, and frees it on `done`, `error` or
+    `cancelled` alike so a failure cannot wedge the queue. Per parent, so one
+    agent's fan-out cannot starve another root's children. Totals per turn and per
+    session stay refusals, on the limits row. Not covered: a daemon restart does not
+    re-drive queued admissions — the non-guarantee running children already have."""
     answer_preview_chars: int = 240
     """How much of the child's answer the status record carries, for `ph trace`
     and the P3-19 panel. There is deliberately no `default_access` knob here: the
@@ -149,6 +168,14 @@ class _Child:
     Held here rather than folded, because it decides whether the terminal notice
     fires — a decision made at completion, in this process, about a child this
     process ran."""
+    waiting: anyio.CancelScope | None = None
+    """The wait for a slot, while there is one — what `_release` cancels for a
+    child deleted before it ever ran.
+
+    A body parked on a limiter reads no cancel token (`ctx.jobs` cancellation is
+    cooperative), so without this the revoked child's coroutine stays queued
+    behind children that may never settle — and `ctx.drain()` waits for it, which
+    turns a revocation into a teardown that hangs."""
 
 
 @dataclass(slots=True)
@@ -158,6 +185,16 @@ class RlmChildProvider:
     ctx: Context
     config: Config
     _children: dict[str, _Child] = field(default_factory=dict)
+    _slots: dict[str, anyio.CapacityLimiter] = field(default_factory=dict)
+    """One limiter per parent session, each owned by that parent's own scope.
+
+    **Not dropped by a "was that the last child?" check at release**, which is
+    what this first was and which could never fire: `_quiesce` keeps a settled
+    child's record so a late `result()` still answers, and only a *revocation*
+    pops `_children` — so the predicate was always true, the table grew for the
+    process's life, and the scan cost O(children) on every release. The parent's
+    scope is what owns per-parent artifacts (I2), so the disposer goes there and
+    the question is never asked."""
 
     @property
     def depth_limit(self) -> int:
@@ -317,13 +354,14 @@ class RlmChildProvider:
         """
         assert child.session is not None
         child.unobserve = child.session.observe(self._mirror(child))
+        await self._reserve_slots(parent)
         # `ctx.jobs`, which detaches rather than running inline: the job gives the
         # run an id, a cancel and `job/*` events for free, and a subagent is the
         # seam's own example of work that outlives the step that started it.
         job = await self.ctx.jobs.start(
             kind="subagent",
             label=f"{child.run.name} ({child.run.id})",
-            run=lambda _job: self._drive(child, cause=cause),
+            run=lambda _job: self._drive_in_slot(child, cause=cause),
             # The delegation's lifetime, which is the parent's: a disposed parent
             # abandons the drive, and a settled child releases its own entry so a
             # chatty exchange does not leave one job per message behind.
@@ -416,6 +454,52 @@ class RlmChildProvider:
         # handle would be a second source of truth for a fact the roster folds,
         # frozen at the last in-process update.
         child.parent_session.append(STATUS, {"runId": child.run.id, "status": status, **extra})
+
+    async def _reserve_slots(self, parent: Any) -> None:
+        """Give this parent its limiter, owned by the parent's own scope (I2).
+
+        Idempotent, and reached from `_attach` so a fresh admission and a
+        rehydration take the same path — a rehydrated child that found no table
+        would run outside the cap while looking capped.
+        """
+        parent_id = parent.session.id
+        if self.config.max_concurrent is None or parent_id in self._slots:
+            return
+        self._slots[parent_id] = anyio.CapacityLimiter(self.config.max_concurrent)
+
+        def enter() -> Disposer:
+            return lambda: self._slots.pop(parent_id, None)
+
+        await parent.ctx.effect(enter, label=f"subagent-slots({parent_id})")
+
+    async def _drive_in_slot(self, child: _Child, *, cause: StatusCause | None) -> None:
+        """Wait for one of the parent's slots, then drive — the queue (`Config.max_concurrent`).
+
+        The wait is its own cancel scope rather than the job's: a child deleted
+        while queued must stop waiting, but a child deleted while *running* is
+        stopped through its agent, and one scope covering both would cancel the
+        drive mid-turn. `queued` is written only when there is actually a wait —
+        an admitted child with no status already reads as queued to the roster,
+        and the record is for the case where that is true for a reason.
+        """
+        limiter = self._slots.get(child.parent_session.id)
+        if limiter is None:
+            await self._drive(child, cause=cause)
+            return
+        if limiter.available_tokens < 1:
+            self._status(child, "queued", slots=self.config.max_concurrent)
+        with anyio.CancelScope() as waiting:
+            child.waiting = waiting
+            await limiter.acquire()
+        child.waiting = None
+        if waiting.cancelled_caught:
+            # Released while queued: `_release` wrote `cancelled` and quiesced,
+            # and no slot was ever taken.
+            return
+        try:
+            await self._drive(child, cause=cause)
+        finally:
+            limiter.release()
 
     async def _drive(self, child: _Child, *, cause: StatusCause | None) -> None:
         """Run the child to quiescence, tell the parent, then let it go."""
@@ -654,6 +738,9 @@ class RlmChildProvider:
         child = self._children.pop(run_id, None)
         if child is None:
             return False
+        if child.waiting is not None:
+            # Queued, never ran: stop the wait for a slot it will now never take.
+            child.waiting.cancel()
         if child.agent is not None:
             child.agent.cancel(AgentCancelCause(kind="parent"))
         # A terminal state for the roster: a revoked child is not merely absent,

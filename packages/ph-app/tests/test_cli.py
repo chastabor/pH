@@ -204,12 +204,15 @@ def test_a_row_contributes_a_reading_without_ph_app_importing_it(
     assert "not covered" in result.stdout
 
 
-def test_doctor_reports_a_profile_that_refuses_to_start(tmp_path: Path, roots: Path) -> None:
-    """E8's refusal reaches the person as a sentence, not a traceback: doctor is
-    what someone runs *because* the process will not start, and the exit code
-    still says it failed."""
-    profile = tmp_path / "strict.yaml"
-    profile.write_text(
+def _strict_profile(tmp_path: Path) -> Path:
+    """A profile that cannot mount: `containment.strict` with no sandbox backend.
+
+    One composition, two doors — doctor and the run path — because the pair's
+    whole claim is that both report the *same* refusal. Written out twice, an
+    edit to one is two tests exercising different profiles and both still green.
+    """
+    path = tmp_path / "strict.yaml"
+    path.write_text(
         yaml.safe_dump(
             [
                 {
@@ -220,11 +223,37 @@ def test_doctor_reports_a_profile_that_refuses_to_start(tmp_path: Path, roots: P
             ]
         )
     )
+    return path
+
+
+def test_doctor_reports_a_profile_that_refuses_to_start(tmp_path: Path, roots: Path) -> None:
+    """E8's refusal reaches the person as a sentence, not a traceback: doctor is
+    what someone runs *because* the process will not start, and the exit code
+    still says it failed."""
+    profile = _strict_profile(tmp_path)
 
     result = runner.invoke(app, ["doctor", "--profile", str(profile)])
 
     assert result.exit_code == 1
     assert "no sandbox backend is mounted" in result.output
+
+
+def test_print_mode_reports_a_profile_that_refuses_to_start(tmp_path: Path, roots: Path) -> None:
+    """The same refusal doctor prints, from the path a person actually runs.
+
+    `ContainmentUnavailableError` was a bare `RuntimeError`, so `ph -p` under
+    `containment.strict` answered a 191-line traceback while doctor alone caught
+    broadly. A deliberate refusal is now a `MountRefusal`, and the run path maps
+    it the way doctor does (P4-12, E8).
+    """
+    profile = _strict_profile(tmp_path)
+
+    result = runner.invoke(app, ["-p", "hello", "--profile", str(profile)])
+
+    assert result.exit_code == 1, result.output
+    assert "does not mount" in result.output
+    assert "no sandbox backend is mounted" in result.output
+    assert "Traceback" not in result.output
 
 
 def test_doctor_refuses_an_unknown_profile_with_the_same_code(roots: Path) -> None:

@@ -596,3 +596,24 @@ async def test_an_unreadable_parent_refuses_instead_of_granting_everything(
     assert "wide_open" not in stated, "a stated boundary answers whatever the parent looks like"
     _, rootless = ctx.subagents.held_by(SubagentRequest(prompt="go", parent=None))
     assert "wide_open" in rootless, "a spawn with no parent is a root delegation"
+
+
+async def test_a_guard_refuses_before_the_provider_is_asked(mount: Any) -> None:
+    """`ctx.subagents.guard` (P4-04): deny-only, asked before admission, and
+    unwound with the scope that registered it."""
+    ctx = await mount()
+    parent = _agent(ctx)
+    provider = StubSubagentProvider(root=ctx)
+    ctx.subagents.register_provider("stub", provider)
+    policy = ctx.scope("policy")
+    ctx.subagents.guard(
+        lambda request: "not today" if request.prompt == "no" else None, scope=policy
+    )
+
+    await ctx.subagents.start("stub", SubagentRequest(prompt="yes", parent=parent))
+    with pytest.raises(SubagentSpawnError, match="not today"):
+        await ctx.subagents.start("stub", SubagentRequest(prompt="no", parent=parent))
+    assert [request.prompt for request in provider.requests] == ["yes"]
+
+    await policy.dispose()
+    await ctx.subagents.start("stub", SubagentRequest(prompt="no", parent=parent))

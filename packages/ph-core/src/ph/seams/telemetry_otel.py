@@ -29,7 +29,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..cordis import Context, plugin
+from ..cordis import Context, MountRefusal, plugin
 from ..session import dumps
 from ..wire import WireModel
 from .diagnostics import Diagnostic, contribute
@@ -93,7 +93,7 @@ async def apply(ctx: Context, config: Config) -> None:
         # rather than mounting a sink that ships nowhere.
         processor = _pipeline(config)
     except ImportError as error:
-        raise RuntimeError(MISSING) from error
+        raise MountRefusal(MISSING) from error
 
     provider = LoggerProvider(resource=Resource.create({"service.name": config.service_name}))
     provider.add_log_record_processor(processor)

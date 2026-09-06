@@ -111,9 +111,20 @@ that agent, and unwinds with it. Passing no scope means the mount's own, which i
 the whole process. Those are different policies, and choosing by omission is how
 a per-agent rule becomes a global one.
 
+## Refusing to mount
+
+A row that cannot honour its configuration refuses at `apply`, and it refuses with
+`MountRefusal` (`ph.cordis`) rather than a bare exception. Every command that
+mounts a profile turns that one type into a sentence and an exit code, and leaves
+anything else as the traceback a bug deserves. `containment.strict` on a host with
+no sandbox backend and the OTel exporter without its extra are the two shipped
+examples (E8). Refuse at mount, not at first use: by then the agent is running and
+"refuse to start" has already been disobeyed.
+
 ## Checklist
 
 - [ ] `inject` lists what you use, and nothing more
+- [ ] a deliberate refusal raises `MountRefusal`, so `ph -p` prints a sentence
 - [ ] config is a `WireModel` with per-field docstrings (`ph config` prints them)
 - [ ] artifacts acquired through `ctx.effect`
 - [ ] the row is in a profile, and `--dump-config` shows it where you expect

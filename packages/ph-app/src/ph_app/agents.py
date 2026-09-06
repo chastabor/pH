@@ -299,8 +299,13 @@ class _Follow:
         self.write(event for event, _view in pairs)
 
     def _status(self, params: Mapping[str, Any]) -> None:
-        console.print(f"[dim]· {params.get('status')}[/dim]", soft_wrap=True)
-        if self.until_idle and params.get("status") == "idle":
+        status = params.get("status")
+        last = params.get("lastTurn")
+        # Named when it is not the ordinary ending: `idle` after an error turn
+        # reads as success, and this line is what `--until-idle` stops on.
+        ended = f" · last turn {last}" if status == "idle" and last and last != "completed" else ""
+        console.print(f"[dim]· {status}{ended}[/dim]", soft_wrap=True)
+        if self.until_idle and status == "idle":
             self.done.set()
 
     def write(self, events: Iterable[Mapping[str, Any]]) -> None:
@@ -357,12 +362,14 @@ def agents(ctx: typer.Context) -> None:
     table = Table(show_header=True, header_style="bold")
     table.add_column("session")
     table.add_column("status")
+    table.add_column("last turn")
     table.add_column("events", justify="right")
     table.add_column("watchers", justify="right")
     for row in rows:
         table.add_row(
             row["sessionId"],
             row["status"],
+            str(row["lastTurn"] or ""),
             str(obj(row.get("cursor")).get("sequence", "")),
             str(row["watchers"]),
         )

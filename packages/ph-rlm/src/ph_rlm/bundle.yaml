@@ -59,6 +59,11 @@
   name: rlm-subagent-provider
   config:
     maxDepth: 2
+    # How many of one parent's children run at once; the rest queue in
+    # admission order rather than being refused. A deployment number, not a
+    # row default: the row says `null` (no cap) so a profile that never chose is
+    # not silently serialised. Four is a starting point, not a measurement.
+    maxConcurrent: 4
 
 # The model-facing half: `rlm.run(...)` inside a cell is a governed dispatch,
 # not a comm-channel RPC — so a policy row can deny or ask on spawning, and C4's

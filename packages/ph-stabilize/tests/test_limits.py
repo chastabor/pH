@@ -22,12 +22,14 @@ import pytest
 from stabilize_helpers import PROFILE, bash_call, events_of, result_text, row, run_tool_calls
 
 from ph.llm.types import ToolCallBlock
+from ph.seams.subagents import ADMITTED, SubagentRequest, SubagentSpawnError
 from ph.session import Session, SurfaceIntent
 from ph.session.known_event_types import (
     IGNORABLE_SESSION_EVENT_TYPES,
     KNOWN_SESSION_EVENT_TYPES,
 )
-from ph.testing import FAKE_OPTIONS, tool_result_payload
+from ph.testing import FAKE_OPTIONS, StubSubagentProvider, tool_result_payload
+from ph.tools.code_mode import CodeDispatchLog
 from ph_stabilize.limits import (
     BREAKER_DENIAL,
     SIBLING_STOPPED,
@@ -367,3 +369,73 @@ async def test_the_footer_says_nothing_when_no_budget_is_set(mount: Any) -> None
     session = ctx.sessions.create("ungauged")
 
     assert ctx.tui_status.readings(session) == []
+
+
+# ------------------------------------------------------------ code dispatches --
+
+
+async def test_a_code_mode_dispatch_counts_as_a_tool_call(mount: Any) -> None:
+    """C1 made every dispatch a governed evaluation; the fold now counts it.
+
+    A `tools.glob(...)` from inside a cell logs `tool/code-dispatch-start`, not
+    `tool/call`, so per-tool budgets and the breaker were checked on each
+    dispatch against a count that never moved. Payloads through the real wire
+    type, so a renamed field fails here rather than silently uncounting.
+    """
+    from ph_stabilize.limits import counts_of
+
+    ctx = await mount(row("limits"), profile=PROFILE)
+    session = ctx.sessions.create("cell")
+    ref = {"root_call_id": "r1", "parent_call_id": "p1", "name": "glob"}
+    for sub, failed in (("d1", False), ("d2", True)):
+        start = CodeDispatchLog(**ref, sub_call_id=sub, is_error=failed).to_wire()
+        del start["isError"]
+        session.append("tool/code-dispatch-start", {**start, "arguments": {}})
+        settle = CodeDispatchLog(**ref, sub_call_id=sub, is_error=failed).to_wire()
+        session.append("tool/code-dispatch", {**settle, "content": []})
+
+    current = counts_of(session)
+    assert (current.turn_tools, current.session_tools) == (2, 2)
+    assert current.per_tool_turn["glob"] == 2
+    assert current.consecutive_failures["glob"] == 1, "the failed settle fed the breaker"
+
+
+# ------------------------------------------------------------------ children --
+
+
+async def _parent(ctx: Any, session_id: str = "parent") -> tuple[Any, Any, Any]:
+    """A parent agent and a stub provider. The stub does not log admission —
+    the real provider does, as obligation 1 — so tests say what it would have."""
+    session = ctx.sessions.create(session_id)
+    agent = ctx.agents.create(session, FAKE_OPTIONS)
+    provider = StubSubagentProvider(root=ctx)
+    ctx.subagents.register_provider("stub", provider)
+    return session, agent, provider
+
+
+async def test_the_children_budget_refuses_the_spawn_that_would_cross_it(mount: Any) -> None:
+    """P4-04's last piece: a cap on children, as a guard on `ctx.subagents`.
+
+    Refused *before* the provider is asked, so nothing is created — the contract
+    `SubagentSpawnError` states — and recorded as `limits/exceeded` like the
+    other two ceilings.
+    """
+    ctx = await mount(row("limits", children={"turnLimit": 1}), profile=PROFILE)
+    session, parent, provider = await _parent(ctx)
+
+    first = await ctx.subagents.start("stub", SubagentRequest(prompt="go", parent=parent))
+    session.append(ADMITTED, {**first.to_wire(), "prompt": "go"})
+
+    with pytest.raises(SubagentSpawnError, match=r"turn limit exceeded \(2/1 children\)"):
+        await ctx.subagents.start("stub", SubagentRequest(prompt="again", parent=parent))
+
+    assert len(provider.requests) == 1, "refused before the provider was asked"
+    breach = events_of(session, "limits/exceeded")[-1].data
+    assert breach["limit"] == "children" and breach["turn"] == 1
+
+
+async def test_no_children_budget_registers_no_guard(mount: Any) -> None:
+    """Unset by default, like every other ceiling here — and the guard is not
+    even registered, so a spawn pays nothing for a cap nobody chose."""
+    ctx = await mount(row("limits"), profile=PROFILE)
+    assert ctx.subagents._guards == []

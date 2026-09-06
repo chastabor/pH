@@ -22,6 +22,7 @@ from typing import Any
 
 import pytest
 
+from ph.cordis import MountRefusal
 from ph.seams.containment import ContainmentUnavailableError
 from ph.testing import StubSandboxProvider, acquire_for_role
 
@@ -180,3 +181,10 @@ async def test_a_profile_that_cannot_honour_strict_does_not_start(mount: Any) ->
     """
     with pytest.raises(ContainmentUnavailableError):
         await mount(_row(tier="sandbox", strict=True))
+
+
+def test_the_strict_refusal_is_a_mount_refusal() -> None:
+    """The type the run path maps to a sentence (P4-12). Pinned because the
+    cheapest regression is a new refusal subclassing `RuntimeError` directly and
+    reaching `ph -p` as a traceback again."""
+    assert issubclass(ContainmentUnavailableError, MountRefusal)

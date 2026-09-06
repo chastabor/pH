@@ -380,6 +380,10 @@ def _guard(service: Any) -> Any:
     return service.guard(lambda _execution: None)
 
 
+def _subagent_guard(service: Any) -> Any:
+    return service.guard(lambda _request: None)
+
+
 def _tool(service: Any) -> Any:
     from ph.testing import simple_tool
 
@@ -422,6 +426,7 @@ RECIPES: dict[str, tuple[str, Callable[[Any], Any]]] = {
     "SystemPromptService.variable": ("system_prompt", _variable),
     "SystemPromptService.tools": ("system_prompt", _prompt_tools),
     "ToolRuntime.guard": ("tools", _guard),
+    "SubagentService.guard": ("subagents", _subagent_guard),
     "ToolRuntime.register": ("tools", _tool),
     "ToolRuntime.restrict": ("tools", _restrict),
     "ApprovalService.register_answerer": ("approval", _approval),
@@ -1372,6 +1377,8 @@ BOUND: dict[str, str] = {
     "SandboxSeam.provider": "SandboxSeam.confine",
     "WorkspaceSeam.provider": "WorkspaceSeam.acquire",
     "_Registered.provider": "SubagentService.start",
+    # A spawn guard is asked before the provider is, inside the same method.
+    "_SpawnGuard.check": "SubagentService.start",
     # The one provider slot whose target is already in hand — `ph.seams.fs` has
     # `_scope_of` of its own — so a rebase resolver runs for the agent whose path
     # is being resolved, where the other four take the registration's layer.

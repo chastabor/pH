@@ -35,7 +35,12 @@ from ..session import Session, SessionEvent, dumps, now_ms
 from ..wire import WireModel
 from ._registry import claim_entry
 
-__all__ = ["SessionTelemetry", "SessionTelemetryRecord", "apply"]
+__all__ = [
+    "SessionTelemetry",
+    "SessionTelemetryRecord",
+    "apply",
+    "ops_record",
+]
 
 log = logging.getLogger("ph.seams.telemetry")
 
@@ -78,6 +83,15 @@ class SessionTelemetry:
 
     ctx: Context
     _sinks: list[_Sink] = field(default_factory=list)
+    _exporting: bool = False
+    """Whether a fan-out is already in flight, so a sink cannot feed itself.
+
+    A sink that records what it just failed to ship — through `ops_record`, or
+    any indirection reaching it — would re-enter `record` and fan out to itself,
+    a loop with no floor. The rule was a docstring asking each future sink author
+    to remember; this is the same rule where it cannot be forgotten. Dropping the
+    nested record is the intended answer, not a cost: it is a record *about* the
+    export path, made while that path is the thing failing."""
     _last_chunked_step: dict[str, tuple[int, int]] = field(default_factory=dict)
     """Per session, the step whose first chunk already shipped. One entry per
     session rather than one per step, so it does not grow with the conversation."""
@@ -96,16 +110,20 @@ class SessionTelemetry:
             return candidate
 
         redacted = await self.ctx.waterfall("session-telemetry/record", record, inner=inner)
-        if redacted is None:
+        if redacted is None or self._exporting:
             return
-        for sink in list(self._sinks):
-            try:
-                # No target: telemetry is deployment-wide, so both halves are
-                # what registration recorded.
-                with running(sink.by):
-                    await maybe_await(sink.export(redacted))
-            except Exception:
-                log.exception("ph.seams.telemetry: a sink failed")
+        self._exporting = True
+        try:
+            for sink in list(self._sinks):
+                try:
+                    # No target: telemetry is deployment-wide, so both halves are
+                    # what registration recorded.
+                    with running(sink.by):
+                        await maybe_await(sink.export(redacted))
+                except Exception:
+                    log.exception("ph.seams.telemetry: a sink failed")
+        finally:
+            self._exporting = False
 
     def wants(self, session: Session, event: SessionEvent) -> bool:
         """Whether this event ships — decided synchronously, so a dropped chunk
@@ -145,6 +163,32 @@ class SessionTelemetry:
                 body=body,
             )
         )
+
+
+async def ops_record(
+    ctx: Context, body: str, *, severity: Severity = "info", **attributes: Any
+) -> None:
+    """Record something about the harness, if this deployment has the seam (P5-09).
+
+    The producer's door. A row or a host holding a fact that is *not* a session
+    event — an open refused because another process holds the log, a store that
+    cannot take the I-5 lease, a workspace provider that broke and left an agent
+    uncontained — says it here and never looks for the seam itself. No seam, no
+    record and no error: telemetry is optional, and a producer must not fail its
+    own work for want of somewhere to put a note about it.
+
+    A sink that failed and reported its own failure here would fan out to the
+    same sink, which is a loop with no floor; `record` refuses a nested fan-out
+    for that reason, so reaching this from inside a sink drops the record rather
+    than recursing.
+    """
+    telemetry = ctx.get("session_telemetry")
+    if telemetry is None:
+        return
+    try:
+        await telemetry.ops(body, severity=severity, **attributes)
+    except Exception:
+        log.exception("ph.seams.telemetry: an ops record could not be made")
 
 
 class Config(WireModel):
