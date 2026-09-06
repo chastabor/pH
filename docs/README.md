@@ -1,14 +1,15 @@
 # pH documentation
 
-**Status:** the cookbook is written; the per-seam reference is started and owes
-most of its pages (P6-10).
+**Status:** P6-10 is complete — the cookbook is written and every seam has a
+page. Both are pinned by `test_docs_seams.py`, so a new seam without an entry, or
+a page naming a method that no longer exists, fails the suite.
 
 ## Where things are
 
 | | |
 |---|---|
 | [Cookbook](cookbook/) | How to extend pH: a plugin, a tool, an adapter, a seam. Start here. |
-| [Seams](seams/) | Reference for each capability seam — what it publishes, who may provide it, what it refuses. |
+| [Seams](seams/) | Reference for all 29 service keys — what each publishes, who may provide it, what it refuses. |
 | [Skills](skills/) | Authoring skills and playbooks (P7-18). |
 | [Dev notes](dev-notes/) | Per-phase records and design notes, including measurements and things that were tried and dropped. |
 
