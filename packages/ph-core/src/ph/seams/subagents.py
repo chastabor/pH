@@ -45,7 +45,6 @@ from .skills import ORDER_SKILLS, SkillRestriction
 
 __all__ = [
     "ADMITTED",
-    "CHILD_RETRY_LIMIT",
     "DELETED",
     "INTERRUPTED_DETAIL",
     "SETTLED_STATUSES",
@@ -104,19 +103,6 @@ Access: TypeAlias = Literal["read", "write"]
 
 SubagentStatus: TypeAlias = Literal["queued", "running", "done", "error", "cancelled"]
 
-CHILD_RETRY_LIMIT = 3
-"""How many times an interrupted child is put back to work before it is failed.
-
-The root's ladder is three attempts for the reason this one is (`RETRY_DELAYS`):
-what a harness stopping interrupts is transient by construction, and a child that
-has been caught mid-turn three times is not unlucky — it is in front of something
-that keeps stopping, and re-driving it forever spends a parent's budget on a
-transcript nobody is reading.
-
-**No delays, where the root's ladder has them.** The root retries a crash that
-just happened, so it waits before trying again; this one only ever runs while a
-harness is starting, which is already the delay."""
-
 UNRECOVERABLE_DETAIL = (
     "the harness stopped while this child was running, and no provider here can "
     "start it again; its transcript is on disk"
@@ -148,16 +134,15 @@ A sentence rather than a code, because its reader is a person or a model looking
 at a roster and asking what happened to a child that never answered."""
 
 
-def exhausted_detail(limit: int = CHILD_RETRY_LIMIT) -> str:
+def exhausted_detail(limit: int) -> str:
     """The ladder spent, naming the bound **actually in force**.
 
     A function rather than a module string, for the reason `Recovery.total` is a
     property one ladder over: a value baked at import time describes the number
-    that was set when this module was first read, so a deployment that shortens
-    the ladder — or a test that does — tells the child it was interrupted three
-    times whatever the truth. Built from `INTERRUPTED_DETAIL` rather than
-    restating it, so the two cannot come to describe one interruption
-    differently.
+    that was set when this module was first read, so a host that shortens the
+    ladder — or a test that does — tells the child it was interrupted three times
+    whatever the truth. Built from `INTERRUPTED_DETAIL` rather than restating it,
+    so the two cannot come to describe one interruption differently.
     """
     return (
         f"{INTERRUPTED_DETAIL} — and it has now been interrupted "
@@ -856,7 +841,7 @@ class SubagentService:
         run = next((one for one in self._runs.values() if one.session_id == session_id), None)
         return bool(run is not None and await self.rehydrate(run.id))
 
-    async def resume_children(self, parent: Any) -> Sequence[str]:
+    async def resume_children(self, parent: Any, *, retry_limit: int) -> Sequence[str]:
         """What a resumed root owes the children in its log (P5-04). Returns the revived.
 
         Two opposite answers to two states, which is why this exists rather than
@@ -866,7 +851,7 @@ class SubagentService:
           claimed, spent or written and the work is the same work.
         * **running** — interrupted mid-turn. Put back on the *ladder*: its turn
           is closed on resume and its task is presented again, up to
-          `CHILD_RETRY_LIMIT` times, after which it is failed and says so.
+          `retry_limit` times, after which it is failed and says so.
 
         **The ladder is what makes re-running an interrupted child sound**, and it
         is the piece this row shipped without at first. A child that started a
@@ -885,6 +870,13 @@ class SubagentService:
         below needs no second branch: "admitted and not running" is one state to
         re-drive, and the ladder's only job is to decide whether this child is
         allowed to reach it again.
+
+        `retry_limit` has **no default**, and that is P6-32's rule rather than an
+        inconvenience: how many attempts work is worth is the host's policy, and
+        a seam that answered it for a caller who said nothing would be choosing
+        one. The daemon states it beside the root's own ladder
+        (`ph_app.daemon.recovery.CHILD_RETRY_LIMIT`), which is where somebody
+        tuning restart behaviour will already be looking.
         """
         session = getattr(parent, "session", None)
         if session is None:
@@ -902,12 +894,12 @@ class SubagentService:
             # for a slot no one will ever give it — the parent held out of
             # passivation by a child nothing will move, which is the state this
             # whole sweep exists to end.
-            spent = int(row.get("attempts") or 0) >= CHILD_RETRY_LIMIT
+            spent = int(row.get("attempts") or 0) >= retry_limit
             recoverable = self._readmitter(row) is not None
             resumable = recoverable and not spent
             detail = INTERRUPTED_DETAIL
             if spent:
-                detail = exhausted_detail()
+                detail = exhausted_detail(retry_limit)
             elif not recoverable:
                 detail = UNRECOVERABLE_DETAIL
             row["status"] = "queued" if resumable else "error"

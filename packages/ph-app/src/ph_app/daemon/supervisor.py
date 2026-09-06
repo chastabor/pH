@@ -59,6 +59,7 @@ from .cards import CARD_EVENTS, presentation_of
 from .frontend import AskDesk
 from .projections import commands_of, readings_of, screens_of
 from .recovery import (
+    CHILD_RETRY_LIMIT,
     FAILED,
     PASSIVATE_AFTER,
     PASSIVATED,
@@ -631,7 +632,7 @@ class Supervisor:
             # starts a drive job owned by this root's scope.
             subagents = ctx.get("subagents")
             if subagents is not None:
-                revived = await subagents.resume_children(agent)
+                revived = await subagents.resume_children(agent, retry_limit=CHILD_RETRY_LIMIT)
                 if revived:
                     log.info(
                         "ph_app.daemon: root %s put %d admitted child(ren) back to work",
@@ -1155,6 +1156,27 @@ class Supervisor:
         daemon's `MUTATIONS` table for every mutating method at once, before this
         is called; the scheduler reaches this directly and carries no key, which
         is why the parameter is gone rather than optional.
+
+        **A busy root is steered, not followed up**, which is the difference
+        between reaching it at its next *step* and at its next turn. A child
+        already had this: `rlm-messaging` delivers by steer so "a running agent
+        picks it up without finishing first", and a person interjecting had
+        strictly less reach than the children they had spawned — during a long
+        fan-out, a typed line waited for the whole turn to end.
+
+        The one consequence, and it is the reason this is not simply better:
+        an interjection *joins the running turn* rather than starting one. No
+        `turn/start` is appended, so the transcript shows it inside that turn and
+        every **per-turn** ceiling keeps counting rather than resetting — a typed
+        line arriving at step nine of a ten-step budget gets one step and then the
+        turn ends as `blocked`. `CallBudget.turn_limit` carries that in full,
+        beside the setting it is about; per-*session* ceilings are unaffected,
+        and `/autonomous`'s `max_turns` is spent more slowly.
+
+        Both readings of "also this" are defensible; this one answers sooner,
+        which is what a person waiting on a fan-out is asking for. An idle root
+        still gets `followup`, because there is no turn to join and a new one is
+        exactly what a prompt to an idle agent means.
         """
         root = await self.start(root_id)
         # The client's own list comes first because it is what that person just
@@ -1163,7 +1185,11 @@ class Supervisor:
         taken = root.staged.take()
         if taken:
             root.publish("session.staged", {"sessionId": root.id, "staged": []})
-        root.agent.followup(prompt_message(text, [*attachments, *taken]))
+        message = prompt_message(text, [*attachments, *taken])
+        if root.agent.status == "idle":
+            root.agent.followup(message)
+        else:
+            root.agent.steer(message)
         # A full channel means the task has wakes pending and has not reached
         # them yet, so it will drain this message too — the inbox is the queue,
         # and this is only the doorbell.

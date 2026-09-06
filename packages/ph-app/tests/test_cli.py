@@ -485,6 +485,65 @@ def test_the_config_catalog_is_generated_from_each_row_s_own_model() -> None:
     assert by_name["diagnostics"]["config"] == []
 
 
+def _config(*args: str) -> Any:
+    """`ph config …` rendered wide enough to assert on.
+
+    Rich wraps to 80 columns off a terminal, and a wrapped cell is a substring
+    that is present and unfindable — `test_agents_cli`'s own runner says the
+    same thing about the same trap.
+    """
+    result = runner.invoke(
+        app,
+        ["config", *args],
+        env={"COLUMNS": "220", "FORCE_COLOR": None, "NO_COLOR": "1", "TERM": "dumb"},
+    )
+    assert result.exit_code == 0, result.output
+    return result
+
+
+def test_the_catalog_says_what_the_profile_sets_not_only_what_the_code_defaults() -> None:
+    """`ph config` answers "what would a run use", which is a deployment's
+    question and not the code's.
+
+    Three states, and they are genuinely different: a row this profile does not
+    mount (nothing here applies), one it mounts without setting the option (the
+    default stands), and one it sets (that is what runs). Composed, never
+    mounted — no agent is started and no session opened to answer it.
+    """
+    absent = _config("--row", "limits", "--profile", "headless")
+    assert "row not mounted" in absent.output, "headless ships no limits row"
+
+    mounted = _config("--row", "limits", "--profile", "rlm-stable")
+    assert "row not mounted" not in mounted.output
+    assert "turn_limit=None" in mounted.output, "the code's answer stays visible"
+
+    configured = _config(
+        "--row",
+        "limits",
+        "--profile",
+        "rlm-stable",
+        "--patch",
+        "{id: limits, config: {modelCalls: {turnLimit: 40}}}",
+    )
+    assert "40" in configured.output, "a ceiling a run would actually hit"
+
+
+def test_the_catalog_documents_every_option_of_the_limits_row() -> None:
+    """The column was blank for this row: four options, no field docstrings.
+
+    Pinned per option rather than as one substring, because the failure mode is
+    a *new* option arriving with nothing said about it — which reads as a knob
+    with no explanation to the person who came looking for one.
+    """
+    result = _config("--row", "limits")
+    for option in ("modelCalls", "toolCalls", "children", "breaker"):
+        assert option in result.output
+    assert "may call the model" in result.output
+    assert "Code Mode dispatch counts as one" in result.output
+    assert "queues rather than refusing" in result.output
+    assert "on by default" in result.output
+
+
 def test_the_catalog_refuses_an_unknown_row_rather_than_printing_nothing() -> None:
     """An empty table answers "no such row" and "that row has no options"
     identically, and the person typing it meant one of them."""

@@ -28,7 +28,12 @@ from ph.seams.subagents import ADMITTED, DELETED, STATUS, USAGE, subagent_roster
 from ph.session import Session
 from ph_app.tui.adapter import TuiEventAdapter
 from ph_app.tui.state import ChatItem, SubagentRow, ToolCard, TuiState
-from ph_app.tui.widgets.status import NO_WORK_SEEN, _todo_line, render_subagents
+from ph_app.tui.widgets.status import (
+    NO_WORK_SEEN,
+    _todo_line,
+    children_heading,
+    render_subagents,
+)
 from ph_app.tui.widgets.transcript import (
     CodeCellWidget,
     ToolCardWidget,
@@ -220,6 +225,43 @@ def test_delegation_records_produce_no_transcript_rows() -> None:
 
 def test_an_empty_family_renders_nothing() -> None:
     assert render_subagents(TuiState()) == ""
+    assert children_heading(TuiState()) == "children"
+
+
+def test_the_panel_heading_counts_the_fan_out() -> None:
+    """Eight children is a list somebody has to tally by eye; this is the tally.
+
+    **"pending", not "queued"**: the status bar already says "queued" for the
+    person's *own* prompts waiting on a busy agent, and one word for two counts
+    on one screen is worse than a synonym. The roster's vocabulary is untouched —
+    the log still says `queued` and every other reader still folds it.
+    """
+    session = Session("fanout")
+    for index in range(5):
+        session.append(ADMITTED, _admitted(f"r{index}", f"scout-{index}"))
+    for index in range(2):
+        session.append(STATUS, {"runId": f"r{index}", "status": "running"})
+    session.append(STATUS, {"runId": "r4", "status": "done"})
+
+    state = TuiEventAdapter().replay(session)
+
+    assert children_heading(state) == "children · 2 running, 2 pending"
+    assert "queued" not in children_heading(state), "that word is the person's prompts"
+
+
+def test_the_heading_counts_only_what_is_still_going() -> None:
+    """A settled or revoked child stays *listed* — a parent asking what happened
+    to it deserves an answer — but "how busy is this fan-out" is about the rest."""
+    session = Session("settled")
+    session.append(ADMITTED, _admitted("r1", "scout"))
+    session.append(STATUS, {"runId": "r1", "status": "done"})
+    session.append(ADMITTED, _admitted("r2", "revoked"))
+    session.append(DELETED, {"runId": "r2", "reason": "user"})
+
+    state = TuiEventAdapter().replay(session)
+
+    assert children_heading(state) == "children"
+    assert len(render_subagents(state).splitlines()) == 2, "both stay on the panel"
 
 
 def test_a_revoked_child_stays_listed() -> None:

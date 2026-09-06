@@ -137,7 +137,28 @@ class CallBudget(WireModel):
     """A per-turn and per-session ceiling. `None` on both means no limit."""
 
     turn_limit: int | None = None
+    """The ceiling for one turn — and a turn is longer than one prompt.
+
+    **A person interjecting joins the running turn rather than starting one.**
+    The daemon steers a prompt at a *busy* root so it lands at the next step
+    instead of after the whole turn (P5-01), and the loop keeps turning while
+    anything is waiting there — so no `turn/start` is appended, and every
+    per-turn counter here keeps running. The same is true of a child's message
+    (`rlm-messaging`) and of `/autonomous`'s own steer.
+
+    The consequence to plan around: an interjection **shares this ceiling with
+    the work already done**, where before it got a fresh one. With
+    `modelCalls.turnLimit: 10` against a turn that has spent nine steps, the
+    typed line gets one step and then the turn ends as `blocked` — which reads
+    as the harness ignoring what was just asked. A deployment that expects
+    people to interject mid-fan-out wants this set for the *conversation* a turn
+    can become, or set on `sessionLimit` instead, which counts the same work
+    either way and cannot be extended by talking.
+
+    It moves the other way for `/autonomous`'s `max_turns`, for the same reason:
+    fewer turns carry the same work, so that budget is spent more slowly."""
     session_limit: int | None = None
+    """The ceiling for the whole session. Unaffected by where turns are drawn."""
 
     @property
     def unlimited(self) -> bool:
@@ -190,12 +211,40 @@ class BreakerConfig(WireModel):
 
 
 class Config(WireModel):
-    """Row config."""
+    """Row config.
+
+    **Every ceiling here is unset by default and the breaker ships on**, which is
+    the row's whole posture: a limit nobody chose fires on somebody's longest
+    legitimate turn, while five identical failures in a row is not a long task
+    but a stuck one. A deployment that wants a ceiling says so.
+
+    The four options nest, so `ph config` shows each as one line with its
+    sub-fields in the default — the per-field reasoning lives on those fields
+    (`CallBudget.turn_limit` is the one with a consequence worth reading before
+    setting it).
+    """
 
     model_calls: ModelCallLimits = ModelCallLimits()
+    """How many times a turn and a session may call the model.
+
+    The ceiling that catches a loop the model cannot see it is in. `exit: end`
+    closes the turn and records why; `error` raises."""
     tool_calls: ToolCallLimits = ToolCallLimits()
+    """How many tool calls a turn and a session may make, in total and per tool.
+
+    A Code Mode dispatch counts as one (C1), so a cell calling four tools spends
+    four — the door a program uses is not a cheaper door."""
     children: ChildLimits = ChildLimits()
+    """How many subagents a turn and a session may spawn.
+
+    Refused before the provider is asked, so a denied spawn creates nothing. How
+    many run *at once* is a different question with a different answer — the work
+    seam's `concurrency`, which queues rather than refusing."""
     breaker: BreakerConfig = BreakerConfig()
+    """The consecutive-failure breaker: the one thing here that is on by default.
+
+    Counted per tool and reset by any success, so a tool that works
+    intermittently never trips it."""
 
 
 # -------------------------------------------------------------- the counting --

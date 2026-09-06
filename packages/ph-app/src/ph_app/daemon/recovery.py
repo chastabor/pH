@@ -42,6 +42,7 @@ from dataclasses import dataclass
 from ph.session import Session
 
 __all__ = [
+    "CHILD_RETRY_LIMIT",
     "FAILED",
     "RECOVERED",
     "RETRY",
@@ -81,6 +82,30 @@ milliseconds or not at all. A ladder that started at five seconds would make the
 common recovery feel like a hang, and one that never gave up would turn a
 permanently broken root into a process that retries a doomed turn forever while
 reporting itself busy.
+"""
+
+
+CHILD_RETRY_LIMIT = 3
+"""How many times an interrupted **child** is put back to work before it is failed.
+
+Here, beside the root's ladder, because it answers the root's question one level
+down — *how many times does this harness re-run work its own stopping
+interrupted* — and an answer that lived in `ph-core` made one question two, in
+two packages, in two vocabularies, for whoever came to tune it. `ctx.subagents`
+owns the sweep, the fold and the records; how many attempts they are worth is the
+host's, and `resume_children` takes it with no default so a host cannot get the
+number by saying nothing.
+
+Three, matching `RETRY_DELAYS`, for the same reason: what a harness stopping
+interrupts is transient by construction, and a child caught mid-turn three times
+is not unlucky — it is in front of something that keeps stopping.
+
+**No delays, unlike the root's.** That ladder retries a crash that just happened
+and waits before trying again; this one only ever runs while a harness is
+starting, which is already the wait. Which is also why the two do not share
+`Recovery`: its `total` is `len(RETRY_DELAYS)` and its `delay` indexes them, so a
+child would either report the root's bound or force delays into a type that has
+none. `spent` is the word worth sharing, and it costs nothing to say twice.
 """
 
 

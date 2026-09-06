@@ -25,6 +25,13 @@ Four limits rather than one, because they fail differently:
 
 One number could only ever catch whichever happened to bind first.
 
+**A turn is not a prompt.** A person interjecting at a busy root, a child's
+message and this seam's own steer all land at the next *step*, so they extend the
+running turn rather than starting one. `max_turns` is therefore spent more slowly
+than a reader counting prompts would expect — and the *per-turn* ceilings on the
+limits row move the other way, since an interjection shares the allowance with
+whatever the turn had already spent. `CallBudget.turn_limit` states that in full.
+
 Every one is **folded from the session's own events**, never from a counter the
 loop keeps: a run that survives a daemon restart must not come back with a fresh
 allowance.

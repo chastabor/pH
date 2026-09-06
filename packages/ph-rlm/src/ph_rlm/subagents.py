@@ -296,7 +296,9 @@ class RlmChildProvider:
             self.ctx.sessions.dispose(child_session.id)
             raise SubagentSpawnError(f"the child agent could not be created: {error}") from error
 
-        granted, downgrade = await self._workspace(parent, child_agent, child_session, request)
+        granted, downgrade = await self._workspace(
+            parent, child_agent, child_session, request.access
+        )
 
         run = SubagentRun(
             id=run_id,
@@ -497,6 +499,18 @@ class RlmChildProvider:
         child.run.scope = child.agent.ctx
         if child.run.grant is not None:
             child.run.grant.apply(self.ctx, child.agent.ctx)
+        # **And its workspace back**, which is not a convenience: a child that
+        # settled released its checkout, so one given a runtime again and no tree
+        # writes into whatever `ctx.fs` resolves without one — its *parent's*
+        # directory. A child narrowed at admission would come back unnarrowed on
+        # the one path nobody watches (E2, D21).
+        #
+        # It comes back to its *own* work, and that falls out of the tier rather
+        # than being arranged here: disposal commits the tree to the child's
+        # branch before removing the checkout, and `_add` attaches an existing
+        # branch rather than resetting it. So the same run id resolves to the
+        # same branch, and the second question starts where the first stopped.
+        await self._workspace(parent, child.agent, session, child.run.requested_access)
         # A fresh gate, which the awaiter already on the run reads at await time —
         # its closure holds the `_Child`, not the old Event.
         child.finished = anyio.Event()
@@ -696,9 +710,13 @@ class RlmChildProvider:
         parent: Any,
         child_agent: Any,
         child_session: Session,
-        request: SubagentRequest,
+        access: Access,
     ) -> tuple[Access, DowngradeReason | None]:
         """Take the child's workspace, and report what it actually got (D21, E3).
+
+        Takes the `access` rather than the request, because the other caller has
+        no request: a child being given its runtime back has only what its
+        admission recorded, and that is exactly what it should come back with.
 
         **Acquired here rather than left to the lifecycle row**, because a
         child's base and access are its *parent's* decision and the row knows
@@ -726,7 +744,7 @@ class RlmChildProvider:
             # one implementation, and a second one in this package is the one
             # that must not disagree with it.
             base=self.ctx.fs.root_for(parent),
-            access=request.access,
+            access=access,
             session=child_session,
             # The child's own scope: a revoked or finished child releases its
             # checkout with everything else it took (I2).

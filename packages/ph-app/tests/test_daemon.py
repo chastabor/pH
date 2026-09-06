@@ -147,6 +147,7 @@ from ph.testing import stored_log
 from ph_app.daemon import recovery, server
 from ph_app.daemon import supervisor as supervisor_module
 from ph_app.daemon.client import DaemonClient
+from ph_app.daemon.recovery import CHILD_RETRY_LIMIT
 from ph_app.daemon.server import DaemonUnavailable, serve
 from ph_app.daemon.supervisor import Supervisor
 from ph_app.protocol import DaemonError
@@ -195,6 +196,67 @@ async def _settled(client: DaemonClient, root_id: str, *, events: int) -> dict[s
             if row["status"] == "idle" and row["cursor"]["sequence"] >= events:
                 return row
             await anyio.sleep(0.01)
+
+
+async def test_a_resumed_root_hands_the_child_ladder_its_own_bound(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`resume_children` takes the limit because the policy is the host's (P6-32).
+
+    Which makes *this* the only place the daemon's answer is stated, so it is the
+    only place the wiring can be checked: the seam states no bound of its own, so
+    nothing in `ph-core` would notice the daemon passing a different number, and
+    the ladder's own tests supply their own.
+    """
+    from ph.seams.subagents import SubagentService
+
+    seen: list[int] = []
+    original = SubagentService.resume_children
+
+    async def spy(self: Any, parent: Any, *, retry_limit: int) -> Any:
+        seen.append(retry_limit)
+        return await original(self, parent, retry_limit=retry_limit)
+
+    monkeypatch.setattr(SubagentService, "resume_children", spy)
+    async with running(tmp_path) as daemon:
+        client = await daemon.client()
+        await client.call("session/new", sessionId="wired")
+
+    assert seen == [CHILD_RETRY_LIMIT], "the daemon's own ladder bound, not the seam's"
+
+
+async def test_a_person_reaches_a_busy_root_at_its_next_step(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A child could already interrupt its parent mid-turn; a person could not.
+
+    `rlm-messaging` delivers by steer so "a running agent picks it up without
+    finishing first", while a typed line waited for the whole turn — so during a
+    long fan-out the person had strictly less reach than the children they had
+    spawned. Asserted through the inbox target rather than through timing, which
+    is the fact and not a race.
+    """
+    from ph.agent_loop.driver import ReactLoopAgent
+
+    targets: list[str] = []
+    original = ReactLoopAgent.send
+
+    def spy(self: Any, message: Any, target: str, wakeup: bool) -> None:
+        targets.append(target)
+        original(self, message, target, wakeup)
+
+    monkeypatch.setattr(ReactLoopAgent, "send", spy)
+    async with running(tmp_path) as daemon:
+        supervisor = daemon.server.supervisor
+        root = await supervisor.start("busy")
+
+        await supervisor.prompt("busy", "the first thing")
+        assert targets[-1] == "next-turn", "an idle root has no turn to join"
+
+        monkeypatch.setattr(type(root.agent), "status", property(lambda _self: "running"))
+        await supervisor.prompt("busy", "also this")
+
+    assert targets[-1] == "next-step", "a person waited for the whole turn to end"
 
 
 async def test_a_failed_turn_is_named_beside_an_idle_status(

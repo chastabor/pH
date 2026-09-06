@@ -42,7 +42,6 @@ import pytest
 from ph.llm.types import text_of
 from ph.persistence import resume_session
 from ph.seams.subagents import (
-    CHILD_RETRY_LIMIT,
     STATUS,
     UNRECOVERABLE_DETAIL,
     USAGE,
@@ -57,6 +56,7 @@ from ph.seams.subagents import (
 from ph.seams.workspace import workspace_survivors
 from ph.session import derive_event_message
 from ph.testing import FAKE_OPTIONS, StubWorkspaceProvider, skill
+from ph.testing.git import WORKTREE_ROWS, git_repo, needs_git
 from ph_rlm.subagents import PROVIDER_NAME, TASK_PREFIX, delegation_depth
 
 pytestmark = pytest.mark.anyio
@@ -913,6 +913,16 @@ async def _persisted(ctx: Any, session: Any) -> None:
     await ctx.sessions.flush(session)
 
 
+RETRIES = 3
+"""This suite's own ladder bound.
+
+Stated here rather than imported: `resume_children` takes the limit because it is
+the *host's* policy, and a test that reached into `ph-app` for the daemon's
+number would be asserting against a value it does not control — and coupling
+`ph-rlm`'s tests to a package they do not depend on.
+"""
+
+
 async def _restart(
     mount: Any, session_id: str, *, skills: tuple[str, ...] = (), concurrent: int = 1
 ) -> Any:
@@ -932,7 +942,7 @@ async def _restart(
         ctx.skills.register(skill(name))
     session = await resume_session(ctx, session_id)
     parent = ctx.agents.create(session, FAKE_OPTIONS)
-    await ctx.subagents.resume_children(parent)
+    await ctx.subagents.resume_children(parent, retry_limit=RETRIES)
     return ctx, session, parent
 
 
@@ -1044,8 +1054,8 @@ async def test_the_ladder_gives_up_and_says_so(
     reads, which is the failure the root's own ladder is bounded to avoid.
     """
     ctx, session, parent = await delegating(maxConcurrent=1)
-    spent = await _stalled(ctx, session, parent, gate, restarts=CHILD_RETRY_LIMIT)
-    assert subagent_roster(session)[spent.id]["attempts"] == CHILD_RETRY_LIMIT
+    spent = await _stalled(ctx, session, parent, gate, restarts=RETRIES)
+    assert subagent_roster(session)[spent.id]["attempts"] == RETRIES
     await _persisted(ctx, session)
 
     revived_ctx, revived, _parent = await _restart(mount, session.id)
@@ -1053,8 +1063,8 @@ async def test_the_ladder_gives_up_and_says_so(
     assert revived_ctx.subagents.list() == [], "a spent ladder put a child back to work"
     row = subagent_roster(revived)[spent.id]
     assert row["status"] == "error"
-    assert row["detail"] == exhausted_detail()
-    assert str(CHILD_RETRY_LIMIT) in row["detail"], "the sentence names the bound it hit"
+    assert row["detail"] == exhausted_detail(RETRIES)
+    assert str(RETRIES) in row["detail"], "the sentence names the bound it hit"
     assert not child_is_live(row), "a root cannot be passivated while this reads live"
 
 
@@ -1069,7 +1079,7 @@ async def test_progress_since_the_last_restart_clears_the_ladder(
     something a turn that did nothing cannot produce.
     """
     ctx, session, parent = await delegating(maxConcurrent=1)
-    moved = await _stalled(ctx, session, parent, gate, restarts=CHILD_RETRY_LIMIT)
+    moved = await _stalled(ctx, session, parent, gate, restarts=RETRIES)
     session.append(USAGE, {"runId": moved.id, "targetSeq": 0, "childUsage": {}, "origin": "probe"})
     assert subagent_roster(session)[moved.id]["attempts"] == 0, "progress clears the count"
     await _persisted(ctx, session)
@@ -1139,9 +1149,80 @@ async def test_a_child_no_provider_can_resume_is_settled_not_left_queued(
 
     bare = await mount()
     revived = await resume_session(bare, session.id)
-    await bare.subagents.resume_children(bare.agents.create(revived, FAKE_OPTIONS))
+    await bare.subagents.resume_children(
+        bare.agents.create(revived, FAKE_OPTIONS), retry_limit=RETRIES
+    )
 
     row = subagent_roster(revived)[orphan.id]
     assert row["status"] == "error"
     assert row["detail"] == UNRECOVERABLE_DETAIL
     assert not child_is_live(row), "a root cannot be passivated while this reads live"
+
+
+# ------------------------------------------------- a child asked a second thing --
+
+
+@needs_git
+async def test_a_re_addressed_child_comes_back_to_its_own_work(mount: Any, tmp_path: Path) -> None:
+    """A second question reaches the child that answered the first, tree and all.
+
+    Disposal commits the checkout to the child's branch before removing it, and
+    `_add` attaches an existing branch rather than resetting it — so the same run
+    id resolves to the same branch, and re-acquiring restores what the child did.
+    Nothing arranges that here; what was missing is that `rehydrate` never asked.
+    """
+    ctx = await mount(*WORKTREE_ROWS, PROVIDER_ROW)
+    base = await git_repo(ctx, tmp_path / "repo")
+    session = ctx.sessions.create("parent")
+    parent = ctx.agents.create(session, FAKE_OPTIONS)
+    await ctx.workspace.acquire(
+        session_id=session.id, agent_id=parent.id, base=base, access="write", session=session
+    )
+
+    run = await ctx.subagents.start(
+        PROVIDER_NAME, SubagentRequest(prompt="first question", parent=parent, access="write")
+    )
+    first = ctx.workspace.of(run.session_id)
+    assert first is not None and first.kind == "worktree"
+    (first.root / "child-work.txt").write_text("what the first answer produced\n", encoding="utf-8")
+    await ctx.drain()
+    assert not first.root.exists(), "the checkout goes; the branch is what survives"
+
+    assert await ctx.subagents.ensure_addressable(run.session_id) is True
+
+    again = ctx.workspace.of(run.session_id)
+    assert again is not None, "a child given a runtime back and no tree writes into its parent's"
+    assert again.root == first.root, "the same child, so the same checkout"
+    assert again.ref == first.ref
+    assert (again.root / "child-work.txt").read_text(encoding="utf-8").startswith("what the first")
+
+
+@needs_git
+async def test_a_re_addressed_child_is_no_wider_than_it_was_admitted(
+    mount: Any, tmp_path: Path
+) -> None:
+    """The containment half. A child admitted `read` comes back ephemeral.
+
+    Its access is read from the admission, not from the caller re-addressing it,
+    so nothing about being asked a second question can widen what the first was
+    allowed to keep.
+    """
+    ctx = await mount(*WORKTREE_ROWS, PROVIDER_ROW)
+    base = await git_repo(ctx, tmp_path / "repo")
+    session = ctx.sessions.create("parent")
+    parent = ctx.agents.create(session, FAKE_OPTIONS)
+    await ctx.workspace.acquire(
+        session_id=session.id, agent_id=parent.id, base=base, access="write", session=session
+    )
+
+    run = await ctx.subagents.start(
+        PROVIDER_NAME, SubagentRequest(prompt="look only", parent=parent, access="read")
+    )
+    assert ctx.workspace.of(run.session_id).kind == "worktree-ephemeral"
+    await ctx.drain()
+
+    assert await ctx.subagents.ensure_addressable(run.session_id) is True
+
+    again = ctx.workspace.of(run.session_id)
+    assert again is not None
+    assert again.kind == "worktree-ephemeral", "a second question must not widen the first's grant"

@@ -206,9 +206,16 @@ disagree with them:
 | `starts` | every time this child has been driven | nothing |
 | `attempts` | restarts that achieved nothing since | a model answer |
 
-After `CHILD_RETRY_LIMIT` attempts the child is failed and the reason says which
-bound it hit. There are no delays, unlike the root's ladder, because this one only
-ever runs while a harness is starting — which is already the wait.
+After `retry_limit` attempts the child is failed and the reason says which bound
+it hit. There are no delays, unlike the root's ladder, because this one only ever
+runs while a harness is starting — which is already the wait.
+
+**The bound is the host's, and `resume_children` takes it with no default.** This
+seam owns the sweep, the fold and the records; how many attempts work is worth is
+policy, and a seam that answered it for a caller who said nothing would be
+choosing one (P6-32's rule). The daemon states it beside the root's own ladder,
+in `ph_app.daemon.recovery`, which is where somebody tuning restart behaviour is
+already looking.
 
 **Progress clears `attempts`**, so the ladder bounds *consecutive* interruptions
 rather than a lifetime's: a child stopped once, working for an hour, then stopped
@@ -240,6 +247,20 @@ to restore work that was once allowed. Guards gate new work.
 A provider opts in by implementing `ReadmittingProvider.readmit(request, *,
 run_id, session_id, restarts)` — its own Protocol, like `RehydratableProvider`, because
 resuming an un-run child is not something every way of running one can do.
+
+## Asking a settled child something else
+
+Addressing a child that has finished rehydrates it (`RehydratableProvider`), and
+it comes back **to its own work**. That falls out of the `worktree` tier rather
+than being arranged: disposal commits the checkout to the child's branch before
+removing it, and a re-acquire attaches that branch rather than resetting it — so
+the same run id resolves to the same branch and the second question starts where
+the first stopped.
+
+The workspace is re-acquired with the access the *admission* recorded, so nothing
+about being asked again can widen what the first question was allowed. Before
+this, rehydration rebuilt the agent and its grant but took no workspace at all,
+which left a re-addressed child writing into its parent's tree.
 
 ## What it does not do
 

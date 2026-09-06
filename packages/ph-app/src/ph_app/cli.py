@@ -25,7 +25,7 @@ from __future__ import annotations
 import json
 import shlex
 import sys
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from functools import partial
 from pathlib import Path
 from typing import Annotated, Any, Literal, TypeAlias
@@ -754,22 +754,37 @@ def events(
 def config(
     as_json: Annotated[bool, typer.Option("--json", help="Emit JSON.")] = False,
     row: Annotated[list[str], typer.Option("--row", help="Only these rows. Repeatable.")] = [],  # noqa: B006 - typer builds the list per invocation
+    profile: ProfileOption = DEFAULT_PROFILE,
+    patch: PatchOption = [],  # noqa: B006 - typer builds the list per invocation
     all_: Annotated[
         bool, typer.Option("--all", help="Include rows that take no configuration.")
     ] = False,
 ) -> None:
-    """Print what every row accepts as configuration.
+    """Print what every row accepts as configuration, and what a profile sets.
 
     Generated from each plugin's own `config=` model, so it cannot drift from
     the code the way a hand-written options table does — the same argument
     `ph events` makes about the event registry, applied to the other half of
     what a profile is.
 
+    **The `default` column is the code's answer; the profile column is the
+    deployment's**, and the second is the one a run actually uses. Composed, not
+    mounted: it reads the same layered documents `--dump-config` prints,
+    `--patch` included, so what somebody is about to run is what they can check —
+    and it starts no agent and opens no session. The answer is the **root**
+    agent's, which is what a child inherits. A row the profile does not mount is
+    said so rather than shown with a value nothing would apply.
+
     Rows with no options are omitted unless `--all` asks for them: "this row has
     no configuration" is worth being able to look up, but it is not what
     somebody scanning for a knob is reading past sixty of.
     """
     catalog = config_catalog()
+    composed = {
+        str(one.get("name")): one.get("config")
+        for one in profile_or_exit(profile, patch).dump()
+        if one.get("name")
+    }
     wanted = {name.strip() for name in row if name.strip()}
     if wanted:
         catalog = [entry for entry in catalog if entry["name"] in wanted]
@@ -791,13 +806,16 @@ def config(
     table.add_column("option")
     table.add_column("type")
     table.add_column("default")
+    table.add_column(f"in {profile}")
     table.add_column("what it does")
     for entry in shown:
         if error := entry.get("error"):
-            table.add_row(entry["name"], "[red]unavailable[/red]", "", "", error)
+            table.add_row(entry["name"], "[red]unavailable[/red]", "", "", "", error)
             continue
+        mounted = entry["name"] in composed
+        set_here = composed.get(entry["name"]) or {}
         if not entry["config"]:
-            table.add_row(entry["name"], "[dim]none[/dim]", "", "", "")
+            table.add_row(entry["name"], "[dim]none[/dim]", "", "", "", "")
             continue
         for index, field in enumerate(entry["config"]):
             table.add_row(
@@ -807,9 +825,26 @@ def config(
                 # Required has no default, and printing one would invent a
                 # value a profile must actually supply.
                 "[bold]required[/bold]" if field["required"] else (field["default"] or ""),
+                _in_profile(field["name"], mounted=mounted, set_here=set_here, first=index == 0),
                 field["doc"],
             )
     console.print(table)
+
+
+def _in_profile(name: str, *, mounted: bool, set_here: Mapping[str, Any], first: bool) -> str:
+    """What the composed profile says about one option.
+
+    Three answers, and they are genuinely different: the row is not in this
+    profile at all, so nothing here applies; the row is mounted and says nothing
+    about this option, so the default stands; or the profile set it, and that is
+    what a run uses. Blank for the first case past its first line, because the
+    fact is the *row's* and repeating it once per option is noise.
+    """
+    if not mounted:
+        return "[dim]row not mounted[/dim]" if first else ""
+    if name not in set_here:
+        return "[dim]—[/dim]"
+    return f"[bold]{set_here[name]}[/bold]"
 
 
 def main() -> None:

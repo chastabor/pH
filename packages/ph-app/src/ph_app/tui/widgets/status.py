@@ -23,7 +23,7 @@ from ph.seams.tui_status import StatusReading
 
 from ..state import TuiState
 
-__all__ = ["COMPACTION_THRESHOLD", "Sidebar", "StatusBar", "render_subagents"]
+__all__ = ["COMPACTION_THRESHOLD", "Sidebar", "StatusBar", "children_heading", "render_subagents"]
 
 COMPACTION_THRESHOLD = 0.85
 """Where Phase 4's `compaction-summarize` triggers. The gauge warns here."""
@@ -31,6 +31,40 @@ COMPACTION_THRESHOLD = 0.85
 SPINNER = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
 
 _HOME = str(Path.home())
+
+
+def children_heading(state: TuiState) -> str:
+    """`children · 3 running, 5 pending` — the shape of the fan-out at a glance.
+
+    A count, because the panel is one line per child and eight of them is a list
+    somebody has to tally by eye; the question a person actually has mid-fan-out
+    is how much is moving and how much is waiting.
+
+    **"pending", never "queued"**, and that is the whole reason this reads oddly
+    next to the roster it counts. The status bar already says "queued" for the
+    person's *own* prompts waiting on a busy agent, and two counts on one screen
+    using one word for two different things is worse than a synonym. The roster's
+    own vocabulary is untouched — `queued` is what the log says and what every
+    other reader folds; this is a heading, and headings are for the reader.
+
+    Settled children are not counted at all. They stay listed, because a parent
+    asking what happened to one deserves an answer, but "how busy is this
+    fan-out" is a question about the ones still going.
+    """
+    live = [row for row in state.subagents.values() if not row.deleted]
+    running = sum(1 for row in live if row.status == "running")
+    pending = sum(1 for row in live if row.status == "queued")
+    if not (running or pending):
+        return "children"
+    counts = ", ".join(
+        part
+        for part in (
+            f"{running} running" if running else "",
+            f"{pending} pending" if pending else "",
+        )
+        if part
+    )
+    return f"children · {counts}"
 
 
 def render_subagents(state: TuiState) -> str:
@@ -135,7 +169,7 @@ class Sidebar(Vertical):
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self.styles.width = self.WIDTH
-        self._shown: tuple[str, str, str] | None = None
+        self._shown: tuple[str, str, str, str] | None = None
 
     def compose(self) -> ComposeResult:
         yield Static(Content.from_markup("[b]session[/b]"), classes="section-title")
@@ -162,9 +196,10 @@ class Sidebar(Vertical):
         )
         todos = "\n".join(_todo_line(todo) for todo in state.todos) or "—"
         children = render_subagents(state)
-        if (facts, todos, children) == self._shown:
+        heading = children_heading(state)
+        if (facts, todos, children, heading) == self._shown:
             return
-        self._shown = (facts, todos, children)
+        self._shown = (facts, todos, children, heading)
         try:
             facts_panel = self.query_one("#session-facts", Static)
             todo_panel = self.query_one("#todo-list", Static)
@@ -177,6 +212,7 @@ class Sidebar(Vertical):
         facts_panel.update(Content(facts))
         todo_panel.update(Content(todos))
         children_title.display = bool(children)
+        children_title.update(Content.from_markup(f"[b]{heading}[/b]"))
         panel.display = bool(children)
         panel.update(Content(children))
 
