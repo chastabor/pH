@@ -185,6 +185,17 @@ result a real git branch, which is what makes this a provider swap rather than a
 migration. It never converts a repository: a base jj does not already manage is
 declined, and the binary being absent declines the row at mount.
 
+One consequence is worth knowing before reading the jj tier: a `jj` command
+commits the working copy of the directory it runs in *before* answering, so which
+calls do that is a decision, not a detail. `workspace-jj` makes it one — the calls
+whose answer or effect is the tree commit first and carry the `auto_track`
+exclusion; every other call passes `--ignore-working-copy` and does not touch the
+tree at all. That is what closes the **read-shaped** case no exclusion could: `jj
+workspace root` runs in the *person's own* checkout, where the provisioned list is
+correctly empty, and was committing whatever they had left untracked. What a
+committing call adopts from that same checkout is the non-guarantee below, not a
+hole this closes — freezing a fork point is meant to see the parent's work.
+
 The mirror image is worth stating, because it is the same property with the sign
 flipped: **a file sitting untracked in the base reaches a child's branch** under
 jj and does not under git. jj put it in the base's working-copy commit before pH

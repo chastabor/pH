@@ -41,13 +41,17 @@ from typing import Any, Literal, TypeAlias
 
 import anyio
 import anyio.abc
+from pydantic import Field
 
 from ..cordis import Context, plugin
 from ..wire import WireModel
 
 __all__ = [
+    "COHERENT",
+    "DEFAULT_SCRUB",
     "MAX_OUTPUT",
     "SECRET_PATTERN",
+    "EnvScrub",
     "SubprocessHandle",
     "SubprocessResult",
     "SubprocessService",
@@ -82,12 +86,97 @@ there is no spelling for is *unbounded* — a caller who forgets is exactly the
 caller this protects.
 """
 
-SECRET_PATTERN = re.compile(r"KEY|SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL", re.IGNORECASE)
-"""Environment names a model-run child never inherits.
+DEFAULT_SCRUB = ("KEY", "SECRET", "TOKEN", "PASSWORD", "PASSWD", "CREDENTIAL")
+"""What marks an environment name as a credential, by default (I-4).
 
 Substring matching, deliberately broad: `MY_API_KEY_2` and `GH_TOKEN_FILE` are
 both worth losing, and a child that genuinely needs a secret should be given it
-explicitly rather than by inheritance."""
+explicitly rather than by inheritance.
+
+A **default**, not the rule: `subprocess-local` takes `scrub` and `keep`, because
+breadth this deliberate has a wrong answer for somebody — see `EnvScrub.keep`.
+"""
+
+SECRET_PATTERN = re.compile("|".join(DEFAULT_SCRUB), re.IGNORECASE)
+"""The default marks as one pattern. Kept for callers that had it; `EnvScrub` is
+what a deployment configures."""
+
+COHERENT = (("GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_"),)
+"""Families of environment variables that must be dropped or kept **together**.
+
+**A scrub that is broad is fine; a scrub that is *incoherent* is not.** git
+configures itself from `GIT_CONFIG_COUNT=n` plus `GIT_CONFIG_KEY_0…n-1` and
+`GIT_CONFIG_VALUE_0…n-1`, and `KEY` matches those key names — so the default
+scrub removed the keys, kept the count, and left git reading a configuration that
+declares two entries and supplies none:
+
+    error: missing config key GIT_CONFIG_KEY_0
+    fatal: unable to parse command-line config
+
+That is **every** git and jj invocation pH makes failing, on any host that uses
+that entirely standard mechanism — a sandbox, a CI runner, tooling that injects
+`http.extraheader`. Found when a sandbox set it here; the bug was never the
+sandbox's.
+
+Dropping the whole family is also the *safer* reading of I-4, not a relaxation of
+it: `GIT_CONFIG_VALUE_n` is where an injected auth header's value would sit, and
+`VALUE` matches none of the marks. Keeping a family whole means keeping a
+credential; dropping it whole is what this does.
+"""
+
+
+def _family(name: str) -> tuple[str, ...] | None:
+    """The coherent family `name` belongs to, if any."""
+    for family in COHERENT:
+        if any(name == member or name.startswith(member) for member in family):
+            return family
+    return None
+
+
+@dataclass(frozen=True, slots=True)
+class EnvScrub:
+    """Which environment names a spawned child never inherits (I-4).
+
+    A value rather than a module constant because the breadth is deliberate and
+    therefore sometimes wrong: `GIT_CONFIG_KEY_n` is a *configuration* name that
+    matches `KEY`, and a deployment that wants git configured through it needs a
+    way to say so without editing pH. `subprocess-local` carries both fields.
+
+    The default is unchanged, and the safe direction is the default: a deployment
+    that configures nothing scrubs exactly what it scrubbed before.
+    """
+
+    marks: tuple[str, ...] = DEFAULT_SCRUB
+    """Substrings that mark a name as a credential, matched case-insensitively."""
+    keep: frozenset[str] = frozenset()
+    """Names kept even though they match — the override, and it is exact-match on
+    purpose. A pattern here would be a second scrub language to get wrong, and the
+    thing an operator actually knows is the variable's name."""
+
+    def drops(self, name: str) -> bool:
+        """Whether a child is denied this name."""
+        if name in self.keep:
+            return False
+        upper = name.upper()
+        return any(mark.upper() in upper for mark in self.marks)
+
+    def apply(
+        self, base: Mapping[str, str] | None = None, *, extra: Mapping[str, str] | None = None
+    ) -> dict[str, str]:
+        """The parent environment minus the credentials, minus broken families."""
+        source = os.environ if base is None else base
+        dropped = {name for name in source if self.drops(name)}
+        # A family loses every member as soon as it loses one, so a child never
+        # sees a half-configured tool. See `COHERENT`.
+        broken = {_family(name) for name in dropped} - {None}
+        kept = {
+            name: value
+            for name, value in source.items()
+            if name not in dropped and _family(name) not in broken
+        }
+        if extra:
+            kept.update(extra)
+        return kept
 
 
 def first_line(text: str) -> str:
@@ -104,12 +193,13 @@ def first_line(text: str) -> str:
 def scrub_env(
     base: Mapping[str, str] | None = None, *, extra: Mapping[str, str] | None = None
 ) -> dict[str, str]:
-    """The parent environment minus anything that looks like a credential."""
-    source = os.environ if base is None else base
-    scrubbed = {key: value for key, value in source.items() if not SECRET_PATTERN.search(key)}
-    if extra:
-        scrubbed.update(extra)
-    return scrubbed
+    """The parent environment minus anything that looks like a credential.
+
+    The **default** scrub, for a caller with no `ctx` to ask. A caller that has
+    one goes through `ctx.subprocess.env()`, which is the same thing under the
+    deployment's own `scrub`/`keep` — the whole point of making them config.
+    """
+    return EnvScrub().apply(base, extra=extra)
 
 
 @dataclass(frozen=True, slots=True)
@@ -275,6 +365,21 @@ class SubprocessResult:
 class Config(WireModel):
     """Row config for `subprocess-local`."""
 
+    scrub: list[str] = Field(default_factory=lambda: list(DEFAULT_SCRUB))
+    """Substrings that mark an environment variable as a credential a child never
+    inherits (I-4). Case-insensitive, matched anywhere in the name.
+
+    Config rather than a constant because the breadth is deliberate and therefore
+    sometimes wrong — and because a deployment that narrows it should have to say
+    so in a profile, where it is reviewable, rather than by editing pH."""
+    keep: list[str] = Field(default_factory=list)
+    """Names kept even though they match `scrub` — the exception, by exact name.
+
+    `GIT_CONFIG_KEY_0` is the case this exists for: a *configuration* name that
+    matches `KEY`. It needs no entry here today, because `COHERENT` keeps git's
+    numbered-config family whole either way; what this is for is the deployment
+    that genuinely wants such a variable through, and would otherwise have no
+    spelling for it short of a fork."""
     max_output_bytes: int = MAX_OUTPUT
     """How much of each stream a child's output is kept. See `MAX_OUTPUT`.
 
@@ -292,13 +397,31 @@ class SubprocessService:
     ctx: Context
     max_output: int = MAX_OUTPUT
     """The deployment's ceiling, applied to any spec that names none."""
+    scrub: EnvScrub = field(default_factory=EnvScrub)
+    """The deployment's credential scrub, applied to every child this seam spawns.
+
+    On the seam because the alternative is a module constant that no profile can
+    reach, and "what a spawned child inherits" is exactly the kind of thing a
+    deployment has to be able to state — see `EnvScrub` and `COHERENT`.
+    """
+
+    def env(self, *, extra: Mapping[str, str] | None = None) -> dict[str, str]:
+        """The environment a child of this deployment gets. **The one door.**
+
+        Every seam that spawns a tool — git, jj, agentfs, the sandbox backend, the
+        kernel — used to call the module-level `scrub_env` itself, which meant the
+        deployment's own `scrub`/`keep` reached none of them: the row could be
+        configured and every actual child would still be built from the default.
+        Asking the seam is what makes the config mean anything.
+        """
+        return self.scrub.apply(extra=extra)
 
     async def spawn(
         self, spec: SubprocessSpawnSpec, *, scope: Context | None = None
     ) -> SubprocessHandle:
         """Spawn a child owned by `scope`, terminated and reaped on disposal."""
         owner = self.ctx.owner_for(scope)
-        env = scrub_env() if spec.env is None else spec.env
+        env = self.env() if spec.env is None else spec.env
         cap = self.max_output if spec.max_output is None else spec.max_output
         handle: dict[str, SubprocessHandle] = {}
 
@@ -370,7 +493,14 @@ def _stdio(mode: Stdio) -> Any:
 @plugin("subprocess-local", config=Config)
 async def apply(ctx: Context, config: Config) -> None:
     """Mount the local subprocess provider."""
-    ctx.provide("subprocess", SubprocessService(ctx=ctx, max_output=config.max_output_bytes))
+    ctx.provide(
+        "subprocess",
+        SubprocessService(
+            ctx=ctx,
+            max_output=config.max_output_bytes,
+            scrub=EnvScrub(marks=tuple(config.scrub), keep=frozenset(config.keep)),
+        ),
+    )
 
 
 def platform_shell() -> Sequence[str]:

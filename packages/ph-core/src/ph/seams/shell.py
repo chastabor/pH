@@ -18,7 +18,7 @@ from typing import Any
 
 from ..cordis import Context, plugin
 from .sandbox import SandboxPolicy
-from .subprocess import SubprocessSpawnSpec, platform_shell, scrub_env
+from .subprocess import SubprocessSpawnSpec, platform_shell
 from .workspace import workspace_of, workspace_policy
 
 log = logging.getLogger("ph.seams.shell")
@@ -125,7 +125,9 @@ class ShellService:
             # Additive, not wholesale: the redirection variables are the only
             # thing being said here, and a command that inherited nothing else
             # would not find its own toolchain.
-            env=scrub_env(extra=workspace.env) if workspace and workspace.env else None,
+            env=self.ctx.subprocess.env(extra=workspace.env)
+            if workspace and workspace.env
+            else None,
         )
         outcome = await self.ctx.subprocess.run(spec, scope=scope)
         return ShellResult(

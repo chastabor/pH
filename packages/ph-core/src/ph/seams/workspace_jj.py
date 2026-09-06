@@ -1,8 +1,9 @@
 """`workspace-jj` — the `worktree` tier over Jujutsu, where a child sees work in progress.
 
 A third workspace provider, and it exists for one property the git tier cannot
-offer. **jj's working copy is a commit**: there is no uncommitted state, because
-every `jj` command snapshots the tree it runs in before doing anything else.
+offer. **jj's working copy is a commit**: there is no uncommitted state, because a
+`jj` command commits the tree it runs in before doing anything else — unless told
+not to, which is the distinction `_read` and `_commit` exist to make.
 
 That is not a nicety here, it is the gap P4-11 left open. A child under
 `workspace-git` branches from its parent's last *commit*, and a live parent
@@ -76,7 +77,7 @@ from ..paths import default_home_path, is_under
 from ..wire import WireModel
 from .containment import TIERS, TierDescription
 from .diagnostics import Diagnostic, contribute
-from .subprocess import SubprocessSpawnSpec, first_line, scrub_env
+from .subprocess import SubprocessSpawnSpec, first_line
 from .workspace import (
     BRANCH_PREFIX,
     ContainmentTier,
@@ -109,14 +110,18 @@ async def jj(
 
     `LC_ALL=C` for the same reason it is there: pH reads what the tool says.
 
-    **`cwd` is never incidental.** jj snapshots the workspace the command runs in
-    and no other, so which directory a call is made from decides whose work the
-    command sees — the finding that cost this module a lost child tree in
-    testing, when a bookmark set from the parent's directory named the child's
-    *previous* commit and the child's work went nowhere.
+    **`cwd` is never incidental.** jj commits the workspace the command runs in and
+    no other, so which directory a call is made from decides whose work the command
+    sees — the finding that cost this module a lost child tree in testing, when a
+    bookmark set from the parent's directory named the child's *previous* commit and
+    the child's work went nowhere.
+
+    Callers go through `JjWorkspaceProvider._read` or `._commit` rather than here,
+    because whether a call commits that tree is a decision every call site has to
+    make out loud.
     """
     spec = SubprocessSpawnSpec(
-        argv=("jj", *args), cwd=cwd, env=scrub_env(extra={"LC_ALL": "C", **(env or {})})
+        argv=("jj", *args), cwd=cwd, env=ctx.subprocess.env(extra={"LC_ALL": "C", **(env or {})})
     )
     outcome = await ctx.subprocess.run(spec)
     return outcome.exit_code, outcome.stdout, outcome.stderr
@@ -140,25 +145,51 @@ splitting on a space a path may contain.
 """
 
 
+_NEEDS_THE_TREE = (("new",), ("restore",), ("diff",), ("workspace", "add"))
+"""jj verbs whose answer or effect *is* the working copy, so reading them is a bug.
+
+**Measured, and it corrects the reason this split was first argued for.** The claim
+was that jj refuses `--ignore-working-copy` on anything that must write, *by name*,
+so a wrong choice would fail loudly. It does that for `workspace add` alone — and
+even there only *after* registering the workspace, leaving an empty directory. `new`,
+`restore` and `diff` all **exit 0 and answer from a stale tree**: `jj
+--ignore-working-copy new` silently produced a fork point with none of the parent's
+work in it, which is the one property this whole provider exists to offer.
+
+So the loudness has to be pH's. argv cannot *derive* the choice — `log` and `bookmark
+set` are each correct on both sides, decided by the revset or by whose tree the call
+runs in — but it can **veto** the combination that is never right, which is what
+`_read` asserts. One direction, at the runner, where 25 call sites would otherwise
+each have to remember it.
+"""
+
+
+def _needs_the_tree(args: Sequence[str]) -> bool:
+    """Whether this argv is one `_read` must refuse."""
+    return any(tuple(args[: len(verb)]) == verb for verb in _NEEDS_THE_TREE)
+
+
 def auto_track(provisioned: Sequence[str]) -> tuple[str, ...]:
     """`--config` keeping the seam's own materials out of the agent's commit (E14).
 
-    **jj snapshots everything the project does not gitignore, and provisioning is
-    what puts non-gitignored things in a workspace.** A `.env` copied in so the
-    tests can run is not the agent's work; here it lands in the working-copy commit
-    by default, which puts it on the bookmark, which puts it in the git ref somebody
-    merges. That is P6-35's finding arriving at this tier, where it stops being
-    bookkeeping and becomes a credential on a branch — and it is silent, because
-    every command still succeeds.
+    **jj commits everything the project does not gitignore, and provisioning is what
+    puts non-gitignored things in a workspace.** A `.env` copied in so the tests can
+    run is not the agent's work; here it lands in the working-copy commit by default,
+    which puts it on the bookmark, which puts it in the git ref somebody merges. That
+    is P6-35's finding arriving at this tier, where it stops being bookkeeping and
+    becomes a credential on a branch — and it is silent, because every command still
+    succeeds.
 
     `snapshot.auto-track` is a **fileset**, so this is the exact analogue of the git
     tier's `agent_work_pathspec()`: everything, minus what the seam put there.
+
     Passed per call rather than written to the repository's config, because the list
     is a property of one *workspace* and a repo config is shared by all of them.
 
-    It governs what becomes tracked, so it only works while the file has never been
-    snapshotted — which holds because every jj command pH runs in a child carries
-    this, and `workspace add` runs before provisioning does.
+    **Precondition: only a call that commits needs this**, and it governs what
+    *becomes* tracked — so it works only while the file has never been committed,
+    which holds because every committing call pH makes goes through `_commit` and
+    `workspace add` runs before provisioning does.
 
     A path holding a `"` is skipped rather than escaped: the string is parsed as a
     fileset, and a quote inside one changes what it selects — so a wrong guess reads
@@ -285,7 +316,7 @@ class JjWorkspaceProvider:
 
         # Through `_in` like every other call made in a directory that is not ours:
         # for a fan-out *from a child*, `managed` is that child's own workspace.
-        code, _, err = await self._in(managed, "bookmark", "set", ref, "-r", f"{name}@")
+        code, _, err = await self._read(managed, "bookmark", "set", ref, "-r", f"{name}@")
         if code != 0:
             # Not fatal, because release names the work again before exporting it
             # and is the authority on whether `kept` is true. What is lost is the
@@ -346,7 +377,9 @@ class JjWorkspaceProvider:
         direction, and the reason `unchanged_failure` is written as "already failed
         against this exact state" rather than as a cache to be trusted.
         """
-        found = await self._log(workspace.root, "@", full=True)
+        found = await self._log(
+            workspace.root, "@", full=True, snapshot=True, provisioned=workspace.provisioned
+        )
         if found is None:
             log.warning("ph.seams.workspace_jj: no restore point for %s", workspace.root)
             return None
@@ -375,13 +408,22 @@ class JjWorkspaceProvider:
         tier: it is what `/revert` catches to say "no longer available" rather than
         showing a person a traceback for a restore point it offered them.
         """
-        code, out, err = await self._in(workspace.root, "diff", "--summary", "--from", token)
+        code, out, err = await self._commit(
+            workspace.root,
+            "diff",
+            "--summary",
+            "--from",
+            token,
+            provisioned=workspace.provisioned,
+        )
         if code != 0:
             raise FileNotFoundError(
                 f"restore point {token} is gone: {first_line(err) or f'jj exited {code}'}"
             )
         added = tuple(sorted(line[2:] for line in out.splitlines() if line.startswith("A ")))
-        code, _, err = await self._in(workspace.root, "restore", "--from", token)
+        code, _, err = await self._commit(
+            workspace.root, "restore", "--from", token, provisioned=workspace.provisioned
+        )
         if code != 0:
             raise FileNotFoundError(
                 f"could not restore {token}: {first_line(err) or f'jj exited {code}'}"
@@ -411,7 +453,7 @@ class JjWorkspaceProvider:
         filter changed nothing any test could see, and the mechanism that was
         actually correct could not be told from the one that was covering for it.
         """
-        code, out, _ = await self._in(base, "bookmark", "list", "--all-remotes", "-T", _BOOKMARKS)
+        code, out, _ = await self._read(base, "bookmark", "list", "--all-remotes", "-T", _BOOKMARKS)
         if code != 0:
             return []
         return [line.strip() for line in out.splitlines() if line.strip()]
@@ -425,9 +467,9 @@ class JjWorkspaceProvider:
         ancestry of where the person is standing — and it is the same question,
         because by disposal everything the agent did is on that bookmark.
         """
-        if not force and await self._log(base, f"{ref} ~ ::@"):
+        if not force and await self._log(base, f"{ref} ~ ::@", snapshot=False):
             return f"the bookmark {ref} holds work that is not in this workspace's history"
-        code, _, err = await self._in(base, "bookmark", "delete", ref)
+        code, _, err = await self._read(base, "bookmark", "delete", ref)
         return "" if code == 0 else (first_line(err) or f"jj exited {code}")
 
     async def merge(self, base: Path, ref: str) -> str:
@@ -443,12 +485,16 @@ class JjWorkspaceProvider:
         and let them find out by opening the file, so the conflict is asked for by
         revset and reported as what it is: a merge that happened and is not finished.
         """
-        code, _, err = await self._in(base, "new", "@", ref)
+        code, _, err = await self._commit(base, "new", "@", ref)
         if code != 0:
             return f"could not merge {ref}: {first_line(err) or f'jj exited {code}'}"
-        if not await self._log(base, "@ & conflicts()"):
+        # `resolve --list` exits non-zero with "No conflicts found at this revision",
+        # so it answers *whether* as well as *which* — the `@ & conflicts()` revset
+        # this used to ask first was a second spawn for the half of the answer this
+        # one already carries.
+        code, out, _ = await self._read(base, "resolve", "--list")
+        if code != 0 or not out.strip():
             return ""
-        code, out, _ = await self._in(base, "resolve", "--list")
         paths = [line.split()[0] for line in out.splitlines() if line.strip()]
         return (
             f"merged {ref}, with conflicts jj recorded in the commit at: "
@@ -475,7 +521,7 @@ class JjWorkspaceProvider:
         is now *on the ref*. `/workspaces list` on this tier is therefore mildly
         curative, where on the git tier it is purely a read.
         """
-        code, out, _ = await self._in(base, "workspace", "list", "-T", _LISTING)
+        code, out, _ = await self._read(base, "workspace", "list", "-T", _LISTING)
         if code != 0:
             return []
         found: list[tuple[str, Path]] = []
@@ -507,7 +553,9 @@ class JjWorkspaceProvider:
             name = path.relative_to(self.root).as_posix()
         except ValueError:
             return f"{path} is not a workspace this tier made"
-        code, _, err = await self._in(path, "workspace", "forget", name, provisioned=provisioned)
+        code, _, err = await self._commit(
+            path, "workspace", "forget", name, provisioned=provisioned
+        )
         if code != 0:
             return first_line(err) or f"jj exited {code}"
         await anyio.to_thread.run_sync(lambda: shutil.rmtree(path, ignore_errors=True))
@@ -586,7 +634,7 @@ class JjWorkspaceProvider:
             # rather than remembered: a rehydrated child is a *new process* half the
             # time, and its release owes the same "what has this done since it forked"
             # the first one did.
-            return await self._log(path, "@-", full=True) or ""
+            return await self._log(path, "@-", full=True, snapshot=False) or ""
         # `jj workspace add` refuses a path whose parent is missing, where `git
         # worktree add` creates the chain — so the first agent of a session pays
         # one mkdir rather than a decline that reads as "jj is broken here".
@@ -595,11 +643,11 @@ class JjWorkspaceProvider:
         # From `base`, not from `managed`: `@` is per workspace, so a fan-out from
         # a child forks that child's work, which is the whole point of the tier.
         add = ("workspace", "add", "--name", name, "-r", fork, str(path))
-        code, _, err = await self._in(base, *add)
+        code, _, err = await self._commit(base, *add)
         registered = code != 0 and await self._registered(managed, name)
         if registered and not path.exists():
-            await self._in(managed, "workspace", "forget", name)
-            code, _, err = await self._in(base, *add)
+            await self._read(managed, "workspace", "forget", name)
+            code, _, err = await self._commit(base, *add)
             registered = code != 0
         if code != 0:
             reason = self._why(registered, path)
@@ -628,27 +676,42 @@ class JjWorkspaceProvider:
             return "branch-in-use"
         return "path-exists" if path.exists() else "provider-failed"
 
-    async def _in(
+    async def _read(self, cwd: Path, *args: str) -> tuple[int, str, str]:
+        """A jj call that must not touch the tree it runs in.
+
+        `--ignore-working-copy`, and no fileset: nothing can be adopted into a commit
+        that is not being made. It is *stronger* than the `auto_track` exclusion the
+        other path needs — that keeps a material from becoming tracked, this keeps the
+        command from reading the tree at all.
+
+        **It is what closed the hole no fileset could.** `_managed` runs `workspace
+        root` in the *person's own* checkout, where `_base_materials` correctly answers
+        `()` — nothing was provisioned there — so a probe whose name says it reads was
+        committing their working copy and adopting whatever they had left untracked. No
+        exclusion could have fixed that, because the material was theirs.
+
+        Two methods rather than one `snapshot=` flag, because the pairing that means
+        nothing — a read *plus* a fileset — then cannot be written. It was
+        representable and silently ignored, and the change that introduced it had
+        already paid for that twice by hand, deleting a `provisioned=` that had quietly
+        stopped applying.
+        """
+        assert not _needs_the_tree(args), f"jj {' '.join(args[:2])} cannot answer from a stale tree"
+        return await jj(self.ctx, cwd, "--ignore-working-copy", *args)
+
+    async def _commit(
         self, cwd: Path, *args: str, provisioned: Sequence[str] | None = None
     ) -> tuple[int, str, str]:
-        """**The** jj call. One door into a directory, with the seam's materials held out.
+        """A jj call whose answer or effect is the tree, so it commits the tree first.
 
-        Every jj command snapshots the workspace it runs in, which is the trap this
-        exists to close and it closed it twice: `workspace root` — a *probe*, which
-        reads nothing as far as its name goes — and `workspace add`, both of which run
-        in a **parent's** tree and both of which tracked a provisioned material on the
-        way past. Once tracked, no later `auto_track` can untrack it, so the exclusion
-        at release was correct and already too late.
+        These are the only calls that let the snapshot happen, and therefore the only
+        ones that need `auto_track` to keep the seam's own materials out of the commit
+        they cause.
 
         `provisioned=None` means "look it up", which is right whenever the workspace is
         one the seam still holds. Disposal is the case that must pass it: `_release`
         runs *after* the seam has dropped the workspace, so a lookup would come back
         empty exactly when the materials still need holding out.
-
-        There were three spellings of this — this, a `_jj(workspace, ...)` that read
-        `workspace.provisioned`, and bare `jj(..., *held, ...)` with the rendered
-        fileset threaded through the release path. Three ways to say one thing is the
-        drift this docstring was already arguing against while being one of them.
         """
         materials = self._base_materials(cwd) if provisioned is None else provisioned
         return await jj(self.ctx, cwd, *auto_track(materials), *args)
@@ -658,6 +721,7 @@ class JjWorkspaceProvider:
         cwd: Path,
         revset: str,
         *,
+        snapshot: bool,
         full: bool = False,
         provisioned: Sequence[str] | None = None,
     ) -> str | None:
@@ -667,16 +731,24 @@ class JjWorkspaceProvider:
         three module constants and three inline — varying only in the revset and in
         short-versus-full. `full` is for a value that goes into a **log** and is read
         back by a later process; the short form is for a presence test.
+
+        The one shape that legitimately lives on both sides, which is why it keeps a
+        boolean where every other call picks a method: a revset can ask about the tree
+        or about the repository. `@ & ~empty()` means nothing until the working copy is
+        committed; `@-` and a bookmark's ancestry are answers the tree cannot change.
         """
-        code, out, _ = await self._in(
-            cwd,
+        args = (
             "log",
             "--no-graph",
             "-r",
             revset,
             "-T",
             "commit_id" if full else "commit_id.short()",
-            provisioned=provisioned,
+        )
+        code, out, _ = await (
+            self._commit(cwd, *args, provisioned=provisioned)
+            if snapshot
+            else self._read(cwd, *args)
         )
         return None if code != 0 else out.strip()
 
@@ -718,13 +790,13 @@ class JjWorkspaceProvider:
         commit. Without the guard, eight children would leave eight empty commits
         stacked in the parent's history and each fork from a different one.
         """
-        if await self._log(base, "@ & ~empty()"):
-            await self._in(base, "new")
+        if await self._log(base, "@ & ~empty()", snapshot=True):
+            await self._commit(base, "new")
         # **Resolved, not left as `@-`.** The workspace needs a revision and `@-` would
         # do; what needs the concrete commit is *release*, which has to ask "what has
         # this workspace done since it forked" and cannot ask it of a revset that means
         # something different in every workspace and moves under both of them.
-        return await self._log(base, "@-", full=True) or "@-"
+        return await self._log(base, "@-", full=True, snapshot=False) or "@-"
 
     async def _registered(self, managed: Path, name: str) -> bool:
         """Whether jj still knows a workspace by this name.
@@ -734,7 +806,7 @@ class JjWorkspaceProvider:
         promised to keep, and it ran bare `jj` in a directory that may be somebody
         else's workspace.
         """
-        code, out, _ = await self._in(managed, "workspace", "list", "-T", _LISTING)
+        code, out, _ = await self._read(managed, "workspace", "list", "-T", _LISTING)
         return code == 0 and any(line.partition("\t")[0] == name for line in out.splitlines())
 
     async def _release(
@@ -794,8 +866,8 @@ class JjWorkspaceProvider:
             )
             return True
         if not kept:
-            await self._in(path, "bookmark", "delete", ref, provisioned=provisioned)
-        code, _, err = await self._in(path, "git", "export", provisioned=provisioned)
+            await self._read(path, "bookmark", "delete", ref)
+        code, _, err = await self._read(path, "git", "export")
         if code != 0:
             log.warning(
                 "ph.seams.workspace_jj: %s did not reach git (%s)",
@@ -819,8 +891,12 @@ class JjWorkspaceProvider:
         path this is confirming what is already true — and `kept` is a claim that a
         person can find this work, which is not a claim to make on the strength of a
         call made at a different time that may have failed.
+
+        `snapshot=True` for that same reason: `-r @` is only the work if the working
+        copy has been committed, and this must not depend on `_has_work` having
+        happened to run first.
         """
-        code, _, err = await self._in(
+        code, _, err = await self._commit(
             path, "bookmark", "set", ref, "-r", "@", provisioned=provisioned
         )
         if code != 0:
@@ -849,13 +925,16 @@ class JjWorkspaceProvider:
         toward keeping.
         """
         found = await self._log(
-            path, f"{fork}..@ & ~empty()" if fork else "@ & ~empty()", provisioned=provisioned
+            path,
+            f"{fork}..@ & ~empty()" if fork else "@ & ~empty()",
+            snapshot=True,
+            provisioned=provisioned,
         )
         return None if found is None else bool(found)
 
     async def _named(self, repo: Path, ref: str) -> bool:
         """Whether a bookmark by this name still points at something."""
-        code, out, _ = await self._in(repo, "bookmark", "list", ref)
+        code, out, _ = await self._read(repo, "bookmark", "list", ref)
         return code == 0 and bool(out.strip())
 
     async def _managed(self, base: Path) -> Path | None:
@@ -870,7 +949,7 @@ class JjWorkspaceProvider:
         the git tier asks git: a subdirectory is a perfectly good `base`, and a
         probe that stats one path answers wrongly for it.
         """
-        code, out, _ = await self._in(base, "workspace", "root")
+        code, out, _ = await self._read(base, "workspace", "root")
         if code != 0 or not out.strip():
             log.info(
                 "ph.seams.workspace_jj: %s is not inside a jj workspace; declining so the "

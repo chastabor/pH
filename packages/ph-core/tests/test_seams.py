@@ -49,6 +49,7 @@ from ph.seams.settings import SettingsService
 from ph.seams.skills import NAME_MAX, NAME_PATTERN, Skill, SkillService
 from ph.seams.spill import SpillStore
 from ph.seams.subprocess import (
+    EnvScrub,
     SubprocessService,
     SubprocessSpawnSpec,
     scrub_env,
@@ -243,6 +244,73 @@ def test_the_environment_is_scrubbed_of_anything_credential_shaped() -> None:
     }
     scrubbed = scrub_env(base)
     assert scrubbed == {"PATH": "/usr/bin", "HOME": "/home/x"}
+
+
+def test_a_broken_config_family_is_dropped_whole_rather_than_half() -> None:
+    """**A broad scrub is fine; an incoherent one is not.**
+
+    git configures itself from `GIT_CONFIG_COUNT=n` plus `GIT_CONFIG_KEY_i` and
+    `GIT_CONFIG_VALUE_i`. `KEY` is one of the marks, so the scrub took the keys,
+    left the count, and handed git a configuration declaring two entries and
+    supplying none — `fatal: unable to parse command-line config`, on **every**
+    git and jj call pH makes, on any host that uses that standard mechanism.
+
+    Dropping the family whole is also the safer reading of I-4, not a relaxation:
+    `GIT_CONFIG_VALUE_i` is where an injected auth header's value sits, and
+    `VALUE` matches none of the marks — so the old behaviour leaked the half that
+    holds the secret and broke the half that does not.
+    """
+    kept = EnvScrub().apply(
+        {
+            "PATH": "/usr/bin",
+            "GIT_CONFIG_COUNT": "2",
+            "GIT_CONFIG_KEY_0": "http.extraheader",
+            "GIT_CONFIG_VALUE_0": "Authorization: Bearer sk-secret",
+            "GIT_CONFIG_KEY_1": "safe.directory",
+            "GIT_CONFIG_VALUE_1": "/repo",
+            "GIT_CONFIG_PARAMETERS": "'safe.directory=/repo'",
+        }
+    )
+
+    assert kept == {"PATH": "/usr/bin"}, "a family survived in part"
+
+
+def test_a_deployment_can_keep_a_configuration_name_that_looks_like_a_secret() -> None:
+    """`keep` is the override the breadth needs, and it is exact-match on purpose.
+
+    The marks are deliberately broad, which means they are sometimes wrong:
+    `GIT_CONFIG_KEY_0` is a *configuration* name that matches `KEY`. A deployment
+    that wants it through says so in a profile, where it is reviewable, rather
+    than by editing pH — and says it by name, because a second pattern language
+    is a second thing to get wrong.
+    """
+    base = {"GIT_CONFIG_KEY_0": "safe.directory", "FOO_API_KEY": "sk-secret"}
+
+    assert EnvScrub().apply(base) == {}
+    assert EnvScrub(keep=frozenset({"GIT_CONFIG_KEY_0"})).apply(base) == {
+        "GIT_CONFIG_KEY_0": "safe.directory"
+    }, "the exception did not apply"
+    # And narrowing the marks never widens by accident: the credential still goes.
+    assert "FOO_API_KEY" not in EnvScrub(keep=frozenset({"GIT_CONFIG_KEY_0"})).apply(base)
+
+
+async def test_the_deployments_scrub_reaches_the_children_it_spawns(tmp_path: Path) -> None:
+    """The row is only worth having if the *actual* children are built from it.
+
+    Every seam that spawns a tool — git, jj, agentfs, the sandbox backend — called
+    the module-level `scrub_env` itself, so a configured row reached none of them:
+    the profile could say anything and each child was still built from the
+    default. `ctx.subprocess.env()` is the one door, and this is what makes the
+    config mean something rather than describe an intention.
+    """
+    seam = SubprocessService(ctx=Context(), scrub=EnvScrub(marks=("SHIBBOLETH",)))
+
+    env = seam.env(extra={"LC_ALL": "C"})
+
+    assert env["LC_ALL"] == "C"
+    assert "PATH" in env
+    # Narrowed to one mark, so a name the *default* would have taken survives.
+    assert not any("SHIBBOLETH" in name.upper() for name in env)
 
 
 async def test_a_flood_is_capped_before_the_buffer_grows(tmp_path: Path) -> None:

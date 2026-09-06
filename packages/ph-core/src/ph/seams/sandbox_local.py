@@ -47,7 +47,7 @@ from ..paths import default_home_path
 from ..wire import WireModel
 from .diagnostics import Diagnostic, contribute
 from .sandbox import ConfinedArgv, Enforcement, SandboxPolicy, writable_paths
-from .subprocess import SubprocessSpawnSpec, first_line, scrub_env
+from .subprocess import SubprocessSpawnSpec, first_line
 
 __all__ = [
     "Bubblewrap",
@@ -250,7 +250,7 @@ async def probe_sandbox(ctx: Context, backend: LocalBackend, scratch: Path) -> S
             ("/bin/sh", "-c", f"echo landed > {inside}; echo escaped > {outside}"), policy
         )
         probe = await ctx.subprocess.run(
-            SubprocessSpawnSpec(argv=confined.argv, cwd=work, env=scrub_env())
+            SubprocessSpawnSpec(argv=confined.argv, cwd=work, env=ctx.subprocess.env())
         )
         err = probe.stderr
         landed, host = await anyio.to_thread.run_sync(verdict)

@@ -31,6 +31,7 @@ from typing import Any
 import pytest
 
 from ph.seams.workspace import CHECKPOINT, WorkspaceRecord
+from ph.seams.workspace_jj import _needs_the_tree
 from ph.testing import FAKE_OPTIONS, git, jj, jj_agent, jj_repo, needs_jj
 
 pytestmark = [pytest.mark.anyio, needs_jj]
@@ -917,6 +918,109 @@ async def test_removing_a_bookmark_refuses_work_nothing_else_has(
 
     assert forced.endswith("and branch ph/s1/a1"), forced
     assert "ph/s1/a1" not in await ctx.workspace.refs(base)
+
+
+async def _at(ctx: Any, cwd: Path, template: str = "commit_id") -> str:
+    """`@` rendered by `template`, asked *without* committing the working copy.
+
+    A plain `jj log` would commit the tree on the way to answering, which is the very
+    thing the tests below check nobody does — so the flag is what makes the
+    observation possible, and it is spelled here once rather than at each assertion.
+    """
+    _, out, _ = await jj(
+        ctx, cwd, "--ignore-working-copy", "log", "--no-graph", "-r", "@", "-T", template
+    )
+    return out.strip()
+
+
+async def test_reading_does_not_snapshot_the_persons_own_checkout(
+    mount: Any, tmp_path: Path
+) -> None:
+    """**The hole `auto_track` could not close, and the reason `snapshot` has no default.**
+
+    `_managed` runs `jj workspace root` in the person's own checkout — a *probe*, by
+    name — and `_base_materials` correctly answers `()` there, because nothing was
+    provisioned into their repo. So the exclusion had nothing to exclude, and the
+    probe committed whatever they had left untracked. No fileset could have fixed
+    that: the file was theirs.
+
+    `--ignore-working-copy` is what fixes it, and it is stronger than the exclusion
+    it replaces — `auto_track` stops a file *becoming tracked*, this stops the
+    command touching the tree at all.
+
+    Driven through `/workspaces list`, which is reads end to end: `bookmark list`
+    for the refs and `workspace list` for the checkouts.
+    """
+    ctx, base, session, agent = await jj_agent(mount)
+    (base / "my-own-note.txt").write_text("mid-thought\n", encoding="utf-8")
+    before = await _at(ctx, base)
+
+    await ctx.commands.dispatch("/workspaces list", session=session, agent=agent)
+
+    assert await _at(ctx, base) == before, "a read committed the person's working copy"
+    # And their file never entered a commit. Asked of `@`'s own diff rather than of
+    # `jj status`, which reports *nothing* under `--ignore-working-copy` precisely
+    # because it does not scan the tree — the state this test is about is only
+    # observable without disturbing it.
+    adopted = await _at(ctx, base, 'diff.files().map(|f| f.path()).join(",")')
+    assert adopted == "", adopted
+    assert (base / "my-own-note.txt").exists(), "the file itself must be untouched"
+
+
+def test_a_read_of_a_verb_that_needs_the_tree_is_refused() -> None:
+    """The veto, and it exists because the loudness it replaces was not real.
+
+    `_read` was justified on the grounds that jj refuses `--ignore-working-copy` on
+    anything that must write, *by name*, so a wrong choice would fail loudly.
+    Measured against the installed binary, that is true of `workspace add` alone —
+    and even there only *after* it registers the workspace, leaving an empty
+    directory. `jj --ignore-working-copy new` exits 0 in silence and produces a fork
+    point with **none of the parent's work in it**, which is the one property this
+    provider exists to offer.
+
+    So the loudness is pH's now. argv cannot *derive* the choice — `log` and
+    `bookmark set` are each right on both sides — but it can veto the combination
+    that never is.
+    """
+    assert _needs_the_tree(("new",))
+    assert _needs_the_tree(("restore", "--from", "abc"))
+    assert _needs_the_tree(("diff", "--summary"))
+    assert _needs_the_tree(("workspace", "add", "--name", "x"))
+    # The two that are correct on both sides must not be vetoed.
+    assert not _needs_the_tree(("log", "--no-graph", "-r", "@"))
+    assert not _needs_the_tree(("bookmark", "set", "ph/x", "-r", "@"))
+    assert not _needs_the_tree(("workspace", "root"))
+    assert not _needs_the_tree(("workspace", "forget", "x"))
+
+
+async def test_the_calls_that_must_see_the_tree_still_do(mount: Any, tmp_path: Path) -> None:
+    """The other side of the same parameter, so the fix cannot be "read everything".
+
+    Three verbs' answers *are* the tree, and each would be silently wrong if it
+    stopped committing first: a fork point that misses the parent's newest work, a
+    restore point that names a state the agent has moved past, and a release that
+    decides the child did nothing.
+    """
+    ctx, base, session, _agent = await jj_agent(mount)
+    (base / "wip.txt").write_text("the parent's work\n", encoding="utf-8")
+
+    # A fork point must see it — this is the whole tier.
+    child = await ctx.workspace.acquire(
+        session_id="s1", agent_id="a1", base=base, access="write", session=session
+    )
+    assert (child.root / "wip.txt").read_text(encoding="utf-8") == "the parent's work\n"
+
+    # A capture must see the child's newest edit.
+    (child.root / "cell.txt").write_text("first\n", encoding="utf-8")
+    first = await ctx.workspace.capture(child)
+    (child.root / "cell.txt").write_text("second\n", encoding="utf-8")
+    second = await ctx.workspace.capture(child)
+    assert first is not None and second is not None and first != second
+
+    # And a release must not conclude the child did nothing.
+    await ctx.workspace.dispose("a1")
+    (disposed,) = [one for one in session.events if one.type == "workspace/disposed"]
+    assert disposed.data["kept"] is True
 
 
 # --------------------------------------------------- the seam's own materials --

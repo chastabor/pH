@@ -57,7 +57,7 @@ from ..paths import default_home_path
 from ..wire import WireModel
 from .containment import TIERS, TierDescription
 from .diagnostics import Diagnostic, contribute
-from .subprocess import SubprocessSpawnSpec, first_line, scrub_env
+from .subprocess import SubprocessSpawnSpec, first_line
 from .workspace import (
     ContainmentTier,
     Workspace,
@@ -154,7 +154,9 @@ async def run(ctx: Context, program: str, cwd: Path, *args: str) -> tuple[int, s
     the agent's own directory is what keeps two agents' deltas apart on disk as well
     as in the filesystem they see.
     """
-    spec = SubprocessSpawnSpec(argv=(program, *args), cwd=cwd, env=scrub_env(extra={"LC_ALL": "C"}))
+    spec = SubprocessSpawnSpec(
+        argv=(program, *args), cwd=cwd, env=ctx.subprocess.env(extra={"LC_ALL": "C"})
+    )
     outcome = await ctx.subprocess.run(spec)
     return outcome.exit_code, outcome.stdout, outcome.stderr
 

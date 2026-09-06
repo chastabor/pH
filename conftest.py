@@ -59,6 +59,26 @@ def _isolated_home(tmp_path: Path) -> Iterator[None]:
         # That is the sixth appearance of this class in this suite, and the first
         # one caught before it happened rather than after.
         patch.setenv("PH_CACHE", str(tmp_path / "cache"))
+        # `$XDG_CONFIG_HOME` because **`jj` keeps per-repo state outside the
+        # repo**, and that is the seventh appearance of this class — caught by a
+        # sandbox denying the write, after the suite had already left **2,213**
+        # directories under the developer's real `~/.config/jj/repos/`, one per
+        # jj test repo, each holding a `config.toml` and a pointer to a pytest
+        # path deleted minutes later.
+        #
+        # It is outside the repo on purpose: jj calls it the *secure* config, so
+        # that cloning a repository cannot inject settings into the client. That
+        # is a good reason, and it means `jj config set --repo` in a test fixture
+        # can only be made hermetic from out here — no argument to that command
+        # keeps it inside `tmp_path`.
+        #
+        # **Beside `tmp_path`, never inside it.** A test's repo is built *at*
+        # `tmp_path`, and jj commits everything the project does not ignore — so a
+        # config home under it becomes part of the working copy, and the test that
+        # asserts a read adopts nothing found `config/jj/repos/…` in the commit.
+        # The parent is pytest's own numbered directory: never a repo, and swept
+        # with the run.
+        patch.setenv("XDG_CONFIG_HOME", str(tmp_path.parent / "xdg-config"))
         yield
 
 

@@ -5,6 +5,8 @@ build/
 *.egg-info/
 __pycache__/
 *.py[cod]
+jjt/
+w2/
 
 # Tooling caches
 .pytest_cache/

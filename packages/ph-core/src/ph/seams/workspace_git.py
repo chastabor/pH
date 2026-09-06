@@ -49,7 +49,7 @@ import anyio
 from ..cordis import Context, plugin
 from ..paths import default_home_path, is_under
 from ..wire import WireModel
-from .subprocess import SubprocessSpawnSpec, scrub_env
+from .subprocess import SubprocessSpawnSpec
 from .workspace import (
     BRANCH_PREFIX,
     EXCLUDE,
@@ -99,7 +99,7 @@ async def git(
     off git's words, would depend on the operator's locale.
     """
     spec = SubprocessSpawnSpec(
-        argv=("git", *args), cwd=cwd, env=scrub_env(extra={"LC_ALL": "C", **(env or {})})
+        argv=("git", *args), cwd=cwd, env=ctx.subprocess.env(extra={"LC_ALL": "C", **(env or {})})
     )
     outcome = await ctx.subprocess.run(spec)
     return outcome.exit_code, outcome.stdout, outcome.stderr
