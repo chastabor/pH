@@ -62,6 +62,60 @@ async def test_an_agent_holds_a_workspace_by_the_time_it_steps(mount: Any) -> No
     assert workspace.root == ctx.fs.root
 
 
+async def test_a_child_with_no_workspace_refuses_instead_of_inventing_one(mount: Any) -> None:
+    """§6.5, at the one place it was reachable by omission.
+
+    A child's base and `access` are its parent's decision and arrive with the spawn.
+    The lazy acquire below has neither, so the only thing it could do for a child is
+    substitute the *root's*: the process's own directory as `base`, and whatever the
+    profile configured for the person's own agent as `access` — `write` by default.
+    A child admitted as `read` would come back holding a writable checkout, and
+    every event about it would report that honestly while being wrong about what was
+    asked for.
+
+    So the omission fails loudly. It is a **missing call in a spawn path**, and the
+    loud version costs a failed turn naming the child; the quiet version costs a
+    child holding more than its admission recorded, which nothing downstream can
+    detect — `workspace/acquired` says what it got, not what it should have got.
+    """
+    ctx = await mount()
+    orphan = ctx.sessions.create("child", meta={"origin": "subagent", "parentSession": "root"})
+    agent = ctx.agents.create(orphan, FAKE_OPTIONS)
+
+    await agent.prompt("hello")
+
+    # Loud *and* durable: the turn ends in error and the log says which, which is
+    # what a raise from `agent/pre-step` becomes. A bare exception would reach this
+    # record as `UNKNOWN`, so the code is the half worth pinning.
+    (ended,) = [one for one in orphan.events if one.type == "turn/end"]
+    error = ended.data["reason"]["error"]
+    assert ended.data["reason"]["kind"] == "error"
+    assert error["code"] == "CHILD_WORKSPACE_MISSING"
+    assert agent.id in str(error["message"])
+    assert ctx.workspace.of(agent.id) is None, "the refusal must not leave a workspace behind"
+
+
+async def test_a_child_whose_parent_did_acquire_steps_normally(mount: Any, tmp_path: Path) -> None:
+    """The other half, and the one that must not regress: the refusal is about an
+    *absent* workspace, never about being a child.
+
+    A spawn acquires on the child's behalf before it runs — with the base and access
+    the parent chose — and this row must then find that one rather than refuse it or
+    overwrite it.
+    """
+    ctx = await mount()
+    child = ctx.sessions.create("child", meta={"origin": "subagent", "parentSession": "root"})
+    agent = ctx.agents.create(child, FAKE_OPTIONS)
+    # What a spawn does: the parent decides, and it decided `read`.
+    granted = await ctx.workspace.acquire(
+        session_id=child.id, agent_id=agent.id, base=tmp_path, access="read", session=child
+    )
+
+    await agent.prompt("hello")
+
+    assert ctx.workspace.of(agent.id) is granted
+
+
 async def test_the_workspace_is_taken_once_not_once_per_turn(mount: Any) -> None:
     """`git worktree add` per turn would be both slow and wrong — the second
     call would find the first's tree and the branch already taken."""

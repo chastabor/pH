@@ -1019,22 +1019,25 @@ async def test_the_tree_is_restored_from_the_latest_checkpoint_before_a_retry(
 
         asked: list[str] = []
 
-        async def fake_restore(ctx: Any, workspace: Any, tree: str) -> tuple[str, ...]:
-            asked.append(tree)
+        async def fake_restore(_seam: Any, workspace: Any, token: str) -> tuple[str, ...]:
+            asked.append(token)
             return ()
 
-        monkeypatch.setattr(supervisor_module, "restore", fake_restore)
+        # The **seam's** method, not a module import: the ladder asks the mounted
+        # tier now, so patching a name in this module would have kept passing while
+        # the call it stands for went somewhere else.
         monkeypatch.setattr(type(root.ctx.workspace), "of", lambda self, agent_id: object())
+        monkeypatch.setattr(type(root.ctx.workspace), "restore", fake_restore)
 
         assert await supervisor._restore(root) is True
         assert asked == ["newest"], "the retry went back to a stale restore point"
 
         # Best-effort: a restore that fails must not cost the retry, and must
         # not claim a rollback that did not happen.
-        async def angry_restore(ctx: Any, workspace: Any, tree: str) -> tuple[str, ...]:
-            raise RuntimeError("git said no")
+        async def angry_restore(_seam: Any, workspace: Any, token: str) -> tuple[str, ...]:
+            raise RuntimeError("the tier said no")
 
-        monkeypatch.setattr(supervisor_module, "restore", angry_restore)
+        monkeypatch.setattr(type(root.ctx.workspace), "restore", angry_restore)
         assert await supervisor._restore(root) is False
 
 

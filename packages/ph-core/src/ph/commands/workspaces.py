@@ -19,10 +19,19 @@ information attached to a row rather than the thing being listed.
 
 A workspace a *live agent holds* is refused. The seam is asked, not the
 filesystem, because a checkout that is clean this instant belongs to an agent
-that may write to it in the next — and it is matched by **root path**, not by
-inverting a directory name back into an agent id, because `sanitize_ref` is
-lossy and an id that does not sanitize to itself would read as unheld and lose
-its protection.
+that may write to it in the next — and it is matched by **ref**, the one name
+every tier puts on a `Workspace` and carries, rather than by inverting a
+directory name back into an agent id, because `sanitize_ref` is lossy and an id
+that does not sanitize to itself would read as unheld and lose its protection.
+
+**Nothing here spells `git` any more.** This command listed branches, joined them
+against `git worktree list`, merged and deleted with `git`, which made every verb
+git-shaped twice over. A `workspace-jj` stray had no path, no `dirty` and no way to
+be removed, and a live one was not even protected — and worse, **jj embeds its own
+git**, so a deployment running that tier need not have the binary at all, and there
+the branch listing returned nothing while this command reported that there was
+nothing left behind. `ArtifactProvider` is every one of those verbs, asked of
+whichever tier is mounted.
 
 A branch is deleted with `-d`, never `-D`, unless `--force-branch` says so, and
 a row with no checkout refuses a bare `remove` outright. Every disposed agent is
@@ -43,15 +52,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import anyio
-
 from ..cordis import Context, plugin
-from ..paths import default_home_path, is_under
 from ..seams.commands import CommandDefinition
 from ..seams.workspace import stored_survivors
 from ..seams.workspace_git import BRANCH_PREFIX as PREFIX
-from ..seams.workspace_git import git
-from ..wire import WireModel
 
 __all__ = ["KeptWorktree", "apply"]
 
@@ -97,23 +101,19 @@ class KeptWorktree:
         return f"{self.agent_id:<16} {state:<11} {self.session_id:<14} {self.branch:<24} {where}"
 
 
-class Config(WireModel):
-    """Row config for the command."""
+@plugin("workspace-commands", inject=["commands", "workspace", "fs"])
+async def apply(ctx: Context, _config: Any) -> None:
+    """Register `/workspaces`.
 
-    root: str | None = None
-    """Where checkouts live; must match `workspace-git-worktree`'s own setting.
-    Both default to `$PH_HOME/worktrees`, so a deployment that moved one has to
-    move the other."""
-
-
-@plugin("workspace-commands", inject=["commands", "workspace", "subprocess", "fs"], config=Config)
-async def apply(ctx: Context, config: Config) -> None:
-    """Register `/workspaces`."""
-    root = default_home_path(config.root, "worktrees")
+    No `root` setting any more. It existed to filter the worktree join and had to be
+    kept equal to `workspace-git-worktree`'s own — one fact in two places, where a
+    deployment that moved one and not the other got a command that could see none of
+    its checkouts. The tier answers now, and it knows where it puts them.
+    """
 
     async def workspaces(argument: str, invocation: Any) -> str:
         verb, _, rest = argument.strip().partition(" ")
-        view = _Workspaces(ctx=ctx, root=root, base=ctx.fs.root)
+        view = _Workspaces(ctx=ctx, base=ctx.fs.root)
         try:
             if verb in ("", "list"):
                 return await view.list()
@@ -151,12 +151,11 @@ class _Refused(Exception):
 class _Workspaces:
     """One dispatch's view of the branches pH left behind.
 
-    A value rather than five functions threading `(ctx, root, base)`: all three
-    are fixed for the whole of one `/workspaces` invocation.
+    A value rather than five functions threading `(ctx, base)`: both are fixed for
+    the whole of one `/workspaces` invocation.
     """
 
     ctx: Context
-    root: Path
     base: Path
 
     async def kept(self, *, with_status: bool = True) -> list[KeptWorktree]:
@@ -174,71 +173,55 @@ class _Workspaces:
         whole of what keeps this from being a command that offers to delete a
         person's `feature/x`.
 
-        The worktree join is what remains of the old enumeration, and it still earns
-        its subprocess — it is how `held` and a stray checkout's `path` are known.
-        Filtered by `root` for the same reason as before: a `ph/*` branch checked
-        out somewhere else is not a tree this command made.
+        **The checkout join is the tier's**, not this command's. It used to be `git
+        worktree list --porcelain` here, and **a jj workspace is not a git
+        worktree** — so a stray one had no path in the listing, no `dirty`, and no
+        verb that could remove it, while a live one read as unheld and
+        `remove --with-branch --force-branch` deleted the branch of an agent still
+        working in it. Asking the seam is also what let this command stop carrying a
+        `root` setting that had to be kept equal to the tier's own.
 
-        `with_status=False` for the verbs that only need a name: `git status` is one
-        subprocess per checkout and `merge`/`remove` never read `dirty`.
+        `held` is the seam's too, matched on `ref`: it is the one name every tier
+        puts on a `Workspace` and *carries*, where a directory name has been through
+        a lossy `sanitize_ref` and an id that does not sanitize to itself would read
+        as unheld and lose its protection.
+
+        **The ref listing is the tier's too**, and it was the half that failed
+        *silently*. It was `git branch --list ph/*`, and jj embeds its own git — so a
+        jj deployment need not have the binary, and there this returned nothing and
+        the command answered "no agent workspaces are left behind" with the bookmarks
+        sitting right there. The tier is asked, and it filters nothing.
+
+        `BRANCH_PREFIX` is applied **here**, because pH's own prefix is the whole of
+        what keeps this from being a command that offers to delete a person's
+        `feature/x` — a guard belongs with the verb it guards, not with the tier that
+        would have to be trusted to apply it.
+
+        `with_status=False` for the verbs that only need a name: measuring a stray
+        costs a subprocess per checkout and `merge`/`remove` never read `dirty`.
         """
-        code, out, _ = await git(
-            self.ctx, self.base, "branch", "--list", "--format=%(refname:short)", f"{PREFIX}*"
-        )
-        if code != 0:
-            return []
-        branches = [line.strip() for line in out.splitlines() if line.strip()]
+        branches = [
+            ref for ref in await self.ctx.workspace.refs(self.base) if ref.startswith(PREFIX)
+        ]
         if not branches:
             return []
-        code, out, _ = await git(self.ctx, self.base, "worktree", "list", "--porcelain")
-        checkouts = {
-            branch: path
-            for path, branch in (_parse(out) if code == 0 else [])
-            if branch and is_under(path, self.root)
-        }
-        live = {workspace.root for workspace in self.ctx.workspace.live()}
-        dirty = dict.fromkeys(branches, False)
-        pending = [
-            branch
-            for branch in branches
-            if with_status and branch in checkouts and checkouts[branch] not in live
-        ]
-        if pending:
-            # Concurrent, because this is one subprocess per stray checkout, and a
-            # run that has stranded one has usually stranded several.
-            async def measure(branch: str) -> None:
-                dirty[branch] = await self._dirty(checkouts[branch])
-
-            async with anyio.create_task_group() as group:
-                for branch in pending:
-                    group.start_soon(measure, branch)
+        checkouts = await self.ctx.workspace.strays(self.base, with_status=with_status)
+        live = {workspace.ref for workspace in self.ctx.workspace.live() if workspace.ref}
         rows = []
         for branch in branches:
             agent_id, session_id = _identify(branch)
-            path = checkouts.get(branch)
+            stray = checkouts.get(branch)
             rows.append(
                 KeptWorktree(
                     branch=branch,
                     agent_id=agent_id,
                     session_id=session_id,
-                    path=path,
-                    dirty=dirty[branch],
-                    held=path is not None and path in live,
+                    path=None if stray is None else stray.path,
+                    dirty=stray is not None and stray.dirty,
+                    held=branch in live,
                 )
             )
         return rows
-
-    async def _dirty(self, path: Path) -> bool:
-        """`--untracked-files=normal`, because the answer is a boolean.
-
-        `all` enumerates every file under a provisioned `node_modules` to say what
-        one `?? node_modules/` line says. Measured only for a *stray* checkout —
-        one disposal could not remove — where the question is whether removing the
-        directory by hand loses anything the branch does not already have. A held
-        tree is never measured at all, since `describe` reports it as held.
-        """
-        code, out, _ = await git(self.ctx, path, "status", "--porcelain")
-        return code != 0 or bool(out.strip())
 
     async def find(self, name: str, *, with_status: bool = False) -> KeptWorktree:
         if not name:
@@ -294,11 +277,11 @@ class _Workspaces:
         type, offered where they already are.
         """
         branch = await self._branch_for(name)
-        code, out, err = await git(self.ctx, self.base, "merge", "--no-edit", branch)
-        if code != 0:
-            detail = (err.strip() or out.strip()).splitlines()
-            return f"could not merge {branch}: {detail[0] if detail else f'git exited {code}'}"
-        return f"merged {branch}"
+        # The tier's own sentence when it is not a clean merge, and that is not always
+        # a failure: jj records conflicts in the commit and exits zero, so "merged,
+        # with conflicts at these paths" is a true answer only it can give.
+        trouble = await self.ctx.workspace.merge(self.base, branch)
+        return trouble or f"merged {branch}"
 
     async def _branch_for(self, name: str) -> str:
         """The branch to merge: an agent's, or a ref `export` just made.
@@ -312,10 +295,7 @@ class _Workspaces:
         try:
             return (await self.find(name)).branch
         except _Refused:
-            code, _, _ = await git(
-                self.ctx, self.base, "rev-parse", "--verify", f"refs/heads/{name}"
-            )
-            if code == 0:
+            if name in await self.ctx.workspace.refs(self.base):
                 return name
             raise
 
@@ -348,22 +328,21 @@ class _Workspaces:
                 )
             removed = f"{row.agent_id} had no checkout"
         else:
-            code, _, err = await git(
-                self.ctx, self.base, "worktree", "remove", "--force", str(row.path)
-            )
-            if code != 0:
-                return f"could not remove {row.path}: {err.strip() or f'git exited {code}'}"
+            refused = await self.ctx.workspace.discard(row.path)
+            if refused:
+                return f"could not remove {row.path}: {refused}"
             removed = f"removed {row.path}"
             if "--with-branch" not in flags:
                 return removed
 
         force = "--force-branch" in flags
-        code, _, err = await git(self.ctx, self.base, "branch", "-D" if force else "-d", row.branch)
-        if code != 0:
-            # `-d` refusing is the mechanism working, so it reads as a fact plus
-            # the flag that overrides it — not as an error to decode.
+        refused = await self.ctx.workspace.delete_ref(self.base, row.branch, force=force)
+        if refused:
+            # The refusal is the mechanism working, so it reads as a fact plus the
+            # flag that overrides it — not as an error to decode. Both tiers refuse a
+            # ref holding work nothing else has; only the wording is theirs.
             return (
-                f"{removed}, but kept branch {row.branch}: {err.strip() or 'git refused'}\n"
+                f"{removed}, but kept branch {row.branch}: {refused}\n"
                 "pass --force-branch to delete it anyway"
             )
         return f"{removed} and branch {row.branch}"
@@ -381,24 +360,3 @@ def _identify(branch: str) -> tuple[str, str]:
     if len(parts) != 3:
         return branch, ""
     return parts[2], parts[1]
-
-
-def _parse(porcelain: str) -> list[tuple[Path, str]]:
-    """`git worktree list --porcelain` into `(path, branch)` pairs.
-
-    The main checkout has no `branch` line when detached, and a linked worktree
-    always names one; a record with no path is not a record.
-    """
-    rows: list[tuple[Path, str]] = []
-    path: Path | None = None
-    branch = ""
-    for line in porcelain.splitlines():
-        if line.startswith("worktree "):
-            if path is not None:
-                rows.append((path, branch))
-            path, branch = Path(line[len("worktree ") :].strip()), ""
-        elif line.startswith("branch refs/heads/"):
-            branch = line[len("branch refs/heads/") :].strip()
-    if path is not None:
-        rows.append((path, branch))
-    return rows

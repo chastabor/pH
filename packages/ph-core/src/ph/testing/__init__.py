@@ -43,7 +43,11 @@ from .skills import skill, write_skill
 from .stub_runtime import StubCodeRuntime
 from .stub_sandbox import StubSandboxProvider
 from .stub_subagent import StubSubagentProvider
-from .stub_workspace import StubWorkspaceProvider, acquire_for_role
+from .stub_workspace import (
+    StubCheckpointingProvider,
+    StubWorkspaceProvider,
+    acquire_for_role,
+)
 
 __all__ = [
     "FAKE_OPTIONS",
@@ -54,6 +58,7 @@ __all__ = [
     "RecordedStep",
     "ReplayAdapter",
     "StubAgent",
+    "StubCheckpointingProvider",
     "StubCodeRuntime",
     "StubSandboxProvider",
     "StubSubagentProvider",

@@ -83,6 +83,7 @@ from ..system_prompt.assembly import (
     render_prompt,
 )
 from ..tools.batch import execute_tool_calls
+from ..tools.errors import error_info
 
 __all__ = ["AgentCancelled", "ReactLoopAgent"]
 
@@ -361,10 +362,20 @@ class ReactLoopAgent:
             turn_ends = TurnEndReason(kind="aborted", reason=cause)
             raise
         except Exception as error:
+            # A harness error's own code rather than `UNKNOWN`, because that is
+            # what `HarnessError` is for: *"a failure's routing matters as much as
+            # its message — retry policy, the sandbox layer and replay all branch
+            # on the code"*. Flattening every one of them here made `turn/end`
+            # unable to say which failure it was, in the record a client reads to
+            # decide whether retrying could possibly help.
+            coded = error_info(error)
             failure = (
                 error.failure
                 if isinstance(error, LlmError)
-                else LlmFailure(message=_error_chain(error), code="UNKNOWN")
+                else LlmFailure(
+                    message=_error_chain(error),
+                    code="UNKNOWN" if coded is None else coded["code"],
+                )
             )
             turn_ends = TurnEndReason(kind="error", error=failure)
             self._report(error)

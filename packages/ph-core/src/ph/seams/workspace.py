@@ -46,6 +46,8 @@ from pydantic import Field
 from ..cordis import Context, Disposer, Running, maybe_await, plugin, running, safe_yaml_load
 from ..paths import default_home_path
 from ..session import Session
+from ..tools.definition import ToolExecution
+from ..tools.errors import HarnessError
 from ..wire import WireModel
 from . import workspace_provision
 from ._registry import claim_entry, claim_slot
@@ -56,7 +58,11 @@ from .telemetry import ops_record
 from .workspace_provision import ProvisionEntry, ProvisionReport
 
 __all__ = [
+    "CHECKPOINT",
     "PROJECT_PROVISION_FILE",
+    "ArtifactProvider",
+    "CheckpointingProvider",
+    "ChildWorkspaceMissing",
     "CollectVerdict",
     "Collectable",
     "ContainmentTier",
@@ -65,6 +71,7 @@ __all__ = [
     "LifecycleConfig",
     "ReclaimingProvider",
     "SharedWorkspaceProvider",
+    "Stray",
     "Workspace",
     "WorkspaceAccess",
     "WorkspaceDeclined",
@@ -74,14 +81,16 @@ __all__ = [
     "WorkspaceRecord",
     "WorkspaceSeam",
     "apply",
+    "checkpoint_policy",
+    "checkpoints",
     "discards_writes",
     "discover_provisioning",
     "family_survivors",
     "fresh_root",
+    "latest_checkpoint",
     "lifecycle",
     "project_access",
     "redirection_env",
-    "restorable",
     "stored_survivors",
     "workspace_leaks",
     "workspace_of",
@@ -176,25 +185,6 @@ def discards_writes(kind: WorkspaceKind) -> bool:
             return False
         case "worktree-ephemeral" | "overlay-ephemeral":
             return True
-
-
-def restorable(kind: WorkspaceKind) -> bool:
-    """Whether this kind has a restore mechanism at all (P6-20).
-
-    The gate `/revert` asks before offering a restore point, so that a kind which
-    can never have one **refuses** rather than reporting "no restore points in this
-    session" — true, useless, and indistinguishable from a run that simply had not
-    checkpointed yet.
-
-    An overlay is `False` today rather than forever: its delta is a perfectly good
-    restore point, it is simply not a git tree. Giving it one is a
-    `CheckpointingProvider`, the shape `acquire` and `reclaim` already take.
-    """
-    match kind:
-        case "worktree" | "worktree-ephemeral":
-            return True
-        case "shared" | "readonly-scratch" | "overlay" | "overlay-ephemeral":
-            return False
 
 
 def redirection_env(scratch: Path) -> dict[str, str]:
@@ -393,6 +383,42 @@ class WorkspaceDeclined(Exception):
         self.reason: DeclineReason = reason
 
 
+class ChildWorkspaceMissing(HarnessError):
+    """A child reached its first step holding no workspace. Refused, loudly (§6.5).
+
+    **The lazy acquire below is for the person's own agent, and answering it for a
+    child would widen that child.** A child's workspace is its *parent's* decision
+    — the base to fork from and the `access` to grant both arrive with the spawn and
+    are recorded on its admission — so the only thing this row could do for a child
+    is invent them: the process's own directory as `base`, and whatever the profile
+    configured for the *root* as `access`, which defaults to `write`. A research
+    child admitted as `read` would come back holding a writable checkout of
+    somebody else's tree, and every event about it would say so honestly while being
+    wrong about what was asked for.
+
+    So the absence is treated as the bug it is. A spawn path that forgot to acquire
+    is a **missing call**, and the loud version costs a failed turn that names the
+    child; the quiet version costs a child that holds more than its admission
+    recorded, which nothing downstream can detect — `workspace/acquired` reports
+    what it got, not what it should have got, and §6.5 is checked at admission where
+    this never appeared.
+
+    Not `WorkspaceDeclined`: that is a *tier* saying it cannot serve a request, and
+    the seam is right to fall back for it. This is a caller asking a question that
+    was never this row's to answer.
+
+    A `HarnessError`, so the code survives the trip. Raised from `agent/pre-step`
+    this becomes a recorded `turn/end` with `reason.kind: "error"` — loud, and
+    durable — and `error_info` is what puts a name in it: a bare exception reaches
+    that record as `UNKNOWN`, which is the prose-only failure the code exists to
+    avoid. `HarnessError` sets `self.code`, which is also the attribute the daemon's
+    `respond` reads, so one spelling serves both readers.
+    """
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message, "CHILD_WORKSPACE_MISSING")
+
+
 @runtime_checkable
 class WorkspaceProvider(Protocol):
     """A tier's implementation. `None` declines, and declining is normal.
@@ -447,6 +473,108 @@ class ExportingProvider(Protocol):
     """
 
     async def export(self, record: WorkspaceRecord) -> str: ...
+
+
+@dataclass(frozen=True, slots=True)
+class Stray:
+    """One checkout a tier still has on disk, and what removing it would cost.
+
+    Named for the interesting case rather than the common one: since disposal
+    commits and takes the checkout back, a directory that is still there means a
+    live agent is working in it or disposal could not remove it.
+    """
+
+    ref: str
+    """The branch or bookmark this checkout is on — the key `/workspaces` joins on,
+    because it is the one name every tier puts on a `Workspace` and carries rather
+    than derives from a path."""
+    path: Path
+    dirty: bool
+    """Whether removing the directory would lose something the ref does not have.
+
+    **Each tier answers in its own terms and they are not the same question.** A git
+    worktree is dirty when it holds uncommitted changes. A jj workspace's working
+    copy *is* a commit and its bookmark follows it, so asking is also what makes the
+    answer safe — a `True` there means "there is work, and it is now on the ref",
+    which is a better answer than git can give.
+    """
+
+
+@runtime_checkable
+class ArtifactProvider(Protocol):
+    """A provider that can account for, merge and take back what it left (E15).
+
+    An optional capability as its own Protocol, `ReclaimingProvider`'s shape and for
+    its reason. It exists because `/workspaces` was doing all of this itself, **in
+    git**: `git branch --list ph/*`, `git worktree list --porcelain`, `git merge`,
+    `git branch -d`. Two things were wrong with that. A jj workspace is not a git
+    worktree, so a stray one had no path and no verb that could remove it. And
+    `jj` embeds its own git implementation — *measured*: the whole acquire, bookmark
+    and export flow runs with a `git` on `PATH` that exits 127 — so a jj deployment
+    need not have the binary at all, and there the branch listing failed and
+    `/workspaces` answered "no agent workspaces are left behind" while the bookmarks
+    were sitting there.
+
+    **Five verbs in one Protocol because they are that command's whole surface.** A
+    tier serves `/workspaces` or it does not; splitting them would let one implement
+    half and hand a person rows whose verbs then fail, which is the shape
+    `isinstance` is here to prevent.
+
+    `base` is the repository to ask. `refs` returns **everything**, not just what
+    pH made — the prefix guard belongs to the command that would otherwise offer to
+    delete somebody's `feature/x`, and the second caller is `merge`, which has to
+    accept a ref outside the prefix. `strays` filters by the provider's *own* root,
+    which is what let the command stop carrying a copy of that setting.
+
+    Every verb that acts returns `""` for "it happened" and otherwise **the sentence
+    a person reads**, rather than a bool: what went wrong is the tier's to say, and
+    the two tiers do not fail in the same way. A conflicted merge is the case that
+    proves it — git exits non-zero and refuses, jj exits **zero** and records the
+    conflict in the commit, so a caller testing an exit code would report a clean
+    merge that a person then discovers by opening the file.
+    """
+
+    async def refs(self, base: Path) -> list[str]: ...
+
+    async def strays(self, base: Path, *, with_status: bool = True) -> list[Stray]: ...
+
+    async def discard(self, path: Path) -> str: ...
+
+    async def delete_ref(self, base: Path, ref: str, *, force: bool) -> str: ...
+
+    async def merge(self, base: Path, ref: str) -> str: ...
+
+
+@runtime_checkable
+class CheckpointingProvider(Protocol):
+    """A provider that can name a workspace's state and put it back (P4-09).
+
+    An optional capability as its own Protocol — `ReclaimingProvider`'s shape, and
+    for its reason. Not every tier has a restore mechanism: `shared` is the
+    person's own checkout, and an overlay's delta is a perfectly good restore point
+    that simply is not a git tree. A `getattr` probe would report a provider whose
+    method drifted as one that cannot checkpoint, which loses `/revert` for a tier
+    that has it, silently.
+
+    **`capture` returns one token serving two readers**, which is the rule the git
+    tier already argued for its tree hash: P4-09 stores it as a restore point and
+    P5-07 uses it as a *fingerprint*, to decide that a quality gate which failed
+    against this exact state need not run again. One derivation, so a gate memo and
+    a restore point can never disagree about whether the work changed.
+
+    What a token must promise is therefore narrow and exact: **equal tokens mean
+    equal content**. The converse is *not* required — a tier whose token moves
+    while the content stands still only makes a gate re-run, which is the safe
+    direction — and `workspace-jj` is such a tier and says so in its own words.
+
+    `capture` also **pins** what it names, for as long as the workspace lives. An
+    unreferenced git tree is eligible for `gc`, and a restore point that evaporates
+    is worse than none, because `/revert` listed it.
+    """
+
+    async def capture(self, workspace: Workspace) -> str | None: ...
+
+    async def restore(self, workspace: Workspace, token: str) -> tuple[str, ...]: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -1048,6 +1176,146 @@ class WorkspaceSeam:
             return None
         return await provider.export(record)
 
+    async def refs(self, base: Path) -> list[str]:
+        """Every ref in this repository, as the mounted tier lists them.
+
+        Unfiltered on purpose: `/workspaces` applies `BRANCH_PREFIX` itself, because
+        that prefix is the whole of what keeps it from offering to delete a person's
+        own branch, and `merge` deliberately accepts a ref outside it.
+        """
+        provider = self.provider
+        if not isinstance(provider, ArtifactProvider):
+            return []
+        with running(self.provider_by):
+            return await provider.refs(base)
+
+    async def delete_ref(self, base: Path, ref: str, *, force: bool) -> str:
+        """Delete one ref. `""` when it went, else the tier's own reason.
+
+        `force` is the caller's decision, not the tier's: both tiers refuse a ref
+        holding work nothing else has, and a person overriding that is answering a
+        question only they can.
+        """
+        provider = self.provider
+        if not isinstance(provider, ArtifactProvider):
+            return f"no mounted tier can delete {ref}"
+        with running(self.provider_by):
+            return await provider.delete_ref(base, ref, force=force)
+
+    async def merge(self, base: Path, ref: str) -> str:
+        """Merge `ref` where the person is standing. `""` when it merged cleanly.
+
+        Anything else is the tier's sentence, which is not always a failure: jj
+        records conflicts *in the commit* and exits zero, so "merged, with conflicts
+        at these paths" is a true thing this can answer and a bool could not.
+        """
+        provider = self.provider
+        if not isinstance(provider, ArtifactProvider):
+            return f"no mounted tier can merge {ref}"
+        with running(self.provider_by):
+            return await provider.merge(base, ref)
+
+    async def strays(self, base: Path, *, with_status: bool = True) -> dict[str, Stray]:
+        """Checkouts the mounted tier still has on disk, by ref. `{}` if none can say.
+
+        Keyed by ref rather than returned as a list, because every caller is joining
+        it against something — `/workspaces` against the branches pH made — and a
+        list would have each of them build the same index.
+        """
+        provider = self.provider
+        if not isinstance(provider, ArtifactProvider):
+            return {}
+        with running(self.provider_by):
+            found = await provider.strays(base, with_status=with_status)
+        return {one.ref: one for one in found}
+
+    async def discard(self, path: Path) -> str:
+        """Remove one checkout. `""` when it went, else the sentence saying why not.
+
+        A message rather than a bool, because the only caller is a person who typed
+        `remove` and is owed the tier's own reason. A profile whose tier cannot
+        enumerate cannot have produced this path in the first place, so the refusal
+        is a guard rather than a case.
+        """
+        provider = self.provider
+        if not isinstance(provider, ArtifactProvider):
+            return f"no mounted tier can remove {path}"
+        with running(self.provider_by):
+            return await provider.discard(path)
+
+    def can_checkpoint(self, workspace: Workspace) -> bool:
+        """Whether a restore point can be taken for this workspace at all (P6-20).
+
+        The gate `/revert` asks before offering one, so a workspace that can never
+        have a restore point **refuses** rather than reporting "no restore points in
+        this session" — true, useless, and indistinguishable from a run that had
+        simply not checkpointed yet.
+
+        Two halves, and both are load-bearing. `fresh_root` is the *kind* half: a
+        `shared` workspace's root is the person's own checkout, and offering to
+        overwrite their uncommitted work with whatever an agent found is the one
+        thing this must never do. The Protocol test is the *tier* half, and it
+        replaced a kind-keyed predicate — a table of provider facts kept in a place
+        no provider could see, which had to be edited every time one of them learned
+        to checkpoint.
+        """
+        return fresh_root(workspace.kind) and isinstance(self.provider, CheckpointingProvider)
+
+    async def capture(self, workspace: Workspace) -> str | None:
+        """A token naming this workspace's state now, or `None` if no tier can say.
+
+        `None` rather than a raise, matching `export`: a profile whose tier cannot
+        checkpoint is not a broken deployment, and the fingerprint's consumer reads
+        an empty answer as "always re-run", which is the safe direction.
+        """
+        provider = self.provider
+        if not self.can_checkpoint(workspace) or not isinstance(provider, CheckpointingProvider):
+            return None
+        with running(self.provider_by):
+            return await provider.capture(workspace)
+
+    async def checkpoint(
+        self, workspace: Workspace, *, session: Session, agent_id: str, call_id: str
+    ) -> str | None:
+        """Capture a restore point and record it. `None` when the tier has none to give.
+
+        The event is the *seam's*, for `_log`'s reason: two tiers write restore
+        points and three consumers fold them, so the payload's shape belongs to
+        neither tier.
+
+        **Pinned before it is recorded**, which reverses the order the git tier used
+        while it owned this. That ordering existed for a mechanical reason — the ref
+        was named by the event's own `seq`, so a pin written first had no name to
+        write — and a token now names its own pin. What that changes is the
+        direction a crash between the two can fail in, and the new one is better: it
+        loses the *record* of a restore point whose state is safely pinned, where
+        before it kept a record of state that had not been pinned yet. A pin nobody
+        recorded is idempotent garbage the next capture writes over.
+
+        `tree` is the payload key, and it is historical rather than descriptive: the
+        git tier's token is a tree, jj's is a commit. Renaming it would break every
+        reader of a log written before today for no gain a person can see.
+        """
+        token = await self.capture(workspace)
+        if token is None:
+            return None
+        session.append(CHECKPOINT, {"agentId": agent_id, "tree": token, "callId": call_id})
+        return token
+
+    async def restore(self, workspace: Workspace, token: str) -> tuple[str, ...]:
+        """Put this workspace back to `token`. Returns the paths the run had added.
+
+        Raises rather than answering `None`, unlike every other optional capability
+        here: each caller is acting on a restore point a person or a retry ladder
+        asked for **by name**, and "it silently did nothing" is the one answer none
+        of them may mistake for success.
+        """
+        provider = self.provider
+        if not isinstance(provider, CheckpointingProvider):
+            raise FileNotFoundError(f"no mounted tier can restore {workspace.root}")
+        with running(self.provider_by):
+            return await provider.restore(workspace, token)
+
     def _reclaimer(
         self, records: Sequence[WorkspaceRecord], verb: str
     ) -> ReclaimingProvider | None:
@@ -1256,6 +1524,34 @@ def workspace_leaks(session: Session) -> list[WorkspaceRecord]:
     return [one for one in workspace_survivors(session) if not one.closed]
 
 
+def checkpoints(session: Session) -> dict[int, dict[str, Any]]:
+    """Every restore point in this session, by the event's own seq — a fold.
+
+    A checkpoint is a fact in the log, so a resumed or forked session finds the same
+    restore points a live one has, without anything having remembered them.
+    """
+    return {event.seq: dict(event.data) for event in session.events if event.type == CHECKPOINT}
+
+
+def latest_checkpoint(session: Session, agent_id: str) -> str:
+    """The newest restore point *this agent* took, or `""` if it has none.
+
+    A reverse scan rather than `checkpoints()` plus `max()`: the caller that wants
+    one restore point does not need a dict of every restore point, and building it
+    copies each payload to discard all but the last — on a crash path that runs once
+    per retry.
+
+    Scoped to the agent, which is the rule `/revert` already states: a restore point
+    belongs to the agent that took it. Only one agent writes into a root session
+    today, so this is a latent difference rather than a live one — it is here so the
+    two readers of this fold cannot disagree about it later.
+    """
+    for event in reversed(session.events):
+        if event.type == CHECKPOINT and str(event.data.get("agentId", "")) == agent_id:
+            return str(event.data.get("tree", ""))
+    return ""
+
+
 def stored_survivors(
     store: Any, *, limit: int = 50, family: str = ""
 ) -> tuple[list[WorkspaceRecord], dict[str, float]]:
@@ -1377,6 +1673,18 @@ reconciliation would discard the tree it was told to keep.
 Ignorable: an older build that skips it reads a keep as an ordinary keep.
 """
 
+CHECKPOINT = "workspace/checkpoint"
+"""One restore point, recorded the moment it is taken (P4-09).
+
+Here rather than in the git tier that first wrote it, because the capability is
+the seam's now: two providers append this and three consumers fold it, so an
+event name spelled in one of them would be a vocabulary the other borrowed.
+
+Not part of the acquire/dispose pair — a checkpoint opens nothing and closes
+nothing, and a fold over the pair must ignore it.
+"""
+
+
 _SURVIVOR_TYPES = frozenset({ACQUIRED, DISPOSED, RETAINED})
 """Hoisted out of the fold: tested once per event in the hot loop."""
 
@@ -1442,6 +1750,16 @@ async def lifecycle(ctx: Context, config: LifecycleConfig) -> None:
     async def ensure(request: Any, next_: Callable[..., Any]) -> Any:
         agent = request.agent
         if ctx.workspace.of(agent.id) is None:
+            if agent.session.header.origin == "subagent":
+                # Refused rather than answered: see `ChildWorkspaceMissing`. The
+                # test is the seam's own — `_chosen_tier` reads the same field to
+                # decide which rung a child gets, so "is this a child" has one
+                # spelling here and cannot come apart from the tier decision.
+                raise ChildWorkspaceMissing(
+                    f"agent {agent.id} is a subagent with no workspace: its base and access "
+                    "are its parent's to decide and arrive with the spawn, so acquiring one "
+                    "here would grant it more than its admission recorded"
+                )
             await ctx.workspace.acquire(
                 session_id=agent.session.id,
                 agent_id=agent.id,
@@ -1541,3 +1859,46 @@ async def reconcile(ctx: Context, config: Any) -> None:
     for session in ctx.sessions.list():
         await ctx.workspace.reconcile(session)
     ctx.on("session/created", ctx.workspace.reconcile)
+
+
+@plugin("workspace-checkpoint", inject=["tools", "workspace"])
+async def checkpoint_policy(ctx: Context, _config: Any) -> None:
+    """Take a restore point before every code run that has a workspace to save.
+
+    Around the *transport*, because a run is the unit that can be denied with work
+    already done (Q9a) — a native call that is denied never ran, so there is nothing
+    to restore it to. The transport is identified by the view's own
+    `transport_name`, since a profile may present it as `ipython`.
+
+    **Tier-agnostic since the capability became the seam's.** This was a git row
+    that cached git directories and asked a kind-keyed predicate, so a second tier
+    with restore points would have needed a second copy of the policy to get them —
+    and would have had to be added to that predicate to be allowed to. It now asks
+    the seam, and `subprocess` is gone from `inject` because nothing here spawns
+    anything any more.
+    """
+
+    async def around(execution: ToolExecution, next_: Callable[..., Any]) -> Any:
+        # A failure here never blocks the run: a missing restore point is worse than
+        # no restore point only if it is believed in, and the log records which runs
+        # have one. The guard is inside the `try` on purpose — reading the tool view
+        # is itself a call that must not take a cell down.
+        try:
+            view = ctx.tools.view(execution.scope)
+            workspace = workspace_of(ctx, execution.agent)
+            if (
+                execution.session is not None
+                and execution.name == view.transport_name
+                and workspace is not None
+            ):
+                await ctx.workspace.checkpoint(
+                    workspace,
+                    session=execution.session,
+                    agent_id=getattr(execution.agent, "id", ""),
+                    call_id=execution.call_id,
+                )
+        except Exception:
+            log.warning("ph.seams.workspace: no restore point for this run", exc_info=True)
+        return await next_()
+
+    ctx.on("tools/execute", around)

@@ -44,8 +44,7 @@ from ph.persistence import resumption_of
 from ph.seams.schedule import Schedule, state_to_wire
 from ph.seams.schedule_index import Appointment, ScheduleIndex
 from ph.seams.subagents import child_is_live
-from ph.seams.workspace import workspace_of
-from ph.seams.workspace_git import latest_checkpoint, restore
+from ph.seams.workspace import latest_checkpoint, workspace_of
 from ph.session import Session, SessionEvent, now_ms
 from ph.tools.errors import error_message
 
@@ -1137,7 +1136,9 @@ class Supervisor:
         if not tree:
             return False
         try:
-            await restore(root.ctx, workspace, tree)
+            # Through the seam, which is safe here for the reason the lookup above
+            # is *not*: `workspace_of` already answered, so the row is mounted.
+            await root.ctx.workspace.restore(workspace, tree)
         except Exception:
             log.warning(
                 "ph_app.daemon: root %s could not be restored to %s", root.id, tree, exc_info=True

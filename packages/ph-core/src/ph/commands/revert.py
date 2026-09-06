@@ -32,8 +32,7 @@ from typing import Any
 
 from ..cordis import Context, plugin
 from ..seams.commands import CommandDefinition
-from ..seams.workspace import restorable, workspace_of
-from ..seams.workspace_git import checkpoints, restore
+from ..seams.workspace import checkpoints, workspace_of
 from ..session import Session
 
 __all__ = ["apply"]
@@ -52,14 +51,20 @@ async def apply(ctx: Context, _config: Any) -> None:
         if session is None:
             return "refusing: /revert needs a session to read restore points from"
         workspace = workspace_of(ctx, invocation.agent)
-        if workspace is not None and not restorable(workspace.kind):
+        if workspace is not None and not ctx.workspace.can_checkpoint(workspace):
             # **A refusal, not "no restore points in this session"** (P6-20's own
             # gate). That sentence is true of a kind that cannot checkpoint and
             # useless: it reads as "not yet", so a person waits for one to appear.
             # Naming the kind says the mechanism is absent rather than the points.
+            # **The tier, not the kind**, because that is what decides it now: an
+            # overlay's delta is a perfectly good restore point and nothing has
+            # taught that tier to use it. Naming the workspace as well keeps the
+            # sentence about the thing in front of the person.
+            article = "an" if workspace.kind[0] in "aeiou" else "a"
             return (
-                f"refusing: a {workspace.kind} workspace has no restore mechanism, so it "
-                "has no restore points and will not grow any"
+                f"refusing: the mounted tier has no restore mechanism for {article} "
+                f"{workspace.kind} workspace, so it has no restore points and will not "
+                "grow any"
             )
         points = checkpoints(session)
         raw = argument.strip()
@@ -81,7 +86,7 @@ async def apply(ctx: Context, _config: Any) -> None:
                 f"{point['agentId']!r}, which does not hold a workspace here"
             )
         try:
-            removed = await restore(ctx, workspace, str(point["tree"]))
+            removed = await ctx.workspace.restore(workspace, str(point["tree"]))
         except FileNotFoundError as gone:
             # The write-ahead window (A10): the event was appended before the ref
             # that keeps the tree alive, so a crash in between leaves a restore
@@ -142,7 +147,7 @@ def _not_undone(ctx: Context, scope: Context, session: Session, call_id: str) ->
         return []
     return [
         "",
-        "git restores the tree, not the world. This run also did the following, "
+        "a restore puts the tree back, not the world. This run also did the following, "
         "and restoring the workspace did NOT undo it:",
         *(f"  - {name}({_brief(arguments)})" for name, arguments in outside),
     ]

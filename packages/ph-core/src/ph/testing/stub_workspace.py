@@ -19,12 +19,13 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from hashlib import blake2b
 from pathlib import Path
 from typing import Any
 
 from ..seams.workspace import ContainmentTier, Workspace, WorkspaceAccess, WorkspaceKind
 
-__all__ = ["StubWorkspaceProvider", "acquire_for_role"]
+__all__ = ["StubCheckpointingProvider", "StubWorkspaceProvider", "acquire_for_role"]
 
 
 @dataclass(slots=True)
@@ -75,6 +76,54 @@ class StubWorkspaceProvider:
             ref=f"ph/{session_id}/{agent_id}",
             env=self.env,
         )
+
+
+@dataclass(slots=True)
+class StubCheckpointingProvider(StubWorkspaceProvider):
+    """The same tier, plus restore points — a `CheckpointingProvider` for tests.
+
+    **A separate class rather than a flag, because `isinstance` is the question.**
+    The capability is a runtime-checkable Protocol, so what makes a tier able to
+    checkpoint is having the methods; a `checkpoints: bool = False` on the one class
+    would be invisible to the seam's own gate, and a test that set it would prove
+    nothing.
+
+    The snapshots are in memory and the whole point is the *seam*: which workspaces
+    are offered a restore point, that `/revert` lists rather than refuses, that the
+    token recorded is the token restored. What a real capture costs, and whether it
+    disturbs an agent's index, is `test_workspace_checkpoint.py`'s question against
+    real git.
+    """
+
+    saved: dict[str, dict[str, bytes]] = field(default_factory=dict)
+
+    async def capture(self, workspace: Workspace) -> str | None:
+        held = {
+            str(one.relative_to(workspace.root)): one.read_bytes()
+            for one in sorted(workspace.root.rglob("*"))
+            if one.is_file()
+        }
+        digest = blake2b(digest_size=8)
+        for name, content in held.items():
+            digest.update(name.encode() + b"\0" + content + b"\0")
+        token = digest.hexdigest()
+        self.saved[token] = held
+        return token
+
+    async def restore(self, workspace: Workspace, token: str) -> tuple[str, ...]:
+        held = self.saved.get(token)
+        if held is None:
+            raise FileNotFoundError(f"restore point {token} is gone")
+        added: list[str] = []
+        for one in sorted(workspace.root.rglob("*")):
+            if one.is_file() and str(one.relative_to(workspace.root)) not in held:
+                added.append(str(one.relative_to(workspace.root)))
+                one.unlink()
+        for name, content in held.items():
+            target = workspace.root / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(content)
+        return tuple(sorted(added))
 
 
 async def acquire_for_role(ctx: Any, base: Path, *, child: bool = False) -> Any:

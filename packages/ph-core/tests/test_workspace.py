@@ -32,6 +32,7 @@ refuse it at the kernel.
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -45,13 +46,12 @@ from ph.seams.workspace import (
     discards_writes,
     fresh_root,
     project_access,
-    restorable,
     workspace_of,
     workspace_policy,
     writable_roots,
 )
 from ph.session import Session
-from ph.testing import workspace_seam
+from ph.testing import StubCheckpointingProvider, workspace_seam
 
 pytestmark = pytest.mark.anyio
 
@@ -422,7 +422,7 @@ async def test_mounting_the_seam_changes_nothing(mount: Any) -> None:
 # ------------------------------------------------------- the kind vocabulary --
 
 
-def test_every_kind_is_classified_the_same_way_by_all_four_predicates() -> None:
+def test_every_kind_is_classified_the_same_way_by_all_three_predicates() -> None:
     """**The whole `WorkspaceKind` vocabulary, in one table.**
 
     `mypy` already refuses a `match` that forgets a kind — that is why these four
@@ -436,32 +436,60 @@ def test_every_kind_is_classified_the_same_way_by_all_four_predicates() -> None:
       onto itself — destroying the file the provisioning exists to provide.
     * `discards_writes` is what the retention policy keys on, so a wrong `False`
       silently loses the evidence of a failed child.
-    * `restorable` gates `/revert`, and it is the one that nearly went wrong:
-      it was `kind not in ("worktree", "worktree-ephemeral")` written inline,
-      correct but invisible to exhaustiveness, so a new kind fell outside it and
-      `/revert` answered "no restore points in this session" — true, useless, and
-      indistinguishable from a run that simply had not checkpointed yet.
 
-    Before this, three of the four asserted only the two `overlay` kinds.
+    Before this, two of the three asserted only the two `overlay` kinds.
+
+    There were four. `restorable` was the fourth and is gone: whether a workspace
+    has a restore mechanism stopped being a fact about its *kind* when the
+    capability became a provider Protocol, and a kind-keyed table of provider facts
+    is one no provider can see. `WorkspaceSeam.can_checkpoint` asks the tier, and
+    keeps `fresh_root` as the half that is genuinely about the kind — never the
+    person's own checkout.
     """
-    table: dict[WorkspaceKind, tuple[str, bool, bool, bool]] = {
-        # kind                   access  fresh  discards  restorable
-        "shared": ("write", False, False, False),
-        "worktree": ("write", True, False, True),
-        "worktree-ephemeral": ("read", True, True, True),
-        "readonly-scratch": ("read", True, False, False),
-        "overlay": ("write", True, False, False),
-        "overlay-ephemeral": ("read", True, True, False),
+    table: dict[WorkspaceKind, tuple[str, bool, bool]] = {
+        # kind                   access  fresh  discards
+        "shared": ("write", False, False),
+        "worktree": ("write", True, False),
+        "worktree-ephemeral": ("read", True, True),
+        "readonly-scratch": ("read", True, False),
+        "overlay": ("write", True, False),
+        "overlay-ephemeral": ("read", True, True),
     }
 
     assert set(table) == set(WorkspaceKind.__args__), "a kind was added without a row here"
-    for kind, (access, fresh, discards, restore) in table.items():
+    for kind, (access, fresh, discards) in table.items():
         assert (project_access(kind), fresh_root(kind), discards_writes(kind)) == (
             access,
             fresh,
             discards,
         ), kind
-        assert restorable(kind) is restore, kind
+
+
+async def test_a_shared_workspace_is_never_offered_a_restore_point(
+    mount: Any, tmp_path: Path
+) -> None:
+    """The *kind* half of `can_checkpoint`, which a capable tier must not override.
+
+    A `shared` workspace's root is the person's own checkout. Offering to overwrite
+    their uncommitted work with whatever an agent found is the one thing this must
+    never do — and it is reachable exactly when a tier that *can* checkpoint is
+    mounted, which is the configuration where nobody would think to check.
+
+    Driven from a `Workspace` value rather than an acquire, because the whole point
+    is a mismatch a provider would never produce for itself: a tier that can
+    checkpoint, asked about a workspace whose root is somebody's own tree.
+    """
+    ctx = await mount()
+    provider = StubCheckpointingProvider(root=tmp_path / "trees")
+    ctx.workspace.register_provider(provider)
+    isolated = await ctx.workspace.acquire(
+        session_id="s1", agent_id="a1", base=tmp_path, access="write"
+    )
+    theirs = replace(isolated, kind="shared", root=tmp_path)
+
+    assert ctx.workspace.can_checkpoint(isolated), "a capable tier was refused"
+    assert not ctx.workspace.can_checkpoint(theirs)
+    assert await ctx.workspace.capture(theirs) is None
 
 
 def test_only_the_ephemeral_kinds_lose_evidence_so_only_they_are_retained() -> None:

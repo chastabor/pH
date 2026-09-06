@@ -3,8 +3,8 @@
 A denial settles the whole run (Q9a), which bounds partial state to *about* one
 cell — "about", because the program had already written whatever preceded the
 refused line. These tests are about making that recoverable, and about the one
-sentence a user has to be told while it happens: **git restores the tree, not
-the world.**
+sentence a user has to be told while it happens: **a restore puts the tree
+back, not the world.**
 
 Real `git` throughout. What is pinned here is git's own behaviour — that a tree
 written against a scratch index leaves the agent's staging area alone, that a
@@ -35,10 +35,12 @@ from an empty file instead makes the first `add -A` re-hash **every file in the
 repository — measured at 2.6 s on an 11 000-file checkout**, paid per agent, on
 the first cell. Copying it costs half a millisecond.
 
-**Both `tree_hash` guards live in `tree_hash`.** Keeping copies at the call site
-cost a *fifth* `git` spawn per code cell — `rev-parse --absolute-git-dir`, **1.3
-ms** — which is the waste `_cached_checkpoint` names as "one of four spawns spent
-learning a constant".
+**The guards live where the work does.** Keeping copies at the call site cost a
+*fifth* `git` spawn per code cell — `rev-parse --absolute-git-dir`, **1.3 ms** —
+one of four spawns spent learning a constant. The capability is the seam's now, so
+the kind gate is asked once in `can_checkpoint` before any provider is entered,
+and `tree_hash` keeps only the narrower rule it owes on its own: never the
+person's checkout.
 """
 
 from __future__ import annotations
@@ -49,13 +51,8 @@ from typing import Any
 
 import pytest
 
-from ph.seams.workspace_git import (
-    CHECKPOINT,
-    checkpoint,
-    checkpoints,
-    ref_for,
-    restore,
-)
+from ph.seams.workspace import CHECKPOINT, checkpoints
+from ph.seams.workspace_git import pre_run_ref
 from ph.testing import (
     git,
     git_repo,
@@ -71,7 +68,7 @@ pytestmark = [pytest.mark.anyio, needs_git]
 async def _checkpointed(ctx: Any, session: Any, agent: Any, call_id: str = "c1") -> int:
     """Take a restore point and hand back the seq a person would type."""
     workspace = ctx.workspace.of(agent.id)
-    await checkpoint(ctx, workspace, session=session, agent_id=agent.id, call_id=call_id)
+    await ctx.workspace.checkpoint(workspace, session=session, agent_id=agent.id, call_id=call_id)
     return int(next(item.seq for item in reversed(session.events) if item.type == CHECKPOINT))
 
 
@@ -99,35 +96,48 @@ async def test_a_checkpoint_captures_the_tree_without_disturbing_the_agent(
     await git(ctx, workspace.root, "add", "staged.txt")
     _, before, _ = await git(ctx, workspace.root, "status", "--porcelain")
 
-    ref = await checkpoint(ctx, workspace, session=session, agent_id=agent.id, call_id="call-1")
+    token = await ctx.workspace.checkpoint(
+        workspace, session=session, agent_id=agent.id, call_id="call-1"
+    )
 
-    assert ref is not None
+    assert token is not None
     _, after, _ = await git(ctx, workspace.root, "status", "--porcelain")
     assert after == before, "the checkpoint disturbed the agent's index"
-    # A ref outside `refs/heads`, so `git branch` does not list it and a push
-    # does not carry it — it exists only to keep the tree from being collected.
-    assert ref.startswith("refs/ph/")
+    # Pinned outside `refs/heads`, so `git branch` does not list it and a push does
+    # not carry it — the ref exists only to keep the tree from being collected.
+    assert workspace.ref is not None
+    _, resolved, _ = await git(ctx, workspace.root, "rev-parse", pre_run_ref(workspace.ref, token))
+    assert resolved.strip() == token
     _, branches, _ = await git(ctx, workspace.root, "branch", "--list")
     assert "pre-run" not in branches
 
 
-async def test_the_event_precedes_the_ref_it_is_addressed_by(mount: Any, tmp_path: Path) -> None:
-    """Write-ahead (A10), and the reason `/revert <seq>` names one thing.
+async def test_the_pin_and_the_event_name_each_other(mount: Any, tmp_path: Path) -> None:
+    """`/revert <seq>` names one thing, and the ref is derivable from the event.
 
-    The event is appended *first* and its own `seq` is the address — nothing
-    predicts what `append` will assign, and the payload carries neither `seq`
-    nor `ref` because both are derivable from the event that holds them. A
-    person types one number instead of correlating an event with a ref.
+    The payload carries neither `seq` nor `ref`, because both are derivable from
+    the event that holds them: a person types one number instead of correlating an
+    event with a ref.
+
+    **The pin now precedes the event, where it used to follow it.** That ordering
+    existed for a mechanical reason — the ref was named by the event's own `seq`, so
+    a pin written first had no name to write — and a ref named by the tree it pins
+    needs nothing from `append`. What changed is the direction a crash between the
+    two fails in, and the new one is better: it loses the *record* of a restore
+    point whose tree is safely pinned, where before it kept a record of a tree that
+    had not been pinned yet.
     """
     ctx, session, agent, workspace = await worktree_agent(mount, tmp_path)
 
-    ref = await checkpoint(ctx, workspace, session=session, agent_id=agent.id, call_id="call-1")
+    token = await ctx.workspace.checkpoint(
+        workspace, session=session, agent_id=agent.id, call_id="call-1"
+    )
 
     (event,) = [item for item in session.events if item.type == CHECKPOINT]
-    assert ref == ref_for(session.id, agent.id, event.seq)
     assert set(event.data) == {"agentId", "tree", "callId"}
-    # The ref exists and points at the tree the event named.
-    _, resolved, _ = await git(ctx, workspace.root, "rev-parse", ref)
+    assert event.data["tree"] == token
+    assert workspace.ref is not None
+    _, resolved, _ = await git(ctx, workspace.root, "rev-parse", pre_run_ref(workspace.ref, token))
     assert resolved.strip() == event.data["tree"]
 
 
@@ -146,7 +156,7 @@ async def test_a_shared_workspace_is_never_checkpointed(mount: Any, tmp_path: Pa
     )
     assert workspace.kind == "shared"
 
-    ref = await checkpoint(ctx, workspace, session=session, agent_id="a1", call_id="c1")
+    ref = await ctx.workspace.checkpoint(workspace, session=session, agent_id="a1", call_id="c1")
 
     assert ref is None
     assert not [item for item in session.events if item.type == CHECKPOINT]
@@ -165,7 +175,7 @@ async def test_a_denied_run_reverts_exactly(mount: Any, tmp_path: Path) -> None:
     ctx, session, agent, workspace = await worktree_agent(mount, tmp_path)
     root = workspace.root
     (root / "untracked.txt").write_text("before\n", encoding="utf-8")
-    await checkpoint(ctx, workspace, session=session, agent_id=agent.id, call_id="c1")
+    await ctx.workspace.checkpoint(workspace, session=session, agent_id=agent.id, call_id="c1")
     tree = next(item.data["tree"] for item in session.events if item.type == CHECKPOINT)
 
     # ... the run, before it was denied.
@@ -174,7 +184,7 @@ async def test_a_denied_run_reverts_exactly(mount: Any, tmp_path: Path) -> None:
     (root / "new").mkdir()
     (root / "new" / "spilled.txt").write_text("partial\n", encoding="utf-8")
 
-    removed = await restore(ctx, workspace, tree)
+    removed = await ctx.workspace.restore(workspace, tree)
 
     assert (root / "tracked.txt").read_text(encoding="utf-8") == "original\n"
     assert (root / "untracked.txt").read_text(encoding="utf-8") == "before\n"
@@ -193,12 +203,12 @@ async def test_ignored_paths_are_never_touched(mount: Any, tmp_path: Path) -> No
     ctx, session, agent, workspace = await worktree_agent(mount, tmp_path)
     root = workspace.root
     (root / "build.log").write_text("cached\n", encoding="utf-8")
-    await checkpoint(ctx, workspace, session=session, agent_id=agent.id, call_id="c1")
+    await ctx.workspace.checkpoint(workspace, session=session, agent_id=agent.id, call_id="c1")
     tree = next(item.data["tree"] for item in session.events if item.type == CHECKPOINT)
     (root / "build.log").write_text("cached, then some\n", encoding="utf-8")
     (root / "after.log").write_text("also ignored\n", encoding="utf-8")
 
-    await restore(ctx, workspace, tree)
+    await ctx.workspace.restore(workspace, tree)
 
     assert (root / "build.log").read_text(encoding="utf-8") == "cached, then some\n"
     assert (root / "after.log").exists()
@@ -214,11 +224,11 @@ async def test_an_untracked_file_comes_back_untracked(mount: Any, tmp_path: Path
     ctx, session, agent, workspace = await worktree_agent(mount, tmp_path)
     root = workspace.root
     (root / "untracked.txt").write_text("before\n", encoding="utf-8")
-    await checkpoint(ctx, workspace, session=session, agent_id=agent.id, call_id="c1")
+    await ctx.workspace.checkpoint(workspace, session=session, agent_id=agent.id, call_id="c1")
     tree = next(item.data["tree"] for item in session.events if item.type == CHECKPOINT)
     (root / "untracked.txt").write_text("changed\n", encoding="utf-8")
 
-    await restore(ctx, workspace, tree)
+    await ctx.workspace.restore(workspace, tree)
 
     _, status, _ = await git(ctx, root, "status", "--porcelain")
     assert status.strip() == "?? untracked.txt", f"restore changed the index: {status!r}"
@@ -233,10 +243,10 @@ async def test_scratch_survives_a_revert(mount: Any, tmp_path: Path) -> None:
     """
     ctx, session, agent, workspace = await worktree_agent(mount, tmp_path)
     (workspace.scratch / "notes.md").write_text("what I learned\n", encoding="utf-8")
-    await checkpoint(ctx, workspace, session=session, agent_id=agent.id, call_id="c1")
+    await ctx.workspace.checkpoint(workspace, session=session, agent_id=agent.id, call_id="c1")
     tree = next(item.data["tree"] for item in session.events if item.type == CHECKPOINT)
 
-    await restore(ctx, workspace, tree)
+    await ctx.workspace.restore(workspace, tree)
 
     assert (workspace.scratch / "notes.md").read_text(encoding="utf-8") == "what I learned\n"
 
@@ -252,7 +262,7 @@ async def test_a_collected_tree_reports_rather_than_raises(mount: Any, tmp_path:
     ctx, _session, _agent, workspace = await worktree_agent(mount, tmp_path)
 
     with pytest.raises(FileNotFoundError):
-        await restore(ctx, workspace, "0" * 40)
+        await ctx.workspace.restore(workspace, "0" * 40)
 
 
 # --------------------------------------------------------------------- fold --
@@ -262,9 +272,9 @@ async def test_restore_points_are_a_fold_over_the_log(mount: Any, tmp_path: Path
     """A checkpoint is a *fact in the log*, so a resumed or forked session finds
     the same restore points a live one has — nothing had to remember them."""
     ctx, session, agent, workspace = await worktree_agent(mount, tmp_path)
-    await checkpoint(ctx, workspace, session=session, agent_id=agent.id, call_id="c1")
+    await ctx.workspace.checkpoint(workspace, session=session, agent_id=agent.id, call_id="c1")
     (workspace.root / "tracked.txt").write_text("second\n", encoding="utf-8")
-    await checkpoint(ctx, workspace, session=session, agent_id=agent.id, call_id="c2")
+    await ctx.workspace.checkpoint(workspace, session=session, agent_id=agent.id, call_id="c2")
 
     found = checkpoints(session)
 
@@ -418,7 +428,7 @@ async def test_provisioned_materials_are_not_the_agents_work(mount: Any, tmp_pat
     held = replace(workspace, provisioned=("node_modules",))
     ctx.workspace._held[agent.id].workspace = held
 
-    await checkpoint(ctx, held, session=session, agent_id=agent.id, call_id="c1")
+    await ctx.workspace.checkpoint(held, session=session, agent_id=agent.id, call_id="c1")
     tree = next(item.data["tree"] for item in session.events if item.type == CHECKPOINT)
     _, listing, _ = await git(ctx, workspace.root, "ls-tree", "-r", "--name-only", tree)
 

@@ -42,7 +42,6 @@ from ..llm.types import PluginSource, create_user_message
 from ..seams.commands import CommandContext, CommandDefinition
 from ..seams.goals import Goal, GoalService, GoalState
 from ..seams.workspace import workspace_of
-from ..seams.workspace_git import tree_hash
 from ..session import Session, now_ms
 from ..wire import WireModel
 
@@ -81,7 +80,11 @@ async def run_gates(
     different trees.
     """
     workspace = workspace_of(ctx, agent)
-    tree = "" if workspace is None else (await tree_hash(ctx, workspace) or "")
+    # Through the seam, not the git tier: the fingerprint and the restore point are
+    # one token by design, so asking `capture` is what keeps a gate memo and a
+    # `/revert` from disagreeing about whether the work changed — and it is what
+    # gives a jj deployment a fingerprint at all.
+    tree = "" if workspace is None else (await ctx.workspace.capture(workspace) or "")
     notes: list[str] = []
     passed = True
     for gate in state.goal.gates:

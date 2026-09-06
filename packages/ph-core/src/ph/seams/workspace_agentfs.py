@@ -60,6 +60,7 @@ from .diagnostics import Diagnostic, contribute
 from .subprocess import SubprocessSpawnSpec, first_line, scrub_env
 from .workspace import (
     ContainmentTier,
+    Stray,
     Workspace,
     WorkspaceAccess,
     WorkspaceDeclined,
@@ -67,7 +68,14 @@ from .workspace import (
     discards_writes,
     redirection_env,
 )
-from .workspace_git import COMMIT_AS_PH, git, sanitize_ref
+from .workspace_git import (
+    COMMIT_AS_PH,
+    delete_branch,
+    git,
+    list_branches,
+    merge_branch,
+    sanitize_ref,
+)
 
 __all__ = [
     "ORIGIN",
@@ -314,6 +322,33 @@ class AgentFsProvider:
                 "no /revert"
             ),
         )
+
+    async def refs(self, base: Path) -> list[str]:
+        """`ArtifactProvider`, and only the ref half of it.
+
+        **An overlay's artifact is a git branch like anyone else's** — `export_overlay`
+        builds one out of the delta, and `export`'s closing sentence tells a person to
+        merge it with `/workspaces merge`. So this tier answers the ref verbs or that
+        sentence names a command that refuses.
+
+        The *checkout* half it genuinely has nothing to say to: a mountpoint is not a
+        checkout `/workspaces` can hand back, which is the same empty answer the old
+        `git worktree list` join gave for an overlay.
+        """
+        return await list_branches(self.ctx, base)
+
+    async def delete_ref(self, base: Path, ref: str, *, force: bool) -> str:
+        return await delete_branch(self.ctx, base, ref, force=force)
+
+    async def merge(self, base: Path, ref: str) -> str:
+        return await merge_branch(self.ctx, base, ref)
+
+    async def strays(self, base: Path, *, with_status: bool = True) -> list[Stray]:
+        """None. A mount is not a checkout this command can take back."""
+        return []
+
+    async def discard(self, path: Path) -> str:
+        return f"{path} is an overlay mount, not a checkout /workspaces can remove"
 
     async def acquire(
         self,

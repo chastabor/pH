@@ -65,15 +65,16 @@ import pytest
 
 from ph.seams.containment import TIERS
 from ph.seams.workspace import (
+    CheckpointingProvider,
     Workspace,
     WorkspaceKind,
     WorkspaceRecord,
     discards_writes,
     fresh_root,
     project_access,
-    restorable,
 )
 from ph.seams.workspace_agentfs import (
+    AgentFsProvider,
     ExportRefused,
     export_overlay,
     fs_id,
@@ -81,8 +82,16 @@ from ph.seams.workspace_agentfs import (
     probe_overlay,
     store_for,
 )
-from ph.seams.workspace_git import tree_hash
-from ph.testing import FAKE_OPTIONS, StubWorkspaceProvider, git, git_repo, needs_git
+from ph.seams.workspace_git import GitWorktreeProvider, tree_hash
+from ph.seams.workspace_jj import JjWorkspaceProvider
+from ph.testing import (
+    FAKE_OPTIONS,
+    StubCheckpointingProvider,
+    StubWorkspaceProvider,
+    git,
+    git_repo,
+    needs_git,
+)
 
 pytestmark = pytest.mark.anyio
 
@@ -120,17 +129,24 @@ def test_an_overlay_is_a_fresh_root_so_materials_are_provisioned() -> None:
     assert fresh_root("overlay-ephemeral") is True
 
 
-def test_an_overlay_has_no_restore_mechanism() -> None:
-    """**P6-20's gate, as a predicate `/revert` can refuse on.**
+def test_the_overlay_tier_declares_no_restore_mechanism() -> None:
+    """**P6-20's gate, now asked of the tier rather than of the kind.**
 
-    This was a membership test inside `workspace_git`, invisible to the
-    exhaustiveness every other question about a kind gets — so a kind added to
-    the Literal fell outside it silently and `/revert` answered "no restore
-    points in this session", which reads as "not yet" for a workspace that can
-    never have one.
+    It began as a membership test inside `workspace_git`, then a kind-keyed
+    predicate; both said `overlay` has no restore points, and both were saying
+    something about a *provider* in a place no provider could see. An overlay's
+    delta is a perfectly good restore point — it simply is not a git tree, and
+    nothing has taught this tier to use it yet. When something does, the answer
+    changes here, by the class growing two methods, rather than in a table
+    somewhere else that has to be remembered.
+
+    A structural check on the classes, so it needs neither the AgentFS binary nor a
+    mount: what makes a tier able to checkpoint is having the methods, which is
+    exactly what the seam's own gate tests.
     """
-    assert restorable("worktree") and restorable("worktree-ephemeral")
-    assert not restorable("overlay") and not restorable("overlay-ephemeral")
+    assert not issubclass(AgentFsProvider, CheckpointingProvider)
+    assert issubclass(GitWorktreeProvider, CheckpointingProvider)
+    assert issubclass(JjWorkspaceProvider, CheckpointingProvider)
 
 
 async def test_revert_refuses_an_overlay_and_still_lists_for_a_worktree(
@@ -138,9 +154,9 @@ async def test_revert_refuses_an_overlay_and_still_lists_for_a_worktree(
 ) -> None:
     """**The other half of P6-20's gate: the sentence a person actually reads.**
 
-    The predicate above was asserted and the branch that consumes it was not, so
-    the refusal could have regressed to the empty listing with `restorable`
-    still answering `False` and nothing failing.
+    The capability above was asserted and the branch that consumes it was not, so
+    the refusal could have regressed to the empty listing with the tier still
+    lacking the methods and nothing failing.
 
     The distinction is the whole point. "no restore points in this session" is
     *true* of an overlay, and it reads as **not yet** — so a person waits for one
@@ -159,7 +175,15 @@ async def test_revert_refuses_an_overlay_and_still_lists_for_a_worktree(
     shown: dict[str, str] = {}
     for name, pair in kinds.items():
         ctx = await mount(revert_row)
-        ctx.workspace.register_provider(StubWorkspaceProvider(root=tmp_path / name, kinds=pair))
+        # The difference is the *tier*, which is what decides this now: one can
+        # checkpoint and one cannot, and the kinds ride along to keep the sentence
+        # a person reads about the workspace in front of them.
+        stub = (
+            StubWorkspaceProvider(root=tmp_path / name, kinds=pair)
+            if name == "ov"
+            else StubCheckpointingProvider(root=tmp_path / name, kinds=pair)
+        )
+        ctx.workspace.register_provider(stub)
         session = ctx.sessions.create(f"s-{name}")
         agent = ctx.agents.create(session, FAKE_OPTIONS)
         workspace = await ctx.workspace.acquire(
@@ -168,11 +192,11 @@ async def test_revert_refuses_an_overlay_and_still_lists_for_a_worktree(
         assert workspace.kind == pair[0]
         shown[name] = str(await ctx.commands.dispatch("/revert", session=session, agent=agent))
 
-    assert shown["ov"].startswith("refusing: a overlay workspace has no restore mechanism"), shown[
-        "ov"
-    ]
+    assert shown["ov"].startswith(
+        "refusing: the mounted tier has no restore mechanism for an overlay workspace"
+    ), shown["ov"]
     assert shown["wt"] == "no restore points in this session", (
-        "a restorable kind with no checkpoints yet gets the listing, not the refusal"
+        "a tier that can checkpoint, with no checkpoints yet, gets the listing"
     )
 
 
