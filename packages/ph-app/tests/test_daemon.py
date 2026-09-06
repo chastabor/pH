@@ -253,10 +253,16 @@ async def test_a_person_reaches_a_busy_root_at_its_next_step(
         await supervisor.prompt("busy", "the first thing")
         assert targets[-1] == "next-turn", "an idle root has no turn to join"
 
-        monkeypatch.setattr(type(root.agent), "status", property(lambda _self: "running"))
+        root.agent._phase.kind = "running"
         await supervisor.prompt("busy", "also this")
+        assert targets[-1] == "next-step", "a person waited for the whole turn to end"
 
-    assert targets[-1] == "next-step", "a person waited for the whole turn to end"
+        # A schedule means something else: `tick`'s contract is that a scheduled
+        # turn is an *ordinary* turn, so it must not join one it has nothing to
+        # do with — nor merge with another schedule due in the same pass.
+        await supervisor.prompt("busy", "the appointment", reach="next-turn")
+
+    assert targets[-1] == "next-turn", "a scheduled turn joined a running one"
 
 
 async def test_a_failed_turn_is_named_beside_an_idle_status(
@@ -1379,6 +1385,41 @@ async def test_a_due_schedule_starts_a_turn(tmp_path: Path) -> None:
         types = [event.type for event in root.session.events_from(0)]
         assert types.count("schedule/tick") == 1
         assert "assistant/message" in types, "the scheduled turn never ran"
+
+
+async def test_a_due_schedule_starts_its_own_turn_even_mid_turn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An *ordinary* turn is this path's contract, and a busy root must not break it.
+
+    A person interjecting is delivered at the next step, deliberately — but a
+    schedule is not "also this". Joining a turn it has nothing to do with would
+    share that turn's per-turn ceilings with it, and two schedules due in one
+    pass would become one turn rather than two.
+    """
+    from ph.agent_loop.driver import ReactLoopAgent
+
+    targets: list[str] = []
+    original = ReactLoopAgent.send
+
+    def spy(self: Any, message: Any, target: str, wakeup: bool) -> None:
+        targets.append(target)
+        original(self, message, target, wakeup)
+
+    monkeypatch.setattr(ReactLoopAgent, "send", spy)
+    async with running(tmp_path) as daemon:
+        supervisor = daemon.server.supervisor
+        root = await supervisor.start("cron-busy")
+        root.ctx.schedule.create(
+            root.session,
+            Schedule(id="nightly", kind="interval", spec="60000", prompt="do the thing"),
+        )
+        made = root.ctx.schedule.states(root.session)["nightly"].created_at
+
+        root.agent._phase.kind = "running"
+        assert await supervisor.tick(now=made + 90_000) == ["nightly"]
+
+    assert targets[-1] == "next-turn", "a scheduled turn joined a turn already running"
 
 
 async def test_a_root_with_work_scheduled_is_not_released(tmp_path: Path) -> None:

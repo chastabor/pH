@@ -19,6 +19,7 @@ from textual.content import Content
 from textual.css.query import NoMatches
 from textual.widgets import Static
 
+from ph.seams.subagents import child_is_live
 from ph.seams.tui_status import StatusReading
 
 from ..state import TuiState
@@ -50,21 +51,22 @@ def children_heading(state: TuiState) -> str:
     Settled children are not counted at all. They stay listed, because a parent
     asking what happened to one deserves an answer, but "how busy is this
     fan-out" is a question about the ones still going.
+
+    **`child_is_live` decides which those are, rather than a literal here.** The
+    seam counts an *unrecognised* status as live on purpose, so a status this
+    package has not heard of lands in `pending` — where a hand-written
+    `status in {running, queued}` would have counted it as neither and quietly
+    under-reported a fan-out that is still working. Counted off `state.roster`,
+    the seam's own fold, for the reason the panel draws from it (A11).
     """
-    live = [row for row in state.subagents.values() if not row.deleted]
-    running = sum(1 for row in live if row.status == "running")
-    pending = sum(1 for row in live if row.status == "queued")
-    if not (running or pending):
-        return "children"
-    counts = ", ".join(
-        part
-        for part in (
-            f"{running} running" if running else "",
-            f"{pending} pending" if pending else "",
-        )
-        if part
-    )
-    return f"children · {counts}"
+    live = [row for row in state.roster.values() if child_is_live(row)]
+    running = sum(1 for row in live if row.get("status") == "running")
+    counts = [
+        f"{count} {word}"
+        for count, word in ((running, "running"), (len(live) - running, "pending"))
+        if count
+    ]
+    return f"children · {', '.join(counts)}" if counts else "children"
 
 
 def render_subagents(state: TuiState) -> str:
@@ -197,7 +199,8 @@ class Sidebar(Vertical):
         todos = "\n".join(_todo_line(todo) for todo in state.todos) or "—"
         children = render_subagents(state)
         heading = children_heading(state)
-        if (facts, todos, children, heading) == self._shown:
+        was = self._shown
+        if (facts, todos, children, heading) == was:
             return
         self._shown = (facts, todos, children, heading)
         try:
@@ -212,7 +215,12 @@ class Sidebar(Vertical):
         facts_panel.update(Content(facts))
         todo_panel.update(Content(todos))
         children_title.display = bool(children)
-        children_title.update(Content.from_markup(f"[b]{heading}[/b]"))
+        if was is None or heading != was[3]:
+            # Guarded because `from_markup` is the most expensive thing here —
+            # 28 µs against `children_heading`'s 1 — and the heading is the one
+            # part of this panel that barely changes: a child's token counter
+            # ticking redraws the body every frame and leaves this string alone.
+            children_title.update(Content.from_markup(f"[b]{heading}[/b]"))
         panel.display = bool(children)
         panel.update(Content(children))
 

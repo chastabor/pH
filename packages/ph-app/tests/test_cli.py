@@ -513,6 +513,14 @@ def test_the_catalog_says_what_the_profile_sets_not_only_what_the_code_defaults(
     absent = _config("--row", "limits", "--profile", "headless")
     assert "row not mounted" in absent.output, "headless ships no limits row"
 
+    # A row a profile switches *off* is not mounted either, and a dump keeps it
+    # — reading that as "mounted, the default stands" was the third state told
+    # wrong. `rlm` ships this one `disabled: true`.
+    switched_off = _config("--row", "rlm-context-loader", "--profile", "rlm")
+    assert "row not mounted" in switched_off.output
+
+    # Mounted with no config of its own is the *middle* state, and shares no
+    # sentinel with the first: `row.config` is `None` for both.
     mounted = _config("--row", "limits", "--profile", "rlm-stable")
     assert "row not mounted" not in mounted.output
     assert "turn_limit=None" in mounted.output, "the code's answer stays visible"
@@ -528,20 +536,40 @@ def test_the_catalog_says_what_the_profile_sets_not_only_what_the_code_defaults(
     assert "40" in configured.output, "a ceiling a run would actually hit"
 
 
-def test_the_catalog_documents_every_option_of_the_limits_row() -> None:
-    """The column was blank for this row: four options, no field docstrings.
+def test_every_option_of_the_limits_row_says_what_it_does() -> None:
+    """The column was blank for this row: four options, none of them nested-doc'd.
 
-    Pinned per option rather than as one substring, because the failure mode is
-    a *new* option arriving with nothing said about it — which reads as a knob
-    with no explanation to the person who came looking for one.
+    Asserted as "every option has one" rather than by quoting the prose. The
+    failure this catches is a *new* option arriving with nothing said about it,
+    and a test naming four fixed substrings could not see that — while going red
+    on any rewording, which is the opposite of what it is for.
     """
-    result = _config("--row", "limits")
-    for option in ("modelCalls", "toolCalls", "children", "breaker"):
-        assert option in result.output
-    assert "may call the model" in result.output
-    assert "Code Mode dispatch counts as one" in result.output
-    assert "queues rather than refusing" in result.output
-    assert "on by default" in result.output
+    entry = json.loads(_config("--row", "limits", "--json").output)[0]
+    assert {field["name"] for field in entry["config"]} == {
+        "modelCalls",
+        "toolCalls",
+        "children",
+        "breaker",
+    }
+    undocumented = [field["name"] for field in entry["config"] if not field["doc"]]
+    assert undocumented == [], f"an option arrived with nothing said about it: {undocumented}"
+
+
+def test_a_nested_option_is_documented_by_the_model_that_defines_it() -> None:
+    """And the prose is not copied to get there.
+
+    Every option on this row *is* another config model, so the summary comes from
+    that class rather than from a paragraph beside the field — `ph config`'s
+    claim is that it cannot drift from the code, and a hand-written paraphrase
+    drifts first.
+    """
+    from ph_stabilize.limits import ChildLimits
+
+    entry = json.loads(_config("--row", "limits", "--json").output)[0]
+    children = next(field for field in entry["config"] if field["name"] == "children")
+
+    assert children["doc"].startswith("How many children an agent may spawn")
+    assert children["doc"] in " ".join((ChildLimits.__doc__ or "").split())
 
 
 def test_the_catalog_refuses_an_unknown_row_rather_than_printing_nothing() -> None:

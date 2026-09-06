@@ -194,6 +194,22 @@ class ReactLoopAgent:
         """Deliver at the next step boundary without waking — it waits."""
         self.send(message, "next-step", False)
 
+    def interject(self, message: Message) -> None:
+        """Deliver as soon as this loop will take it: mid-turn if one is running.
+
+        The verb for *"also this"* from outside — a person typing while the agent
+        works. A running turn takes it at the next step, so the answer does not
+        wait for whatever the agent is in the middle of; an idle one has no turn
+        to join, and a prompt to an idle agent means a new one.
+
+        **Decided here rather than by the caller**, because the phase is this
+        object's and a caller reading `status` and then choosing a verb is
+        branching on a value that can change between the two. It also gives every
+        front end the same reach without each re-deriving it — and the reach a
+        child already had, since a child's message is delivered by `steer`.
+        """
+        self.send(message, "next-step" if self._phase.kind != "idle" else "next-turn", True)
+
     def cancel(self, cause: AgentCancelCause, *, keep_inbox: bool = False) -> None:
         if not keep_inbox:
             self.inbox.clear()

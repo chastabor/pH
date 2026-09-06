@@ -42,9 +42,11 @@ than by replacing it.
 | [`ctx.workspace`](workspace.md) | `seams/workspace.py` | Where an agent's writes land, and how honestly that is stated. |
 
 Providers, which register into the seams above rather than publishing their own
-key: `seams/sandbox_local.py` (bwrap, P6-04), `seams/workspace_git.py` (the `worktree` tier),
-`seams/workspace_agentfs.py` (a copy-on-write overlay), `seams/workspace_scratch.py` (the
-`sandbox` rung's kind), `seams/workspace_provision.py` (making a fresh tree usable).
+key: `seams/sandbox_local.py` (bwrap, P6-04), `seams/workspace_git.py` (the
+`worktree` tier), `seams/workspace_jj.py` (the same tier over Jujutsu, where a
+child starts from its parent's work in progress), `seams/workspace_agentfs.py` (a
+copy-on-write overlay), `seams/workspace_scratch.py` (the `sandbox` rung's kind),
+`seams/workspace_provision.py` (making a fresh tree usable).
 
 ## What reaches the model
 

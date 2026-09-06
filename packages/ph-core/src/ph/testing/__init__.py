@@ -29,6 +29,7 @@ from .builders import (
 from .diagnostics import report_section
 from .fake_adapter import FakeAdapter, text_script
 from .git import WORKTREE_ROWS, git, git_repo, needs_git, worktree_agent
+from .jj import JJ_ROWS, jj, jj_repo, needs_jj
 from .replay_adapter import (
     REPLAY_ROW,
     RecordedStep,
@@ -46,6 +47,7 @@ from .stub_workspace import StubWorkspaceProvider, acquire_for_role
 
 __all__ = [
     "FAKE_OPTIONS",
+    "JJ_ROWS",
     "REPLAY_ROW",
     "WORKTREE_ROWS",
     "FakeAdapter",
@@ -62,7 +64,10 @@ __all__ = [
     "boundary_for",
     "git",
     "git_repo",
+    "jj",
+    "jj_repo",
     "needs_git",
+    "needs_jj",
     "parked_gate",
     "plugin_payload",
     "raising",

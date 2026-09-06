@@ -110,18 +110,6 @@ UNRECOVERABLE_DETAIL = (
 """Interrupted, with nothing mounted that could resume it.
 
 Its own sentence because the answer a parent needs differs: the ladder was not
-spent and a deployment that mounts the provider again could have carried on, so
-"it ran out of attempts" would be false. Settled all the same — a row left
-`queued` for a provider that will never come holds the root out of passivation
-for good."""
-
-UNRECOVERABLE_DETAIL = (
-    "the harness stopped while this child was running, and no provider here can "
-    "start it again; its transcript is on disk"
-)
-"""Interrupted, with nothing mounted that could resume it.
-
-Its own sentence because the answer a parent needs differs: the ladder was not
 spent, and a deployment that mounted the provider again could have carried on —
 so "it ran out of attempts" would be false. Settled all the same: a row left
 `queued` for a provider that will never come holds the root out of passivation
@@ -137,12 +125,8 @@ at a roster and asking what happened to a child that never answered."""
 def exhausted_detail(limit: int) -> str:
     """The ladder spent, naming the bound **actually in force**.
 
-    A function rather than a module string, for the reason `Recovery.total` is a
-    property one ladder over: a value baked at import time describes the number
-    that was set when this module was first read, so a host that shortens the
-    ladder — or a test that does — tells the child it was interrupted three times
-    whatever the truth. Built from `INTERRUPTED_DETAIL` rather than restating it,
-    so the two cannot come to describe one interruption differently.
+    Built from `INTERRUPTED_DETAIL` rather than restating it, so the two cannot
+    come to describe one interruption differently.
     """
     return (
         f"{INTERRUPTED_DETAIL} — and it has now been interrupted "

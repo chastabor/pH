@@ -96,9 +96,12 @@ owns the sweep, the fold and the records; how many attempts they are worth is th
 host's, and `resume_children` takes it with no default so a host cannot get the
 number by saying nothing.
 
-Three, matching `RETRY_DELAYS`, for the same reason: what a harness stopping
-interrupts is transient by construction, and a child caught mid-turn three times
-is not unlucky — it is in front of something that keeps stopping.
+Three for the same reason `RETRY_DELAYS` has three rungs — what a harness
+stopping interrupts is transient by construction, and a child caught mid-turn
+three times is not unlucky but in front of something that keeps stopping. Written
+out rather than `len(RETRY_DELAYS)`, because the two are *independent* policies
+that happen to agree: this ladder has no delays to take a length from, and
+shortening the root's should not silently shorten this one.
 
 **No delays, unlike the root's.** That ladder retries a crash that just happened
 and waits before trying again; this one only ever runs while a harness is

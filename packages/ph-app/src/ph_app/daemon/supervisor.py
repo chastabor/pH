@@ -30,7 +30,7 @@ from collections.abc import Callable, Sequence
 from contextlib import AsyncExitStack, suppress
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import anyio
 from anyio.abc import TaskGroup
@@ -1038,7 +1038,10 @@ class Supervisor:
                 claimed = schedule.claim(root.session, now=stamp)
                 for entry in claimed:
                     log.info("ph_app.daemon: root %s firing schedule %s", root.id, entry.id)
-                    await self.prompt(root.id, entry.prompt)
+                    # `next-turn`: a scheduled turn is an ordinary turn, which is
+                    # this method's own contract two paragraphs up and stops two
+                    # schedules due in one pass becoming one turn.
+                    await self.prompt(root.id, entry.prompt, reach="next-turn")
                     fired.append(entry.id)
                 # Only when something was appended: adding `or schedule.live(...)`
                 # folds the whole log a second time to decide whether to flush a
@@ -1143,7 +1146,12 @@ class Supervisor:
         return True
 
     async def prompt(
-        self, root_id: str, text: str, *, attachments: Sequence[AttachmentRef] = ()
+        self,
+        root_id: str,
+        text: str,
+        *,
+        attachments: Sequence[AttachmentRef] = (),
+        reach: Literal["soonest", "next-turn"] = "soonest",
     ) -> Root:
         """Splice a turn into the agent's inbox and wake its task.
 
@@ -1157,26 +1165,21 @@ class Supervisor:
         is called; the scheduler reaches this directly and carries no key, which
         is why the parameter is gone rather than optional.
 
-        **A busy root is steered, not followed up**, which is the difference
-        between reaching it at its next *step* and at its next turn. A child
-        already had this: `rlm-messaging` delivers by steer so "a running agent
-        picks it up without finishing first", and a person interjecting had
-        strictly less reach than the children they had spawned — during a long
-        fan-out, a typed line waited for the whole turn to end.
+        **`reach` is whose message this is**, and the two answers differ. A
+        person typing while the agent works means *"also this"* and wants it read
+        at the next step, which is the reach a child's message already had
+        (`rlm-messaging` steers, so "a running agent picks it up without
+        finishing first") and a person did not. A **schedule** means something
+        else entirely: `tick`'s own contract is that a scheduled turn is an
+        *ordinary turn with a record saying why it started*, so it takes
+        `next-turn` and keeps that true — joining a turn it has nothing to do
+        with would also share that turn's per-turn ceilings with it, and merge
+        two schedules due in one pass into one turn.
 
-        The one consequence, and it is the reason this is not simply better:
-        an interjection *joins the running turn* rather than starting one. No
-        `turn/start` is appended, so the transcript shows it inside that turn and
-        every **per-turn** ceiling keeps counting rather than resetting — a typed
-        line arriving at step nine of a ten-step budget gets one step and then the
-        turn ends as `blocked`. `CallBudget.turn_limit` carries that in full,
-        beside the setting it is about; per-*session* ceilings are unaffected,
-        and `/autonomous`'s `max_turns` is spent more slowly.
-
-        Both readings of "also this" are defensible; this one answers sooner,
-        which is what a person waiting on a fan-out is asking for. An idle root
-        still gets `followup`, because there is no turn to join and a new one is
-        exactly what a prompt to an idle agent means.
+        The consequence of `soonest`: an interjection *joins* the running turn, so
+        no `turn/start` is appended. What that costs a per-turn ceiling is on
+        `CallBudget.turn_limit`, beside the setting it is about, rather than a
+        third copy here.
         """
         root = await self.start(root_id)
         # The client's own list comes first because it is what that person just
@@ -1186,10 +1189,12 @@ class Supervisor:
         if taken:
             root.publish("session.staged", {"sessionId": root.id, "staged": []})
         message = prompt_message(text, [*attachments, *taken])
-        if root.agent.status == "idle":
+        if reach == "next-turn":
             root.agent.followup(message)
         else:
-            root.agent.steer(message)
+            # The loop decides mid-turn-or-not, because the phase is its own and
+            # a status read here could be stale by the time the verb lands.
+            root.agent.interject(message)
         # A full channel means the task has wakes pending and has not reached
         # them yet, so it will drain this message too — the inbox is the queue,
         # and this is only the doorbell.

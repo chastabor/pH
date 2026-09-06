@@ -493,29 +493,40 @@ class RlmChildProvider:
             log.debug("ph_rlm.subagents: %s has no live parent to own its drive", run_id)
             return False
         child.agent = self.ctx.agents.create(session, child.options, parent=parent)
-        # A fresh scope means a fresh ceiling: the filters applied at admission
-        # were disposed with the scope that settled, so a rehydrated child would
-        # otherwise come back holding the whole deployment (P4-13b).
-        child.run.scope = child.agent.ctx
-        if child.run.grant is not None:
-            child.run.grant.apply(self.ctx, child.agent.ctx)
-        # **And its workspace back**, which is not a convenience: a child that
-        # settled released its checkout, so one given a runtime again and no tree
-        # writes into whatever `ctx.fs` resolves without one — its *parent's*
-        # directory. A child narrowed at admission would come back unnarrowed on
-        # the one path nobody watches (E2, D21).
-        #
-        # It comes back to its *own* work, and that falls out of the tier rather
-        # than being arranged here: disposal commits the tree to the child's
-        # branch before removing the checkout, and `_add` attaches an existing
-        # branch rather than resetting it. So the same run id resolves to the
-        # same branch, and the second question starts where the first stopped.
-        await self._workspace(parent, child.agent, session, child.run.requested_access)
+        await self._runtime(child, parent, session)
         # A fresh gate, which the awaiter already on the run reads at await time —
         # its closure holds the `_Child`, not the old Event.
         child.finished = anyio.Event()
         await self._attach(child, parent, cause="rehydrated")
         return True
+
+    async def _runtime(self, child: _Child, parent: Any, session: Session) -> None:
+        """Everything a child needs re-established around a fresh agent.
+
+        **One list, because it has been discovered twice.** A child's agent is not
+        finished when `agents.create` returns: its scope must be handed back, its
+        ceiling re-applied, and its workspace re-taken — each from what the
+        admission recorded. `rehydrate` grew those late and one at a time; the
+        spawn path's own comment says so about the second (*"the ceiling is not
+        the provider's to remember — `rehydrate` below makes a second one, and
+        forgot"*), and the third arrived the same way. Neither omission failed
+        loudly: a child came back holding the whole deployment, and later one came
+        back writing into a tree that was not its own.
+
+        Its work comes back with it, and that falls out of the tier rather than
+        being arranged here: disposal commits the checkout to the child's branch
+        before removing it, and `_add` attaches an existing branch rather than
+        resetting one. The same run id resolves to the same branch, so a second
+        question starts where the first stopped.
+        """
+        # A fresh scope means a fresh ceiling: the filters applied at admission
+        # were disposed with the scope that settled (P4-13b).
+        child.run.scope = child.agent.ctx
+        if child.run.grant is not None:
+            child.run.grant.apply(self.ctx, child.agent.ctx)
+        # The access the **admission** recorded, never a caller's: nothing about
+        # being asked a second question may widen what the first was allowed.
+        await self._workspace(parent, child.agent, session, child.run.requested_access)
 
     def _awaiter(self, child: _Child) -> Any:
         async def wait() -> SubagentResult:

@@ -340,10 +340,21 @@ class GitWorktreeProvider:
             return
         code, _, err = await self._git(toplevel, "worktree", "add", "-b", ref, str(path), "HEAD")
         if code != 0:
-            # Both recoveries hang off the failure, which is what makes them
-            # free: a stale registration from a crash is *why* `add` refuses, and
-            # an existing branch is the other why. Pruning up front spent a
-            # subprocess per acquire to prepare for a case that had not happened.
+            # The recovery hangs off the failure, which is what keeps it free for
+            # the common case: a first acquire succeeds in one subprocess and
+            # pruning up front would have spent one on every one of them.
+            #
+            # **Attach before prune, because the branch-exists case stopped being
+            # rare.** Disposal commits the tree to the branch and removes only the
+            # checkout, and `branch -d` refuses an unmerged branch — so a child
+            # given its workspace back (`rehydrate`) or readmitted after a restart
+            # *always* lands here with the branch present and the checkout gone.
+            # Probing with `prune` + `_has_ref` first cost that path two extra
+            # subprocesses (~10 ms) to learn what trying would have told it.
+            code, _, err = await self._git(toplevel, "worktree", "add", str(path), ref)
+        if code != 0:
+            # Neither: a stale registration from a crash is the other reason
+            # `add` refuses, and it is the one worth a prune.
             await self._git(toplevel, "worktree", "prune")
             retry = (
                 ("worktree", "add", str(path), ref)
@@ -717,8 +728,41 @@ async def _lines(
 
 
 async def _git_dir(ctx: Context, root: Path) -> Path | None:
-    code, out, _ = await git(ctx, root, "rev-parse", "--absolute-git-dir")
-    return Path(out.strip()) if code == 0 and out.strip() else None
+    """This workspace's own git directory, or `None` if it does not have one.
+
+    **`--show-toplevel` is asked in the same breath, and the answer is refused
+    unless it is `root` itself.** `rev-parse` walks *up* from its cwd, so a
+    workspace that is not a git checkout does not fail — it finds whichever
+    repository happens to be an ancestor. Under `$PH_HOME` that is nothing on most
+    machines and a person's dotfiles repository on some, and the callers here
+    stage a tree and write objects: a checkpoint would have hashed one tier's
+    workspace into another repository's store, silently, on exactly the setup
+    nobody tests on.
+
+    Live since a `worktree`-kind workspace stopped implying a git checkout —
+    `workspace-jj` produces one — but the walk was always the bug, and this is the
+    depth it belongs at: one gate, shared by `tree_hash`, `restore` and the
+    checkpoint policy, rather than a provider test bolted onto each of them.
+
+    Both paths are resolved before comparing, because git answers with a real path
+    and `$PH_HOME` is often reached through a symlink.
+    """
+    code, out, _ = await git(
+        ctx, root, "rev-parse", "--path-format=absolute", "--git-dir", "--show-toplevel"
+    )
+    lines = out.split()
+    if code != 0 or len(lines) != 2:
+        return None
+    git_dir, toplevel = Path(lines[0]), Path(lines[1])
+    if await anyio.to_thread.run_sync(lambda: toplevel.resolve() != root.resolve()):
+        log.info(
+            "ph.seams.workspace_git: %s is not a git checkout — the nearest repository is "
+            "%s, which is not this workspace, so nothing here will touch it",
+            root,
+            toplevel,
+        )
+        return None
+    return git_dir
 
 
 def checkpoints(session: Session) -> dict[int, dict[str, Any]]:

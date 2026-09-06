@@ -224,27 +224,15 @@ class Config(WireModel):
     setting it).
     """
 
+    # No docstrings here, deliberately: each of these *is* another config model,
+    # and `ph config` takes an option's summary from the model that defines it
+    # when the field says nothing (`catalog._nested_doc`). A paragraph here would
+    # paraphrase the four classes below and go stale against them first, in the
+    # one command whose claim is that it cannot drift from the code.
     model_calls: ModelCallLimits = ModelCallLimits()
-    """How many times a turn and a session may call the model.
-
-    The ceiling that catches a loop the model cannot see it is in. `exit: end`
-    closes the turn and records why; `error` raises."""
     tool_calls: ToolCallLimits = ToolCallLimits()
-    """How many tool calls a turn and a session may make, in total and per tool.
-
-    A Code Mode dispatch counts as one (C1), so a cell calling four tools spends
-    four — the door a program uses is not a cheaper door."""
     children: ChildLimits = ChildLimits()
-    """How many subagents a turn and a session may spawn.
-
-    Refused before the provider is asked, so a denied spawn creates nothing. How
-    many run *at once* is a different question with a different answer — the work
-    seam's `concurrency`, which queues rather than refusing."""
     breaker: BreakerConfig = BreakerConfig()
-    """The consecutive-failure breaker: the one thing here that is on by default.
-
-    Counted per tool and reset by any success, so a tool that works
-    intermittently never trips it."""
 
 
 # -------------------------------------------------------------- the counting --

@@ -621,6 +621,41 @@ async def test_a_workspace_with_no_checkout_has_no_fingerprint(mount: Any, tmp_p
     assert await tree_hash(ctx, workspace) is None
 
 
+async def test_a_workspace_inside_someone_elses_repository_is_not_hashed_into_it(
+    mount: Any, tmp_path: Path
+) -> None:
+    """`rev-parse` walks **up**, and that is the bug this pins shut.
+
+    A `worktree`-kind workspace no longer implies a git checkout — `workspace-jj`
+    produces one — and a directory that is not a checkout does not make `rev-parse`
+    fail. It makes it find whichever repository happens to be an ancestor. Under
+    `$PH_HOME` that is nothing on most machines and a person's dotfiles repository
+    on some, and the answer feeds `git add -A` and `git write-tree`: a checkpoint
+    would have staged one tier's workspace into an unrelated repository's object
+    store, silently, on exactly the setup nobody tests on.
+
+    The workspace here is a plain directory *inside* a repository it has nothing to
+    do with, which is the shape of that accident. `None` is the only safe answer,
+    and it is the one that also keeps `restore` and the checkpoint policy from
+    reaching in.
+    """
+    ctx = await mount()
+    outer = await git_repo(ctx, tmp_path / "outer")
+    inside = outer / "nested" / "workspace"
+    inside.mkdir(parents=True)
+    (inside / "work.txt").write_text("belongs to another tier\n", encoding="utf-8")
+    workspace = replace(
+        await ctx.workspace.acquire(session_id="s1", agent_id="a1", base=tmp_path, access="write"),
+        root=inside,
+        kind="worktree",
+    )
+
+    assert await tree_hash(ctx, workspace) is None
+    code, out, _ = await git(ctx, outer, "status", "--porcelain")
+    assert code == 0 and "work.txt" not in out.split("nested")[0], "the outer repo was touched"
+    assert not (outer / ".git" / "ph-checkpoint-index").exists()
+
+
 # --- P6-28: a settled child's tree is the evidence ---------------------------
 
 

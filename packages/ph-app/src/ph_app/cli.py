@@ -780,11 +780,6 @@ def config(
     somebody scanning for a knob is reading past sixty of.
     """
     catalog = config_catalog()
-    composed = {
-        str(one.get("name")): one.get("config")
-        for one in profile_or_exit(profile, patch).dump()
-        if one.get("name")
-    }
     wanted = {name.strip() for name in row if name.strip()}
     if wanted:
         catalog = [entry for entry in catalog if entry["name"] in wanted]
@@ -797,6 +792,22 @@ def config(
     if as_json:
         emit(json.dumps(catalog, indent=2))
         return
+    # **After the JSON return, and after `--row`.** The profile column is a thing
+    # the *table* prints, so composing above this made `--json` pay ~6 ms to
+    # build a map it never reads — and, worse, gave a dump that depends on no
+    # profile a way to exit 2 over one.
+    #
+    # `enabled_rows`, not `dump()`: a dump keeps a row a profile switched off,
+    # flagged, so reading it as mounted told a person `disabled: true` was
+    # "mounted, the default stands" — which is the third state this command
+    # promises to tell apart, got wrong. `enabled_rows` is the predicate
+    # `Profile.mount` itself uses.
+    # `or {}` is load-bearing: a mounted row that configures nothing has
+    # `config is None`, which is a *different* answer from "not in this profile"
+    # and must not share its sentinel — absence is what carries that one.
+    composed = {
+        row.name: row.config or {} for row in profile_or_exit(profile, patch).enabled_rows()
+    }
     shown = [entry for entry in catalog if all_ or entry["config"] or entry.get("error")]
     if not shown:
         emit("no row matched")
@@ -812,35 +823,39 @@ def config(
         if error := entry.get("error"):
             table.add_row(entry["name"], "[red]unavailable[/red]", "", "", "", error)
             continue
-        mounted = entry["name"] in composed
-        set_here = composed.get(entry["name"]) or {}
         if not entry["config"]:
             table.add_row(entry["name"], "[dim]none[/dim]", "", "", "", "")
             continue
+        # `None`, not `{}`: a row this profile never mounts is a different answer
+        # from one it mounts and says nothing about, and one lookup carries both.
+        set_here = composed.get(entry["name"])
         for index, field in enumerate(entry["config"]):
+            first = index == 0
             table.add_row(
-                entry["name"] if index == 0 else "",
+                entry["name"] if first else "",
                 field["name"],
                 field["type"],
                 # Required has no default, and printing one would invent a
                 # value a profile must actually supply.
                 "[bold]required[/bold]" if field["required"] else (field["default"] or ""),
-                _in_profile(field["name"], mounted=mounted, set_here=set_here, first=index == 0),
+                _in_profile(field["name"], set_here, first=first),
                 field["doc"],
             )
     console.print(table)
 
 
-def _in_profile(name: str, *, mounted: bool, set_here: Mapping[str, Any], first: bool) -> str:
+def _in_profile(name: str, set_here: Mapping[str, Any] | None, *, first: bool) -> str:
     """What the composed profile says about one option.
 
     Three answers, and they are genuinely different: the row is not in this
     profile at all, so nothing here applies; the row is mounted and says nothing
     about this option, so the default stands; or the profile set it, and that is
-    what a run uses. Blank for the first case past its first line, because the
-    fact is the *row's* and repeating it once per option is noise.
+    what a run uses. `None` carries the first of those, so the caller keeps one
+    lookup rather than two facts to hold in step. Blank for that case past its
+    first line, because it is the *row's* answer and repeating it once per option
+    is noise.
     """
-    if not mounted:
+    if set_here is None:
         return "[dim]row not mounted[/dim]" if first else ""
     if name not in set_here:
         return "[dim]—[/dim]"

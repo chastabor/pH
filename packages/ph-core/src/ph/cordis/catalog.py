@@ -99,6 +99,26 @@ def render_annotation(annotation: Any) -> str:
     return f"{name}[{rendered}]" if rendered else name
 
 
+def _nested_doc(annotation: Any) -> str:
+    """A nested config model's own docstring, for a field that adds nothing.
+
+    `_fields` does not descend, so an option whose type is another model is one
+    line in the table and its sub-fields live inside the rendered default. Left
+    to itself that line says *nothing*, and the obvious repair — a docstring on
+    the field restating the model — is the copy this catalog exists to avoid:
+    `ph config`'s whole claim is that it cannot drift from the code, and a
+    hand-written paragraph next to the prose it paraphrases drifts first.
+
+    So a field with nothing of its own to say borrows the definition's summary.
+    A field that *does* have a docstring still wins: there are things worth
+    saying about a knob that are not true of its type.
+    """
+    model = annotation if inspect.isclass(annotation) else None
+    if model is None or not issubclass(model, BaseModel):
+        return ""
+    return " ".join((model.__doc__ or "").split())
+
+
 def _fields(model: type[BaseModel]) -> list[dict[str, Any]]:
     """One row per config field: the name a profile writes, and what it takes."""
     docs = field_docs(model)
@@ -117,7 +137,7 @@ def _fields(model: type[BaseModel]) -> list[dict[str, Any]]:
                 "default": None
                 if required or field.default is PydanticUndefined
                 else repr(field.default),
-                "doc": field.description or docs.get(name, ""),
+                "doc": field.description or docs.get(name) or _nested_doc(field.annotation),
             }
         )
     return fields

@@ -127,8 +127,18 @@ out of its delta first, and `/workspaces` asks the seam rather than asking which
 tier it is talking to.
 
 Shipped providers: `workspace-shared` (the floor, always available),
-`workspace-git-worktree` (the `worktree` tier), `workspace-agentfs` (a
-copy-on-write overlay), `workspace-readonly-scratch` (the `sandbox` rung's kind).
+`workspace-git-worktree` (the `worktree` tier), `workspace-jj` (the same tier over
+Jujutsu), `workspace-agentfs` (a copy-on-write overlay),
+`workspace-readonly-scratch` (the `sandbox` rung's kind).
+
+`workspace-jj` and `workspace-git-worktree` occupy one rung and differ in what a
+child inherits. A git worktree branches from the parent's last **commit**, and a
+live parent commits only at disposal — so for the whole of a session a child
+starts from context the parent has moved past. jj's working copy *is* a commit, so
+the same spawn starts from the parent's work in progress. Colocation keeps the
+result a real git branch, which is what makes this a provider swap rather than a
+migration. It never converts a repository: a base jj does not already manage is
+declined, and the binary being absent declines the row at mount.
 
 The seam keeps the bookkeeping — which agent, which session, how to end it — so a
 provider cannot half-implement the lifecycle.
