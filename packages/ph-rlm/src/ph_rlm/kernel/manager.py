@@ -60,8 +60,9 @@ from ph.seams.code_runtime import (
     CodeRunResult,
 )
 from ph.seams.diagnostics import Diagnostic, contribute
-from ph.seams.subprocess import scrub_env
-from ph.seams.workspace import workspace_of
+from ph.seams.sandbox import ConfinedArgv, SandboxPolicy
+from ph.seams.subprocess import first_line, scrub_env
+from ph.seams.workspace import workspace_of, workspace_policy
 from ph.session.json import thaw_json
 from ph.tools.code_mode import CodeRunFailure, ToolCallError
 from ph.tools.errors import error_message
@@ -85,6 +86,13 @@ from .venv import InterpreterMode, RuntimeEnvironment, resolve_interpreter
 __all__ = ["RESET_NOTICE", "Config", "Kernel", "KernelLimits", "PythonCodeRuntime", "apply"]
 
 log = logging.getLogger("ph_rlm.kernel.manager")
+
+STDERR_GRACE = 2.0
+"""How long `_stderr_so_far` waits for a child that has not closed its stderr.
+
+Named because it is reachable: the paths that quote a failed child's words include
+one where the child is still running (see `_stderr_so_far`), and an unnamed literal
+in a `move_on_after` reads as though nobody expected to wait at all."""
 
 RESET_NOTICE = "<runtime_reset>"
 """Prefixed to the first result after a kernel died.
@@ -197,8 +205,35 @@ class Kernel:
     **This is what makes the `worktree` tier bound authored code rather than
     merely observe it.** A cell's `open("notes.txt", "w")` reaches no policy
     waterfall by construction (N1), but it does resolve against this directory,
-    so a relative write lands in the agent's own checkout. An absolute path still
-    escapes, and only the `sandbox` tier refuses that (§4.8, E13)."""
+    so a relative write lands in the agent's own checkout. An absolute path escapes
+    *this* mechanism, and only confinement refuses it (§4.8, E13) — which is
+    `confine` below, when a backend is there to do it."""
+    confine: Callable[[tuple[str, ...]], ConfinedArgv] | None = None
+    """How to bound this child at the kernel, or `None` where nothing can.
+
+    **This is what makes `sandbox` mean something for authored code.** `cwd` above
+    bounds a *relative* write by putting the child in the agent's tree; only this
+    refuses `open("/etc/passwd", "w")` from inside a cell, which §4.8 names as the
+    one thing no tier below `sandbox` can do. Until it existed, `permissions-fs`
+    told operators that "a sandbox provider bounds what a code cell can reach
+    directly" while the kernel was spawned unconfined — the sentence is true now.
+
+    Supplied by the runtime rather than resolved here, and resolved per *kernel*,
+    because the writable set is the agent's own workspace and scratch. `None` when
+    no backend is mounted or the agent has no workspace, which is the same
+    condition `ctx.shell` declines on and for the same reason: the seam refuses
+    rather than passing through, so asking for confinement that cannot be given
+    would turn every cell into a `SANDBOX_UNAVAILABLE` denial."""
+    confined: ConfinedArgv | None = None
+    """What `confine` produced, once this kernel has started.
+
+    One field rather than a fact copied out of it per reader: `_interrupt` needs
+    `forwards_signals` — which is *not* the same question as "was I confined at
+    all", since `bwrap` puts a wrapper and a PID namespace in the way while
+    `sandbox-exec` execs its target — and reporting a refusal needs the effective
+    `policy` to know whether the network was even in play. Deriving either from
+    "confinement happened" would drop a working cancel route on macOS and misread
+    an outage as a denial."""
     env: Mapping[str, str] = field(default_factory=dict)
     """Extra environment for the child, from `workspace.env`.
 
@@ -251,7 +286,7 @@ class Kernel:
         self._buffer.clear()
         self._scanned = 0
         host_end, child_end = socket.socketpair()
-        argv = [str(self.environment.python), "-m", "ph_runtime"]
+        argv = (str(self.environment.python), "-m", "ph_runtime")
         child_fd = child_end.fileno()
         # `scrub_env`, not `os.environ`: this is the child the seam's own
         # docstring describes — "a child runs code the model wrote, so it does
@@ -265,9 +300,19 @@ class Kernel:
                 FD_ENV: str(child_fd),
             }
         )
+        # **fd 3 crosses the boundary**, which is the property that makes confining
+        # this child possible at all: `bwrap` passes an inherited descriptor
+        # through to the command it execs, and so does the `sh -c … exec "$@"` the
+        # egress shim wraps around it. Measured on both, with the socket live at
+        # the far end — see `test_kernel_confinement.py`.
+        spawn: tuple[str, ...] = argv
+        if self.confine is not None:
+            confined = self.confine(argv)
+            spawn = confined.argv
+            self.confined = confined
         try:
             self._process = await anyio.open_process(
-                argv,
+                list(spawn),
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -285,7 +330,10 @@ class Kernel:
         self._alive = True
         pid = self._process.pid
         if pid is not None:
-            self.journal.record(pid=pid, argv=argv, namespace=self.namespace)
+            # What is actually running, wrapper included: the journal verifies an
+            # orphan is ours before killing it, and the pid it holds is the
+            # wrapper's.
+            self.journal.record(pid=pid, argv=spawn, namespace=self.namespace)
 
         await self._send(
             self.limits.to_boot(
@@ -296,14 +344,40 @@ class Kernel:
             with anyio.fail_after(self.boot_timeout):
                 fault = await self._await_boot_ack()
         except TimeoutError as timeout:
+            # Quoted here too, and this is the branch that catches a wrapper which
+            # *hangs* rather than exits — the egress shim waiting on its readiness
+            # poll, a bind that never completes. Read before `aclose`, which drops
+            # the process this reads from.
+            said = first_line(await self._stderr_so_far())
             await self.aclose()
             raise KernelDied(
                 f"the runtime did not report ready within {self.boot_timeout}s "
-                f"({self.environment.describe()})"
+                f"({self.environment.describe()})" + (f": {said}" if said else "")
             ) from timeout
         if fault is not None:
             await self.aclose()
             raise KernelDied(fault)
+
+    async def _stderr_so_far(self) -> str:
+        """One read of whatever the child has already written to stderr.
+
+        Bounded twice, because neither bound is redundant. `STDERR_GRACE` covers a
+        child that is still *running* — the boot timeout reached this, and so does
+        a frame flood, where `_recv_line` gives up on a child that is alive and
+        writing — and the cap is the same one `_drain` applies to a stream the
+        model can influence. `EndOfStream` on the ordinary "child died quietly"
+        path is a normal outcome, not a failure, which is why everything is
+        suppressed: this runs while reporting another failure and must not replace
+        it with its own.
+        """
+        process = self._process
+        if process is None or process.stderr is None:
+            return ""
+        with suppress(Exception), anyio.move_on_after(STDERR_GRACE):
+            return (await process.stderr.receive(self.limits.max_log_bytes)).decode(
+                "utf-8", "replace"
+            )
+        return ""
 
     async def _rehydrate(self) -> None:
         """Hand a freshly started kernel the namespace the log remembers (D17).
@@ -332,9 +406,17 @@ class Kernel:
         while True:
             line = await self._recv_line()
             if line is None:
+                # **The child's own words**, which this used to throw away. A guest
+                # that cannot start says why on stderr — a missing module, an
+                # interpreter that will not run, `bwrap` refusing a bind source —
+                # and without it every one of those reads as the same sentence.
+                # The same argument `probe_sandbox` makes about quoting a backend:
+                # "the runtime did not start" is true and useless.
+                said = first_line(await self._stderr_so_far())
+                because = f": {said}" if said else ""
                 return (
                     "the runtime exited before reporting ready; "
-                    f"{self.environment.describe()} could not start ph_runtime"
+                    f"{self.environment.describe()} could not start ph_runtime{because}"
                 )
             frame = decode(line)
             if frame is None:
@@ -448,8 +530,29 @@ class Kernel:
         callback. Both are cooperative and both need the guest's loop to be
         running, so a cell spinning in Python answers neither — that is what the
         grace period and `_kill_unresponsive` are for.
+
+        **The signal route is dropped when it would not reach the guest, and that
+        is a refusal to make cancellation destructive.** Under `bwrap`,
+        `self._process` is the wrapper, and it does not forward signals — measured,
+        it dies of `SIGINT` itself (`rc=-2`), taking the PID namespace and the
+        agent's whole namespace with it. So sending it would turn every "stop this
+        cell" into "lose everything the cell had", which is the outcome the ladder's
+        last rung exists to avoid rather than to reach first.
+
+        Asked of `ConfinedArgv.forwards_signals` rather than of "am I confined":
+        `sandbox-exec` execs its target and signals land, so a backend that does
+        forward keeps both routes.
+
+        What is lost is narrower than it looks. The guest installs `SIGINT` through
+        `loop.add_signal_handler`, so it arrives as an ordinary loop callback —
+        the same loop the `cancel` frame's reader runs on — and the two therefore
+        cover the *same* situation. The signal's independent value is as a backup
+        for a wedged channel with a live loop, and `_kill_unresponsive` still
+        covers that after the grace period.
         """
         await self._send(CancelFrame(id=run_id))
+        if self.confined is not None and not self.confined.forwards_signals:
+            return
         process = self._process
         if process is not None and process.returncode is None:
             with suppress(ProcessLookupError, OSError):
@@ -723,6 +826,15 @@ class PythonCodeRuntime:
     `acme_websearch`, and `rlm-skills-python` is what knows both."""
     workspaces: Callable[[str], Any] | None = None
     """Agent id → its `Workspace`, set by the row (D21). See `workspace_for`."""
+    sandbox: Callable[[], Any] | None = None
+    """The `ctx.sandbox` seam, asked for **when a kernel starts** rather than held.
+
+    A resolver rather than the seam itself, for the reason `workspaces` is one: a
+    value read at mount would be `None` for every kernel this runtime ever spawns
+    if the backend row is layered after this one, and `FsPermissions.ctx` is the
+    same shape for the same reason. Absent entirely — a profile with no sandbox
+    seam at all — leaves cells bounded by `cwd` and nothing else, which is what
+    they were before."""
     boot_timeout: float = 30.0
     shutdown_grace: float = 5.0
     cancel_grace: float = 2.0
@@ -765,7 +877,33 @@ class PythonCodeRuntime:
             ("interpreter", interpreter),
             ("per-child limits", f"{self.limits.cpu_seconds}s CPU, {gib:.3g} GiB address space"),
             ("live kernels", str(len(self._kernels))),
+            ("cells confined by", self._confinement()),
         ]
+
+    def _confinement(self) -> str:
+        """Whether authored code is bounded at the kernel, and by what.
+
+        Its own row in `ph doctor` because it is the difference between a cell that
+        can write `/etc` and one that cannot, and because it is *conditional* — on a
+        backend, and on the agent having a workspace. Read from the kernels that are
+        actually running where there are any, so this reports what is true rather
+        than what would be true.
+
+        **It reports the weakest live kernel, not the strongest.** A first draft
+        joined the set of backends that had confined something, which read as
+        "bwrap — every live kernel's writes are bounded" in the very case that
+        sentence is false: one agent with a workspace and one without. There is only
+        ever one provider, so there was never a plurality to join — only a way to
+        overstate.
+        """
+        seam = None if self.sandbox is None else self.sandbox()
+        if seam is None or seam.provider is None:
+            return "nothing — no sandbox backend, so a cell's raw open() is bounded by cwd only"
+        if not self._kernels:
+            return "a backend is mounted; the next kernel to start will be bounded by it"
+        if any(kernel.confine is None for kernel in self._kernels.values()):
+            return "nothing — these kernels started without a workspace to bound them to"
+        return f"{seam.provider.backend} — every live kernel's writes are bounded at the kernel"
 
     async def environment(self) -> RuntimeEnvironment:
         """Resolve the interpreter once, on first use.
@@ -815,7 +953,65 @@ class PythonCodeRuntime:
         if kernel is None:
             kernel = await self._acquire(namespace)
         token = request.cancel_scope if isinstance(request.cancel_scope, CancelToken) else None
-        return await kernel.run(request.program, request.bindings, token)
+        result = await kernel.run(request.program, request.bindings, token)
+        self._note_denial(kernel, namespace, result)
+        return result
+
+    def _note_denial(self, kernel: Kernel, namespace: str, result: CodeRunResult) -> None:
+        """Record a boundary the cell hit, the way `ctx.shell` records one.
+
+        **Here rather than in `Kernel`**, which holds a confiner and no seam: this is
+        where both are in hand. The seam owns what counts as a refusal
+        (`report_denial`), so a cell that writes `/etc/passwd` now leaves the same
+        `sandbox/denied` record — and the same `/sandbox allow path` line — that the
+        identical refusal from `tool-bash` leaves. Without it the kernel had adopted
+        the boundary and not the rule, and the asymmetry was visible inside one
+        change: a *network* refusal was already recorded, because the proxy is told
+        which agent it is refusing.
+
+        Only for a run that failed, which is `report_denial`'s own requirement: the
+        error is where `OSError: [Errno 30] Read-only file system` lands, and a cell
+        that printed those words and succeeded was refused nothing. The namespace is
+        the agent id, so the record lands in the transcript whoever wrote the cell
+        is reading.
+        """
+        confined = kernel.confined
+        if confined is None or result.error is None:
+            return
+        seam = None if self.sandbox is None else self.sandbox()
+        if seam is not None:
+            seam.report_denial(confined, (result.error, result.logs), namespace)
+
+    def confiner(
+        self, namespace: str, workspace: Any = None
+    ) -> Callable[[tuple[str, ...]], ConfinedArgv] | None:
+        """How to bound this agent's kernel, or `None` where nothing can.
+
+        **The same condition `ctx.shell` applies, deliberately.** A command the
+        harness runs for an agent and a cell the agent writes are the same kind of
+        thing — somebody else's code, in that agent's workspace — so they get the
+        same boundary from the same `workspace_policy`, and a deployment cannot end
+        up with `tool-bash` confined and `run_code` not. It is *not* gated on the
+        containment tier for the same reason: `ctx.shell` confines at every rung
+        where a backend exists, and `ph doctor`'s containment section already says
+        so in the sentence about commands the harness wraps.
+
+        `None` when there is no backend, none that enforces, or no workspace to be
+        the writable root — never a passthrough, because the seam refuses rather
+        than pretending and a caller must not mistake absence for confinement.
+
+        `workspace` is the one `_acquire` has already resolved; omitted, it is looked
+        up. Two lookups for one spawn also logged the failure warning twice.
+        """
+        seam = None if self.sandbox is None else self.sandbox()
+        if workspace is None:
+            workspace = self.workspace_for(namespace)
+        if seam is None or not seam.available or workspace is None:
+            return None
+        policy: SandboxPolicy = workspace_policy(workspace)
+        # `agent=` so a host the egress proxy refuses is recorded in *this* agent's
+        # session, which is the transcript whoever wrote the cell is reading.
+        return partial(seam.confine, policy=policy, agent=namespace)
 
     async def _acquire(self, namespace: str) -> Kernel:
         workspace = self.workspace_for(namespace)
@@ -826,6 +1022,7 @@ class PythonCodeRuntime:
             journal=self.journal,
             cwd=None if workspace is None else workspace.root,
             env={} if workspace is None else workspace.env,
+            confine=self.confiner(namespace, workspace),
             snapshots=self.snapshots,
             skills=self.skill_modules,
             boot_timeout=self.boot_timeout,
@@ -945,6 +1142,10 @@ async def apply(ctx: Context, config: Config) -> None:
     # acquired after the agent exists (P4-08) and a value read at mount would be
     # `None` for every kernel this runtime ever spawns.
     runtime.workspaces = partial(workspace_of, ctx)
+    # Asked when a kernel starts, not now: a profile may layer its backend after
+    # this row, and a seam read here would be the wrong answer for exactly that
+    # profile — `workspace-readonly-scratch` and `permissions-fs` both say so.
+    runtime.sandbox = partial(ctx.get, "sandbox")
 
     contribute(
         ctx, Diagnostic(id="code-runtime", title="Code runtime", read=runtime.describe, order=40)

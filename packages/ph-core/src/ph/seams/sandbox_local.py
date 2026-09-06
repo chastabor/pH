@@ -268,7 +268,13 @@ class Bubblewrap:
                     parts += ["--unsetenv", name]
                 argv = egress_shim(argv, policy.egress)
         return ConfinedArgv(
-            argv=(*parts, "--", *argv), enforcement=self.enforcement, backend=self.backend
+            argv=(*parts, "--", *argv),
+            enforcement=self.enforcement,
+            backend=self.backend,
+            # Measured: `SIGINT` to this argv kills `bwrap` itself (`rc=-2`), and
+            # `--unshare-pid` means the namespace goes with it. A caller meaning to
+            # interrupt would be demolishing instead.
+            forwards_signals=False,
         )
 
     def read_denial(self, output: str, *, network: bool) -> Denial | None:
@@ -392,6 +398,11 @@ class Seatbelt:
             argv=(self.backend, "-p", seatbelt_profile(policy), *wrapped),
             enforcement=self.enforcement,
             backend=self.backend,
+            # `sandbox-exec` execs its target and unshares nothing, so a signal
+            # lands on the command. Unverified like the rest of this backend, and
+            # the default anyway — stated because its sibling above states the
+            # opposite and silence would read as "nobody considered it".
+            forwards_signals=True,
         )
 
 

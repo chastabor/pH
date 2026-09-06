@@ -8,8 +8,7 @@ mechanism, and only one of the three lives in the guest's gift:
 
 * **Linux** — `prctl(PR_SET_PDEATHSIG, SIGKILL)`, set here because it is a
   property of *this* process. It is armed relative to the parent that was
-  current when it was set, so the check right after it is not paranoia: if the
-  host died during spawn, the signal would never come.
+  current when it was set.
 * **macOS** — no equivalent exists, so a daemon thread watches `os.getppid()`
   and `os._exit`s when it changes. This is what prime-agent's fork-server does,
   for this reason.
@@ -35,14 +34,33 @@ _PR_SET_PDEATHSIG = 1
 
 
 def die_with_parent() -> str:
-    """Arrange to not outlive the host. Returns the mechanism that took effect."""
+    """Arrange to not outlive the host. Returns the mechanism that took effect.
+
+    **There is deliberately no "am I already an orphan" check here**, and removing
+    one is what let the guest run confined at all.
+
+    It read `os.getppid() == 1` and `os._exit(0)`, guarding the window between the
+    fork and `prctl`: a host that died in it would never send the signal. The guard
+    was unnecessary and, under a PID namespace, always wrong.
+
+    *Unnecessary*, because of where this is called from. `_serve` reads the boot
+    frame **before** calling this, and returns on `None` — so reaching this line
+    means a frame was just read from the host, which is proof it was alive after
+    the spawn. A host that dies after that closes the socket, `Channel.receive`
+    returns `None`, and `serve` returns; that is the same mechanism relied on for
+    every later death, and `channel.send`'s own comment already points at it.
+
+    *Wrong*, because inside `bwrap --unshare-pid` this process's parent **is** PID
+    1 — the sandbox's init — which is the healthy arrangement rather than evidence
+    of an orphan. So the check fired on every confined start and the guest exited
+    silently, with no stderr, before sending `boot-ack`; the host could only report
+    that the runtime "exited before reporting ready". Dying with the host is the
+    sandbox's job there and it is already arranged: `bwrap` holds
+    `--die-with-parent` against the host, and the kernel tears down every process
+    in the namespace when its init goes.
+    """
     if sys.platform.startswith("linux"):
         if _set_pdeathsig():
-            # Armed against the parent as it was a moment ago. If the host died
-            # in between, no signal is coming and this is the only chance to
-            # notice.
-            if os.getppid() == 1:
-                os._exit(0)
             return "pdeathsig"
     if sys.platform == "win32":  # pragma: no cover — the host owns the Job Object
         return "job-object"

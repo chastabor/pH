@@ -29,8 +29,21 @@ not add one, so this has no caller yet and is tested directly.
 
 **What this does not cover (E9).** These rules bound *seam-mediated* access. A
 model-authored `open(path, "w")` inside a code cell, or a `subprocess` that shells
-out, never fires an intent and is not touched — N1, and no wording here should
-suggest otherwise. When no confining provider is mounted the row says so at mount
+out, never fires an intent and is not touched by *these rules* — N1, and no
+wording here should suggest otherwise. What bounds those is the rung below the
+rules: `code-runtime-python` confines the kernel itself, so a cell's raw `open()`
+is refused by the OS rather than by a rule that never saw it — which is what
+`BOUNDED_REACH` has always promised and, until the kernel was actually wrapped,
+nothing delivered.
+
+**These two do not turn on together, and this sentence must not imply they do.**
+`confined` below is `enforcement_of(ctx) == "full"`; the kernel is confined when a
+backend is *available* and the acting agent has a workspace. So a `partial`
+backend, or an agent with no workspace, is a deployment where one is true and the
+other is not. `ph doctor`'s Code runtime section reports what is actually in force
+per kernel; this row speaks only for these rules.
+
+When no confining provider is mounted the row says so at mount
 and carries the sentence on `ctx.fs_permissions.reach`, so the statement toggles
 with the sandbox rather than being a paragraph in a README that is wrong half the
 time.

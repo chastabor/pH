@@ -249,7 +249,9 @@ class ContainmentService:
                     "confined commands",
                     f'a sandbox backend is mounted and enforces "{confinement}"; every '
                     "command the harness wraps is bounded by the kernel, whatever the "
-                    "workspace rows above say about the tree",
+                    "workspace rows above say about the tree. Whether *code cells* are "
+                    "is a further question — it needs the agent to have a workspace — "
+                    "and the Code runtime section answers it",
                 )
             )
         rows.append(("strict", "yes" if self.strict else "no"))

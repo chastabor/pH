@@ -134,7 +134,10 @@ class ShellService:
         )
         outcome = await self.ctx.subprocess.run(spec, scope=scope)
         if confined is not None and outcome.exit_code != 0:
-            self._report_denial(confined, outcome, agent_id)
+            # stderr first: that is where these sentences come from, and passing the
+            # streams separately avoids joining up to 16 MiB per confined command.
+            # Only for a command that failed — see `report_denial`.
+            self.ctx.sandbox.report_denial(confined, (outcome.stderr, outcome.stdout), agent_id)
         return ShellResult(
             exit_code=outcome.exit_code,
             stdout=outcome.stdout,
@@ -146,32 +149,6 @@ class ShellService:
             cwd=str(cwd),
             confined_by=confined_by,
         )
-
-    def _report_denial(self, confined: ConfinedArgv, outcome: Any, agent: str | None) -> None:
-        """Put what the kernel refused in the log, read from the command's own words.
-
-        The kernel refuses in silence — `bwrap` reports nothing when a write hits
-        the read-only tree or a `connect()` finds no route — so the command's
-        output is the only account there is. **Which sentences count is the
-        backend's** (`DenialReader`), not this seam's and not this module's: they
-        are facts about one kernel's phrasing, and asking the seam keeps this
-        caller from learning which backend answered.
-
-        **Only for a command that failed**, which is the caller's half of the
-        signature table's own claim that it matches nothing an ordinary command
-        prints on success. A `grep` that finds the words "Read-only file system"
-        and exits 0 has not been refused anything.
-
-        stderr first and stdout only if it says nothing, rather than one joined
-        string: these sentences come from stderr, and joining allocated a fresh
-        copy of up to 16 MiB on every confined command.
-        """
-        network = bool(confined.policy.network) if confined.policy is not None else False
-        for stream in (outcome.stderr, outcome.stdout):
-            denial = self.ctx.sandbox.read_denial(stream, network=network)
-            if denial is not None:
-                self.ctx.sandbox.record_denial(denial, agent=agent)
-                return
 
 
 @plugin("shell-local", inject=["subprocess"])

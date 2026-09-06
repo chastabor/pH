@@ -448,6 +448,26 @@ def test_the_signatures_are_this_backends_platform_and_not_the_seams() -> None:
     assert not hasattr(Seatbelt(), "read_denial")
 
 
+def test_the_wrapper_dies_with_the_host_and_says_whether_signals_reach_the_child() -> None:
+    """Two flags another package now depends on, pinned where they are produced.
+
+    `--die-with-parent` is what the guest's `die_with_parent` leans on: it stopped
+    checking whether it had been orphaned, on the argument that inside a PID
+    namespace the sandbox propagates the host's death instead. That argument is only
+    true while this flag is here, and nothing asserted it.
+
+    `forwards_signals` is the other half: `bwrap` does *not* forward, measured — it
+    dies of `SIGINT` itself and takes the namespace with it — so a caller with a
+    cooperative stop of its own reads this rather than guessing from "am I
+    confined". `sandbox-exec` execs its target and does forward.
+    """
+    confined = Bubblewrap().confine(("python",), _policy())
+    assert "--die-with-parent" in confined.argv
+    assert "--unshare-pid" in confined.argv, "the namespace the teardown argument rests on"
+    assert confined.forwards_signals is False
+    assert Seatbelt().confine(("python",), _policy()).forwards_signals is True
+
+
 def test_the_proxy_url_carries_no_user_when_there_is_no_agent() -> None:
     assert proxy_url(_egress(agent=None)) == f"http://127.0.0.1:{EGRESS_PORT}"
     assert (

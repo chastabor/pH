@@ -403,6 +403,23 @@ class ConfinedArgv:
     argv: tuple[str, ...]
     enforcement: Enforcement
     backend: str
+    forwards_signals: bool = True
+    """Whether a signal sent to this argv reaches the command inside it.
+
+    **Declared, because it cannot be discovered by trying.** `bwrap` does not
+    forward: it dies of `SIGINT` itself and, having unshared the PID namespace,
+    takes everything inside down with it — so a caller that signals a confined
+    child to *interrupt* it destroys it instead. `sandbox-exec` execs its target
+    and adds no namespace, so signals land normally.
+
+    A caller with a cooperative stop of its own (the RLM kernel's `cancel` frame)
+    reads this to decide whether the signal is a second route or a demolition. It
+    is `enforcement`'s shape and for `enforcement`'s stated reason: a property only
+    discoverable by confining something and seeing what happens is not one a caller
+    can act on beforehand.
+
+    Defaults to `True` — the unwrapped truth — so a backend that adds no process
+    between the caller and its child says nothing."""
     policy: SandboxPolicy | None = None
     """The *effective* policy the backend enforced — the caller's request with the
     deployment's allowances merged in. Stamped by the seam, so a caller reading the
@@ -662,6 +679,31 @@ class SandboxSeam:
         return replace(confined, policy=effective)
 
     # --------------------------------------------------------------- denials --
+
+    def report_denial(
+        self, confined: ConfinedArgv, streams: Sequence[str], agent: str | None
+    ) -> None:
+        """Read what a confined command's own words say was refused, and record it.
+
+        **The seam's rule, in the seam.** This module's docstring states that a
+        refusal is a record rather than a silence, and `ctx.shell` had the only
+        implementation — so when the RLM kernel became the second thing confined it
+        adopted the boundary and not the rule: a cell refused by the kernel produced
+        a traceback with no `/sandbox allow path` line, while the identical refusal
+        from `tool-bash` produced one. One statement, both callers.
+
+        `streams` are tried in order and the first refusal wins; pass stderr before
+        stdout, which is where these sentences come from. **Only pass the output of
+        a command that actually failed** — the signatures match nothing an ordinary
+        command prints on success, so a `grep` that finds "Read-only file system"
+        and exits 0 has not been refused anything.
+        """
+        network = bool(confined.policy.network) if confined.policy is not None else False
+        for stream in streams:
+            denial = self.read_denial(stream, network=network)
+            if denial is not None:
+                self.record_denial(denial, agent=agent)
+                return
 
     def read_denial(self, output: str, *, network: bool) -> Denial | None:
         """What the mounted backend recognises in a confined command's output.

@@ -44,7 +44,7 @@ something would make that check "run a command and see", which is not something 
 refusal-to-start can do. **`partial` is a refusal under strict, not a
 downgrade.**
 
-## What a confined command may reach, said once (P6-38)
+## What a confined command may reach (P6-38)
 
 The workspace and its scratch are writable; everything else is the deployment's
 to allow, and it says so in one place. `sandbox-allow` registers an `Allowances`
@@ -197,6 +197,40 @@ shim's port, filled in by the seam — and builds the shim around the command;
 `sandbox-local` is the shipped one (bwrap, verified against a real kernel).
 **Landlock and Seatbelt are still owed** — the Seatbelt profile is written blind
 and deny-by-default so a rule somebody forgot fails closed.
+
+## What is confined
+
+Everything the harness spawns for an agent, from one policy:
+
+| spawned by | bounded to |
+|---|---|
+| `ctx.shell` (`!!`, `tool-bash`, an autonomous gate) | the agent's workspace and scratch |
+| `code-runtime-python` (the Python kernel behind `run_code`) | the same, per agent |
+
+Both build `workspace_policy(workspace)`, so a deployment cannot end up with one
+confined and the other not, and both decline the same way — no backend, or no
+workspace to be the writable root, means no confinement rather than a passthrough.
+Neither is gated on the containment tier: `ph doctor`'s containment section says
+so in its own row, because the tree an agent works in and the commands the harness
+wraps are genuinely different boundaries.
+
+**Confining the kernel is what makes E9's sentence true.** `permissions-fs` bounds
+tool calls through `ctx.fs` and tells operators that "a sandbox provider bounds
+what a code cell can reach directly" — which was aspirational while the kernel was
+spawned unwrapped. A cell's raw `open()` still reaches no rule, by construction
+(N1); it is now refused by the OS instead.
+
+Two consequences worth knowing:
+
+- **fd 3 crosses the boundary.** The kernel's framed channel is an inherited
+  descriptor, and both `bwrap` and the egress shim's `sh -c … exec "$@"` pass it
+  through. Measured, because a wrapper that closed it would look like a dead
+  runtime rather than a lost channel.
+- **Cancelling a confined cell has one cooperative route, not two.** `bwrap` does
+  not forward signals — it dies of `SIGINT` itself and takes the namespace with it
+  — so the kernel sends the `cancel` frame and skips the signal. The guest installs
+  `SIGINT` as a loop callback anyway, so both routes always needed the same running
+  loop; what remains is the frame, then the kill.
 
 ## What only this seam can claim
 
