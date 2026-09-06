@@ -1213,6 +1213,7 @@ source = { editable = "packages/ph-core" }
 dependencies = [
     { name = "anyio" },
     { name = "croniter" },
+    { name = "filelock" },
     { name = "pydantic" },
     { name = "pyturso" },
     { name = "pyyaml" },
@@ -1228,6 +1229,7 @@ otel = [
 requires-dist = [
     { name = "anyio", specifier = ">=4.4" },
     { name = "croniter", specifier = ">=3.0" },
+    { name = "filelock", specifier = ">=3.15" },
     { name = "opentelemetry-exporter-otlp-proto-http", marker = "extra == 'otel'", specifier = ">=1.27" },
     { name = "opentelemetry-sdk", marker = "extra == 'otel'", specifier = ">=1.27" },
     { name = "pydantic", specifier = ">=2.9" },

@@ -35,13 +35,12 @@ from typing import Any
 import anyio
 from anyio.abc import TaskGroup
 from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
-from filelock import FileLock, Timeout
 
 from ph.agent.types import AgentOptions
 from ph.cordis import Context, Profile
 from ph.llm.types import AttachmentRef
 from ph.paths import resolve_roots
-from ph.persistence import resume_session, resumption_of
+from ph.persistence import resumption_of
 from ph.seams.schedule import Schedule, state_to_wire
 from ph.seams.schedule_index import Appointment, ScheduleIndex
 from ph.seams.subagents import child_is_live
@@ -52,7 +51,7 @@ from ph.tools.errors import error_message
 
 from ..attach import Tray, prompt_message
 from ..protocol import Refusal, cursor_of
-from ..runtime import mounted
+from ..runtime import mounted, open_session
 from ..sessions import recorded_cwd
 from ..shell import run_shell
 from .cards import CARD_EVENTS, presentation_of
@@ -70,30 +69,20 @@ from .recovery import (
     recovery_of,
 )
 
-__all__ = ["NON_GUARANTEES", "Root", "ScheduleUnavailable", "SessionBusy", "Supervisor"]
+__all__ = ["NON_GUARANTEES", "Root", "ScheduleUnavailable", "Supervisor"]
 
 
 class ScheduleUnavailable(Refusal):
     """This root's profile did not mount the `schedule` seam (P5-06).
 
-    Its own type for `SessionBusy`'s reason: "there is nothing to schedule
-    against here" is a fact about the profile a client can act on — mount the
-    row, or stop asking — and a generic failure would have it guessing whether
-    the schedule was rejected or the id was wrong.
+    Its own type for the reason `SessionBusy` has one (`ph.persistence.lease`,
+    where the I-5 refusal moved with its `session_already_active` code): "there
+    is nothing to schedule against here" is a fact about the profile a client
+    can act on — mount the row, or stop asking — and a generic failure would
+    have it guessing whether the schedule was rejected or the id was wrong.
     """
 
     code = "schedule_unavailable"
-
-
-class SessionBusy(Refusal):
-    """Another process holds this session's lease (I-5).
-
-    Its own type so the wire can name it — the gate is that a concurrent open
-    comes back as `session_already_active` rather than as a generic failure a
-    client cannot branch on.
-    """
-
-    code = "session_already_active"
 
 
 log = logging.getLogger("ph_app.daemon")
@@ -536,7 +525,8 @@ class Supervisor:
         The lease would catch that pair as a *refusal*, which is the wrong answer to the
         question these two clients asked: two clients naming one root want the same root,
         and only a second *process* is a conflict. So the ordering is here and the
-        refusal is in `_lease`, and the second racer gets the root the first one built.
+        refusal is the store's `claim`, reached through `open_session`, and the second
+        racer gets the root the first one built.
 
         One lock rather than one per id, with a fast path that never reaches it —
         `prompt` calls this on *every turn*. `_start` re-checks membership under it,
@@ -702,107 +692,36 @@ class Supervisor:
             root.exits = exits.pop_all()
             return root
 
-    async def _lease(self, ctx: Context, path: Path, root_id: str) -> None:
-        """Claim one session log against every other writer (I-5).
-
-        The lock in `start` orders racers *inside* this process; this stops a second
-        daemon appending to a log this one is writing. Two writers on one JSONL put `seq`
-        backwards mid-file, which breaks A1 and makes every fold double-count.
-
-        **Daemon against daemon, and no further.** A `ph -p --session x` run against a
-        session a daemon holds still opens it: the hazard belongs to
-        `JsonlSessionStore`, and leasing there would cover every mode at once. I-5 names
-        the second daemon and that is what this gates.
-
-        Taken beside the log rather than at a path of its own construction — the store
-        owns where sessions live, and a lease derived independently is one `PH_HOME`
-        change away from guarding a file nobody writes.
-
-        `timeout=0`: "somebody else holds it" is a refusal, not something to wait out,
-        and blocking here would stall the event loop for every *other* root.
-
-        Through `ctx.effect`, the repo's one mechanism for an acquired external artifact,
-        so cleanup is structural rather than remembered (§4.9, I2).
-
-        **`thread_local=False` is load-bearing, and its absence is silent.** filelock
-        keeps its re-entrancy counter in a thread-local by default, so a lease acquired
-        on a worker thread and released from the event loop finds a counter of zero and
-        returns *having released nothing* — no error, no warning, and a lock file held
-        until the process dies. The lease belongs to the process, not to whichever thread
-        took it.
-        """
-
-        def acquire() -> Callable[[], None]:
-            # No mkdir: filelock's own `ensure_directory_exists` is the same
-            # `parents=True, exist_ok=True` call on the same directory one
-            # statement later, and `JsonlSessionStore.track` makes a third. All
-            # three fired on every root start.
-            lock = FileLock(f"{path}.lock", timeout=0, thread_local=False)
-            try:
-                lock.acquire()
-            except Timeout as error:
-                raise SessionBusy(f'session "{root_id}" is already active') from error
-            return lock.release
-
-        await ctx.effect(acquire, label=f"session-lease({root_id})")
-
     async def _session_for(self, ctx: Context, root_id: str, *, cwd: str | None = None) -> Session:
-        """The root's session — resumed from disk when there is one to resume.
+        """The root's session — claimed, then resumed from disk when there is one to resume.
+
+        One call into `open_session`, which is what every host opens a session through:
+        the I-5 claim, the resume-or-create decision and the `session/resumed` record
+        live there, so a root cannot drift from what `ph -p --session x` does to the same
+        file (P5-03). The claim is the store's, taken on this root's own context so that
+        unwinding the root — a passivation, a shutdown — gives the session back.
 
         **Creating unconditionally corrupted the log.** `sessions.create` mints a fresh
-        session and the JSONL store appends, so restarting a daemon with the same root id
+        session and the store appends, so restarting a daemon with the same root id
         concatenated a second session onto the first: one file, one header, and `seq`
-        restarting at zero halfway through.
-
-        Resuming is also what connects this to F6 — a root that died holding a worktree
-        gets its `workspace/acquired` reconciled on the way back up, because
-        `session/created` fires for an adopted session too.
+        restarting at zero halfway through. Resuming is also what connects this to F6 —
+        a root that died holding a worktree gets its `workspace/acquired` reconciled on
+        the way back up, because `session/created` fires for an adopted session too.
 
         The resume is announced, not silent: whoever started this daemon may not know a
         previous run crashed. The durable record is the `session/resumed` event, so a
         cron job leaves the fact in the trace whether or not anyone reads stderr.
         """
-        # A profile with no persistence writes nothing, so it has no log to
-        # lease and none to resume — `path` stays `None` and both fall through
-        # to the one `create` below.
-        store = ctx.get("session_persistence")
-        # `locate` may honestly answer `None` — a backend with no per-session
-        # file has nothing to lease, and P5-03's lease must decline rather than
-        # invent a path, because a lock on a file nobody writes protects nothing
-        # while looking like it does. That backend brings its own concurrency
-        # story; this one is the filesystem's.
-        path = store.locate(root_id) if store is not None else None
-        if path is not None:
-            await self._lease(ctx, path, root_id)
-        elif store is not None:
-            # Said out loud. A backend with no per-session file gets no I-5
-            # lease, and a *silent* skip is the shape that hides it: two daemons
-            # would open one session and nothing would refuse. The store owning
-            # its own claim — `claim(session_id)` on the Protocol rather than a
-            # path accessor — is the real answer and is its own row.
-            log.warning(
-                "ph_app.daemon: %s provides no lease path; I-5 is not enforced for %s",
-                type(store).__name__,
-                root_id,
-            )
-        if store is not None and store.exists(root_id):
-            session: Session = await resume_session(ctx, root_id)
-            resumed = resumption_of(session) or {}
+        session = await open_session(ctx, root_id, cwd=cwd)
+        resumed = resumption_of(session)
+        if resumed is not None:
             log.warning(
                 "ph_app.daemon: resumed root %s from %s existing events%s",
                 root_id,
                 resumed.get("events", "?"),
                 " — the previous run was interrupted" if resumed.get("interrupted") else "",
             )
-            return session
-        # `cwd` reaches the *header*, which is storage metadata beside the log
-        # rather than an event in it — so it describes where this conversation
-        # happened without becoming something the model reads or a replay has to
-        # re-apply. `SessionHeader` validates that it is absolute, so a relative
-        # path is refused here rather than resolved against the daemon's own
-        # working directory, which is not the client's and never was.
-        fresh: Session = ctx.sessions.create(root_id, meta={"cwd": cwd} if cwd else None)
-        return fresh
+        return session
 
     async def _run(self, root: Root) -> None:
         """The root's own task: drive the agent whenever its inbox has work.

@@ -122,7 +122,9 @@ def default(
     model: Annotated[str, typer.Option("--model")] = "fake-1",
     session_id: Annotated[
         str | None,
-        typer.Option("--session", help="Session id to create, or to read under --mode trajectory."),
+        typer.Option(
+            "--session", help="Session id to create or resume, or to read under --mode trajectory."
+        ),
     ] = None,
     mode: Annotated[
         OutputMode,
@@ -285,14 +287,20 @@ def default(
         session_id=session_id,
         attachments=attach or [],
     )
+    # Here rather than at the top: `ph --help` must not pay for the persistence
+    # layer, and `route` is about to import it anyway.
+    from ph.persistence import SessionBusy
+
     try:
         outcome = anyio.run(route)
-    except (AttachmentUnavailable, LoaderError, OSError) as error:
+    except (AttachmentUnavailable, LoaderError, OSError, SessionBusy) as error:
         # A file that cannot be read fails the *command*: `prompted` ingests
         # before the agent exists, so nothing was logged and there is no partial
         # turn to explain. A row whose plugin will not import is the same kind of
         # failure one step earlier — the loader's one refusal left at mount time,
-        # now that `profile_or_exit` composes.
+        # now that `profile_or_exit` composes. A session another process holds is
+        # the same shape again (I-5): refused before a byte is written, as the
+        # one sentence the daemon would have sent, not a traceback.
         fail(f"[red]{error}[/red]", code=2, cause=error)
 
     if mode == "json":

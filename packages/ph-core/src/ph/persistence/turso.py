@@ -49,6 +49,7 @@ from ..seams.diagnostics import Diagnostic, contribute
 from ..session import Session, SessionEvent, SessionHeader
 from ..session.json import dumps
 from .families import locate_under, logs_under, path_under
+from .lease import claim_file
 from .lineage import materialise
 from .protocol import SessionPersistence, StoredSession, attach, stored_row
 
@@ -267,6 +268,15 @@ class TursoSessionStore:
         had none, and `locate` returning `None` silently disabled I-5.
         """
         return self._path_for(session_id)
+
+    async def claim(self, session_id: str, *, scope: Context) -> None:
+        """Hold this database against every other writer for `scope`'s life (I-5).
+
+        The database's own locking serialises *statements*; it does not stop a
+        second process appending a second log's worth of `seq` to one session,
+        which is the hazard, so the lease is the same file lock JSONL takes.
+        """
+        await claim_file(scope, self._path_for(session_id), session_id)
 
     def stored(self, *, limit: int = 50) -> list[StoredSession]:
         """What is on record, most recently touched first.

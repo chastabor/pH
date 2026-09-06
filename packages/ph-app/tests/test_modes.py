@@ -36,8 +36,11 @@ import json
 from pathlib import Path
 
 import pytest
+from filelock import FileLock
 
 from ph.cordis import Profile
+from ph.persistence import SessionBusy, read_session
+from ph.testing import stored_log
 from ph_app.modes import render_transcript, run_json, run_rpc, run_transcript
 from ph_app.profiles import compose_profile
 
@@ -179,3 +182,55 @@ async def test_a_malformed_rpc_line_is_ignored(profile: Profile) -> None:
     # A peer sending garbage must not take the endpoint down.
     assert len(frames) == 1
     assert frames[0]["id"] == 1
+
+
+async def test_a_second_one_shot_run_on_one_session_resumes_it(
+    profile: Profile, tmp_path: Path
+) -> None:
+    """`--session x` twice is one conversation, not two logs in one file (P5-03).
+
+    Before `open_session` the second run *created* a session over the first one's
+    file — one header, `seq` restarting at zero — and the trajectory reader then
+    refused the whole log, so both turns were lost with no daemon and no race
+    involved. Asserted the way that reader sees it: contiguous from zero, and
+    holding both turns.
+    """
+    for prompt in ("hello", "and again"):
+        await run_json(
+            profile, prompt, provider="fake", model="fake-1", session_id="demo", out=io.StringIO()
+        )
+
+    header, events = read_session(stored_log(tmp_path / "sessions", "demo"))
+    assert header.id == "demo"
+    assert [event.seq for event in events] == list(range(len(events)))
+    assert sum(event.type == "turn/start" for event in events) == 2
+    assert any(event.type == "session/resumed" for event in events), "resumed, not recreated"
+
+
+async def test_a_one_shot_run_is_refused_a_session_another_process_holds(
+    profile: Profile, tmp_path: Path
+) -> None:
+    """The half the lease used to miss: a print run against a held log is refused.
+
+    The holder is a bare `FileLock` on the path the store would claim — what a
+    daemon, or another `ph -p`, looks like from here — and the refusal is the
+    store's own, by name, so the CLI and the daemon protocol say one thing.
+    Nothing is written: a refused run leaves no partial turn to explain.
+    """
+    log_path = tmp_path / "sessions" / "held" / "held.jsonl"
+    holder = FileLock(f"{log_path}.lock", thread_local=False)
+    holder.acquire()
+    try:
+        with pytest.raises(SessionBusy) as refused:
+            await run_json(
+                profile,
+                "hello",
+                provider="fake",
+                model="fake-1",
+                session_id="held",
+                out=io.StringIO(),
+            )
+    finally:
+        holder.release()
+    assert refused.value.code == "session_already_active"
+    assert not log_path.exists()

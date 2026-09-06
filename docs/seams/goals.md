@@ -1,7 +1,7 @@
 # `ctx.goals` — an objective, a budget, and the gates that decide it
 
 **Module:** `ph/seams/goals.py` · **Row:** `goals` · **Consumers:**
-`/autonomous`, the daemon's continuation loop
+`/autonomous` and its `agent/turn-stopping` listener
 
 An autonomous run is a loop with three ways to stop: **the gates pass**, **a
 budget runs out**, or **a person cancels it**. This seam holds all three as facts
@@ -94,9 +94,11 @@ a restart without a table.
 
 ## What it does not do
 
-* **It does not drive the loop.** `/autonomous` opens a goal, records spend and
-  decides gates; wiring the *continuation* to the daemon so a turn ending
-  automatically starts the next one is still owed.
+* **It does not drive the loop, and nothing else has to.** `/autonomous`
+  registers a policy on `agent/turn-stopping`: a turn ending with a goal still
+  open is steered into the next step rather than allowed to stop, and the loop
+  only breaks when the inbox is empty. The daemon drives `agent.run()` and so
+  inherits the continuation without a loop of its own.
 * It does not run gates. It records their results; the shell does the running,
   through [`ctx.shell`](../seams/README.md) and whatever confinement is mounted.
 * It does not survive a fork with its allowance intact — the module's promise

@@ -23,11 +23,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
-from typing import Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from ..seams.diagnostics import Diagnostic, contribute
 from ..session import Session, SessionEvent, SessionHeader
 from .lineage import lineage_faults
+
+if TYPE_CHECKING:
+    from ..cordis import Context
 
 SURVEY_LIMIT = 500
 """How many stored sessions the lineage check surveys.
@@ -39,7 +42,7 @@ since the point of answering from the listing is not to walk a store
 without limit.
 """
 
-__all__ = ["SessionPersistence", "StoredSession", "attach"]
+__all__ = ["ClaimingStore", "SessionPersistence", "StoredSession", "attach"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -192,6 +195,32 @@ class SessionPersistence(Protocol):
         path had to walk up two levels to find the rest — which was a rule about
         this backend's layout written into a front end.
         """
+        ...
+
+
+@runtime_checkable
+class ClaimingStore(Protocol):
+    """A backend that can hold one session against every other writer (I-5).
+
+    **Optional, and its own Protocol rather than a `locate() is not None` probe.**
+    The lease used to be the daemon's: it asked the store for a path and locked
+    beside it, so only daemons were refused and `ph -p --session x` appended to
+    a log a daemon held — or to one another `ph -p` had just written, which was
+    enough on its own to make the session unopenable. The writer is the store,
+    so the claim is the store's, and every host reaches it through one
+    `open_session`.
+
+    A backend with no per-session file does not implement this, and a host
+    finding no `ClaimingStore` says so out loud rather than locking a path that
+    protects nothing. Both shipped backends keep one file per session and
+    implement it through `lease.claim_file`.
+
+    `scope` is **required**: it is the lifetime that holds the lock, and a lease
+    with a defaulted owner is one nobody remembers to release.
+    """
+
+    async def claim(self, session_id: str, *, scope: Context) -> None:
+        """Hold this session for `scope`'s life, or raise `SessionBusy`."""
         ...
 
 

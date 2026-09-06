@@ -17,6 +17,7 @@ from typing import Any
 
 import pytest
 import yaml
+from filelock import FileLock
 from typer.testing import CliRunner
 
 from ph.testing import stored_log
@@ -461,6 +462,24 @@ def test_the_catalog_refuses_an_unknown_row_rather_than_printing_nothing() -> No
     result = runner.invoke(app, ["config", "--row", "workspace-git-worktree", "--row", "nope"])
     assert result.exit_code == 2
     assert "nope" in result.output and "workspace-git-worktree" not in result.output
+
+
+def test_print_mode_refuses_a_session_another_process_holds(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """One sentence and exit 2, not a traceback — the daemon's own refusal (P5-03)."""
+    monkeypatch.setenv("PH_HOME", str(tmp_path))
+    log_path = tmp_path / "sessions" / "held" / "held.jsonl"
+    holder = FileLock(f"{log_path}.lock", thread_local=False)
+    holder.acquire()
+    try:
+        result = runner.invoke(app, ["-p", "hello", "--session", "held"])
+    finally:
+        holder.release()
+    assert result.exit_code == 2, result.output
+    assert 'session "held" is already active in another process' in result.output
+    assert "Traceback" not in result.output
+    assert not log_path.exists(), "a refused run writes nothing"
 
 
 def test_print_mode_answers_and_writes_a_readable_log(tmp_path: Path, monkeypatch: Any) -> None:

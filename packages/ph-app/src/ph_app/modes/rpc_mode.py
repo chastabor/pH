@@ -25,7 +25,7 @@ from ph.cordis import DEPLOYMENT, Profile
 from ph.session import Session, SessionEvent, dumps
 
 from ..protocol import capabilities, notification, respond
-from ..runtime import mounted
+from ..runtime import mounted, open_session
 
 __all__ = ["RpcServer", "run_rpc"]
 
@@ -58,7 +58,9 @@ class RpcServer:
             # do: one process, one peer, no supervision.
             return capabilities("tools")
         if method == "session/new":
-            session = self.ctx.sessions.create(params.get("sessionId"))
+            # Open, not create: a peer naming a stored id resumes it, and one
+            # another process holds is refused by name (P5-03).
+            session = await open_session(self.ctx, params.get("sessionId"))
             self._attach(session)
             return {"sessionId": session.id}
         if method == "session/prompt":
@@ -87,7 +89,7 @@ class RpcServer:
         session_id = params.get("sessionId")
         session = self.ctx.sessions.get(session_id) if session_id else None
         if session is None:
-            session = self.ctx.sessions.create(session_id)
+            session = await open_session(self.ctx, session_id)
             self._attach(session)
         agent = self._agents.get(session.id)
         if agent is None:

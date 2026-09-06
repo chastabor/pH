@@ -36,6 +36,7 @@ from ..paths import resolve_roots
 from ..session import Session, SessionEvent, SessionHeader
 from ..session.json import dumps
 from .families import locate_under, logs_under, path_under
+from .lease import claim_file
 from .lineage import materialise
 from .protocol import SessionPersistence, StoredSession, attach, stored_row
 
@@ -209,14 +210,16 @@ class JsonlSessionStore:
         return self.root
 
     def locate(self, session_id: str) -> Path | None:
-        """This backend writes files, so it can always say where.
+        """This backend writes files, so it can always say where."""
+        return self._path_for(session_id)
 
-        **Answers before the file exists**, which is what P5-03's lease needs:
-        `supervisor` calls this to lease a root *before* creating it, and a
-        `None` here is read as "this backend has nothing to lease", skipping I-5
-        in silence. A tracked session's path is already decided; anything else is
-        searched for; and a session that is neither is a root about to be
-        written, whose family is its own id.
+    def _path_for(self, session_id: str) -> Path:
+        """This session's log, by what is known before what is on disk.
+
+        **Answers before the file exists**, which is what the lease needs: a
+        root is claimed *before* it is created. A tracked session's path is
+        already decided; anything else is searched for; and a session that is
+        neither is a root about to be written, whose family is its own id.
         """
         buffer = self._buffers.get(session_id)
         if buffer is not None:
@@ -224,6 +227,10 @@ class JsonlSessionStore:
         return locate_session(self.root, session_id) or session_path(
             self.root, session_id, session_id
         )
+
+    async def claim(self, session_id: str, *, scope: Context) -> None:
+        """Hold this log against every other writer for `scope`'s life (I-5)."""
+        await claim_file(scope, self._path_for(session_id), session_id)
 
     def stored(self, *, limit: int = 50) -> list[StoredSession]:
         """What is on record, most recently touched first.

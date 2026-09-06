@@ -10,16 +10,21 @@ from .jsonl import (
     resumption_of,
     session_path,
 )
+from .lease import SessionBusy, claim_file
 from .lineage import MAX_DEPTH, LineageError, ReadOne, lineage_faults, materialise
+from .protocol import ClaimingStore
 from .repair import TOOL_NOT_STARTED, TOOL_OUTCOME_UNKNOWN, interrupted_turn_closers, repaired
 
 __all__ = [
     "MAX_DEPTH",
     "TOOL_NOT_STARTED",
     "TOOL_OUTCOME_UNKNOWN",
+    "ClaimingStore",
     "JsonlSessionStore",
     "LineageError",
     "ReadOne",
+    "SessionBusy",
+    "claim_file",
     "interrupted_turn_closers",
     "lineage_faults",
     "materialise",

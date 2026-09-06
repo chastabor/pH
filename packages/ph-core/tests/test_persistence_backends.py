@@ -92,7 +92,15 @@ from typing import Any
 
 import pytest
 
-from ph.persistence import MAX_DEPTH, LineageError, lineage_faults, materialise
+from ph.cordis import Context
+from ph.persistence import (
+    MAX_DEPTH,
+    ClaimingStore,
+    LineageError,
+    SessionBusy,
+    lineage_faults,
+    materialise,
+)
 from ph.persistence.jsonl import JsonlSessionStore
 from ph.persistence.protocol import SessionPersistence, StoredSession
 from ph.session import Session, SessionEvent, SessionHeader, SurfaceIntent
@@ -950,3 +958,29 @@ def test_a_cycle_that_closes_inside_the_listing_is_named() -> None:
         ("a", "lineage cycles back through a"),
         ("b", "lineage cycles back through b"),
     ]
+
+
+async def test_a_claimed_session_refuses_a_second_writer_until_released(
+    store: SessionPersistence,
+) -> None:
+    """I-5 at the store: whoever writes a log is who holds it (P5-03).
+
+    Both backends, because both keep one file per session and the hazard is the
+    same — a second process appending its own `seq` sequence to one log, which
+    `_readmit` then refuses outright. The second claimant is refused by *name*,
+    and the release is the first scope's disposal: what lets a passivated root or
+    a finished `ph -p` hand the session on with no lock file left behind.
+    """
+    assert isinstance(store, ClaimingStore), "both shipped backends can claim"
+    first, second = Context(), Context()
+    await store.claim("s1", scope=first)
+
+    with pytest.raises(SessionBusy) as refused:
+        await store.claim("s1", scope=second)
+    assert refused.value.code == "session_already_active"
+    # Per session, not per store: the refused scope is still a working scope.
+    await store.claim("s2", scope=second)
+
+    await first.dispose()
+    await store.claim("s1", scope=second)
+    await second.dispose()
