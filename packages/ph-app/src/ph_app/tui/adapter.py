@@ -829,7 +829,7 @@ class TuiEventAdapter:
         panel and the roster the model reads cannot disagree about seeding,
         tombstones or `cause` — there is one rule, not two kept in step by a
         test. `SubagentRow` is the drawn projection of those rows, plus `tokens`,
-        which is the panel's own addition because usage is not a roster fact.
+        which is the panel's own sum over the same records the seam folds.
         """
         fold_subagent_event(self.state.roster, event)
         self.state.sync_subagents()
@@ -839,11 +839,18 @@ class TuiEventAdapter:
         self._fold_roster(event)
 
     def _on_subagent_usage(self, event: SessionEvent, frame: Frame) -> None:
-        """Attributed tokens, summed per child (P3-11).
+        """Attributed tokens, summed per child (P3-11) — and the seam's fold.
 
-        Not a roster fact: `subagent/usage-attributed` is deliberately outside
-        the seam's `_ROSTER_TYPES`, and the sum is what the panel adds to it.
+        **Both**, because usage stopped being outside the roster: the retry
+        ladder reads it as the one marker a stalled child cannot forge, so it is
+        in `_ROSTER_TYPES` now and clears `attempts`. Summing it here without
+        folding it left this panel showing a restart count that only ever went
+        up, which is the disagreement `_fold_roster` exists to prevent (A11).
+
+        The sum stays the panel's own: nothing else wants a running total, and
+        the seam does not keep one.
         """
+        self._fold_roster(event)
         row = self.state.subagents.get(str(event.data.get("runId")))
         if row is None:
             return

@@ -622,6 +622,22 @@ class Supervisor:
                 if event.type == COMMAND_ACCEPTED
             )
             self.roots[root_id] = root
+            # What this root's *children* are owed, once there is an agent for
+            # them to hang off (P5-04). A daemon that stopped between a child's
+            # admission and its first turn left that work described in the log
+            # and running nowhere: the queued ones are re-driven, and the ones
+            # caught mid-turn are settled rather than re-run — see
+            # `resume_children`. In the table first, because a readmitted child
+            # starts a drive job owned by this root's scope.
+            subagents = ctx.get("subagents")
+            if subagents is not None:
+                revived = await subagents.resume_children(agent)
+                if revived:
+                    log.info(
+                        "ph_app.daemon: root %s put %d admitted child(ren) back to work",
+                        root_id,
+                        len(revived),
+                    )
 
             def relay(source: Session, event: SessionEvent) -> None:
                 # Nothing is built before there is somebody to send it to: this

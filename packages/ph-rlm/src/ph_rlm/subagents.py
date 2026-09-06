@@ -53,6 +53,7 @@ from ph.agent.types import AgentCancelCause, AgentOptions
 from ph.cordis import Context, Disposer, plugin
 from ph.llm.adapter import LlmError
 from ph.llm.types import CONTEXT_SUMMARY_MAX_CHARS, PluginSource, create_user_message, text_of
+from ph.persistence import resume_session
 from ph.seams.subagents import (
     ADMITTED,
     DELETED,
@@ -66,6 +67,7 @@ from ph.seams.subagents import (
     SubagentRun,
     SubagentSpawnError,
     SubagentStatus,
+    admission_payload,
     default_child_name,
 )
 from ph.seams.workspace import discards_writes, project_access, workspace_survivors
@@ -103,21 +105,19 @@ class Config(WireModel):
     max_concurrent: int | None = Field(default=None, ge=1)
     """How many of one parent's children run at once. `None` is no cap.
 
-    **Per parent, so it bounds *fairness*, not host load**: ten roots at four
-    apiece is forty children. It exists so one agent's fan-out cannot starve
-    another root's children, and a deployment that needs to bound the host wants
-    a cap on the work seam rather than a number here.
-
     **A queue, not a refusal.** A parent that delegates nine tasks asked for nine,
     and refusing the ninth because eight are running answers a question about
-    resources with a refusal about intent. So admission is unchanged — the handle
-    still returns at once, the record is written, the roster shows the child — and
-    the *drive* waits for a slot: a child with none free is `queued` in the roster,
-    runs in admission order when one opens, and frees it on `done`, `error` or
-    `cancelled` alike so a failure cannot wedge the queue. Per parent, so one
-    agent's fan-out cannot starve another root's children. Totals per turn and per
-    session stay refusals, on the limits row. Not covered: a daemon restart does not
-    re-drive queued admissions — the non-guarantee running children already have."""
+    resources with a refusal about intent. The *drive* waits; admission is
+    untouched.
+
+    **Per parent, so it bounds *fairness*, not host load**: ten roots at four
+    apiece is forty children. It exists so one agent's fan-out cannot starve
+    another root's, and a deployment bounding the *host* wants `jobs`'
+    `concurrency` instead. Both apply.
+
+    The queue itself is `ctx.jobs`' (`slot=`), and the mechanics — waiting,
+    releasing on every ending, the queue's own lifetime — are stated there rather
+    than here, where they would be a second account of somebody else's code."""
     answer_preview_chars: int = 240
     """How much of the child's answer the status record carries, for `ph trace`
     and the P3-19 panel. There is deliberately no `default_access` knob here: the
@@ -168,14 +168,6 @@ class _Child:
     Held here rather than folded, because it decides whether the terminal notice
     fires — a decision made at completion, in this process, about a child this
     process ran."""
-    waiting: anyio.CancelScope | None = None
-    """The wait for a slot, while there is one — what `_release` cancels for a
-    child deleted before it ever ran.
-
-    A body parked on a limiter reads no cancel token (`ctx.jobs` cancellation is
-    cooperative), so without this the revoked child's coroutine stays queued
-    behind children that may never settle — and `ctx.drain()` waits for it, which
-    turns a revocation into a teardown that hangs."""
 
 
 @dataclass(slots=True)
@@ -185,16 +177,6 @@ class RlmChildProvider:
     ctx: Context
     config: Config
     _children: dict[str, _Child] = field(default_factory=dict)
-    _slots: dict[str, anyio.CapacityLimiter] = field(default_factory=dict)
-    """One limiter per parent session, each owned by that parent's own scope.
-
-    **Not dropped by a "was that the last child?" check at release**, which is
-    what this first was and which could never fire: `_quiesce` keeps a settled
-    child's record so a late `result()` still answers, and only a *revocation*
-    pops `_children` — so the predicate was always true, the table grew for the
-    process's life, and the scan cost O(children) on every release. The parent's
-    scope is what owns per-parent artifacts (I2), so the disposer goes there and
-    the question is never asked."""
 
     @property
     def depth_limit(self) -> int:
@@ -226,17 +208,79 @@ class RlmChildProvider:
         run_id = f"child-{secrets.token_hex(6)}"
         taken = [str(row.get("name")) for row in self.ctx.subagents.roster(parent_session).values()]
         name = self._resolve_name(request.name, prompt, run_id, taken)
+        return await self._admit(
+            request,
+            run_id=run_id,
+            name=name,
+            session_id=f"{parent_session.id}-{run_id}",
+            depth=depth,
+        )
+
+    async def readmit(
+        self, request: SubagentRequest, *, run_id: str, session_id: str, restarts: int = 0
+    ) -> SubagentRun | None:
+        """Take an admitted child back from the log alone, after a restart (P5-04).
+
+        The record is the whole input: the seam rebuilt this request from it and
+        re-derived the ceiling, so what is left here is the build — the same one
+        `start` does, with the ids the log names rather than fresh ones, so the
+        child keeps its identity and its place in the roster.
+
+        **No second `subagent/admitted`.** The admission already happened and is
+        in the log; writing it again would make one delegation read as two, and
+        the roster would grow a child the parent never asked for.
+
+        Declines rather than raises when the parent is not one this provider can
+        build a child under — the seam's sweep is starting a *root*, and one
+        unrecoverable child must not stop the rest from coming back.
+        """
+        parent_session: Session | None = getattr(request.parent, "session", None)
+        if parent_session is None:
+            return None
+        depth = delegation_depth(parent_session)
+        if not request.prompt.strip():
+            # A record with no task is one nothing can re-run. Said out loud: a
+            # silent skip here is a child that stays queued forever.
+            log.warning("ph_rlm.subagents: %s has no prompt in its record; not readmitted", run_id)
+            return None
+        return await self._admit(
+            request,
+            run_id=run_id,
+            name=request.name or run_id,
+            session_id=session_id,
+            depth=depth,
+            log_admission=False,
+            restarts=restarts,
+        )
+
+    async def _admit(
+        self,
+        request: SubagentRequest,
+        *,
+        run_id: str,
+        name: str,
+        session_id: str,
+        depth: int,
+        log_admission: bool = True,
+        restarts: int = 0,
+    ) -> SubagentRun:
+        """Build one child and set it running. Shared by admission and readmit.
+
+        `log_admission` is a fact about the *log* rather than about the child: a
+        readmitted child was admitted once already, and the record it is being
+        rebuilt from is that admission.
+
+        `restarts` is how many times this child has already been started. Above
+        zero the task is presented with that said, which is the difference
+        between a transcript a model can follow and one where the same
+        instruction simply appears twice.
+        """
+        parent = request.parent
+        parent_session: Session = parent.session
+        prompt = request.prompt.strip()
         provider_name, model, effort = self._resolve_model(request, parent)
 
-        child_session = self.ctx.sessions.create(
-            f"{parent_session.id}-{run_id}",
-            meta={
-                "parentSession": parent_session.id,
-                "origin": "subagent",
-                "delegationDepth": depth + 1,
-                "agentPreset": "rlm",
-            },
-        )
+        child_session = await self._child_session(session_id, parent_session, depth)
         # Created before the admission is appended, so the ways `agents.create`
         # can fail — no driver, no route, options the driver rejects — cannot
         # leave a phantom child in an append-only roster. It does not *run* yet,
@@ -280,7 +324,8 @@ class RlmChildProvider:
         self._children[run_id] = child
         run.result = self._awaiter(child)
 
-        parent_session.append(ADMITTED, {**run.to_wire(), "prompt": prompt})
+        if log_admission:
+            parent_session.append(ADMITTED, admission_payload(run, request))
 
         # The child is an artifact of the *parent's* scope (I2), so a disposed
         # parent unwinds its children instead of leaving them running with nobody
@@ -290,14 +335,46 @@ class RlmChildProvider:
             lambda: partial(self._release, parent_session, run_id, "parent-teardown"),
             label=f"subagent:{run_id}",
         )
+        # **Presented again, and that is what makes a retry real.** Starting a
+        # turn claims the task from the inbox, and the claim is a logged splice —
+        # so a resumed child whose task was not re-presented finds an empty inbox,
+        # ends at step zero, and reports `completed` for work it never did.
         child_agent.followup(
             create_user_message(
-                content=[{"type": "text", "text": f"{TASK_PREFIX}\n\n{prompt}"}],
+                content=[{"type": "text", "text": _task_text(prompt, restarts)}],
                 source=PluginSource(plugin="ph_rlm.subagents", form="relay"),
             )
         )
-        await self._attach(child, parent)
+        # `resumed` is what makes a restart countable: without it the log holds
+        # a `running` record per start and no way to tell a first one from a
+        # fourth, which is the fold the ladder needs.
+        await self._attach(child, parent, cause="resumed" if restarts else None)
         return run
+
+    async def _child_session(self, session_id: str, parent_session: Session, depth: int) -> Session:
+        """This child's session — resumed when a log for it survived, else fresh.
+
+        A readmitted child usually has no log at all: it never ran a turn, and
+        what little its session held was still in a buffer when the daemon
+        stopped. But a child that *did* reach disk must be resumed rather than
+        recreated, for the reason `open_session` gives one layer up — a store
+        that already holds this id appends, so creating over it puts `seq`
+        backwards mid-file and the log stops being readable at all (P5-03).
+        """
+        store = self.ctx.get("session_persistence")
+        if store is not None and store.exists(session_id):
+            resumed: Session = await resume_session(self.ctx, session_id)
+            return resumed
+        created: Session = self.ctx.sessions.create(
+            session_id,
+            meta={
+                "parentSession": parent_session.id,
+                "origin": "subagent",
+                "delegationDepth": depth + 1,
+                "agentPreset": "rlm",
+            },
+        )
+        return created
 
     def _resolve_name(
         self, requested: str | None, prompt: str, run_id: str, taken: list[str]
@@ -353,19 +430,29 @@ class RlmChildProvider:
         roster shows beside `running`.
         """
         assert child.session is not None
+        limit = self.config.max_concurrent
         child.unobserve = child.session.observe(self._mirror(child))
-        await self._reserve_slots(parent)
         # `ctx.jobs`, which detaches rather than running inline: the job gives the
         # run an id, a cancel and `job/*` events for free, and a subagent is the
         # seam's own example of work that outlives the step that started it.
         job = await self.ctx.jobs.start(
             kind="subagent",
             label=f"{child.run.name} ({child.run.id})",
-            run=lambda _job: self._drive_in_slot(child, cause=cause),
+            run=lambda _job: self._drive(child, cause=cause),
             # The delegation's lifetime, which is the parent's: a disposed parent
             # abandons the drive, and a settled child releases its own entry so a
             # chatty exchange does not leave one job per message behind.
             scope=parent.ctx,
+            # The queue is the seam's (`Config.max_concurrent`). Keyed by the
+            # *parent's* session, so a cap bounds one agent's fan-out and one
+            # parent's children cannot starve another root's — and the wait, the
+            # release on every ending and the queue's own lifetime are the seam's
+            # to get right rather than this provider's to re-derive.
+            slot=None if limit is None else (parent.session.id, limit),
+            # Written only when there was actually a wait. An admitted child with
+            # no status already reads as `queued` to the roster; this is the record
+            # for the case where that is true *for a reason*.
+            on_queued=lambda: self._status(child, "queued", slots=limit),
         )
         child.job_id = job.id
 
@@ -454,52 +541,6 @@ class RlmChildProvider:
         # handle would be a second source of truth for a fact the roster folds,
         # frozen at the last in-process update.
         child.parent_session.append(STATUS, {"runId": child.run.id, "status": status, **extra})
-
-    async def _reserve_slots(self, parent: Any) -> None:
-        """Give this parent its limiter, owned by the parent's own scope (I2).
-
-        Idempotent, and reached from `_attach` so a fresh admission and a
-        rehydration take the same path — a rehydrated child that found no table
-        would run outside the cap while looking capped.
-        """
-        parent_id = parent.session.id
-        if self.config.max_concurrent is None or parent_id in self._slots:
-            return
-        self._slots[parent_id] = anyio.CapacityLimiter(self.config.max_concurrent)
-
-        def enter() -> Disposer:
-            return lambda: self._slots.pop(parent_id, None)
-
-        await parent.ctx.effect(enter, label=f"subagent-slots({parent_id})")
-
-    async def _drive_in_slot(self, child: _Child, *, cause: StatusCause | None) -> None:
-        """Wait for one of the parent's slots, then drive — the queue (`Config.max_concurrent`).
-
-        The wait is its own cancel scope rather than the job's: a child deleted
-        while queued must stop waiting, but a child deleted while *running* is
-        stopped through its agent, and one scope covering both would cancel the
-        drive mid-turn. `queued` is written only when there is actually a wait —
-        an admitted child with no status already reads as queued to the roster,
-        and the record is for the case where that is true for a reason.
-        """
-        limiter = self._slots.get(child.parent_session.id)
-        if limiter is None:
-            await self._drive(child, cause=cause)
-            return
-        if limiter.available_tokens < 1:
-            self._status(child, "queued", slots=self.config.max_concurrent)
-        with anyio.CancelScope() as waiting:
-            child.waiting = waiting
-            await limiter.acquire()
-        child.waiting = None
-        if waiting.cancelled_caught:
-            # Released while queued: `_release` wrote `cancelled` and quiesced,
-            # and no slot was ever taken.
-            return
-        try:
-            await self._drive(child, cause=cause)
-        finally:
-            limiter.release()
 
     async def _drive(self, child: _Child, *, cause: StatusCause | None) -> None:
         """Run the child to quiescence, tell the parent, then let it go."""
@@ -738,9 +779,14 @@ class RlmChildProvider:
         child = self._children.pop(run_id, None)
         if child is None:
             return False
-        if child.waiting is not None:
-            # Queued, never ran: stop the wait for a slot it will now never take.
-            child.waiting.cancel()
+        if child.job_id is not None:
+            # Queued, never ran: `Job.cancel` stops the wait for a slot it will
+            # now never take. A body parked on a limiter reads no token, so
+            # without this a revoked child stays queued behind children that may
+            # never settle and `ctx.drain()` waits for it — a revocation that
+            # hangs the teardown. Harmless for a child already running: its agent
+            # is what stops that one, one line down.
+            self.ctx.jobs.cancel(child.job_id)
         if child.agent is not None:
             child.agent.cancel(AgentCancelCause(kind="parent"))
         # A terminal state for the roster: a revoked child is not merely absent,
@@ -756,6 +802,29 @@ class RlmChildProvider:
             registry.forget(run_id)
         parent_session.append(DELETED, {"runId": run_id, "reason": reason})
         return True
+
+
+def _task_text(prompt: str, restarts: int) -> str:
+    """The task as the child reads it — and, after an interruption, why twice.
+
+    A resumed child's transcript already holds the turn its harness cut short,
+    closed by the resume's own repair. Re-presenting the task without a word
+    about that shows a model the same instruction twice and lets it conclude it
+    already answered; naming the interruption is what makes the second attempt
+    legible as one.
+
+    The number is how many times this child has been started, not where it sits
+    on the harness's ladder — the two part company the moment progress clears the
+    ladder, and the model's own history is the honest one to tell it about.
+    """
+    if restarts < 1:
+        return f"{TASK_PREFIX}\n\n{prompt}"
+    return (
+        f"{TASK_PREFIX}\n\n{prompt}\n\n[the harness stopped while you were working on "
+        f"this, so the turn above was cut short; this is attempt {restarts + 1}. "
+        "Anything you finished is in your transcript — continue from there rather "
+        "than starting over.]"
+    )
 
 
 def _last_assistant_text(session: Session | None) -> str:

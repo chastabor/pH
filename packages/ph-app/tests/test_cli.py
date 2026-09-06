@@ -22,7 +22,7 @@ from typer.testing import CliRunner
 
 from ph.testing import stored_log
 from ph_app.cli import app
-from ph_app.profiles import resolve_profile
+from ph_app.profiles import profile_or_exit, resolve_profile
 
 runner = CliRunner()
 
@@ -491,6 +491,47 @@ def test_the_catalog_refuses_an_unknown_row_rather_than_printing_nothing() -> No
     result = runner.invoke(app, ["config", "--row", "workspace-git-worktree", "--row", "nope"])
     assert result.exit_code == 2
     assert "nope" in result.output and "workspace-git-worktree" not in result.output
+
+
+def resolve_profile_config(patches: list[str]) -> Any:
+    """The `jobs` row's config as the headless profile composes it, patches and all."""
+    rows = profile_or_exit("headless", patches).dump()
+    return next(row for row in rows if row.get("id") == "jobs").get("config")
+
+
+def test_the_children_cap_reaches_the_row_as_a_patch() -> None:
+    """A deployment-wide bound, overridable from the command line (P4-04).
+
+    Through the profile rather than past it, so `--dump-config` and `ph doctor`
+    report the number actually in force. Unset patches *nothing*, which is what
+    lets the number live once in the bundle that ships a subagent provider — and
+    keeps a plain `ph daemon` working on a profile with no `jobs` row, since a
+    patch names a row the loader refuses when it is absent.
+    """
+    from ph_app.cli import _children_cap
+
+    assert _children_cap(None) == []
+    assert resolve_profile_config([]) is None, "headless caps nothing of its own"
+    assert resolve_profile_config(_children_cap(3)) == {"concurrency": {"subagent": 3}}
+
+
+def test_the_rlm_bundle_caps_the_kind_it_produces() -> None:
+    """The number lives with the producer, not with the seam (P4-04).
+
+    `ph-core`'s jobs seam treats `kind` as a free string everywhere else, and
+    `ph-base` ships no subagent provider — so a default there naming `subagent`
+    would be a definition knowing one bundle's vocabulary.
+    """
+    rows = profile_or_exit("rlm").dump()
+    jobs = next(row for row in rows if row.get("id") == "jobs")
+    assert jobs["config"]["concurrency"] == {"subagent": 8}
+
+
+def test_the_children_cap_refuses_a_number_that_bounds_nothing() -> None:
+    """Zero children is not a cap, it is a stopped deployment."""
+    result = runner.invoke(app, ["daemon", "--max-concurrent-children", "0"])
+    assert result.exit_code == 2
+    assert "positive number of children" in result.output
 
 
 def test_print_mode_refuses_a_session_another_process_holds(

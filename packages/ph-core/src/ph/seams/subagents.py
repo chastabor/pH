@@ -31,7 +31,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from typing import Any, Literal, Protocol, TypeAlias, runtime_checkable
+from typing import Any, Literal, Protocol, TypeAlias, cast, runtime_checkable
 
 from pydantic import Field
 
@@ -45,12 +45,16 @@ from .skills import ORDER_SKILLS, SkillRestriction
 
 __all__ = [
     "ADMITTED",
+    "CHILD_RETRY_LIMIT",
     "DELETED",
+    "INTERRUPTED_DETAIL",
     "SETTLED_STATUSES",
     "STATUS",
+    "UNRECOVERABLE_DETAIL",
     "USAGE",
     "Access",
     "FamilyRole",
+    "ReadmittingProvider",
     "RehydratableProvider",
     "SpawnGuard",
     "StatusCause",
@@ -63,11 +67,13 @@ __all__ = [
     "SubagentService",
     "SubagentSpawnError",
     "SubagentStatus",
+    "admission_payload",
     "apply",
     "child_is_live",
     "default_child_name",
     "descendants",
     "downgrade_text",
+    "exhausted_detail",
     "family_reach",
     "fold_subagent_event",
     "reachable_family",
@@ -91,12 +97,73 @@ USAGE = "subagent/usage-attributed"
 Named here rather than spelled at each `append` site, because the fold below and
 every producer have to agree on them exactly."""
 
-_ROSTER_TYPES = frozenset({ADMITTED, DELETED, STATUS})
+_ROSTER_TYPES = frozenset({ADMITTED, DELETED, STATUS, USAGE})
 
 Access: TypeAlias = Literal["read", "write"]
 """What a child asks of the parent's workspace. `read` is the default (E4)."""
 
 SubagentStatus: TypeAlias = Literal["queued", "running", "done", "error", "cancelled"]
+
+CHILD_RETRY_LIMIT = 3
+"""How many times an interrupted child is put back to work before it is failed.
+
+The root's ladder is three attempts for the reason this one is (`RETRY_DELAYS`):
+what a harness stopping interrupts is transient by construction, and a child that
+has been caught mid-turn three times is not unlucky — it is in front of something
+that keeps stopping, and re-driving it forever spends a parent's budget on a
+transcript nobody is reading.
+
+**No delays, where the root's ladder has them.** The root retries a crash that
+just happened, so it waits before trying again; this one only ever runs while a
+harness is starting, which is already the delay."""
+
+UNRECOVERABLE_DETAIL = (
+    "the harness stopped while this child was running, and no provider here can "
+    "start it again; its transcript is on disk"
+)
+"""Interrupted, with nothing mounted that could resume it.
+
+Its own sentence because the answer a parent needs differs: the ladder was not
+spent and a deployment that mounts the provider again could have carried on, so
+"it ran out of attempts" would be false. Settled all the same — a row left
+`queued` for a provider that will never come holds the root out of passivation
+for good."""
+
+UNRECOVERABLE_DETAIL = (
+    "the harness stopped while this child was running, and no provider here can "
+    "start it again; its transcript is on disk"
+)
+"""Interrupted, with nothing mounted that could resume it.
+
+Its own sentence because the answer a parent needs differs: the ladder was not
+spent, and a deployment that mounted the provider again could have carried on —
+so "it ran out of attempts" would be false. Settled all the same: a row left
+`queued` for a provider that will never come holds the root out of passivation
+for good."""
+
+INTERRUPTED_DETAIL = "the harness stopped while this child was running; it did not finish"
+"""Why a child that was mid-turn at shutdown did not finish.
+
+A sentence rather than a code, because its reader is a person or a model looking
+at a roster and asking what happened to a child that never answered."""
+
+
+def exhausted_detail(limit: int = CHILD_RETRY_LIMIT) -> str:
+    """The ladder spent, naming the bound **actually in force**.
+
+    A function rather than a module string, for the reason `Recovery.total` is a
+    property one ladder over: a value baked at import time describes the number
+    that was set when this module was first read, so a deployment that shortens
+    the ladder — or a test that does — tells the child it was interrupted three
+    times whatever the truth. Built from `INTERRUPTED_DETAIL` rather than
+    restating it, so the two cannot come to describe one interruption
+    differently.
+    """
+    return (
+        f"{INTERRUPTED_DETAIL} — and it has now been interrupted "
+        f"{limit} times, so it will not be started again"
+    )
+
 
 SETTLED_STATUSES: frozenset[str] = frozenset({"done", "error", "cancelled"})
 """The statuses that mean a child has stopped. Beside the vocabulary it reads.
@@ -137,8 +204,12 @@ roster folds status last-write-wins: a `rehydrated` member would have meant a
 woken child that is actively working reads as not-running to every consumer that
 branches on `"running"`."""
 
-StatusCause: TypeAlias = Literal["rehydrated"]
-"""Why a child entered its current status, when it is not simply "it started"."""
+StatusCause: TypeAlias = Literal["rehydrated", "resumed"]
+"""Why a child entered its current status, when it is not simply "it started".
+
+`resumed` is a child put back on its feet after its harness stopped mid-turn —
+the ladder below, and the reason a reader of the roster can tell that run from a
+first attempt."""
 
 DowngradeReason: TypeAlias = Literal["workspace-not-mounted"]
 """Why a granted access is narrower than the one requested."""
@@ -322,6 +393,61 @@ class SubagentRun:
         if self.downgrade_reason is not None:
             wire["downgradeReason"] = self.downgrade_reason
         return wire
+
+
+def admission_payload(run: SubagentRun, request: SubagentRequest) -> dict[str, Any]:
+    """The `subagent/admitted` record: the run, the task, and **the narrowing**.
+
+    One function because there are now two readers of these keys and they must not
+    drift — the writer is a provider, and `_readmit_children` reconstructs a request
+    from what it wrote. `CodeDispatchRef` states the same argument for the same
+    reason: a hand-written payload on one side and a hand-written reader on the
+    other unpair silently.
+
+    **The narrowing is logged because a restart re-derives the ceiling from this
+    record and nothing else.** `preset`, `skills` and `tools` are what
+    `grant_for` resolves a child's reach from, and an admission that recorded
+    only the run would come back after a restart with the parent's *whole* set —
+    a child quietly wider than the one that was admitted, which is §6.5 broken by
+    a power cut. Absent keys mean "inherited everything", which is what `None`
+    already means on the request, so a log written before this stays readable and
+    a child admitted then is refused a readmit rather than widened.
+    """
+    payload: dict[str, Any] = {**run.to_wire(), "prompt": request.prompt.strip()}
+    if request.preset is not None:
+        payload["preset"] = request.preset
+    if request.skills is not None:
+        payload["skills"] = list(request.skills)
+    if request.tools is not None:
+        payload["tools"] = list(request.tools)
+    if request.reasoning_effort is not None:
+        payload["reasoningEffort"] = request.reasoning_effort
+    return payload
+
+
+@runtime_checkable
+class ReadmittingProvider(Protocol):
+    """A provider that can take an admitted child back from the log alone (P5-04).
+
+    A daemon that stopped between a child's admission and its first turn left the
+    work described in the parent's log and running nowhere. `readmit` is how the
+    next daemon puts it back: the run id and the session id come from the record,
+    so the child keeps its identity, its name and its place in the roster rather
+    than arriving as a second child the parent never asked for.
+
+    Its own Protocol, and not a method on `SubagentProvider`, for
+    `RehydratableProvider`'s reason exactly — resuming an *un-run* child is not
+    something every way of running one can do, and a `getattr` probe would report
+    a provider whose method is misnamed as one that cannot do it.
+
+    Returning `None` declines this one child without failing the sweep: the next
+    daemon is starting a root, and one child it cannot rebuild must not stop the
+    others from coming back.
+    """
+
+    async def readmit(
+        self, request: SubagentRequest, *, run_id: str, session_id: str, restarts: int = 0
+    ) -> SubagentRun | None: ...
 
 
 @runtime_checkable
@@ -730,6 +856,179 @@ class SubagentService:
         run = next((one for one in self._runs.values() if one.session_id == session_id), None)
         return bool(run is not None and await self.rehydrate(run.id))
 
+    async def resume_children(self, parent: Any) -> Sequence[str]:
+        """What a resumed root owes the children in its log (P5-04). Returns the revived.
+
+        Two opposite answers to two states, which is why this exists rather than
+        one sweep over "everything unsettled":
+
+        * **queued** — admitted and never run. Re-driven, because nothing was
+          claimed, spent or written and the work is the same work.
+        * **running** — interrupted mid-turn. Put back on the *ladder*: its turn
+          is closed on resume and its task is presented again, up to
+          `CHILD_RETRY_LIMIT` times, after which it is failed and says so.
+
+        **The ladder is what makes re-running an interrupted child sound**, and it
+        is the piece this row shipped without at first. A child that started a
+        turn has *claimed* its task from its inbox, so simply driving it again
+        finds nothing pending and ends at step zero reporting `completed` — the
+        empty turn P5-04 found at the root, and a parent told its child succeeded
+        when it did not. Re-presenting the task is what makes the next attempt a
+        real one, and the count is what stops it being infinite.
+
+        Doing nothing was never the third option: `child_is_live` counts an
+        unsettled child, so a row nothing will ever move keeps its whole root out
+        of passivation for the life of the process while the parent waits on a
+        reply nobody is writing.
+
+        **An interrupted child becomes a queued one**, which is why the sweep
+        below needs no second branch: "admitted and not running" is one state to
+        re-drive, and the ladder's only job is to decide whether this child is
+        allowed to reach it again.
+        """
+        session = getattr(parent, "session", None)
+        if session is None:
+            return []
+        # One fold for both halves. Read again after the appends below it would
+        # be a guaranteed cache miss — `session.seq` has moved — so the whole log
+        # would be folded twice on exactly the restarts that have work to do.
+        roster = dict(self.roster(session))
+        for run_id, row in roster.items():
+            if row.get("deleted") or row.get("status") != "running":
+                continue
+            # **Decided where the answer is known, and written once.** Marking a
+            # child `queued` and discovering afterwards that nothing can readmit
+            # it leaves a row that is live to `child_is_live`, claiming to wait
+            # for a slot no one will ever give it — the parent held out of
+            # passivation by a child nothing will move, which is the state this
+            # whole sweep exists to end.
+            spent = int(row.get("attempts") or 0) >= CHILD_RETRY_LIMIT
+            recoverable = self._readmitter(row) is not None
+            resumable = recoverable and not spent
+            detail = INTERRUPTED_DETAIL
+            if spent:
+                detail = exhausted_detail()
+            elif not recoverable:
+                detail = UNRECOVERABLE_DETAIL
+            row["status"] = "queued" if resumable else "error"
+            session.append(
+                STATUS,
+                {
+                    "runId": run_id,
+                    "status": row["status"],
+                    "detail": detail,
+                    # What it was doing, kept where a person looking for the work
+                    # will find it: the child's own transcript is still on disk.
+                    "sessionId": row.get("sessionId"),
+                },
+            )
+        return await self._readmit_children(parent, roster)
+
+    async def _readmit_children(self, parent: Any, roster: Mapping[str, Any]) -> Sequence[str]:
+        """Put this parent's un-run children back to work. `resume_children`'s second half.
+
+        A daemon that stopped between a child's admission and its first turn left
+        that work described in the parent's log and running nowhere: the roster
+        shows it, the parent is waiting for it, and nothing will ever drive it.
+        This is the sweep that answers, and it is called where a root is resumed.
+
+        **Only `queued` rows**, which by the time this runs means both children
+        that never started and the ones `resume_children` has just put back on
+        the ladder — it converts a `running` row to `queued` precisely so there
+        is one state to re-drive rather than two branches here.
+
+        **The ceiling is re-derived** — `check_grant`, `grant_for` and `_enforce`,
+        from a request rebuilt out of the admission record. That is why the
+        narrowing is logged (`admission_payload`): a readmit that reconstructed
+        only the run would hand the child its parent's whole reach, so a child
+        would come back from a power cut wider than it was admitted (§6.5).
+
+        **The spawn guards do not run, and that is deliberate.** A guard answers
+        "may this delegation happen", and this one already did — its admission is
+        in the log. Asking again would count the child against a cap its own
+        record fills, so `ChildLimits` would refuse to restore the very work it
+        once allowed, and the child would stay queued for good. Guards gate new
+        work; a readmit is old work resuming.
+
+        Returns the run ids that are running again. One child that cannot be
+        rebuilt is logged and skipped rather than failing the sweep: a root
+        coming back must not be held hostage by the least recoverable thing in
+        its log.
+        """
+        revived: list[str] = []
+        for run_id, row in roster.items():
+            if row.get("deleted") or row.get("status") != "queued" or run_id in self._runs:
+                continue
+            try:
+                run = await self._readmit_one(parent, run_id, row)
+            except Exception:
+                log.exception("ph.seams.subagents: %s could not be readmitted", run_id)
+                continue
+            if run is not None:
+                revived.append(run_id)
+        return revived
+
+    async def _readmit_one(
+        self, parent: Any, run_id: str, row: Mapping[str, Any]
+    ) -> SubagentRun | None:
+        """One child, through the admission path it originally took."""
+        owner = str(row.get("owner") or "")
+        name = self.resolve(owner or None)
+        entry = self._providers.get(name or "")
+        if entry is None or not isinstance(entry.provider, ReadmittingProvider):
+            return None
+        request = self.resolve_preset(
+            SubagentRequest(
+                prompt=str(row.get("prompt") or ""),
+                parent=parent,
+                name=str(row.get("name") or "") or None,
+                provider=str(row.get("modelProvider") or "") or None,
+                model=str(row.get("model") or "") or None,
+                reasoning_effort=str(row.get("reasoningEffort") or "") or None,
+                access=cast(Access, row.get("requestedAccess") or "read"),
+                preset=str(row.get("preset") or "") or None,
+                # `None` inherits everything, which is what an absent key means —
+                # and what a log written before the narrowing was recorded says.
+                skills=None if row.get("skills") is None else tuple(row["skills"]),
+                tools=None if row.get("tools") is None else tuple(row["tools"]),
+            )
+        )
+        boundary = self._delegating_boundary(request)
+        held = self.held_by(request, boundary)
+        self.check_grant(request, held)
+        grant = self.grant_for(request, held, boundary=boundary)
+        with running(entry.by):
+            run = await entry.provider.readmit(
+                request,
+                run_id=run_id,
+                session_id=str(row.get("sessionId") or ""),
+                # How many times this child has *already* been started, which is
+                # what tells a restart from a first run — and it is `starts`,
+                # never `attempts`: progress clears the ladder, so a child that
+                # got somewhere and was then stopped again would otherwise be
+                # readmitted as though it had never run, its restart go
+                # unrecorded, and the ladder never count it again.
+                restarts=int(row.get("starts") or 0),
+            )
+        if run is None:
+            return None
+        run.owner = name or ""
+        self._enforce(grant, run, held, boundary)
+        self._runs[run.id] = run
+        return run
+
+    def _readmitter(self, row: Mapping[str, Any]) -> _Registered | None:
+        """The provider that could put this child back, or `None` if none can.
+
+        Asked *before* a child is re-queued, so the sweep never labels one
+        `queued` that nothing will ever pick up — see `resume_children`.
+        """
+        name = self.resolve(str(row.get("owner") or "") or None)
+        entry = self._providers.get(name or "")
+        if entry is None or not isinstance(entry.provider, ReadmittingProvider):
+            return None
+        return entry
+
     async def rehydrate(self, run_id: str) -> bool:
         """Make a settled child addressable again (P3-13).
 
@@ -902,6 +1201,13 @@ def subagent_roster(session: Session) -> dict[str, dict[str, Any]]:
     parent asking what happened to the one it revoked deserves an answer other
     than silence.
 
+    `starts` and `attempts` ride on the row and are the interruption ladder's
+    whole state, both folded rather than carried: the log already records one
+    `running` per drive and one usage record per model answer, so "how many times
+    has this been started" and "how many of those achieved nothing" are questions
+    about events that are already there. A counter written onto a payload would be
+    a second account of the same events, free to disagree with them.
+
     In the seam rather than in the bundle that produces the events, because the
     two consumers live in different packages — the model's roster tool in the
     RLM bundle, the subagent panel in the app, which cannot import the bundle. A
@@ -939,8 +1245,24 @@ def fold_subagent_event(roster: dict[str, dict[str, Any]], event: Any) -> None:
     row = roster.get(run_id)
     if row is None:
         return
-    if event.type == STATUS:
+    if event.type == USAGE:
+        # **Progress clears the ladder**, and this is where the log already said
+        # so: a usage record is a model answer attributed to this child, so it
+        # cannot be produced by a turn that did nothing. See `attempts` below.
+        row["attempts"] = 0
+    elif event.type == STATUS:
         row.update({key: value for key, value in event.data.items() if key != "runId"})
+        if event.data.get("status") == "running":
+            # Every drive writes one of these, so counting them *is* the answer
+            # to "how many times has this child been started" — a fact the log
+            # already carried and nothing had yet read.
+            row["starts"] = int(row.get("starts") or 0) + 1
+        if event.data.get("cause") == "resumed":
+            # And how many of those starts were restarts with nothing achieved
+            # since. Two counters because they answer different questions: this
+            # one is cleared by progress and `starts` never is, so deriving one
+            # from the other would lose whichever fact the ladder did not need.
+            row["attempts"] = int(row.get("attempts") or 0) + 1
     else:
         row["deleted"] = True
         row["deletedReason"] = event.data.get("reason")

@@ -55,6 +55,16 @@
 # `ctx.workspace` lands (Phase 4, D21) a `write` request is recorded and
 # downgraded with a reason code, because a guarantee nothing enforces must not
 # be granted, and a row knob that could not change that would be a lie.
+# What this host can carry, across every root — the other half of the per-parent
+# figure below, and here rather than in `ph-core` because this is the bundle that
+# produces `subagent` jobs at all. `ph daemon --max-concurrent-children` overrides
+# it. Eight rather than four so two parents fanning out fully is the ordinary
+# case and not a queue; a starting point, not a measurement.
+- id: jobs
+  config:
+    concurrency:
+      subagent: 8
+
 - id: rlm-subagent-provider
   name: rlm-subagent-provider
   config:

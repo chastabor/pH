@@ -285,6 +285,12 @@ class _Follow:
     everything: bool = False
     selectors: Sequence[Selector] = ()
     """Namespace selectors from `--type`; empty means no filter (P6-33)."""
+    last_turn: str | None = None
+    """How the turn this stopped on ended, so the exit code can say (P5-04).
+
+    Kept because the status that *releases* `--until-idle` is the only one that
+    decides the exit code, and it has gone by the time the wait returns.
+    """
     done: anyio.Event = field(default_factory=anyio.Event)
     feed: Followed = field(init=False)
 
@@ -306,6 +312,7 @@ class _Follow:
         ended = f" · last turn {last}" if status == "idle" and last and last != "completed" else ""
         console.print(f"[dim]· {status}{ended}[/dim]", soft_wrap=True)
         if self.until_idle and status == "idle":
+            self.last_turn = last
             self.done.set()
 
     def write(self, events: Iterable[Mapping[str, Any]]) -> None:
@@ -400,7 +407,11 @@ def attach(
         int, typer.Option("--since", help="Skip history up to this sequence number.")
     ] = 0,
     until_idle: Annotated[
-        bool, typer.Option("--until-idle", help="Stop once the root goes idle.")
+        bool,
+        typer.Option(
+            "--until-idle",
+            help="Stop once the root goes idle; exit 1 if its last turn errored.",
+        ),
     ] = False,
     everything: Annotated[
         bool, typer.Option("--all", help="Include streamed chunks and other per-delta events.")
@@ -418,6 +429,15 @@ def attach(
     `assistant/chunk`, whose content arrives again as the `assistant/message`
     that closes it, so showing both is a keystroke log wrapped around the thing
     a person came to read.
+
+    **`--until-idle` exits 1 when the turn it stopped on ended in an error.**
+    Idle is how a root that answered and a root whose last answer failed both
+    look, so a script chaining on this had no way to tell them apart and read the
+    second as success (P5-04). Only `error` — the kind the loop records when a
+    turn could not be completed. A turn a person cancelled, or one a limit ended,
+    exits 0 and says so on its own line: those are outcomes somebody already
+    knows about, and turning them into a failed command would make the ordinary
+    way of stopping an agent look like a fault.
     """
 
     # The session-log vocabulary: a bare `workspace` needs no prefix, and
@@ -454,6 +474,7 @@ def attach(
                 # anything at all. Without this the second case waits forever.
                 current = await client.call("session/status", sessionId=session)
                 if current["status"] == "idle":
+                    follow.last_turn = current.get("lastTurn")
                     follow.done.set()
             await first_of(follow.done, client.closed)
         finally:
@@ -464,6 +485,10 @@ def attach(
                 await client.call("session/detach", sessionId=session)
         if client.closed.is_set():
             raise DaemonGone
+        if follow.last_turn == "error":
+            # After the detach above, so the refusal does not leave a
+            # subscription behind on a daemon that is still running.
+            fail(f"[red]{session}: the last turn ended in an error[/red]")
 
     _ask(work)
 

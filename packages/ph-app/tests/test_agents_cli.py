@@ -125,6 +125,46 @@ async def test_send_queues_a_turn_and_attach_shows_the_answer(
         assert followed.output.count("user/message") == 1
 
 
+async def test_until_idle_exits_non_zero_when_the_last_turn_errored(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """Idle is how "answered" and "the last answer failed" both look (P5-04).
+
+    A script chaining on `--until-idle` read the second as success, which is the
+    whole reason the root's last turn is projected beside its status. The turn is
+    made to fail at the provider, so the loop records `turn/end{error}` the way it
+    would for a real outage rather than the test asserting on a synthetic record.
+    """
+    from ph.testing.fake_adapter import FakeAdapter
+
+    async def exploding(self: Any, options: Any) -> Any:
+        raise RuntimeError("provider is down")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(FakeAdapter, "stream", exploding)
+    async with _daemon(tmp_path, monkeypatch):
+        assert (await _ph("agents", "send", "sour", "answer me")).exit_code == 0
+
+        followed = await _ph("agents", "attach", "sour", "--until-idle")
+
+        assert followed.exit_code == 1, followed.output
+        assert "the last turn ended in an error" in followed.output
+        assert "last turn error" in followed.output, "the status line names it too"
+
+
+async def test_until_idle_exits_zero_when_the_turn_completed(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """The other half, so the exit code is a signal rather than a constant."""
+    async with _daemon(tmp_path, monkeypatch):
+        assert (await _ph("agents", "send", "sweet", "answer me")).exit_code == 0
+
+        followed = await _ph("agents", "attach", "sweet", "--until-idle")
+
+        assert followed.exit_code == 0, followed.output
+        assert "last turn" not in followed.output, "an ordinary ending is not annotated"
+
+
 async def test_since_skips_the_history_a_client_already_has(
     tmp_path: Path, monkeypatch: Any
 ) -> None:

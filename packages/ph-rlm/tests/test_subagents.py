@@ -39,15 +39,23 @@ from typing import Any
 import anyio
 import pytest
 
+from ph.llm.types import text_of
+from ph.persistence import resume_session
 from ph.seams.subagents import (
+    CHILD_RETRY_LIMIT,
     STATUS,
+    UNRECOVERABLE_DETAIL,
+    USAGE,
     SubagentRequest,
     SubagentSpawnError,
+    child_is_live,
     default_child_name,
+    exhausted_detail,
     family_reach,
     subagent_roster,
 )
 from ph.seams.workspace import workspace_survivors
+from ph.session import derive_event_message
 from ph.testing import FAKE_OPTIONS, StubWorkspaceProvider, skill
 from ph_rlm.subagents import PROVIDER_NAME, TASK_PREFIX, delegation_depth
 
@@ -761,6 +769,10 @@ class _Gate:
     def release_one(self) -> None:
         self.held.pop(0).set()
 
+    def twice(self) -> bool:
+        """Whether a second child has reached the model — the readmit's proof."""
+        return self.arrived >= 2
+
     def release_all(self) -> None:
         self.open = True
         for event in self.held:
@@ -884,3 +896,252 @@ async def test_deleting_a_queued_child_stops_its_wait_and_takes_no_slot(
     assert (await first.result()).status == "done"
     assert (await third.result()).status == "done"
     assert _statuses(session, third.id) == ["queued", "running", "done"]
+
+
+# ------------------------------------------------------------ across a restart --
+
+
+async def _persisted(ctx: Any, session: Any) -> None:
+    """Put on disk what a restart will read, with the harness holding still.
+
+    A flush and nothing else. The first harness is parked at the model for the
+    whole of these tests, so it appends nothing more to this log until the gate
+    opens at teardown — which is what lets a second one open the same file
+    without the two writers P5-03 refuses. Draining here instead would wait on
+    the very child that is meant to be caught mid-flight.
+    """
+    await ctx.sessions.flush(session)
+
+
+async def _restart(
+    mount: Any, session_id: str, *, skills: tuple[str, ...] = (), concurrent: int = 1
+) -> Any:
+    """A second harness over the same `$PH_HOME`, resuming one root from its log.
+
+    What a daemon restart *is* from the seam's side: a fresh mount, nothing in
+    memory, and a session that has to come off disk. `resume_children` is the
+    call `Supervisor` makes at the same point, against the same agent.
+
+    `skills` is what the *deployment* still provides. It is a parameter because
+    a readmit re-derives the child's ceiling against what the parent holds now,
+    not against what it held then — so a skill this deployment no longer mounts
+    is a child refused rather than one quietly readmitted without it.
+    """
+    ctx = await mount(dict(PROVIDER_ROW, config={"maxConcurrent": concurrent}))
+    for name in skills:
+        ctx.skills.register(skill(name))
+    session = await resume_session(ctx, session_id)
+    parent = ctx.agents.create(session, FAKE_OPTIONS)
+    await ctx.subagents.resume_children(parent)
+    return ctx, session, parent
+
+
+async def test_a_queued_child_is_re_driven_after_a_restart(
+    delegating: Mounted, gate: _Gate, mount: Any
+) -> None:
+    """The work was described in the parent's log and running nowhere (P5-04).
+
+    A child that never reached its first turn has claimed nothing and spent
+    nothing, so the next harness runs it for the first time — under its original
+    id, so the parent's roster gains no second child it never asked for.
+
+    Reaching the model is the proof of "re-driven": the gate counts arrivals, and
+    the readmitted child is the only one the second harness can run.
+    """
+    ctx, session, parent = await delegating(maxConcurrent=1)
+    await _spawn(ctx, parent, "first")
+    second = await _spawn(ctx, parent, "second")
+    await _until(lambda: gate.arrived == 1, "the first child to reach the model")
+    assert _statuses(session, second.id) == ["queued"]
+    await _persisted(ctx, session)
+
+    # Room for both, so which one this asserts about is not a race: the
+    # interrupted sibling is on the ladder and comes back too.
+    revived_ctx, revived, _parent = await _restart(mount, session.id, concurrent=2)
+
+    assert second.id in {run.id for run in revived_ctx.subagents.list()}, (
+        "the queued child came back under its own id"
+    )
+    await _until(
+        lambda: _statuses(revived, second.id)[-1] == "running",
+        "the readmitted child to reach the model",
+    )
+    assert len(subagent_roster(revived)) == 2, "no child was invented or lost"
+    assert "attempts" not in subagent_roster(revived)[second.id], (
+        "a child that never ran is a first attempt, not a retry"
+    )
+
+
+async def test_a_child_caught_mid_turn_climbs_the_ladder_with_its_task_re_presented(
+    delegating: Mounted, gate: _Gate, mount: Any
+) -> None:
+    """The ladder, and the thing that makes it a real attempt rather than a lie.
+
+    Starting a turn *claims* the task from the inbox and the claim is a logged
+    splice, so a resumed child that was simply driven again would find an empty
+    inbox, end at step zero and report `completed` for work it never did —
+    P5-04's finding at the root. Re-presenting the task is the fix, and saying
+    the turn was cut short is what stops the transcript reading as one
+    instruction given twice.
+    """
+    ctx, session, parent = await delegating(maxConcurrent=1)
+    interrupted = await _spawn(ctx, parent, "only")
+    await _until(lambda: gate.arrived == 1, "the child to reach the model")
+    assert _statuses(session, interrupted.id) == ["running"]
+    await _persisted(ctx, session)
+
+    revived_ctx, revived, _parent = await _restart(mount, session.id)
+
+    assert interrupted.id in {run.id for run in revived_ctx.subagents.list()}
+    assert child_is_live(subagent_roster(revived)[interrupted.id]), "a child owed a turn is live"
+    # The count follows the restart's own `running` record, which a detached
+    # drive job writes a moment later — so this waits for the fact rather than
+    # reading the roster before it exists.
+    await _until(
+        lambda: subagent_roster(revived)[interrupted.id].get("attempts") == 1,
+        "the restart to be counted",
+    )
+    assert subagent_roster(revived)[interrupted.id]["starts"] == 2, "one first run, one restart"
+    await _until(gate.twice, "the resumed child to reach the model again")
+
+    child = revived_ctx.sessions.get(interrupted.session_id)
+    assert child is not None
+    tasks = [
+        text_of(derive_event_message(event).content)
+        for event in child.events
+        if event.type == "user/message" and TASK_PREFIX in repr(event.data)
+    ]
+    assert len(tasks) == 2, "the task was not presented again, so the retry answers nothing"
+    assert "the harness stopped while you were working on this" in tasks[-1]
+    assert "this is attempt 2" in tasks[-1]
+
+
+def _resumed(session: Any, run_id: str, times: int) -> None:
+    """Record `times` restarts, the way a restart actually records one.
+
+    The real facts rather than a seeded count: the ladder folds `running` records
+    carrying `cause: resumed`, so a test that wrote an `attempts` number would be
+    asserting against a field production no longer has.
+    """
+    for _ in range(times):
+        session.append(STATUS, {"runId": run_id, "status": "running", "cause": "resumed"})
+
+
+async def _stalled(ctx: Any, session: Any, parent: Any, gate: _Gate, *, restarts: int) -> Any:
+    """A child at the model that has already been restarted `restarts` times."""
+    child = await _spawn(ctx, parent, "only")
+    await _until(lambda: gate.arrived == 1, "the child to reach the model")
+    _resumed(session, child.id, restarts)
+    return child
+
+
+async def test_the_ladder_gives_up_and_says_so(
+    delegating: Mounted, gate: _Gate, mount: Any
+) -> None:
+    """Three restarts with nothing achieved between them is not bad luck.
+
+    Re-driving forever would spend a parent's budget on a transcript nobody
+    reads, which is the failure the root's own ladder is bounded to avoid.
+    """
+    ctx, session, parent = await delegating(maxConcurrent=1)
+    spent = await _stalled(ctx, session, parent, gate, restarts=CHILD_RETRY_LIMIT)
+    assert subagent_roster(session)[spent.id]["attempts"] == CHILD_RETRY_LIMIT
+    await _persisted(ctx, session)
+
+    revived_ctx, revived, _parent = await _restart(mount, session.id)
+
+    assert revived_ctx.subagents.list() == [], "a spent ladder put a child back to work"
+    row = subagent_roster(revived)[spent.id]
+    assert row["status"] == "error"
+    assert row["detail"] == exhausted_detail()
+    assert str(CHILD_RETRY_LIMIT) in row["detail"], "the sentence names the bound it hit"
+    assert not child_is_live(row), "a root cannot be passivated while this reads live"
+
+
+async def test_progress_since_the_last_restart_clears_the_ladder(
+    delegating: Mounted, gate: _Gate, mount: Any
+) -> None:
+    """A child stopped, working an hour, then stopped again met two incidents.
+
+    Without a reset the ladder counts a lifetime's interruptions rather than
+    consecutive ones, and fails work that was going fine. The same setup as the
+    test above plus one fact: the child was attributed a model answer, which is
+    something a turn that did nothing cannot produce.
+    """
+    ctx, session, parent = await delegating(maxConcurrent=1)
+    moved = await _stalled(ctx, session, parent, gate, restarts=CHILD_RETRY_LIMIT)
+    session.append(USAGE, {"runId": moved.id, "targetSeq": 0, "childUsage": {}, "origin": "probe"})
+    assert subagent_roster(session)[moved.id]["attempts"] == 0, "progress clears the count"
+    await _persisted(ctx, session)
+
+    revived_ctx, revived, _parent = await _restart(mount, session.id)
+
+    row = subagent_roster(revived)[moved.id]
+    assert child_is_live(row), "a child that got somewhere is owed another attempt"
+    assert moved.id in {run.id for run in revived_ctx.subagents.list()}
+    # **The restart is still recorded as one**, counting up from the cleared
+    # ladder. Derived from `attempts` instead, this readmit would look like a
+    # first run, write no `resumed`, and the ladder would never count it again.
+    await _until(
+        lambda: subagent_roster(revived)[moved.id].get("attempts") == 1,
+        "the restart to be counted from a cleared ladder",
+    )
+
+
+async def test_a_readmitted_child_does_not_come_back_wider_than_it_was_admitted(
+    delegating: Mounted, gate: _Gate, mount: Any
+) -> None:
+    """§6.5 across a power cut, which is why the narrowing is in the record.
+
+    The ceiling is re-derived from the admission, so a child admitted with one
+    skill does not return holding every skill its parent has. Rebuilt from the
+    run alone it would, and nothing would have said so.
+    """
+    ctx, session, parent = await delegating(maxConcurrent=1)
+    ctx.skills.register(skill("review"))
+    ctx.skills.register(skill("audit"))
+    await _spawn(ctx, parent, "first")
+    narrowed = await _spawn(ctx, parent, "second", skills=("review",), tools=("read",))
+    await _until(lambda: gate.arrived == 1, "the first child to reach the model")
+    await _persisted(ctx, session)
+
+    revived_ctx, revived, _parent = await _restart(mount, session.id, skills=("review", "audit"))
+
+    # Read back off the *resumed* log, which is the only copy a restart has.
+    admitted = next(
+        event.data
+        for event in revived.events
+        if event.type == "subagent/admitted" and event.data["runId"] == narrowed.id
+    )
+    assert list(admitted["skills"]) == ["review"], "the narrowing has to survive the round trip"
+    assert list(admitted["tools"]) == ["read"]
+
+    back = next(run for run in revived_ctx.subagents.list() if run.id == narrowed.id)
+    assert back.grant is not None
+    assert back.grant.skills == ("review",)
+    assert back.grant.tools == ("read",)
+
+
+async def test_a_child_no_provider_can_resume_is_settled_not_left_queued(
+    delegating: Mounted, gate: _Gate, mount: Any
+) -> None:
+    """A `queued` row nothing will pick up is worse than an honest failure.
+
+    It reads as live, so the root can never be passivated, and the parent waits
+    on a slot no one will ever give it. Deciding where the capability probe
+    answers is what stops the sweep writing a status it cannot honour — here the
+    next harness mounts no subagent provider at all.
+    """
+    ctx, session, parent = await delegating(maxConcurrent=1)
+    orphan = await _spawn(ctx, parent, "only")
+    await _until(lambda: gate.arrived == 1, "the child to reach the model")
+    await _persisted(ctx, session)
+
+    bare = await mount()
+    revived = await resume_session(bare, session.id)
+    await bare.subagents.resume_children(bare.agents.create(revived, FAKE_OPTIONS))
+
+    row = subagent_roster(revived)[orphan.id]
+    assert row["status"] == "error"
+    assert row["detail"] == UNRECOVERABLE_DETAIL
+    assert not child_is_live(row), "a root cannot be passivated while this reads live"

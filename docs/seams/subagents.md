@@ -154,6 +154,93 @@ one about intent. A queued child is live to the roster, so a parent is not
 passivated while it waits, and a slot is freed on `done`, `error` or `cancelled`
 alike. Deleting a queued child cancels its wait and takes no slot.
 
+**The queue itself is [`ctx.jobs`](jobs.md)**, not this provider's — `slot=` on
+the drive job, keyed by the parent's session. A provider chooses *whether* to cap
+and what to key it by; the waiting, the release on every ending and the queue's
+own lifetime belong to the work seam, so a second provider gets them without
+re-deriving forty lines of async.
+
+That per-parent number is a **fair share**, not a bound on the host: ten roots at
+four apiece is forty children. What the machine can carry is the work seam's
+`concurrency` config. The `rlm` bundle sets `subagent: 8` beside its per-parent
+number, so the two figures an operator compares sit in one file; `ph-core` ships
+no default naming a kind it does not produce. `ph daemon
+--max-concurrent-children` overrides it, and both apply, the parent's first.
+
+## Across a restart
+
+A harness that stopped between a child's admission and its first turn left that
+work described in the parent's log and running nowhere. `resume_children(parent)`
+is what the next one calls — the daemon does, at the point it resumes a root —
+and it gives the two states opposite answers:
+
+| the log says | what happens | why |
+|---|---|---|
+| `queued` | **re-driven**, under its own run id | it claimed nothing and spent nothing; this is the work happening once |
+| `running` | put back on the **ladder**, its task presented again | its turn was cut short; three attempts, then failed |
+| `running`, nothing mounted that can resume it | **settled** with its own reason | a row left `queued` for a provider that never comes holds the root out of passivation for good |
+
+Which of those a child gets is decided where the capability probe answers, and
+written once. Marking it `queued` and discovering afterwards that nothing can
+readmit it is the state this sweep exists to end, recreated.
+
+Leaving the second alone is not neutral: `child_is_live` counts an unsettled
+child, so a row nothing will ever move keeps its whole root out of passivation
+for the life of the process while the parent waits on a reply nobody is writing.
+
+**Re-presenting the task is what makes a retry real.** Starting a turn *claims*
+the task from the child's inbox, and the claim is a logged splice — so a resumed
+child that was merely driven again finds an empty inbox, ends at step zero and
+reports `completed` for work it never did. The task goes back in, saying the
+turn was cut short, so the transcript reads as one interrupted attempt and not
+as one instruction given twice.
+
+**The ladder's whole state is folded, not carried.** The parent's log already
+records one `subagent/status running` per drive and one
+`subagent/usage-attributed` per model answer, so the roster derives two counters
+from facts that are already there rather than maintaining a number that could
+disagree with them:
+
+| on the row | what it counts | cleared by |
+|---|---|---|
+| `starts` | every time this child has been driven | nothing |
+| `attempts` | restarts that achieved nothing since | a model answer |
+
+After `CHILD_RETRY_LIMIT` attempts the child is failed and the reason says which
+bound it hit. There are no delays, unlike the root's ladder, because this one only
+ever runs while a harness is starting — which is already the wait.
+
+**Progress clears `attempts`**, so the ladder bounds *consecutive* interruptions
+rather than a lifetime's: a child stopped once, working for an hour, then stopped
+again met two separate incidents, and reading that as one child running out of
+attempts fails work that was going fine. Progress is a **model answer** and never
+a turn ending — P5-04's forged-marker problem one level down, since a retry whose
+task somehow never reached the inbox ends a turn having done nothing, and counting
+turns would let exactly the broken case clear the count that bounds it.
+
+**The two counters are separate because they part company.** Which attempt a
+restart is comes from `starts`, never from `attempts`: progress clears the ladder,
+so a child that got somewhere and was stopped again would otherwise be readmitted
+as though it had never run, its restart go unrecorded as one, and the ladder never
+count it again.
+
+**The ceiling is re-derived, not restored from memory.** A readmit goes through
+the same `check_grant` and `grant_for` a fresh admission does, against a request
+rebuilt from the admission record — which is why that record carries the
+child's `preset`, `skills` and `tools` (`admission_payload`). Without them a
+child would come back holding its parent's whole reach: §6.5 broken by a power
+cut. It is checked against what the deployment holds **now**, so a child admitted
+with a skill since removed is refused rather than quietly readmitted without it.
+
+The spawn **guards** do not run again, deliberately: a guard answers "may this
+delegation happen", and this one already did — its admission is in the log, so
+asking again would count the child against a cap its own record fills and refuse
+to restore work that was once allowed. Guards gate new work.
+
+A provider opts in by implementing `ReadmittingProvider.readmit(request, *,
+run_id, session_id, restarts)` — its own Protocol, like `RehydratableProvider`, because
+resuming an un-run child is not something every way of running one can do.
+
 ## What it does not do
 
 * It does not run the child. That is the provider's, and `ph-base` has none.
@@ -162,6 +249,9 @@ alike. Deleting a queued child cancels its wait and takes no slot.
   named.
 * It does not bound spend or fan-out by itself — `ctx.goals` and the limits row
   do, the latter through `guard`.
+* It does not retry a child *turn* that failed on its own — that is the model's
+  outcome and the transcript's. The ladder above counts interruptions, meaning a
+  harness that stopped, which is a different thing entirely.
 
 ## See also
 

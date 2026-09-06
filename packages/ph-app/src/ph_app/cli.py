@@ -466,11 +466,48 @@ def _passivation(value: str) -> float | None:
     return minutes * 60.0
 
 
+def _children_cap(value: int | None) -> list[str]:
+    """The `--max-concurrent-children` override, as the patch it really is.
+
+    The cap *is* row config, so overriding it from the command line is a
+    `--patch` and not a second channel: `--dump-config` and `ph doctor` then show
+    the number actually in force with `cli` as its provenance, which a field
+    threaded past the profile could not do.
+
+    **Unset patches nothing**, which is what lets the flag carry no default of
+    its own: whatever the composed profile says stands, so the number lives once,
+    in the bundle that ships a subagent provider at all. It also keeps a plain
+    `ph daemon` working on a profile with no `jobs` row — a patch names a row by
+    id and the loader refuses one that is not there, so a default that always
+    patched would have made every such run exit 2 over a cap nobody asked for.
+    Name a number *there* and the refusal is earned, and says which row is
+    missing.
+
+    The kind comes from `ph.seams.jobs`, imported where the daemon's other
+    imports are: this module is read by every `ph` invocation, and the seam is
+    not otherwise on that path.
+    """
+    if value is None:
+        return []
+    if value < 1:
+        raise typer.BadParameter(f"wants a positive number of children, not {value}")
+    from ph.seams.jobs import CHILDREN_KIND
+
+    return [f"{{id: jobs, config: {{concurrency: {{{CHILDREN_KIND}: {value}}}}}}}"]
+
+
 @app.command()
 def daemon(
     profile: ProfileOption = DEFAULT_PROFILE,
     provider: Annotated[str, typer.Option("--provider")] = "fake",
     model: Annotated[str, typer.Option("--model")] = "fake-1",
+    max_concurrent_children: Annotated[
+        int | None,
+        typer.Option(
+            "--max-concurrent-children",
+            help="Children this deployment runs at once, across every root; the rest queue.",
+        ),
+    ] = None,
     passivate_after: Annotated[
         str,
         typer.Option(
@@ -488,10 +525,16 @@ def daemon(
     `$PH_RUNTIME/daemon.sock` — per boot and per user, which is the tier chosen
     for exactly this — and a stale one from a crashed daemon is cleared, while a
     live one is refused rather than stolen.
+
+    `--max-concurrent-children` is the **deployment's** bound and is the one a
+    host operator wants: a child is an agent with a model, a workspace and often
+    an interpreter of its own, and fan-out across many roots multiplies without
+    it. A parent's own fair share is `rlm-subagent-provider`'s `maxConcurrent`,
+    and both apply. Neither refuses a delegation — the overflow queues.
     """
     from .daemon.server import DaemonUnavailable, serve
 
-    composed = profile_or_exit(profile)
+    composed = profile_or_exit(profile, _children_cap(max_concurrent_children))
     try:
         roots = resolve_roots(create=True)
     except RuntimeDirError as error:
