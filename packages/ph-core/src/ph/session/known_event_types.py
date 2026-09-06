@@ -134,6 +134,13 @@ KNOWN_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         "command/run",
         "permission/preset",
         "sandbox/mode",
+        # A confined command refused something (P6-38): a host the egress proxy
+        # would not carry, or a write the kernel turned back. The proxy knows the
+        # host; the kernel refuses in silence, so the filesystem half is read from
+        # what the command printed and the record says so (`via`). Ignorable: the
+        # command's own result already shows it failed; this is the account of
+        # *why*, carrying the `/sandbox` line that lifts it.
+        "sandbox/denied",
         # capability observations
         "fs/observed",
         # Where an agent's writes land (D21, P4-07). A *pair*: an `acquired` with
@@ -334,6 +341,7 @@ IGNORABLE_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         "goal/gate",
         "limits/exceeded",
         "limits/breaker-tripped",
+        "sandbox/denied",
         "workspace/acquired",
         "workspace/disposed",
         "workspace/retained",

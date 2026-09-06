@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from ..cordis import Context, plugin
-from .sandbox import SandboxPolicy
+from .sandbox import ConfinedArgv, SandboxPolicy
 from .subprocess import SubprocessSpawnSpec, platform_shell
 from .workspace import workspace_of, workspace_policy
 
@@ -111,11 +111,14 @@ class ShellService:
                     "ph.seams.shell: %s has a workspace but no sandbox backend; running unconfined",
                     cwd,
                 )
+        agent_id: str | None = agent if isinstance(agent, str) else getattr(agent, "id", None)
         confined_by: str | None = None
+        confined: ConfinedArgv | None = None
         if policy is not None:
             # Requesting confinement and getting none is an error, not a
-            # fallback: see ph.seams.sandbox.
-            confined = self.ctx.sandbox.confine(argv, policy)
+            # fallback: see ph.seams.sandbox. The agent goes with it so a host
+            # the proxy refuses is recorded in this agent's session.
+            confined = self.ctx.sandbox.confine(argv, policy, agent=agent_id)
             argv = confined.argv
             confined_by = confined.backend
         spec = SubprocessSpawnSpec(
@@ -130,6 +133,8 @@ class ShellService:
             else None,
         )
         outcome = await self.ctx.subprocess.run(spec, scope=scope)
+        if confined is not None and outcome.exit_code != 0:
+            self._report_denial(confined, outcome, agent_id)
         return ShellResult(
             exit_code=outcome.exit_code,
             stdout=outcome.stdout,
@@ -141,6 +146,32 @@ class ShellService:
             cwd=str(cwd),
             confined_by=confined_by,
         )
+
+    def _report_denial(self, confined: ConfinedArgv, outcome: Any, agent: str | None) -> None:
+        """Put what the kernel refused in the log, read from the command's own words.
+
+        The kernel refuses in silence — `bwrap` reports nothing when a write hits
+        the read-only tree or a `connect()` finds no route — so the command's
+        output is the only account there is. **Which sentences count is the
+        backend's** (`DenialReader`), not this seam's and not this module's: they
+        are facts about one kernel's phrasing, and asking the seam keeps this
+        caller from learning which backend answered.
+
+        **Only for a command that failed**, which is the caller's half of the
+        signature table's own claim that it matches nothing an ordinary command
+        prints on success. A `grep` that finds the words "Read-only file system"
+        and exits 0 has not been refused anything.
+
+        stderr first and stdout only if it says nothing, rather than one joined
+        string: these sentences come from stderr, and joining allocated a fresh
+        copy of up to 16 MiB on every confined command.
+        """
+        network = bool(confined.policy.network) if confined.policy is not None else False
+        for stream in (outcome.stderr, outcome.stdout):
+            denial = self.ctx.sandbox.read_denial(stream, network=network)
+            if denial is not None:
+                self.ctx.sandbox.record_denial(denial, agent=agent)
+                return
 
 
 @plugin("shell-local", inject=["subprocess"])

@@ -423,3 +423,20 @@ def test_every_declared_child_status_has_a_glyph() -> None:
     assert set(STATUS_GLYPHS) == declared, (
         f"unglyphed: {declared - set(STATUS_GLYPHS)}; unknown: {set(STATUS_GLYPHS) - declared}"
     )
+
+
+def test_a_sandbox_refusal_is_a_notice_with_the_way_out() -> None:
+    """P6-38: the record carries the seam's sentence, and the transcript shows it
+    as a notice — the command's own result already said it failed."""
+    from ph.seams.sandbox import Denial
+
+    session = Session("s")
+    session.append(
+        "sandbox/denied", Denial(kind="network", via="proxy", host="h", port=443).record("a")
+    )
+
+    (item,) = _replay(session).items
+    assert item.role == "notice"
+    assert (
+        item.text == "Sandbox blocked network access to h:443. Allow it with /sandbox allow host h."
+    )

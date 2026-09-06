@@ -738,3 +738,43 @@ async def test_a_leading_wildcard_hides_the_file_without_refusing_the_tree(
     # callers of `_refuses_under` differ rather than an oversight.
     policy = _policy(Rule(paths=["**/.env"], mode="deny"), root=str(tmp_path))
     assert policy.deletion_reason(tmp_path / "src", recursive=True) is not None
+
+
+async def test_a_directory_the_sandbox_allows_is_not_outside_the_workspace(
+    mount: Any, tmp_path: Path
+) -> None:
+    """P6-38, E6: the prompt boundary is the enforced one. A write into a directory
+    `sandbox-allow` binds writable must not be asked about as if it left the
+    workspace — the backend would permit it, and a prompt describing a boundary
+    that is not there is the drift the shared set exists to prevent."""
+    cache = tmp_path / "shared-cache"
+    cache.mkdir()
+    ctx = await mount(
+        {"id": "sandbox-allow", "config": {"paths": [str(cache)]}},
+        {
+            "insert": [
+                {
+                    "id": "permissions-fs",
+                    "name": "permissions-fs",
+                    "config": {
+                        "rules": [
+                            {
+                                "operations": ["write"],
+                                "paths": ["**"],
+                                "mode": "deny",
+                                "scope": "outside-workspace",
+                            }
+                        ]
+                    },
+                }
+            ]
+        },
+    )
+    (tmp_path / "project").mkdir()
+    agent, _ = await scoped_agent(ctx, tmp_path)
+    permissions = ctx.fs_permissions
+
+    assert permissions.objection("write", cache / "wheel.whl", agent=agent) is None
+    assert (
+        permissions.objection("write", tmp_path.parent / "elsewhere.txt", agent=agent) is not None
+    )

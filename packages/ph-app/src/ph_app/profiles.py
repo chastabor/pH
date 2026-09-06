@@ -32,6 +32,8 @@ __all__ = [
     "available_profiles",
     "compose_profile",
     "profile_documents",
+    "profile_file",
+    "profile_name",
     "profile_or_exit",
     "resolve_profile",
 ]
@@ -105,14 +107,27 @@ def available_profiles() -> list[str]:
     )
 
 
+def profile_file(name: str) -> Path | None:
+    """The `.yaml` this `--profile` value names, or `None` when it names a profile.
+
+    **The one predicate**, because there were two and they disagreed: this module's
+    own `available_profiles` states the rule — "two predicates for one question is
+    how a `--help` line and a command line come to disagree" — and `profile_name`
+    had re-derived it without the `.exists()` half, so a mistyped path resolved as a
+    file here and as a named profile there.
+    """
+    candidate = Path(name)
+    return candidate if candidate.suffix in (".yaml", ".yml") and candidate.exists() else None
+
+
 def resolve_profile(name: str) -> list[Path]:
     """The documents for `name`, built-in layers first then the user's overlay.
 
     A name that is a path is used directly, which is what makes a scenario test
     or a one-off deployment a single file rather than an install step.
     """
-    candidate = Path(name)
-    if candidate.suffix in (".yaml", ".yml") and candidate.exists():
+    candidate = profile_file(name)
+    if candidate is not None:
         return [candidate]
     declared = PROFILES.get(name)
     if declared is None:
@@ -132,10 +147,34 @@ def resolve_profile(name: str) -> list[Path]:
                 f"distribution provides; install ph-{layer.name} and try again"
             )
         layers.append(resolved)
-    overlay = resolve_roots().profiles_dir() / f"{name}.yaml"
+    roots = resolve_roots()
+    overlay = roots.profile_overlay(name)
     if overlay.exists():
         layers.append(overlay)
+    # Then whatever pH wrote on the person's behalf — `/sandbox`'s allowlists — in
+    # name order, after the overlay, so a change made from the TUI outlives the
+    # process without touching the file the person edits. See
+    # `PathRoots.profile_dropins`.
+    dropins = roots.profile_dropins(name)
+    if dropins.is_dir():
+        layers.extend(
+            sorted(
+                path
+                for path in dropins.iterdir()
+                if path.suffix in (".yaml", ".yml") and path.is_file()
+            )
+        )
     return layers
+
+
+def profile_name(profile: str) -> str:
+    """The name a `--profile` value names, or `""` for a path to a `.yaml`.
+
+    What `Profile.name` records, so a command that writes a drop-in knows where to —
+    and knows *not to* for a file profile, whose one document is the person's own.
+    Asked through `profile_file`, so it cannot disagree with what actually resolved.
+    """
+    return "" if profile_file(profile) is not None else profile
 
 
 DEFAULT_PROFILE = "headless"
@@ -188,7 +227,7 @@ def compose_profile(name: str) -> Profile:
 
     A command goes through `profile_or_exit`, which is this plus the exit code.
     """
-    return Profile.from_documents(profile_documents(name))
+    return Profile.from_documents(profile_documents(name), name=profile_name(name))
 
 
 def profile_or_exit(profile: str, patches: Sequence[str] = ()) -> Profile:
@@ -215,7 +254,7 @@ def profile_or_exit(profile: str, patches: Sequence[str] = ()) -> Profile:
         entries = [entry for text in patches for entry in _patch_entries(text)]
         documents.append((CLI_LAYER, entries))
     try:
-        return Profile.from_documents(documents)
+        return Profile.from_documents(documents, name=profile_name(profile))
     except LoaderError as error:
         fail(f"[red]{error}[/red]", code=2, cause=error)
 

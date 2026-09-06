@@ -557,6 +557,8 @@ NOT_EXERCISED: frozenset[str] = frozenset(
         "CompactionSeam.register",
         "FsService.rebase",
         "JobService.start",
+        "SandboxSeam.register_allowances",
+        "SandboxSeam.register_egress",
         "SandboxSeam.register_provider",
         "SessionTelemetry.add_sink",
         "SkillService.restrict",
@@ -1421,6 +1423,17 @@ UNBOUND: dict[str, str] = {
     # answers yes or no. Nothing to register — and it is consulted *before* the
     # ask is committed, so there is no execution for it to belong to yet.
     "UserQuestionService._reachable": "a policy answer read before the ask; nothing to register",
+    # The egress proxy asks the seam per connection and reports a refusal back to
+    # the row that mounted it. Both run on the proxy's own task, outside every
+    # pipeline; the answer registers nothing and the report appends a record.
+    "EgressProxy.permits": "a policy answer asked per proxy connection; nothing to register",
+    "EgressProxy.on_denied": "a callback back into the row that supplied it; appends a record",
+    # A private lookup table inside one command body, so that `allow` and `revoke`
+    # share one validator per kind rather than four branches. Pure functions over a
+    # value; nothing invokes them but the command that owns them.
+    "_Kind.read": "a pure accessor in a command's own lookup table",
+    "_Kind.validate": "a pure validator in a command's own lookup table",
+    "_Kind.write": "a pure updater in a command's own lookup table",
     "SpillClaim.owners": "a policy answer read by the sweep; nothing to register",
     "SpillClaim.owner": "a policy answer read by the sweep; nothing to register",
     "SpillClaim.locator": "a policy answer read by the sweep; nothing to register",

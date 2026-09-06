@@ -20,6 +20,7 @@ import pytest
 
 from ph.bundles import BASE, HEADLESS
 from ph.cordis import Context, Profile, load_profile_documents
+from ph.cordis.loader import compose_rows
 
 MountProfile = Callable[..., Awaitable[Context]]
 
@@ -175,7 +176,21 @@ async def mount(tmp_path: Path) -> AsyncIterator[MountProfile]:
         # real worktree off `main` — and each time the fix was local. This is
         # the guarantee stated once. A test that genuinely needs the cwd
         # overrides the row.
-        documents.append(("test-root", [{"id": "fs", "config": {"root": str(tmp_path)}}]))
+        patches: list[dict[str, Any]] = [{"id": "fs", "config": {"root": str(tmp_path)}}]
+        # Asked of the loader rather than re-read from the raw documents: which
+        # entries are rows, which are patches and what `insert:`/`remove:` mean is
+        # `compose_rows`' grammar, and a second copy of it here got `remove:` wrong.
+        if any(row.id == "sandbox-local" for row in compose_rows(documents)):
+            # `sandbox-local` ships in `ph-base` and probes the host at every mount
+            # — two spawns and a proxy — and on a host where bwrap works every
+            # `ctx.shell.run` in the suite would then be confined, which is a
+            # different measurement from the one most tests make. Off here, once;
+            # a test that wants the backend says
+            # `{"id": "sandbox-local", "disabled": False}`. Only when the row is
+            # there to patch: a test composing its own layers without `ph-base`
+            # must not be refused over a row it never had.
+            patches.append({"id": "sandbox-local", "disabled": True})
+        documents.append(("test-root", patches))
         if overlay_rows:
             documents.append(("test-overlay", list(overlay_rows)))
         ctx = Context()

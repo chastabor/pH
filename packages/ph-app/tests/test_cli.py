@@ -20,9 +20,16 @@ import yaml
 from filelock import FileLock
 from typer.testing import CliRunner
 
+from ph.paths import resolve_roots
 from ph.testing import stored_log
 from ph_app.cli import app
-from ph_app.profiles import profile_or_exit, resolve_profile
+from ph_app.profiles import (
+    compose_profile,
+    profile_file,
+    profile_name,
+    profile_or_exit,
+    resolve_profile,
+)
 
 runner = CliRunner()
 
@@ -919,3 +926,38 @@ def test_a_launchs_lifetime_choice_reaches_its_tabs() -> None:
     assert "--keep-daemon" in kept
     assert "--keep-daemon" not in plain
     assert "--no-spawn" not in plain, "spawning is the default; refusing is the flag"
+
+
+def test_drop_ins_compose_after_the_overlay(roots: Path) -> None:
+    """P6-38: what pH wrote on the person's behalf layers over what they wrote,
+    in name order — and a file profile has no name to write under."""
+    profiles = resolve_roots().profiles_dir()
+    (profiles / "headless.yaml").parent.mkdir(parents=True, exist_ok=True)
+    (profiles / "headless.yaml").write_text("[]", encoding="utf-8")
+    dropins = resolve_roots().profile_dropins("headless")
+    dropins.mkdir()
+    (dropins / "sandbox.yaml").write_text("[]", encoding="utf-8")
+    (dropins / "a-first.yaml").write_text("[]", encoding="utf-8")
+    (dropins / "notes.txt").write_text("ignored", encoding="utf-8")
+
+    documents = resolve_profile("headless")
+
+    assert [path.name for path in documents] == [
+        "base.yaml",
+        "headless.yaml",
+        "headless.yaml",
+        "a-first.yaml",
+        "sandbox.yaml",
+    ]
+    assert profile_name("headless") == "headless"
+    assert compose_profile("headless").name == "headless"
+    # One predicate for "name or path", shared with `resolve_profile`: a `.yaml`
+    # that exists is a file profile with no name to write a drop-in under, and one
+    # that does not exist is a name — which then fails resolution by that name
+    # rather than resolving here and refusing there.
+    written = profiles / "ad-hoc.yaml"
+    written.write_text("[]", encoding="utf-8")
+    assert profile_file(str(written)) == written
+    assert profile_name(str(written)) == ""
+    assert profile_file("some/missing.yaml") is None
+    assert profile_name("some/missing.yaml") == "some/missing.yaml"

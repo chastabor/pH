@@ -498,10 +498,18 @@ class Profile:
 
     documents: list[ProfileDocument] = field(default_factory=list)
     rows: list[Row] = field(default_factory=list)
+    name: str = ""
+    """Which named composition this is — `headless`, `rlm` — and `""` for one built
+    from a path or assembled ad hoc.
+
+    Opaque provenance, deliberately: cordis takes rows in and produces a plugin
+    tree, and where a named profile's files live on disk is `ph.paths`'s to say.
+    What this enables is that a row writing on the person's behalf can tell the two
+    cases apart, because an ad-hoc composition has no name to write under."""
 
     @classmethod
-    def from_documents(cls, documents: Sequence[ProfileDocument]) -> Profile:
-        return cls(documents=list(documents), rows=compose_rows(documents))
+    def from_documents(cls, documents: Sequence[ProfileDocument], *, name: str = "") -> Profile:
+        return cls(documents=list(documents), rows=compose_rows(documents), name=name)
 
     @classmethod
     def from_paths(cls, paths: Sequence[Path]) -> Profile:
@@ -608,6 +616,59 @@ class Mount:
     forks: dict[str, ForkScope] = field(default_factory=dict)
     """Every mounted plugin by row id. A private copy mounted into a realm is keyed
     `"<isolating row>/<source row>"`, which is also how `topology` labels it."""
+    reconfigured: set[str] = field(default_factory=set)
+    """Row ids re-applied live on this mount — what `topology` marks.
+
+    A set, not the configs: the only question anyone asks of it is whether a row
+    was, and the config each fork runs is already on the fork (`ForkScope.config`).
+    Keeping a parallel dict was a second statement of one fact, and it retained
+    every superseded config for the life of the mount."""
+
+    async def reconfigure(self, row_id: str, config: Any) -> ForkScope:
+        """Re-apply one row with a new config, on this mount, and touch nothing else.
+
+        **Cordis's own shape, used for what it is for.** A row's `apply` registers
+        into seams, and every registration is an effect of the row's activation
+        scope (I2): disposing the fork unwinds them all, and mounting the row again
+        with the new config makes them all again. No other row is asked to do
+        anything — a seam whose slot was released and refilled answers its next
+        call with the new value, and an agent mid-command notices only when its
+        next command asks. That is what lets `/sandbox allow host` take effect
+        with the agent still running.
+
+        Per *mount*, not per profile: a daemon mounts one `Profile` once per root
+        and `Row` is frozen, so the new config is recorded here and `topology`
+        marks the row `reconfigured live`. Whoever wants the change to survive
+        this process writes it to the profile — `/sandbox` does, as a drop-in.
+
+        Refused for a row that is disabled (there is no fork to replace; enable it
+        in the profile), that isolates others (its realm holds private copies this
+        would orphan), or that others isolate (their private copies would keep the
+        old config while the shared instance moved).
+        """
+        row = next((one for one in self.profile.rows if one.id == row_id), None)
+        if row is None:
+            raise LoaderError(f'no row with id "{row_id}" to reconfigure')
+        if row.disabled:
+            raise LoaderError(
+                f'row "{row_id}" is disabled by {row.layer}; enable it in the profile '
+                "before reconfiguring it"
+            )
+        if row.isolate:
+            raise LoaderError(f'row "{row_id}" isolates other rows and cannot be reconfigured live')
+        copies = [key for key in self.forks if key.endswith(f"/{row_id}")]
+        if copies:
+            raise LoaderError(
+                f'row "{row_id}" has private copies ({", ".join(copies)}) that would keep '
+                "the old config; change the profile instead"
+            )
+        previous = self.forks.get(row_id)
+        if previous is not None:
+            await previous.dispose()
+        fork = self.forks[row_id] = self.root.plugin(resolve_plugin(row.name), interpolate(config))
+        self.reconfigured.add(row_id)
+        await self.root.reconcile()
+        return fork
 
     def inactive(self) -> list[str]:
         """Row ids whose plugin is not active — an unmet `inject` key."""
@@ -644,7 +705,10 @@ class Mount:
             if fork is None:
                 lines.append((row.id, f"disabled · by {layer}"))
                 continue
-            lines.append((row.id, f"{_state(fork)} · from {layer}"))
+            provenance = f"from {layer}"
+            if row.id in self.reconfigured:
+                provenance += ", reconfigured live"
+            lines.append((row.id, f"{_state(fork)} · {provenance}"))
             for source_id, override in (row.isolate or {}).items():
                 private = self.forks[f"{row.id}/{source_id}"]
                 how = "own config" if override is None else "overridden config"

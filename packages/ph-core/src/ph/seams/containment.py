@@ -121,9 +121,11 @@ TIERS: dict[ContainmentTier, TierDescription] = {
         buys="collision isolation and revertibility (fan-out safety, per-run checkpoints, /revert)",
     ),
     "sandbox": TierDescription(
-        bounds="every write, absolute paths included, refused at the kernel",
-        does_not_bound="side effects that are not filesystem writes — network, "
-        "already-published artifacts",
+        bounds="every write, absolute paths included, refused at the kernel; and "
+        "network egress, to whatever `ph doctor`'s Sandbox allowances section reports "
+        "as in force",
+        does_not_bound="what an allowed request does at the far end — an artifact "
+        "published or a message sent to a reachable host is not taken back",
         buys="confinement",
     ),
 }

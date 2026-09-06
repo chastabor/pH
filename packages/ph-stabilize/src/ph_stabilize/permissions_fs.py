@@ -59,7 +59,7 @@ from ph.seams.fs import (
     WriteIntent,
     matches_glob,
 )
-from ph.seams.sandbox import enforcement_of
+from ph.seams.sandbox import allowed_paths_of, enforcement_of
 from ph.seams.workspace import workspace_of, writable_roots
 from ph.wire import WireModel
 
@@ -459,7 +459,20 @@ class FsPermissions:
         workspace = None if self.ctx is None else workspace_of(self.ctx, agent)
         if workspace is None:
             return False
-        return not any(is_under(path, root) for root in writable_roots(workspace))
+        # Plus the deployment's own allowances: the backend binds those writable, and
+        # a prompt about a write the kernel would permit describes a boundary that
+        # is not there (E6).
+        #
+        # **Not quite one set, and the difference is worth stating.** `effective`
+        # drops these under `read-only`, where the session has said nothing is
+        # writable — so in that posture the prompt boundary is *wider* than the
+        # enforced one and a write here is refused by the kernel without having been
+        # asked about. Wider in the direction that fails closed, and this rule has no
+        # session to read the mode from; a seam that answered "may this path be
+        # written, in this mode" would collapse the two, and is worth building when
+        # something needs the mode for another reason.
+        allowed = () if self.ctx is None else allowed_paths_of(self.ctx)
+        return not any(is_under(path, root) for root in (*writable_roots(workspace), *allowed))
 
     def _spellings(self, absolute: str, agent: Any = None) -> tuple[str, ...]:
         """Both ways to name this path: absolute, and relative to the workspace.

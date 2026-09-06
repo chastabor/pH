@@ -377,6 +377,7 @@ HANDLERS: Mapping[str, Handler] = {
     "workspace/checkpoint": _on_harness_event,
     "permission/preset": _on_harness_event,
     "sandbox/mode": _on_harness_event,
+    "sandbox/denied": _on_harness_event,
     "command/run": _on_harness_event,
     "command/done": _on_harness_event,
     "fs/observed": _on_harness_event,

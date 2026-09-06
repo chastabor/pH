@@ -520,3 +520,40 @@ async def test_a_private_copy_that_cannot_activate_is_refused_not_fallen_through
     with pytest.raises(LoaderError, match='isolates "fs", whose private copy is waiting on t_late'):
         await profile.mount(ctx)
     await ctx.dispose()
+
+
+# -------------------------------------------------------------- reconfigure --
+
+
+async def test_reconfigure_reapplies_one_row_and_touches_nothing_else(mount: Any) -> None:
+    """P6-38: a row re-applied live releases and refills its own registrations,
+    and every other fork in the mount is the same object it was."""
+    ctx = await mount()
+    before = {row_id: fork for row_id, fork in ctx.mount.forks.items() if row_id != "sandbox-allow"}
+    old = ctx.mount.forks["sandbox-allow"]
+
+    fork = await ctx.mount.reconfigure(
+        "sandbox-allow", {"network": {"mode": "allowlist", "hosts": ["only.example"]}}
+    )
+
+    assert fork is not old and old.unmounted and fork.active
+    assert ctx.mount.forks["sandbox-allow"] is fork
+    assert ctx.sandbox.allowances is not None
+    assert ctx.sandbox.allowances.network.hosts == ["only.example"]
+    assert {
+        row_id: fork for row_id, fork in ctx.mount.forks.items() if row_id != "sandbox-allow"
+    } == before
+    assert dict(ctx.mount.topology())["sandbox-allow"].endswith(
+        "from bundles/base.yaml, reconfigured live"
+    )
+    assert ctx.mount.reconfigured == {"sandbox-allow"}
+    # The config each row runs is the fork's, not a parallel dict's.
+    assert fork.config == {"network": {"mode": "allowlist", "hosts": ["only.example"]}}
+
+
+async def test_reconfigure_refuses_what_it_cannot_do_honestly(mount: Any) -> None:
+    ctx = await mount({"id": "sandbox-allow", "disabled": True})
+    with pytest.raises(LoaderError, match="no row with id"):
+        await ctx.mount.reconfigure("nonesuch", {})
+    with pytest.raises(LoaderError, match="is disabled by"):
+        await ctx.mount.reconfigure("sandbox-allow", {})

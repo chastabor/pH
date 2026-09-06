@@ -86,6 +86,20 @@ class PathRoots:
     def profiles_dir(self) -> Path:
         return self.home / "profiles"
 
+    def profile_overlay(self, name: str) -> Path:
+        """The person's own layer over a shipped profile: `$PH_HOME/profiles/<name>.yaml`."""
+        return self.profiles_dir() / f"{name}.yaml"
+
+    def profile_dropins(self, name: str) -> Path:
+        """Where pH writes rows on the person's behalf: `$PH_HOME/profiles/<name>.d/`.
+
+        Beside the overlay rather than inside it, because the overlay is a file a
+        person edits and comments, and a tool that rewrites YAML drops every comment
+        in it. Each drop-in holds what one command owns, says so at the top, and
+        composes *after* the overlay, in name order — the most recent decision wins.
+        """
+        return self.profiles_dir() / f"{name}.d"
+
     def daemon_socket(self) -> Path:
         """Where the supervisor listens (P5-01).
 

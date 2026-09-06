@@ -728,6 +728,20 @@ class TuiEventAdapter:
         `turn/end{blocked}` says that it stopped, not what stopped it."""
         self._row("limits", "notice", str(event.data.get("message") or "Limit reached."), event)
 
+    def _on_sandbox_denied(self, event: SessionEvent, frame: Frame) -> None:
+        """A boundary the sandbox held (P6-38), and the `/sandbox` line that lifts it.
+
+        The sentence is the seam's (`Denial.message`), carried in the record so
+        every reader prints one account. A notice rather than an error: the
+        command's own result already said it failed, and this is the account of why.
+        """
+        self._row(
+            "sandbox",
+            "notice",
+            str(event.data.get("message") or "The sandbox refused something."),
+            event,
+        )
+
     def _on_breaker_tripped(self, event: SessionEvent, frame: Frame) -> None:
         """A tool taken out of service after repeated failure."""
         tool, failures = event.data.get("tool"), event.data.get("failures")
@@ -914,6 +928,7 @@ HANDLERS: Mapping[str, Handler] = {
     "question/answered": TuiEventAdapter._on_question_answered,
     "permission/preset": TuiEventAdapter._on_permission_preset,
     "sandbox/mode": TuiEventAdapter._on_sandbox_mode,
+    "sandbox/denied": TuiEventAdapter._on_sandbox_denied,
     "command/run": TuiEventAdapter._on_command_run,
     "command/done": TuiEventAdapter._on_command_done,
     "llm/retry": TuiEventAdapter._on_llm_retry,

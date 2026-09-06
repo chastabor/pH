@@ -38,7 +38,7 @@ from ph.testing import StubSandboxProvider, report_section
 pytestmark = pytest.mark.anyio
 
 ROW = {"insert": [{"id": "workspace-readonly-scratch", "name": "workspace-readonly-scratch"}]}
-SANDBOX_ROW = {"insert": [{"id": "sandbox-local", "name": "sandbox-local"}]}
+SANDBOX_ROW = {"id": "sandbox-local", "disabled": False}
 SECTION = "Read-only scratch workspaces"
 
 

@@ -50,11 +50,17 @@ from typing import Any
 
 import pytest
 
-from ph.seams.sandbox import SandboxError, SandboxPolicy, writable_paths
+from ph.seams.sandbox import Egress, SandboxError, SandboxPolicy, writable_paths
 from ph.seams.sandbox_local import (
+    BYPASS_VARIABLES,
+    DENIAL_SIGNATURES,
+    EGRESS_PORT,
+    PROXY_PASSWORD,
+    PROXY_VARIABLES,
     Bubblewrap,
     Seatbelt,
     local_backend,
+    proxy_url,
     seatbelt_profile,
 )
 from ph.seams.subprocess import SubprocessSpawnSpec, scrub_env
@@ -62,7 +68,9 @@ from ph.testing.diagnostics import report_section
 
 pytestmark = pytest.mark.anyio
 
-ROW = {"insert": [{"id": "sandbox-local", "name": "sandbox-local"}]}
+ROW = {"id": "sandbox-local", "disabled": False}
+"""The row ships in `ph-base`; the `mount` fixture turns it off for the suite, and
+this turns it back on for the tests that are about it."""
 
 
 def _policy(root: str = "/w", **extra: Any) -> SandboxPolicy:
@@ -340,24 +348,134 @@ async def test_read_only_mode_refuses_the_workspace_too(mount: Any, tmp_path: Pa
     assert not (workspace / "here.txt").exists()
 
 
+FULL_NETWORK = {"id": "sandbox-allow", "config": {"network": {"mode": "full"}}}
+"""The deployment saying confined commands get the host's network."""
+
+# `/proc/net/dev`, not `/sys/class/net`: `/sys` is bind-mounted from the host and
+# its sysfs is not namespace-aware, so it reports the host's 13 interfaces even
+# inside `--unshare-net`. The netlink-backed `/proc` view is the one the namespace
+# actually owns — measured 1 against 13.
+LINKS = "print(len(open('/proc/net/dev').read().splitlines()) - 2)"
+PIDS = "import os;print(len([p for p in os.listdir('/proc') if p.isdigit()]))"
+
+
+async def _count(ctx: Any, workspace: Path, script: str, **extra: Any) -> int:
+    """One confined `python -c` through the **seam**, so the deployment's allowances
+    are merged in — which is what makes `refuse_network=` a request rather than the
+    resolved fact a backend reads."""
+    policy = SandboxPolicy(mode="workspace-write", workspace_root=str(workspace), **extra)
+    argv = ctx.sandbox.confine((sys.executable, "-c", script), policy).argv
+    _, out = await _run(ctx, argv, workspace)
+    return int(out.strip())
+
+
 async def test_the_namespaces_are_real(mount: Any, tmp_path: Path) -> None:
     """`--unshare-net` and `--unshare-pid` are namespaces, not filters — nothing
-    inside can talk past them, which is why they are the mechanism."""
+    inside can talk past them, which is why they are the mechanism.
+
+    **A caller cannot widen the deployment's posture** (§6.5): there is no way to
+    ask for the network at all, only to refuse it, and the shipped `sandbox-allow`
+    says `allowlist` — still one interface and a door. The host's interfaces appear
+    only when the *deployment* says `full`, which is the next test.
+    """
     ctx, workspace = await _enforcing(mount, tmp_path)
 
-    async def count(script: str, **extra: Any) -> int:
-        policy = SandboxPolicy(mode="workspace-write", workspace_root=str(workspace), **extra)
-        argv = ctx.sandbox.confine((sys.executable, "-c", script), policy).argv
-        _, out = await _run(ctx, argv, workspace)
-        return int(out.strip())
+    assert await _count(ctx, workspace, LINKS) == 1, "loopback and nothing else"
+    assert await _count(ctx, workspace, LINKS, refuse_network=True) == 1, (
+        "and a caller refusing the network still has none"
+    )
+    assert await _count(ctx, workspace, PIDS) < 10, "its own processes, not the host's table"
 
-    # `/proc/net/dev`, not `/sys/class/net`: `/sys` is bind-mounted from the
-    # host and its sysfs is not namespace-aware, so it reports the host's 13
-    # interfaces even inside `--unshare-net`. The netlink-backed `/proc` view is
-    # the one the namespace actually owns — measured 1 against 13.
-    links = "print(len(open('/proc/net/dev').read().splitlines()) - 2)"
-    pids = "import os;print(len([p for p in os.listdir('/proc') if p.isdigit()]))"
 
-    assert await count(links) == 1, "loopback and nothing else"
-    assert await count(links, network=True) > 1, "the host's interfaces, when allowed"
-    assert await count(pids) < 10, "its own processes, not the host's table"
+async def test_the_deployment_can_hand_out_the_hosts_network(mount: Any, tmp_path: Path) -> None:
+    """`network.mode: full` is the one way to the host's interfaces, and it is the
+    deployment's to say — a row, not a per-call flag."""
+    ctx = await mount(ROW, FULL_NETWORK)
+    if ctx.sandbox.provider is None:
+        pytest.skip("no enforcing sandbox backend on this host")
+    workspace = tmp_path / "work"
+    workspace.mkdir()
+
+    assert await _count(ctx, workspace, LINKS) > 1, "the host's interfaces, when the row says so"
+    assert await _count(ctx, workspace, LINKS, refuse_network=True) == 1, (
+        "and a caller refusing the network still gets none"
+    )
+
+
+# ------------------------------------------------------------------- egress --
+
+
+def _egress(agent: str | None = "a1") -> Egress:
+    return Egress(socket="/run/user/1/ph/sandbox/egress-1-1.sock", port=EGRESS_PORT, agent=agent)
+
+
+def test_the_egress_door_is_a_shim_and_the_proxy_variables_with_the_namespace_kept() -> None:
+    """P6-38's argv, read as the policy it is: the namespace is still unshared, the
+    proxy variables point at loopback with the agent in the user part, the bypass
+    variables are gone, and the command runs behind a `socat` shim that is waited
+    for before it `exec`s."""
+    argv = Bubblewrap().confine(("curl", "https://x"), _policy(egress=_egress())).argv
+
+    assert "--unshare-net" in argv, "the door does not open the namespace"
+    settings = {argv[i + 1]: argv[i + 2] for i, token in enumerate(argv) if token == "--setenv"}
+    assert set(settings) == set(PROXY_VARIABLES)
+    assert set(settings.values()) == {f"http://a1:{PROXY_PASSWORD}@127.0.0.1:{EGRESS_PORT}"}
+    unset = [argv[i + 1] for i, token in enumerate(argv) if token == "--unsetenv"]
+    assert unset == list(BYPASS_VARIABLES)
+
+    command = argv[argv.index("--") + 1 :]
+    assert command[:2] == ("/bin/sh", "-c")
+    assert command[3:] == ("ph-egress", "curl", "https://x"), "the command is `$@`, untouched"
+    script = command[2]
+    assert f"TCP-LISTEN:{EGRESS_PORT},bind=127.0.0.1,fork,reuseaddr" in script
+    assert "UNIX-CONNECT:/run/user/1/ph/sandbox/egress-1-1.sock" in script
+    assert script.rstrip().endswith('exec "$@"')
+    assert "until socat" in script, "the shim is waited for, not assumed"
+
+
+def test_the_backend_names_itself_rather_than_being_named_by_its_class() -> None:
+    """`ConfinedArgv.backend` is the provider's declared name, so a consumer that
+    wants to tell a person what is confining them never reads a Python class."""
+    assert Bubblewrap().backend == "bwrap"
+    assert Seatbelt().backend == "sandbox-exec"
+    assert Bubblewrap().confine(("true",), _policy()).backend == "bwrap"
+
+
+def test_the_signatures_are_this_backends_platform_and_not_the_seams() -> None:
+    """Every sentence here is Linux/glibc/bwrap; Seatbelt's are unmeasured, so it
+    reads nothing rather than guessing (see `Seatbelt`'s docstring)."""
+    assert ("filesystem", "Read-only file system") in DENIAL_SIGNATURES
+    assert not hasattr(Seatbelt(), "read_denial")
+
+
+def test_the_proxy_url_carries_no_user_when_there_is_no_agent() -> None:
+    assert proxy_url(_egress(agent=None)) == f"http://127.0.0.1:{EGRESS_PORT}"
+    assert (
+        proxy_url(_egress(agent="s/1")) == f"http://s%2F1:{PROXY_PASSWORD}@127.0.0.1:{EGRESS_PORT}"
+    )
+
+
+def test_a_command_with_the_hosts_network_gets_no_shim() -> None:
+    """`full` is the host's network; the door is for `allowlist` only, and a seam
+    that hands both to a backend has made a mistake this backend does not repeat."""
+    argv = Bubblewrap().confine(("curl",), _policy(network=True, egress=_egress())).argv  # type: ignore[arg-type]
+    assert "--unshare-net" not in argv
+    assert "--setenv" not in argv
+    assert argv[argv.index("--") + 1 :] == ("curl",)
+
+
+def test_the_seatbelt_profile_opens_only_the_door() -> None:
+    """Unverified on a real macOS, so written narrow: the socket outbound and the
+    shim's loopback port, and nothing that would let a command dial out itself."""
+    with_door = seatbelt_profile(_policy(egress=_egress()))
+    socket = "/run/user/1/ph/sandbox/egress-1-1.sock"
+    assert f'(allow network-outbound (remote unix-socket (path-literal "{socket}")))' in with_door
+    assert f'(allow network-bind (local ip "localhost:{EGRESS_PORT}"))' in with_door
+    assert "(allow network*)" not in with_door
+    assert "unix-socket" not in seatbelt_profile(_policy()), "no door, no lines"
+    assert "unix-socket" not in seatbelt_profile(_policy(network=True, egress=_egress()))  # type: ignore[arg-type]
+
+    confined = Seatbelt().confine(("curl",), _policy(egress=_egress()))
+    assert confined.argv[3] == "/usr/bin/env", "sandbox-exec sets no environment; env does"
+    assert f"HTTPS_PROXY=http://a1:{PROXY_PASSWORD}@127.0.0.1:{EGRESS_PORT}" in confined.argv
+    assert confined.argv[-1] == "curl"

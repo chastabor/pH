@@ -24,9 +24,15 @@ __all__ = ["StubSandboxProvider"]
 
 @dataclass(slots=True)
 class StubSandboxProvider:
-    """A backend that reports `enforcement` and wraps nothing."""
+    """A backend that reports `enforcement` and wraps nothing.
+
+    Not a `DenialReader`: it confines nothing, so there are no refusals of its own
+    to recognise. A test that wants the reading half drives `Bubblewrap`, whose
+    kernel's words the table describes.
+    """
 
     enforcement: Enforcement = "full"
+    backend: str = "stub"
 
     def confine(self, argv: tuple[str, ...], policy: Any) -> ConfinedArgv:
-        return ConfinedArgv(argv=argv, enforcement=self.enforcement, backend="stub")
+        return ConfinedArgv(argv=argv, enforcement=self.enforcement, backend=self.backend)
