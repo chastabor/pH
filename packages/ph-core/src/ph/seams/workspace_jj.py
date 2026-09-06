@@ -65,7 +65,7 @@ from __future__ import annotations
 
 import logging
 import shutil
-from collections.abc import Mapping, Sequence
+from collections.abc import Container, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -78,6 +78,7 @@ from .containment import TIERS, TierDescription
 from .diagnostics import Diagnostic, contribute
 from .subprocess import SubprocessSpawnSpec, first_line, scrub_env
 from .workspace import (
+    BRANCH_PREFIX,
     ContainmentTier,
     DeclineReason,
     Stray,
@@ -86,9 +87,10 @@ from .workspace import (
     WorkspaceDeclined,
     WorkspaceRecord,
     discards_writes,
+    measure_strays,
     redirection_env,
+    sanitize_ref,
 )
-from .workspace_git import BRANCH_PREFIX, sanitize_ref
 
 __all__ = ["JjWorkspaceProvider", "apply", "auto_track", "jj"]
 
@@ -135,29 +137,6 @@ _LISTING = 'name ++ "\t" ++ root ++ "\n"'
 A template rather than the human format, which is a sentence — `name: path commit
 bookmark | description` — that nobody promised to keep stable and that would need
 splitting on a space a path may contain.
-"""
-
-_STATE_PARENT = ("log", "--no-graph", "-r", "@-", "-T", "commit_id")
-"""The commit a workspace created here would fork from, resolved once."""
-
-_STATE = ("log", "--no-graph", "-r", "@", "-T", "commit_id")
-"""This workspace's working-copy commit — its state, named.
-
-`@` unconditionally, where `_WORK` asks `@ & ~empty()`: an *empty* working copy is
-a perfectly good restore point, and it is the interesting one — "the run created
-three files, put it back" is exactly the revert a person asks for after a bad
-cell. The full id rather than the short prefix, because this is stored in a log
-and read back by a later process.
-"""
-
-_WORK = ("log", "--no-graph", "-r", "@ & ~empty()", "-T", "commit_id.short()")
-"""Does this workspace's working copy hold anything? Empty output means no.
-
-One command doing two jobs, which is why it is spelled once and used twice.
-Running it **snapshots the workspace first**, so at release it is both the
-question and the act of capturing the answer — the child's work lands in its
-commit, the bookmark follows, and no separate `jj status` is spent making that
-happen.
 """
 
 
@@ -367,15 +346,11 @@ class JjWorkspaceProvider:
         direction, and the reason `unchanged_failure` is written as "already failed
         against this exact state" rather than as a cache to be trusted.
         """
-        code, out, err = await self._jj(workspace, *_STATE)
-        if code != 0:
-            log.warning(
-                "ph.seams.workspace_jj: no restore point for %s (%s)",
-                workspace.root,
-                first_line(err) or f"jj exited {code}",
-            )
+        found = await self._log(workspace.root, "@", full=True)
+        if found is None:
+            log.warning("ph.seams.workspace_jj: no restore point for %s", workspace.root)
             return None
-        return out.strip() or None
+        return found or None
 
     async def restore(self, workspace: Workspace, token: str) -> tuple[str, ...]:
         """Put the working copy back to `token`. Returns the paths the run had added.
@@ -400,22 +375,18 @@ class JjWorkspaceProvider:
         tier: it is what `/revert` catches to say "no longer available" rather than
         showing a person a traceback for a restore point it offered them.
         """
-        code, out, err = await self._jj(workspace, "diff", "--summary", "--from", token)
+        code, out, err = await self._in(workspace.root, "diff", "--summary", "--from", token)
         if code != 0:
             raise FileNotFoundError(
                 f"restore point {token} is gone: {first_line(err) or f'jj exited {code}'}"
             )
         added = tuple(sorted(line[2:] for line in out.splitlines() if line.startswith("A ")))
-        code, _, err = await self._jj(workspace, "restore", "--from", token)
+        code, _, err = await self._in(workspace.root, "restore", "--from", token)
         if code != 0:
             raise FileNotFoundError(
                 f"could not restore {token}: {first_line(err) or f'jj exited {code}'}"
             )
         return added
-
-    async def _jj(self, workspace: Workspace, *args: str) -> tuple[int, str, str]:
-        """One jj call in this workspace, with the seam's materials held out of it."""
-        return await jj(self.ctx, workspace.root, *auto_track(workspace.provisioned), *args)
 
     async def refs(self, base: Path) -> list[str]:
         """Every bookmark in this repository (`ArtifactProvider`).
@@ -454,12 +425,8 @@ class JjWorkspaceProvider:
         ancestry of where the person is standing — and it is the same question,
         because by disposal everything the agent did is on that bookmark.
         """
-        if not force:
-            code, out, _ = await self._in(
-                base, "log", "--no-graph", "-r", f"{ref} ~ ::@", "-T", "commit_id.short()"
-            )
-            if code == 0 and out.strip():
-                return f"the bookmark {ref} holds work that is not in this workspace's history"
+        if not force and await self._log(base, f"{ref} ~ ::@"):
+            return f"the bookmark {ref} holds work that is not in this workspace's history"
         code, _, err = await self._in(base, "bookmark", "delete", ref)
         return "" if code == 0 else (first_line(err) or f"jj exited {code}")
 
@@ -479,10 +446,7 @@ class JjWorkspaceProvider:
         code, _, err = await self._in(base, "new", "@", ref)
         if code != 0:
             return f"could not merge {ref}: {first_line(err) or f'jj exited {code}'}"
-        code, out, _ = await self._in(
-            base, "log", "--no-graph", "-r", "@ & conflicts()", "-T", "commit_id.short()"
-        )
-        if code != 0 or not out.strip():
+        if not await self._log(base, "@ & conflicts()"):
             return ""
         code, out, _ = await self._in(base, "resolve", "--list")
         paths = [line.split()[0] for line in out.splitlines() if line.strip()]
@@ -491,8 +455,10 @@ class JjWorkspaceProvider:
             f"{', '.join(paths) or 'some paths'} — resolve them and describe the merge"
         )
 
-    async def strays(self, base: Path, *, with_status: bool = True) -> list[Stray]:
-        """The workspaces this tier still has on disk (`EnumeratingProvider`).
+    async def strays(
+        self, base: Path, *, with_status: bool = True, skip: Container[str] = ()
+    ) -> list[Stray]:
+        """The workspaces this tier still has on disk (`ArtifactProvider`).
 
         **`jj workspace list` with a template**, which is why this is a listing and
         not a parse: `name ++ "\t" ++ root` is two fields jj computes, where the
@@ -518,19 +484,16 @@ class JjWorkspaceProvider:
             path = Path(where)
             if tab and is_under(path, self.root):
                 found.append((f"{BRANCH_PREFIX}{name}", path))
-        dirty = dict.fromkeys((ref for ref, _ in found), False)
-        if with_status and found:
 
-            async def measure(ref: str, path: Path) -> None:
-                dirty[ref] = await self._has_work(path) is True
+        async def probe(path: Path) -> bool:
+            # `is True` because `_has_work` answers `None` for "jj could not say",
+            # which here means an unreadable tree rather than a dirty one.
+            return await self._has_work(path) is True
 
-            async with anyio.create_task_group() as group:
-                for ref, path in found:
-                    group.start_soon(measure, ref, path)
-        return [Stray(ref=ref, path=path, dirty=dirty[ref]) for ref, path in found]
+        return await measure_strays(found, probe, with_status=with_status, skip=skip)
 
-    async def discard(self, path: Path) -> str:
-        """Remove one workspace, leaving its bookmark alone (`EnumeratingProvider`).
+    async def discard(self, path: Path, *, provisioned: Sequence[str] | None = None) -> str:
+        """Remove one workspace, leaving its bookmark alone (`ArtifactProvider`).
 
         The name comes back off the path by the same construction `acquire` used to
         build it — `<root>/<session>/<agent>` and `<session>/<agent>` are the same
@@ -544,7 +507,7 @@ class JjWorkspaceProvider:
             name = path.relative_to(self.root).as_posix()
         except ValueError:
             return f"{path} is not a workspace this tier made"
-        code, _, err = await jj(self.ctx, path, "workspace", "forget", name)
+        code, _, err = await self._in(path, "workspace", "forget", name, provisioned=provisioned)
         if code != 0:
             return first_line(err) or f"jj exited {code}"
         await anyio.to_thread.run_sync(lambda: shutil.rmtree(path, ignore_errors=True))
@@ -623,8 +586,7 @@ class JjWorkspaceProvider:
             # rather than remembered: a rehydrated child is a *new process* half the
             # time, and its release owes the same "what has this done since it forked"
             # the first one did.
-            code, out, _ = await jj(self.ctx, path, *_STATE_PARENT)
-            return out.strip() if code == 0 else ""
+            return await self._log(path, "@-", full=True) or ""
         # `jj workspace add` refuses a path whose parent is missing, where `git
         # worktree add` creates the chain — so the first agent of a session pays
         # one mkdir rather than a decline that reads as "jj is broken here".
@@ -636,7 +598,7 @@ class JjWorkspaceProvider:
         code, _, err = await self._in(base, *add)
         registered = code != 0 and await self._registered(managed, name)
         if registered and not path.exists():
-            await jj(self.ctx, managed, "workspace", "forget", name)
+            await self._in(managed, "workspace", "forget", name)
             code, _, err = await self._in(base, *add)
             registered = code != 0
         if code != 0:
@@ -666,22 +628,57 @@ class JjWorkspaceProvider:
             return "branch-in-use"
         return "path-exists" if path.exists() else "provider-failed"
 
-    async def _in(self, cwd: Path, *args: str) -> tuple[int, str, str]:
-        """One jj call in a directory that may be somebody's live workspace.
+    async def _in(
+        self, cwd: Path, *args: str, provisioned: Sequence[str] | None = None
+    ) -> tuple[int, str, str]:
+        """**The** jj call. One door into a directory, with the seam's materials held out.
 
-        **Every jj command snapshots the workspace it runs in**, which is the trap
-        this exists to close and it closed it twice: `workspace root` — a *probe*,
-        which reads nothing and changes nothing as far as its name goes — and
-        `workspace add`, both of which run in a **parent's** tree and both of which
-        tracked a provisioned material on the way past. Once tracked, no later
-        `auto_track` can untrack it, so the exclusion at release was correct and
-        already too late.
+        Every jj command snapshots the workspace it runs in, which is the trap this
+        exists to close and it closed it twice: `workspace root` — a *probe*, which
+        reads nothing as far as its name goes — and `workspace add`, both of which run
+        in a **parent's** tree and both of which tracked a provisioned material on the
+        way past. Once tracked, no later `auto_track` can untrack it, so the exclusion
+        at release was correct and already too late.
 
-        So the rule is not "pass the config where it matters" but "there is one door
-        into somebody else's workspace". A call that forgets it is a call that does
-        not compile, rather than a leak nothing reports.
+        `provisioned=None` means "look it up", which is right whenever the workspace is
+        one the seam still holds. Disposal is the case that must pass it: `_release`
+        runs *after* the seam has dropped the workspace, so a lookup would come back
+        empty exactly when the materials still need holding out.
+
+        There were three spellings of this — this, a `_jj(workspace, ...)` that read
+        `workspace.provisioned`, and bare `jj(..., *held, ...)` with the rendered
+        fileset threaded through the release path. Three ways to say one thing is the
+        drift this docstring was already arguing against while being one of them.
         """
-        return await jj(self.ctx, cwd, *auto_track(self._base_materials(cwd)), *args)
+        materials = self._base_materials(cwd) if provisioned is None else provisioned
+        return await jj(self.ctx, cwd, *auto_track(materials), *args)
+
+    async def _log(
+        self,
+        cwd: Path,
+        revset: str,
+        *,
+        full: bool = False,
+        provisioned: Sequence[str] | None = None,
+    ) -> str | None:
+        """One revset, answered as a commit id. `None` when jj could not say.
+
+        The `log --no-graph -r <revset> -T commit_id` shape was written six times —
+        three module constants and three inline — varying only in the revset and in
+        short-versus-full. `full` is for a value that goes into a **log** and is read
+        back by a later process; the short form is for a presence test.
+        """
+        code, out, _ = await self._in(
+            cwd,
+            "log",
+            "--no-graph",
+            "-r",
+            revset,
+            "-T",
+            "commit_id" if full else "commit_id.short()",
+            provisioned=provisioned,
+        )
+        return None if code != 0 else out.strip()
 
     def _base_materials(self, base: Path) -> tuple[str, ...]:
         """What the seam provisioned into `base`, if `base` is itself a workspace.
@@ -721,24 +718,24 @@ class JjWorkspaceProvider:
         commit. Without the guard, eight children would leave eight empty commits
         stacked in the parent's history and each fork from a different one.
         """
-        code, out, _ = await self._in(base, *_WORK)
-        if code == 0 and out.strip():
+        if await self._log(base, "@ & ~empty()"):
             await self._in(base, "new")
         # **Resolved, not left as `@-`.** The workspace needs a revision and `@-` would
         # do; what needs the concrete commit is *release*, which has to ask "what has
         # this workspace done since it forked" and cannot ask it of a revset that means
         # something different in every workspace and moves under both of them.
-        code, out, _ = await self._in(base, *_STATE_PARENT)
-        return out.strip() or "@-"
+        return await self._log(base, "@-", full=True) or "@-"
 
     async def _registered(self, managed: Path, name: str) -> bool:
         """Whether jj still knows a workspace by this name.
 
-        `jj workspace list` prints `<name>: <commit> …` a line at a time, so the
-        test is the prefix. Structural, for `_why`'s reason.
+        Through `_LISTING` and `_in`, like `strays` — this read the human `<name>:
+        <commit> …` line, which that template's own docstring calls a sentence nobody
+        promised to keep, and it ran bare `jj` in a directory that may be somebody
+        else's workspace.
         """
-        code, out, _ = await jj(self.ctx, managed, "workspace", "list")
-        return code == 0 and any(line.startswith(f"{name}: ") for line in out.splitlines())
+        code, out, _ = await self._in(managed, "workspace", "list", "-T", _LISTING)
+        return code == 0 and any(line.partition("\t")[0] == name for line in out.splitlines())
 
     async def _release(
         self,
@@ -782,9 +779,8 @@ class JjWorkspaceProvider:
         # `None` is "could not tell", and it counts as work for the git tier's
         # reason: keeping a tree nobody wanted costs disk, and discarding one that
         # held work costs the work.
-        held = auto_track(provisioned)
-        kept = not discard and await self._has_work(path, held, fork) is not False
-        if kept and not await self._name(path, ref, held):
+        kept = not discard and await self._has_work(path, fork, provisioned) is not False
+        if kept and not await self._name(path, ref, provisioned):
             # **A failure to name cancels the removal, not the work** — the git
             # tier's rule at the same point. An orphaned directory is worse than a
             # clean disposal and far better than deleting a tree whose work never
@@ -798,28 +794,24 @@ class JjWorkspaceProvider:
             )
             return True
         if not kept:
-            await jj(self.ctx, path, *held, "bookmark", "delete", ref)
-        code, _, err = await jj(self.ctx, path, *held, "git", "export")
+            await self._in(path, "bookmark", "delete", ref, provisioned=provisioned)
+        code, _, err = await self._in(path, "git", "export", provisioned=provisioned)
         if code != 0:
             log.warning(
                 "ph.seams.workspace_jj: %s did not reach git (%s)",
                 ref,
                 first_line(err) or f"jj exited {code}",
             )
-        code, _, err = await jj(self.ctx, path, *held, "workspace", "forget", name)
-        if code != 0:
-            log.warning(
-                "ph.seams.workspace_jj: could not forget the workspace %s (%s)",
-                name,
-                first_line(err) or f"jj exited {code}",
-            )
-        # jj deliberately leaves the directory — right for a person switching
-        # between workspaces, wrong for a harness that promised one per agent and
-        # must not accumulate them.
-        await anyio.to_thread.run_sync(lambda: shutil.rmtree(path, ignore_errors=True))
+        # The same two steps `discard` is, and it said so in prose before it said so
+        # in code: forget the registration, then remove the directory jj deliberately
+        # leaves behind — right for a person switching workspaces, wrong for a harness
+        # that promised one per agent and must not accumulate them.
+        refused = await self.discard(path, provisioned=provisioned)
+        if refused:
+            log.warning("ph.seams.workspace_jj: could not take back %s (%s)", path, refused)
         return kept
 
-    async def _name(self, path: Path, ref: str, held: Sequence[str] = ()) -> bool:
+    async def _name(self, path: Path, ref: str, provisioned: Sequence[str]) -> bool:
         """Point the bookmark at what this workspace holds now. Reports whether it landed.
 
         **Release names the work rather than trusting the name acquire wrote.** The
@@ -828,7 +820,9 @@ class JjWorkspaceProvider:
         person can find this work, which is not a claim to make on the strength of a
         call made at a different time that may have failed.
         """
-        code, _, err = await jj(self.ctx, path, *held, "bookmark", "set", ref, "-r", "@")
+        code, _, err = await self._in(
+            path, "bookmark", "set", ref, "-r", "@", provisioned=provisioned
+        )
         if code != 0:
             log.warning(
                 "ph.seams.workspace_jj: jj bookmark set failed in %s (%s)",
@@ -837,7 +831,9 @@ class JjWorkspaceProvider:
             )
         return code == 0
 
-    async def _has_work(self, path: Path, held: Sequence[str] = (), fork: str = "") -> bool | None:
+    async def _has_work(
+        self, path: Path, fork: str = "", provisioned: Sequence[str] = ()
+    ) -> bool | None:
         """Whether this workspace has done anything since it forked. `None` if jj cannot say.
 
         **Since it forked, not "is `@` non-empty"**, and the difference is a bug that
@@ -852,11 +848,10 @@ class JjWorkspaceProvider:
         *keeping* a tree whose work is already on its bookmark, because reclaim errs
         toward keeping.
         """
-        revset = f"{fork}..@ & ~empty()" if fork else "@ & ~empty()"
-        code, out, _ = await jj(
-            self.ctx, path, *held, "log", "--no-graph", "-r", revset, "-T", "commit_id.short()"
+        found = await self._log(
+            path, f"{fork}..@ & ~empty()" if fork else "@ & ~empty()", provisioned=provisioned
         )
-        return None if code != 0 else bool(out.strip())
+        return None if found is None else bool(found)
 
     async def _named(self, repo: Path, ref: str) -> bool:
         """Whether a bookmark by this name still points at something."""

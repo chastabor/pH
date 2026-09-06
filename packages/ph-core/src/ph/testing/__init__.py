@@ -29,7 +29,7 @@ from .builders import (
 from .diagnostics import report_section
 from .fake_adapter import FakeAdapter, text_script
 from .git import WORKTREE_ROWS, git, git_repo, needs_git, worktree_agent
-from .jj import JJ_ROWS, jj, jj_repo, needs_jj
+from .jj import JJ_ROWS, jj, jj_agent, jj_repo, needs_jj
 from .replay_adapter import (
     REPLAY_ROW,
     RecordedStep,
@@ -70,6 +70,7 @@ __all__ = [
     "git",
     "git_repo",
     "jj",
+    "jj_agent",
     "jj_repo",
     "needs_git",
     "needs_jj",

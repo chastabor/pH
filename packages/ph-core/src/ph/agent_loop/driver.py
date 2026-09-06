@@ -368,15 +368,7 @@ class ReactLoopAgent:
             # on the code"*. Flattening every one of them here made `turn/end`
             # unable to say which failure it was, in the record a client reads to
             # decide whether retrying could possibly help.
-            coded = error_info(error)
-            failure = (
-                error.failure
-                if isinstance(error, LlmError)
-                else LlmFailure(
-                    message=_error_chain(error),
-                    code="UNKNOWN" if coded is None else coded["code"],
-                )
-            )
+            failure = error.failure if isinstance(error, LlmError) else _as_failure(error)
             turn_ends = TurnEndReason(kind="error", error=failure)
             self._report(error)
             raise
@@ -606,3 +598,18 @@ def _error_chain(error: BaseException) -> str:
         parts.append(str(current) or type(current).__name__)
         current = current.__cause__ or current.__context__
     return ": ".join(parts)
+
+
+def _as_failure(error: Exception) -> LlmFailure:
+    """A raised error as a turn's `reason.error`, keeping its code if it has one.
+
+    A harness error's own code rather than `UNKNOWN`, because that is what
+    `HarnessError` is for: *"a failure's routing matters as much as its message —
+    retry policy, the sandbox layer and replay all branch on the code"*. Flattening
+    every one of them left `turn/end` unable to say which failure it was, in the
+    record a client reads to decide whether retrying could possibly help.
+    """
+    coded = error_info(error)
+    return LlmFailure(
+        message=_error_chain(error), code="UNKNOWN" if coded is None else coded["code"]
+    )

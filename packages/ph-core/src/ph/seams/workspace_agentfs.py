@@ -60,13 +60,13 @@ from .diagnostics import Diagnostic, contribute
 from .subprocess import SubprocessSpawnSpec, first_line, scrub_env
 from .workspace import (
     ContainmentTier,
-    Stray,
     Workspace,
     WorkspaceAccess,
     WorkspaceDeclined,
     WorkspaceRecord,
     discards_writes,
     redirection_env,
+    sanitize_ref,
 )
 from .workspace_git import (
     COMMIT_AS_PH,
@@ -74,7 +74,6 @@ from .workspace_git import (
     git,
     list_branches,
     merge_branch,
-    sanitize_ref,
 )
 
 __all__ = [
@@ -324,16 +323,17 @@ class AgentFsProvider:
         )
 
     async def refs(self, base: Path) -> list[str]:
-        """`ArtifactProvider`, and only the ref half of it.
+        """`ArtifactProvider`, and only that — an overlay leaves refs, not checkouts.
 
-        **An overlay's artifact is a git branch like anyone else's** — `export_overlay`
+        **An overlay's artifact is a git branch like anyone else's**: `export_overlay`
         builds one out of the delta, and `export`'s closing sentence tells a person to
-        merge it with `/workspaces merge`. So this tier answers the ref verbs or that
+        merge it with `/workspaces merge`. So this tier answers the ref verbs, or that
         sentence names a command that refuses.
 
-        The *checkout* half it genuinely has nothing to say to: a mountpoint is not a
-        checkout `/workspaces` can hand back, which is the same empty answer the old
-        `git worktree list` join gave for an overlay.
+        It does *not* implement `EnumeratingProvider`, and that is the reason the two
+        are separate Protocols: a mountpoint is not a checkout `/workspaces` can hand
+        back. This tier used to say so by writing two stubs, which `isinstance` could
+        not tell from a tier that meant them.
         """
         return await list_branches(self.ctx, base)
 
@@ -342,13 +342,6 @@ class AgentFsProvider:
 
     async def merge(self, base: Path, ref: str) -> str:
         return await merge_branch(self.ctx, base, ref)
-
-    async def strays(self, base: Path, *, with_status: bool = True) -> list[Stray]:
-        """None. A mount is not a checkout this command can take back."""
-        return []
-
-    async def discard(self, path: Path) -> str:
-        return f"{path} is an overlay mount, not a checkout /workspaces can remove"
 
     async def acquire(
         self,

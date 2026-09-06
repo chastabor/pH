@@ -39,9 +39,8 @@ git tree object under a hidden ref, and `/revert` restores it.
 from __future__ import annotations
 
 import logging
-import re
 import shutil
-from collections.abc import Mapping, Sequence
+from collections.abc import Container, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -52,6 +51,7 @@ from ..paths import default_home_path, is_under
 from ..wire import WireModel
 from .subprocess import SubprocessSpawnSpec, scrub_env
 from .workspace import (
+    BRANCH_PREFIX,
     EXCLUDE,
     ContainmentTier,
     DeclineReason,
@@ -62,7 +62,9 @@ from .workspace import (
     WorkspaceRecord,
     discards_writes,
     fresh_root,
+    measure_strays,
     redirection_env,
+    sanitize_ref,
 )
 
 __all__ = [
@@ -72,10 +74,7 @@ __all__ = [
     "git",
     "list_branches",
     "merge_branch",
-    "parse_worktrees",
     "pre_run_ref",
-    "restore_tree",
-    "sanitize_ref",
 ]
 
 log = logging.getLogger("ph.seams.workspace_git")
@@ -106,16 +105,6 @@ async def git(
     return outcome.exit_code, outcome.stdout, outcome.stderr
 
 
-BRANCH_PREFIX = "ph/"
-"""What every branch this tier makes is named under.
-
-Shared with `/workspaces`, which enumerates the prefix to find the artifacts
-disposal leaves. A management command that offered to delete a person's own
-branches would be a different and much worse tool, and this prefix is the whole
-of what keeps it from being one — so the two must not drift.
-"""
-
-
 COMMIT_AS_PH = (
     "-c",
     "user.name=pH",
@@ -138,25 +127,6 @@ checks belong on the merge that publishes it.
 """
 
 
-_UNSAFE_REF = re.compile(r"[^A-Za-z0-9._-]+")
-"""Everything git refuses in a ref component, plus `/`, which would nest.
-
-Session and agent ids are pH's, not a user's, but a ref name is a filesystem
-path under `.git/refs` on most setups — so this collapses rather than trusts.
-"""
-
-
-def sanitize_ref(component: str) -> str:
-    """One ref path component, safe by construction.
-
-    Git's own rules are a deny-list (`git check-ref-format`); this is the
-    allow-list, because a branch name that fails validation *after* a worktree
-    has been created is a half-made artifact to clean up.
-    """
-    cleaned = _UNSAFE_REF.sub("-", component).strip("-.")
-    return cleaned or "agent"
-
-
 @dataclass(slots=True)
 class GitWorktreeProvider:
     """The `worktree` tier: one checkout per agent, on its own branch."""
@@ -168,6 +138,14 @@ class GitWorktreeProvider:
     walk the agent runs over its own tree."""
     tier: ContainmentTier = field(default="worktree", init=False)
     _toplevels: dict[Path, Path | None] = field(default_factory=dict, init=False)
+    _pinned: dict[Path, str] = field(default_factory=dict, init=False)
+    """Workspace root → the tree its last restore point pinned.
+
+    `capture` runs before **every** code cell, and `pre_run_ref` is named by the tree
+    it pins — so a cell that changed nothing re-writes the identical ref to the
+    identical value. The memo turns that spawn into a dict lookup, which matters
+    because inspection and printing cells are most of them.
+    """
     """`base` → its repository, asked once.
 
     Every sibling in a fan-out is handed the *same* `base` — the parent's root —
@@ -240,6 +218,11 @@ class GitWorktreeProvider:
         tree = await tree_hash(self.ctx, workspace)
         if tree is None or workspace.ref is None:
             return None
+        if self._pinned.get(workspace.root) == tree:
+            # Already pinned, and the ref is named by the tree — so this would write
+            # the same value to the same name. A cell that changed nothing is most
+            # cells, and this is the difference between three spawns and two.
+            return tree
         code, _, err = await self._git(
             workspace.root, "update-ref", pre_run_ref(workspace.ref, tree), tree
         )
@@ -249,6 +232,7 @@ class GitWorktreeProvider:
             # not resolve later.
             log.warning("ph.seams.workspace_git: could not pin %s (%s)", tree, err.strip())
             return None
+        self._pinned[workspace.root] = tree
         return tree
 
     async def restore(self, workspace: Workspace, token: str) -> tuple[str, ...]:
@@ -265,14 +249,15 @@ class GitWorktreeProvider:
     async def merge(self, base: Path, ref: str) -> str:
         return await merge_branch(self.ctx, base, ref)
 
-    async def strays(self, base: Path, *, with_status: bool = True) -> list[Stray]:
+    async def strays(
+        self, base: Path, *, with_status: bool = True, skip: Container[str] = ()
+    ) -> list[Stray]:
         """The checkouts this tier still has on disk (`EnumeratingProvider`).
 
-        `git worktree list --porcelain`, filtered to this tier's own root — a
-        `ph/*` branch checked out somewhere else is not a tree this tier made, and
-        the filter is here rather than in `/workspaces` because the root is the
-        provider's own setting and the command was carrying a copy that had to be
-        kept equal to it.
+        `git worktree list --porcelain`, filtered to this tier's own root — a `ph/*`
+        branch checked out somewhere else is not a tree this tier made, and the
+        filter is here rather than in `/workspaces` because the root is the
+        provider's own setting and the command was carrying a copy of it.
 
         `with_status=False` for the verbs that only need a name: `git status` is one
         subprocess per checkout and `merge`/`remove` never read `dirty`.
@@ -281,22 +266,17 @@ class GitWorktreeProvider:
         if code != 0:
             return []
         found = [
-            (ref, path) for path, ref in parse_worktrees(out) if ref and is_under(path, self.root)
+            (ref, path) for path, ref in _parse_worktrees(out) if ref and is_under(path, self.root)
         ]
-        dirty = dict.fromkeys((ref for ref, _ in found), False)
-        if with_status and found:
-            # Concurrent: one subprocess per stray, and a run that stranded one has
-            # usually stranded several.
-            async def measure(ref: str, path: Path) -> None:
-                dirty[ref] = await self._dirty(path, ())
-
-            async with anyio.create_task_group() as group:
-                for ref, path in found:
-                    group.start_soon(measure, ref, path)
-        return [Stray(ref=ref, path=path, dirty=dirty[ref]) for ref, path in found]
+        return await measure_strays(
+            found,
+            lambda path: self._dirty(path, ()),
+            with_status=with_status,
+            skip=skip,
+        )
 
     async def discard(self, path: Path) -> str:
-        """Remove one checkout, leaving its branch alone (`EnumeratingProvider`).
+        """Remove one checkout, leaving its branch alone (`ArtifactProvider`).
 
         The tree locates its own repository, `reclaim`'s rule: a path recorded
         against a different checkout resolves the wrong toplevel, and `worktree
@@ -532,15 +512,14 @@ class GitWorktreeProvider:
             )
             return True
         if discard:
-            await self._git(toplevel, "branch", "-D", ref)
+            await delete_branch(self.ctx, toplevel, ref, force=True)
             return False
         # `-d`, not `-D`: a clean worktree is not evidence that its branch was
         # merged — by this line everything the agent did is *on* that branch,
         # whether the agent committed it or `_commit` just did, and forcing here
         # would delete precisely what disposal set out to preserve. Git refuses
         # instead, the branch survives, and `kept` says so.
-        code, _, _ = await self._git(toplevel, "branch", "-d", ref)
-        return code != 0
+        return bool(await delete_branch(self.ctx, toplevel, ref, force=False))
 
     async def _commit(self, path: Path, ref: str, pathspec: Sequence[str]) -> bool:
         """Put the tree's uncommitted work on its own branch. Reports whether it landed.
@@ -850,7 +829,7 @@ async def tree_hash(ctx: Context, workspace: Workspace) -> str | None:
     return out.strip()
 
 
-def parse_worktrees(porcelain: str) -> list[tuple[Path, str]]:
+def _parse_worktrees(porcelain: str) -> list[tuple[Path, str]]:
     """`git worktree list --porcelain` into `(path, branch)` pairs.
 
     The main checkout has no `branch` line when detached, and a linked worktree

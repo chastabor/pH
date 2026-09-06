@@ -35,7 +35,8 @@ Invariants this seam holds:
 from __future__ import annotations
 
 import logging
-from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
+import re
+from collections.abc import Awaitable, Callable, Container, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal, Protocol, TypeAlias, runtime_checkable
@@ -58,6 +59,7 @@ from .telemetry import ops_record
 from .workspace_provision import ProvisionEntry, ProvisionReport
 
 __all__ = [
+    "BRANCH_PREFIX",
     "CHECKPOINT",
     "PROJECT_PROVISION_FILE",
     "ArtifactProvider",
@@ -67,6 +69,7 @@ __all__ = [
     "Collectable",
     "ContainmentTier",
     "DeclineReason",
+    "EnumeratingProvider",
     "ExportingProvider",
     "LifecycleConfig",
     "ReclaimingProvider",
@@ -89,8 +92,10 @@ __all__ = [
     "fresh_root",
     "latest_checkpoint",
     "lifecycle",
+    "measure_strays",
     "project_access",
     "redirection_env",
+    "sanitize_ref",
     "stored_survivors",
     "workspace_leaks",
     "workspace_of",
@@ -266,6 +271,43 @@ def workspace_of(ctx: Context, agent: Any) -> Workspace | None:
         log.warning("ph.seams.workspace: lookup failed for %s", agent_id, exc_info=True)
         return None
     return found
+
+
+BRANCH_PREFIX = "ph/"
+"""What every ref pH makes is named under.
+
+Here rather than in the git tier that first wrote it, for the reason `CHECKPOINT`
+moved: **it is the seam's ref namespace, not one tier's**. Three tiers and one
+command have to agree on it — the jj tier names its bookmarks with it, the overlay
+tier its exports, and `/workspaces` enumerates it — so leaving it in
+`workspace_git` made it a vocabulary the others borrowed, and made a deployment
+that never layers the git tier import it anyway for a string constant.
+
+
+Shared with `/workspaces`, which enumerates the prefix to find the artifacts
+disposal leaves. A management command that offered to delete a person's own
+branches would be a different and much worse tool, and this prefix is the whole
+of what keeps it from being one — so the two must not drift.
+"""
+
+
+_UNSAFE_REF = re.compile(r"[^A-Za-z0-9._-]+")
+"""Everything git refuses in a ref component, plus `/`, which would nest.
+
+Session and agent ids are pH's, not a user's, but a ref name is a filesystem
+path under `.git/refs` on most setups — so this collapses rather than trusts.
+"""
+
+
+def sanitize_ref(component: str) -> str:
+    """One ref path component, safe by construction.
+
+    Git's own rules are a deny-list (`git check-ref-format`); this is the
+    allow-list, because a branch name that fails validation *after* a worktree
+    has been created is a half-made artifact to clean up.
+    """
+    cleaned = _UNSAFE_REF.sub("-", component).strip("-.")
+    return cleaned or "agent"
 
 
 EXCLUDE = ":(exclude)"
@@ -500,49 +542,105 @@ class Stray:
     """
 
 
+async def measure_strays(
+    found: Sequence[tuple[str, Path]],
+    probe: Callable[[Path], Awaitable[bool]],
+    *,
+    with_status: bool,
+    skip: Container[str] = (),
+) -> list[Stray]:
+    """`(ref, path)` pairs into `Stray`s, measuring `dirty` concurrently.
+
+    Beside `Stray` because it was the same twelve lines in both tiers — the
+    `dict.fromkeys`, the `with_status` guard, the task group, the comprehension —
+    differing only in the probe, which is the one part that is genuinely the tier's.
+    A change to the fan-out or to `Stray` landed twice, in files that already share
+    code deliberately.
+
+    Concurrent because each probe is a subprocess, and a run that stranded one
+    checkout has usually stranded several.
+
+    **`skip` is the refs a live agent holds, and leaving it out cost more than
+    time.** `/workspaces` never reads `dirty` for a held row — `describe` reports it
+    as `held` and stops — so every probe against one was a subprocess spent on an
+    answer nobody looks at, one per live child per listing. On the jj tier it was
+    worse than waste: the probe snapshots, so *listing* mutated the working-copy
+    commit of every agent that was mid-turn. The old command filtered these out and
+    the filter did not survive being moved behind a Protocol; it lives here now,
+    where both tiers get it.
+    """
+    dirty = dict.fromkeys((ref for ref, _ in found), False)
+    wanted = [(ref, path) for ref, path in found if ref not in skip] if with_status else []
+    if wanted:
+
+        async def measure(ref: str, path: Path) -> None:
+            dirty[ref] = await probe(path)
+
+        async with anyio.create_task_group() as group:
+            for ref, path in wanted:
+                group.start_soon(measure, ref, path)
+    return [Stray(ref=ref, path=path, dirty=dirty[ref]) for ref, path in found]
+
+
 @runtime_checkable
 class ArtifactProvider(Protocol):
-    """A provider that can account for, merge and take back what it left (E15).
+    """A provider that can list, merge and delete the refs it leaves behind (E15).
 
     An optional capability as its own Protocol, `ReclaimingProvider`'s shape and for
-    its reason. It exists because `/workspaces` was doing all of this itself, **in
-    git**: `git branch --list ph/*`, `git worktree list --porcelain`, `git merge`,
-    `git branch -d`. Two things were wrong with that. A jj workspace is not a git
-    worktree, so a stray one had no path and no verb that could remove it. And
-    `jj` embeds its own git implementation — *measured*: the whole acquire, bookmark
-    and export flow runs with a `git` on `PATH` that exits 127 — so a jj deployment
-    need not have the binary at all, and there the branch listing failed and
+    its reason. It exists because `/workspaces` was doing this itself, **in git** —
+    `git branch --list ph/*`, `git merge`, `git branch -d` — and `jj` embeds its own
+    git implementation. *Measured*: the whole acquire, bookmark and export flow runs
+    with a `git` on `PATH` that exits 127 and the binary is never invoked. So a jj
+    deployment need not have it, and there the branch listing failed and
     `/workspaces` answered "no agent workspaces are left behind" while the bookmarks
-    were sitting there.
+    were sitting right there.
 
-    **Five verbs in one Protocol because they are that command's whole surface.** A
-    tier serves `/workspaces` or it does not; splitting them would let one implement
-    half and hand a person rows whose verbs then fail, which is the shape
-    `isinstance` is here to prevent.
+    `refs` returns **everything**, not just what pH made: the prefix guard belongs to
+    the command that would otherwise offer to delete somebody's `feature/x`, and the
+    second caller is `merge`, which has to accept a ref outside the prefix.
 
-    `base` is the repository to ask. `refs` returns **everything**, not just what
-    pH made — the prefix guard belongs to the command that would otherwise offer to
-    delete somebody's `feature/x`, and the second caller is `merge`, which has to
-    accept a ref outside the prefix. `strays` filters by the provider's *own* root,
-    which is what let the command stop carrying a copy of that setting.
-
-    Every verb that acts returns `""` for "it happened" and otherwise **the sentence
-    a person reads**, rather than a bool: what went wrong is the tier's to say, and
-    the two tiers do not fail in the same way. A conflicted merge is the case that
-    proves it — git exits non-zero and refuses, jj exits **zero** and records the
-    conflict in the commit, so a caller testing an exit code would report a clean
-    merge that a person then discovers by opening the file.
+    Both acting verbs return `""` for "it happened" and otherwise **the sentence a
+    person reads**, rather than a bool: what went wrong is the tier's to say, and the
+    two tiers do not fail the same way. A conflicted merge is the case that proves
+    it — git exits non-zero and refuses, jj exits **zero** and records the conflict
+    in the commit, so a caller testing an exit code reports a clean merge that a
+    person then discovers by opening the file.
     """
 
     async def refs(self, base: Path) -> list[str]: ...
 
-    async def strays(self, base: Path, *, with_status: bool = True) -> list[Stray]: ...
-
-    async def discard(self, path: Path) -> str: ...
-
     async def delete_ref(self, base: Path, ref: str, *, force: bool) -> str: ...
 
     async def merge(self, base: Path, ref: str) -> str: ...
+
+
+@runtime_checkable
+class EnumeratingProvider(Protocol):
+    """A provider that can find and take back the checkouts it left on disk (E15).
+
+    **Separate from `ArtifactProvider`, and the overlay tier is why.** These were one
+    Protocol of five verbs, justified as "`/workspaces`' whole surface — a tier
+    serves that command or it does not". `workspace-agentfs` falsified that in the
+    same breath: its artifact is a git branch like anyone else's, so it answers the
+    ref verbs, but a *mountpoint is not a checkout* this command can hand back — so
+    it had to write two stubs to be admitted, and `isinstance` could not tell a tier
+    that meant them from one that had merely typed them. Two Protocols along the line
+    the code was already drawing, and the stubs are gone.
+
+    `strays` filters by the provider's **own root**, which is the whole safety of
+    `discard`: `jj workspace list` reports the person's own `default` workspace at
+    the repository root, and a `remove` that trusted it would delete their
+    repository. It is also what let the command stop carrying a copy of that setting.
+
+    `discard` removes a checkout and nothing else — the ref is the artifact, and
+    `/workspaces` deletes that separately, deliberately, behind its own flag.
+    """
+
+    async def strays(
+        self, base: Path, *, with_status: bool = True, skip: Container[str] = ()
+    ) -> list[Stray]: ...
+
+    async def discard(self, path: Path) -> str: ...
 
 
 @runtime_checkable
@@ -1176,6 +1274,33 @@ class WorkspaceSeam:
             return None
         return await provider.export(record)
 
+    def _artifacts(self) -> ArtifactProvider | None:
+        """The mounted tier's ref verbs, or `None` — `_reclaimer`'s shape, one line."""
+        provider = self.provider
+        return provider if isinstance(provider, ArtifactProvider) else None
+
+    def _checkouts(self) -> EnumeratingProvider | None:
+        provider = self.provider
+        return provider if isinstance(provider, EnumeratingProvider) else None
+
+    def _checkpointer(self, workspace: Workspace) -> CheckpointingProvider | None:
+        """The tier able to checkpoint *this* workspace, or `None` (P6-20).
+
+        Both halves of `can_checkpoint` in one place, so the predicate and the
+        narrowing cannot come apart — it was the same `isinstance` written twice,
+        once to decide and once to convince the type checker.
+
+        `fresh_root` is the **kind** half: a `shared` workspace's root is the
+        person's own checkout, and offering to overwrite their uncommitted work with
+        whatever an agent found is the one thing this must never do. The Protocol
+        test is the **tier** half, which replaced a kind-keyed table of provider
+        facts kept where no provider could see it.
+        """
+        provider = self.provider
+        if not fresh_root(workspace.kind) or not isinstance(provider, CheckpointingProvider):
+            return None
+        return provider
+
     async def refs(self, base: Path) -> list[str]:
         """Every ref in this repository, as the mounted tier lists them.
 
@@ -1183,8 +1308,8 @@ class WorkspaceSeam:
         that prefix is the whole of what keeps it from offering to delete a person's
         own branch, and `merge` deliberately accepts a ref outside it.
         """
-        provider = self.provider
-        if not isinstance(provider, ArtifactProvider):
+        provider = self._artifacts()
+        if provider is None:
             return []
         with running(self.provider_by):
             return await provider.refs(base)
@@ -1196,8 +1321,8 @@ class WorkspaceSeam:
         holding work nothing else has, and a person overriding that is answering a
         question only they can.
         """
-        provider = self.provider
-        if not isinstance(provider, ArtifactProvider):
+        provider = self._artifacts()
+        if provider is None:
             return f"no mounted tier can delete {ref}"
         with running(self.provider_by):
             return await provider.delete_ref(base, ref, force=force)
@@ -1209,8 +1334,8 @@ class WorkspaceSeam:
         records conflicts *in the commit* and exits zero, so "merged, with conflicts
         at these paths" is a true thing this can answer and a bool could not.
         """
-        provider = self.provider
-        if not isinstance(provider, ArtifactProvider):
+        provider = self._artifacts()
+        if provider is None:
             return f"no mounted tier can merge {ref}"
         with running(self.provider_by):
             return await provider.merge(base, ref)
@@ -1222,11 +1347,15 @@ class WorkspaceSeam:
         it against something — `/workspaces` against the branches pH made — and a
         list would have each of them build the same index.
         """
-        provider = self.provider
-        if not isinstance(provider, ArtifactProvider):
+        provider = self._checkouts()
+        if provider is None:
             return {}
+        # The refs live agents hold, so no tier spends a probe on a `dirty` the
+        # caller discards — `describe` reports a held row as held and reads no
+        # further. The seam supplies it because `live()` is the seam's.
+        held = frozenset(workspace.ref for workspace in self.live() if workspace.ref)
         with running(self.provider_by):
-            found = await provider.strays(base, with_status=with_status)
+            found = await provider.strays(base, with_status=with_status, skip=held)
         return {one.ref: one for one in found}
 
     async def discard(self, path: Path) -> str:
@@ -1237,8 +1366,8 @@ class WorkspaceSeam:
         enumerate cannot have produced this path in the first place, so the refusal
         is a guard rather than a case.
         """
-        provider = self.provider
-        if not isinstance(provider, ArtifactProvider):
+        provider = self._checkouts()
+        if provider is None:
             return f"no mounted tier can remove {path}"
         with running(self.provider_by):
             return await provider.discard(path)
@@ -1251,15 +1380,11 @@ class WorkspaceSeam:
         this session" — true, useless, and indistinguishable from a run that had
         simply not checkpointed yet.
 
-        Two halves, and both are load-bearing. `fresh_root` is the *kind* half: a
-        `shared` workspace's root is the person's own checkout, and offering to
-        overwrite their uncommitted work with whatever an agent found is the one
-        thing this must never do. The Protocol test is the *tier* half, and it
-        replaced a kind-keyed predicate — a table of provider facts kept in a place
-        no provider could see, which had to be edited every time one of them learned
-        to checkpoint.
+        Both halves live in `_checkpointer`, which is also what `capture` narrows
+        through — the predicate and the narrowing were the same `isinstance` written
+        twice, and two spellings of one gate is one that can come apart.
         """
-        return fresh_root(workspace.kind) and isinstance(self.provider, CheckpointingProvider)
+        return self._checkpointer(workspace) is not None
 
     async def capture(self, workspace: Workspace) -> str | None:
         """A token naming this workspace's state now, or `None` if no tier can say.
@@ -1268,8 +1393,8 @@ class WorkspaceSeam:
         checkpoint is not a broken deployment, and the fingerprint's consumer reads
         an empty answer as "always re-run", which is the safe direction.
         """
-        provider = self.provider
-        if not self.can_checkpoint(workspace) or not isinstance(provider, CheckpointingProvider):
+        provider = self._checkpointer(workspace)
+        if provider is None:
             return None
         with running(self.provider_by):
             return await provider.capture(workspace)

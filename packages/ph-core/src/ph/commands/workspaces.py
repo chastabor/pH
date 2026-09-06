@@ -48,14 +48,14 @@ becomes a row, so `remove` can never be aimed at it.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from ..cordis import Context, plugin
 from ..seams.commands import CommandDefinition
+from ..seams.workspace import BRANCH_PREFIX as PREFIX
 from ..seams.workspace import stored_survivors
-from ..seams.workspace_git import BRANCH_PREFIX as PREFIX
 
 __all__ = ["KeptWorktree", "apply"]
 
@@ -157,6 +157,15 @@ class _Workspaces:
 
     ctx: Context
     base: Path
+    _refs: list[list[str]] = field(default_factory=list)
+    """One invocation's ref listing, asked once.
+
+    `merge <name>` asked for it twice — once through `kept()` and again in
+    `_branch_for`'s fallback — which is two `git branch --list` / `jj bookmark list`
+    spawns for one question. The value is fixed for the whole of one dispatch, which
+    is the argument this frozen value object already makes about `base`; a one-slot
+    list is how a frozen dataclass holds a memo.
+    """
 
     async def kept(self, *, with_status: bool = True) -> list[KeptWorktree]:
         """Every artifact pH left in this repository: one row per `ph/*` branch.
@@ -168,10 +177,6 @@ class _Workspaces:
         ordinary one — a tree a live agent still holds, and a tree disposal failed
         to remove — and reported every successfully disposed agent as nothing at
         all.
-
-        `BRANCH_PREFIX` rather than a walk of `refs/heads`: pH's own prefix is the
-        whole of what keeps this from being a command that offers to delete a
-        person's `feature/x`.
 
         **The checkout join is the tier's**, not this command's. It used to be `git
         worktree list --porcelain` here, and **a jj workspace is not a git
@@ -200,9 +205,7 @@ class _Workspaces:
         `with_status=False` for the verbs that only need a name: measuring a stray
         costs a subprocess per checkout and `merge`/`remove` never read `dirty`.
         """
-        branches = [
-            ref for ref in await self.ctx.workspace.refs(self.base) if ref.startswith(PREFIX)
-        ]
+        branches = [ref for ref in await self._all_refs() if ref.startswith(PREFIX)]
         if not branches:
             return []
         checkouts = await self.ctx.workspace.strays(self.base, with_status=with_status)
@@ -222,6 +225,12 @@ class _Workspaces:
                 )
             )
         return rows
+
+    async def _all_refs(self) -> list[str]:
+        """Every ref the mounted tier knows, once per dispatch."""
+        if not self._refs:
+            self._refs.append(await self.ctx.workspace.refs(self.base))
+        return self._refs[0]
 
     async def find(self, name: str, *, with_status: bool = False) -> KeptWorktree:
         if not name:
@@ -295,7 +304,7 @@ class _Workspaces:
         try:
             return (await self.find(name)).branch
         except _Refused:
-            if name in await self.ctx.workspace.refs(self.base):
+            if name in await self._all_refs():
                 return name
             raise
 

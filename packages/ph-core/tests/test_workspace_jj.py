@@ -31,7 +31,7 @@ from typing import Any
 import pytest
 
 from ph.seams.workspace import CHECKPOINT, WorkspaceRecord
-from ph.testing import FAKE_OPTIONS, git, jj, jj_repo, needs_jj
+from ph.testing import FAKE_OPTIONS, git, jj, jj_agent, jj_repo, needs_jj
 
 pytestmark = [pytest.mark.anyio, needs_jj]
 
@@ -703,12 +703,7 @@ async def test_a_live_jj_workspace_is_refused_by_workspaces_remove(
     `held` comes from the seam now, matched on `ref`, which is the one name both
     tiers put on a `Workspace` and carry rather than derive.
     """
-    ctx = await mount(
-        TIER_ROW, {"insert": [{"id": "workspace-commands", "name": "workspace-commands"}]}
-    )
-    base = await jj_repo(ctx, ctx.fs.root)
-    session = ctx.sessions.create("s1")
-    agent = ctx.agents.create(session, FAKE_OPTIONS)
+    ctx, base, session, agent = await jj_agent(mount)
     held = await ctx.workspace.acquire(
         session_id="s1", agent_id="a1", base=base, access="write", session=session
     )
@@ -729,7 +724,7 @@ async def test_a_live_jj_workspace_is_refused_by_workspaces_remove(
 async def test_a_stray_jj_workspace_is_listed_with_its_path_and_can_be_removed(
     mount: Any, tmp_path: Path
 ) -> None:
-    """The gap `EnumeratingProvider` closes, from a person's side.
+    """The gap `ArtifactProvider` closes, from a person's side.
 
     `/workspaces` joined branches against `git worktree list`, and **a jj workspace
     is not a git worktree** — so a directory disposal could not take back had no
@@ -740,12 +735,7 @@ async def test_a_stray_jj_workspace_is_listed_with_its_path_and_can_be_removed(
     leaves: a workspace jj knows about, on disk, with a bookmark, that the seam
     never held and so will never dispose.
     """
-    ctx = await mount(
-        TIER_ROW, {"insert": [{"id": "workspace-commands", "name": "workspace-commands"}]}
-    )
-    base = await jj_repo(ctx, ctx.fs.root)
-    session = ctx.sessions.create("s1")
-    agent = ctx.agents.create(session, FAKE_OPTIONS)
+    ctx, base, session, agent = await jj_agent(mount)
     stray = await ctx.workspace.provider.acquire(
         session_id="s1", agent_id="a1", base=base, scratch=tmp_path / "scratch"
     )
@@ -804,12 +794,7 @@ async def test_a_live_jj_workspace_shows_where_the_disk_went(mount: Any, tmp_pat
     this tier they saw none — every jj row was a bare branch with `-` for a path,
     whether an agent was working in it or not.
     """
-    ctx = await mount(
-        TIER_ROW, {"insert": [{"id": "workspace-commands", "name": "workspace-commands"}]}
-    )
-    base = await jj_repo(ctx, ctx.fs.root)
-    session = ctx.sessions.create("s1")
-    agent = ctx.agents.create(session, FAKE_OPTIONS)
+    ctx, base, session, agent = await jj_agent(mount)
     held = await ctx.workspace.acquire(
         session_id="s1", agent_id="a1", base=base, access="write", session=session
     )
@@ -822,9 +807,6 @@ async def test_a_live_jj_workspace_shows_where_the_disk_went(mount: Any, tmp_pat
     # bookmark tracks the working copy, so it has moved since the last export and
     # `jj bookmark list` renders it once for itself and once for `@git`.
     assert shown.count("ph/s1/a1") == 1, shown
-
-
-COMMANDS_ROW = {"insert": [{"id": "workspace-commands", "name": "workspace-commands"}]}
 
 
 async def test_workspaces_needs_no_git_binary_on_a_jj_host(
@@ -842,10 +824,7 @@ async def test_workspaces_needs_no_git_binary_on_a_jj_host(
     also break every other tool the harness needs, and a green test would then say
     nothing about which of them was being exercised.
     """
-    ctx = await mount(TIER_ROW, COMMANDS_ROW)
-    base = await jj_repo(ctx, ctx.fs.root)
-    session = ctx.sessions.create("s1")
-    agent = ctx.agents.create(session, FAKE_OPTIONS)
+    ctx, base, session, agent = await jj_agent(mount)
     workspace = await ctx.workspace.acquire(
         session_id="s1", agent_id="a1", base=base, access="write", session=session
     )
@@ -885,11 +864,8 @@ async def test_merging_reports_the_conflicts_jj_records_instead_of_claiming_succ
     opening the file. Measured, not assumed: `jj new` on a two-sided conflict returns
     0 with a warning on stderr.
     """
-    ctx = await mount(TIER_ROW, COMMANDS_ROW)
-    base = await jj_repo(ctx, ctx.fs.root)
+    ctx, base, session, agent = await jj_agent(mount)
     (base / "shared.txt").write_text("original\n", encoding="utf-8")
-    session = ctx.sessions.create("s1")
-    agent = ctx.agents.create(session, FAKE_OPTIONS)
     child = await ctx.workspace.acquire(
         session_id="s1", agent_id="a1", base=base, access="write", session=session
     )
@@ -916,10 +892,7 @@ async def test_removing_a_bookmark_refuses_work_nothing_else_has(
     fully merged" is a revset here, and it is the same question: by disposal
     everything the agent did is on that bookmark.
     """
-    ctx = await mount(TIER_ROW, COMMANDS_ROW)
-    base = await jj_repo(ctx, ctx.fs.root)
-    session = ctx.sessions.create("s1")
-    agent = ctx.agents.create(session, FAKE_OPTIONS)
+    ctx, base, session, agent = await jj_agent(mount)
     workspace = await ctx.workspace.acquire(
         session_id="s1", agent_id="a1", base=base, access="write", session=session
     )

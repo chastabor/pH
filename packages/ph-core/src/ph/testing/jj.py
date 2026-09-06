@@ -23,7 +23,7 @@ import pytest
 
 from ..seams.workspace_jj import jj
 
-__all__ = ["JJ_ROWS", "jj", "jj_repo", "needs_jj"]
+__all__ = ["JJ_ROWS", "jj", "jj_agent", "jj_repo", "needs_jj"]
 
 needs_jj = pytest.mark.skipif(shutil.which("jj") is None, reason="the jj tier needs jj")
 """Shared for `needs_git`'s reason: the third module to drive a real binary forgot
@@ -31,6 +31,7 @@ the marker, and on a machine without it a clean skip became a dozen errors."""
 
 JJ_ROWS: tuple[dict[str, Any], ...] = (
     {"insert": [{"id": "workspace-jj", "name": "workspace-jj"}]},
+    {"insert": [{"id": "workspace-commands", "name": "workspace-commands"}]},
 )
 """The jj tier as a profile row. Layered nowhere by default — which provider a
 deployment pays for is P4-11's decision — so a test that wants it says so."""
@@ -57,3 +58,24 @@ async def jj_repo(ctx: Any, path: Path) -> Path:
     for setting in (("user.name", "pH"), ("user.email", "ph@example.invalid")):
         await jj(ctx, path, "config", "set", "--repo", *setting)
     return path
+
+
+async def jj_agent(mount: Any, *extra_rows: dict[str, Any]) -> tuple[Any, Any, Any, Any]:
+    """`(ctx, base, session, agent)` — a mounted jj tier and somebody to ask it things.
+
+    `worktree_agent`'s counterpart, and it exists for that helper's reason: six tests
+    had written the same four lines, and the preamble is exactly the kind that grows
+    a row in one copy and not the others.
+
+    The repository is built **at `ctx.fs.root`**, which the `mount` fixture points at
+    `tmp_path`. That is what makes `/workspaces` — whose base is `ctx.fs.root` — look
+    at the same repository the tier is branching from; a repo built beside it would
+    have every command in this file report nothing and every assertion pass for the
+    wrong reason.
+    """
+    from ..testing import FAKE_OPTIONS
+
+    ctx = await mount(*JJ_ROWS, *extra_rows)
+    base = await jj_repo(ctx, ctx.fs.root)
+    session = ctx.sessions.create("s1")
+    return ctx, base, session, ctx.agents.create(session, FAKE_OPTIONS)
