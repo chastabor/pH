@@ -547,6 +547,33 @@ def test_the_prompted_boundary_and_the_enforced_one_are_one_definition(
     assert named == {str(path) for path in writable_roots(workspace)}
 
 
+async def test_the_seam_hands_out_canonical_roots(tmp_path: Path) -> None:
+    """**The prompted boundary and the enforced one are one *string*, not merely one
+    set.** Seatbelt matches the path the kernel resolves, and on macOS `/var` is a
+    symlink into `/private` — so a root spelled the way a caller typed it was refused
+    its own writes, and a backend that quietly re-spelled `writable_roots` to fix
+    that would have left `permissions-fs` prompting about a different string than
+    the kernel enforced (E6). The seam canonicalises every input it mints from, so
+    what `writable_roots` and `workspace_policy` say is what every consumer reads.
+    """
+    real = tmp_path / "real"
+    (real / "repo").mkdir(parents=True)
+    link = tmp_path / "link"
+    link.symlink_to(real)
+    seam = workspace_seam(link / "scratch")
+
+    workspace = await seam.acquire(session_id="s1", agent_id="a1", base=link / "repo")
+
+    assert workspace.root == real / "repo", "resolved through the link"
+    assert workspace.scratch == real / "scratch" / "s1" / "a1", "scratch descends canonically"
+    # `writable_roots` is those two and `workspace_policy` is derived from it — the
+    # test above pins that derivation — so one positive assertion on the policy is
+    # what the boundary consumers actually read.
+    policy = workspace_policy(workspace)
+    assert policy.workspace_root == str(real / "repo")
+    assert policy.writable_extra == [str(real / "scratch" / "s1" / "a1")]
+
+
 def test_scratch_is_writable_without_being_asked_about(tmp_path: Path) -> None:
     """`scratch` is in the set, always — and it is the reason the set exists.
 

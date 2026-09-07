@@ -50,7 +50,6 @@ outcomes stay readable — the checks remain independent without paying twice.
 
 from __future__ import annotations
 
-import os
 import shutil
 import socket
 import sys
@@ -549,23 +548,27 @@ def test_seatbelt_reads_the_path_on_the_line_to_tell_the_boundaries_apart() -> N
     )
 
 
-def test_the_seatbelt_profile_names_the_path_the_kernel_resolves(tmp_path: Path) -> None:
-    """Seatbelt matches the path the kernel resolves, and on macOS `/var` and `/tmp`
-    are symlinks into `/private`: a workspace under `$TMPDIR` named as given was
-    refused its own writes and the probe declined the tier (measured — see
-    `_canonical`). So the profile carries the canonical path, never the spelling."""
+def test_the_profile_names_the_path_it_is_given_because_the_seam_spells_it(
+    tmp_path: Path,
+) -> None:
+    """Seatbelt matches the path the kernel resolves, and on macOS `/var` is a symlink
+    into `/private` — a root spelled as typed was refused its own writes (measured).
+    The fix is **not here**: every root the workspace seam mints and every directory
+    `sandbox-allow` admits is canonical at its source (`ph.paths.canonical`,
+    `test_workspace.py`), so this builder emits exactly what it is given. A
+    resolution here would be a second spelling of "the one definition"
+    (`writable_roots`) — the prompt boundary and the enforced one drifting apart,
+    which is E6's own failure in miniature.
+    """
     real = tmp_path / "real"
     real.mkdir()
     link = tmp_path / "link"
     link.symlink_to(real)
 
-    profile = seatbelt_profile(_policy(str(link), writable_extra=[str(link / "deeper")]))
+    profile = seatbelt_profile(_policy(str(link)))
 
-    assert f'(allow file-write* (subpath "{os.path.realpath(link)}"))' in profile
-    assert f'(allow file-write* (subpath "{os.path.realpath(link)}/deeper"))' in profile, (
-        "a tail that does not exist yet is kept"
-    )
-    assert f'"{link}"' not in profile
+    assert f'(allow file-write* (subpath "{link}"))' in profile, "as given, unresolved"
+    assert str(real) not in profile, "nothing here resolves; the seam already did"
 
 
 def test_the_wrapper_dies_with_the_host_and_says_whether_signals_reach_the_child() -> None:

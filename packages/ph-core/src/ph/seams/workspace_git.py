@@ -47,7 +47,7 @@ from pathlib import Path
 import anyio
 
 from ..cordis import Context, plugin
-from ..paths import default_home_path, is_under
+from ..paths import canonical, default_home_path, is_under
 from ..wire import WireModel
 from .subprocess import SubprocessSpawnSpec
 from .workspace import (
@@ -780,7 +780,10 @@ async def _git_dir(ctx: Context, root: Path) -> Path | None:
     if code != 0 or len(lines) != 2:
         return None
     git_dir, toplevel = Path(lines[0]), Path(lines[1])
-    if await anyio.to_thread.run_sync(lambda: toplevel.resolve() != root.resolve()):
+    # `root` is canonical by construction — every workspace root and provider root
+    # is (`ph.paths.canonical`) — so only git's answer needs resolving. Re-spelling
+    # `root` here would be the private re-resolution the seam's own doctrine ended.
+    if await anyio.to_thread.run_sync(lambda: canonical(toplevel) != root):
         log.info(
             "ph.seams.workspace_git: %s is not a git checkout — the nearest repository is "
             "%s, which is not this workspace, so nothing here will touch it",

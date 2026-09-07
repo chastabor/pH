@@ -51,7 +51,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from .paths import PathRoots, RuntimeTier, is_under, resolve_roots
+from .paths import PathRoots, RuntimeTier, canonical, is_under, resolve_roots
 
 __all__ = [
     "LINGER_DIR",
@@ -154,7 +154,11 @@ class RuntimeLifetime:
         reaped exactly the same — the tier says where the answer came from, not
         where it points.
         """
-        return bool(self.runtime_dir) and is_under(self.path, Path(self.runtime_dir))
+        # Both sides canonical: `path` comes from `resolve_roots`, which resolves,
+        # so comparing it against a raw `$XDG_RUNTIME_DIR` would answer `False` on
+        # any host reaching it through a link (`/var/run/user/N` where `/var/run`
+        # is `/run`) — the same spelling drift the roots were canonicalised to end.
+        return bool(self.runtime_dir) and is_under(self.path, canonical(Path(self.runtime_dir)))
 
     @property
     def survives_logout(self) -> bool | None:

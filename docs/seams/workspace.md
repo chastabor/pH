@@ -35,6 +35,13 @@ harness could not promise; it says so rather than pretending.
   the registry does not know falls back to the seam's default owner.
   That is the in-process half; the `workspace/acquired` + `workspace/disposed`
   pair is the crash half, reconciled at session open.
+* **Every root the seam hands out is canonical** (`ph.paths.canonical`): `base` is
+  resolved on the way in, `scratch` descends from a canonical `scratch_root`, and a
+  provider's own root comes from `default_home_path`. The kernel matches the path it
+  resolves — on macOS `/var` is `/private/var` to it — and `writable_roots` is read
+  both by the backend that *enforces* the set and by `permissions-fs`, which
+  *prompts* about it. One spelling at the source is what keeps those one boundary
+  (E6); no consumer re-spells it.
 * **`scratch` is always present and always writable**, on every kind and every
   tier — and the *seam* creates it, one implementation rather than one per
   provider. It lives in pH's own state directory rather than inside the

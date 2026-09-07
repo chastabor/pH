@@ -46,6 +46,7 @@ from typing import Literal
 __all__ = [
     "PathRoots",
     "RuntimeDirError",
+    "canonical",
     "default_home_path",
     "is_under",
     "resolve_roots",
@@ -237,17 +238,53 @@ def _resolve_runtime() -> tuple[Path, RuntimeTier, str]:
     return path, "tmp-uid", ""
 
 
+def canonical(path: Path) -> Path:
+    """`path` with every symlink resolved — the one spelling the kernel will match.
+
+    **Every directory that participates in a boundary goes through this, once,
+    where it is minted** — the three `$PH_*` roots, `default_home_path` (from which
+    every provider's root descends), the workspace seam's `base` and `scratch`, and
+    `sandbox-allow`'s directories. The kernel does not see a path the way it was
+    typed: Seatbelt matches `subpath` rules against the resolved path, and on macOS
+    `/var`, `/tmp` and `/etc` are symlinks into `/private` — so a workspace under
+    `$TMPDIR` named as `/var/folders/…` was refused its own writes by a profile that
+    named it that way (measured 2026-09-07). The fix belongs here rather than in the
+    backend that noticed, because the same set of roots is what `permissions-fs`
+    prompts about and what `bwrap` binds: `writable_roots` is documented as "the one
+    definition" of that set, and a backend re-spelling it privately would have made
+    the *enforced* boundary `/private/var/…` while the *prompt* boundary stayed
+    `/var/…` — E6's own failure. Canonical at the source, every consumer agrees.
+
+    Roots that bound nothing are deliberately outside this: `uploads`, the session
+    stores and `temporary_directory` mint directories nobody compares against a
+    workspace, and canonicalising them would be ceremony rather than an invariant.
+    The *candidate* side of a comparison is not canonical either — `FsService.resolve`
+    passes an absolute path through as authored — so a caller comparing against these
+    roots resolves the candidate itself where the answer would otherwise differ; see
+    `permissions_fs.FsPermissions._outside_workspace`, which does it only once the
+    cheap compare has already said "outside".
+
+    `realpath`, not `Path.resolve(strict=True)`: a tail that does not exist yet
+    (a scratch about to be created) resolves through what does exist and keeps
+    the rest, which is what a path about to be `mkdir`ed needs.
+    """
+    return Path(os.path.realpath(path))
+
+
 def resolve_roots(*, create: bool = False) -> PathRoots:
     """Resolve all three roots, optionally creating them.
+
+    Canonical (`canonical`) so that everything minted under them — scratch,
+    worktrees, the daemon and egress sockets — carries one spelling.
 
     :raises RuntimeDirError: when the tier-3 `/tmp` fallback fails its check —
         pH refuses to start rather than adopt a directory it cannot vouch for.
     """
     runtime, tier, source = _resolve_runtime()
     roots = PathRoots(
-        home=_env_path("PH_HOME") or _default_home(),
-        cache=_env_path("PH_CACHE") or _default_cache(),
-        runtime=runtime,
+        home=canonical(_env_path("PH_HOME") or _default_home()),
+        cache=canonical(_env_path("PH_CACHE") or _default_cache()),
+        runtime=canonical(runtime),
         runtime_tier=tier,
         runtime_source=source,
     )
@@ -255,8 +292,14 @@ def resolve_roots(*, create: bool = False) -> PathRoots:
 
 
 def default_home_path(configured: str | None, name: str) -> Path:
-    """A row's `path` setting, else `$PH_HOME/<name>` — the idiom every seam shares."""
-    return Path(configured).expanduser() if configured else resolve_roots().home / name
+    """A row's `path` setting, else `$PH_HOME/<name>` — the idiom every seam shares.
+
+    Canonical either way (`canonical`): a configured path is a person's spelling,
+    and the roots a seam mints under it must match what the kernel will enforce.
+    """
+    if configured:
+        return canonical(Path(configured).expanduser())
+    return resolve_roots().home / name
 
 
 def is_under(candidate: Path, root: Path) -> bool:

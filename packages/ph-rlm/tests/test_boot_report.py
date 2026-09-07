@@ -4,17 +4,20 @@ Found on macOS on 2026-09-07, while verifying the Seatbelt backend: every kernel
 start waited out `boot_timeout` and reported "did not report ready" with nothing to
 quote — and the guest had answered within 50 ms. macOS refuses `RLIMIT_AS`
 (`ValueError: current limit exceeds maximum limit`), the guest reported the soft
-limit in force — `RLIM_INFINITY`, 2**63-1 — and the host's codec, which refuses
-integers above 2**53 as non-lossless (A1), dropped the whole `boot-ack` as junk
-and kept waiting for a frame that had already come.
+limit in force — `RLIM_INFINITY`, 2**63-1 — and the host's codec, whose
+lossless-integer rule was then a `parse_int` hook over the whole line, dropped the
+`boot-ack` as junk and kept waiting for a frame that had already come.
 
-Three fixes, pinned here. The guest reports `None` for a limit it could not apply.
-The host treats anything that is not `boot-ack` or `fault` as a fault to report —
-unreadable *or* merely unexpected — because nothing model-written has run before
-`boot-ack`, so C10's "junk is skipped, the peer is hostile" tolerance is not yet
-owed and looping on it is how a silent `boot_timeout` happens. And `ph doctor`
-reports the limits the guests actually applied, not the ones the host asked for,
-since on macOS those differ and claiming the request would be E1's failure one
+The root cause is the codec's, and is fixed there: the bound applies to the `int`
+fields the spec declares and to nothing it declines to inspect (`test_codec.py`).
+Three things pinned here are true regardless of it. The guest reports `None` for a
+limit it could not apply, because a report is for reading and `RLIM_INFINITY` is
+not a limit. The host treats anything that is not `boot-ack` or `fault` as a fault
+to report — unreadable *or* merely unexpected — because nothing model-written has
+run before `boot-ack`, so C10's "junk is skipped, the peer is hostile" tolerance is
+not yet owed and looping on it is how a silent `boot_timeout` happens. And `ph
+doctor` reports the limits the guests actually applied, not the ones the host asked
+for, since on macOS those differ and claiming the request would be E1's failure one
 layer down from the tier table.
 """
 
@@ -60,11 +63,6 @@ def test_a_limit_the_platform_refuses_is_reported_as_none_and_the_frame_stays_re
 
     assert applied["addressSpaceBytes"] is None, "not in force, and said so"
     assert codec.decode(_boot_ack(applied)) is not None, "and the host can read the report"
-    # The bound that made the old report unreadable, pinned beside the fix: the
-    # number the guest used to send is above the codec's lossless-integer rule and
-    # a representable one is not.
-    assert codec.decode(_boot_ack({"addressSpaceBytes": INFINITY})) is None
-    assert codec.decode(_boot_ack({"addressSpaceBytes": 2**31})) is not None
 
 
 def test_a_finite_soft_limit_already_in_force_is_still_the_number_reported(
@@ -80,9 +78,10 @@ def test_a_finite_soft_limit_already_in_force_is_still_the_number_reported(
 
 
 async def test_an_unreadable_first_frame_is_a_fault_not_a_silence(tmp_path: Path) -> None:
-    """Driven through `_await_boot_ack` over a socketpair, with no guest spawned: the
-    frame the macOS guest actually sent, and the host's answer to it — a fault that
-    quotes the line — rather than a wait for `boot_timeout`."""
+    """Driven through `_await_boot_ack` over a socketpair, with no guest spawned: a
+    `boot-ack` in a shape this host will not read — `protocol` as a string, the
+    kind of drift D7 is about — and the host's answer to it is a fault that quotes
+    the line rather than a wait for `boot_timeout`."""
     kernel = Kernel(
         namespace="agent-test",
         environment=resolve_interpreter(cache=tmp_path, mode="host"),
@@ -93,14 +92,15 @@ async def test_an_unreadable_first_frame_is_a_fault_not_a_silence(tmp_path: Path
     try:
         host.setblocking(False)
         kernel._sock = host
-        guest.sendall(_boot_ack({"addressSpaceBytes": INFINITY, "cpu": "per-run"}))
+        drifted = {"type": "boot-ack", "protocol": "two", "python": "3.12", "limits": {}}
+        guest.sendall(json.dumps(drifted).encode() + b"\n")
 
         with anyio.fail_after(5):
             fault = await kernel._await_boot_ack()
 
         assert fault is not None
         assert "could not be read as protocol" in fault
-        assert str(INFINITY) in fault, "the offending line is quoted"
+        assert '"protocol": "two"' in fault, "the offending line is quoted"
     finally:
         guest.close()
         host.close()

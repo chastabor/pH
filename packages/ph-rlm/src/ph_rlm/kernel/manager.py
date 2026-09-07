@@ -443,10 +443,11 @@ class Kernel:
                 # Not C10's "junk → skip": nothing model-written has run yet, so a
                 # line this host cannot read is the guest speaking a shape it does
                 # not accept (D7), and skipping it means waiting out `boot_timeout`
-                # in silence with nothing to quote. Measured on macOS: the guest
-                # reported `addressSpaceBytes` as RLIM_INFINITY, the codec's
-                # lossless-integer rule refused the frame, and every start ended
-                # 60 s later as "did not report ready".
+                # in silence with nothing to quote. How it was found: on macOS the
+                # guest reported `addressSpaceBytes` as RLIM_INFINITY, the codec of
+                # the day refused the whole frame over it, and every start ended
+                # 60 s later as "did not report ready" — the codec is fixed, and
+                # this is what would have said so in a minute instead of never.
                 return (
                     "the runtime's first frame could not be read as protocol "
                     f"{PROTOCOL_VERSION} ({self.environment.describe()}): "

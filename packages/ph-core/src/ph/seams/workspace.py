@@ -45,7 +45,7 @@ import anyio
 from pydantic import Field
 
 from ..cordis import Context, Disposer, Running, maybe_await, plugin, running, safe_yaml_load
-from ..paths import default_home_path
+from ..paths import canonical, default_home_path
 from ..session import Session
 from ..tools.definition import ToolExecution
 from ..tools.errors import HarnessError
@@ -232,6 +232,13 @@ def writable_roots(workspace: Workspace) -> tuple[Path, ...]:
     `scratch` is always in it. It is outside the worktree by design (E5) and is the
     one place a read-only or ephemeral agent is *told* it may write, so a set naming
     only `root` would prompt on exactly the writes the design invites.
+
+    **Canonical, by construction rather than by resolving here.** The kernel matches
+    the path it resolves — Seatbelt refused a workspace spelled `/var/folders/…` its
+    own writes, because that is `/private/var/…` to the kernel — and a backend that
+    re-spelled the set privately would have made the enforced boundary and the
+    prompted one two different strings. So the seam canonicalises every input it
+    mints roots from (`acquire`), and this returns what the seam handed out.
     """
     return (workspace.root, workspace.scratch)
 
@@ -915,7 +922,15 @@ class WorkspaceSeam:
         when `ctx.agents` knows `agent_id` (P4-16): the caller has already said whose
         workspace this is, and the only lifetime that can own a live agent's checkout is
         that agent's. An id the registry has never seen keeps `owner_for`'s fallback.
+
+        **Every root this hands out is canonical** (`ph.paths.canonical`), because the
+        inputs are: `base` is resolved here, `scratch` is resolved in `_scratch_for`,
+        and a provider's own root comes from `default_home_path`. The
+        kernel matches resolved paths, and the same set is what `permissions-fs`
+        prompts about — one spelling at the source is what keeps those two boundaries
+        one boundary (E6, `writable_roots`).
         """
+        base = canonical(base)
         scratch = await self._scratch_for(session_id, agent_id)
         chosen = self._chosen_tier(session) if tier is None else tier
         workspace = None
@@ -1017,8 +1032,12 @@ class WorkspaceSeam:
         """Per session *and* per agent, created rather than merely named. Owned by the seam
         so the layout has one implementation: two children of one session writing notes
         into one directory is the collision this avoids.
+
+        Canonical here rather than trusting `scratch_root` to be: the shipped row gets
+        it from `default_home_path`, which already is, but the guarantee `acquire`
+        makes is the seam's, so it does not depend on how the seam was built.
         """
-        scratch = self.scratch_root / session_id / agent_id
+        scratch = canonical(self.scratch_root / session_id / agent_id)
         await anyio.to_thread.run_sync(lambda: scratch.mkdir(parents=True, exist_ok=True))
         return scratch
 

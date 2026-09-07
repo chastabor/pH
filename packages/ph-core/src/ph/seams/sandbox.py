@@ -51,6 +51,7 @@ from typing import Any, Literal, Protocol, TypeAlias, cast, get_args, runtime_ch
 from pydantic import Field
 
 from ..cordis import Context, Disposer, Running, plugin, running
+from ..paths import canonical
 from ..session import Session
 from ..tools.errors import FailureKind, HarnessError
 from ..wire import WireModel
@@ -510,12 +511,25 @@ class SandboxSeam:
         self, allowances: Allowances, *, scope: Context | None = None
     ) -> Disposer:
         """Say what confined commands may reach. One slot: two statements of one
-        boundary is a contradiction, and re-applying the row is how it changes."""
+        boundary is a contradiction, and re-applying the row is how it changes.
+
+        **The paths are canonicalised here, because this is where they are minted.**
+        A deployment writes `~/.cache/uv`; the kernel matches the path it resolves,
+        and so must the prompt boundary `permissions-fs` draws from the same set
+        (E6). Doing it here rather than in `allowed_paths` is the difference between
+        once per mount and once per confined command *and* per gated write — the
+        cost the memoised helper this replaced was written to avoid, and it belongs
+        at the mint, not behind a cache. `expanduser` comes with it: `~` is a
+        spelling too, and a consumer comparing against a literal `~` compares
+        against nothing.
+        """
         return claim_slot(
             self.ctx.running_for(scope),
             self,
             "allowances",
-            allowances,
+            allowances.model_copy(
+                update={"paths": [str(canonical(Path(p).expanduser())) for p in allowances.paths]}
+            ),
             label="sandbox.allowances",
         )
 
@@ -567,14 +581,16 @@ class SandboxSeam:
         more — and `sandbox-allow`'s diagnostic marks the entry `missing` so the
         omission is visible rather than silent.
         """
-        found: list[Path] = []
-        for entry in self._allowed.paths:
-            path = Path(entry).expanduser()
-            if path.is_dir():
-                found.append(path)
-            else:
-                log.debug("ph.seams.sandbox: allowed path %s does not exist; not bound", entry)
-        return tuple(found)
+        # Already canonical and expanded — `register_allowances` did it once, at the
+        # mint. This is a filter and nothing more: it runs inside `effective`, so on
+        # every confined command and every gated write, and a `realpath` here would
+        # be a syscall per configured directory per command.
+        found = [Path(entry) for entry in self._allowed.paths]
+        existing = tuple(path for path in found if path.is_dir())
+        for path in found:
+            if path not in existing:
+                log.debug("ph.seams.sandbox: allowed path %s does not exist; not bound", path)
+        return existing
 
     def permits(self, host: str, port: int) -> bool:
         """What the egress proxy asks, per connection, against the allowances *now*.

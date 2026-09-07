@@ -61,7 +61,7 @@ from pathlib import Path
 from typing import Any, Literal, TypeAlias
 
 from ph.cordis import Context, plugin
-from ph.paths import is_under
+from ph.paths import canonical, is_under
 from ph.seams.approval import denial_reason
 from ph.seams.diagnostics import Diagnostic, contribute
 from ph.seams.fs import (
@@ -485,7 +485,37 @@ class FsPermissions:
         # written, in this mode" would collapse the two, and is worth building when
         # something needs the mode for another reason.
         allowed = () if self.ctx is None else allowed_paths_of(self.ctx)
-        return not any(is_under(path, root) for root in (*writable_roots(workspace), *allowed))
+        roots = (*writable_roots(workspace), *allowed)
+        if any(is_under(path, root) for root in roots):
+            return False
+        # **Only now is it worth a syscall.** Every root here is canonical, and the
+        # candidate is not: `FsService.resolve` passes an absolute path through
+        # untouched, deliberately (`docs/seams/fs.md`), so on macOS a model-authored
+        # `/var/folders/…/repo/x` misses a workspace root spelled
+        # `/private/var/folders/…/repo` and would be prompted about a write the
+        # kernel permits — the two boundaries disagreeing about one file, which is
+        # E6's failure in the fail-safe direction.
+        #
+        # Resolved *after* the cheap compare rather than before it, which is what
+        # makes closing that gap free: a path already inside answers with no
+        # `realpath` at all, and this runs on every gated write. The remaining case
+        # was about to interrupt a person, and one `realpath` is nothing beside
+        # that. `is_under`'s own contract is kept — neither side is resolved
+        # implicitly; this caller resolves, as its docstring says a caller must.
+        #
+        # **What this deliberately does not do**, so nobody reads it as more than it
+        # is: a path that is textually *inside* the tree is accepted without
+        # resolving, so a symlink planted inside the workspace and pointing out of
+        # it is not asked about. That is the hole `is_under`'s docstring names, it
+        # predates the canonical roots, and closing it means resolving every
+        # candidate — a syscall on every gated write, and a change to what this
+        # boundary claims rather than to how it spells things. `sandbox` is the tier
+        # that bounds an escaping write (N2, E13); this one bounds tool calls and
+        # says so.
+        resolved = canonical(path)
+        if resolved == path:
+            return True
+        return not any(is_under(resolved, root) for root in roots)
 
     def _spellings(self, absolute: str, agent: Any = None) -> tuple[str, ...]:
         """Both ways to name this path: absolute, and relative to the workspace.

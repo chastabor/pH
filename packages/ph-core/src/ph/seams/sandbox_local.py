@@ -43,8 +43,10 @@ Permission denied`. Seatbelt: measured on macOS 26.6 on 2026-09-07, and the prof
 written blind was wrong in three places the probe would have caught and one it
 would not. (1) Seatbelt matches the path the kernel *resolves*, and `/var` and
 `/tmp` are symlinks into `/private` — so a workspace under `$TMPDIR` was refused
-its own writes and the probe declined the tier; `seatbelt_profile` now names the
-canonical path. (2) The unix-socket door had the same defect, and (3) a `socat`
+its own writes and the probe declined the tier; every root pH mints is now
+canonical at its source (`ph.paths.canonical`), which is the only place a spelling
+can be fixed without the prompt boundary and the enforced one drifting apart (E6).
+(2) The unix-socket door had the same defect, and (3) a `socat`
 shim under Seatbelt is not in a PID namespace, so it outlived every command and
 the next one's bind found the port taken — hence the loopback door, which needs no
 shim and no `socat`. (4) What the kernel prints: `Operation not permitted`, with
@@ -66,7 +68,6 @@ import shlex
 import shutil
 import sys
 from dataclasses import dataclass
-from functools import lru_cache
 from itertools import count
 from pathlib import Path
 from typing import TypeAlias
@@ -416,31 +417,6 @@ down server prints too, so it is deliberately absent.
 """
 
 
-@lru_cache(maxsize=512)
-def _canonical(path: str) -> str:
-    """The path as Seatbelt will match it.
-
-    **Memoised, because this is the hot path.** `realpath` is stat-backed — one
-    `lstat` per component, measured at 22 `lstat` + 2 `readlink` for a two-root
-    policy under `$TMPDIR` — and `seatbelt_profile` runs inside `confine`, on every
-    confined command and every code cell. Uncached it took profile construction
-    from **0.3 µs to 25.3 µs**; cached it is 0.3 µs again after the first call per
-    path. The set it answers for is tiny and stable: an agent's workspace root and
-    its scratch, plus whatever `sandbox-allow` names. The trade is that a symlink
-    swapped under a workspace root mid-process keeps the old resolution, which is
-    not a boundary a deployment moves while an agent is running.
-
-    Seatbelt evaluates `subpath` against the path the kernel *resolves*, and on
-    macOS `/var`, `/tmp` and `/etc` are symlinks into `/private`. Measured: a
-    workspace under `$TMPDIR` (`/var/folders/…`) named as given was refused its own
-    writes — `Operation not permitted` on `inside.txt` — and the probe declined the
-    tier; the same profile over `/private/var/folders/…` landed the write and
-    refused the escape. A missing tail is fine: `realpath` resolves what exists and
-    keeps the rest.
-    """
-    return os.path.realpath(path)
-
-
 def seatbelt_profile(policy: SandboxPolicy) -> str:
     """The Seatbelt profile for one policy, as `sandbox-exec -p` takes it.
 
@@ -453,8 +429,14 @@ def seatbelt_profile(policy: SandboxPolicy) -> str:
     also denied reads would refuse the toolchain its own libraries and be
     switched off by the first person who met it.
 
-    Writable roots are named by their canonical path (`_canonical`), because that
-    is the path the kernel matches.
+    Writable roots are emitted **as given**, and that is load-bearing: Seatbelt
+    matches `subpath` against the path the kernel resolves, and on macOS `/var` is a
+    symlink into `/private` — a root spelled `/var/folders/…` was refused its own
+    writes (measured). The spelling is fixed at the source instead: every root the
+    workspace seam mints and every directory `sandbox-allow` admits is canonical
+    (`ph.paths.canonical`), so this builder, `bwrap`'s binds and `permissions-fs`'s
+    prompt boundary all read one string. A resolution here would be a second
+    spelling of "the one definition" (`writable_roots`), and E6's drift in miniature.
 
     The door is **one remote and nothing else**: `(remote ip "localhost:<port>")`,
     the proxy's own loopback listener. Measured: the allowed port answers, the port
@@ -481,7 +463,7 @@ def seatbelt_profile(policy: SandboxPolicy) -> str:
         ' (literal "/dev/stderr"))',
     ]
     for path in writable_paths(policy):
-        lines.append(f'(allow file-write* (subpath "{_canonical(path)}"))')
+        lines.append(f'(allow file-write* (subpath "{path}"))')
     if policy.network:
         # Only the permitting arm is emitted: `(deny network*)` is a no-op under
         # `(deny default)` above, and a line that changes nothing is a line a

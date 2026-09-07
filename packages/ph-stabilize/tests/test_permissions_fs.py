@@ -604,6 +604,36 @@ async def test_writing_inside_the_workspace_never_asks(mount: Any, tmp_path: Pat
     assert (workspace.root / "nested" / "three.txt").read_text(encoding="utf-8") == "x"
 
 
+async def test_a_write_named_through_a_symlink_into_the_workspace_never_asks(
+    mount: Any, tmp_path: Path
+) -> None:
+    """**Both sides of the boundary are one spelling, and only one of them is
+    canonical by construction.**
+
+    Workspace roots are canonicalised where they are minted (`ph.paths.canonical`),
+    because the kernel matches the path it resolves. The *candidate* is not:
+    `FsService.resolve` passes an absolute path through as the model authored it,
+    deliberately. So a path naming this agent's own tree through a link — which is
+    what `$TMPDIR` produces on macOS, where `/var` is `/private/var` — reaches the
+    gate spelled differently from the root it is inside, and a plain prefix compare
+    would interrupt a person about a write the sandbox permits. That is E6's
+    disagreement, in the fail-safe direction rather than the fail-open one.
+
+    The resolution happens only *after* the cheap compare has said "outside", so
+    the ordinary write pays no syscall for it and this one is answered correctly.
+    """
+    ctx = await _scoped(mount, tmp_path)
+    agent, workspace = await scoped_agent(ctx, tmp_path)
+    asked = answer_approvals(ctx, "rejected")
+    link = tmp_path / "as-linked"
+    link.symlink_to(workspace.root)
+
+    await run_tool(ctx, "write", {"path": str(link / "inside.txt"), "content": "x"}, agent=agent)
+
+    assert asked == [], "the agent's own tree, named the other way"
+    assert (workspace.root / "inside.txt").read_text(encoding="utf-8") == "x"
+
+
 async def test_writing_to_scratch_never_asks(mount: Any, tmp_path: Path) -> None:
     """Scratch is outside the worktree *by design* (E5) and is the one place a
     read-only or ephemeral agent is told it may write — so a scope covering only

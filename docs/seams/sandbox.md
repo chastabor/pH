@@ -225,8 +225,13 @@ real kernel**: `bwrap` on 2026-09-01, Seatbelt on 2026-09-07. The Seatbelt profi
 was written blind and deny-by-default so a rule somebody forgot would fail closed —
 and it did: Seatbelt matches the path the kernel *resolves*, and on macOS `/var`
 and `/tmp` are symlinks into `/private`, so a workspace under `$TMPDIR` was refused
-its own writes and the probe declined the tier rather than claiming it. The
-profile now names canonical paths. **Landlock is still owed.**
+its own writes and the probe declined the tier rather than claiming it. The fix is
+**not in the profile**: a backend re-spelling the writable set privately would have
+made the enforced boundary `/private/var/…` while `permissions-fs` kept prompting
+about `/var/…` — E6's own drift. Instead every root pH mints is canonical at its
+source (`ph.paths.canonical`: the three `$PH_*` roots, `default_home_path`, the
+workspace seam's `base`, and `sandbox-allow`'s directories), so this backend,
+`bwrap` and the prompt boundary all read one string. **Landlock is still owed.**
 
 ## What is confined
 

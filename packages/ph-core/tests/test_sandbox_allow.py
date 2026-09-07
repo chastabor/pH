@@ -18,6 +18,7 @@ import pytest
 
 from ph.agent.types import AgentOptions
 from ph.cordis import Context
+from ph.paths import canonical
 from ph.seams.sandbox import (
     DEFAULT_HOSTS,
     DENIED,
@@ -94,12 +95,20 @@ def test_without_a_row_the_seam_fails_closed() -> None:
 
 def test_allowed_directories_join_the_writable_set_when_they_exist(tmp_path: Path) -> None:
     """A missing directory is skipped — bwrap refuses to start over an absent bind
-    source — and the skip is the closed direction."""
+    source — and the skip is the closed direction.
+
+    And a present one is **canonical**, like every root the workspace seam mints: this
+    set joins `writable_roots` in both the enforced boundary and the prompted one
+    (E6), so a person's symlinked spelling becomes the one the kernel matches before
+    either reads it.
+    """
     present = tmp_path / "cache"
     present.mkdir()
-    seam = _seam(paths=[str(present), str(tmp_path / "absent")])
+    link = tmp_path / "link"
+    link.symlink_to(present)
+    seam = _seam(paths=[str(link), str(tmp_path / "absent")])
     effective = seam.effective(SandboxPolicy(mode="workspace-write", workspace_root="/w"))
-    assert effective.writable_extra == [str(present)]
+    assert effective.writable_extra == [str(present)], "the link's target, not the link"
     assert seam.allowed_paths() == (present,)
 
 
@@ -279,18 +288,51 @@ async def test_the_row_registers_the_shipped_defaults_and_describes_them(mount: 
 
 
 async def test_a_profile_replaces_the_whole_statement(mount: Any, tmp_path: Path) -> None:
-    """The loader's patch rule: `config:` is one layer's, wholly."""
+    """The loader's patch rule: `config:` is one layer's, wholly.
+
+    The paths come back **expanded and canonical**, because `register_allowances`
+    settles the spelling once at the mint: a deployment writes `~/.cache/uv`, and
+    both the kernel that enforces this set and the prompt boundary drawn from it
+    compare against the path the filesystem resolves (E6). What the row *replaces*
+    is still the whole statement, which is what this test is about.
+    """
     ctx = await mount(
         _allow(paths=[str(tmp_path), "~/definitely-not-here-ph"], network={"mode": "off"})
     )
     assert ctx.sandbox.allowances == Allowances(
-        paths=[str(tmp_path), "~/definitely-not-here-ph"],
+        paths=[
+            str(canonical(tmp_path)),
+            str(canonical(Path("~/definitely-not-here-ph").expanduser())),
+        ],
         network=NetworkAllowance(mode="off", hosts=list(DEFAULT_HOSTS)),
     )
     rows = report_section(ctx, "Sandbox allowances")
     assert rows["network"] == "off — confined commands have no network"
     assert "(missing — not bound)" in rows["writable beyond the workspace"]
-    assert str(tmp_path) in rows["writable beyond the workspace"]
+    assert str(canonical(tmp_path)) in rows["writable beyond the workspace"]
+
+
+async def test_the_allowed_paths_are_settled_once_where_they_are_registered(
+    mount: Any, tmp_path: Path
+) -> None:
+    """**The spelling is the mint's, not the reader's.** `allowed_paths()` runs
+    inside `effective`, so on every confined command *and* every gated write; a
+    `realpath` there would be a syscall per configured directory per command, which
+    is the cost a memoised helper in the Seatbelt backend used to exist to avoid.
+    Settling it at registration makes the read a pure `is_dir` filter and still
+    hands every consumer the one spelling the kernel matches.
+    """
+    real = tmp_path / "real"
+    real.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(real)
+    ctx = await mount(_allow(paths=[str(link)]))
+
+    assert ctx.sandbox.allowances is not None
+    assert ctx.sandbox.allowances.paths == [str(real)], "resolved once, at the mint"
+    assert ctx.sandbox.allowed_paths() == (real,)
+    effective = ctx.sandbox.effective(SandboxPolicy(mode="workspace-write", workspace_root="/w"))
+    assert effective.writable_extra == [str(real)]
 
 
 async def test_unmounting_the_row_closes_the_seam_again(mount: Any) -> None:

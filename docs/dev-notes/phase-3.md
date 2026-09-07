@@ -180,11 +180,15 @@ the child choose which pending call a reply lands on. Nothing malformed raises,
 because a decoder that raises is a decoder the child can crash the host with on
 demand.
 
-dsh's `hasUnsafeIntegerToken` is ported as a `json.loads(parse_int=...)` hook
-rather than a text scan, which is strictly better: digits inside a string are not
-mistaken for a number, and a number nested in an object is still checked. The
-rule matters because pH's log is JSON that dsh's TypeScript tooling reads (Q2),
-and past 2^53 a JS reader loses precision silently.
+dsh's `hasUnsafeIntegerToken` was first ported as a `json.loads(parse_int=...)`
+hook, and that turned out to be the one shape rule exempt from the codec's own
+principle — it vetoed a *frame* over a number in a field the spec had declined to
+inspect (`boot-ack.limits` is `obj`, `done.value` is `any`), which is how every
+kernel start on macOS waited out its timeout on a `boot-ack` that had arrived
+(P6-40). The bound now lives in `_coerce` beside the other shape rules and applies
+to the `int` fields the host reads — `id`, `protocol` — which are exactly the
+numbers it echoes and which a JS reader past 2^53 would mangle (Q2). What reaches
+the log is judged by `ph.session.json`'s walker, with the offending path named.
 
 There is an end-to-end test for this where the *cell itself* writes forged frames
 onto its own descriptor.

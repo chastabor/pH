@@ -32,7 +32,13 @@ from typing import Any
 
 import pytest
 
-from ph.paths import RuntimeDirError, _check_private_dir, resolve_roots
+from ph.paths import (
+    RuntimeDirError,
+    _check_private_dir,
+    canonical,
+    default_home_path,
+    resolve_roots,
+)
 
 pytestmark = pytest.mark.skipif(
     sys.platform == "win32", reason="POSIX path tiers; Windows has its own mapping"
@@ -317,3 +323,43 @@ def test_a_windows_host_with_neither_variable_still_resolves(monkeypatch: Any) -
     assert _default_home() == Path.home() / ".ph"
     assert _default_cache() == Path.home() / ".cache" / "ph"
     assert _resolve_runtime()[2] == ""
+
+
+# ------------------------------------------------------------------ canonical --
+
+
+def test_the_roots_are_canonical_because_everything_minted_under_them_must_be(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """The kernel matches the path it *resolves*: Seatbelt refused a workspace spelled
+    `/var/folders/…` its own writes, because that is `/private/var/…` to it. Every
+    root pH mints descends from these three, so this is where one spelling is fixed
+    — and why no backend has to re-spell the set privately (E6)."""
+    _clear(monkeypatch)
+    real = tmp_path / "real"
+    real.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(real)
+    monkeypatch.setenv("PH_HOME", str(link / "home"))
+    monkeypatch.setenv("PH_CACHE", str(link / "cache"))
+    monkeypatch.setenv("PH_RUNTIME", str(link / "run"))
+
+    roots = resolve_roots()
+
+    assert roots.home == real / "home", "resolved through the link, tail kept"
+    assert roots.cache == real / "cache"
+    assert roots.runtime == real / "run"
+    assert default_home_path(str(link / "own"), "x") == real / "own", "a configured path too"
+    assert default_home_path(None, "scratch") == real / "home" / "scratch"
+
+
+def test_canonical_resolves_what_exists_and_keeps_the_rest(tmp_path: Path) -> None:
+    """`realpath`, not `resolve(strict=True)`: a scratch about to be created is a
+    path whose tail does not exist yet, and it must still come out canonical."""
+    real = tmp_path / "real"
+    real.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(real)
+
+    assert canonical(link / "not" / "yet") == real / "not" / "yet"
+    assert canonical(real) == real, "already canonical is a no-op"

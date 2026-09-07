@@ -13,12 +13,24 @@ frame from a declared spec rather than parsing it into a model:
 * anything malformed becomes `None`, never a raise. A handler that can raise on
   a forged frame is a handler the child can crash on demand.
 
-The unsafe-integer rule is dsh's, implemented better than a text scan can
-manage: `json.loads(..., parse_int=...)` sees each integer *as JSON parses it*,
-so digits inside a string are not mistaken for a number and a number inside a
-nested object is still checked. The rule matters because pH's log is JSON that
-dsh's TypeScript tooling reads (Q2), and an integer past 2^53 silently loses
-precision there.
+The unsafe-integer rule is dsh's, and it applies **where the host reads a
+number** — the `int` fields `INBOUND` declares (`id`, `protocol`) — through the
+same `_coerce` every other shape rule goes through. Past 2^53 a JavaScript reader
+loses precision silently (Q2), and an `id` the host would echo back is exactly the
+number that must survive that reader.
+
+**It was a whole-frame veto once, and that was a defect.** A `parse_int` hook on
+the decoder raised on any integer past the bound *anywhere* in the line — inside
+`boot-ack.limits`, which the spec declares `obj` and does not inspect; inside
+`done.value`, declared `any`. So a payload the codec had explicitly declined to
+validate could still make it drop the frame, and it did: on macOS the guest
+reported `RLIM_INFINITY` for a limit the platform refused, every `boot-ack` was
+dropped as junk, and every kernel start waited out its timeout in silence
+(2026-09-07). A cell ending in `2**60` had the same fate on every platform. The
+frame is now judged by its declared fields and nothing else — the module's own
+rule, finally applied to the one check that had been exempt from it. What
+reaches the *log* is guarded there, by `ph.session.json`, with the offending
+path in the message, which is the diagnosis this bug never got.
 
 @module ph_rlm.kernel.codec
 """
@@ -33,40 +45,27 @@ from ph.wire import WireModel
 
 from .protocol import INBOUND, FieldKind
 
-__all__ = ["UnsafeInteger", "decode", "encode", "has_unsafe_integer"]
+__all__ = ["decode", "encode"]
 
 _INVALID: Final = object()
 
 
-class UnsafeInteger(ValueError):
-    """A JSON integer too large to survive a JavaScript reader."""
+_DECODER: Final = json.JSONDecoder()
+"""Built once, and **hookless**.
 
-
-def _guard_int(token: str) -> int:
-    value = int(token)
-    if abs(value) > JSON_MAX_SAFE_INTEGER:
-        raise UnsafeInteger(token)
-    return value
-
-
-_DECODER: Final = json.JSONDecoder(parse_int=_guard_int)
-"""Built once. A `parse_int` keyword bypasses `json.loads`'s cached decoder, so
-without this every frame constructs a fresh `JSONDecoder` and scanner.
+Two separate reasons, and dropping the object when the hook went would have lost
+the first. *Built once*: `json.loads` re-dispatches per call — a wrapper frame plus
+the str/bytes sniff — which measured **0.406 µs against 0.334 µs** for this object
+on a `log` frame, the most numerous frame on the stdout path, and `decode` runs on
+every frame the guest sends. *Hookless*: the `parse_int` guard that used to live
+here is now `_coerce`'s, for the reason the module docstring gives.
 """
 
 
-def has_unsafe_integer(raw: str | bytes) -> bool:
-    """Whether `raw` carries an integer no JS reader could hold losslessly."""
-    try:
-        _decode_json(raw)
-    except UnsafeInteger:
-        return True
-    except (ValueError, UnicodeDecodeError):
-        return False
-    return False
-
-
 def _decode_json(raw: str | bytes) -> Any:
+    # Decoded to `str` here rather than handing bytes to the decoder: measured
+    # 0.49 µs against 0.65 µs on an 84-byte frame, because the bytes path sniffs
+    # the encoding before doing exactly this.
     return _DECODER.decode(raw if isinstance(raw, str) else raw.decode("utf-8"))
 
 
@@ -74,8 +73,10 @@ def _coerce(value: Any, kind: FieldKind) -> Any:
     if kind == "any":
         return value
     if kind == "int":
-        # `bool` is an `int` in Python and would sail through a bare isinstance.
-        return value if isinstance(value, int) and not isinstance(value, bool) else _INVALID
+        # `bool` is an `int` in Python and would sail through a bare isinstance;
+        # and an int a JS reader cannot hold is not one the host may echo (Q2).
+        numeric = isinstance(value, int) and not isinstance(value, bool)
+        return value if numeric and abs(value) <= JSON_MAX_SAFE_INTEGER else _INVALID
     if kind == "str":
         return value if isinstance(value, str) else _INVALID
     if kind == "bool":
