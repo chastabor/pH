@@ -94,7 +94,7 @@ behalf and wires the result into `ctx.fs.rebase`. What ordinary code wants is
 ```python
 @runtime_checkable
 class WorkspaceProvider(Protocol):
-    tier: ContainmentTier            # which rung this provider occupies
+    tier: ContainmentTier  # which rung this provider occupies
 
     async def acquire(
         self,
@@ -104,7 +104,7 @@ class WorkspaceProvider(Protocol):
         base: Path,
         scratch: Path,
         access: WorkspaceAccess = "write",
-    ) -> Workspace | None: ...       # None = decline
+    ) -> Workspace | None: ...  # None = decline
 ```
 
 **One required method.** Register with

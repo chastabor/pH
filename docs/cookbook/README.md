@@ -24,7 +24,7 @@ Nothing you write needs an `unload()`.
 ```python
 @plugin("tool-clock", inject=["tools"], config=Config)
 async def apply(ctx: Context, config: Config) -> None:
-    ctx.tools.register(define_tool(...))          # disposer owned by this scope
+    ctx.tools.register(define_tool(...))  # disposer owned by this scope
 ```
 
 `inject` is not documentation — it **gates activation**. A row whose injected

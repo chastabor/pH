@@ -66,6 +66,7 @@ language: str
 isolation: Isolation
 persistence: Persistence
 
+
 async def run(self, request: CodeRunRequest) -> CodeRunResult: ...
 ```
 

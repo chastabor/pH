@@ -121,11 +121,11 @@ Most extensions are a listener, not a tool:
 async def apply(ctx: Context, config: Config) -> None:
     async def gate(execution, next_):
         if execution.name == "bash" and _looks_destructive(execution.arguments):
-            return Ask()          # -> ctx.approval
+            return Ask()  # -> ctx.approval
         return await next_()
 
     ctx.on("tools/pre-execute", gate)
-    ctx.tools.guard(refuse_after_budget)          # deny-only, final
+    ctx.tools.guard(refuse_after_budget)  # deny-only, final
     ctx.tools.restrict(NameFilter(deny={"bash"}), scope=child.ctx)
 ```
 

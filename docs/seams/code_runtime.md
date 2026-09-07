@@ -18,7 +18,7 @@ be invisible to the log"*. pH admits one only from a provider that has promised,
 at registration, to keep it visible:
 
 ```python
-ctx.code_runtime.register(provider)     # raises PersistenceObligationError
+ctx.code_runtime.register(provider)  # raises PersistenceObligationError
 ```
 
 A promise checked at runtime would be discovered by the person who lost work.
@@ -29,8 +29,8 @@ A promise checked at runtime would be discovered by the person who lost work.
 @runtime_checkable
 class CodeRuntime(Protocol):
     language: str
-    isolation: Isolation          # in-process | thread | process | sandbox | remote
-    persistence: Persistence      # none | namespace
+    isolation: Isolation  # in-process | thread | process | sandbox | remote
+    persistence: Persistence  # none | namespace
 
     async def run(self, request: CodeRunRequest) -> CodeRunResult: ...
 ```

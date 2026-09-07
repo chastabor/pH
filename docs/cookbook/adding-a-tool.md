@@ -13,7 +13,11 @@ Worked examples in the tree, smallest first: `ph/tools/builtin/ask_user.py`,
 from pydantic import Field
 from ph.cordis import Context, plugin
 from ph.tools.definition import (
-    ToolModel, ToolOutput, ToolRunContext, define_tool, text_content,
+    ToolModel,
+    ToolOutput,
+    ToolRunContext,
+    define_tool,
+    text_content,
 )
 from ph.tools.presentation import simple_views
 
@@ -33,8 +37,11 @@ class ReadValue(ToolModel):
 async def apply(ctx: Context, config: Any) -> None:
     async def read(args: ReadArgs, run: ToolRunContext) -> Any:
         window = await ctx.fs.read(
-            args.path, limit=args.limit,
-            agent=run.agent, scope=run.scope, session=run.session,
+            args.path,
+            limit=args.limit,
+            agent=run.agent,
+            scope=run.scope,
+            session=run.session,
         )
         return window.model_dump()
 

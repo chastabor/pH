@@ -46,7 +46,7 @@ ctx.invariants.register(
     Invariant(
         id="session-invariant",
         statement="the transcript rebuilds from session.events alone",
-        check=_check,          # omit for an inline invariant
+        check=_check,  # omit for an inline invariant
     )
 )
 ```

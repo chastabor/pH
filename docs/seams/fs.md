@@ -163,8 +163,8 @@ every shipped extension attaches:
 ```python
 @plugin("my-fs-policy", inject=["fs"])
 async def apply(ctx: Context, config: Config) -> None:
-    ctx.on("fs/read-intent", refuse_secrets)      # may I open it
-    ctx.fs.screen(hide_secrets, scope=ctx)        # may I be told it exists
+    ctx.on("fs/read-intent", refuse_secrets)  # may I open it
+    ctx.fs.screen(hide_secrets, scope=ctx)  # may I be told it exists
 ```
 
 `permissions_fs.py` in `ph-stabilize` is the worked example, and registers exactly

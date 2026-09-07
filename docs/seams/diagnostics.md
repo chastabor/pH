@@ -45,12 +45,15 @@ await ctx.diagnostics.report()                        # what doctor prints
 A `Diagnostic` is `id`, `title`, `order`, `read`.
 
 ```python
-contribute(ctx, Diagnostic(
-    id="session-lineage",
-    title="Session lineage",
-    read=partial(lineage_faults_of, store),
-    order=20,
-))
+contribute(
+    ctx,
+    Diagnostic(
+        id="session-lineage",
+        title="Session lineage",
+        read=partial(lineage_faults_of, store),
+        order=20,
+    ),
+)
 ```
 
 ## State what is *not* enforced

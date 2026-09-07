@@ -354,8 +354,8 @@ deferral rather than a gap to be discovered.
 ### 2.8 `Boundary` and `DEPLOYMENT`
 
 ```python
-Boundary: TypeAlias = "Context | Deployment"      # context.py:301
-DEPLOYMENT = Deployment()                          # context.py:298
+Boundary: TypeAlias = "Context | Deployment"  # context.py:301
+DEPLOYMENT = Deployment()  # context.py:298
 ```
 
 `Boundary` is deliberately **not** `| None`. The reason is a defect that recurred
@@ -927,10 +927,13 @@ late `result()` still answers.
 **The reach rule (C7, "nuclear family")** — `seams/subagents.py:1093-1110`:
 
 ```python
-if sender_id == target_id:      return True   # self
-if target_id == sender_parent:  return True   # the parent
-if target_parent == sender_id:  return True   # a direct child
-return sender_parent == target_parent          # a sibling, roots included
+if sender_id == target_id:
+    return True  # self
+if target_id == sender_parent:
+    return True  # the parent
+if target_parent == sender_id:
+    return True  # a direct child
+return sender_parent == target_parent  # a sibling, roots included
 ```
 
 A grandparent is out of reach. Two roots are siblings. `reachable_family` is

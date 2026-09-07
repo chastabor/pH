@@ -34,6 +34,7 @@ class Uploader(Protocol):
 @dataclass(slots=True)
 class UploadRegistry:
     """The service published as `ctx.uploads`."""
+
     ctx: Context
     ...
 
@@ -74,7 +75,8 @@ binding then it must have kept who registered it (P6-29). Invoke it with
 
 ```python
 events.declare(
-    "uploads/stored", "emit",
+    "uploads/stored",
+    "emit",
     owner="ph.seams.uploads",
     doc="Bytes reached a provider's file API.",
 )

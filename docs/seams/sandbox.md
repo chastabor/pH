@@ -196,11 +196,13 @@ ctx.sandbox.enforcement                     -> Enforcement | None
 @runtime_checkable
 class SandboxProvider(Protocol):
     enforcement: Enforcement
-    backend: str          # the declared name — "bwrap", "sandbox-exec"
+    backend: str  # the declared name — "bwrap", "sandbox-exec"
+
     def confine(self, argv: tuple[str, ...], policy: SandboxPolicy) -> ConfinedArgv: ...
 
+
 @runtime_checkable
-class DenialReader(Protocol):        # optional; a backend that knows its kernel's words
+class DenialReader(Protocol):  # optional; a backend that knows its kernel's words
     def read_denial(self, output: str, *, network: bool) -> Denial | None: ...
 ```
 
