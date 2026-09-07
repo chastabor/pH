@@ -1,7 +1,7 @@
 # `ctx.sandbox` — confinement, and the refusal to pretend
 
 **Module:** `ph/seams/sandbox.py` · **Rows:** `sandbox-policy` (definition),
-`sandbox-local` (the bwrap backend, plus the egress proxy), `sandbox-allow` (what a
+`sandbox-local` (the bwrap or Seatbelt backend, plus the egress proxy), `sandbox-allow` (what a
 confined command may reach beyond its workspace), `sandbox-commands` (`/sandbox`) ·
 **Consumers:** `ctx.shell`, `permissions-fs`, `containment`
 
@@ -93,6 +93,19 @@ unix socket under `$PH_RUNTIME/sandbox/` that the sandbox reaches through its
 read-only view of `/`, and inside the sandbox a `socat` shim that turns
 `127.0.0.1:3128` into that socket so `HTTPS_PROXY` has something to point at.
 
+**Each backend declares its door** (`sandbox_local.Door`), because the two
+mechanisms are not the same shape. `bwrap` *unshares*: the sandbox has a loopback
+of its own, so the shim above is the door. Seatbelt *denies*: a confined command on
+macOS shares the host's loopback, there is no PID namespace for a shim to die with
+— one left by the first design was still holding port 3128 an hour later — so the
+proxy also listens on the host's `127.0.0.1:<port>` and the profile allows exactly
+`(remote ip "localhost:<port>")` and nothing else. No shim, no `socat`. Measured:
+the allowed port answers, the port beside it is `Operation not permitted`, DNS is
+refused, and `curl` honouring `HTTPS_PROXY` gets the proxy's own 403. The loopback
+listener exposes nothing the host does not already have — it tunnels only to hosts
+the deployment allows, which every local process can reach directly — and costs
+attribution only, since a local caller can name any agent in the proxy URL.
+
 **The proxy decides; the namespace enforces.** A `CONNECT example.com:443` is
 checked against the allowances — asked of the seam per connection, so `/sandbox
 allow host` takes effect on the next request with nothing restarted — and refused
@@ -101,10 +114,12 @@ proxy variables (`ssh`, a raw socket) reaches nothing, which is the direction a
 filter must fail in.
 
 The bridge is **claimed only when it works**: `sandbox-local` starts the proxy and
-sends one `CONNECT` through the shim from inside a confined shell to
+sends one `CONNECT` from inside a confined command — `socat` through the shim under
+`bwrap`, this interpreter dialling the port under Seatbelt — to
 `ph-egress-probe.invalid`, the host the proxy always refuses, and registers the
-bridge only if that 403 comes back. Without `socat`, or with a bridge that does
-not answer, `allowlist` means no network — and `network_posture()` says so.
+bridge only if that 403 comes back. Without `socat` on a `bwrap` host, or with a
+bridge that does not answer, `allowlist` means no network — and `network_posture()`
+says so.
 
 ## Refusals are records
 
@@ -116,11 +131,16 @@ command printed — `Read-only file system`, `Network is unreachable` — and th
 record says so (`via: output`), and only for a command that actually failed.
 
 **Which sentences count is the backend's, not the seam's.** Those strings are
-facts about one platform, so `Bubblewrap` implements the optional `DenialReader`
-protocol and owns `DENIAL_SIGNATURES`; `Seatbelt` deliberately does not, because
-what Seatbelt prints has not been measured and a guess would record refusals that
-did not happen. A backend with no reader means no filesystem record, which is the
-honest answer.
+facts about one platform, so each backend implements the optional `DenialReader`
+protocol over its own table: `Bubblewrap` owns `DENIAL_SIGNATURES` (`Read-only
+file system`, `Network is unreachable`, the glibc resolver texts) and `Seatbelt`
+owns `SEATBELT_SIGNATURES`, measured on macOS on 2026-09-07. Seatbelt has one word
+for both boundaries — `Operation not permitted` — so its reader looks at the
+*line*: a path on it is a file refusal (every tool measured puts one there), a bare
+one is a socket when the command had no network, and a bare one under the host's
+network is neither boundary this seam bounds and is not recorded. A backend with no
+reader means no filesystem record, which is the honest answer; until the
+measurement Seatbelt was one.
 
 The TUI renders the sentence as a notice; the footer counts the session's
 refusals; `/sandbox` lists them.
@@ -190,13 +210,23 @@ would fail at runtime inside a caller's `except` and be reported as "no
 provider".
 
 A backend reads `policy.egress` when it is set — the proxy's socket and the
-shim's port, filled in by the seam — and builds the shim around the command;
-`ph/seams/sandbox_local.py` does it for `bwrap` (verified) and `sandbox-exec`
-(written blind, deny-by-default, gated by the same probe).
+port to dial, filled in by the seam — and builds its door around the command;
+`ph/seams/sandbox_local.py` does it for `bwrap` (a `socat` shim on the sandbox's
+loopback) and `sandbox-exec` (an `env` prefix and one `remote ip` line). A backend
+owns its door in three pieces: `needs_loopback`, which the row reads *before* it
+has confined anything to decide whether the proxy opens a TCP listener
+(`enforcement`'s shape, and its reason); and `egress_blocker` plus `egress_probe`,
+the prerequisite and the command that proves the door works (`DenialReader`'s
+shape — behaviour the backend owns). So a third backend adds a door without
+editing the probe.
 
-`sandbox-local` is the shipped one (bwrap, verified against a real kernel).
-**Landlock and Seatbelt are still owed** — the Seatbelt profile is written blind
-and deny-by-default so a rule somebody forgot fails closed.
+`sandbox-local` is the shipped one, and **both backends are verified against a
+real kernel**: `bwrap` on 2026-09-01, Seatbelt on 2026-09-07. The Seatbelt profile
+was written blind and deny-by-default so a rule somebody forgot would fail closed —
+and it did: Seatbelt matches the path the kernel *resolves*, and on macOS `/var`
+and `/tmp` are symlinks into `/private`, so a workspace under `$TMPDIR` was refused
+its own writes and the probe declined the tier rather than claiming it. The
+profile now names canonical paths. **Landlock is still owed.**
 
 ## What is confined
 
@@ -223,14 +253,25 @@ spawned unwrapped. A cell's raw `open()` still reaches no rule, by construction
 Two consequences worth knowing:
 
 - **fd 3 crosses the boundary.** The kernel's framed channel is an inherited
-  descriptor, and both `bwrap` and the egress shim's `sh -c … exec "$@"` pass it
-  through. Measured, because a wrapper that closed it would look like a dead
-  runtime rather than a lost channel.
-- **Cancelling a confined cell has one cooperative route, not two.** `bwrap` does
-  not forward signals — it dies of `SIGINT` itself and takes the namespace with it
-  — so the kernel sends the `cancel` frame and skips the signal. The guest installs
-  `SIGINT` as a loop callback anyway, so both routes always needed the same running
-  loop; what remains is the frame, then the kill.
+  descriptor, and `bwrap`, the egress shim's `sh -c … exec "$@"`, `sandbox-exec`
+  and its `env` prefix all pass it through. Measured on both platforms, because a
+  wrapper that closed it would look like a dead runtime rather than a lost channel.
+- **Cancelling a confined cell has one cooperative route under `bwrap`, two under
+  Seatbelt.** `bwrap` does not forward signals — it dies of `SIGINT` itself and
+  takes the namespace with it — so there the kernel sends the `cancel` frame and
+  skips the signal. `sandbox-exec` execs its target, so a signal lands on the cell
+  (measured) and both routes stay; `ConfinedArgv.forwards_signals` is how the
+  kernel knows which host it is on. The guest installs `SIGINT` as a loop callback
+  either way, so both routes always needed the same running loop.
+- **A kernel that never boots confines nothing**, and on macOS none did until
+  2026-09-07: the guest cannot set `RLIMIT_AS` there and reported `RLIM_INFINITY`,
+  which the host's lossless-integer codec refused, so every `boot-ack` was dropped
+  as junk and every start waited out `boot_timeout`. The guest now reports `None`
+  for a limit it could not apply and the host faults on an unreadable first frame
+  (`test_boot_report.py`). The address-space limit itself is unenforceable on
+  macOS, so `ph doctor`'s per-child limits row is read from the guests that
+  actually started and says "address space not applied" rather than repeating the
+  number the host asked for — E1's rule, one layer down from the tier table.
 
 ## What only this seam can claim
 

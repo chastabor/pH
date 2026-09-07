@@ -42,7 +42,7 @@ than by replacing it.
 | [`ctx.workspace`](workspace.md) | `seams/workspace.py` | Where an agent's writes land, and how honestly that is stated. |
 
 Providers, which register into the seams above rather than publishing their own
-key: `seams/sandbox_local.py` (bwrap, P6-04), `seams/sandbox_egress.py` (the
+key: `seams/sandbox_local.py` (bwrap and Seatbelt, P6-04/P6-40), `seams/sandbox_egress.py` (the
 filtering proxy behind the network allowlist), `seams/sandbox_allow.py` (what a
 confined command may reach beyond its workspace), `seams/workspace_git.py` (the
 `worktree` tier), `seams/workspace_jj.py` (the same tier over Jujutsu, where a

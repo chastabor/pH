@@ -1083,11 +1083,11 @@ was chosen (`seams/workspace.py:589-614`).
 > confined child and finds it untouched. Every kind in `WorkspaceKind` now has a
 > producer, and `effective_tier` can return every rung in `ContainmentTier`.
 >
-> What remains unwritten is *backends*: `sandbox-local` ships `bwrap` only, so
-> Seatbelt is written deny-by-default and never run, and Landlock does not exist.
-> A host with neither has no `sandbox` rung — the row declines rather than
-> claiming one, which is the whole of why the claim is trustworthy where it is
-> made.
+> What remains unwritten is one *backend*: `sandbox-local` ships `bwrap` and
+> Seatbelt, both verified against a real kernel (P6-04, P6-40), and Landlock does
+> not exist. A host with neither has no `sandbox` rung — the row declines rather
+> than claiming one, which is the whole of why the claim is trustworthy where it
+> is made.
 
 > **`DowngradeReason` has exactly one member** — `workspace-not-mounted` — and one
 > producer. A *tier-driven* narrowing (asking `write`, getting
@@ -1320,7 +1320,7 @@ Stated here rather than left to be discovered, per the codebase's own rule.
 
 | Gap | Status |
 |---|---|
-| `sandbox-local` ships `bwrap` only; the Seatbelt half is written deny-by-default and **has never been run** — the probe is what stands between "unverified" and "claimed". Landlock is unwritten | P6-04, partial |
+| `sandbox-local` ships `bwrap` and Seatbelt, both verified against a real kernel — the blind Seatbelt profile was wrong in four places a Mac found (P6-40). Landlock is unwritten | P6-04, P6-40; Landlock open |
 | `install_lifecycle` (signal handling, grace period, self-`SIGKILL`) has **no production caller**; `ph daemon` calls bare `anyio.run` | unwired |
 | `AgentCancelCause.kind` declares `hook` and `legacy`; neither is ever constructed | dead vocabulary |
 | `TurnEndReason(kind="interrupted")` is never constructed as a dataclass — it reaches logs only as repair's wire payload | dead vocabulary |

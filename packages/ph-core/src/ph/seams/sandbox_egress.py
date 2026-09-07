@@ -6,7 +6,11 @@ than a filter, so nothing inside can talk past it. What this module adds is the
 **one door**: a filtering HTTP proxy on the host, listening on a unix socket the
 sandbox can reach through its read-only view of `/`, and inside the sandbox a
 `socat` shim that turns `127.0.0.1:<port>` into that socket so the proxy variables
-every HTTP client honours have something to point at.
+every HTTP client honours have something to point at. Where the sandbox is a
+*deny list* rather than a namespace — Seatbelt on macOS — there is no separate
+loopback to put a shim on, so the same proxy also listens on the host's
+`127.0.0.1:<port>` and the profile allows that one remote and nothing else
+(`EgressProxy.loopback`).
 
 **The proxy decides; the namespace enforces.** A `CONNECT example.com:443` is
 checked against the deployment's allowances — asked of the seam per connection,
@@ -216,7 +220,8 @@ def origin_form(request: ProxyRequest) -> bytes:
 
 @dataclass(slots=True)
 class EgressProxy:
-    """The filtering proxy: one unix socket, one `permits` question per connection.
+    """The filtering proxy: one unix socket (and, asked for, one loopback port), one
+    `permits` question per connection.
 
     **Its own task, not `ctx.detach`.** A detached coroutine is one `ctx.drain`
     waits for, and the hosts drain *before* they dispose — so a server that runs
@@ -230,12 +235,45 @@ class EgressProxy:
     on_denied: OnDenied | None = None
     """Attached once the bridge has been probed, so the probe's own refusal is
     never charged to anyone."""
+    loopback: bool = False
+    """Also listen on `127.0.0.1:<ephemeral>`, for a backend with no network
+    namespace to put a shim in.
+
+    Seatbelt confines by *denying* rather than by unsharing: a confined command on
+    macOS shares the host's loopback, so the proxy can be reached there directly
+    and the profile allows exactly one remote — `localhost:<tcp_port>` — and refuses
+    every other address. Measured 2026-09-07: the allowed port answers, the next
+    port is `Operation not permitted`, DNS is refused, and `curl` honouring
+    `HTTPS_PROXY` gets the proxy's own 403.
+
+    Nothing the host does not already have is exposed by the listener: it tunnels
+    only to hosts the deployment allows, and every process on this machine can
+    reach those directly. What it costs is attribution — a local process that dials
+    the port with a made-up user is charged to that name — which the unix socket's
+    `0700` directory does not allow and this does. Off by default, so a `bwrap`
+    host (whose sandboxes cannot reach it anyway) opens no port."""
     denied: int = 0
     """How many connections this proxy has refused, for `ph doctor`."""
     _server: asyncio.AbstractServer | None = field(default=None, repr=False)
+    _tcp: asyncio.Server | None = field(default=None, repr=False)
+    """`Server`, not `AbstractServer`: `tcp_port` reads `.sockets`, which only the
+    concrete class carries — and `start_server` returns exactly that."""
     _connections: set[asyncio.Task[object]] = field(default_factory=set, repr=False)
     """Every connection being served, so `aclose` can end the tunnels the server's
     own `close` leaves running."""
+
+    @property
+    def tcp_port(self) -> int | None:
+        """Where the loopback listener landed, or `None` when there is not one.
+
+        Derived from the listener rather than copied beside it: the port *is* the
+        socket's, and a field assigned in `start` and cleared in `aclose` was two
+        places to keep one fact true. `None` before `start` and after `aclose`,
+        which is what `sandbox_local` reads to pick the port a command dials.
+        """
+        if self._tcp is None:
+            return None
+        return int(self._tcp.sockets[0].getsockname()[1])
 
     async def start(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -247,6 +285,10 @@ class EgressProxy:
         # The directory is already private; this is belt and braces for a socket
         # that hands out the deployment's network.
         os.chmod(self.path, 0o600)
+        if self.loopback:
+            self._tcp = await asyncio.start_server(
+                self._handle, host="127.0.0.1", port=0, limit=HEAD_LIMIT
+            )
         # No `serve_forever` task: `start_unix_server` defaults to
         # `start_serving=True`, so the loop is already accepting and already spawns
         # `_handle` per connection. A task parked on `serve_forever`'s future runs
@@ -260,8 +302,11 @@ class EgressProxy:
         spawned running, which for a tunnel means until the far end hangs up — so
         the in-flight ones are cancelled here rather than outliving the row.
         """
-        server, self._server = self._server, None
-        if server is not None:
+        servers = [server for server in (self._server, self._tcp) if server is not None]
+        # Cleared before the close, so `tcp_port` reads `None` from the moment the
+        # row starts letting go rather than after the last tunnel drains.
+        self._server = self._tcp = None
+        for server in servers:
             server.close()
         pending = list(self._connections)
         for task in pending:
@@ -272,7 +317,7 @@ class EgressProxy:
             # whoever is disposing the row.
             await asyncio.wait(pending, timeout=5)
         self._connections.clear()
-        if server is not None:
+        for server in servers:
             with suppress(Exception):
                 await server.wait_closed()
         with suppress(OSError):

@@ -156,6 +156,11 @@ async def test_a_cpu_bomb_hits_its_budget_and_the_kernel_survives(
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="RLIMIT_AS is POSIX")
+@pytest.mark.skipif(
+    sys.platform == "darwin",
+    reason="macOS refuses RLIMIT_AS (ValueError: current limit exceeds maximum limit), "
+    "so the guest reports the limit as not applied — see test_boot_report.py",
+)
 async def test_a_memory_bomb_hits_its_address_space_limit(make_kernel: MakeKernel) -> None:
     kernel = await make_kernel(address_space_bytes=1024**3)
     result = await kernel.run("buffer = bytearray(4 * 1024**3)", (), None)

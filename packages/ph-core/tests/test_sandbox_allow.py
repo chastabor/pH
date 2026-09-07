@@ -31,7 +31,7 @@ from ph.seams.sandbox import (
     SandboxSeam,
     host_allowed,
 )
-from ph.seams.sandbox_local import Bubblewrap, Seatbelt
+from ph.seams.sandbox_local import Bubblewrap, LocalBackend, Seatbelt, local_backend
 from ph.testing import StubSandboxProvider, report_section
 
 pytestmark = pytest.mark.anyio
@@ -224,8 +224,10 @@ def test_the_backend_reads_its_own_kernels_words_and_the_seam_asks_it() -> None:
     assert seam.read_denial(output, network=False) is None, "no backend, no reading"
     seam.register_provider(backend)
     assert seam.read_denial(output, network=False) == found
-    # A backend that has not been measured reads nothing rather than guessing.
-    assert not isinstance(Seatbelt(), DenialReader)
+    # Each backend reads its own kernel's words and nobody else's: measured on
+    # both platforms, and the bwrap sentence means nothing to Seatbelt's reader.
+    assert isinstance(Seatbelt(), DenialReader)
+    assert Seatbelt().read_denial(output, network=False) is None
 
 
 def test_a_denial_carries_the_sentence_with_the_way_out() -> None:
@@ -302,27 +304,51 @@ async def test_unmounting_the_row_closes_the_seam_again(mount: Any) -> None:
 # ------------------------------------------------------------------ shell --
 
 
+def _platform_backend() -> LocalBackend:
+    """The backend whose wrapper this host can exec.
+
+    The *reading* is the backend's own (`DenialReader`), which is why a stub will not
+    do here — but `ctx.shell` really spawns the argv, so the backend has to be one
+    this platform runs: a `Bubblewrap()` registered by hand on a Mac fails at
+    `exec` with `No such file or directory: 'bwrap'` before anything is read.
+    """
+    backend, why = local_backend()
+    if backend is None:
+        pytest.skip(why)
+    return backend
+
+
+FILE_REFUSAL = {
+    "bwrap": "sh: 1: cannot create /etc/x: Read-only file system",
+    "sandbox-exec": "sh: /etc/x: Operation not permitted",
+}
+"""What each kernel's `sh` prints for a refused redirect — measured on each."""
+
+OUTAGE = {
+    "bwrap": "Network is unreachable",
+    "sandbox-exec": "nodename nor servname provided, or not known",
+}
+"""What each platform prints when the network is simply not there."""
+
+
 async def test_the_shell_records_what_the_kernel_refused_from_the_commands_words(
     mount: Any, tmp_path: Path
 ) -> None:
     """`ctx.shell` runs confined, reads the output, and appends the record for the
-    agent it ran for. A stub backend, so what is pinned is the reading: the
-    command is not actually confined and prints the kernel's sentence itself."""
+    agent it ran for. What is pinned is the reading: the command is confined, but
+    it is not refused anything — it prints the kernel's own sentence itself."""
     ctx = await mount()
-    # `Bubblewrap` because the *reading* is its own (`DenialReader`); it confines
-    # nothing here, since the command prints the kernel's sentence itself.
-    ctx.sandbox.register_provider(Bubblewrap())
+    backend = _platform_backend()
+    ctx.sandbox.register_provider(backend)
     session = ctx.sessions.create("s")
     agent = ctx.agents.create(session, AgentOptions(provider="fake", model="f"))
     # The lifecycle row acquires at the agent's first step; the shell confines only
     # an agent that has a workspace, so acquire it by hand as the ladder tests do.
     await ctx.workspace.acquire(session_id=session.id, agent_id=agent.id, base=tmp_path)
 
-    result = await ctx.shell.run(
-        "echo 'sh: 1: cannot create /etc/x: Read-only file system' >&2; exit 1", agent=agent
-    )
+    result = await ctx.shell.run(f"echo '{FILE_REFUSAL[backend.backend]}' >&2; exit 1", agent=agent)
 
-    assert result.confined_by == "bwrap"
+    assert result.confined_by == backend.backend
     (event,) = [one for one in session.events if one.type == DENIED]
     assert event.data["kind"] == "filesystem" and event.data["via"] == "output"
     assert event.data["agent"] == agent.id
@@ -332,11 +358,12 @@ async def test_the_shell_does_not_blame_the_sandbox_for_an_outage_under_full_net
     mount: Any, tmp_path: Path
 ) -> None:
     ctx = await mount(_allow(network={"mode": "full"}))
-    ctx.sandbox.register_provider(Bubblewrap())
+    backend = _platform_backend()
+    ctx.sandbox.register_provider(backend)
     session = ctx.sessions.create("s")
     agent = ctx.agents.create(session, AgentOptions(provider="fake", model="f"))
     await ctx.workspace.acquire(session_id=session.id, agent_id=agent.id, base=tmp_path)
 
-    await ctx.shell.run("echo 'Network is unreachable' >&2", agent=agent)
+    await ctx.shell.run(f"echo '{OUTAGE[backend.backend]}' >&2; exit 1", agent=agent)
 
     assert not [one for one in session.events if one.type == DENIED]

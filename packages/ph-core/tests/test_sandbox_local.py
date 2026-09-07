@@ -19,6 +19,13 @@ an absolute-path write **refused with the host file untouched**, a workspace wri
 **landing**, `read-only` **refusing everywhere**, and **one network interface
 against thirteen** on the host.
 
+**And against Seatbelt** (macOS 26.6, 2026-09-07), where the blind profile was wrong
+in the ways the module docstring lists: canonical paths, no shim, a loopback door,
+and `Operation not permitted` as the kernel's one word for both boundaries. The
+network tests ask their question the same way on both platforms — can a confined
+command reach a listener this process opened on the host's loopback — because
+one backend unshares and the other denies, and only that question is the same.
+
 **Where the time goes, so nobody optimises the wrong end.** Building the argv
 costs **0.83 µs**; wrapping a command in `bwrap` costs **~5.8 ms fixed plus
 ~0.3 ms per writable root**. The Python is **0.024%** of the price, and the best
@@ -43,7 +50,9 @@ outcomes stay readable — the checks remain independent without paying twice.
 
 from __future__ import annotations
 
+import os
 import shutil
+import socket
 import sys
 from pathlib import Path
 from typing import Any
@@ -51,12 +60,14 @@ from typing import Any
 import pytest
 
 from ph.seams.sandbox import Egress, SandboxError, SandboxPolicy, writable_paths
+from ph.seams.sandbox_egress import PROBE_HOST
 from ph.seams.sandbox_local import (
     BYPASS_VARIABLES,
     DENIAL_SIGNATURES,
     EGRESS_PORT,
     PROXY_PASSWORD,
     PROXY_VARIABLES,
+    SEATBELT_SIGNATURES,
     Bubblewrap,
     Seatbelt,
     local_backend,
@@ -354,24 +365,58 @@ FULL_NETWORK = {"id": "sandbox-allow", "config": {"network": {"mode": "full"}}}
 # `/proc/net/dev`, not `/sys/class/net`: `/sys` is bind-mounted from the host and
 # its sysfs is not namespace-aware, so it reports the host's 13 interfaces even
 # inside `--unshare-net`. The netlink-backed `/proc` view is the one the namespace
-# actually owns — measured 1 against 13.
+# actually owns — measured 1 against 13. Linux only, like the namespaces it counts.
 LINKS = "print(len(open('/proc/net/dev').read().splitlines()) - 2)"
 PIDS = "import os;print(len([p for p in os.listdir('/proc') if p.isdigit()]))"
 
 
-async def _count(ctx: Any, workspace: Path, script: str, **extra: Any) -> int:
-    """One confined `python -c` through the **seam**, so the deployment's allowances
-    are merged in — which is what makes `refuse_network=` a request rather than the
-    resolved fact a backend reads."""
+async def _said(ctx: Any, workspace: Path, script: str, **extra: Any) -> str:
+    """What one confined `python -c` printed, run through the **seam** so the
+    deployment's allowances are merged in — which is what makes `refuse_network=` a
+    request rather than the resolved fact a backend reads.
+
+    The two questions below differ only in how they read this string, so they share
+    the three lines that produce it.
+    """
     policy = SandboxPolicy(mode="workspace-write", workspace_root=str(workspace), **extra)
     argv = ctx.sandbox.confine((sys.executable, "-c", script), policy).argv
     _, out = await _run(ctx, argv, workspace)
-    return int(out.strip())
+    return out
+
+
+async def _count(ctx: Any, workspace: Path, script: str, **extra: Any) -> int:
+    """A confined command's printed number — the Linux namespace counts."""
+    return int((await _said(ctx, workspace, script, **extra)).strip())
+
+
+async def _isolated(ctx: Any, workspace: Path, **extra: Any) -> bool:
+    """Whether a confined command is cut off from the network, asked the one way that
+    is the same on every backend: can it reach a listener *this process* opened on
+    the host's loopback?
+
+    Under `bwrap --unshare-net` the sandbox has a loopback of its own and the connect
+    finds nothing listening; under Seatbelt the profile allows no remote but the
+    proxy's port and the connect is `Operation not permitted`. Either way "reached"
+    never prints.
+    """
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen()
+    try:
+        port = listener.getsockname()[1]
+        reach = (
+            f"import socket; socket.create_connection(('127.0.0.1', {port}), 3); print('reached')"
+        )
+        return "reached" not in await _said(ctx, workspace, reach, **extra)
+    finally:
+        listener.close()
 
 
 async def test_the_namespaces_are_real(mount: Any, tmp_path: Path) -> None:
     """`--unshare-net` and `--unshare-pid` are namespaces, not filters — nothing
-    inside can talk past them, which is why they are the mechanism.
+    inside can talk past them, which is why they are the mechanism. Seatbelt has
+    no namespaces and *is* a filter, at the kernel; the loopback question below is
+    what both must answer the same way.
 
     **A caller cannot widen the deployment's posture** (§6.5): there is no way to
     ask for the network at all, only to refuse it, and the shipped `sandbox-allow`
@@ -380,11 +425,13 @@ async def test_the_namespaces_are_real(mount: Any, tmp_path: Path) -> None:
     """
     ctx, workspace = await _enforcing(mount, tmp_path)
 
-    assert await _count(ctx, workspace, LINKS) == 1, "loopback and nothing else"
-    assert await _count(ctx, workspace, LINKS, refuse_network=True) == 1, (
+    assert await _isolated(ctx, workspace), "a listener on the host's loopback is out of reach"
+    assert await _isolated(ctx, workspace, refuse_network=True), (
         "and a caller refusing the network still has none"
     )
-    assert await _count(ctx, workspace, PIDS) < 10, "its own processes, not the host's table"
+    if sys.platform.startswith("linux"):
+        assert await _count(ctx, workspace, LINKS) == 1, "loopback and nothing else"
+        assert await _count(ctx, workspace, PIDS) < 10, "its own processes, not the host's table"
 
 
 async def test_the_deployment_can_hand_out_the_hosts_network(mount: Any, tmp_path: Path) -> None:
@@ -396,10 +443,12 @@ async def test_the_deployment_can_hand_out_the_hosts_network(mount: Any, tmp_pat
     workspace = tmp_path / "work"
     workspace.mkdir()
 
-    assert await _count(ctx, workspace, LINKS) > 1, "the host's interfaces, when the row says so"
-    assert await _count(ctx, workspace, LINKS, refuse_network=True) == 1, (
+    assert not await _isolated(ctx, workspace), "the host's network, when the row says so"
+    assert await _isolated(ctx, workspace, refuse_network=True), (
         "and a caller refusing the network still gets none"
     )
+    if sys.platform.startswith("linux"):
+        assert await _count(ctx, workspace, LINKS) > 1, "the host's interfaces, counted"
 
 
 # ------------------------------------------------------------------- egress --
@@ -441,11 +490,82 @@ def test_the_backend_names_itself_rather_than_being_named_by_its_class() -> None
     assert Bubblewrap().confine(("true",), _policy()).backend == "bwrap"
 
 
-def test_the_signatures_are_this_backends_platform_and_not_the_seams() -> None:
-    """Every sentence here is Linux/glibc/bwrap; Seatbelt's are unmeasured, so it
-    reads nothing rather than guessing (see `Seatbelt`'s docstring)."""
+def test_the_signatures_are_each_backends_platform_and_not_the_seams() -> None:
+    """Every sentence in `DENIAL_SIGNATURES` is Linux/glibc/bwrap and every one in
+    `SEATBELT_SIGNATURES` is macOS — measured on each, and disjoint, so neither
+    backend records the other kernel's refusals as its own."""
     assert ("filesystem", "Read-only file system") in DENIAL_SIGNATURES
-    assert not hasattr(Seatbelt(), "read_denial")
+    assert ("filesystem", "Operation not permitted") in SEATBELT_SIGNATURES
+    kernel_words = {
+        table: {mark for kind, mark in table if kind == "filesystem"}
+        for table in (DENIAL_SIGNATURES, SEATBELT_SIGNATURES)
+    }
+    assert not kernel_words[DENIAL_SIGNATURES] & kernel_words[SEATBELT_SIGNATURES]
+    shared = {mark for _, mark in DENIAL_SIGNATURES} & {mark for _, mark in SEATBELT_SIGNATURES}
+    assert shared == {"Could not resolve host"}, "curl's sentence, the same on both; not a kernel's"
+    assert Bubblewrap().read_denial("sh: /x: Operation not permitted", network=False) is None
+    assert Seatbelt().read_denial("sh: /x: Read-only file system", network=False) is None
+
+
+def test_seatbelt_reads_the_path_on_the_line_to_tell_the_boundaries_apart() -> None:
+    """Seatbelt answers a refused `open()` and a refused `connect()` with one `EPERM`,
+    and every tool measured puts the path on the line for the first and nothing for
+    the second — so the line, not the sentence, names the boundary. Each string here
+    is one that was printed under the real profile on 2026-09-07."""
+    reader = Seatbelt()
+    trace = (
+        "Traceback (most recent call last):\n"
+        '  File "<string>", line 1, in <module>\n'
+        "PermissionError: [Errno 1] Operation not permitted: '/tmp/ph_sb_x'\n"
+    )
+    file = reader.read_denial(trace, network=False)
+    assert file is not None and (file.kind, file.via) == ("filesystem", "output")
+    assert file.evidence == "PermissionError: [Errno 1] Operation not permitted: '/tmp/ph_sb_x'"
+    made = reader.read_denial("mkdir: /tmp/d: Operation not permitted", network=True)
+    assert made is not None and made.kind == "filesystem", (
+        "a path is a file refusal whatever the network posture"
+    )
+
+    bare = "PermissionError: [Errno 1] Operation not permitted\n"
+    dialled = reader.read_denial(bare, network=False)
+    assert dialled is not None and dialled.kind == "network", "no path, no network: a socket"
+    assert reader.read_denial(bare, network=True) is None, (
+        "with the host's network a bare EPERM is neither boundary this seam bounds"
+    )
+
+    dns = "socket.gaierror: [Errno 8] nodename nor servname provided, or not known"
+    resolved = reader.read_denial(dns, network=False)
+    assert resolved is not None and resolved.kind == "network"
+    assert reader.read_denial("curl: (6) Could not resolve host: x", network=True) is None
+    assert reader.read_denial("Couldn't connect to server", network=False) is None, (
+        "curl's generic connect failure is what a down server prints too"
+    )
+    assert reader.read_denial("all fine\n", network=False) is None
+
+    both = f"{dns}\nrm: /etc/hosts: Operation not permitted\n"
+    first = reader.read_denial(both, network=False)
+    assert first is not None and first.kind == "network", (
+        "the earliest refusal wins, as bwrap's reader does"
+    )
+
+
+def test_the_seatbelt_profile_names_the_path_the_kernel_resolves(tmp_path: Path) -> None:
+    """Seatbelt matches the path the kernel resolves, and on macOS `/var` and `/tmp`
+    are symlinks into `/private`: a workspace under `$TMPDIR` named as given was
+    refused its own writes and the probe declined the tier (measured — see
+    `_canonical`). So the profile carries the canonical path, never the spelling."""
+    real = tmp_path / "real"
+    real.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(real)
+
+    profile = seatbelt_profile(_policy(str(link), writable_extra=[str(link / "deeper")]))
+
+    assert f'(allow file-write* (subpath "{os.path.realpath(link)}"))' in profile
+    assert f'(allow file-write* (subpath "{os.path.realpath(link)}/deeper"))' in profile, (
+        "a tail that does not exist yet is kept"
+    )
+    assert f'"{link}"' not in profile
 
 
 def test_the_wrapper_dies_with_the_host_and_says_whether_signals_reach_the_child() -> None:
@@ -485,17 +605,41 @@ def test_a_command_with_the_hosts_network_gets_no_shim() -> None:
 
 
 def test_the_seatbelt_profile_opens_only_the_door() -> None:
-    """Unverified on a real macOS, so written narrow: the socket outbound and the
-    shim's loopback port, and nothing that would let a command dial out itself."""
+    """Measured on macOS: the door is the proxy's own loopback port — one `remote ip`
+    line, in the spelling Seatbelt accepts — and nothing that would let a command
+    dial out itself. **No shim**, because there is no PID namespace for one to die
+    with: a `socat` left by the blind design was still holding the port an hour
+    later, and the next command's bind found it taken."""
     with_door = seatbelt_profile(_policy(egress=_egress()))
-    socket = "/run/user/1/ph/sandbox/egress-1-1.sock"
-    assert f'(allow network-outbound (remote unix-socket (path-literal "{socket}")))' in with_door
-    assert f'(allow network-bind (local ip "localhost:{EGRESS_PORT}"))' in with_door
+    assert f'(allow network-outbound (remote ip "localhost:{EGRESS_PORT}"))' in with_door
     assert "(allow network*)" not in with_door
-    assert "unix-socket" not in seatbelt_profile(_policy()), "no door, no lines"
-    assert "unix-socket" not in seatbelt_profile(_policy(network=True, egress=_egress()))  # type: ignore[arg-type]
+    assert "unix-socket" not in with_door and "network-bind" not in with_door, (
+        "nothing to bind and nothing to reach by path"
+    )
+    assert "network" not in seatbelt_profile(_policy()), "no door, no lines"
+    assert "remote ip" not in seatbelt_profile(_policy(network=True, egress=_egress()))  # type: ignore[arg-type]
 
     confined = Seatbelt().confine(("curl",), _policy(egress=_egress()))
     assert confined.argv[3] == "/usr/bin/env", "sandbox-exec sets no environment; env does"
+    assert confined.argv[4:8] == ("-u", "NO_PROXY", "-u", "no_proxy"), "the bypass list goes"
     assert f"HTTPS_PROXY=http://a1:{PROXY_PASSWORD}@127.0.0.1:{EGRESS_PORT}" in confined.argv
-    assert confined.argv[-1] == "curl"
+    assert confined.argv[-1] == "curl", "env execs the command itself; no sh, no socat"
+    assert not any("socat" in token for token in confined.argv)
+    assert Seatbelt().needs_loopback and not Bubblewrap().needs_loopback
+
+
+def test_each_backend_owns_its_door_rather_than_the_row_switching_on_it() -> None:
+    """The declaration the row reads before it has confined anything, and the two
+    behaviours it must not have to know about. A `Literal` switch read by
+    `probe_egress` meant a third backend edited the probe; these mean it does not.
+    """
+    bridge = _egress()
+    assert Bubblewrap().egress_probe(bridge)[:2] == ("/bin/sh", "-c")
+    assert "socat" in Bubblewrap().egress_probe(bridge)[2]
+    assert PROBE_HOST in Bubblewrap().egress_probe(bridge)[2]
+
+    door = Seatbelt().egress_probe(bridge)
+    assert door[0] == sys.executable and door[1] == "-c"
+    assert PROBE_HOST in door[2] and str(bridge.port) in door[2]
+    assert "socat" not in door[2], "the loopback door needs no binary a Mac lacks"
+    assert Seatbelt().egress_blocker() is None, "nothing to install for a TCP connect"

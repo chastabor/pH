@@ -9,10 +9,10 @@ this one refuses `open("/etc/passwd", "w")`.
 **`confine` is pure argv construction, and that is deliberate.** It builds a
 command line and runs nothing, so every rule this module encodes is assertable
 without a kernel that will enforce it. The argv *is* the policy, so a test that
-reads it is testing the thing — and it is what lets the Seatbelt half be reviewed
-on a machine that cannot run it. That stays true with the network door: when the
-effective policy carries an `Egress`, the argv gains the proxy variables and a
-`socat` shim wrapped around the command, and still nothing here runs.
+reads it is testing the thing — and it is what let the Seatbelt half be reviewed
+before a Mac ran it. That stays true with the network door: when the effective
+policy carries an `Egress`, the argv gains the proxy variables and — under `bwrap`
+— a `socat` shim wrapped around the command, and still nothing here runs.
 
 **The probe decides registration, and it is the only reason blind implementation
 is safe.** A confinement backend that silently fails open is the worst object in
@@ -23,19 +23,37 @@ whose rules are wrong in the permissive direction fails that and declines, rathe
 than claiming a tier it does not occupy.
 
 **The egress bridge is probed the same way, and claimed only when it works.** The
-proxy is started, and a confined `socat` sends one `CONNECT` through the shim to
-the host the proxy always refuses; the bridge is registered on the seam only if
-the proxy's own 403 comes back. Without `socat`, or with a bridge that does not
-answer, the row registers no bridge — and `allowlist` then means no network,
-which `SandboxSeam.network_posture` says in so many words.
+proxy is started, and one `CONNECT` is sent from inside a confined command to the
+host the proxy always refuses; the bridge is registered on the seam only if the
+proxy's own 403 comes back. Each backend owns its **door** — `needs_loopback`,
+`egress_blocker` and `egress_probe`: `bwrap`
+unshares the network, so its door is a `socat` shim on the sandbox's own loopback
+forwarding to the proxy's unix socket; Seatbelt denies rather than unshares, so
+the confined command shares the host's loopback and its door is the proxy's own
+`127.0.0.1:<port>`, the one remote the profile allows. Without `socat` on a
+`bwrap` host, or with a bridge that does not answer, the row registers no bridge —
+and `allowlist` then means no network, which `SandboxSeam.network_posture` says in
+so many words.
 
-**bwrap is verified against a real kernel; Seatbelt is not.** The prerequisite on
+**Both backends are verified against a real kernel.** `bwrap`: the prerequisite on
 Ubuntu 23.10+ is an AppArmor profile at `/etc/apparmor.d/bwrap`:
 `kernel.apparmor_restrict_unprivileged_userns=1` is the default there, and an
 unprofiled `bwrap` is not setuid, so without one it dies with `setting up uid map:
-Permission denied`. `sandbox-exec` is macOS-only and cannot be run here at all, so
-its profile is written deny-by-default and the probe is what stands between
-"unverified" and "claimed" — the egress lines included.
+Permission denied`. Seatbelt: measured on macOS 26.6 on 2026-09-07, and the profile
+written blind was wrong in three places the probe would have caught and one it
+would not. (1) Seatbelt matches the path the kernel *resolves*, and `/var` and
+`/tmp` are symlinks into `/private` — so a workspace under `$TMPDIR` was refused
+its own writes and the probe declined the tier; `seatbelt_profile` now names the
+canonical path. (2) The unix-socket door had the same defect, and (3) a `socat`
+shim under Seatbelt is not in a PID namespace, so it outlived every command and
+the next one's bind found the port taken — hence the loopback door, which needs no
+shim and no `socat`. (4) What the kernel prints: `Operation not permitted`, with
+the path on the line for a file and without one for a socket — measured across
+`sh`, `mkdir`, `touch`, `rm`, `git`, Python and `socat`, and `Seatbelt` is now the
+`DenialReader` it deliberately was not. Also measured: `SIGINT` to the wrapper
+lands on the command, with and without the `env` prefix; fd 3 crosses; and
+`(remote ip "localhost:<port>")` is the spelling Seatbelt accepts — a literal
+`127.0.0.1:<port>` is a profile syntax error.
 
 @module ph.seams.sandbox_local
 """
@@ -48,6 +66,7 @@ import shlex
 import shutil
 import sys
 from dataclasses import dataclass
+from functools import lru_cache
 from itertools import count
 from pathlib import Path
 from typing import TypeAlias
@@ -78,7 +97,9 @@ __all__ = [
     "EGRESS_PORT",
     "PROXY_PASSWORD",
     "PROXY_VARIABLES",
+    "SEATBELT_SIGNATURES",
     "Bubblewrap",
+    "LocalBackend",
     "Seatbelt",
     "apply",
     "egress_shim",
@@ -130,10 +151,10 @@ DENIAL_SIGNATURES: tuple[tuple[DenialKind, str], ...] = (
 """What `bwrap`'s silent refusals look like from inside a command.
 
 Here rather than on the seam because every one of these is a fact about **this
-backend's platform** — Linux, glibc, `bwrap` — and Seatbelt refuses in words
-nobody here has measured. A table of these sentences in the seam definition would
-be one kernel's dialect asserted on every backend's behalf; `Bubblewrap` is a
-`DenialReader` and `Seatbelt` is deliberately not.
+backend's platform** — Linux, glibc, `bwrap` — and Seatbelt refuses in other words
+(`SEATBELT_SIGNATURES`). A table of these sentences in the seam definition would be
+one kernel's dialect asserted on every backend's behalf; each backend is its own
+`DenialReader`.
 
 Measured, not guessed: a redirect onto the read-only tree prints the first from
 `sh`, and a raw `connect()` inside an unshared namespace raises `[Errno 101]
@@ -143,6 +164,53 @@ namespace does not have. Substrings rather than patterns, and only ones no
 ordinary command prints on success — which is also why `ShellService` only asks
 about a command that actually failed.
 """
+
+
+# The door — how a confined command reaches the egress proxy — is **split between a
+# declaration and a behaviour**, because the row needs the two at different times.
+#
+# `needs_loopback` is `enforcement`'s shape and `enforcement`'s stated reason: the
+# row must know *before* it has confined anything whether to open a TCP listener,
+# and a property discoverable only by running something is not one a caller can act
+# on beforehand. `egress_blocker` and `egress_probe` are `DenialReader`'s shape:
+# behaviour the backend owns, because what proves a door works is a fact about that
+# door. A single `Literal["shim", "loopback"]` switch read by the row conflated the
+# two, and adding Landlock meant editing a `Literal` plus every `if` that matched
+# on it with nothing checking you had found them all.
+
+
+def _earliest(
+    output: str, signatures: tuple[tuple[DenialKind, str], ...], *, network: bool
+) -> tuple[int, DenialKind] | None:
+    """The first refusal any signature shows in `output`, as `(offset, kind)`.
+
+    `find` over the whole buffer rather than a loop over `splitlines()`, because
+    this runs on every failed confined command and the seam keeps up to 8 MiB *per
+    stream*: at that size the line loop measured **51 ms** and ~27 MB of transient
+    `str` objects to almost always find nothing, against **13 ms** and no allocation
+    for a handful of C-level scans. The earliest match wins, as the line loop's did,
+    which is why every signature is scanned rather than the first hit returned.
+
+    `network=True` — the command had the host's network — skips the network
+    signatures: an outage is not the sandbox's doing, and saying so would be the
+    misattribution this record must not make.
+    """
+    found: tuple[int, DenialKind] | None = None
+    for kind, mark in signatures:
+        if kind == "network" and network:
+            continue
+        at = output.find(mark)
+        if at >= 0 and (found is None or at < found[0]):
+            found = (at, kind)
+    return found
+
+
+def _line_at(output: str, at: int) -> str:
+    """The line `at` falls in, stripped and capped — the evidence a record carries."""
+    start = output.rfind("\n", 0, at) + 1
+    end = output.find("\n", at)
+    line = output[start:] if end < 0 else output[start:end]
+    return line.strip()[:200]
 
 
 # ------------------------------------------------------------------ bwrap --
@@ -176,6 +244,12 @@ def egress_shim(argv: tuple[str, ...], egress: Egress) -> tuple[str, ...]:
     connection, and `exec`s the command — so the command's exit status and
     signals are its own, and the shim is a sibling that dies when the PID
     namespace does (`--unshare-pid`, measured: nothing survives the command).
+
+    **`bwrap`'s door only.** Without a PID namespace the sibling *outlives* the
+    command — measured under Seatbelt, where a shim from one test run was still
+    holding `EGRESS_PORT` an hour later and the next command's bind found it
+    taken — which is why the Seatbelt backend has a different door and never
+    calls this.
 
     The wait is a bounded poll rather than a fixed sleep, because the shim is up in
     a few milliseconds and a command that reached for the network in its first
@@ -214,6 +288,9 @@ class Bubblewrap:
 
     enforcement: Enforcement = "full"
     backend: str = "bwrap"
+    needs_loopback: bool = False
+    """The namespace is the sandbox's own, so the proxy needs no listener on the
+    host's loopback — nothing inside could reach it. See `egress_probe`."""
 
     def confine(self, argv: tuple[str, ...], policy: SandboxPolicy) -> ConfinedArgv:
         """Wrap `argv` in a namespace that binds the filesystem read-only.
@@ -277,39 +354,91 @@ class Bubblewrap:
             forwards_signals=False,
         )
 
+    def egress_blocker(self) -> str | None:
+        """Why this host cannot bridge at all, or `None`.
+
+        `socat` on the *host* side is the question, because the same binary is what
+        runs inside: the read-only bind of `/` is the host's filesystem, so a
+        missing binary here is a missing binary there.
+        """
+        if shutil.which("socat") is None:
+            return "socat is not installed; it is the shim between the sandbox and the proxy"
+        return None
+
+    def egress_probe(self, bridge: Egress) -> tuple[str, ...]:
+        """One `CONNECT` through the shim, as a command to confine and run.
+
+        The shim has to come up and reach the socket through the read-only bind
+        before the proxy can answer, so this proves the whole path in one spawn —
+        `confine` wraps it in `egress_shim` exactly as it would any other command.
+        """
+        request = f"CONNECT {PROBE_HOST}:443 HTTP/1.1\\r\\nHost: {PROBE_HOST}\\r\\n\\r\\n"
+        script = f"printf '{request}' | socat -T2 - TCP:127.0.0.1:{bridge.port},connect-timeout=2"
+        return ("/bin/sh", "-c", script)
+
     def read_denial(self, output: str, *, network: bool) -> Denial | None:
         """The first refusal this kernel's words show, or `None` — the `DenialReader`
         half of the backend (see `DENIAL_SIGNATURES`).
 
-        `network=True` — the command had the host's network — skips the network
-        signatures: an outage is not the sandbox's doing, and saying so would be the
-        misattribution this record must not make.
-
-        `find` over the whole buffer rather than a loop over `splitlines()`, because
-        this runs on every confined command and the seam keeps up to 8 MiB *per
-        stream*: at that size the line loop measured **51 ms** and ~27 MB of
-        transient `str` objects to almost always find nothing, against **13 ms** and
-        no allocation for five C-level scans. The earliest match wins, as the line
-        loop's did, which is why every signature is scanned rather than the first
-        hit returned.
+        The scan is `_earliest`'s, shared with `Seatbelt` — the table is what
+        differs between the two, not the way it is read.
         """
-        found: tuple[int, DenialKind] | None = None
-        for kind, mark in DENIAL_SIGNATURES:
-            if kind == "network" and network:
-                continue
-            at = output.find(mark)
-            if at >= 0 and (found is None or at < found[0]):
-                found = (at, kind)
+        found = _earliest(output, DENIAL_SIGNATURES, network=network)
         if found is None:
             return None
         at, kind = found
-        start = output.rfind("\n", 0, at) + 1
-        end = output.find("\n", at)
-        line = output[start:] if end < 0 else output[start:end]
-        return Denial(kind=kind, via="output", evidence=line.strip()[:200])
+        return Denial(kind=kind, via="output", evidence=_line_at(output, at))
 
 
 # --------------------------------------------------------------- seatbelt --
+
+
+SEATBELT_SIGNATURES: tuple[tuple[DenialKind, str], ...] = (
+    ("filesystem", "Operation not permitted"),
+    ("network", "nodename nor servname provided, or not known"),
+    ("network", "Could not resolve host"),
+)
+"""What Seatbelt's refusals look like from inside a command — measured on macOS 26.6,
+2026-09-07, and the reason `Seatbelt` is now a `DenialReader`.
+
+The kernel answers `EPERM`, and every tool spells it `Operation not permitted`:
+`sh: /tmp/x: Operation not permitted`, `mkdir: /tmp/d: Operation not permitted`,
+`rm: /etc/hosts: Operation not permitted`, `git: error: couldn't create cache file
+'/tmp/xcrun_db-…' (errno=Operation not permitted)`, Python's `PermissionError:
+[Errno 1] Operation not permitted: '/tmp/x'`. A refused `connect()` gets the same
+`EPERM` — `PermissionError: [Errno 1] Operation not permitted` from Python, `E
+connect(… AF=2 127.0.0.1:9 …): Operation not permitted` from `socat` — so the
+sentence alone does not say which boundary; `Seatbelt.read_denial` reads the line
+for a path. The two resolver texts are what Python (`gaierror`) and `curl` print
+when a command bypasses the proxy variables and asks for DNS the profile denies.
+`curl` to a raw address prints its generic `Couldn't connect to server`, which a
+down server prints too, so it is deliberately absent.
+"""
+
+
+@lru_cache(maxsize=512)
+def _canonical(path: str) -> str:
+    """The path as Seatbelt will match it.
+
+    **Memoised, because this is the hot path.** `realpath` is stat-backed — one
+    `lstat` per component, measured at 22 `lstat` + 2 `readlink` for a two-root
+    policy under `$TMPDIR` — and `seatbelt_profile` runs inside `confine`, on every
+    confined command and every code cell. Uncached it took profile construction
+    from **0.3 µs to 25.3 µs**; cached it is 0.3 µs again after the first call per
+    path. The set it answers for is tiny and stable: an agent's workspace root and
+    its scratch, plus whatever `sandbox-allow` names. The trade is that a symlink
+    swapped under a workspace root mid-process keeps the old resolution, which is
+    not a boundary a deployment moves while an agent is running.
+
+    Seatbelt evaluates `subpath` against the path the kernel *resolves*, and on
+    macOS `/var`, `/tmp` and `/etc` are symlinks into `/private`. Measured: a
+    workspace under `$TMPDIR` (`/var/folders/…`) named as given was refused its own
+    writes — `Operation not permitted` on `inside.txt` — and the probe declined the
+    tier; the same profile over `/private/var/folders/…` landed the write and
+    refused the escape. A missing tail is fine: `realpath` resolves what exists and
+    keeps the rest.
+    """
+    return os.path.realpath(path)
 
 
 def seatbelt_profile(policy: SandboxPolicy) -> str:
@@ -324,10 +453,15 @@ def seatbelt_profile(policy: SandboxPolicy) -> str:
     also denied reads would refuse the toolchain its own libraries and be
     switched off by the first person who met it.
 
-    The egress lines are **unverified**: no macOS host has run them. They allow
-    exactly the four things the bridge needs — the proxy's socket outbound, and
-    the shim's loopback port bound, accepted and dialled — and nothing else, so a
-    line that is wrong fails the probe rather than opening anything.
+    Writable roots are named by their canonical path (`_canonical`), because that
+    is the path the kernel matches.
+
+    The door is **one remote and nothing else**: `(remote ip "localhost:<port>")`,
+    the proxy's own loopback listener. Measured: the allowed port answers, the port
+    beside it is `Operation not permitted`, DNS is refused, a raw `curl` to an
+    address cannot connect, and `curl` honouring `HTTPS_PROXY` gets the proxy's own
+    403. `localhost` is the spelling Seatbelt takes — a literal `127.0.0.1:<port>`
+    is a syntax error — and it admits `::1` as well, where nothing listens.
 
     A separate function because it is the part worth reading in a test: the argv
     around it is three tokens and the profile is the policy.
@@ -347,20 +481,14 @@ def seatbelt_profile(policy: SandboxPolicy) -> str:
         ' (literal "/dev/stderr"))',
     ]
     for path in writable_paths(policy):
-        lines.append(f'(allow file-write* (subpath "{path}"))')
+        lines.append(f'(allow file-write* (subpath "{_canonical(path)}"))')
     if policy.network:
         # Only the permitting arm is emitted: `(deny network*)` is a no-op under
         # `(deny default)` above, and a line that changes nothing is a line a
         # test can assert while proving nothing — which is what happened.
         lines.append("(allow network*)")
     elif policy.egress is not None:
-        egress = policy.egress
-        lines += [
-            f'(allow network-outbound (remote unix-socket (path-literal "{egress.socket}")))',
-            f'(allow network-bind (local ip "localhost:{egress.port}"))',
-            f'(allow network-inbound (local ip "localhost:{egress.port}"))',
-            f'(allow network-outbound (remote ip "localhost:{egress.port}"))',
-        ]
+        lines.append(f'(allow network-outbound (remote ip "localhost:{policy.egress.port}"))')
     return "\n".join(lines)
 
 
@@ -368,14 +496,21 @@ def seatbelt_profile(policy: SandboxPolicy) -> str:
 class Seatbelt:
     """`sandbox-exec` (macOS): Apple's Seatbelt, driven by a generated profile.
 
-    Deliberately **not** a `DenialReader`: what Seatbelt prints when it refuses a
-    write has not been measured on a real macOS, and guessing the sentence would
-    make the seam record refusals that did not happen and miss the ones that did.
-    Recording nothing is the honest answer until somebody measures it.
+    Verified against a real kernel on 2026-09-07 (macOS 26.6): a write inside the
+    workspace lands, an absolute-path write outside it is refused with the host
+    file untouched, `read-only` refuses the workspace too, fd 3 crosses the
+    wrapper, and `SIGINT` sent to the wrapper lands on the command.
+
+    A `DenialReader` since that measurement — see `SEATBELT_SIGNATURES` for the
+    words and `read_denial` for the one judgement the words alone do not make.
     """
 
     enforcement: Enforcement = "full"
     backend: str = "sandbox-exec"
+    needs_loopback: bool = True
+    """Seatbelt denies rather than unsharing, so a confined command shares the
+    host's loopback and the proxy can listen there — which is the whole door, and
+    why there is no shim to leak. See `egress_probe`."""
 
     def confine(self, argv: tuple[str, ...], policy: SandboxPolicy) -> ConfinedArgv:
         """Wrap `argv` in `sandbox-exec -p <profile>`.
@@ -386,24 +521,69 @@ class Seatbelt:
         mistake absence for confinement.
 
         `sandbox-exec` sets no environment, so the proxy variables ride an `env`
-        prefix inside the profile, ahead of the shim.
+        prefix, and `env` execs the command so a signal still lands on it
+        (measured). **No shim**: the door is the proxy's own loopback port, which
+        the profile allows and the command reaches directly — see `Door`.
         """
         wrapped = argv
         if policy.egress is not None and not policy.network:
             url = proxy_url(policy.egress)
             assignments = [f"{name}={url}" for name in PROXY_VARIABLES]
             unset = [flag for name in BYPASS_VARIABLES for flag in ("-u", name)]
-            wrapped = ("/usr/bin/env", *unset, *assignments, *egress_shim(argv, policy.egress))
+            wrapped = ("/usr/bin/env", *unset, *assignments, *argv)
         return ConfinedArgv(
             argv=(self.backend, "-p", seatbelt_profile(policy), *wrapped),
             enforcement=self.enforcement,
             backend=self.backend,
-            # `sandbox-exec` execs its target and unshares nothing, so a signal
-            # lands on the command. Unverified like the rest of this backend, and
-            # the default anyway — stated because its sibling above states the
-            # opposite and silence would read as "nobody considered it".
+            # Measured: `sandbox-exec` execs its target and unshares nothing, so
+            # `SIGINT` to the wrapper's pid reaches the command — a Python handler
+            # inside ran and exited 3, with and without the `env` prefix. Stated
+            # because `Bubblewrap` states the opposite.
             forwards_signals=True,
         )
+
+    def egress_blocker(self) -> str | None:
+        """Nothing to install: the door is a TCP connect and this interpreter makes
+        it, so there is no host binary to be missing."""
+        return None
+
+    def egress_probe(self, bridge: Egress) -> tuple[str, ...]:
+        """One `CONNECT` to the proxy's loopback port, as a command to confine.
+
+        This interpreter rather than `socat`, because a Mac has no `socat` unless
+        somebody installed one and the door needs nothing but a TCP connect — which
+        is also what makes it a fair probe of what a confined command will do.
+        """
+        program = (
+            "import socket, sys\n"
+            f"s = socket.create_connection(('127.0.0.1', {bridge.port}), timeout=2)\n"
+            f"s.sendall(b'CONNECT {PROBE_HOST}:443 HTTP/1.1\\r\\nHost: {PROBE_HOST}\\r\\n\\r\\n')\n"
+            "sys.stdout.write(s.recv(4096).decode('latin-1'))\n"
+        )
+        return (sys.executable, "-c", program)
+
+    def read_denial(self, output: str, *, network: bool) -> Denial | None:
+        """The first refusal this kernel's words show, or `None`.
+
+        **One judgement the sentence does not make for us.** Seatbelt answers a
+        refused `open()` and a refused `connect()` with the same `EPERM`, so
+        `Operation not permitted` is read with its line: a line naming a path is a
+        filesystem refusal — every tool measured puts the path there — and a bare
+        one is a socket when the command had no network. When it *had* the
+        network a bare `EPERM` is neither boundary this seam bounds (a `mach-lookup`
+        or `process-info` the profile does not open, say) and is not recorded: a
+        record that names the wrong boundary is worse than none.
+        """
+        found = _earliest(output, SEATBELT_SIGNATURES, network=network)
+        if found is None:
+            return None
+        at, kind = found
+        line = _line_at(output, at)
+        if kind == "filesystem" and "/" not in line:
+            if network:
+                return None
+            kind = "network"
+        return Denial(kind=kind, via="output", evidence=line)
 
 
 LocalBackend: TypeAlias = Bubblewrap | Seatbelt
@@ -514,29 +694,31 @@ async def probe_egress(
 ) -> SandboxProbe:
     """Send one `CONNECT` through the bridge from inside, and expect the proxy's refusal.
 
-    The whole path in one spawn: the shim has to come up, reach the socket through
-    the read-only bind, and the proxy has to answer. `PROBE_HOST` is what it asks
-    for — the host the proxy refuses whatever the allowances say — so a `403` is
-    the only pass, and it is the proxy's own. A `502`, a connection refused or
-    silence is the bridge not working, quoted.
+    The whole path in one spawn, whatever the door is: the command has to reach the
+    proxy from inside the sandbox and the proxy has to answer. `PROBE_HOST` is what
+    it asks for — the host the proxy refuses whatever the allowances say — so a
+    `403` is the only pass, and it is the proxy's own. A `502`, a connection refused
+    or silence is the bridge not working, quoted.
 
-    `socat` on the *host* side too, because the same binary is what runs inside:
-    the read-only bind of `/` is the host's filesystem, so a missing binary here is
-    a missing binary there.
+    **What the door is belongs to the backend**, which supplies both the
+    prerequisite it needs on this host (`egress_blocker`) and the command that
+    proves it (`egress_probe`). This function knows only that something is spawned
+    confined and a 403 comes back, so a third backend adds a door without editing
+    it.
     """
-    if shutil.which("socat") is None:
-        return SandboxProbe(
-            False, "socat is not installed; it is the shim between the sandbox and the proxy"
-        )
+    blocked = backend.egress_blocker()
+    if blocked is not None:
+        # Before the directory, so a host that was always going to decline does no
+        # work and leaves nothing behind — this guard used to sit above the mkdir
+        # and the door branch pushed it below.
+        return SandboxProbe(False, blocked)
     work = scratch / "egress-probe"
     await anyio.to_thread.run_sync(lambda: work.mkdir(parents=True, exist_ok=True))
-    request = f"CONNECT {PROBE_HOST}:443 HTTP/1.1\\r\\nHost: {PROBE_HOST}\\r\\n\\r\\n"
-    script = f"printf '{request}' | socat -T2 - TCP:127.0.0.1:{bridge.port},connect-timeout=2"
     # Straight to the backend, so `network` is the resolved field at its closed
     # default and the door is the bridge being proved.
     policy = SandboxPolicy(mode="workspace-write", workspace_root=str(work), egress=bridge)
     try:
-        confined = backend.confine(("/bin/sh", "-c", script), policy)
+        confined = backend.confine(backend.egress_probe(bridge), policy)
         probe = await ctx.subprocess.run(
             SubprocessSpawnSpec(
                 argv=confined.argv, cwd=work, env=ctx.subprocess.env(), timeout_ms=10_000
@@ -611,8 +793,11 @@ class _Egress:
             return [("egress", "not attempted — no confining backend")]
         if self.proxy is None:
             return [("egress", f"declined — {self.verdict.because}")]
+        where = str(self.proxy.path)
+        if self.proxy.tcp_port is not None:
+            where += f" and 127.0.0.1:{self.proxy.tcp_port}"
         return [
-            ("egress", f"proxy at {self.proxy.path}; {self.verdict.because}"),
+            ("egress", f"proxy at {where}; {self.verdict.because}"),
             ("egress refused", str(self.proxy.denied)),
         ]
 
@@ -625,7 +810,9 @@ class _Egress:
         here rather than left listening for nothing.
         """
         path = await egress_socket_path(ctx)
-        proxy = EgressProxy(path=path, permits=ctx.sandbox.permits)
+        # The door is the backend's to declare (`Door`): a namespace gets a shim
+        # on the unix socket, a deny-list backend gets the proxy on loopback too.
+        proxy = EgressProxy(path=path, permits=ctx.sandbox.permits, loopback=backend.needs_loopback)
         try:
             await proxy.start()
         except OSError as error:
@@ -637,7 +824,10 @@ class _Egress:
             return
         ctx.add_disposer(proxy.aclose, label="sandbox-local(egress proxy)")
         global _BRIDGE_VERDICT
-        bridge = Egress(socket=str(path), port=EGRESS_PORT)
+        # Where the command dials: the proxy's own loopback port where it opened
+        # one, else the shim's fixed number inside the namespace. Read from the
+        # proxy rather than re-derived from the backend, so there is one answer.
+        bridge = Egress(socket=str(path), port=proxy.tcp_port or EGRESS_PORT)
         if _BRIDGE_VERDICT is None:
             _BRIDGE_VERDICT = await probe_egress(ctx, backend, bridge, scratch)
         self.verdict = _BRIDGE_VERDICT

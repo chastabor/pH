@@ -27,8 +27,9 @@ class StubSandboxProvider:
     """A backend that reports `enforcement` and wraps nothing.
 
     Not a `DenialReader`: it confines nothing, so there are no refusals of its own
-    to recognise. A test that wants the reading half drives `Bubblewrap`, whose
-    kernel's words the table describes.
+    to recognise. A test that wants the reading half drives the backend whose
+    kernel's words it means to read — `Bubblewrap` or `Seatbelt`, each of which
+    owns its own signature table.
     """
 
     enforcement: Enforcement = "full"

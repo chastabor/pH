@@ -14,11 +14,13 @@ would fail *silently at boot* on a host nobody tested — the kernel would hang 
 `boot_timeout` and be reported as a dead runtime rather than as a lost channel.
 
 The enforcement half skips where the kernel cannot enforce — no `bwrap`, or no
-AppArmor profile on Ubuntu 23.10+ — through the same in-body check
-`test_sandbox_local.py` uses, which asks whether the row actually registered a
-provider rather than whether the binary exists. `needs_bwrap` is only on the test
-that drives `Bubblewrap` directly without mounting the row, where there is no
-provider to ask.
+AppArmor profile on Ubuntu 23.10+; no `sandbox-exec` — through the same in-body
+check `test_sandbox_local.py` uses, which asks whether the row actually registered
+a provider rather than whether the binary exists. `needs_backend` is only on the
+test that drives the platform's backend directly without mounting the row, where
+there is no provider to ask. Verified against both: `bwrap` on 2026-09-01, Seatbelt
+on 2026-09-07 — the latter only after the macOS boot hang `test_boot_report.py`
+pins was found, because a kernel that never reports ready confines nothing.
 """
 
 from __future__ import annotations
@@ -47,7 +49,7 @@ pytestmark = pytest.mark.anyio
 
 SANDBOX_ROW: dict[str, Any] = {"id": "sandbox-local", "disabled": False}
 
-needs_bwrap = pytest.mark.skipif(
+needs_backend = pytest.mark.skipif(
     local_backend()[0] is None, reason="no local confinement backend on this host"
 )
 
@@ -55,12 +57,13 @@ needs_bwrap = pytest.mark.skipif(
 # ------------------------------------------------------- fd 3 crosses it --
 
 
-@needs_bwrap
+@needs_backend
 def test_the_framed_channel_survives_the_wrapper(tmp_path: Path) -> None:
     """**The property the whole design rests on.** `bwrap` passes an inherited
-    descriptor through to what it execs, so the kernel's fd 3 reaches the guest.
+    descriptor through to what it execs, and so does `sandbox-exec` (measured on
+    both), so the kernel's fd 3 reaches the guest.
 
-    Against the real argv `Bubblewrap` builds, with a live socket at the far end,
+    Against the real argv this platform's backend builds, with a live socket at the far end,
     because a wrapper that closed the descriptor would fail at *boot*: the guest
     would find nothing on fd 3, the host would wait out `boot_timeout`, and the
     report would say the runtime died rather than that the channel never crossed.
@@ -72,7 +75,9 @@ def test_the_framed_channel_survives_the_wrapper(tmp_path: Path) -> None:
         child_fd = child_end.fileno()
         speak = f"import os, socket; socket.socket(fileno=int(os.environ[{FD_ENV!r}])).send(b'ok')"
         policy = SandboxPolicy(mode="workspace-write", workspace_root=str(work))
-        argv = Bubblewrap().confine((sys.executable, "-c", speak), policy).argv
+        backend = local_backend()[0]
+        assert backend is not None
+        argv = backend.confine((sys.executable, "-c", speak), policy).argv
 
         done = subprocess.run(
             argv,
@@ -216,7 +221,7 @@ async def test_a_confined_kernel_reports_the_backend_that_bounds_it(
     assert (await _run_cell(ctx, agent.id, "x = 1")).error is None
 
     confined = report_section(ctx, "Code runtime")["cells confined by"]
-    assert confined.startswith("bwrap —"), confined
+    assert confined.startswith(f"{ctx.sandbox.provider.backend} —"), confined
 
 
 async def _run_cell(ctx: Any, agent_id: str, program: str) -> Any:

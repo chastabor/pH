@@ -68,8 +68,17 @@ def apply_limits(*, address_space_bytes: int) -> dict[str, Any]:
         try:
             resource.setrlimit(resource.RLIMIT_AS, (target, hard))
             applied["addressSpaceBytes"] = target
-        except (ValueError, OSError):  # pragma: no cover
-            applied["addressSpaceBytes"] = soft
+        except (ValueError, OSError):
+            # The limit is *not* in force, and the report must say so in a number
+            # the host can read. macOS refuses `RLIMIT_AS` outright (`ValueError:
+            # current limit exceeds maximum limit`), and this branch used to report
+            # `soft` — which there is `RLIM_INFINITY`, 2**63-1, above the codec's
+            # lossless-integer bound. The host dropped the whole `boot-ack` as
+            # unreadable and waited out `boot_timeout` on every kernel start
+            # (measured 2026-09-07: 60 s of silence, then "did not report ready").
+            # `None` is what the report already means by "no limit"; a finite soft
+            # limit that was already in force is still the number in force.
+            applied["addressSpaceBytes"] = None if soft == resource.RLIM_INFINITY else soft
     return applied
 
 

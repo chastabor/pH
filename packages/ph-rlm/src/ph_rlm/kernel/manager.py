@@ -224,6 +224,15 @@ class Kernel:
     condition `ctx.shell` declines on and for the same reason: the seam refuses
     rather than passing through, so asking for confinement that cannot be given
     would turn every cell into a `SANDBOX_UNAVAILABLE` denial."""
+    applied_limits: dict[str, Any] = field(default_factory=dict)
+    """What the guest reported it could actually apply, from `boot-ack`.
+
+    **Stored because `ph doctor` reports it, and it is not always the request.**
+    `KernelLimits` is what the host *asked* for; macOS refuses `RLIMIT_AS`
+    outright, so a limit named in the request can simply not be in force. Printing
+    the request there would claim a bound nothing enforces, which is E1's failure
+    one layer down from the tier table — so `PythonCodeRuntime.describe` reads this
+    and says "not applied" where the guest said `None`. Empty until `boot-ack`."""
     confined: ConfinedArgv | None = None
     """What `confine` produced, once this kernel has started.
 
@@ -395,13 +404,24 @@ class Kernel:
         await self.snapshots.restored(self.namespace, outcome)
 
     async def _await_boot_ack(self) -> str | None:
-        """Wait for the child to report ready. Returns a fault message, or `None`.
+        """Read the child's first frame. Returns a fault message, or `None`.
 
-        What it applied is logged rather than stored: the three die-with-parent
-        mechanisms carry genuinely different guarantees — a session that ran under
+        **Until `boot-ack`, the only frames that exist are `boot-ack` and `fault`,
+        and anything else is a fault to report.** The guest sends `boot-ack` before
+        `Runner.serve` and before any skill import or cell, so nothing
+        model-written has written to fd 3 yet and C10's tolerance — junk is skipped,
+        the peer is hostile — is not owed here. It is actively wrong here: every
+        frame this loop declines to understand is one it would wait `boot_timeout`
+        for in silence with nothing to quote, which is the failure this function was
+        rewritten to end. So the phase is stated once, over both ways a guest can
+        violate it (a line that will not decode, and a decodable frame that is not
+        one of the two), rather than over only the first.
+
+        The die-with-parent mechanism it applied is logged rather than stored: the
+        three carry genuinely different guarantees — a session that ran under
         `getppid-poll` had a one-second window in which a hard-killed host could
-        leave a stray — and that belongs in the record, not in a field nothing
-        reads.
+        leave a stray — and that belongs in the record. What it *could not apply*
+        is stored, because `describe()` reports it: see `applied_limits`.
         """
         while True:
             line = await self._recv_line()
@@ -420,19 +440,39 @@ class Kernel:
                 )
             frame = decode(line)
             if frame is None:
-                continue
+                # Not C10's "junk → skip": nothing model-written has run yet, so a
+                # line this host cannot read is the guest speaking a shape it does
+                # not accept (D7), and skipping it means waiting out `boot_timeout`
+                # in silence with nothing to quote. Measured on macOS: the guest
+                # reported `addressSpaceBytes` as RLIM_INFINITY, the codec's
+                # lossless-integer rule refused the frame, and every start ended
+                # 60 s later as "did not report ready".
+                return (
+                    "the runtime's first frame could not be read as protocol "
+                    f"{PROTOCOL_VERSION} ({self.environment.describe()}): "
+                    f"{line[:200].decode('utf-8', 'replace')!r}"
+                )
             if frame["type"] == "boot-ack":
                 if frame["protocol"] != PROTOCOL_VERSION:
                     return f"the runtime speaks protocol {frame['protocol']}"
+                limits = frame["limits"]
                 log.info(
                     "ph_rlm.kernel: %s ready on python %s, limits %s",
                     self.namespace,
                     frame["python"],
-                    frame["limits"],
+                    limits,
                 )
+                self.applied_limits = limits if isinstance(limits, dict) else {}
                 return None
             if frame["type"] == "fault":
                 return str(frame["message"])
+            # Readable, and still not one of the two frames that exist before the
+            # guest is ready. Looping here is how a `log` or `done` arriving early
+            # became the same silent `boot_timeout` an undecodable line did.
+            return (
+                f"the runtime sent {frame['type']!r} before reporting ready "
+                f"({self.environment.describe()})"
+            )
 
     # ----------------------------------------------------------------- runs --
 
@@ -870,15 +910,40 @@ class PythonCodeRuntime:
             if environment is not None
             else f"{self.interpreter_mode} — not resolved yet, built on the first cell"
         )
-        gib = self.limits.address_space_bytes / 1024**3
         return [
             ("workers", "one CPython child per agent namespace, spawned lazily"),
             ("on a dead child", "replaced, and the model is told the namespace was lost"),
             ("interpreter", interpreter),
-            ("per-child limits", f"{self.limits.cpu_seconds}s CPU, {gib:.3g} GiB address space"),
+            ("per-child limits", self._limits()),
             ("live kernels", str(len(self._kernels))),
             ("cells confined by", self._confinement()),
         ]
+
+    def _limits(self) -> str:
+        """The per-child limits, as the live kernels actually got them.
+
+        **Read from the guests where there are any**, which is `_confinement`'s rule
+        and for `_confinement`'s reason: the request is what the host asked for, and
+        on a platform that refuses `RLIMIT_AS` — macOS does, with `ValueError:
+        current limit exceeds maximum limit` — the number in force is not the number
+        configured. Printing the request would be `ph doctor` claiming a bound
+        nothing holds, which is the shape E1 forbids one level up in the tier table.
+
+        The weakest live kernel wins, again as `_confinement` does: one child that
+        could not take the limit means the row must not say every child has it.
+        """
+        gib = self.limits.address_space_bytes / 1024**3
+        asked = f"{self.limits.cpu_seconds}s CPU, {gib:.3g} GiB address space"
+        reports = [kernel.applied_limits for kernel in self._kernels.values()]
+        started = [report for report in reports if report]
+        if not started:
+            return f"{asked} (requested; no kernel has started to apply them yet)"
+        if any(report.get("addressSpaceBytes") is None for report in started):
+            return (
+                f"{self.limits.cpu_seconds}s CPU; "
+                "address space not applied — this platform refused it"
+            )
+        return asked
 
     def _confinement(self) -> str:
         """Whether authored code is bounded at the kernel, and by what.

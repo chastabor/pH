@@ -8,8 +8,9 @@ reasoning about a boundary that does not exist.
 
 So the Phase 1 provider is honest and useless: it resolves and records policy,
 and raises `SANDBOX_UNAVAILABLE` when asked to actually confine (dsh's fail-
-closed posture). `sandbox-local` landed in P6-04 with `bwrap` (Landlock and Seatbelt still owed),
-and that is the *only* tier that bounds an absolute-path write (N2, E13).
+closed posture). `sandbox-local` landed in P6-04 with `bwrap`, and P6-40 verified
+Seatbelt (Landlock still owed) — that is the *only* tier that bounds an
+absolute-path write (N2, E13).
 
 Mode resolution is explicit > last logged `sandbox/mode` event > deployment
 default, so a per-call decision wins, a session-level change persists in the
@@ -149,10 +150,10 @@ class SandboxError(HarnessError):
 
 
 class Egress(WireModel):
-    """The one door out of an unshared network namespace.
+    """The one door out of a confined command's network, to the proxy.
 
     Two roles, one value. The backend row **registers** one on the seam once its
-    probe has shown a confined `socat` can reach the proxy; `SandboxSeam.effective`
+    probe has shown a confined command can reach the proxy; `SandboxSeam.effective`
     then hands a **copy carrying the agent** to each policy it merges. A separate
     `EgressBridge` type held the same two fields for the registration half and was
     copied into this one at three sites.
@@ -165,10 +166,13 @@ class Egress(WireModel):
 
     socket: str
     """The proxy's unix socket on the host, reachable inside through the read-only
-    bind of `/` — no extra mount, and nothing writable."""
+    bind of `/` — no extra mount, and nothing writable. The `shim` door's target;
+    the `loopback` door does not use it."""
     port: int
-    """Where the shim listens inside. Private to the sandbox's own namespace, so a
-    fixed number collides with nothing but the command's own listeners."""
+    """Where the command dials on `127.0.0.1`, and what `proxy_url` names. Under a
+    network namespace it is the shim's fixed port inside, private to that sandbox;
+    under Seatbelt, which shares the host's loopback, it is the proxy's own
+    listener there — see `sandbox_local.Door`."""
     agent: str | None = None
     """Who this command runs for, carried to the proxy as the proxy URL's user, so a
     refusal is recorded in the right session."""
@@ -375,10 +379,11 @@ class DenialReader(Protocol):
     **Optional, and the backend's rather than the seam's**, because every string
     such a reader matches is a fact about one platform: `bwrap` on Linux leaves
     `Read-only file system` and `Network is unreachable`, and Seatbelt on macOS
-    says something else that nobody here has measured. A table of Linux sentences
-    living in this module would be the seam asserting one kernel's dialect on every
-    backend's behalf — `DescribingProvider` next door exists for exactly this
-    shape, and for the same reason.
+    says `Operation not permitted` for both boundaries and leaves the path on the
+    line to tell them apart. A table of Linux sentences living in this module would
+    be the seam asserting one kernel's dialect on every backend's behalf —
+    `DescribingProvider` next door exists for exactly this shape, and for the same
+    reason.
 
     A backend that has not been measured implements nothing and the seam records
     nothing, which is the honest answer: the kernel refuses in silence, and a

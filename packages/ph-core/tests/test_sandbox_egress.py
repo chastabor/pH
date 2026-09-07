@@ -4,12 +4,14 @@
 What this row adds is a filtering proxy on the host, reached from inside over a
 unix socket through a `socat` shim, so `HTTPS_PROXY` has something to point at
 and everything not on the allowlist is refused *by the proxy* — with a record.
+Seatbelt has no namespace to shim, so there the same proxy listens on the host's
+loopback and the profile allows that one remote (`EgressProxy.loopback`).
 
 Two halves, like `test_sandbox_local.py`. The proxy is exercised over a real
-unix socket against a real TCP server on this host, which needs no kernel that
-confines. The end-to-end half runs a confined command through the whole path —
-shim, socket, proxy, host server — and skips cleanly where bwrap cannot enforce,
-or where `socat` is not installed.
+unix socket (and its loopback door) against a real TCP server on this host, which
+needs no kernel that confines. The end-to-end half runs a confined command through
+the whole path — door, proxy, host server — and skips cleanly where no backend
+enforces, or where a `bwrap` host has no `socat`.
 """
 
 from __future__ import annotations
@@ -18,6 +20,7 @@ import base64
 import http.server
 import json
 import sys
+import tempfile
 import threading
 from pathlib import Path
 from typing import Any
@@ -144,20 +147,62 @@ async def _through(proxy: EgressProxy, request: bytes) -> bytes:
         return bytes(received)
 
 
-async def _proxy(tmp_path: Path, permits: Any) -> EgressProxy:
-    proxy = EgressProxy(path=tmp_path / "px.sock", permits=permits)
+async def _proxy(permits: Any, *, loopback: bool = False) -> EgressProxy:
+    """A started proxy on a socket path short enough to bind.
+
+    Not under `tmp_path`: `sun_path` is 108 bytes and pytest's tree on macOS —
+    `/private/var/folders/<xx>/<32 chars>/T/pytest-of-<user>/pytest-<n>/<test>0/` — is
+    already past it (`AF_UNIX path too long`, measured). A private directory of its
+    own instead, which `aclose` removes once the socket is gone — the fallback
+    `egress_socket_path` takes for the same reason.
+    """
+    home = Path(tempfile.mkdtemp(prefix="ph-px-"))
+    proxy = EgressProxy(path=home / "px.sock", permits=permits, loopback=loopback)
     await proxy.start()
     return proxy
 
 
-async def test_an_allowed_origin_is_reached_and_a_refused_one_gets_the_proxys_403(
-    tmp_path: Path,
-) -> None:
+async def test_the_loopback_door_is_the_same_proxy_over_tcp() -> None:
+    """Seatbelt's door (`EgressProxy.loopback`): the proxy also answers on the
+    host's `127.0.0.1:<port>`, with the same 403 and the same refusal charged to the
+    same agent, and the port is closed with the row. Off by default, so a `bwrap`
+    host — whose sandboxes could not reach it anyway — opens nothing."""
+    refused: list[tuple[str, int, str | None]] = []
+    proxy = await _proxy(lambda h, p: False, loopback=True)
+    proxy.on_denied = lambda h, p, a: refused.append((h, p, a))
+    try:
+        assert proxy.tcp_port is not None
+        port = proxy.tcp_port
+        credential = base64.b64encode(b"a1:ph").decode()
+        request = (
+            f"CONNECT example.invalid:443 HTTP/1.1\r\n"
+            f"Proxy-Authorization: Basic {credential}\r\n\r\n"
+        ).encode()
+        async with await anyio.connect_tcp("127.0.0.1", port) as client:
+            await client.send(request)
+            with anyio.fail_after(5):
+                answer = await client.receive(65536)
+        assert answer.startswith(b"HTTP/1.1 403")
+        assert refused == [("example.invalid", 443, "a1")]
+    finally:
+        await proxy.aclose()
+    assert proxy.tcp_port is None
+    with pytest.raises(OSError):
+        await anyio.connect_tcp("127.0.0.1", port)
+
+    plain = await _proxy(lambda h, p: True)
+    try:
+        assert plain.tcp_port is None, "no door was asked for, so no port is open"
+    finally:
+        await plain.aclose()
+
+
+async def test_an_allowed_origin_is_reached_and_a_refused_one_gets_the_proxys_403() -> None:
     """The gate. Both directions in one test for `probe_sandbox`'s reason: a proxy
     that refused everything would pass the refusal half while carrying nothing."""
     refused: list[tuple[str, int, str | None]] = []
     with _HostServer() as host:
-        proxy = await _proxy(tmp_path, lambda h, p: h == "127.0.0.1" and p == host.port)
+        proxy = await _proxy(lambda h, p: h == "127.0.0.1" and p == host.port)
         proxy.on_denied = lambda h, p, agent: refused.append((h, p, agent))
         try:
             reply = await _through(
@@ -183,11 +228,11 @@ async def test_an_allowed_origin_is_reached_and_a_refused_one_gets_the_proxys_40
     assert not proxy.path.exists(), "the socket goes with the proxy"
 
 
-async def test_a_connect_to_an_allowed_host_is_a_tunnel(tmp_path: Path) -> None:
+async def test_a_connect_to_an_allowed_host_is_a_tunnel() -> None:
     """Bytes after `200 Connection Established` go to the origin untouched — the
     HTTPS shape, exercised with a plain request so the answer is readable."""
     with _HostServer() as host:
-        proxy = await _proxy(tmp_path, lambda h, p: True)
+        proxy = await _proxy(lambda h, p: True)
         try:
             reply = await _through(
                 proxy,
@@ -202,10 +247,10 @@ async def test_a_connect_to_an_allowed_host_is_a_tunnel(tmp_path: Path) -> None:
     assert reply.endswith(b"hello from host")
 
 
-async def test_the_probe_host_is_always_refused_and_never_recorded(tmp_path: Path) -> None:
+async def test_the_probe_host_is_always_refused_and_never_recorded() -> None:
     """What lets `sandbox-local` check the bridge whatever the allowlist says."""
     refused: list[Any] = []
-    proxy = await _proxy(tmp_path, lambda h, p: True)
+    proxy = await _proxy(lambda h, p: True)
     proxy.on_denied = lambda *args: refused.append(args)
     try:
         reply = await _through(proxy, f"CONNECT {PROBE_HOST}:443 HTTP/1.1\r\n\r\n".encode())
@@ -215,11 +260,11 @@ async def test_the_probe_host_is_always_refused_and_never_recorded(tmp_path: Pat
     assert refused == [] and proxy.denied == 0
 
 
-async def test_a_connection_that_hangs_up_is_not_a_request(tmp_path: Path) -> None:
+async def test_a_connection_that_hangs_up_is_not_a_request() -> None:
     """The shim's readiness check connects and closes; the proxy must not answer,
     record, or fall over."""
     refused: list[Any] = []
-    proxy = await _proxy(tmp_path, lambda h, p: False)
+    proxy = await _proxy(lambda h, p: False)
     proxy.on_denied = lambda *args: refused.append(args)
     try:
         async with await anyio.connect_unix(proxy.path):
@@ -231,12 +276,12 @@ async def test_a_connection_that_hangs_up_is_not_a_request(tmp_path: Path) -> No
     assert len(refused) == 1
 
 
-async def test_the_allowlist_is_asked_live(tmp_path: Path) -> None:
+async def test_the_allowlist_is_asked_live() -> None:
     """`permits` is consulted per connection, which is what lets `/sandbox allow`
     take effect without the proxy restarting."""
     allowed: set[str] = set()
     with _HostServer() as host:
-        proxy = await _proxy(tmp_path, lambda h, p: h in allowed)
+        proxy = await _proxy(lambda h, p: h in allowed)
         try:
             request = f"GET http://127.0.0.1:{host.port}/ HTTP/1.1\r\nHost: x\r\n\r\n".encode()
             assert (await _through(proxy, request)).startswith(b"HTTP/1.1 403")
@@ -297,7 +342,7 @@ async def test_a_confined_command_reaches_an_allowed_host_and_only_that(
         reached = await ctx.shell.run(_fetch(f"http://127.0.0.1:{host.port}/"), agent=agent)
         assert reached.exit_code == 0, reached.stderr
         assert reached.stdout.strip() == "hello from host"
-        assert reached.confined_by == "bwrap"
+        assert reached.confined_by == ctx.sandbox.provider.backend
 
         refused = await ctx.shell.run(_fetch("http://example.invalid/"), agent=agent)
         assert refused.exit_code != 0
@@ -315,7 +360,8 @@ async def test_a_command_that_ignores_the_proxy_reaches_nothing_and_says_so(
 ) -> None:
     """The closed direction, and the record read from the command's own words:
     a raw `connect()` finds no route, and the kernel's silence becomes a
-    `sandbox/denied` because the output said `Network is unreachable`."""
+    `sandbox/denied` because the output said so — `Network is unreachable` from a
+    namespace with no route, `Operation not permitted` from Seatbelt's deny."""
     ctx = await _bridged(mount)
     session = ctx.sessions.create("raw")
     agent = ctx.agents.create(session, AgentOptions(provider="fake", model="f"))
@@ -325,15 +371,16 @@ async def test_a_command_that_ignores_the_proxy_reaches_nothing_and_says_so(
     result = await ctx.shell.run(raw, agent=agent)
 
     assert result.exit_code != 0
-    assert "Network is unreachable" in result.stderr
+    words = "Operation not permitted" if sys.platform == "darwin" else "Network is unreachable"
+    assert words in result.stderr
     denials = [event for event in session.events if event.type == DENIED]
     assert len(denials) == 1
     assert denials[0].data["kind"] == "network" and denials[0].data["via"] == "output"
 
 
 async def test_the_bridge_is_claimed_only_after_its_probe(mount: Any) -> None:
-    """`ph doctor` says the bridge is up because a confined `socat` reached it,
-    not because a proxy was started."""
+    """`ph doctor` says the bridge is up because a confined command reached it
+    through the door, not because a proxy was started."""
     ctx = await _bridged(mount)
     section = report_section(ctx, "Local confinement")
     assert section["egress"].startswith("proxy at ")
