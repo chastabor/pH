@@ -29,7 +29,6 @@
 #   ./test.sh format --fix    the same, for the format gate alone
 #   ./test.sh test -k pattern anything after the gate goes to pytest
 #   ./test.sh test --cov      with coverage, as CI runs it
-#   ./test.sh --strict        known platform gaps fail too (what CI effectively does)
 #
 # Lint and format are *checks* by default rather than rewrites, because a command
 # whose name is "test" should not quietly edit your working tree while you are
@@ -64,11 +63,9 @@ case "$OS" in
   *)      PLATFORM=other ;;
 esac
 
-STRICT=0
 FIX=0
 FAILED_GATES=()
 NEW_FAILURES=0
-KNOWN_HIT=0
 
 # ------------------------------------------------------------------- the TMPDIR --
 
@@ -111,27 +108,26 @@ prepare_tmpdir() {
 # Tests that do not run on this platform, each with the reason. **Prefix match on
 # the pytest node id**, so a whole file can be named without listing every test in
 # it. Anything failing that is not matched here is a regression and fails the run.
+#
+# **Both lists are empty, and that took work to earn.** The first version of this
+# script carried fourteen macOS entries. Investigating them found no platform
+# limitation among them — twelve were one `sys.platform != "linux"` guard in
+# `ph.lingering` that answered before reading the evidence a test had staged; one
+# was `fail()` hard-wrapping a path inside a word at 80 columns, where a macOS temp
+# path is a dozen characters longer than Linux's; one was `--until-idle` printing
+# its status line in one of two race outcomes; one was a test payload 150 bytes over
+# the frame ceiling that Linux forgave by handing anyio bigger socket chunks. Each is
+# fixed where it lived. A gap added here needs a reason of the kind those turned out
+# not to have.
 known_gaps() {
   case "$PLATFORM" in
-    macos)
-      cat <<'EOF'
-packages/ph-core/tests/test_lingering.py|systemd: linger state is read from loginctl's marker directory, which macOS has no equivalent of
-packages/ph-app/tests/test_cli.py::test_doctor_says_whether_the_daemon_socket_survives_logout|systemd: the logout-survival answer is a Linux runtime-dir property
-packages/ph-app/tests/test_cli.py::test_starting_a_daemon_that_will_not_outlive_logout_says_so_first|systemd: as above, on the start path
-packages/ph-app/tests/test_agents_cli.py::test_doctor_prints_the_lifetime_the_daemon_reports|systemd: the lifetime row is the linger answer
-packages/ph-app/tests/test_agents_cli.py::test_a_reaped_socket_is_not_reported_as_one_never_started|systemd: distinguishing reaped from never-started needs the reaped-tree semantics of $XDG_RUNTIME_DIR
-packages/ph-app/tests/test_daemon.py::test_a_reaped_runtime_dir_reaches_every_root_as_a_record|systemd: as above, as a per-root record
-packages/ph-app/tests/test_daemon.py::test_daemon_status_says_it_cannot_be_reached_and_what_would_fix_it|systemd: the advice it prints names the linger fix
-packages/ph-app/tests/test_cli.py::test_a_profile_that_will_not_parse_is_refused_before_anything_mounts|unexplained on macOS; the refusal arrives but doctor's table is printed first. Pre-existing (verified at a20ac5e), not yet diagnosed
-packages/ph-app/tests/test_agents_cli.py::test_until_idle_exits_non_zero_when_the_last_turn_errored|unexplained on macOS; pre-existing (verified at a20ac5e), not yet diagnosed
-packages/ph-app/tests/test_daemon_attachments.py::test_a_file_too_large_for_a_frame_is_refused_by_name|unexplained on macOS; the oversize frame closes the connection before the named refusal is read. Pre-existing (verified at a20ac5e)
-EOF
-      ;;
+    macos) : ;;
     linux)
-      # Left empty on purpose. Linux is CI's reference platform: everything is
-      # expected to pass, and a gap here should be argued for rather than
-      # inherited. `bwrap`'s absence does not belong on this list — those tests
-      # skip themselves by asking whether the row registered a provider.
+      # Linux is CI's reference platform, so a gap here needs arguing for rather
+      # than inheriting. The discriminator, kept because it is the concrete shape
+      # of the bar: `bwrap`'s absence does *not* belong on this list — those tests
+      # skip themselves by asking whether the row registered a provider, which is
+      # a test declining to run, not a test failing.
       : ;;
   esac
 }
@@ -244,9 +240,9 @@ gate_lint() {
 
 # **No allowlist here, unlike `known_gaps`, and the difference is the point.**
 #
-# A platform gap is something no action of yours can fix: macOS has no `loginctl`,
-# so those tests cannot pass here and tolerating them is the only alternative to
-# pretending they do not exist. Formatting is the opposite — `ruff format` is
+# A platform gap would be something no action of yours can fix — and note that the
+# fourteen macOS failures this script first shipped with all turned out *not* to be
+# that, which is why `known_gaps` is empty. Formatting is further still — `ruff format` is
 # deterministic and idempotent, so every complaint it makes is one command away
 # from being gone for good. An allowlist there would not be recording a fact about
 # the platform, it would be deferring a fix forever and calling it a fact. So this
@@ -281,9 +277,6 @@ gate_test() {
   head1 "Tests  (pytest)"
   say "  ${DIM}TMPDIR=$TMPDIR${RESET}"
   local log status node reason
-  # This gate's own tally. `KNOWN_HIT` is the run-wide total the summary prints,
-  # and sharing one counter had the test gate reporting the format gate's twelve
-  # documentation files as tests that failed.
   local gaps=0
   log="$(mktemp "${TMPDIR}/ph-pytest.XXXXXX")"
 
@@ -308,7 +301,6 @@ EOF
     [ -n "$node" ] || continue
     if reason="$(reason_for "$node")"; then
       gaps=$((gaps + 1))
-      KNOWN_HIT=$((KNOWN_HIT + 1))
       note "known: $node"
       note "       $reason"
     else
@@ -333,11 +325,10 @@ EOF
 
   if [ "$NEW_FAILURES" -gt 0 ]; then
     FAILED_GATES+=("test")
-  elif [ "$STRICT" = "1" ]; then
-    bad "$gaps known platform gap(s) failed (--strict)"
-    FAILED_GATES+=("test")
-  else
+  elif [ "$gaps" -gt 0 ]; then
     ok "no regressions ($gaps known platform gap(s) failed, each listed above)"
+  else
+    ok "no regressions"
   fi
   rm -f "$log"
 }
@@ -349,7 +340,6 @@ main() {
   local args=()
   while [ $# -gt 0 ]; do
     case "$1" in
-      --strict) STRICT=1; shift ;;
       --fix) FIX=1; shift ;;
       -h|--help) sed -n '2,32p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
       doctor|lint|format|types|test|all) gate="$1"; shift; args=("$@"); break ;;
@@ -380,9 +370,6 @@ main() {
     exit 1
   fi
   ok "everything green on $PLATFORM"
-  if [ "$KNOWN_HIT" -gt 0 ]; then
-    note "$KNOWN_HIT known gap(s) tolerated across all gates; run with --strict to fail on them"
-  fi
   exit 0
 }
 

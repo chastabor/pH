@@ -310,7 +310,7 @@ class _Follow:
         # Named when it is not the ordinary ending: `idle` after an error turn
         # reads as success, and this line is what `--until-idle` stops on.
         ended = f" · last turn {last}" if status == "idle" and last and last != "completed" else ""
-        console.print(f"[dim]· {status}{ended}[/dim]", soft_wrap=True)
+        console.print(f"[dim]· {status}{ended}[/dim]")
         if self.until_idle and status == "idle":
             self.last_turn = last
             self.done.set()
@@ -324,11 +324,10 @@ class _Follow:
         """
         lines = [_line(event) for event in events if self._shows(event)]
         if lines:
-            # `soft_wrap`, for the reason a machine-readable dump does not go
-            # through a console at all: a follower's lines are records, and
-            # folding one at the terminal width turns a `grep` into two
-            # half-matches.
-            console.print("\n".join(lines), soft_wrap=True)
+            # A follower's lines are records, and folding one at the terminal
+            # width turns a `grep` into two half-matches — which is why the
+            # console itself is `soft_wrap` (see `ph_app.console`).
+            console.print("\n".join(lines))
 
     def _shows(self, event: Mapping[str, Any]) -> bool:
         """Whether this follower prints one event.
@@ -472,10 +471,18 @@ def attach(
                 # catch-up announced it into `pending` and has just been drained,
                 # and one that was already idle before the attach never announced
                 # anything at all. Without this the second case waits forever.
+                #
+                # Through `_status`, so the two cases print the same thing. This
+                # used to set `last_turn` and `done` by hand, which stopped the
+                # command correctly and silently: the `· idle · last turn error`
+                # line — the one `_status` documents as "what --until-idle stops
+                # on" — was printed only when the status arrived live. Which case
+                # a run landed in was a race between the turn failing and the
+                # attach arriving, won differently on macOS and Linux, so the
+                # same outcome produced different output depending on the host.
                 current = await client.call("session/status", sessionId=session)
                 if current["status"] == "idle":
-                    follow.last_turn = current.get("lastTurn")
-                    follow.done.set()
+                    follow._status(current)
             await first_of(follow.done, client.closed)
         finally:
             # Only while there is somebody to tell. A daemon that shut down under

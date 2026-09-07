@@ -99,7 +99,10 @@ def reaped_host(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> ReapedHost:
     removing that directory is what logout does rather than something like it.
     `linger=False` is a user who does not linger, `True` one who does, and
     `None` the third state — a host with no `/var/lib/systemd/linger` at all,
-    which must read as "unknown" and never as "off". `$PH_HOME` is untouched:
+    which must read as "unknown" and never as "off". `logind=False` is the fourth:
+    a host systemd did not boot, which must read as "not applicable" and advise
+    nothing — the branch that had no test at all while its evidence was inferred
+    from the marker directory. `$PH_HOME` is untouched:
     `_isolated_home` above owns it, and a second fixture setting the same
     variable is how a rule comes to be half applied.
 
@@ -113,7 +116,7 @@ def reaped_host(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> ReapedHost:
     five copies of these four lines; this is them stated once.
     """
 
-    def make(*, linger: bool | None = False, user: str = "someone") -> Path:
+    def make(*, linger: bool | None = False, user: str = "someone", logind: bool = True) -> Path:
         from ph import lingering
 
         # The runtime tier's inputs only. `$PH_HOME` is `_isolated_home`'s to
@@ -133,6 +136,16 @@ def reaped_host(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> ReapedHost:
             if linger:
                 (markers / user).touch()
         monkeypatch.setattr(lingering, "LINGER_DIR", markers)
+        # Staged separately, because it answers a separate question: `logind=False`
+        # is a host systemd did not boot, where nothing reaps a runtime directory
+        # and there is nothing to advise. Inferring it from `markers` instead would
+        # make the "no logind" branch unreachable in a test — a temp directory
+        # always has a parent that exists — which is how it went untested when the
+        # two facts shared one constant.
+        booted = tmp_path / "systemd-run"
+        if logind:
+            booted.mkdir(exist_ok=True)
+        monkeypatch.setattr(lingering, "SYSTEMD_RUN_DIR", booted)
         return runtime
 
     return make

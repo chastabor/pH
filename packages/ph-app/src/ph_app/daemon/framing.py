@@ -95,6 +95,16 @@ async def read_frames(stream: ByteStream) -> AsyncIterator[dict[str, Any]]:
     A peer that closes mid-frame **ends the iteration rather than raising**: it did not
     send that frame, and acting on half of one is how a supervisor executes a command
     nobody completed.
+
+    **The cap is checked twice, and the second check is the one that makes it a cap.**
+    `receive_until` looks for the delimiter *before* it tests the buffer against
+    `max_bytes`, so an over-length frame is refused only when its newline has not yet
+    arrived — which depends on how much the socket hands over per read.
+    `net.local.stream.recvspace` is 64 KiB on Linux and 8 KiB on macOS, so the same
+    oversized frame was refused on one and accepted on the other (measured 2026-09-07,
+    on a 6 MiB attachment that Linux let through and macOS closed the connection over).
+    A wire limit that holds on one kernel is not a limit, and both ends of this wire
+    derive `MAX_ATTACHMENT_BYTES` from it.
     """
     buffered = BufferedByteReceiveStream(stream)
     while True:
@@ -104,6 +114,10 @@ async def read_frames(stream: ByteStream) -> AsyncIterator[dict[str, Any]]:
             return
         except anyio.DelimiterNotFound as error:
             raise FramingError(f"frame exceeds {MAX_LINE} bytes") from error
+        if len(line) >= MAX_LINE:
+            # The delimiter arrived inside a chunk that took the buffer past the
+            # cap. Same refusal, same sentence, on every platform.
+            raise FramingError(f"frame exceeds {MAX_LINE} bytes")
         if not line.strip():
             continue
         try:

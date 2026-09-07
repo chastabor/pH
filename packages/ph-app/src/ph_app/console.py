@@ -42,14 +42,35 @@ __all__ = [
     "selectors_or_exit",
 ]
 
-console = Console(highlight=False)
-err = Console(stderr=True, highlight=False)
-"""`highlight=False` on both: Rich's automatic highlighter re-colours whatever
-in a plain string *looks* like a number, a path or a UUID, which in a CLI's
-prose is an arbitrary word coloured for looking like data — `scheduled sch-1 ·
-interval 3600000` came out with the interval in cyan and nothing else. Explicit
-markup still works; only the guessing is off. It is also a third of the cost of
-printing a line, and `ph agents attach` prints one per log event."""
+console = Console(highlight=False, soft_wrap=True)
+err = Console(stderr=True, highlight=False, soft_wrap=True)
+"""Two settings, on **both** consoles, which is the whole reason the pair is
+declared here rather than per module: a console setting applied to half the CLI
+is how the two halves come to disagree about what a line looks like.
+
+`highlight=False`: Rich's automatic highlighter re-colours whatever in a plain
+string *looks* like a number, a path or a UUID, which in a CLI's prose is an
+arbitrary word coloured for looking like data — `scheduled sch-1 · interval
+3600000` came out with the interval in cyan and nothing else. Explicit markup
+still works; only the guessing is off. It is also a third of the cost of
+printing a line, and `ph agents attach` prints one per log event.
+
+`soft_wrap=True`: this CLI's lines *name things* — a profile path, a session id,
+a socket, a `loginctl` command to run — and Rich's default folds at the console
+width with a hard newline, **inside a word** when the word is longer than what is
+left of the line. A path broken across two lines cannot be copied and cannot be
+grepped. Under a test runner the width is 80, and a macOS temp path is a dozen
+characters longer than the same path on Linux, which is exactly the margin by
+which `broken.yaml` stopped appearing in its own refusal there. The terminal
+still wraps what does not fit; it just no longer edits the sentence to do it.
+
+**It does not reach `section()` below.** `soft_wrap` is a print-time setting and
+a `Table` folds inside its own cells, so a path printed as a table *value* — `ph
+doctor`'s roots, `RuntimeLifetime.describe()`'s rows — still breaks. Stated
+rather than left to be discovered, because this module owns both the consoles
+and the table and is therefore the only place that could make "a path this CLI
+prints is copyable" true everywhere; today it is true of every line and not of
+table cells."""
 
 
 def section(title: str, rows: Iterable[tuple[str, str]]) -> Table:
@@ -87,6 +108,8 @@ def fail(message: str, *, code: int = 1, cause: BaseException | None = None) -> 
     keep in step at every refusal in both command modules. `cause` keeps the
     chaining, because a traceback that lost the original is the thing `--pdb` was
     going to be used for.
+
+    The no-fold property is the console's, not this function's — see `err` above.
     """
     err.print(message)
     raise typer.Exit(code=code) from cause

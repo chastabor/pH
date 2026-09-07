@@ -26,6 +26,7 @@ import pytest
 from daemon_helpers import running, until
 
 from ph.llm.types import AttachmentRef
+from ph_app.daemon.framing import MAX_ATTACHMENT_BYTES, MAX_LINE
 from ph_app.protocol import DaemonError
 
 pytestmark = pytest.mark.anyio
@@ -100,7 +101,22 @@ async def test_a_file_too_large_for_a_frame_is_refused_by_name(tmp_path: Any) ->
     limit is in the sentence, so a client can say so rather than guess. Chunked
     upload is the fix and it is not built (§5 rule 6); the alternative to this
     refusal is a framing error with no name, raised after the bytes were sent.
+
+    **The payload sits between the two limits, and that is the whole test.** The
+    named refusal is the handler's, so the frame has to *arrive* — over
+    `MAX_ATTACHMENT_BYTES` but comfortably under `MAX_LINE`. `+ 1024` is the margin
+    `test_web.py` uses for the same ceiling; the assertion is on the encoded length
+    rather than on a re-derivation of base64's 4/3 expansion, because the encoded
+    string is right there and an approximation of it is a thing that drifts.
+
+    It used to send 6 MiB, whose base64 is exactly `MAX_LINE` before the JSON
+    around it, and it passed on Linux only by luck of chunk size — `read_frames`
+    now enforces the cap on both platforms, so that payload would fail here
+    everywhere rather than on one kernel.
     """
+    payload = b64encode(b"x" * (MAX_ATTACHMENT_BYTES + 1024)).decode()
+    assert len(payload) + 1024 < MAX_LINE, "must arrive as a frame to be named"
+
     async with running(tmp_path) as daemon:
         root = await daemon.root("oversized")
         client = await daemon.client()
@@ -111,7 +127,7 @@ async def test_a_file_too_large_for_a_frame_is_refused_by_name(tmp_path: Any) ->
                 sessionId=root.id,
                 name="huge.bin",
                 mime="application/octet-stream",
-                contentB64=b64encode(b"x" * (6 * 1024 * 1024)).decode(),
+                contentB64=payload,
             )
 
         assert refused.value.reason == "attachment_too_large"

@@ -40,13 +40,28 @@ running, which is exactly the host whose answer is least obvious. What is lost
 is a host that stores the marker somewhere else — reported as `unknown` rather
 than guessed at, with `loginctl show-user` named as the way to settle it.
 
+**Whether logind is here at all is read the same way, from its own directory.**
+It was `sys.platform == "linux"` once, and that answered the wrong question twice
+over: a Linux host without systemd (Alpine, a slim container) was told to check
+with a `loginctl` it does not have, and every test that stood up a simulated
+logind host on a Mac — marker directory and all — was answered `not-applicable`
+before the marker was looked at, so twelve of them failed on macOS for no reason
+the code under test had.
+
+The evidence is `SYSTEMD_RUN_DIR`, which is systemd's own `sd_booted()` test.
+**Booted, not installed**, and the difference is the whole point: `/var/lib/systemd`
+is created by `systemd-timesyncd` and friends and survives on a host booted under
+sysvinit or in a Debian container where PID 1 is not systemd — so keying off it
+would hand exactly the `loginctl` advice this change removes to a narrower set of
+hosts instead of none. `/run/systemd/system` exists only where systemd is the init
+that booted the machine, which is the only case where logind reaps anything.
+
 @module ph.lingering
 """
 
 from __future__ import annotations
 
 import os
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -55,13 +70,27 @@ from .paths import PathRoots, RuntimeTier, canonical, is_under, resolve_roots
 
 __all__ = [
     "LINGER_DIR",
+    "SYSTEMD_RUN_DIR",
     "LingerState",
     "RuntimeLifetime",
     "lifetime",
     "linger_state",
+    "logind_present",
     "socket_identity",
     "username",
 ]
+
+SYSTEMD_RUN_DIR = Path("/run/systemd/system")
+"""Systemd's own "am I the init that booted this host" marker (`sd_booted(3)`).
+
+A directory systemd creates at boot and nothing else does, so its presence is the
+one cheap answer to "will logind reap a runtime directory here". Its **own**
+constant rather than a fact inferred from `LINGER_DIR`: the linger marker
+directory answers whether a *user* lingers, and reading a second meaning out of it
+made one path carry two questions — and made the "no logind" branch impossible to
+test, since a test pointing `LINGER_DIR` at its own temp directory necessarily
+gave that directory a parent that exists. A module constant for `LINGER_DIR`'s
+reason: a test needs to point it somewhere it controls."""
 
 LINGER_DIR = Path("/var/lib/systemd/linger")
 """Where logind records the users it keeps a manager running for.
@@ -72,10 +101,11 @@ point the probe at a directory it controls, since the real one is root-owned
 and a test that needed to write to it could not run."""
 
 LingerState = Literal["on", "off", "unknown", "not-applicable"]
-"""`on`/`off` when the marker directory settles it, `unknown` when the
-directory is missing (no logind, or a host that keeps the state elsewhere), and
-`not-applicable` off Linux, where nothing reaps a runtime directory at logout
-because nothing created one."""
+"""`on`/`off` when the marker directory settles it; `unknown` when systemd is
+installed but the marker directory is not where logind keeps it (a host that
+stores the state elsewhere); `not-applicable` where systemd is not installed at
+all — macOS, Windows, a Linux without it — and nothing reaps a runtime directory
+at logout because nothing created one."""
 
 
 def username() -> str:
@@ -105,7 +135,7 @@ def linger_state(user: str = "") -> LingerState:
     something is broken, and an unreadable `/var/lib/systemd` is a fact to
     report rather than a traceback to replace the rest of the report with.
     """
-    if sys.platform != "linux":
+    if not logind_present():
         return "not-applicable"
     name = user or username()
     if not name:
@@ -116,6 +146,24 @@ def linger_state(user: str = "") -> LingerState:
         return "on" if (LINGER_DIR / name).exists() else "off"
     except OSError:
         return "unknown"
+
+
+def logind_present() -> bool:
+    """Whether this host has a logind to reap anything — read from disk, not from
+    the platform name.
+
+    One `stat` of `SYSTEMD_RUN_DIR`, which is what `sd_booted(3)` does. Never
+    raises, for `linger_state`'s reason: this is read by `ph doctor`.
+
+    The three answers stay distinct downstream, and each earns a different
+    sentence: no logind is `not-applicable` and advises nothing; logind but no
+    marker directory is `unknown` and asks a question; a marker directory settles
+    it into `on`/`off` and, when off, gives an instruction.
+    """
+    try:
+        return SYSTEMD_RUN_DIR.is_dir()
+    except OSError:
+        return False
 
 
 @dataclass(frozen=True, slots=True)
@@ -209,7 +257,11 @@ class RuntimeLifetime:
         """
         match (self.linger, self.reaped_at_logout):
             case ("not-applicable", _):
-                return True, "nothing on this platform reaps a runtime directory at logout", ""
+                return (
+                    True,
+                    "no logind on this host, so nothing reaps a runtime directory at logout",
+                    "",
+                )
             case ("on", _):
                 return (
                     True,

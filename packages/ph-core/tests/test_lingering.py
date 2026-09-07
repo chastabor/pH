@@ -59,6 +59,33 @@ def test_linger_is_read_from_the_marker_the_command_creates(
     assert linger_state() == "on"
 
 
+def test_a_host_systemd_did_not_boot_has_nothing_to_reap_and_nothing_to_advise(
+    reaped_host: ReapedHost,
+) -> None:
+    """The branch that had no test while its evidence was inferred from the marker
+    directory — and the one a Mac, an Alpine box and a sysvinit host all land in.
+
+    `sd_booted(3)`'s own question, asked the way systemd asks it: `/run/systemd/system`
+    exists only where systemd is the init that booted the machine. Keying off
+    `/var/lib/systemd` instead would call a Debian container with `systemd-timesyncd`
+    installed a logind host and hand it a `loginctl` that will not answer — the same
+    wrong advice, given to fewer people.
+
+    "Not applicable" earns no instruction: there is nothing to enable, because
+    nothing removes the runtime directory at logout.
+    """
+    reaped_host(logind=False)
+
+    assert linger_state() == "not-applicable"
+    life = lifetime()
+    assert life.survives_logout is True
+    assert life.advice == "", "nothing to advise where nothing reaps"
+    assert "no logind on this host" in life.explanation
+    rows = dict(life.describe())
+    assert "linger" not in rows, "a row about a marker file no host here keeps"
+    assert "loginctl" not in life.verdict()
+
+
 def test_a_host_with_no_marker_directory_is_unknown_rather_than_off(
     reaped_host: ReapedHost,
 ) -> None:

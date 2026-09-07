@@ -12,6 +12,7 @@ a page naming a method that no longer exists, fails the suite.
 | [Seams](seams/) | Reference for all 29 service keys — what each publishes, who may provide it, what it refuses. |
 | [Skills](skills/) | Authoring skills and playbooks (P7-18). |
 | [Dev notes](dev-notes/) | Per-phase records and design notes, including measurements and things that were tried and dropped. |
+| [Linux/macOS differences](dev-notes/linux-macos-differences.md) | What breaks when this is built on the other platform, and why every "platform gap" so far turned out to be a bug. Read before adding a `skipif`. |
 
 The *specification* is not here. [`DESIGN.md`](../DESIGN.md) says what pH is;
 [`plans/`](../plans/) says why each decision fell where it did and what remains.
