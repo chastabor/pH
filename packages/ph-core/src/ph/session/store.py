@@ -250,6 +250,11 @@ class SessionStore:
         seeded event. The seed is still handed over in full because every reader
         downstream wants a whole session, and a trusted-seed path would be a change to
         the session model rather than to `fork`.
+
+        The narrower fix — skipping the *copy* while keeping every check — is measured
+        and deliberately deferred; `ph.session.json`'s module docstring says why, and
+        the short version is that a fast path through the gate that enforces A1 would
+        be correct only as far as its tests reached.
         """
         if child_session_id is not None and child_session_id in self._entries:
             raise SessionForkError(

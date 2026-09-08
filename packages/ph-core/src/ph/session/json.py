@@ -24,6 +24,43 @@ objects and `tuple` for arrays (D4). Re-admitting an already-frozen tree (a
 seed taken from a live session) is the one case where a tuple *is* an array,
 and `frozen_input=True` says so explicitly rather than weakening the rule.
 
+## Re-freezing costs real time, and the obvious fix is refused
+
+Every container is rebuilt on every pass — a fresh `MappingProxyType` per object,
+a fresh `tuple` per array — even when the input is already exactly the frozen form
+this would produce. `frozen_input=True` accepts that shape; it does not skip the
+copy. So a tree that has already been through here pays for a second structural
+copy each time it is re-admitted, and the cost scales with **node count**, not
+bytes, because strings pass through by identity.
+
+Measured (2026-09-07): re-freezing a streamed chunk payload is **0.95 µs**; a
+500-node tool result is **232 µs**. Four paths pay it — `Session.admit` per wire
+event on a remote front end, `Session(seed=…)`, `resume_session` on every daemon
+rehydrate, and `SessionStore.fork`, whose own docstring already says "a fork is
+cheap on disk and not free in memory".
+
+The obvious optimisation is a validation-only pre-walk: check the tree against
+every rule above and, when it is already frozen, return the *input* rather than a
+copy. It measured at roughly half the cost. **It is deliberately not built**, and
+the reason is not that it looked hard:
+
+> This function is where invariant A1 is enforced — it is the gate that decides
+> what may enter a log. A fast path adds a second route through that gate, and if
+> the "already frozen?" predicate is wrong anywhere, the failure is a value
+> entering the log *unvalidated*. Nothing in the type system distinguishes a
+> `MappingProxyType` wrapping a frozen tree from one wrapping a live mutable dict,
+> or a `tuple` holding frozen children from one holding a `list`. The predicate
+> would therefore be correct only insofar as it was tested — and a test suite is
+> the wrong kind of guarantee for a gate, because it enumerates the hostile shapes
+> somebody thought of.
+
+So this waits for a design whose correctness is **structural** rather than tested:
+a frozen tree that carries its own proof (a distinct wrapper type the walker can
+recognise by identity, say, so "already frozen" is a type question rather than an
+inspection), or a freeze that is idempotent by construction. Until then the copy
+stays, and the cost above is the price of a gate that cannot be walked around.
+See DESIGN.md §8 and plan row P6-44.
+
 @module ph.session.json
 """
 

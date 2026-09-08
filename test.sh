@@ -203,15 +203,21 @@ report_env() {
       ;;
   esac
 
+  # **No counts here.** This runs before pytest, so a number written at this
+  # point is one nobody can check — and the two that used to be here (3 and 11)
+  # were both wrong by the time anybody read them: `test_workspace_jj.py` alone
+  # skips two dozen. What each missing tool actually costs is counted from the
+  # run and printed by `report_skips` below, where it is a measurement rather
+  # than a claim.
   head1 "Optional backends (absent means skipped tests, never failures)"
   if have jj; then ok "jj — the Jujutsu workspace tier"
   else
-    warn "jj is missing — 3 jj-tier tests skip"
+    warn "jj is missing — its tier's tests skip; the run counts them"
     note "macOS: brew install jj   ·   Linux: cargo install --locked jj-cli"
   fi
   if have agentfs; then ok "agentfs — the copy-on-write overlay tier"
   else
-    warn "agentfs is missing — 11 overlay tests skip"
+    warn "agentfs is missing — the overlay tier's tests skip; the run counts them"
     note "there is no packaged build; the overlay tier simply declines without it"
   fi
   # Turso is a *Python* dependency (pyturso), not a CLI — `uv sync` provides it,
@@ -273,6 +279,33 @@ gate_types() {
   if uv run mypy; then ok "clean"; else bad "types"; FAILED_GATES+=("types"); fi
 }
 
+# What was skipped, grouped by the reason the test gave for skipping.
+#
+# pytest already prints one `SKIPPED [n] <file>:<line>: <reason>` line per skip
+# (the `-ra` in `[tool.pytest.ini_options]`), so the reasons are the suite's own
+# words — nothing here decides what a skip means or how many there are. Grouped
+# because 61 individual lines is a wall and "24 · the jj tier needs jj" is the
+# fact: which capability this host is missing, and what it costs.
+report_skips() {
+  local log="$1" rows
+  # `SKIPPED [n] path:line: reason` → `n<TAB>reason`. The location token has no
+  # spaces and ends in a colon, so it can be consumed whole; anything that does
+  # not match that shape is kept verbatim rather than dropped.
+  rows="$(
+    grep -E '^SKIPPED \[[0-9]+\]' "$log" |
+      sed -E 's/^SKIPPED \[([0-9]+)\] [^ ]+ (.*)$/\1\t\2/' |
+      awk -F'\t' 'NF==2 {n[$2]+=$1; next} {n[$0]+=1} END {for (r in n) printf "%d\t%s\n", n[r], r}' |
+      sort -rn
+  )"
+  [ -n "$rows" ] || return 0
+  local total
+  total="$(printf '%s\n' "$rows" | awk -F'\t' '{t+=$1} END {print t+0}')"
+  note "$total skipped, by reason:"
+  printf '%s\n' "$rows" | while IFS=$'\t' read -r count reason; do
+    printf '  %s%6s  %s%s\n' "$DIM" "$count" "$reason" "$RESET"
+  done
+}
+
 gate_test() {
   head1 "Tests  (pytest)"
   say "  ${DIM}TMPDIR=$TMPDIR${RESET}"
@@ -285,6 +318,7 @@ gate_test() {
 
   if [ "$status" = "0" ]; then
     ok "all tests passed"
+    report_skips "$log"
     # A gap that has started passing is a line to delete, and saying so is what
     # keeps the list from rotting into a place regressions hide.
     while IFS= read -r line; do
@@ -330,6 +364,7 @@ EOF
   else
     ok "no regressions"
   fi
+  report_skips "$log"
   rm -f "$log"
 }
 
