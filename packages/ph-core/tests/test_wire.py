@@ -7,6 +7,12 @@ The second half is the point. `to_camel` → `to_snake` happens to round-trip fo
 every field name in this plan, so a runtime string conversion would pass its
 tests today and break at the first acronym or digit. Pinning aliases at class
 definition means a name is never reconstructed from a wire string at all.
+
+**"Every model" is now literally every model.** The round-trip was parametrised
+over all 75 and *skipped* the ones `_sample` could not build — which is how
+`StatusReading` and `Egress`, both a required field or two away from trivial, came
+to be exempt from the one property this file asserts. A missing sample is a gap in
+the table below, not a test with nothing to say, so it fails and names the model.
 """
 
 from __future__ import annotations
@@ -87,8 +93,13 @@ def test_every_field_alias_equals_to_camel_of_its_name() -> None:
 @pytest.mark.parametrize("model", _all_ph_models(), ids=lambda m: m.__name__)
 def test_models_round_trip_by_alias(model: type[BaseModel]) -> None:
     sample = _sample(model)
-    if sample is None:
-        pytest.skip(f"no constructible sample for {model.__name__}")
+    assert sample is not None, (
+        f"no constructible sample for {model.__name__}: add one to `_sample`'s table. "
+        "This used to `skip`, which meant a model with required fields joined the "
+        "suite already exempt from the property this file exists to assert — "
+        "`StatusReading` and `Egress` sat unchecked that way. A model pH puts on a "
+        "wire is either round-tripped here or argued about; it is not quietly passed."
+    )
     wire = sample.model_dump(by_alias=True, exclude_none=True)
     assert model.model_validate(wire) == sample
     # Tolerant readers: the snake_case form validates too, which is what lets
@@ -160,6 +171,14 @@ def _sample(model: type[BaseModel]) -> BaseModel | None:
             "body": "started",
         },
         "SandboxPolicy": {"mode": "read-only"},
+        # Both halves of the egress door, `agent` included: it is the field that
+        # carries who a refusal belongs to, and an optional one left out of a
+        # sample is a field `exclude_none=True` would drop before the round trip
+        # could test it.
+        "Egress": {"socket": "/run/user/1/ph/egress.sock", "port": 3128, "agent": "s/1"},
+        # A non-default `level`, for the same reason: the default would round-trip
+        # through a field the wire never carried.
+        "StatusReading": {"text": "3 refused", "level": "warning"},
         "CodeDispatchRef": {
             "rootCallId": "r",
             "parentCallId": "p",
