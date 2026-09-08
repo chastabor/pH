@@ -1,0 +1,81 @@
+# A profile for a local llama.cpp server over the OpenAI-compatible wire.
+#
+# The shipped route that is *not* a hosted service, which is the whole reason it
+# is its own document rather than a `baseUrl` note on `deepseek.yaml`: three of
+# `ProviderProfile`'s defaults are wrong for a server on localhost, and each one
+# fails in a different direction (see below).
+#
+# `apiKeyEnv` is a *name*, never an interpolation, exactly as on every other
+# route (I-3) — and here the value is a formality rather than a secret:
+# llama.cpp ignores the `Authorization` header unless it was started with
+# `--api-key`. It is still resolved at the request edge, so `LLAMA_API_KEY` must
+# be set to *something* or the route refuses with `MISSING_CREDENTIAL`. Set it
+# to `local` and forget it.
+#
+#   export LLAMA_API_KEY=local
+#   ph --profile llama --provider llama --model "$(the model llama-server loaded)" -p "hi"
+#
+# **`contextWindow` is the window of one slot, not of the server.** llama.cpp
+# divides `--ctx-size` by `--parallel`, so a server started `-c 1572864
+# --parallel 6` gives each of its six slots 262144 — and this is the number that
+# has to be here, because it is what pH budgets and compacts against. Reading
+# the server's total would let six agents each believe they have the whole KV
+# cache. `/slots` reports the per-slot figure directly; the default below is
+# deliberately small, since guessing high overflows a slot and guessing low only
+# compacts sooner than necessary.
+- insert:
+    - id: llm-llama
+      name: llm-openai-compatible
+      config:
+        profiles:
+          - provider: llama
+            baseUrl: ${env:LLAMA_BASE_URL:-http://127.0.0.1:9931/v1}
+            apiKeyEnv: LLAMA_API_KEY
+            contextWindow: ${env:LLAMA_CONTEXT_WINDOW:-32768}
+            defaultMaxTokens: 4096
+            # **Images, no audio, no uploads** — and each third of that is a
+            # departure from the row default, which describes OpenAI's endpoint.
+            #
+            # * **Audio is dropped.** This row defaults to the image *and* audio
+            #   families; llama.cpp needs an audio projector for `input_audio`
+            #   and most multimodal GGUFs have none. `/props` states its model's
+            #   answer — `"modalities":{"vision":true,"audio":false}` — and that
+            #   is the line to read before widening this.
+            # * **Images are kept**, even though a server started without
+            #   `--mmproj` will reject the request. The reverse default was
+            #   tried first and is worse: a text-only deployment never attaches
+            #   a picture, so it never meets this field, while a deployment that
+            #   *did* load a projector would get its photograph silently
+            #   downgraded to a text pointer — and the repair is a whole route
+            #   restated in `$PH_HOME/profiles/llama.yaml`, because an overlay
+            #   replaces a list rather than merging into it. An overlay that
+            #   trims `accepts` and forgets to restate `baseUrl` inherits this
+            #   row's default of `api.openai.com`, which is a local deployment
+            #   quietly calling a hosted provider.
+            #
+            #   And the downgrade is not merely quiet, it is *expensive*: with
+            #   `accepts: []` and a picture attached, the pointer told a
+            #   27B-parameter agent there was an image it could not see, and it
+            #   spent eighteen steps trying to look — `attach` twice, `glob`,
+            #   then `sips` to transcode the JPEG and hand-written zlib to
+            #   decode the PNG into ASCII art of the subject's silhouette. It
+            #   was still going when the run was killed. A pointer is an honest
+            #   answer to "this route cannot take media"; it is a *terrible*
+            #   prompt for a tool-using agent, and that is the load-bearing
+            #   reason this field errs toward claiming images.
+            #
+            #   So the pointer path is the one that has to be opted *into*:
+            #
+            #       # $PH_HOME/profiles/llama.yaml — a server with no --mmproj
+            #       - id: llm-llama
+            #         config:
+            #           profiles:
+            #             - provider: llama
+            #               baseUrl: ${env:LLAMA_BASE_URL:-http://127.0.0.1:9931/v1}
+            #               apiKeyEnv: LLAMA_API_KEY
+            #               accepts: []
+            #
+            # * **`uploads` stays at its empty default**, and must: there is no
+            #   `/files` endpoint here at all, so a MIME listed there would be
+            #   intersected away rather than referenced — see `_body`.
+            accepts: ["image/png", "image/jpeg", "image/gif", "image/webp"]

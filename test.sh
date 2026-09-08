@@ -29,6 +29,8 @@
 #   ./test.sh format --fix    the same, for the format gate alone
 #   ./test.sh test -k pattern anything after the gate goes to pytest
 #   ./test.sh test --cov      with coverage, as CI runs it
+#   ./test.sh smoke           the live local-server gate; needs llama-server up
+#   ./test.sh smoke -k cat    anything after this gate goes to pytest too
 #
 # Lint and format are *checks* by default rather than rewrites, because a command
 # whose name is "test" should not quietly edit your working tree while you are
@@ -368,6 +370,63 @@ EOF
   rm -f "$log"
 }
 
+# ------------------------------------------------------------------- the smoke gate --
+#
+# `tests/test_local_server.py` is the one file in this suite that talks to a real
+# model, and it skips itself unless `LLAMA_BASE_URL` is set. That is right for
+# `./test.sh` — a suite must not depend on a server somebody happens to have
+# running — and useless as a way to *run* it: exporting a variable to un-skip four
+# tests is a step nobody remembers, and it is not discoverable from `--help`.
+#
+# **The URL is read out of the profile the tests mount.** `llama.yaml` owns the
+# default port; this reads it back rather than restating it, because a second
+# literal here is how `./test.sh smoke` comes to probe a server the profile is not
+# pointed at — which is exactly the drift that motivated this gate. Comment lines
+# are stripped first: that document carries a worked overlay example with a
+# `baseUrl` in it, and matching the example instead of the setting would be the
+# same bug one layer down.
+SMOKE_TESTS="tests/test_local_server.py"
+SMOKE_PROFILE="packages/ph-app/src/ph_app/profiles/llama.yaml"
+
+profile_base_url() {
+  grep -v '^[[:space:]]*#' "$SMOKE_PROFILE" 2>/dev/null |
+    sed -n 's/.*baseUrl: *${env:LLAMA_BASE_URL:-\([^}]*\)}.*/\1/p' | head -1
+}
+
+gate_smoke() {
+  head1 "Smoke  (live local server)"
+  if [ -n "${LLAMA_BASE_URL:-}" ]; then
+    note "LLAMA_BASE_URL from the environment"
+  else
+    LLAMA_BASE_URL="$(profile_base_url)"
+    if [ -z "$LLAMA_BASE_URL" ]; then
+      bad "no baseUrl default in $SMOKE_PROFILE; export LLAMA_BASE_URL and retry"
+      FAILED_GATES+=("smoke")
+      return
+    fi
+    note "LLAMA_BASE_URL from $SMOKE_PROFILE"
+  fi
+  export LLAMA_BASE_URL
+  # A formality llama.cpp ignores unless it was started with `--api-key`, and a
+  # `MISSING_CREDENTIAL` refusal when absent. Defaulted for the reason the test's
+  # own fixture defaults it: the person already said which server.
+  export LLAMA_API_KEY="${LLAMA_API_KEY:-local}"
+  say "  ${DIM}$LLAMA_BASE_URL${RESET}"
+
+  # Asked before pytest, because "nothing is listening" is one sentence and a
+  # `ConnectError` raised inside a fixture is twenty lines of traceback.
+  local root="${LLAMA_BASE_URL%/}"
+  root="${root%/v1}"
+  if ! curl -fsS -m 5 "$root/health" >/dev/null 2>&1; then
+    bad "nothing answered $root/health"
+    note "start llama-server, or point LLAMA_BASE_URL at the one you meant"
+    FAILED_GATES+=("smoke")
+    return
+  fi
+  ok "$root answers /health"
+  gate_test "$SMOKE_TESTS" "$@"
+}
+
 # ------------------------------------------------------------------------ driver --
 
 main() {
@@ -376,8 +435,8 @@ main() {
   while [ $# -gt 0 ]; do
     case "$1" in
       --fix) FIX=1; shift ;;
-      -h|--help) sed -n '2,32p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
-      doctor|lint|format|types|test|all) gate="$1"; shift; args=("$@"); break ;;
+      -h|--help) sed -n '2,34p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+      doctor|lint|format|types|test|smoke|all) gate="$1"; shift; args=("$@"); break ;;
       *) args+=("$1"); shift ;;
     esac
   done
@@ -390,6 +449,10 @@ main() {
     format) gate_format ;;
     types)  gate_types ;;
     test)   report_env; gate_test "${args[@]+"${args[@]}"}" ;;
+    # No `report_env`: this gate's subject is a server, not this host's
+    # backends, and it is deliberately *not* part of `all` — a suite that needed
+    # llama-server running would be red on every machine that does not have it.
+    smoke)  gate_smoke "${args[@]+"${args[@]}"}" ;;
     all)
       report_env
       gate_lint

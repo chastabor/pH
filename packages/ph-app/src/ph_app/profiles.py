@@ -77,6 +77,10 @@ PROFILES: dict[str, tuple[Layer, ...]] = {
     # Real providers layer onto base; the fake adapter is deliberately absent so
     # a misconfigured key fails loudly instead of silently answering "ok".
     "deepseek": (BASE, PROFILE_DIR / "deepseek.yaml"),
+    # A server on localhost rather than a service, and the differences are in the
+    # document: one slot's window rather than the whole server's, and none of the
+    # media the hosted default claims.
+    "llama": (BASE, PROFILE_DIR / "llama.yaml"),
     "anthropic": (BASE, PROFILE_DIR / "anthropic.yaml"),
     "google": (BASE, PROFILE_DIR / "google.yaml"),
     "rlm": RLM_LAYERS,
