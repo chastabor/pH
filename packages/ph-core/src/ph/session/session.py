@@ -204,13 +204,24 @@ class Session:
             # replay or fork must not be able to construct a live log that no
             # backend could store — otherwise a bad seed surfaces later as a
             # flush rejection or, worse, as a silent divergence from disk.
-            for index, source in enumerate(seed):
-                event = _readmit(source, index)
+            #
+            # Through `admit`, which is that rule with a name on it: a seed event
+            # is already stamped, exactly like one arriving over a wire. Written
+            # inline here once, which made the rule two statements a screen apart
+            # — and this loop the copy without the docstring. The publish inside
+            # is a no-op here by construction: `_observers` is empty until the
+            # constructor returns, so nothing can be watching a session that does
+            # not exist yet.
+            for source in seed:
                 try:
-                    self._surface.validate_next(event)
+                    self.admit(source)
                 except ValueError as error:
-                    raise ValueError(f"invalid seed event at index {index}: {error}") from error
-                self._log.append(event)
+                    # The index the caller can act on. `_readmit` names it too, so
+                    # only the surface's errors gain it — theirs say what is wrong
+                    # with the event, this says which one.
+                    raise ValueError(
+                        f"invalid seed event at index {len(self._log)}: {error}"
+                    ) from error
 
         self.durable_length = durable
         """How many leading events a **store already holds**; 0 unless declared.
@@ -349,12 +360,6 @@ class Session:
         :raises SurfaceError: when the surface metadata is wrong for this type.
         :raises RuntimeError: when re-entered during publication.
         """
-        if self._publishing:
-            # A reentrant append would assign a seq inside another event's
-            # publication, so observers would see the log grow underneath them.
-            raise RuntimeError(
-                "session append cannot reenter while another append is being published"
-            )
         event = SessionEvent(
             type=event_type,
             seq=len(self._log),
@@ -364,10 +369,54 @@ class Session:
             surface_op=None if surface is None else surface.surface_op,
             ignorable=event_type in IGNORABLE_SESSION_EVENT_TYPES,
         )
-        # Validated BEFORE the push: a rejected candidate must leave both the
-        # log and the surface exactly as they were.
-        self._surface.validate_next(event)
+        return self._commit(event)
 
+    def admit(self, event: SessionEvent) -> SessionEvent:
+        """Append an event that already carries its `seq` and `time` — a replica's path.
+
+        `append` is for the process that *owns* a log: it mints the seq and stamps
+        the clock. A front end mirroring a daemon's session over the wire owns
+        nothing; it receives events the daemon already stamped and must keep them
+        as they are — re-stamping `time` would put this client's clock on the
+        daemon's record, and the trajectory's timings read `event.time`. So the
+        mirror admits rather than appends, and the mirror is a real `Session`: the
+        same surface fold, the same `stale()` check, the same `cursor_of` as the
+        log it copies, rather than a list of events rebuilt into a `Session` from
+        scratch at every read.
+
+        Held to the seed path's rules, through the seed path's function: `_readmit`
+        refuses a seq that is not the next index — a replica that skipped a frame
+        must stop rather than admit a log with a hole in it — and an unrecognized
+        required type. Then the surface is validated and the event published, the
+        same tail `append` uses, so an observer cannot tell which door an event
+        came through.
+
+        :raises ValueError: when `event.seq` is not `len(self)`, or its type is
+            unknown and not `ignorable`.
+        :raises SurfaceError: when the surface metadata is wrong for this type.
+        :raises RuntimeError: when re-entered during publication.
+        """
+        return self._commit(_readmit(event, len(self._log)))
+
+    def _commit(self, event: SessionEvent) -> SessionEvent:
+        """Validate against the surface, push, and publish — `append` and `admit`'s
+        one tail.
+
+        Validated BEFORE the push: a rejected candidate must leave both the log
+        and the surface exactly as they were.
+
+        The re-entrancy guard is here rather than on each door, because
+        `_publishing` is this method's own flag: a reentrant commit would land a
+        seq inside another event's publication, so observers would see the log
+        grow underneath them. Stated once, so a third door cannot arrive without
+        it — and so the two doors cannot disagree about the sentence, which they
+        briefly did.
+        """
+        if self._publishing:
+            raise RuntimeError(
+                "session append cannot reenter while another append is being published"
+            )
+        self._surface.validate_next(event)
         self._publishing = True
         try:
             self._log.append(event)

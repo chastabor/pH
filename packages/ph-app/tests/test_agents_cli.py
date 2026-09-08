@@ -171,10 +171,10 @@ async def test_since_skips_the_history_a_client_already_has(
     """A reattach is not a replay.
 
     The cursor a client resumes from is `{generation, sequence}`, and the
-    generation is what makes a bare sequence mean anything — so `--since` is
-    paged against the generation the *attach reply* just named rather than
-    against one this side invented, which the server would read as "you have
-    seen nothing" and answer with the whole log.
+    generation is what makes a bare sequence mean anything — so a bare `--since`
+    is stamped with the generation the *attach reply* just named. That is the
+    form a person types at a session they were just watching; the verifiable
+    form is the next test's.
     """
     async with _daemon(tmp_path, monkeypatch) as daemon:
         client = await daemon.client()
@@ -192,6 +192,103 @@ async def test_since_skips_the_history_a_client_already_has(
         assert rest.exit_code == 0, rest.output
         assert "the second thing" in rest.output
         assert "the first thing" not in rest.output
+        assert "history starts at" not in rest.output, "honoured, so nothing to report"
+
+
+async def test_a_full_cursor_is_verified_and_a_stale_one_skips_nothing(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """**The hole.** A bare `--since` was the only form, and it was stamped with the
+    *current* generation — so a sequence kept from another incarnation of the log
+    was honoured against this one, skipping events this reader had never seen.
+    That is precisely the case `resume_at` exists to refuse, defeated by the
+    caller handing it a fresh generation with a stale sequence.
+
+    Two things are pinned. The `GENERATION:SEQ` form goes through intact, so the
+    daemon can check it. And when the generation does not match, the fallback to 0
+    is *visible and lossless*: the whole log is shown and a line says so. It used
+    to be silent and lossy — `seen` was pre-set to `since - 1`, so the first `since`
+    events of the new incarnation were dropped as already seen.
+    """
+    async with _daemon(tmp_path, monkeypatch) as daemon:
+        client = await daemon.client()
+        await _ph("agents", "send", "kept", "the first thing")
+        await _ph("agents", "attach", "kept", "--until-idle")
+        cursor = obj((await client.call("session/status", sessionId="kept"))["cursor"])
+        await _ph("agents", "send", "kept", "the second thing")
+
+        right = await _ph(
+            "agents",
+            "attach",
+            "kept",
+            "--since",
+            f"{cursor['generation']}:{cursor['sequence']}",
+            "--until-idle",
+        )
+        assert right.exit_code == 0, right.output
+        assert "the second thing" in right.output
+        assert "the first thing" not in right.output, "a verified cursor resumes where it says"
+        assert "history starts at" not in right.output
+
+        stale = await _ph(
+            "agents", "attach", "kept", "--since", f"1:{cursor['sequence']}", "--until-idle"
+        )
+        assert stale.exit_code == 0, stale.output
+        assert "the first thing" in stale.output, "another incarnation: nothing is skipped"
+        assert "the second thing" in stale.output
+        assert "history starts at 0" in stale.output, "and the fallback is said, not hidden"
+
+
+async def test_status_prints_the_cursor_attach_can_take_back(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """The two halves of a cursor were printed as two rows a script would have to
+    reassemble; the `resume with` row is the one form `--since` can verify."""
+    async with _daemon(tmp_path, monkeypatch):
+        await _ph("agents", "send", "shown", "hello")
+        await _ph("agents", "attach", "shown", "--until-idle")
+
+        shown = await _ph("agents", "status", "shown")
+
+        assert shown.exit_code == 0, shown.output
+        assert "resume with" in shown.output
+        assert "--since " in shown.output
+        # Generation and sequence, joined the way the parser splits them.
+        import re
+
+        assert re.search(r"--since \d+:\d+", shown.output), shown.output
+
+
+def test_the_since_parser_stamps_a_bare_sequence_and_keeps_a_full_cursor() -> None:
+    """The parse is the protocol's, beside `cursor_of` and `resume_at` which define
+    what a cursor is; `rpartition(":")` is unambiguous because the generation is an
+    integer timestamp. `None` for anything that is not two integers — what to do
+    about that is the caller's, and for the CLI it is exit 2."""
+    from ph_app.protocol import cursor_text, parse_cursor
+
+    current = {"generation": "1700000000000", "sequence": 40}
+    assert parse_cursor("7", current) == {"generation": "1700000000000", "sequence": 7}
+    assert parse_cursor("42:7", current) == {"generation": "42", "sequence": 7}
+    assert parse_cursor("0", current)["sequence"] == 0, "a real position, not a default"
+    for bad in ("seven", "a:7", "7:b", ":", "1:2:3x"):
+        assert parse_cursor(bad, current) is None, bad
+
+    # And the printed form round-trips through it, which is why the two live together.
+    assert cursor_text({"generation": "42", "sequence": 7}) == "42:7"
+    assert parse_cursor(cursor_text(current), {}) == {"generation": "1700000000000", "sequence": 40}
+
+
+def test_the_cli_refuses_an_unparseable_since_with_exit_two() -> None:
+    """The refusal is the command's, not the parser's — the same split
+    `selectors_or_exit` makes one module over."""
+    import typer
+
+    from ph_app.agents import _since_cursor
+
+    assert _since_cursor("7", {"generation": "9"}) == {"generation": "9", "sequence": 7}
+    with pytest.raises(typer.Exit) as refused:
+        _since_cursor("seven", {"generation": "9"})
+    assert refused.value.exit_code == 2
 
 
 async def test_agents_lists_every_root_the_daemon_is_running(
@@ -564,6 +661,80 @@ async def test_the_follower_shows_each_event_once_and_in_the_log_s_order(
     assert "turn/end" not in printed, "seq 3 was already in a snapshot page"
     assert printed.count("turn/start") == 1
     assert "9" not in printed, "another session's frames are not this follow's"
+
+
+async def test_attach_reads_the_status_it_was_handed_rather_than_asking_again(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """**The round trip is gone, and that is the point of `Followed.seed`.**
+
+    The attach reply is `root.describe()` plus the footer — the same shape
+    `session.status` sends — so it already carries `status` and `lastTurn`. The
+    command used to call `session/status` for them anyway, on the one path where a
+    root was idle before the attach landed. Asserted by watching what the client
+    actually sends, because "we no longer need it" is the kind of claim that
+    quietly stops being true.
+    """
+    from ph_app.daemon.client import DaemonClient
+
+    called: list[str] = []
+    original = DaemonClient.call
+
+    async def recording(self: Any, method: str, **params: Any) -> Any:
+        called.append(method)
+        return await original(self, method, **params)
+
+    monkeypatch.setattr(DaemonClient, "call", recording)
+    async with _daemon(tmp_path, monkeypatch):
+        assert (await _ph("agents", "send", "asked", "answer me")).exit_code == 0
+        called.clear()
+
+        followed = await _ph("agents", "attach", "asked", "--until-idle")
+
+        assert followed.exit_code == 0, followed.output
+        assert "session/attach" in called
+        assert "session/status" not in called, f"asked for what it was handed: {called}"
+
+
+def test_the_attach_reply_is_the_first_status_and_stops_an_already_idle_root(
+    capsys: Any,
+) -> None:
+    """A root idle *before* the attach announces nothing afterwards, so the reply is
+    the only status this feed will ever see.
+
+    Losing it is how `--until-idle` came to hang on a finished root, and reading it
+    outside `_status` is how the same outcome came to print differently depending on
+    which side of a race the host landed on. One entry point, one decision.
+
+    Held against the class because the end-to-end version is the race: the fake
+    adapter answers in microseconds, so a real turn is usually finished before the
+    attach and the *other* branch is the one that never runs.
+    """
+    from ph_app.agents import _Follow
+
+    follow = _Follow(session_id="s", until_idle=True)
+    reply = {"sessionId": "s", "status": "idle", "lastTurn": "error", "cursor": {}}
+
+    follow.feed.seed(reply)
+
+    assert follow.done.is_set(), "an already-idle root releases the wait"
+    assert follow.last_turn == "error", "and carries the reason the exit code needs"
+    printed = capsys.readouterr().out
+    assert "idle" in printed and "last turn error" in printed, printed
+
+
+def test_a_busy_root_is_seeded_without_ending_the_follow(capsys: Any) -> None:
+    """The other half, for `probe_sandbox`'s reason: a seed that always stopped the
+    follow would pass the test above while making `attach` useless. The reply is
+    still printed — a person is told what they attached to — and the wait stands."""
+    from ph_app.agents import _Follow
+
+    follow = _Follow(session_id="s", until_idle=True)
+
+    follow.feed.seed({"sessionId": "s", "status": "busy", "lastTurn": None, "cursor": {}})
+
+    assert not follow.done.is_set()
+    assert "busy" in capsys.readouterr().out
 
 
 def test_a_followed_line_says_what_the_event_says() -> None:

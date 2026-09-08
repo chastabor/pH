@@ -1252,6 +1252,56 @@ Nothing in `Session` can rewrite an event: `data` is frozen through
 append during publication raises rather than assigning a seq inside another
 event's publication.
 
+#### Readers of the log have one shape
+
+Because the log is append-only, `session.seq` is an exact invalidation key: if
+the log has not grown, no fold over it can have changed. Every reader in pH is
+therefore the same three things — a **state**, a **step** that folds one more
+event into it, and a **canonical replay** over the whole prefix that the steps must
+agree with — and `SessionFoldCache` (`session/folds.py`) is that shape with the
+cache attached: `compute` is the replay, `extend` the step, and the key is `seq`.
+Eight rows hold their projection in one: the subagent roster, goals, schedules,
+the harness state, the limits, the sandbox refusals.
+
+Three readers live *inside* `Session` and are its own, and `Session.stale()` checks
+exactly those three against their replays (I6): the **events snapshot** against the
+log's length, the **surface order** (`SurfaceManager`) against `fold_surface`, and
+**`derive_messages`** against a fresh derivation over the canonical nodes. A fourth
+kind is there and is *not* checked — the latest-of-type folds (`_LatestFold`, behind
+`request_header()`, `request_context()` and `latest()`), whose replay `fold_latest`
+exists but is compared nowhere. Named as the known exception rather than counted
+among the checked, because the claim this section makes is precisely that a reader
+has a replay its steps are held to.
+They are inside rather than cached beside for the reason `folds.py` gives for
+keeping everyone else *out*: a fold attached to a live session is monotonic in that
+log and cannot answer for an earlier prefix, and forking at a boundary and viewing a
+stored file both need exactly that.
+
+One reader is deliberately outside this: `TuiEventAdapter` has a state and a step,
+but **no canonical replay to be checked against**, and cannot have one. Two of the
+inputs its steps consume are not in the log — `Frame.view` is a card the daemon
+rendered beside the event, and `Frame.live` selects between two deliberately
+different foldings (a replay reads `assistant/message` and ignores the chunks a
+live fold streams). `replay()` is therefore a *different* fold, not a check on
+`apply`, and the same fact is why the adapter stays off `SessionFoldCache`, whose
+one requirement is a pure fold of the log prefix. `build_trajectory` is a full fold
+per open for a different reason: `fork_boundaries` runs over the whole log, and an
+incremental version would have to reproduce it over a slice.
+
+**The TUI over a socket is a reader too, and it is now the same reader.** A remote
+front end keeps a real `Session` and `admit`s each wire event into it as it arrives
+— the daemon's own `seq` and `time`, held to the seed path's contiguity rule and the
+surface's validation, published to observers through the tail `append` uses. It
+used to keep a list and rebuild `Session(seed=…)` from it on every screen open,
+re-validating the whole log and growing a `session/end-seed` marker the daemon's
+log does not have. The generation from the `session/new` reply keys the
+mirror at construction, so `cursor_of` gives the same answer on both ends,
+`stale()` runs on the client, and any `SessionFoldCache` consumer can be pointed at
+the mirror unchanged. Because the mirror is kept incrementally, a frame it cannot
+take desynchronises it silently where the rebuild used to refuse loudly — so
+`diverged` is a fact the screen path asks about rather than a counter that only
+quietens a log line.
+
 ### I5 — Seams have three roles
 
 **Mechanism and its limits: §3.** The design statement is Definition + Provider +

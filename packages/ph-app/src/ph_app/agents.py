@@ -45,7 +45,7 @@ from ph.selectors import Selector, matches_any
 from .console import TypeOption, console, fail, section, selectors_or_exit
 from .daemon.client import DaemonClient, Exchange, connected
 from .daemon.follow import Followed, first_of
-from .protocol import DaemonError, DaemonGone
+from .protocol import DaemonError, DaemonGone, cursor_text, parse_cursor
 from .wire import describe, message_of, obj, one_line, result_block, seq, text_of_wire
 
 __all__ = ["agents_app"]
@@ -271,6 +271,23 @@ the silent omission the fallback in `_summary` exists to prevent.
 """
 
 
+def _since_cursor(raw: str, current: Mapping[str, Any]) -> dict[str, Any]:
+    """`--since` as a cursor the daemon can check, or exit 2.
+
+    The parse is `ph_app.protocol.parse_cursor`, beside `cursor_of` and
+    `resume_at` which define what a cursor is; what is the CLI's own is the
+    refusal, and its code.
+    """
+    cursor = parse_cursor(raw, current)
+    if cursor is None:
+        fail(
+            f"[red]--since {raw!r} is not a cursor; use SEQ or GENERATION:SEQ as "
+            "`ph agents status` prints it[/red]",
+            code=2,
+        )
+    return cursor
+
+
 @dataclass(slots=True)
 class _Follow:
     """One attached session as the CLI prints it, over `Followed`.
@@ -289,7 +306,10 @@ class _Follow:
     """How the turn this stopped on ended, so the exit code can say (P5-04).
 
     Kept because the status that *releases* `--until-idle` is the only one that
-    decides the exit code, and it has gone by the time the wait returns.
+    decides the exit code, and it has gone by the time the wait returns. Set in
+    `_status` and nowhere else — including for a root that was already idle when
+    the attach landed, whose only status is the attach reply `Followed.seed`
+    delivers through the same handler.
     """
     done: anyio.Event = field(default_factory=anyio.Event)
     feed: Followed = field(init=False)
@@ -403,8 +423,12 @@ def send(
 def attach(
     session: Annotated[str, SESSION_ARGUMENT],
     since: Annotated[
-        int, typer.Option("--since", help="Skip history up to this sequence number.")
-    ] = 0,
+        str,
+        typer.Option(
+            "--since",
+            help="Resume from a cursor: SEQ for this log, or GENERATION:SEQ as `status` prints it.",
+        ),
+    ] = "0",
     until_idle: Annotated[
         bool,
         typer.Option(
@@ -428,6 +452,16 @@ def attach(
     `assistant/chunk`, whose content arrives again as the `assistant/message`
     that closes it, so showing both is a keystroke log wrapped around the thing
     a person came to read.
+
+    **`--since` resumes a reader that already has part of the log.** A cursor is
+    `{generation, sequence}`, and a sequence means something only against the log
+    that counted it. The full form, `GENERATION:SEQ`, is what `ph agents status`
+    prints and what a script should pass back — the daemon checks the generation
+    and, for another incarnation of the log, pages from 0 rather than skipping
+    events this reader never saw. The bare `SEQ` form is for a person typing at a
+    session they were just watching: it is stamped with the *current* generation
+    and so cannot be checked. Either way the command says where the history
+    actually started when that is not where it was asked to.
 
     **`--until-idle` exits 1 when the turn it stopped on ended in an error.**
     Idle is how a root that answered and a root whose last answer failed both
@@ -458,31 +492,27 @@ def attach(
         # carries, so `from` is 0 here by construction and catch-up is paged from
         # `--since` against the generation the daemon just named.
         attached = await client.call("session/attach", sessionId=session, cursor=None)
-        cursor = {**obj(attached["cursor"]), "sequence": since}
+        cursor = _since_cursor(since, obj(attached["cursor"]))
+        # The reply *is* a status frame, and for a root that was already idle it is
+        # the only one there will ever be — so it goes through the feed rather than
+        # being read here. `_status` is then the single place that decides "idle
+        # means done", and this command has no `--until-idle` branch of its own.
+        follow.feed.seed(attached)
         try:
-            # `since` is the sequence to start *at*, so what has been "seen" is
-            # everything below it — `- 1`, because seq 0 is a real event and
-            # `--since 0` must still print it.
-            follow.feed.seen = since - 1
-            await follow.feed.catch_up(client, cursor)
+            # `seen` is *not* pre-set to `asked - 1`. It used to be, so that live
+            # frames below the cursor would be dropped — but nothing live can
+            # arrive below the head, and the pre-set had a real cost: when the
+            # daemon answered a stale generation by paging from 0, the first
+            # `asked` events of *this* incarnation were discarded as already
+            # seen. Advancing from what arrives shows the fallback instead.
+            started = await follow.feed.catch_up(client, cursor)
+            if started < int(cursor["sequence"]):
+                console.print(
+                    f"[yellow]history starts at {started}, not {cursor['sequence']}: --since "
+                    "named a different incarnation of this log, so nothing was "
+                    "skipped[/yellow]"
+                )
             follow.feed.live()
-            if until_idle and not follow.done.is_set():
-                # One check, after the replay: a root that went idle *during*
-                # catch-up announced it into `pending` and has just been drained,
-                # and one that was already idle before the attach never announced
-                # anything at all. Without this the second case waits forever.
-                #
-                # Through `_status`, so the two cases print the same thing. This
-                # used to set `last_turn` and `done` by hand, which stopped the
-                # command correctly and silently: the `· idle · last turn error`
-                # line — the one `_status` documents as "what --until-idle stops
-                # on" — was printed only when the status arrived live. Which case
-                # a run landed in was a race between the turn failing and the
-                # attach arriving, won differently on macOS and Linux, so the
-                # same outcome produced different output depending on the host.
-                current = await client.call("session/status", sessionId=session)
-                if current["status"] == "idle":
-                    follow._status(current)
             await first_of(follow.done, client.closed)
         finally:
             # Only while there is somebody to tell. A daemon that shut down under
@@ -601,6 +631,9 @@ def status(session: Annotated[str, SESSION_ARGUMENT]) -> None:
                 ("status", str(row["status"])),
                 ("events", str(cursor.get("sequence", ""))),
                 ("generation", str(cursor.get("generation", ""))),
+                # The two above in the one form `attach --since` can verify, spelled
+                # by the module that defines what a cursor is.
+                ("resume with", f"--since {cursor_text(cursor)}"),
                 ("watchers", str(row["watchers"])),
                 ("retry attempts", str(row["attempts"])),
                 ("given up", "yes" if row["failed"] else "no"),

@@ -30,8 +30,10 @@ from tui_helpers import StubHost
 from ph.seams.user_questions import UserQuestion
 from ph.testing import StubAgent
 from ph_app.daemon.follow import Followed
+from ph_app.tui.adapter import TuiEventAdapter
 from ph_app.tui.commands import TUI_VERBS
-from ph_app.tui.remote import attach_session
+from ph_app.tui.remote import DaemonSession, attach_session
+from ph_app.tui.state import TuiState
 
 pytestmark = pytest.mark.anyio
 
@@ -85,6 +87,90 @@ async def test_a_front_end_attaching_to_a_finished_turn_rebuilds_it_exactly(
         second, _ = await _front(daemon, "shared")
 
         assert [(item.role, item.text) for item in second.state.items] == before
+
+
+async def test_the_front_ends_log_is_a_live_mirror_not_a_rebuild(tmp_path: Path) -> None:
+    """**The TUI is a log reader of the same shape as the daemon's (P6-44).**
+
+    It used to hold a list of events and rebuild `Session(seed=…)` from it on every
+    screen open — re-validating the whole log each time, and with a
+    `session/end-seed` marker on the end that the daemon's log does not have. Now
+    it keeps one `Session` and admits each event as it arrives, so the object a
+    screen builds from is the same object across a turn, holds exactly what the
+    daemon holds, and passes the same `stale()` check the daemon's own log does.
+    """
+    from ph_app.protocol import cursor_of
+
+    async with running(tmp_path) as daemon:
+        front, _ = await _front(daemon, "mirror")
+        before = front.session
+        await front.submit("hello")
+        root = await daemon.root("mirror")
+
+        assert front.session is before, "one session, extended — not rebuilt"
+        assert front.session.seq == root.session.seq
+        assert [e.type for e in front.session.events] == [e.type for e in root.session.events]
+        assert front.session.stale() == [], "the client's incremental fold agrees with its replay"
+        # The daemon's own timestamps, not this client's clock.
+        assert [e.time for e in front.session.events] == [e.time for e in root.session.events]
+        # Keyed to the daemon's generation by `begin`, so a cursor made here is one
+        # `resume_at` will honour rather than treat as another log's.
+        assert cursor_of(front.session) == cursor_of(root.session)
+
+
+def test_the_generation_is_a_constructor_argument_not_a_later_setter() -> None:
+    """The mirror is keyed at birth, so there is no window in which it is not.
+
+    `session/new` answers with this root's cursor *before* the front end is built,
+    so the generation is in hand at construction. It arrived as a `begin()` that
+    swapped the `Session` afterwards and raised if anything had been admitted
+    first — a runtime guard against an ordering that need not exist, which is the
+    shape `Session.durable_length`'s own docstring rejects for itself. A value the
+    type cannot be built without is one nobody can get wrong.
+    """
+    front = DaemonSession(
+        client=None,  # type: ignore[arg-type]
+        session_id="k",
+        state=TuiState(),
+        adapter=TuiEventAdapter(state=TuiState()),
+        host=StubHost(),
+        generation=1_700_000_000_000,
+    )
+
+    assert front.session.header.created_at == 1_700_000_000_000
+    assert not hasattr(front, "begin"), "no second phase to forget"
+    # Driven without a daemon, it still has a valid session of its own.
+    bare = DaemonSession(
+        client=None,  # type: ignore[arg-type]
+        session_id="k",
+        state=TuiState(),
+        adapter=TuiEventAdapter(state=TuiState()),
+        host=StubHost(),
+    )
+    assert bare.session.seq == 0
+
+
+def test_a_mirror_that_missed_a_frame_says_so_rather_than_serving_a_prefix() -> None:
+    """Either refusal desynchronises the mirror permanently — a skipped frame makes
+    every later seq non-contiguous — so `diverged` is the fact, and the screen path
+    is what must ask. Under the rebuild this replaced, the same skip refused loudly
+    at screen-open time; keeping the mirror incrementally moved the refusal earlier,
+    and this is what keeps it from becoming silent."""
+
+    front = DaemonSession(
+        client=None,  # type: ignore[arg-type]
+        session_id="d",
+        state=TuiState(),
+        adapter=TuiEventAdapter(state=TuiState()),
+        host=StubHost(),
+    )
+    assert not front.diverged
+
+    # seq 1 with nothing at seq 0: the hole a dropped frame leaves.
+    front._apply([({"type": "turn/start", "seq": 1, "time": 1, "data": {}}, None)], True)
+
+    assert front.diverged, "the mirror knows it is short"
+    assert front.session.seq == 0, "and did not admit a log with a gap"
 
 
 async def test_an_event_arriving_on_both_routes_is_folded_once() -> None:

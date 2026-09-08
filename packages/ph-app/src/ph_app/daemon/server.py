@@ -697,6 +697,12 @@ class _Connection:
             "sessionId": session_id,
             "events": events,
             "presentations": presentations,
+            # Where the read actually began, which is not always where the cursor
+            # asked: `resume_at` answers a cursor from another incarnation of the
+            # log with 0. Sent rather than left to be inferred from the first
+            # event's seq — that inference is `None` for an empty page, and
+            # `resume_at`'s own docstring already promises the client will be told.
+            "from": start,
             "cursor": cursor_of(root.session, start + len(events)),
             "more": start + len(events) < root.session.seq,
         }

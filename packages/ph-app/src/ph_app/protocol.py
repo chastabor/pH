@@ -33,7 +33,9 @@ __all__ = [
     "SeamAbsent",
     "capabilities",
     "cursor_of",
+    "cursor_text",
     "notification",
+    "parse_cursor",
     "request",
     "respond",
     "result_of",
@@ -206,6 +208,42 @@ def cursor_of(session: Any, sequence: int | None = None) -> dict[str, Any]:
         "generation": str(session.header.created_at),
         "sequence": session.seq if sequence is None else sequence,
     }
+
+
+def cursor_text(cursor: Any) -> str:
+    """A cursor as `GENERATION:SEQ` — the form a person or a script hands back.
+
+    Beside `cursor_of` for `cursor_of`'s own stated reason: the shape is a fact
+    about a session, not about one transport or one command, and the printed form
+    is the same fact spelled for a terminal. It lived as an f-string in the CLI's
+    status table and a `rpartition` in its option parser, 350 lines apart, with
+    nothing tying the two.
+    """
+    fields = cursor if isinstance(cursor, dict) else {}
+    return f"{fields.get('generation', '')}:{fields.get('sequence', '')}"
+
+
+def parse_cursor(text: str, current: Any) -> dict[str, Any] | None:
+    """`GENERATION:SEQ` or a bare `SEQ`, as a cursor — or `None` if it is neither.
+
+    Two spellings, and only one of them can be checked. The full form is a cursor
+    a reader kept from an earlier read, passed through intact so `resume_at` can
+    refuse it when the log has since been forked or rebuilt. A bare sequence is
+    stamped with `current`'s generation — the only thing that makes a typed number
+    mean anything, and exactly what makes it unverifiable.
+
+    `generation` is `SessionHeader.created_at`, an integer, so the split is
+    unambiguous. `None` rather than a raise: what to do about an unparseable
+    cursor is the caller's — the CLI exits 2, and a front end reading a stored
+    position would rather start from the beginning than fail to open.
+    """
+    generation, separator, sequence = text.rpartition(":")
+    if not separator:
+        fields = current if isinstance(current, dict) else {}
+        generation, sequence = str(fields.get("generation", "")), text
+    if not (sequence.isdigit() and generation.isdigit()):
+        return None
+    return {"generation": generation, "sequence": int(sequence)}
 
 
 def resume_at(session: Any, cursor: Any) -> int:

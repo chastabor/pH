@@ -21,12 +21,21 @@ the harness's. Each remote verb is a `CommandDefinition` whose `run` sends
 `session/command`, so `run_command` finds a name and calls `run` without knowing
 which side owns it.
 
-**The `Session` is rebuilt from the log, on demand.** Only one thing wants it:
-`ScreenDefinition.build(session)` when somebody opens a screen. `Session` has no
-way to admit an already-numbered event, and inventing one to make a client-side
-mirror writable would be a second append path into the type whose whole contract
-is that appends are its own. The id is on the protocol separately so the sidebar
-never asks for the whole thing.
+**The `Session` is a mirror, extended as events arrive.** Only one thing wants it:
+`ScreenDefinition.build(session)` when somebody opens a screen — but it is kept
+whole and incrementally, not rebuilt on demand.
+
+That is a reversal, and the objection it had to answer is worth keeping: *"`Session`
+has no way to admit an already-numbered event, and inventing one would be a second
+append path into the type whose whole contract is that appends are its own."* The
+answer is that `admit` is not a second append path. It shares `_commit` with
+`append`, so the surface validation, the push and the publish are one tail and an
+observer cannot tell the two doors apart; what differs is only who stamped the
+event, which is the whole distinction between owning a log and mirroring one.
+Rebuilding instead cost a full `Session(seed=…)` — every event re-frozen and
+re-validated — per screen open, and grew a `session/end-seed` marker the daemon's
+log does not have. The id is on the protocol separately so the sidebar never asks
+for the whole thing.
 
 **A screen's `build` is the one thing that cannot travel**, which
 `ScreenDefinition` already says. Each screen pH ships exports a `CLIENT_SIDE`
@@ -58,7 +67,7 @@ from ph.seams.commands import CommandDefinition, CommandSchema, parse_command_li
 from ph.seams.tui_screens import ScreenDefinition, ScreenSchema
 from ph.seams.tui_status import StatusReading
 from ph.seams.user_questions import UserQuestion
-from ph.session import Session, SessionEvent
+from ph.session import Session, SessionEvent, SessionHeader
 
 from ..attach import Tray, stage_bytes
 from ..daemon.client import DaemonClient
@@ -102,10 +111,35 @@ class DaemonSession:
     _verbs: list[CommandDefinition] = field(default_factory=list)
     _keys: list[Callable[[], Any]] = field(default_factory=list)
     _unreadable: int = 0
-    """Frames this client could not rebuild. Counted so the warning is one."""
-    _log: list[SessionEvent] = field(default_factory=list)
-    _session: Session | None = None
-    _built_from: int = -1
+    """Frames this client could not rebuild **or admit**. Counted so the warning is
+    one — and read as a fact, not only as a log-quietener: see `diverged`."""
+    generation: int | None = None
+    """The daemon session's `created_at`, from the `session/new` reply.
+
+    **A constructor argument rather than a setter**, for the reason
+    `Session.durable_length`'s own docstring gives about itself: an ordering
+    constraint policed at runtime is one a reader has to learn, and a value the
+    type cannot be built without is one nobody can get wrong. This was a `begin()`
+    that replaced `session` after construction and raised if anything had been
+    admitted first — a guard against a window that need not exist, since
+    `session/new` answers with the cursor before this object is built.
+
+    `None` only where no daemon said otherwise: a headless test driving this
+    directly gets a session with a generation of its own."""
+    session: Session = field(init=False)
+    """This client's mirror of the daemon's log — **a `Session`, kept incrementally.**
+
+    The daemon rehydrates a root once from its store and then appends; this used to
+    keep a bare list of events and rebuild `Session(seed=…)` from it on every read,
+    which re-validated the whole log each time and grew a `session/end-seed` marker
+    the daemon's log does not have. Now each event is `admit`ted as it arrives, so
+    the mirror is the same type as what it mirrors, with the same surface fold, the
+    same `stale()` check available to this client, and — once `begin` has keyed the
+    header to the attach reply's generation — the same `cursor_of` as the daemon's
+    own. A screen built from it reads a live log rather than a copy.
+
+    A placeholder until `begin`: valid and empty, with a generation of its own, so a
+    front end driven without an attach reply still has a session to build on."""
     _readings: list[StatusReading] = field(default_factory=list)
     _moved: anyio.Event = field(default_factory=anyio.Event)
     """Set and replaced whenever the root's status changes — a wake-up for
@@ -117,6 +151,12 @@ class DaemonSession:
     looking at one conversation must see one composer."""
 
     def __post_init__(self) -> None:
+        header = (
+            None
+            if self.generation is None
+            else SessionHeader(id=self.session_id, created_at=self.generation)
+        )
+        self.session = Session(self.session_id, header=header)
         self.feed = Followed(
             session_id=self.session_id, on_events=self._apply, on_status=self._status
         )
@@ -124,18 +164,45 @@ class DaemonSession:
     # -------------------------------------------------------------- the log --
 
     @property
-    def session(self) -> Session:
-        """The log as a `Session`, rebuilt when it has grown.
+    def diverged(self) -> bool:
+        """Whether this mirror has stopped matching the daemon's log.
 
-        Keyed on the length this was built *from*, not on the built session's
-        own length: `Session(seed=…)` appends a `session/end-seed` marker, so
-        comparing the two lengths never matched and the cache never hit.
+        Either refusal desynchronises it permanently: a frame that will not rebuild
+        is skipped, so the next `admit` meets a seq that is no longer next and
+        refuses too, and every frame after it. The mirror is then a *prefix* of the
+        daemon's log with no way to tell how short.
+
+        A fact a consumer reads rather than a counter that only quietens logs.
+        Under the code this replaced, the same skip surfaced loudly and late —
+        `Session(seed=…)` refused a non-contiguous log the next time a screen
+        opened, which is how a past instance of it was found. Keeping the mirror
+        incrementally means nothing refuses later, so the divergence has to be
+        *asked about* at the one place that builds from the log.
         """
-        if self._built_from != len(self._log):
-            self._session = Session(self.session_id, seed=self._log)
-            self._built_from = len(self._log)
-        assert self._session is not None
-        return self._session
+        return self._unreadable > 0
+
+    def _unread(self, message: str, *args: Any) -> None:
+        """Record a frame this client could not take, loudly once.
+
+        **Loud once, then quiet.** A frame that will not rebuild is a protocol
+        mismatch between this client and its daemon, and twice now the silent
+        version of this hid a real defect — an extra key `_EventWire` forbids, and
+        a dropped seq — by turning "the transcript is wrong" into "the transcript
+        is empty" with nothing to say why. But a mismatch is *systematic*: it fails
+        for every chunk of a streaming turn, and formatting a traceback per chunk
+        on the read loop that also drives redraws costs more than the diagnosis is
+        worth. One is the diagnosis.
+
+        One method because there are two ways to fail and one policy: the second
+        arrived as a copy of the first, and a third would have been a third copy.
+        """
+        log.log(
+            logging.WARNING if not self._unreadable else logging.DEBUG,
+            message,
+            *args,
+            exc_info=not self._unreadable,
+        )
+        self._unreadable += 1
 
     def _apply(self, events: Sequence[tuple[Mapping[str, Any], Any]], live: bool) -> None:
         """Fold a run of wire events into the transcript and this client's log.
@@ -146,23 +213,21 @@ class DaemonSession:
             try:
                 event = SessionEvent.from_wire(wire)
             except Exception:
-                # **Loud once, then quiet.** A frame that will not rebuild is a
-                # protocol mismatch between this client and its daemon, and twice
-                # now the silent version of this line hid a real defect — an
-                # extra key `_EventWire` forbids, and a dropped seq — by turning
-                # "the transcript is wrong" into "the transcript is empty" with
-                # nothing to say why. But a mismatch is *systematic*: it fails
-                # for every chunk of a streaming turn, and formatting a traceback
-                # per chunk on the read loop that also drives redraws costs more
-                # than the diagnosis is worth. One is the diagnosis.
-                log.log(
-                    logging.WARNING if not self._unreadable else logging.DEBUG,
-                    "ph_app.tui: a frame would not rebuild as an event",
-                    exc_info=not self._unreadable,
-                )
-                self._unreadable += 1
+                self._unread("ph_app.tui: a frame would not rebuild as an event")
                 continue
-            self._log.append(event)
+            try:
+                # The mirror keeps the daemon's stamps and refuses a hole: a
+                # frame that would not rebuild above has already been skipped, so
+                # the next seq no longer matches and the mirror stops there rather
+                # than admitting a log with a gap in it.
+                self.session.admit(event)
+            except ValueError:
+                self._unread(
+                    "ph_app.tui: the mirror refused seq %s; it stops at %s",
+                    event.seq,
+                    self.session.seq,
+                )
+                continue
             try:
                 # `view_of` at the wire edge, so the fold is handed a type rather
                 # than a mapping it would have to distrust; `tools` stays `None`
@@ -467,9 +532,15 @@ async def attach_session(
     await client.initialize("asks")
     # `trust` is the person's answer, which this client asked for and the daemon
     # enforces — it refuses a `cwd` nobody has vouched for (P5-14).
-    await client.call(
+    # The reply carries this root's cursor, and so its generation — which is what
+    # keys the mirror below. Read rather than discarded: `created_at` is stable
+    # across a resume (`cursor_of` says so), so the number here is the one the
+    # attach reply will name, and taking it now is what lets the mirror be built
+    # whole instead of re-keyed afterwards.
+    created = await client.call(
         "session/new", sessionId=session_id, cwd=str(cwd) if cwd else None, trust=trust
     )
+    generation = str(obj(created.get("cursor")).get("generation", ""))
 
     replies: dict[str, dict[str, Any]] = {}
 
@@ -496,12 +567,15 @@ async def attach_session(
             for one in seq(replies["commands/list"].get("commands"))
         ],
         screens=_screens_of(seq(replies["screens/list"].get("screens"))),
+        generation=int(generation) if generation.isdigit() else None,
     )
     client.peer.on_notify = front.dispatch
     # The attach reply carries the status, the route and the footer, so this is
     # the one frame the front end starts from.
     attached = await client.call("session/attach", sessionId=session_id)
-    front._status(attached)
+    # Through the feed, which owns the rule that this reply is the first status
+    # frame — the CLI reached for it separately and got a different answer.
+    front.feed.seed(attached)
     # The attach reply's **cursor**, wound back to the start — not its `from`,
     # which is the *index* the live stream begins at and is not a cursor at all.
     # Passing it as one cost the client seq 0 of every session: `session/snapshot`

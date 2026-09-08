@@ -549,6 +549,21 @@ class PHTuiApp(App[str | None]):
                 markup=False,
             )
             return
+        if getattr(front, "diverged", False):
+            # A screen is built from this client's mirror of the log, and a mirror
+            # that refused a frame is a *prefix* with no way to tell how short. Said
+            # rather than drawn: the old code rebuilt the session here and a
+            # non-contiguous log refused loudly at exactly this point, which is how
+            # the last instance of this was found. Keeping the mirror incrementally
+            # moved the refusal earlier, so this is where it has to be asked about.
+            self.notify(
+                "this client missed part of the log, so a screen built from it would "
+                "be incomplete — reattach to rebuild it",
+                title="screen",
+                severity="warning",
+                markup=False,
+            )
+            return
         screen = definition.build(front.session)
         if isinstance(screen, Revealing) and self._view is not None:
             # Opened where the reader is, when the screen can take a position.

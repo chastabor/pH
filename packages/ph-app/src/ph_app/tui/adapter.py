@@ -17,6 +17,22 @@ Feeding chunks on replay would rebuild a message the log already has one delta a
 a time, and any chunk lost to a crash would leave the transcript disagreeing with
 the log.
 
+**This is a log reader with a state and a step, and — alone among pH's readers —
+no canonical replay to be checked against.** Every other one has a pure fold of
+the prefix that its incremental steps must agree with: `SessionFoldCache`'s
+`compute` against its `extend`, `fold_surface` against `SurfaceManager`. This
+cannot, because two of the inputs its steps consume are not in the log. `Frame.view`
+is a card the *daemon* rendered beside the event, and `Frame.live` selects between
+two deliberately different foldings — a replay reads `assistant/message` and ignores
+the chunks a live fold streams, as the modes above say. So `replay` is a second fold
+rather than a check on `apply`, and the same fact is why this stays off
+`SessionFoldCache`, whose one requirement is a pure fold of the prefix.
+
+Stated rather than left implicit, because "state + step" is the shape the rest of
+the codebase holds to a replay, and a reader who assumed the pair here agreed would
+be wrong in a way nothing would catch. The position itself lives in `Followed.seen`
+and in the mirror `Session` a remote front end admits into.
+
 `HANDLERS` is the closed list of what renders. Together with `RECORDLESS` — the
 known types that are an auditor's records rather than a reader's (P3-24) — it
 covers the log's whole vocabulary, and a test holds that equality so a new event

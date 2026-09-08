@@ -11,6 +11,15 @@ socket — and the invariant it protects was tested once. This is the one copy; 
 caller supplies the sink and keeps whatever is its own (a console and a `--type`
 filter for the CLI, a transcript fold for the TUI).
 
+**The attach reply is the first status frame, and `seed` is what says so.** The
+same gap has a second half nobody named: a root that was already idle when the
+attach landed announces *nothing* afterwards, so that reply is the only status the
+feed will ever see. Both callers compensated for it and they did it differently —
+the TUI replayed the reply through its own handler, while the CLI made a second
+`session/status` round trip for a fact the daemon had already handed it, and then
+re-decided "idle means done" outside the handler that decides it. `seed` is the
+one compensation.
+
 @module ph_app.daemon.follow
 """
 
@@ -82,13 +91,30 @@ class Followed:
         self.seen = at
         self.on_events([(event, params.get("presentation"))], True)
 
+    def seed(self, attached: Mapping[str, Any]) -> None:
+        """Deliver the attach reply as this feed's first status.
+
+        The reply is `root.describe()` plus the footer — the *same shape*
+        `session.status` sends, which the server says in as many words — so it goes
+        to the same sink rather than to a caller-side special case.
+
+        **Delivered now rather than held until `live()`, because status has no
+        catch-up phase to wait for.** `session/snapshot` pages *events*; the reply
+        is already the whole of the status history, so there is nothing for it to
+        arrive out of order with. That is also what lets a front end draw its
+        footer while a long log is still paging, and it makes the busy and
+        already-idle cases print in one order instead of two — the difference that
+        used to be settled by which side of a race a host landed on.
+        """
+        self.on_status(attached)
+
     def live(self) -> None:
         """Catch-up is done: go live, then release what arrived during it."""
         held, self.pending = self.pending or [], None
         for method, params in held:
             self(method, params)
 
-    async def catch_up(self, client: DaemonClient, cursor: Any) -> None:
+    async def catch_up(self, client: DaemonClient, cursor: Any) -> int:
         """Page from `cursor` to the head, one sink call per page.
 
         Paged because `session/snapshot` is the only mechanism that catches up
@@ -96,10 +122,24 @@ class Followed:
         size into a bounded outbox fails at exactly the moment it matters), and a
         page at a time is one write at a time, which is what keeps a resumed
         root's whole log from being rendered event by event.
+
+        **Returns the seq the daemon actually started from**, which is the reply's
+        own `from`. A cursor names a position *in one incarnation of the log*;
+        `resume_at` answers a cursor from another incarnation with "you have seen
+        nothing of this one" and pages from 0 — the safe reading, but a silent one
+        unless the caller can see that it happened. Read rather than inferred from
+        the first event's seq, which is what `resume_at`'s docstring already
+        promised and what an empty page cannot answer at all. `seen` is advanced
+        from what arrives rather than pre-set from what was asked, so a fallback to
+        0 is *shown* instead of having its first `since` events dropped as already
+        seen.
         """
+        started: int | None = None
         while True:
             page = await client.call("session/snapshot", sessionId=self.session_id, cursor=cursor)
             events = [obj(wire) for wire in seq(page.get("events"))]
+            if started is None:
+                started = int(page.get("from", 0))
             # Sparse and keyed by seq, which is how the daemon sends it: a page
             # is 2048 events and a turn contributes a handful of cards.
             views = obj(page.get("presentations"))
@@ -107,7 +147,7 @@ class Followed:
             for event in events:
                 self.seen = max(self.seen, int(event.get("seq", self.seen)))
             if not page.get("more"):
-                return
+                return started
             cursor = page.get("cursor")
 
 
