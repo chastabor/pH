@@ -20,7 +20,7 @@ import pytest
 
 from ph.session import KNOWN_SESSION_EVENT_TYPES, Session, SessionFoldCache, SurfaceIntent
 from ph.session.json import InvalidJsonValueError
-from ph.testing import user_payload
+from ph.testing import prefix_of, user_payload
 
 
 def test_seq_always_equals_log_length() -> None:
@@ -212,10 +212,4 @@ def test_a_fold_cache_leaves_the_fold_callable_on_a_slice() -> None:
         return sum(1 for event in log.events if event.type == "turn/start")
 
     assert count_turns(session) == 2
-
-    class _AsOf:
-        id = session.id
-        seq = boundary
-        events = session.events[:boundary]
-
-    assert count_turns(_AsOf()) == 1
+    assert count_turns(prefix_of(session, boundary)) == 1

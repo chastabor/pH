@@ -28,13 +28,19 @@ from ph.session.known_event_types import (
     IGNORABLE_SESSION_EVENT_TYPES,
     KNOWN_SESSION_EVENT_TYPES,
 )
-from ph.testing import FAKE_OPTIONS, StubSubagentProvider, tool_result_payload
+from ph.testing import (
+    FAKE_OPTIONS,
+    StubSubagentProvider,
+    assert_fold_laws,
+    tool_result_payload,
+)
 from ph.tools.code_mode import CodeDispatchLog
 from ph_stabilize.limits import (
     BREAKER_DENIAL,
     SIBLING_STOPPED,
     TOOL_DENIAL,
     ModelCallLimitExceeded,
+    _extend,
     counts_of,
 )
 
@@ -111,6 +117,32 @@ def test_a_failure_run_is_counted_per_tool_and_reset_by_a_success() -> None:
         )
 
     assert counts_of(session).consecutive_failures == {"bash": 1}
+
+
+def test_the_counts_obey_the_fold_laws() -> None:
+    """`counts_of` is `_extend` from empty, so the law holds by construction — and
+    this is where that is asked rather than assumed, over every prefix of a log
+    that exercises each counted type and the reset a `turn/start` performs."""
+    session = Session("lawful")
+    for turn in (1, 2):
+        session.append("turn/start", {"turn": turn})
+        session.append("step/start", {"turn": turn, "step": 1})
+        for index, is_error in enumerate([True, False], start=1):
+            call_id = f"t{turn}c{index}"
+            session.append(
+                "tool/call", {"turn": turn, "step": 1, "callId": call_id, "name": "bash"}
+            )
+            session.append(
+                "tool/result",
+                tool_result_payload("out", f"m{call_id}", call_id, is_error=is_error),
+                SurfaceIntent("append"),
+            )
+        session.append("assistant/chunk", {"text": "…"})
+    session.append(
+        ADMITTED, {"runId": "r1", "name": "scout", "model": "fake-1", "grantedAccess": "read"}
+    )
+
+    assert_fold_laws(session, counts_of, _extend)
 
 
 # -------------------------------------------------------------- model calls --

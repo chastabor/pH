@@ -28,6 +28,7 @@ from .builders import (
 )
 from .diagnostics import report_section
 from .fake_adapter import FakeAdapter, text_script
+from .folds import VerifyingFoldCache, assert_fold_laws, check_fold_laws, prefix_of
 from .git import WORKTREE_ROWS, git, git_repo, needs_git, worktree_agent
 from .jj import JJ_ROWS, jj, jj_agent, jj_repo, needs_jj
 from .replay_adapter import (
@@ -63,10 +64,13 @@ __all__ = [
     "StubSandboxProvider",
     "StubSubagentProvider",
     "StubWorkspaceProvider",
+    "VerifyingFoldCache",
     "acquire_for_role",
     "anthropic_reply",
+    "assert_fold_laws",
     "assistant_payload",
     "boundary_for",
+    "check_fold_laws",
     "git",
     "git_repo",
     "jj",
@@ -76,6 +80,7 @@ __all__ = [
     "needs_jj",
     "parked_gate",
     "plugin_payload",
+    "prefix_of",
     "raising",
     "recorded_steps",
     "reference_fork",

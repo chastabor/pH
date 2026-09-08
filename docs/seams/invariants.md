@@ -54,6 +54,39 @@ ctx.invariants.register(
 The shipped set: `session-invariant`, `tools-invariant`, `skills-invariant`,
 `scope-invariant`, and the agent loop's `messages == derive_messages()`.
 
+## Fold caches get one row each
+
+Six rows cache a fold over the session log through `SessionFoldCache`, keyed on
+`session.seq`. That key is exact for the thing it checks — an append-only log
+that has not grown cannot have changed any fold over it — and blind to the two
+ways a cached answer goes wrong anyway: a fold that read something other than the
+log, and a *reader* that mutated the value it was handed.
+
+`contribute_fold_cache` declares that property for one consumer:
+
+```python
+contribute_fold_cache(ctx, id="goal-fold-cache", subject="goal table", stale=service.stale_folds)
+```
+
+`stale` is the owning service's delegate to `SessionFoldCache.stale`, which lives
+with the cache for `ToolRegistry.stale_views`' reason. The helper reads
+`ctx.sessions` at **poll** time, so the store may mount after the row.
+
+**A row each, not one row for all six**, for the reason `skills-invariant` gives
+about not folding itself into `tools-invariant`: they are different folds with
+different failure stories, and a report naming *which* cache drifted is what a
+person can act on. Each declaration also sits inside the row that owns the cache,
+so a profile that drops the seam drops the claim with it rather than reporting
+`holds` about a cache nobody mounted.
+
+An entry the log has outgrown is **not** drift — that is the ordinary state of a
+cache between reads — and a cached session that is no longer live is skipped,
+because there is no log left to fold.
+
+The laws the cache cannot check at all — that the fold is pure, and that
+extending a prefix equals folding the whole — are checked ahead of time instead,
+from the process that appended the log: see `ph.testing.folds`.
+
 A row that enforces something worth promising should register — the report is
 only as complete as what rows declare, and an unregistered enforcement is a
 guarantee nobody can discover.

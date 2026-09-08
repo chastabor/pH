@@ -45,6 +45,7 @@ from ph.agent.types import PreStepDecision
 from ph.cordis import Context, plugin
 from ph.llm.types import ToolResultBlock
 from ph.seams._registry import contribute_via
+from ph.seams.invariants import contribute_fold_cache
 from ph.seams.subagents import ADMITTED, SubagentRequest
 from ph.seams.tui_status import StatusField, StatusReading
 from ph.session import (
@@ -427,6 +428,11 @@ def _record(session: Session, kind: str, detail: dict[str, Any]) -> None:
 async def apply(ctx: Context, config: Config) -> None:
     """Arm the model-call limit, the tool-call limit and the breaker."""
     counts = SessionFoldCache(counts_of, extend=_extend)
+    # The cache is a local rather than a service, so the poll is declared where it
+    # is built. It has the strongest claim of the six to being polled: this fold
+    # is the only thing standing between a looping agent and an unbounded run, and
+    # every way it could drift drifts *low* — the direction that stops refusing.
+    contribute_fold_cache(ctx, id="limits-fold-cache", subject="limit count", stale=counts.stale)
 
     # ------------------------------------------------------- model calls --
 

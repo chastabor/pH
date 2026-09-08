@@ -30,6 +30,7 @@ from one stamp.
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Literal, TypeAlias
@@ -38,6 +39,7 @@ from ..cordis import Context, plugin
 from ..paths import resolve_roots
 from ..session import Session, SessionFoldCache, now_ms
 from ..wire import WireModel
+from .invariants import contribute_fold_cache
 from .schedule_index import ScheduleIndex
 
 __all__ = [
@@ -343,6 +345,15 @@ class ScheduleService:
         """Drop what this service cached about one session."""
         self._states.forget(session_id)
 
+    def stale_folds(self, sessions: Iterable[Session]) -> list[str]:
+        """Cached schedule tables that no longer equal their fold (I6).
+
+        Asked of the cache rather than reconstructed here. A drifted table is how
+        a cancelled schedule keeps firing, or a live one stops being claimed —
+        both silent, because the log would still say the right thing.
+        """
+        return self._states.stale(sessions)
+
     def create(self, session: Session, schedule: Schedule) -> Schedule:
         """Record a schedule. It is live from the moment the event lands."""
         session.append(CREATED, schedule.to_wire())
@@ -452,3 +463,6 @@ async def apply(ctx: Context, config: Config) -> None:
     # write is skipped when nothing moved, so the ordinary open costs a fold the
     # cache already has.
     ctx.on("session/created", lambda session: service.reindex(session))
+    contribute_fold_cache(
+        ctx, id="schedule-fold-cache", subject="schedule table", stale=service.stale_folds
+    )

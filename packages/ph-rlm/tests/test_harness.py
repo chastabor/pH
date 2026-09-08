@@ -27,6 +27,7 @@ from ph.system_prompt import (
     render_context_sections,
     render_prompt,
 )
+from ph.testing import assert_fold_laws
 from ph_rlm.harness import (
     GLOBAL_LOG_NAME,
     PROJECTION_NAME,
@@ -42,6 +43,7 @@ from ph_rlm.harness import (
     read_global_events,
     render_state,
 )
+from ph_rlm.harness.state import extend_session
 
 pytestmark = pytest.mark.anyio
 
@@ -56,6 +58,32 @@ def _allow(ctx: Any) -> list[str]:
 
     ctx.approval.register_answerer(answerer)
     return asked
+
+
+async def _refined(harnessed: Harnessed) -> tuple[Any, Any, Any]:
+    """A harness that has taken two refinements: a create, then an update and a create.
+
+    One definition, because two tests need the same shape of log and a second copy
+    is one that keeps passing against a log the service has stopped writing.
+    """
+    ctx, session, agent = await harnessed()
+    await ctx.harness.apply(
+        RefinementProposal(summary="one", edits=[note_edit("first")]), session=session, agent=agent
+    )
+    await ctx.harness.apply(
+        RefinementProposal(
+            summary="two",
+            edits=[
+                HarnessEdit(
+                    action="update", kind="note", id="first", title="revised", content="v2"
+                ),
+                note_edit("second"),
+            ],
+        ),
+        session=session,
+        agent=agent,
+    )
+    return ctx, session, agent
 
 
 # --------------------------------------------------------------- the fold --
@@ -84,29 +112,23 @@ async def test_deleting_the_state_and_re_deriving_is_byte_identical(harnessed: H
     Asserted against a cold fold rather than the cached one, so the cache cannot
     be what makes them agree.
     """
-    ctx, session, agent = await harnessed()
-    await ctx.harness.apply(
-        RefinementProposal(summary="one", edits=[note_edit("first")]), session=session, agent=agent
-    )
-    await ctx.harness.apply(
-        RefinementProposal(
-            summary="two",
-            edits=[
-                HarnessEdit(
-                    action="update", kind="note", id="first", title="revised", content="v2"
-                ),
-                note_edit("second"),
-            ],
-        ),
-        session=session,
-        agent=agent,
-    )
+    ctx, session, _ = await _refined(harnessed)
 
     assert fold_session(session).to_wire() == ctx.harness.local(session).to_wire()
     # And an update bumped the version rather than replacing history.
     revised = fold_session(session).entry("note", "first")
     assert revised is not None
     assert (revised.version, revised.title) == (2, "revised")
+
+
+async def test_the_harness_fold_obeys_the_fold_laws(harnessed: Harnessed) -> None:
+    """`extend_session` is `fold_session` resumed from a prefix, and the cache
+    relies on that being the same fold. Asked over every prefix of a log the
+    real service wrote — create, update, and a second create in one refinement —
+    rather than assumed from the two functions sharing a step."""
+    _, session, _ = await _refined(harnessed)
+
+    assert_fold_laws(session, fold_session, extend_session)
 
 
 async def test_a_fork_inherits_the_harness_as_of_its_boundary(harnessed: Harnessed) -> None:

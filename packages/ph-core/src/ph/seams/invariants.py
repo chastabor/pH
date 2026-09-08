@@ -53,11 +53,13 @@ from .diagnostics import contribute as contribute_diagnostic
 
 __all__ = [
     "ID_MAX",
+    "ORDER_FOLD_CACHE",
     "Invariant",
     "InvariantRegistry",
     "Violation",
     "apply",
     "contribute",
+    "contribute_fold_cache",
 ]
 
 log = logging.getLogger("ph.seams.invariants")
@@ -208,6 +210,55 @@ def contribute(ctx: Context, invariant: Invariant) -> None:
     precondition for *enforcing* it, which inverts the two.
     """
     contribute_via(ctx, "invariants", invariant, label=f"invariant({invariant.id})")
+
+
+ORDER_FOLD_CACHE = 15
+"""Where a fold-cache invariant sits: just after `session-log`, which it extends.
+
+`session-log` asks whether a `Session`'s own projections equal its folds; these
+ask the same of the caches consumers keep *over* that log. Adjacent in the report
+because a person reading one wants the other, and after it because a drifting log
+explains a drifting fold over it while the reverse is not true.
+"""
+
+
+def contribute_fold_cache(
+    ctx: Context, *, id: str, subject: str, stale: Callable[[Any], Sequence[str]]
+) -> None:
+    """Declare that one consumer's `SessionFoldCache` still equals its fold (I6).
+
+    `stale` is the owning service's delegate to `SessionFoldCache.stale`, handed
+    the sessions to check; the store lookup happens here so six rows do not each
+    write it. One statement, likewise written once: six consumers cache a fold
+    over the session log, and six hand-written sentences saying so would drift
+    into six slightly different promises about one property.
+
+    **A row each rather than one row for all of them**, for the reason
+    `skills-invariant` gives about not folding itself into `tools-invariant`: they
+    are different folds with different failure stories, and a report naming which
+    cache drifted is what a person can act on. It also keeps each declaration
+    inside the row that owns the cache, so a profile that drops the seam drops the
+    claim with it instead of reporting `holds` about a cache nobody mounted.
+    """
+
+    def check() -> Sequence[str]:
+        # Read at poll time, never captured at `apply` time: the store may mount
+        # after this row. With no store there is nothing to enumerate and no
+        # cached answer that could be serving anybody, so `[]` is the honest
+        # answer rather than a reassuring one — `HarnessService.stale_projections`
+        # reads its sessions the same way and says so for the same reason.
+        sessions = ctx.get("sessions")
+        return [] if sessions is None else stale(sessions.list())
+
+    contribute(
+        ctx,
+        Invariant(
+            id=id,
+            statement=f"every cached {subject} equals the fold of the log it projects",
+            check=check,
+            order=ORDER_FOLD_CACHE,
+        ),
+    )
 
 
 @plugin("invariants")

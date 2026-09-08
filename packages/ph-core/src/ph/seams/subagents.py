@@ -41,6 +41,7 @@ from ..system_prompt.assembly import PromptSection
 from ..tools.registry import ToolRestriction
 from ..wire import WireModel
 from ._registry import claim_entry, claim_key
+from .invariants import contribute_fold_cache
 from .skills import ORDER_SKILLS, SkillRestriction
 
 __all__ = [
@@ -795,6 +796,16 @@ class SubagentService:
         """Drop what this service cached about one session."""
         self._rosters.forget(session_id)
 
+    def stale_folds(self, sessions: Iterable[Session]) -> list[str]:
+        """Cached rosters that no longer equal their fold (I6).
+
+        Asked of the cache rather than reconstructed here. The roster is what the
+        prompt tells a parent about its children and what the interruption ladder
+        counts starts against, so a drifted one is a parent reasoning about a
+        family the log does not describe.
+        """
+        return self._rosters.stale(sessions)
+
     def name_of(self, sessions: Iterable[Session], agent_id: str) -> str:
         """`roster_name`, through the cached fold. The live path."""
         by_id = {session.id: session for session in sessions}
@@ -1092,6 +1103,9 @@ async def apply(ctx: Context, config: Any) -> None:
     # A disposed session's last projection is a value nobody can reach; the cache
     # is bounded either way, but holding it is holding it for nothing.
     ctx.on("session/disposed", lambda session: service.forget_session(session.id))
+    contribute_fold_cache(
+        ctx, id="subagent-fold-cache", subject="subagent roster", stale=service.stale_folds
+    )
 
 
 @dataclass(frozen=True, slots=True)

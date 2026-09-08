@@ -34,7 +34,7 @@ without a record.
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal, TypeAlias, cast, get_args
 
@@ -44,6 +44,7 @@ from ..cordis import Context, plugin
 from ..llm.types import TokenUsage
 from ..session import Session, SessionFoldCache
 from ..wire import WireModel
+from .invariants import contribute_fold_cache
 
 __all__ = [
     "CONTINUED",
@@ -288,6 +289,15 @@ class GoalService:
     def forget_session(self, session_id: str) -> None:
         self._states.forget(session_id)
 
+    def stale_folds(self, sessions: Iterable[Session]) -> list[str]:
+        """Cached goal tables that no longer equal their fold (I6).
+
+        Asked of the cache rather than reconstructed here, and worth polling
+        because this fold is the one that decides when a run has spent its budget:
+        a table that drifted low hands an autonomous loop turns it already used.
+        """
+        return self._states.stale(sessions)
+
     def open(self, session: Session) -> GoalState | None:
         """The goal still being worked on, if there is one."""
         return open_goal(self.states(session))
@@ -342,3 +352,6 @@ async def apply(ctx: Context, _config: Any) -> None:
     service = GoalService()
     ctx.provide("goals", service)
     ctx.on("session/disposed", lambda session: service.forget_session(session.id))
+    contribute_fold_cache(
+        ctx, id="goal-fold-cache", subject="goal table", stale=service.stale_folds
+    )

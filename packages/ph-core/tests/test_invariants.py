@@ -27,6 +27,7 @@ from typing import Any
 import pytest
 
 from ph.cordis import DEPLOYMENT, Context
+from ph.seams.goals import Goal
 from ph.seams.invariants import Invariant, InvariantRegistry, Violation
 from ph.seams.scope_invariant import violations as scope_violations
 from ph.seams.skills import SkillRestriction, SkillService
@@ -471,10 +472,42 @@ async def test_the_rows_reach_the_report_through_the_real_mount(mount: Any) -> N
 
     rows = report_section(ctx, "Invariants")
 
-    pollable = ("session-log", "tool-view-cache", "skill-reach-cache", "scope-unwind")
+    pollable = (
+        "session-log",
+        "tool-view-cache",
+        "skill-reach-cache",
+        "scope-unwind",
+        # One per `SessionFoldCache` in the base bundle. Listed rather than
+        # summarised, so a seam that stops declaring its fold cache fails here
+        # instead of quietly leaving the property unchecked.
+        "goal-fold-cache",
+        "schedule-fold-cache",
+        "subagent-fold-cache",
+        "sandbox-fold-cache",
+    )
     assert set(rows) == {"model-visible-logged", *pollable}
     assert rows["model-visible-logged"].startswith("enforced inline ·")
     assert all(rows[name].startswith("holds ·") for name in pollable), rows
+
+
+async def test_a_drifted_fold_cache_is_reported_by_the_row_that_owns_it(mount: Any) -> None:
+    """The poll, end to end, through the mount a deployment actually runs.
+
+    A goal is set, the service caches the fold, and a reader mutates the table it
+    was handed — the failure `session.seq` structurally cannot see, because the log
+    did not grow. The report must name `goal-fold-cache` and no other row: which
+    cache drifted is the part a person can act on, and is why these are a row each.
+    """
+    ctx = await mount()
+    session = ctx.sessions.create("drifted")
+    ctx.goals.set(session, Goal(id="g1", objective="make the tests pass"))
+
+    ctx.goals.states(session)["g1"].spent.turns = 99
+
+    violations = ctx.invariants.verify()
+    assert [one.invariant for one in violations] == ["goal-fold-cache"]
+    assert "drifted" in violations[0].detail
+    assert report_section(ctx, "Invariants")["goal-fold-cache"].startswith("VIOLATED ·")
 
 
 @pytest.mark.parametrize(

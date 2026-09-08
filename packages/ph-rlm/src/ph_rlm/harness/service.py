@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import logging
 import secrets
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -125,6 +126,16 @@ class HarnessService:
     def local(self, session: Session) -> HarnessState:
         """This session's own refinements, folded and cached on `session.seq`."""
         return self._local.read(session)
+
+    def stale_folds(self, sessions: Iterable[Session]) -> list[str]:
+        """Cached local harness states that no longer equal their fold (I6).
+
+        The sibling of `stale_projections`, one layer in: that one asks whether the
+        file on disk equals the fold, this one whether the value in memory does.
+        Both matter, because the projection is written *from* the cache — a drifted
+        cache writes a file that agrees with it and with nothing else.
+        """
+        return self._local.stale(sessions)
 
     def globals(self) -> HarnessState:
         """The deployment-wide refinements, folded from `$PH_HOME`.

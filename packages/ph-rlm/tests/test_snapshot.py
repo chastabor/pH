@@ -45,7 +45,7 @@ from ph.cordis import DEPLOYMENT
 from ph.llm.types import text_of
 from ph.session import IGNORABLE_SESSION_EVENT_TYPES, SurfaceIntent
 from ph.session.events import SurfaceReplace
-from ph.testing import FAKE_OPTIONS, plugin_payload, user_payload
+from ph.testing import FAKE_OPTIONS, plugin_payload, prefix_of, user_payload
 from ph_rlm.snapshot import (
     KernelSnapshotPolicy,
     fold_namespace,
@@ -287,14 +287,8 @@ async def test_the_fold_reconstructs_the_namespace_as_of_a_boundary(
     await run_cell(ctx, "second = 2", agent=agent, session=session, call_id="c2")
 
     assert set(fold_namespace(session, agent.id)) == {"first", "second"}
-
-    class _AsOf:
-        """The prefix of the log a fork at `boundary` would carry."""
-
-        id = session.id
-        events = session.events[:boundary]
-
-    assert set(fold_namespace(_AsOf(), agent.id)) == {"first"}
+    # The prefix of the log a fork at `boundary` would carry.
+    assert set(fold_namespace(prefix_of(session, boundary), agent.id)) == {"first"}
 
 
 async def test_a_foreign_record_does_not_break_the_fold(mounted_runtime: Mounted) -> None:

@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import logging
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, get_args
@@ -38,6 +38,7 @@ from ..cordis import Context, plugin
 from ..paths import resolve_roots, write_text_under
 from ..seams._registry import contribute_via
 from ..seams.commands import CommandDefinition
+from ..seams.invariants import contribute_fold_cache
 from ..seams.sandbox import DENIED, Allowances, NetworkAllowance, NetworkMode
 from ..seams.sandbox_allow import describe
 from ..seams.tui_status import StatusField, StatusReading
@@ -78,6 +79,26 @@ No scheme and no path — those are what people paste, and the proxy matches hos
 def _denials_in(session: Session) -> tuple[Any, ...]:
     """Every `sandbox/denied` record in a session, oldest first."""
     return session.select(DENIED)
+
+
+def denial_count(session: Session) -> int:
+    """How many boundaries this log records being refused — a fold.
+
+    Named, rather than the lambda it was, for the reason every sibling seam names
+    its fold: a fold nobody can import is one nobody can hold to the laws
+    `SessionFoldCache` requires of it and cannot itself check.
+    """
+    return len(_denials_in(session))
+
+
+def extend_denial_count(previous: int, session: Session, from_seq: int) -> int:
+    """`denial_count`, resumed from an already-counted prefix.
+
+    A refusal is rare and `session.seq` moves on every chunk, so the cache misses
+    on nearly every read while a model streams; counting the new slice is what
+    makes the miss cost nothing.
+    """
+    return previous + sum(1 for event in session.events_from(from_seq) if event.type == DENIED)
 
 
 class _Refused(Exception):
@@ -269,13 +290,17 @@ class _Denials:
     """The footer's count of refusals, folded at most once per appended event."""
 
     cache: SessionFoldCache[int] = field(
-        default_factory=lambda: SessionFoldCache(
-            lambda session: len(_denials_in(session)),
-            extend=lambda previous, session, from_seq: (
-                previous + sum(1 for event in session.events_from(from_seq) if event.type == DENIED)
-            ),
-        )
+        default_factory=lambda: SessionFoldCache(denial_count, extend=extend_denial_count)
     )
+
+    def stale_folds(self, sessions: Iterable[Session]) -> list[str]:
+        """Cached refusal counts that no longer equal their fold (I6).
+
+        The lightest of the six folds and still worth polling: this number is the
+        footer's account of how much the sandbox refused, and a count that drifted
+        down is the reassuring direction to drift.
+        """
+        return self.cache.stale(sessions)
 
     def reading(self, session: Session) -> StatusReading | None:
         denied = self.cache.read(session)
@@ -317,4 +342,7 @@ async def apply(ctx: Context, _config: Any) -> None:
         "tui_status",
         StatusField(id="sandbox", read=denials.reading, order=12),
         label="sandbox(status)",
+    )
+    contribute_fold_cache(
+        ctx, id="sandbox-fold-cache", subject="sandbox refusal count", stale=denials.stale_folds
     )

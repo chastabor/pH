@@ -19,15 +19,26 @@ from __future__ import annotations
 from typing import Any
 
 from ph.cordis import Context, plugin
-from ph.seams.invariants import Invariant, contribute
+from ph.seams.invariants import Invariant, contribute, contribute_fold_cache
 
-__all__ = ["apply", "violations"]
+__all__ = ["apply", "stale_folds", "violations"]
 
 
 def violations(ctx: Context) -> list[str]:
     """Every written projection that no longer equals the fold behind it."""
     harness = ctx.get("harness")
     return [] if harness is None else list(harness.stale_projections())
+
+
+def stale_folds(ctx: Context, sessions: Any) -> list[str]:
+    """Every cached local state that no longer equals the fold behind it.
+
+    The layer under `violations`: that one compares the *file* to the fold, this
+    one the value the file is written from. Declared here beside its sibling so a
+    reader meets the harness's two I6 claims together.
+    """
+    harness = ctx.get("harness")
+    return [] if harness is None else list(harness.stale_folds(sessions))
 
 
 @plugin("harness-invariant", inject=["harness"])
@@ -46,4 +57,10 @@ async def apply(ctx: Context, _config: Any) -> None:
             check=lambda: violations(ctx),
             order=40,
         ),
+    )
+    contribute_fold_cache(
+        ctx,
+        id="harness-fold-cache",
+        subject="harness state",
+        stale=lambda sessions: stale_folds(ctx, sessions),
     )

@@ -21,14 +21,22 @@ append-only (A1): if it has not grown, no fold over it can have changed.
 **The one requirement**, and the only way to misuse this: the cached function
 must be a pure fold of the prefix. A function that also reads the clock, the
 filesystem, or a mutable table can change its answer without the log growing, and
-the cache will not notice. Nothing here can check that.
+the cache will not notice. Nothing here can check that *ahead* of the fact;
+`ph.testing.folds` can, from a process that holds the whole log and so every
+prefix of it, and each consumer's tests hold their fold to those laws before the
+cache ever relies on them.
+
+What `stale` adds is the half a test cannot reach: whether the answers this cache
+is serving **right now**, in a running deployment, still equal the fold. Each
+consumer polls it through its own invariant row, so a report names which cache
+drifted rather than that one did.
 
 @module ph.session.folds
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from typing import Any, Protocol
 
 __all__ = ["SessionFoldCache"]
@@ -85,6 +93,40 @@ class SessionFoldCache[T]:
             value = self._compute(session)
         self._entries[session.id] = (session.seq, value)
         return value
+
+    def stale(self, sessions: Iterable[Any]) -> list[str]:
+        """Every cached answer that no longer equals the fold of its log (I6).
+
+        Here rather than in the invariant row that declares it, for
+        `ToolRuntime.stale_views`' reason: `_entries` is this class's own secret,
+        and a check written against it from outside is one a rename disables
+        without anybody noticing.
+
+        **Only entries whose key still matches are compared.** An entry below the
+        session's current `seq` is not drift — it is the ordinary state of a cache
+        between reads, and `read` will fold the new slice before serving it. What
+        this catches is the failure the key cannot see: a fold that answered from
+        something other than the log, and a reader that mutated the value it was
+        handed and so poisoned the entry for everyone after it.
+
+        A cached session that is no longer live is skipped rather than reported:
+        there is no log left to fold, so nothing here can say whether it drifted.
+
+        O(events) per cached session, which is why this is polled and never run on
+        `read` — doing it there would cost exactly the memoization it checks.
+        """
+        found: list[str] = []
+        for session in sessions:
+            cached = self._entries.get(session.id)
+            if cached is None or cached[0] != session.seq:
+                continue
+            fresh = self._compute(session)
+            if cached[1] != fresh:
+                found.append(
+                    f"session {session.id}: the value cached at seq {session.seq} "
+                    f"does not equal the fold of its log"
+                )
+        return found
 
     def forget(self, session_id: str) -> None:
         self._entries.pop(session_id, None)
