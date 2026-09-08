@@ -1260,7 +1260,7 @@ therefore the same three things — a **state**, a **step** that folds one more
 event into it, and a **canonical replay** over the whole prefix that the steps must
 agree with — and `SessionFoldCache` (`session/folds.py`) is that shape with the
 cache attached: `compute` is the replay, `extend` the step, and the key is `seq`.
-Eight rows hold their projection in one: the subagent roster, goals, schedules,
+Six rows hold their projection in one: the subagent roster, goals, schedules,
 the harness state, the limits, the sandbox refusals.
 
 Three readers live *inside* `Session` and are its own, and `Session.stale()` checks
@@ -1276,6 +1276,66 @@ They are inside rather than cached beside for the reason `folds.py` gives for
 keeping everyone else *out*: a fold attached to a live session is monotonic in that
 log and cannot answer for an earlier prefix, and forking at a boundary and viewing a
 stored file both need exactly that.
+
+#### "Must agree with" is checked, ahead of time and at runtime
+
+The shape above rests on a contract `folds.py` states and could not enforce: the
+cached function must be a **pure fold of the prefix**, and `extend` resumed from a
+prefix must equal the replay of the whole. A function that also reads the clock,
+the filesystem or a mutable table changes its answer without the log growing, and
+`seq` cannot see it. That is the same *shape* of assurance as the freeze fast path
+refused in §8 — correct only insofar as it is tested — at lower stakes: a wrong
+fold serves a stale projection, where a wrong freeze admits unvalidated data into
+the log. It is now checked from both ends.
+
+**Ahead of time, in tests** (`ph.testing.folds`). The laws only mean something to
+a process that holds the whole log and therefore every prefix of it, which is the
+process that appended it — never the deployment reading one back. `prefix_of`
+rebuilds a prefix as a real `Session` by re-admitting its events, and
+`check_fold_laws` runs three laws over the prefixes from `first_live_seq` up,
+every one of them until the log is long and evenly sampled past that:
+
+- **Determinism** — two replays of one log agree, and a replica admitting the same
+  events under the same header agrees with them. This is what catches a fold
+  reading *process* state rather than log state.
+- **No side effects** — the fold does not grow the log, and a profiler watches its
+  C calls for the clock, the filesystem and random sources. A **heuristic by name**,
+  so it catches the common impurities and cannot prove their absence; an
+  environment read reaches no C function it knows.
+- **Batching invariance** — extending from any prefix to any later one equals the
+  replay of the later one; walking the prefixes one step at a time, which is what a
+  cache read after every append does, never leaves the replay; and extending over
+  an empty slice changes nothing. The first step that diverges is named with its
+  seq and event type, because that event is the one the two paths read differently.
+
+All six consumers are held to these, over logs their own services wrote — the
+third law to the four that carry an `extend`, since schedules and the subagent
+roster have no step to hold to their replay. (Deterministic and
+batching-invariant are the same two laws LangGraph asks of a `DeltaChannel`
+reducer, and enforces in a docstring; pH runs them.)
+
+**At runtime, as an invariant** (`SessionFoldCache.stale`, one row per cache:
+`goal-fold-cache`, `schedule-fold-cache`, `subagent-fold-cache`,
+`sandbox-fold-cache` in `ph-base`, the limits and harness rows with their own
+bundles). The check lives on the cache class for `ToolRegistry.stale_views`'
+reason — `_entries` is its own secret, and a check written from outside is one a
+rename disables silently — and each owning row declares it through
+`contribute_fold_cache`, so a profile that drops a seam drops the claim with it.
+It compares **only entries whose key still matches**: an entry the log has
+outgrown is the ordinary state of a cache between reads, not drift, and a cached
+session no longer live is skipped because there is no log left to fold. What is
+left is exactly the pair `seq` cannot see — a fold that answered from outside the
+log, and a *reader* that mutated the value it was handed and so poisoned the entry
+for everyone after it.
+
+**A row each rather than one row for all six**, for the reason `skills-invariant`
+gives about not folding itself into `tools-invariant`: different folds with
+different failure stories, and a report naming *which* cache drifted is what a
+person can act on.
+
+Neither end closes `_LatestFold`, which remains the named exception above: it is
+inside `Session`, not a `SessionFoldCache`, and `fold_latest` is still compared
+nowhere.
 
 One reader is deliberately outside this: `TuiEventAdapter` has a state and a step,
 but **no canonical replay to be checked against**, and cannot have one. Two of the
