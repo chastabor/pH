@@ -78,7 +78,7 @@ the agent loop, and every capability seam. Nothing here knows about a terminal.
 protocol, and the provider adapters (Anthropic, OpenAI-compatible). Depends on
 `ph-core` and on neither bundle: bundles reach it through the `ph.bundles`
 entry-point group, so `ph-app` need not import `ph-rlm` to offer the `rlm`
-profile (`ph_app/profiles.py:37-49`).
+profile (`ph_app/profiles.py`).
 
 **`ph-rlm`** — Prime Agent's design as plugins. The model's surface is Code Mode:
 it writes Python, and *bindings* re-enter the governed tool pipeline as
@@ -90,12 +90,12 @@ anchor, result offloading, threshold compaction, call limits, human-in-the-loop.
 
 **`ph-runtime-guest`** — the guest half of the Python code runtime. It runs in
 `$PH_CACHE/runtime-venv`, in a subprocess spawned per agent, and speaks to the
-host over one framed channel on **fd 3** (`ph_runtime/protocol.py:47-56`).
+host over one framed channel on **fd 3** (`ph_runtime/protocol.py`).
 `PROTOCOL_VERSION = 2`; fd 0/1/2 stay the program's own so a cell's `print` and a
 grandchild's output need not be untangled from frames. **It imports neither
 `ph-core` nor `ph-rlm`** — verified, zero such imports — because "the process
 boundary exists so that model code cannot reach the harness, and importing the
-harness would put it back inside" (`ph_runtime/__init__.py:1-8`).
+harness would put it back inside" (`ph_runtime/__init__.py`).
 
 ---
 
@@ -113,20 +113,20 @@ async def apply(ctx: Context, config: SessionConfig) -> None: ...
 ```
 
 A name, a list of injected service keys, an optional pydantic config model, and
-an `apply` body (`cordis/plugin.py:24-46`). The shape is duck-typed by
-`normalize_plugin` (`plugin.py:69-95`), not enforced by a base class — a
+an `apply` body (`cordis/plugin.py`). The shape is duck-typed by
+`normalize_plugin` (`plugin.py`), not enforced by a base class — a
 decorated function, a module, or any object carrying those attributes all work.
 
 ### 2.2 Rows compose into a profile
 
 A profile is an ordered list of YAML documents. Each document holds **rows** (a
 row mounts one plugin with one config) or **patches** addressing an existing row
-by id (`cordis/loader.py:275-294`).
+by id (`cordis/loader.py`).
 
 A patch may `insert`, `remove`, replace `config`, set `disabled`, or set
 `isolate` (§2.7). A patch replaces a row's **whole** config rather than merging
 into it, deliberately: "a row's effective value is always one layer's, readable
-in one place" (`loader.py:264-266`).
+in one place" (`loader.py`).
 
 **Three layers, and the third is reachable from the command line.** dsh's notes
 name them — bundle, profile, patch — and for six phases pH had the third only as
@@ -142,15 +142,15 @@ nothing if the command line were a way around it.
 
 YAML is read by `SafeRowLoader`, which strips every non-scalar implicit
 conversion — refusing timestamps, sexagesimals, and any unknown `!tag`
-(`loader.py:89-114`). Config is data, not code. `${env:VAR:-default}` is the only
+(`loader.py`). Config is data, not code. `${env:VAR:-default}` is the only
 interpolation.
 
 ### 2.3 Activation is service-driven, never file-ordered
 
 `Profile.mount(ctx)` mounts every enabled row in file order — **and nothing runs**
-(`loader.py:409-426`). Execution begins at `Context.reconcile()`, which runs to a
+(`loader.py`). Execution begins at `Context.reconcile()`, which runs to a
 fixpoint because activating one plugin may provide the service another was
-waiting on (`context.py:1060-1098`).
+waiting on (`context.py`).
 
 A plugin activates when every key in its `inject` list resolves. Load order is
 therefore *expressed through service requirements*, never through position in a
@@ -158,20 +158,20 @@ file. Three consequences:
 
 - Losing a service **deactivates** the fork but leaves it mounted, so
   re-providing the key reactivates it on a later reconcile
-  (`context.py:1091-1094`, `ForkScope` at `context.py:211-217`).
+  (`context.py`, and `ForkScope` in the same module).
 - An `apply` that raises is deactivated before the exception propagates
-  (`context.py:1086-1090`).
+  (`context.py`).
 - Oscillation is bounded: 64 rounds, then `RuntimeError` naming the cycle
-  (`context.py:71`, `:1095-1098`).
+  (`context.py`).
 
 `running(scope)` is bound around each activation and released on the way out, so
 one row's registrations cannot land on the previous row's scope
-(`context.py:1080-1085`).
+(`context.py`).
 
 After reconciliation, `await ctx.serial("profile/mounted")` fires — the one
 moment a profile is whole and nothing has run. A row uses it either to **refuse
 the deployment** (a strict containment posture with no sandbox backend) or to
-**collect what the profile turned out to contain** (`loader.py:59-86`).
+**collect what the profile turned out to contain** (`loader.py`).
 
 **dsh calls this unit a *fiber*.** pH's spelling is `ForkScope` — the mounted
 plugin — over `_Dependent`, the reactive half: the keys it waits on, the
@@ -181,7 +181,7 @@ present. The word does not appear in this codebase, which is said here so a
 reader arriving from dsh can find the thing it names.
 
 `Mount.inactive()` reports row ids whose plugin is not active — an unmet
-`inject` key (`loader.py:612-614`). `Mount.topology()` renders that per row —
+`inject` key (`loader.py`). `Mount.topology()` renders that per row —
 `active`, `activating`, `waiting on <key>`, `unwound · waiting on <key>`,
 `unmounted`, or `disabled · by <layer>` — with what each injects and which layer
 put it there, into `ph doctor`'s **Topology** section: the live half that
@@ -201,9 +201,9 @@ verbatim.
 ### 2.4 Services and realms
 
 `ctx.provide(key, service)` claims `ctx.<key>` within a **provisioning realm**
-(`context.py:927-950`). A second claim on a held key raises
+(`context.py`). A second claim on a held key raises
 `ServiceConflictError` naming both the realm and the incumbent owner. Resolution
-walks the scope chain most-specific-first (`context.py:952-958`), so a child
+walks the scope chain most-specific-first (`context.py`), so a child
 scope can shadow a service for itself and its descendants.
 
 `provide` returns a disposer, registered as an effect of the calling scope, and
@@ -218,12 +218,12 @@ await ctx.effect(enter, label="worktree")
 
 `Context.effect` acquires an artifact and registers its release in one step, so
 a failure between the two cannot leave the artifact unregistered
-(`context.py:775`). Its docstring states the rule: *"Every external artifact
+(`context.py`). Its docstring states the rule: *"Every external artifact
 an agent takes — a child process, a worktree, a temp path, a lock — is acquired
 through here, so cleanup is structural rather than remembered."*
 
 `Context.dispose()` unwinds **children first (reverse order), then own effects
-LIFO** (`context.py:1100-1131`). Each disposer's exception is caught and logged
+LIFO** (`context.py`). Each disposer's exception is caught and logged
 so one bad teardown cannot strand the rest.
 
 > **That ordering is load-bearing and is a real constraint on plugin authors.**
@@ -232,12 +232,12 @@ so one bad teardown cannot strand the rest.
 > docstring bounds what that path may do: the roster, the parent's log and the
 > tombstone are live; anything needing the *child's* scope — flushing its session
 > through its own services, snapshotting its workspace — is not
-> (`ph_rlm/subagents.py:640-653`).
+> (`ph_rlm/subagents.py`).
 
 Process-level shutdown is the other half. `ph.resources.install_lifecycle`
 disposes the root on `atexit` and on `SIGTERM`/`SIGINT` with a grace period, then
 **self-`SIGKILL`s**, "because a shutdown path that can hang is a shutdown path
-that will" (`resources.py:74-95`). It states its own limit: `SIGKILL` runs
+that will" (`resources.py`). It states its own limit: `SIGKILL` runs
 nothing on any platform, which is why the crash-recovery layer (paired events,
 reconciliation) exists separately.
 
@@ -248,12 +248,14 @@ reconciliation) exists separately.
 
 ### 2.6 Dispatch: four modes, and every event is declared
 
-| Mode | Semantics | Line |
-|---|---|---|
-| `emit` | Sync, return values ignored. A coroutine is scheduled, not awaited. `contained=True` logs a failing listener and continues | `context.py:1184` |
-| `serial` | Awaits listeners in registration order until one bails | `context.py:1220` |
-| `parallel` | All listeners concurrently, all awaited; failures collected into an `ExceptionGroup` | `context.py:1229` |
-| `waterfall` | Around-middleware. Listeners run outermost-first and receive `(*args, next)`; returning without calling `next()` vetoes the rest of the chain, `inner` included | `context.py:1253` |
+Each mode is a method of the same name on `Context` (`cordis/context.py`).
+
+| Mode | Semantics |
+|---|---|
+| `emit` | Sync, return values ignored. A coroutine is scheduled, not awaited. `contained=True` logs a failing listener and continues |
+| `serial` | Awaits listeners in registration order until one bails |
+| `parallel` | All listeners concurrently, all awaited; failures collected into an `ExceptionGroup` |
+| `waterfall` | Around-middleware. Listeners run outermost-first and receive `(*args, next)`; returning without calling `next()` vetoes the rest of the chain, `inner` included |
 
 > Four modes, where P0-03 ported five and P6-25 still counts five. The fifth
 > was a synchronous `bail` — `serial` without the `await` — that no package
@@ -264,13 +266,13 @@ reconciliation) exists separately.
 > The drop is recorded against P0-03 in the plan, where the port history lives.
 
 **Every event must be declared before it can be listened to or dispatched.**
-`EventRegistry.declare(name, mode, payload, owner, doc)` (`cordis/events.py:47`)
+`EventRegistry.declare(name, mode, payload, owner, doc)` (`cordis/events.py`)
 fixes an event's dispatch mode as part of its contract: re-declaring with a
 different mode raises, dispatching through the wrong mode raises
-(`events.py:85-92`), and listening to an undeclared name raises
-(`events.py:76-84`). `note_consumer` records who listens, so `ph events` renders
+(`events.py`), and listening to an undeclared name raises
+(`events.py`). `note_consumer` records who listens, so `ph events` renders
 a producer/consumer matrix from the registry rather than a hand-kept list
-(`events.py:105-112`).
+(`events.py`).
 
 **The consumer half needs a mount, and did not work until P6-02.** A `declare`
 runs at import, so producers are knowable from the import alone; `ctx.on` runs
@@ -291,21 +293,21 @@ waterfall is the only mode where a plugin can veto.
 ### 2.7 Scopes, isolation, and visibility
 
 Every agent gets its own `Context` created with `isolated=True`
-(`context.py:1012-1027`), which makes it an **isolation boundary**. The key line:
+(`context.py`), which makes it an **isolation boundary**. The key line:
 
 ```python
 self._isolation = self if isolated else (parent._isolation if parent is not None else None)
 ```
 — fixed at construction, "so `reaches()` is a lookup rather than a walk"
-(`context.py:602`).
+(`context.py`).
 
 Two derived questions answer everything about visibility:
 
-- **`isolation_chain()`** (`context.py:898-910`) — this context's isolation
+- **`isolation_chain()`** (`context.py`) — this context's isolation
   scopes, most specific first, ending in `None` (the global layer). A scoped
   registry walks it to resolve a name: the innermost scope that registered one
   wins.
-- **`reaches(target)`** (`context.py:912-919`) — *the one visibility rule*, shared
+- **`reaches(target)`** (`context.py`) — *the one visibility rule*, shared
   by event dispatch and by every scoped registry:
   ```python
   return self._isolation is None or self._isolation.is_ancestor_of(target)
@@ -315,7 +317,7 @@ Two derived questions answer everything about visibility:
 
 A plugin's *activation* scope is deliberately **transparent** — it is not
 `isolated`, so it answers `isolation == None` and its registrations are global
-(`context.py:606-610`). Isolation is for agents, not for rows.
+(`context.py`). Isolation is for agents, not for rows.
 
 **A realm can be asked for from YAML, which is dsh's `isolate.fs`.** A row that
 says `isolate: [fs]` runs in a scope that is an isolation boundary *and* its own
@@ -359,7 +361,7 @@ DEPLOYMENT = Deployment()  # context.py:298
 ```
 
 `Boundary` is deliberately **not** `| None`. The reason is a defect that recurred
-four times under four different names (`context.py:277-284`):
+four times under four different names (`context.py`):
 
 | | The `None` that widened |
 |---|---|
@@ -374,7 +376,7 @@ boundary"* with *"I mean the deployment"*, and the convenient default was
 
 The fix has two halves. **Give "everything" a name**: `DEPLOYMENT` is greppable,
 where passing the mount `Context` explicitly would not be "since `ctx` is in
-scope everywhere and reaches for itself" (`context.py:285-289`). **Take the
+scope everywhere and reaches for itself" (`context.py`). **Take the
 default off**: enforcement is two layers — mypy for typed references, and a
 runtime `TypeError: missing 1 required positional argument` at mount for the
 sites that reach a seam through `ctx.<seam>` (which is `Any`).
@@ -382,11 +384,11 @@ sites that reach a seam through `ctx.<seam>` (which is `Any`).
 **What `DEPLOYMENT` means, precisely.** It resolves the *mount's* isolation
 chain — widest along the **restriction** axis only. It is **not** a union over
 agents: a tool registered on one agent's scope is invisible under it
-(`context.py:258-266`, `tools/registry.py:1102-1108`, pinned at
-`tests/test_tools_registry.py:33-44`). "A true is-it-taken-*anywhere* audit is a
+(`context.py`, `tools/registry.py`, pinned at
+`tests/test_tools_registry.py`). "A true is-it-taken-*anywhere* audit is a
 per-layer question no single boundary answers."
 
-`boundary_of(scope, mount)` (`context.py:321-331`) is the **one** narrowing site,
+`boundary_of(scope, mount)` (`context.py`) is the **one** narrowing site,
 because `scope is DEPLOYMENT` does not narrow the union — identity against a
 value is not a type guard.
 
@@ -394,11 +396,11 @@ value is not a type guard.
 a `Boundary`, and so do the two dispatch-time resolvers `owner_for` and
 `layer_for`. Their `None` resolves through the `_ACTIVATING` contextvar to the
 running row — the **narrowest** correct answer, the opposite of the `None` this
-mechanism deletes (`context.py:631-637`).
+mechanism deletes (`context.py`).
 
 Explicitly rejected: `None` meaning *no access*. That "trades a silent-wide
 failure for a silent-narrow one: an empty tool set or an empty prompt degrades a
-model quietly rather than erroring, and nobody notices" (`context.py:291-296`).
+model quietly rather than erroring, and nobody notices" (`context.py`).
 
 ---
 
@@ -432,7 +434,7 @@ The five `claim_slot` seams each carry a sibling `<attr>_by: Running | None`
 field recording *who* registered — verified: `fs`, `sandbox`, `compaction`,
 `code_runtime`, `workspace`. `subagents` deliberately uses `claim_key` instead,
 because "run a child" has genuinely different answers in one deployment
-(`seams/subagents.py:363-372`).
+(`seams/subagents.py`).
 
 **Contribution tables** — many registrations, no single holder: `commands`,
 `skills`, `diagnostics`, `tui_screens`, `tui_status`, `session_telemetry`, and
@@ -440,7 +442,7 @@ compaction *notes*.
 
 **Waterfall registrations** — `approval` and `user_questions` register answerers
 as `ctx.on(...)` listeners, deliberately: "sugar over `ctx.on`; there is one
-routing mechanism" (`seams/approval.py:229-238`).
+routing mechanism" (`seams/approval.py`).
 
 > **These two now have a transport, and it changed the seam rather than sitting
 > beside it** (P5-13). An answerer used to be a screen in this process; under the
@@ -464,7 +466,7 @@ routing mechanism" (`seams/approval.py:229-238`).
 > **One provider seam lives outside `ph/seams/`.** `LlmAdapter` is a `Protocol`
 > but **not** `@runtime_checkable`, and `LlmRuntime.register_adapter` uses no
 > `claim_*` helper — it appends a handle by hand and takes no `scope=`
-> (`llm/adapter.py:83`, `:124-138`). This is documented in place as the case that
+> (`llm/adapter.py`). This is documented in place as the case that
 > escaped the ownership sweep.
 
 ### 3.2 The three claiming helpers
@@ -472,17 +474,17 @@ routing mechanism" (`seams/approval.py:229-238`).
 `ph/seams/_registry.py` exists because this was written by hand six times and the
 release step drifted: "some copies checked identity before removing, some did
 not. A disposer that removes whatever *currently* occupies the slot would tear
-down a successor registered after its own owner was replaced" (`_registry.py:5-8`).
+down a successor registered after its own owner was replaced" (`_registry.py`).
 
 | Helper | Guarantees | Release |
 |---|---|---|
-| `claim_key` `:36` | **Refuses a conflict** — a held key raises | `del` only if the value is still *identically* the one registered |
-| `claim_entry` `:58` | Appends; no conflict | Removes **by identity**, never `==` — because two rows contributing an equal entry would otherwise have one disposer take the other's |
-| `claim_slot` `:81` | **Single holder** — a second raises. Also sets the derived `<attr>_by` field | Clears **both** fields, identity-checked |
+| `claim_key` | **Refuses a conflict** — a held key raises | `del` only if the value is still *identically* the one registered |
+| `claim_entry` | Appends; no conflict | Removes **by identity**, never `==` — because two rows contributing an equal entry would otherwise have one disposer take the other's |
+| `claim_slot` | **Single holder** — a second raises. Also sets the derived `<attr>_by` field | Clears **both** fields, identity-checked |
 
 `claim_slot` derives the `_by` field name rather than taking it as a parameter,
 so a holder that omits the field fails loudly at registration (`slots=True` plus
-`setattr` on an undeclared name) — `_registry.py:92-99`.
+`setattr` on an undeclared name) — `_registry.py`.
 
 Unwinding is *not* these helpers' job; they delegate to `Context.add_disposer`.
 Ownership is decided by the caller through `owner_for`/`running_for`.
@@ -501,9 +503,9 @@ are ever `isinstance`-checked, and both are *second* Protocols asking "can this
 provider also do X":
 
 - `ReclaimingProvider` — can the mounted tier release a tree it did not create?
-  (`seams/workspace.py:1111`)
+  (`seams/workspace.py`)
 - `RehydratableProvider` — can this provider re-attach a runtime to a settled
-  child? (`seams/subagents.py:757`)
+  child? (`seams/subagents.py`)
 
 Both are a Protocol rather than a `getattr` probe on purpose: "a provider whose
 method is misnamed or has the wrong arity would then fail silently as 'cannot
@@ -512,7 +514,7 @@ rehydrate'".
 **3. Registration-time refusal.** One seam validates the provider object itself:
 a `CodeRuntime` declaring `persistence == "namespace"` without
 `declares_kernel_snapshots is True` raises `PersistenceObligationError`
-(`seams/code_runtime.py:238-247`). A runtime that promises to survive must
+(`seams/code_runtime.py`). A runtime that promises to survive must
 promise to snapshot.
 
 **4. Tree-walking gate tests.** `tests/test_registration_ownership.py` (~1 460
@@ -520,28 +522,28 @@ lines) walks every module under `ph` via `pkgutil.walk_packages` and requires
 that **every scoped method and every provider slot is classified in exactly one
 table**. A new seam cannot join unchecked. Highlights:
 
-- `test_every_scoped_method_is_accounted_for` `:517` — every `scope=`-taking
+- `test_every_scoped_method_is_accounted_for` — every `scope=`-taking
   method is in `RECIPES`, `NOT_A_LIFETIME`, or `NOT_EXERCISED`.
-- `test_a_registration_is_an_effect_of_the_row_that_made_it` `:393` — the
+- `test_a_registration_is_an_effect_of_the_row_that_made_it` — the
   behavioural gate: row registers, row unmounts, **the seam's own context did not
   grow an effect**.
-- `test_a_boundary_parameter_never_has_a_default` `:205` — §2.8's durable half,
+- `test_a_boundary_parameter_never_has_a_default` — §2.8's durable half,
   covering both parameters and dataclass fields.
-- `test_the_classification_is_a_check_and_not_a_promise` `:646` — source-text
+- `test_the_classification_is_a_check_and_not_a_promise` — source-text
   falsifiability, so a table entry cannot claim something the code does not do.
-- `test_no_module_is_skipped_for_a_bad_reason` `:85` — a module that fails to
+- `test_no_module_is_skipped_for_a_bad_reason` — a module that fails to
   import must not silently shrink every other walk.
 
-Sibling gates: `test_cordis_events.py:61` (every dispatched event is declared),
-`test_wire.py:64` (every model uses the shared wire base and camel aliases),
-`test_seams.py` (per-seam failure-mode contracts), `test_layering.py:19` (import
+Sibling gates: `test_cordis_events.py` (every dispatched event is declared),
+`test_wire.py` (every model uses the shared wire base and camel aliases),
+`test_seams.py` (per-seam failure-mode contracts), `test_layering.py` (import
 layering).
 
 ### 3.4 Decline is not failure pattern
 
 `WorkspaceSeam.acquire` distinguishes **three** outcomes, and the distinction is
 load-bearing because half the directories a person runs pH in are not git
-repositories (`seams/workspace.py:687-778`):
+repositories (`seams/workspace.py`):
 
 | Outcome | Signal | Recorded `DeclineReason` |
 |---|---|---|
@@ -553,11 +555,11 @@ None is fatal; all three fall back to `shared` and record what happened on
 `workspace/acquired`. `DeclineReason` is a `Literal`, "a code rather than prose",
 because `ph doctor` prints it and "a durable event carrying an English sentence
 is unparseable by the consumer that has to branch on it"
-(`seams/workspace.py:384-390`).
+(`seams/workspace.py`).
 
 The refusal to invent a reason is the interesting part: fabricating one "would
 reintroduce one level down the very confusion this field exists to remove"
-(`workspace.py:749-754`).
+(`workspace.py`).
 
 Parallel shapes elsewhere: `ApprovalService.request` never raises and returns
 `"unavailable"` — **fail-closed**; `SubagentService.resolve` returns `None` plus a
@@ -597,18 +599,18 @@ ph workspaces gc [--profile] [--older-than DAYS] [--remove] [--session ID]
 non-guarantees, available profiles — then **mounts** the profile and prints every
 `ctx.diagnostics` section. If the profile refuses to start (a strict containment
 posture with no sandbox backend), that is the most important thing it can say, so
-it reports a sentence and exits 1 rather than a traceback (`cli.py:312-318`).
+it reports a sentence and exits 1 rather than a traceback (`cli.py`).
 
 `ph agents` is the client half of the daemon. Every command goes through one
 `_ask()` spine, which is what keeps "no daemon is running" one sentence rather
 than seven, and which distinguishes an **absent** socket (nothing was started)
 from a **present but refusing** one (something crashed and left its path behind)
-— opposite next steps (`agents.py:157-187`, `:96-139`).
+— opposite next steps (`agents.py`).
 
 `ph workspaces gc` **reports by default; removing is the flag** — the opposite
 way round from most `gc`, because the person who most needs it is the one who
 just found the disk full and does not yet know what these directories are
-(`workspaces.py:145-150`).
+(`workspaces.py`).
 
 Everything exits **1** on refusal, except argument errors under
 `--mode trajectory` and unreadable attachments, which exit **2**.
@@ -630,7 +632,7 @@ Everything exits **1** on refusal, except argument errors under
 The `commands` seam (`seams/commands.py`) registers in-session `/verbs`. A
 dispatch appends `command/run` then `command/done` **even when the body raises**,
 and never opens a `turn/*` — because the human decided it, not the model
-(`commands.py:1-7`, `:134`, `:180-185`).
+(`commands.py`).
 
 | Command | Row | In profiles |
 |---|---|---|
@@ -644,7 +646,7 @@ The TUI registers its own verbs at runtime rather than through a profile row —
 `/commands`, `/model`, `/theme`, `/sessions`, `/permissions`, `/login`,
 `/thinking`, `/tools`, `/sidebar`, `/quit` — each reachable three ways (slash
 command, Textual action, key binding), so adding one is a table row plus a method
-(`tui/commands.py:50-88`). A contributed screen gets the same three routes;
+(`tui/commands.py`). A contributed screen gets the same three routes;
 `/trajectory` (F2) is the one that ships.
 
 ---
@@ -665,7 +667,7 @@ profile name ──► profile_or_exit ──► Profile.from_documents ──�
                                  ctx.serial("profile/mounted")
 ```
 
-`mounted()` (`ph_app/runtime.py:25-42`) wraps this and guarantees
+`mounted()` (`ph_app/runtime.py`) wraps this and guarantees
 `await ctx.drain(); await ctx.dispose()` in an unconditional `finally`.
 `prompted()` adds the run: create session → ingest attachments → create agent →
 `followup` → `run()` → **flush**. Attachments are ingested *before* the agent
@@ -673,7 +675,7 @@ exists so an unreadable file fails the command rather than a turn.
 
 ### 5.2 Running
 
-The per-turn contract, from `agent_loop/driver.py:8-25`:
+The per-turn contract, from `agent_loop/driver.py`:
 
 ```
 turn/start
@@ -693,17 +695,17 @@ turn/start
 turn/end
 ```
 
-Two properties the loop holds itself to (`driver.py:27-32`): every request's
+Two properties the loop holds itself to (`driver.py`): every request's
 `messages` **is** `session.derive_messages()` (§7.3), and `max-tokens` is
 **sticky for the turn**, so a later completed step cannot report a truncated
 answer as clean.
 
 A driver that let an exception escape would take the process down with one bad
 turn, so `run()` contains everything except cancellation
-(`driver.py:228-231`).
+(`driver.py`).
 
 Three inbox targets, differing in *when* and *whether they wake*
-(`agent/inbox.py:6-10`):
+(`agent/inbox.py`):
 
 | Call | Lands at | Wakes an idle agent |
 |---|---|---|
@@ -713,7 +715,7 @@ Three inbox targets, differing in *when* and *whether they wake*
 
 Durability is not the loop's job: `session-checkpoint-policy` flushes before
 every model request, before every top-level tool body, and after a rejected
-`agent/pre-step` (`persistence/checkpoint_policy.py:43-75`).
+`agent/pre-step` (`persistence/checkpoint_policy.py`).
 
 ### 5.3 Rehydrate
 
@@ -725,13 +727,13 @@ store.read(id) ──► interrupted_turn_closers(events) ──► Session(seed
                                        append session/resumed ┘
 ```
 
-`resume_session` (`persistence/jsonl.py:270-306`) reads through the **Protocol**,
+`resume_session` (`persistence/jsonl.py`) reads through the **Protocol**,
 not a filename, so a database backend resumes identically.
 
 **Repair runs on the seed, before publication**, so a resumed session is
 provider-valid the first time anything reads it — an open turn reaching
 `derive_messages()` would otherwise be rejected by the provider before anyone
-noticed it was unclosed. `interrupted_turn_closers` (`persistence/repair.py:69-178`)
+noticed it was unclosed. `interrupted_turn_closers` (`persistence/repair.py`)
 emits, in order: one synthetic `tool/result` per unresolved call (`is_error`,
 code `TOOL_NOT_STARTED` if the call was never stamped, else
 `TOOL_OUTCOME_UNKNOWN`), a `step/end` if a step was open, and `turn/end` with
@@ -743,18 +745,18 @@ crashed" versus "this was reopened": a clean stop synthesizes no closers.
 
 Because `adopt` emits `session/created`, the resume path meets the **same**
 listeners a fresh session does — which is how workspace reconciliation runs on
-resume without a resume-only hook (`seams/workspace.py:1647-1665`).
+resume without a resume-only hook (`seams/workspace.py`).
 
 **Seed acceptance is one gate for every path** (fork, resume, replay, import):
 `_readmit` requires `seq == index`, contiguous from 0, and refuses unknown
-non-ignorable types (`session/session.py:373-392`).
+non-ignorable types (`session/session.py`).
 
 **Subagent rehydration** is separate and narrower. `RehydratableProvider.rehydrate`
 re-attaches a runtime to a *settled* child so it can be addressed again. The one
 implementation refuses if the session or the **parent** is not live — checked
 *before* anything is built, because the earlier order orphaned an unbounded agent
 — and then **re-applies the stored grant, because a fresh scope means a fresh
-ceiling** (`ph_rlm/subagents.py:333-379`). A deleted child is never rehydrated;
+ceiling** (`ph_rlm/subagents.py`). A deleted child is never rehydrated;
 the tombstone is the record.
 
 > ### A session resumes repeatedly
@@ -806,7 +808,7 @@ Details worth having:
 **Passivation** measures idleness **from the log's own last event**, so the clock
 survives a restart. It keeps a root alive for any of five reasons: status ≠ idle
 (a root mid-ladder is never released), live subscribers, inside the window, a
-live subagent, or a live schedule (`supervisor.py:986-1041`). A passivated root
+live subagent, or a live schedule (`supervisor.py`). A passivated root
 is resumable through the ordinary `start()` path — but while passivated,
 `session/status` and friends return `no_such_session`, because `_root()` looks
 only in the live map.
@@ -814,7 +816,7 @@ only in the live map.
 **The retry ladder** is three delays `(0.25, 1.0, 5.0)`; the fourth consecutive
 crash gives up. Its state is **folded from the log, not remembered** — and
 `turn/end` is deliberately not consulted, because doing so once produced 165
-retries in two seconds with no give-up (`daemon/recovery.py:73-81`). **Turn
+retries in two seconds with no give-up (`daemon/recovery.py`). **Turn
 failures are explicitly out of scope**: the driver contains its own, retry
 policy has already handled transient provider errors, and re-running a failed
 turn would find an empty inbox and produce a trivially-successful empty one.
@@ -831,7 +833,7 @@ the recovery ladder to work climbing over a socket.
 
 **The lease is daemon-against-daemon and no further.** A `ph -p --session x` run
 against a daemon-held session still opens it, because the lease is not in the
-store (`supervisor.py:560-566`). `thread_local=False` is load-bearing and its
+store (`supervisor.py`). `thread_local=False` is load-bearing and its
 absence is silent: filelock's re-entrancy counter is thread-local, so a lease
 taken on a worker thread releases nothing.
 
@@ -846,13 +848,13 @@ wire payload repair writes on resume.
 
 **Limits ship off.** All five ceilings default to unlimited and no profile sets
 them, because "a limit nobody chose is a limit that fires on someone's longest
-legitimate turn" (`ph_stabilize/bundle.yaml:55-59`). The **breaker** is the
+legitimate turn" (`ph_stabilize/bundle.yaml`). The **breaker** is the
 exception: on by default at 5 consecutive failures per tool, reset by any
 success, and it refuses *one tool call* rather than ending a turn.
 
 **There is no global turn or request timeout**, no max-steps in the driver, no
 health check, no max-roots cap, and no per-root memory cap. `NON_GUARANTEES`
-(`supervisor.py:93-130`) states this rather than leaving it to be discovered, and
+(`supervisor.py`) states this rather than leaving it to be discovered, and
 `ph doctor` prints it — including that **after a restart roots are not
 re-mounted, so a schedule does not fire until something touches its root**.
 
@@ -867,7 +869,7 @@ owner = getattr(parent, "ctx", None)
 base = owner if isinstance(owner, Context) else self.ctx
 scope = base.scope(f"agent:{session.id}")
 ```
-— `agent/registry.py:125-127`. That is the whole mechanism. `parent=` makes the
+— `agent/registry.py`. That is the whole mechanism. `parent=` makes the
 child's scope a **child node of the parent's `Context`**; without it the scope
 hangs off the registry.
 
@@ -878,10 +880,10 @@ Three consequences follow structurally, with no bookkeeping:
   child's tools.
 - **Disposal cascades** — `Context.dispose` unwinds `_children` first.
 - **Containment is one-way** — `parent.ctx.reaches(child.ctx)` is true and the
-  reverse is false (pinned at `tests/test_subagent_grant.py:392-408`).
+  reverse is false (pinned at `tests/test_subagent_grant.py`).
 
 The roster entry is itself a disposer of the scope it describes
-(`registry.py:141`), so a parent's cascade cannot leave a live-looking handle
+(`registry.py`), so a parent's cascade cannot leave a live-looking handle
 behind.
 
 In the log, the same relationship is `SessionHeader.parent_session`,
@@ -892,16 +894,16 @@ id, so the link needs no side index.
 
 **Admission is non-blocking.** `start()` resolves once the child is *admitted* —
 session created, admission logged, task detached — not once it has answered
-(`seams/subagents.py:7-17`).
+(`seams/subagents.py`).
 
-The spawn path, in order (`ph_rlm/subagents.py:172-262`): depth gate → name and
+The spawn path, in order (`ph_rlm/subagents.py`): depth gate → name and
 model resolution (**no model fallback**) → child session with the header meta →
 `agents.create(..., parent=parent)` → workspace → `SubagentRun` → append
 `subagent/admitted` → register the parent-scope effect → `followup` the task.
 
 **Status is a fold, not a field.** `subagent_roster(session)` folds
 `admitted | status | deleted` from the parent's own log
-(`seams/subagents.py:925-974`). Admission seeds `queued` because `to_wire()`
+(`seams/subagents.py`). Admission seeds `queued` because `to_wire()`
 deliberately omits status and the first `subagent/status` comes from a detached
 task — without the seed, a reader between the two sees a child with no status.
 Deletion writes a **tombstone**, not a status: a parent asking what happened to
@@ -909,13 +911,13 @@ the child it revoked deserves an answer other than silence.
 
 `SETTLED_STATUSES` is a real constant for a real reason: a hand-written copy was
 once wrong in three of its four members and pinned every parent forever
-(`seams/subagents.py:100-111`). `child_is_live` checks the tombstone first and
+(`seams/subagents.py`). `child_is_live` checks the tombstone first and
 treats **an unrecognised status as live** — failing toward keeping a child alive.
 
 **Depth** is `RLM_MAX_DEPTH = 2` ("depth 0 delegates, depth 1 delegates, depth 2
 does the work"), read from the **typed** header field rather than the wire alias,
 because a rename would return 0 and 0 *opens* the gate
-(`ph_rlm/subagents.py:108-116`).
+(`ph_rlm/subagents.py`).
 
 **Quiescing** drops the session observer, releases the jobs entry, and disposes
 the agent — because the agent scope owns the child's kernel subprocess, and
@@ -924,7 +926,7 @@ late `result()` still answers.
 
 ### 6.3 Communication
 
-**The reach rule (C7, "nuclear family")** — `seams/subagents.py:1093-1110`:
+**The reach rule (C7, "nuclear family")** — `family_reach` in `seams/subagents.py`:
 
 ```python
 if sender_id == target_id:
@@ -941,7 +943,7 @@ A grandparent is out of reach. Two roots are siblings. `reachable_family` is
 tells the model who it may address cannot disagree.
 
 **The boundary is a `ctx.tools.guard`** — deny-only, runs last, and cannot be
-re-permitted by any later listener (`ph_rlm/messaging.py:232-245`). The rate
+re-permitted by any later listener (`ph_rlm/messaging.py`). The rate
 limit is deliberately **not** a guard, because under Code Mode a *denial* ends
 the whole cell, and being rate-limited should not.
 
@@ -954,7 +956,7 @@ session, and bodies at 16 KiB.
 
 > It is an **additive record for readers**, not an input to any measurement: the
 > meter does not read this event — `TokenMeter.last_usage` scans only
-> `assistant/message` in the log it is given (`seams/token_meter.py:163-168`), and
+> `assistant/message` in the log it is given (`seams/token_meter.py`), and
 > a child's messages are in the *child's* log, so the parent's measurement is
 > already correct without it. Its only consumer today is the TUI panel. The
 > producing module claimed the meter "can subtract" a child's tokens; that wording
@@ -965,7 +967,7 @@ and covers grandchildren; the messaging family is one hop and includes siblings.
 Borrowing the messaging rule for a filesystem question "would widen a filesystem
 question with an answer computed for a different one. That is the shape of
 privilege escalation I7 names, arrived at by reuse rather than by intent"
-(`seams/subagents.py:1017-1025`).
+(`seams/subagents.py`).
 
 ### 6.4 Resources
 
@@ -983,7 +985,7 @@ may do (§2.5).
 ### 6.5 Capability: a child never holds more than its parent at time of initialization
 
 This is the security content of the hierarchy, and it is enforced at the **seam**,
-not left to providers (`seams/subagents.py:673-701`):
+not left to providers (`check_grant` and `_enforce` in `seams/subagents.py`):
 
 ```
 resolve_preset  →  _delegating_boundary  →  held_by  →  check_grant
@@ -1009,11 +1011,11 @@ resolve_preset  →  _delegating_boundary  →  held_by  →  check_grant
   are the only instrument a spawn is allowed to use."
 
 The restriction algebra is one type, `NameFilter(allow, deny)`
-(`seams/_restriction.py:27-41`). `None` means "no opinion" in both directions,
+(`seams/_restriction.py`). `None` means "no opinion" in both directions,
 "which is what makes intersection the whole composition rule: a filter can only
 ever remove a name another filter allowed, never restore one another removed."
 
-The resolution rule in `ToolRuntime._build_view` (`tools/registry.py:596-632`):
+The resolution rule in `ToolRuntime._build_view` (`tools/registry.py`):
 
 > **A restriction reaches everything outside the scope that wrote it, and nothing
 > inside.** A layer is never filtered by its own restriction — an agent's own
@@ -1030,7 +1032,7 @@ allow-list rather than relying on the chain, because "the chain answers 'no more
 than the parent **holds**', and this answers 'no more than the parent held
 **then**'. Only the second is stable enough to read a transcript against."
 Pinned: a tool the parent gains *later* is visible to the parent and not to the
-child (`tests/test_subagent_grant.py:485-519`).
+child (`tests/test_subagent_grant.py`).
 
 ### 6.6 The containment ladder
 
@@ -1055,7 +1057,7 @@ row claims the rung only when a backend is mounted and enforcing, because
 commands"** row: a reader must not have to reconcile "bounds: nothing" in the
 workspace section with a kernel that is in fact refusing the write.
 
-The rule, verbatim (`seams/workspace.py:9-14`):
+The rule, verbatim (the module docstring of `seams/workspace.py`):
 
 > **`repo_writable` records which guarantee was obtained, never which was
 > requested.** A caller asking `access="read"` gets the strongest kind the
@@ -1075,7 +1077,7 @@ lands in `granted_access` on `subagent/admitted`.
 
 Both halves of tier selection can only **lower** the answer: a chosen `advisory`
 declines a registered provider, and an absent provider cannot deliver whatever
-was chosen (`seams/workspace.py:589-614`).
+was chosen (`seams/workspace.py`).
 
 > **The ladder is complete, and this paragraph has been wrong twice.** It once
 > read "no tier in pH bounds an absolute-path write, and `containment.strict` has
@@ -1111,8 +1113,8 @@ makes hard to violate*, not as rules anyone remembers.
 > | Register | Where | Content |
 > |---|---|---|
 > | Items **1–5** | `Python_Harness_Port_Plan.md` §2 | the five below |
-> | **I1–I8** | `Implementation_Plan.md:27` | those five (origin `dsh`) **plus three added by pH**: I6 every-projection-equals-its-fold, I7 knowledge-layer-may-only-reference-existing-capability, I8 containment-is-not-interception |
-> | **I-1 – I-9** | `Implementation_Plan.md:166` | a *separate* hardening register — runtime-dir resolution, credentials, session leases, wire casing |
+> | **I1–I8** | `Implementation_Plan.md` | those five (origin `dsh`) **plus three added by pH**: I6 every-projection-equals-its-fold, I7 knowledge-layer-may-only-reference-existing-capability, I8 containment-is-not-interception |
+> | **I-1 – I-9** | `Implementation_Plan.md` | a *separate* hardening register — runtime-dir resolution, credentials, session leases, wire casing |
 >
 > So code citing "I7" means the knowledge-layer rule; code citing "I-5" means
 > session leases. They are not the same series. Note also that I7's *canonical*
@@ -1130,7 +1132,7 @@ one by id.
 **Where it bites.** Two shipped session backends (JSONL, Turso) satisfy one
 `SessionPersistence` Protocol, and four consumers that used to reach for
 `store.root` and rebuild a filename now ask `locate()` — which is allowed to
-answer `None` (`persistence/protocol.py:1-25`). That is I1 paying for itself: a
+answer `None` (`persistence/protocol.py`). That is I1 paying for itself: a
 second backend was addable without breaking four call sites.
 
 **Where it is imperfect.** `ph-app` is not a plugin — the CLI, the TUI and the
@@ -1146,7 +1148,7 @@ layer's).
 **How ownership is decided.** `owner_for(scope)` answers "whose lifetime does a
 registration made *now* belong to", in three cases: an explicit `scope=` wins; the
 **activation scope** when a row's `apply` is running (this is the fix P6-12
-landed); otherwise this context (`context.py:612-665`). The third branch is a
+landed); otherwise this context (`context.py`). The third branch is a
 widening in I2's sense, and it is the one branch that *fails open* — so it
 **warns**, because "a silent fallback would make the one path that still outlives
 its owner both invisible and unmeasurable".
@@ -1163,7 +1165,7 @@ walks every module and requires every scoped method and provider slot to be
 classified; the behavioural gate mounts a row, registers through it, unmounts,
 and asserts **the seam's own context did not grow an effect**. A lint additionally
 refuses `subprocess.Popen` and `tempfile.mkdtemp` outside the seams, "because the
-fiftieth plugin author will not have read §4.9" (`resources.py:5-8`).
+fiftieth plugin author will not have read §4.9" (`resources.py`).
 
 **Where it is imperfect.** Outside state needs to be idempotent. Should a change
 take place in an external database, or an email get sent out, those cannot be
@@ -1172,12 +1174,12 @@ The invariant is about the *harness*, not the external state.
 
 ### I3 — Model-visible means logged
 
-**Mechanism.** `Session.derive_messages()` (`session/session.py:380-403`) projects
+**Mechanism.** `Session.derive_messages()` (`session/session.py`) projects
 the ordered *surface* into the LLM history. Anything reaching a model request must
 be exactly that projection.
 
 **Enforced at runtime, not only in tests.** `agent-loop-invariant`
-(`agent_loop/invariant.py:34-60`) registers a `llm/stream` listener that compares
+(`agent_loop/invariant.py`) registers a `llm/stream` listener that compares
 `request.messages` against `session.derive_messages()` — *identically*, not
 "equivalently", not "a superset" — and raises `ModelVisibleNotLoggedError` naming
 both counts. It is **prepended**, so it sees what the loop built before any
@@ -1212,7 +1214,7 @@ would read as verified while verifying nothing. The pollable ones — I6's
 
 ### I4 — The log is append-only; the surface is what changes
 
-**Mechanism.** `SurfaceManager` (`session/surface.py:278-329`) keeps an ordered
+**Mechanism.** `SurfaceManager` (`session/surface.py`) keeps an ordered
 list of surface *node* seqs. A surface-eligible event
 (`user/message | assistant/message | tool/result`) **must** declare a
 `surface_op`: either `append`, or `replace(start, end)` which swaps a range of
@@ -1221,8 +1223,8 @@ nodes for one new node. The log keeps every event; only the *derivation* changes
 **The validation is a plan, not a mutation.** `validate_next(event)` plans the
 transition without committing it, so "a rejected append leaves the surface
 untouched — a partially mutated surface would be unrecoverable"
-(`surface.py:292-301`). `Session.append` validates **before** the push
-(`session.py:279-281`).
+(`surface.py`). `Session.append` validates **before** the push
+(`session.py`).
 
 Four rules the planner enforces:
 
@@ -1231,15 +1233,15 @@ Four rules the planner enforces:
   `source_event_seqs`; an eligible one must carry a `surface_op`.
 - **Provenance** — a replacement must cite **every** shadowed node in
   `source_event_seqs`, with no duplicates, all earlier than itself
-  (`surface.py:147-168`).
+  (`surface.py`).
 - **Tool-result narrowing** — a `tool/result` replacement may rewrite exactly one
   node and may change **only content**, never the call id or the error identity,
   so "a 'spill' cannot silently rewrite what the model is told happened"
-  (`surface.py:188-205`).
+  (`surface.py`).
 
 **And the fold is reproducible offline.** `fold_surface(events)` replays a stored
 log through the same rules, so an external reconstructor must reach the same
-nodes (`surface.py:263-275`).
+nodes (`surface.py`).
 
 **Areas affected.** `transcript()` and `derive_messages()` deliberately differ:
 the transcript keeps what compaction shadowed, because a human scrolling back
@@ -1363,6 +1365,15 @@ Stated here rather than left to be discovered, per the codebase's own rule.
 - **So read the tests for the argument.** "The first draft did X, which broke Y"
   is still the most valuable sentence in the codebase; it is now in
   `packages/*/tests/`, where X is a test that fails.
+- **Cite a file and a symbol, never a line number.** The same drift argument, one
+  step further: a path survives every edit to the file, a function or class name
+  survives everything but a rename, and `file.py:1093-1110` is wrong the next time
+  anybody inserts a paragraph above it. This document carried 118 such citations
+  and the plans another 79; enough of them had rotted — pointing at blank lines,
+  at the middle of an unrelated docstring, at a `return None` — that the numbers
+  were removed wholesale rather than repaired. Where the surrounding prose does
+  not already name what is being pointed at, name it: `family_reach` in
+  `seams/subagents.py` still finds it after the function has moved twice.
 - **`ph events`** prints the live producer/consumer matrix.
 - **`ph doctor --profile <name>`** mounts a profile and reports what it actually
   composed — the effective containment tier, what the file rules reach, what runs

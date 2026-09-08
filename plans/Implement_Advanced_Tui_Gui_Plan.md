@@ -14,12 +14,12 @@ precisely because it sets the priority:
 
 * **Approvals are a live defect.** `ctx.approval.request(...)` suspends a *specific pending tool
   call* inside `agent.run()`. Under the daemon no answerer is registered, so the waterfall's
-  `inner` returns `unavailable` (`ph/seams/approval.py:276-283`) and the call is **denied** —
+  `inner` returns `unavailable` (`ph/seams/approval.py`) and the call is **denied** —
   not because a person said no, but because nobody could be asked. Both doctors report the
   deployment as healthy.
 * **Questions are, as of today, theoretical.** `ctx.user_questions.ask(...)` is pH's
   `AskUserQuestion`: free-form or multiple-choice, asked *by the harness*, turn parked until
-  answered, degrading to `None`. The row is mounted (`base.yaml:118`), the TUI registers an
+  answered, degrading to `None`. The row is mounted (`base.yaml`), the TUI registers an
   answerer and ships `AskUserModal` — and **`grep '\.ask('` across `packages/*/src` finds no
   caller.** It is a seam with a definition and a consumer and no producer.
 
@@ -120,7 +120,7 @@ fourth timer:
 3. `sweep(after=EPHEMERAL_QUIET)` leaves `supervisor.roots` empty, **and**
 4. `ScheduleIndex.read()` is empty — **any** appointment keeps the daemon up.
 
-Then `server.stop.set()`. Teardown **already unlinks the socket** (`server.py:673`, inside the
+Then `server.stop.set()`. Teardown **already unlinks the socket** (`server.py`, inside the
 shielded shutdown after `supervisor.aclose()`), so the next client sees an *absent* socket and
 starts one rather than hitting the "present and refusing" crash diagnosis.
 
@@ -169,7 +169,7 @@ timely scheduling on a machine that reboots still wants a systemd/launchd unit o
 ## Increment 0 — the seam: `PHTuiApp` stops reaching past the harness
 
 `app.py` touches `front.ctx` in nine places (`_open`, `_screen`, `action_open_{commands,models,
-sessions,presets,login}`, `_store`, `_completion_source`; `tui/app.py:238-567`) and 18 pilot-test
+sessions,presets,login}`, `_store`, `_completion_source`; `tui/app.py`) and 18 pilot-test
 sites read `front.ctx`/`front.session`. Nothing over a socket can satisfy that, so the seam lands
 first, with no wire change, and ships alone.
 
@@ -190,10 +190,10 @@ first, with no wire change, and ships alone.
 **1a. One duplex end, and two framing fixes that gate everything.** *(Landed. The two fixes
 became three, and the second end became the same object as the first.)* Both ends assume
 "id-bearing frame = reply":
-`DaemonClient._pump` (`client.py:86-96`) files every id in `_replies`; `_Connection._handle`
-(`server.py:192-195`) runs `respond()` on every inbound frame. Route on `"method" in frame`
+`DaemonClient._pump` (`client.py`) files every id in `_replies`; `_Connection._handle`
+(`server.py`) runs `respond()` on every inbound frame. Route on `"method" in frame`
 (request) vs `"result"/"error"` (reply); server-minted ids are strings `"s<n>"` so they cannot
-collide with the client's ints. And `_read` awaits `_handle` inline (`server.py:169-172`) — a
+collide with the client's ints. And `_read` awaits `_handle` inline (`server.py`) — a
 `session/command` whose body asks approval would deadlock — so `_handle` runs via
 `start_soon`, bounded by an `IN_FLIGHT` semaphore so "do not await the loop" does not silently
 become "accept without limit"; a single writer task keeps frames unmixed.
@@ -248,7 +248,7 @@ speculative.
 - `question/asked {askId, question, options, header, multiSelect}` and
   `question/answered {askId, answer}`, appended by `UserQuestionService.ask(question, *,
   session=)` around its waterfall, mirroring `_record_asked`/`_record_decided`
-  (`approval.py:310-352`). Add to `KNOWN_SESSION_EVENT_TYPES`, `tui/adapter.py HANDLERS`, and
+  (`approval.py`). Add to `KNOWN_SESSION_EVENT_TYPES`, `tui/adapter.py HANDLERS`, and
   `tui/trajectory.py` — the vocabulary tests force both. Both types are **ignorable**, unlike
   `approval/*`: an approval's decision can carry substituted arguments and so changes what ran,
   while a question's answer reaches the model only as the `ask_user` tool result, which is a
@@ -287,7 +287,7 @@ what P5-13's repair half closes.
 **1c. Server→client asks.** Frames `approval/ask {sessionId, askId, request}` and
 `question/ask {…, question}`; the client replies in `respond`'s envelope — **reuse `respond` on
 the client verbatim** by giving `DaemonClient` a `handlers: dict[str, Dispatch]`. `askId` is the
-key `pending_approvals` already uses (`callId or toolName`, `approval.py:203`), so a re-posed ask
+key `pending_approvals` already uses (`callId or toolName`, `approval.py`), so a re-posed ask
 is recognisable.
 
 New `ph_app/daemon/frontend.py` (ph-app, because it knows connections; seams stay
@@ -314,8 +314,8 @@ Fan-out: every front end is asked; the first reply settles; later replies are re
 `ask_settled`; the others receive `ask.settled {sessionId, askId, by}`. **No front end → the ask
 sits in `asks` and the answerer awaits it** — P5-13's parked state, which survives the daemon
 stopping because the log holds the ask with no answer. Turn cancellation propagates through that
-await. The `reason` steer mirrors `frontend.py:219-228`. Wired from `Supervisor._start` after
-`agents.create` (`supervisor.py:468`), disposers on `exits`. **Answering is a capability the
+await. The `reason` steer mirrors `frontend.py`. Wired from `Supervisor._start` after
+`agents.create` (`supervisor.py`), disposers on `exits`. **Answering is a capability the
 client declares at `initialize`**, not a flag on each attach: `asks` is the same name the daemon
 uses to offer the direction, because it is one feature and each half is useless alone, and
 whether a UI can put a modal in front of a person does not vary by which root it is watching —
@@ -327,7 +327,7 @@ Also here: `Root.status` gains **`waiting`** (derived: `desk.asks` non-empty), t
 **releasable** by `passivatable` — see *Daemon lifetime*.
 
 **Gates:** `test_every_attached_front_end_is_asked_and_the_first_answer_wins` (two clients; fire
-`root.ctx.approval.request(...)` as `test_tui_frontend.py:55-58` does; both receive the ask; one
+`root.ctx.approval.request(...)` as `test_tui_frontend.py` does; both receive the ask; one
 answers; the other gets `ask.settled`; the log has one `approval/decided`) ·
 `test_an_ask_with_nobody_attached_is_posed_to_whoever_attaches_next` ·
 `test_a_late_answer_is_refused_not_recorded` · `test_a_front_end_that_vanishes_mid_ask_is_
@@ -339,7 +339,7 @@ off the attach frame) · the same three for `ask_user`. **Sabotage:** resolve on
 
 - `session.status` params gain `readings: [{text, level}]`. `StatusField.read(session)` is a fold
   of the log and changes only on append, so push on change (computed in `relay`,
-  `supervisor.py:494`, only when subscribers exist, sent only when different); pollable
+  `supervisor.py`, only when subscribers exist, sent only when different); pollable
   `session/readings` for the attach moment. **The TUI's 30 Hz `_tick` is gone**: it was a poll
   watching a flag that was already event-set, so the first change now schedules one draw a frame
   later and every change until then rides it — same bounded latency, nothing running while nothing
@@ -355,12 +355,12 @@ off the attach frame) · the same three for `ask_user`. **Sabotage:** resolve on
 - `daemon/config` → `{rows: supervisor.profile.dump()}`; feeds `credential_choices`.
 - `commands/list {sessionId}` from `root.ctx.commands.list()`; `session/command {sessionId, line,
   clientId, commandId}` → `{shown}`, running `ctx.commands.dispatch(line, scope=root.agent.ctx,
-  session=, agent=)` as `frontend.py:120` does, idempotent via `root.remember`. The TUI's own
+  session=, agent=)` as `frontend.py` does, idempotent via `root.remember`. The TUI's own
   verbs (`TUI_VERBS`) stay client-side; the client merges.
 - `screens/list {sessionId}` → `[{id, label, order, key}]`. `build()` still runs **in the client**
   against the session it rebuilt from its snapshot — enough for textual-serve, since it *is* the
   TUI. P5-15's declarative body is deferred to P7-07 and said so.
-- `tools/list {sessionId}` — copy `rpc_mode.py:69-73` against `root.ctx`.
+- `tools/list {sessionId}` — copy `rpc_mode.py` against `root.ctx`.
 - `session/new` gains `cwd` → `SessionHeader.cwd` (validator demands absolute; verify
   `store.create(meta=)` reaches the header). `session/preset`, `session/credential` — the value
   never logged; extend `test_login_stores_a_secret_without_logging_it`.
@@ -411,7 +411,7 @@ a secret could travel in, which is what makes "never the value" structural rathe
 - `attachment/put {name, mime, contentB64}` → `AttachmentRef.to_wire()` via
   `store.save_bytes(...)`. **The client reads the bytes** — the human door (I-9), with the
   person's permissions, and the only path a browser can take. `MAX_LINE` is 8 MiB
-  (`framing.py:30`); refuse over 5 MiB with `attachment_too_large` naming the limit. Chunking
+  (`framing.py`); refuse over 5 MiB with `attachment_too_large` naming the limit. Chunking
   deferred and stated.
 - `session/stage {sessionId, attachment}` → per-root `staged: list[AttachmentRef]`; notification
   `session.staged` to every watcher, so an upload becomes a chip in *every* attached composer.
@@ -419,7 +419,7 @@ a secret could travel in, which is what makes "never the value" structural rathe
   lost on daemon restart with the blob still in the store. Rule 6 note.
 - `session/prompt` gains `attachments: [AttachmentRef]` and drains `staged`; checks
   `store.exists(ref)` → `attachment_unknown`; builds via `prompt_message(text, refs)`
-  (`attach.py:54`), replacing the bare `create_user_message` at `supervisor.py:990`.
+  (`attach.py`), replacing the bare `create_user_message` at `supervisor.py`.
 - TUI verb `/attach <path> …` → the same two methods, so both UIs attach one way. Intercepted in
   the app rather than registered as a `ctx.commands` entry, and the reason is the same one that
   puts the read on the client: a command body runs where the profile is *mounted*, so `/attach`
@@ -448,12 +448,12 @@ be the allocation the refusal exists to avoid.
 ## Increment 1f — `!!`: the person's own shell — new row P7-10 *(landed)*
 
 `!!<command>` in the composer runs a shell command in the session's workspace and appends what
-happened. Ported from tau (`session.py:2712-2751`) with one deliberate narrowing: tau ships a
+happened. Ported from tau (`session.py`) with one deliberate narrowing: tau ships a
 *pair* — `!` splices the output into the model's context, `!!` does not — and pH takes only the
 quiet one. Someone who wants the model to see it pastes it.
 
 **Logged, and not model-visible — and pH's filter is type-level, which decides the shape.**
-`derive_messages()` walks the *surface*, and `_surface_op_of` (`session/surface.py:126`) makes
+`derive_messages()` walks the *surface*, and `_surface_op_of` (`session/surface.py`) makes
 surface membership a property of the **event type**: a surface-eligible type (`user/message`,
 `assistant/message`, `tool/result`) **must** carry a `surfaceOp` and both ops — `append` and
 `replace` — put it on the surface; a non-eligible type **may not** carry one and is therefore
@@ -467,7 +467,7 @@ There is a second, harder reason not to borrow the tool types even if the surfac
 `tool/result` derives a `Message` that providers expect to pair with a `tool_use` block from an
 assistant message. A human's shell command has none, so an on-surface tool result is an
 **orphan** — an error at Anthropic. That is why tau's `!` splices a `UserMessage` carrying the
-command and output as *text* (`session.py:2734-2743`) rather than a tool pair, and it is what
+command and output as *text* (`session.py`) rather than a tool pair, and it is what
 `!` would have to do here if it is ever added.
 
 I3 is untouched throughout: it says model-visible implies logged, and this is the converse.
@@ -509,7 +509,7 @@ has, where a person can approve any tool call the model makes. Into `NON_GUARANT
 obvious worry is `!!env` writing credentials into the log for good. It does not: `ctx.shell.run`
 passes `env=scrub_env(...)`, which drops every name matching
 `KEY|SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL` from the inherited environment
-(`seams/subprocess.py:53`), and `env=None` means "scrubs and inherits" rather than "inherits". The
+(`seams/subprocess.py`), and `env=None` means "scrubs and inherits" rather than "inherits". The
 harness reads a provider key through `ctx.credentials` and never puts it in the child's
 environment, so it is not there to be printed. **No scrubbing of shell output is needed**, and
 adding it would be a second mechanism for a hazard the first one already closed.
@@ -591,7 +591,7 @@ this section for what the switch-over turned up.)*
   spawn, wait on the **connect** rather than on the socket file (the file exists before `serve`
   is listening, which is exactly the window a `path.exists()` poll lands in); `spawn=False`
   refuses with "run `ph daemon`"; a present-but-refusing socket keeps today's crash diagnosis
-  (`agents.py:96-139`) because this function stops at "something is listening". The argv is
+  (`agents.py`) because this function stops at "something is listening". The argv is
   `sys.executable -m ph_app` and not a bare `ph` — a `PATH` lookup can find a different install,
   an older version, or nothing at all in a checkout with no console script, and a daemon composed
   by a different pH than its client is one whose profile, event vocabulary and wire version
@@ -606,7 +606,7 @@ this section for what the switch-over turned up.)*
   root). `cwd` now populated. **Gate**
   `test_the_picker_tells_running_from_passivated_from_stored`.
 - Sequencing inside the increment: **2a** `DaemonSession` behind `PH_TUI_DAEMON=1`, in-process
-  default; **2b** flip the default and point `make_tui_app` (`tests/conftest.py:17`) at an
+  default; **2b** flip the default and point `make_tui_app` (`tests/conftest.py`) at an
   in-process daemon via `daemon_helpers.running(...)`, exposing `root =
   daemon.server.supervisor.roots[id]` so the 18 pilot sites become `root.ctx`/`root.session`
   (mechanical); all 10 `.raw` snapshots and `test_tui_frontend.py` (now `DaemonSession` +
@@ -1216,13 +1216,13 @@ sabotage is the one a flag has when nobody tests it: ignore `keep`, and
 
 ## Reuse (do not rewrite)
 
-`_Follow`/`_catch_up` (`agents.py:315-426`) · `respond`/`notification`/`capabilities`
-(`protocol.py`) · `pending_approvals` (`approval.py:194`) and `_record_asked`/`_record_decided`
-(`:310-352`) · `ScheduleIndex` + `Supervisor.rehydrate`/`wake_and_tick` · `sweep(after=)` and
+`_Follow`/`_catch_up` (`agents.py`) · `respond`/`notification`/`capabilities`
+(`protocol.py`) · `pending_approvals` (`approval.py`) and `_record_asked`/`_record_decided`
+() · `ScheduleIndex` + `Supervisor.rehydrate`/`wake_and_tick` · `sweep(after=)` and
 `passivatable` · `AskUserModal` (`tui/modals/ask_user.py`, already built) · `tool-todo`'s row
 shape · `prompt_message`/`ingest` (`attach.py`) · `AttachmentStore.save_bytes/exists` ·
 `filelock` (as P5-03 uses it) · the socket unlink already in `serve()`'s teardown
-(`server.py:673`) · `daemon_helpers.running`, `tests/tui_helpers.running`, `StubHost` ·
+(`server.py`) · `daemon_helpers.running`, `tests/tui_helpers.running`, `StubHost` ·
 `ph_app/wire.py` readers · `session_summaries` · `TrustStore` · `lifetime()`.
 
 ## Verification

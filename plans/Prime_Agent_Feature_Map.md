@@ -290,7 +290,7 @@ dsh's stated reason for refusing a persistent kernel. Also silently wrong under 
 
 *Correction (v0.2).* v0.1 said the RLM design depends on re-entrancy. It does not. Checked at source:
 
-- `prime-agent-runtime` uses `asyncio.get_running_loop()` + `loop.call_soon_threadsafe()` and **never re-enters the loop**; `host_request` is a plain coroutine awaiting a future the comm callback resolves. The single `asyncio.run()` in the package (`rlm/skill.py:37`) is a **console-script entry point** that runs in its own process, not in a kernel.
+- `prime-agent-runtime` uses `asyncio.get_running_loop()` + `loop.call_soon_threadsafe()` and **never re-enters the loop**; `host_request` is a plain coroutine awaiting a future the comm callback resolves. The single `asyncio.run()` in the package (`rlm/skill.py`) is a **console-script entry point** that runs in its own process, not in a kernel.
 - IPython ≥ 7 executes top-level `await` natively (`autoawait` / `run_cell_async`), so `await rlm(...)` in a cell needs nothing extra.
 - Prime Agent's own bootstrap wraps it in `try: … except Exception: pass` — it is best-effort cover, not a dependency.
 

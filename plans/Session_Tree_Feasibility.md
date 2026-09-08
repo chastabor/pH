@@ -67,7 +67,7 @@ referential integrity becomes a real concern (§5.4). That is the whole of it.
 
 ### The envelope
 
-`SessionEvent` (`ph/session/events.py:118-142`), a frozen slots dataclass:
+`SessionEvent` (`ph/session/events.py`), a frozen slots dataclass:
 
 | Field | Meaning |
 |---|---|
@@ -81,15 +81,15 @@ referential integrity becomes a real concern (§5.4). That is the whole of it.
 
 ### Identity is position
 
-`Session.append` mints `seq=len(self._log)` (`session.py:295`). `_readmit`
-refuses any seed where `source.seq != index` (`session.py:404-408`). So identity,
+`Session.append` mints `seq=len(self._log)` (`session.py`). `_readmit`
+refuses any seed where `source.seq != index` (`session.py`). So identity,
 position and log length are the same number by construction — which is invariant
 A1, and is deliberate.
 
 ### Two derivations from one log
 
 - `derive_messages()` — the model-visible history, projected from the **surface**
-  (`session.py:340-355`).
+  (`session.py`).
 - `transcript()` — every append-origin message, compaction or not.
 
 The surface (`ph/session/surface.py`) is an ordered list of node seqs.
@@ -102,15 +102,15 @@ node list for one new node. The log never changes — invariant I4.
   No key.
 - **Turso**: one database per session,
   `CREATE TABLE events (seq INTEGER PRIMARY KEY, wire TEXT NOT NULL)`
-  (`turso.py:69`). In SQLite an `INTEGER PRIMARY KEY` *is* the rowid, so the
+  (`turso.py`). In SQLite an `INTEGER PRIMARY KEY` *is* the rowid, so the
   table is clustered by seq and `SELECT wire FROM events ORDER BY seq`
-  (`turso.py:181`) needs no sort. `INSERT OR REPLACE` makes writes idempotent.
+  (`turso.py`) needs no sort. `INSERT OR REPLACE` makes writes idempotent.
 
 ### Branching today: a prefix copy
 
-`SessionStore.fork(source, boundary)` (`store.py:159-230`) slices
+`SessionStore.fork(source, boundary)` (`store.py`) slices
 `log[:boundary + 1]` and seeds a **new** session with a **copy**. The module
-docstring states the model plainly (`store.py:8-11`):
+docstring states the model plainly (`store.py`):
 
 > *"pH does not model branching as a message tree, it models it as
 > `fork(source, boundary)` plus `seed_length`."*
@@ -139,14 +139,14 @@ copy 100 000 events.
 
 ### What is worth taking
 
-**Branching as one entry.** `branch_to_entry` (`session.py:870-939`) appends a
+**Branching as one entry.** `branch_to_entry` (`session.py`) appends a
 single `LeafEntry(parent_id=target, entry_id=target)`, sets `_last_parent_id`, and
 re-replays. Nothing is copied, nothing is deleted; the abandoned subtree stays as
 a sibling. Editing an earlier user message is the same operation with
 `target = entry.parent_id` and the old text pre-filled.
 
 **Compaction by id-set is branch-safe by construction.** `_apply_compaction`
-(`memory.py:107-129`) drops rows whose id is in `replaces_entry_ids`. A
+(`memory.py`) drops rows whose id is in `replaces_entry_ids`. A
 compaction on one branch **cannot** affect a sibling, because the sibling's
 root→leaf path never contains that `CompactionEntry`. pH's positional slice has
 no such guarantee.
@@ -155,19 +155,19 @@ no such guarantee.
 
 **tau's concurrency story, because there isn't one.**
 
-- The per-session `flock` (`storage.py:124-133`) is held for one
+- The per-session `flock` (`storage.py`) is held for one
   `append`/`read_all` — never across a read-modify-write.
-- `_last_parent_id` is cached in memory (`session.py:403`), and
+- `_last_parent_id` is cached in memory (`session.py`), and
   `_refresh_persisted_state` re-reads the file but replays with **the leaf the
-  caller just wrote** (`session.py:3214-3217`) — a rival's entries are read and
+  caller just wrote** (`session.py`) — a rival's entries are read and
   ignored.
 - No conflict resolution, no sibling ordering. Two processes appending under one
   parent produce two silent sibling subtrees; the winner is whichever `leaf` line
-  lands last in the file (`_latest_leaf_entry`, `session.py:3678-3682`).
+  lands last in the file (`_latest_leaf_entry`, `session.py`).
 - Print mode *avoids* the problem: it refuses to resume an existing id and
-  creates the file exclusively (`cli.py:1161-1175`).
+  creates the file exclusively (`cli.py`).
 
-**tau's absence of an index.** `_persist_message` (`session.py:3117-3153`) calls
+**tau's absence of an index.** `_persist_message` (`session.py`) calls
 `_refresh_persisted_state` after **every** message — a full read, full JSONL
 parse, full pydantic validation, plus an O(n) dangling-parent pass. A turn with N
 tool calls costs ~2N+2 appends and ~2N+2 full reparses. There is no pagination
@@ -205,10 +205,10 @@ So, today, already:
 - After any replacement it is **non-monotonic** — the new node's seq is larger
   than the nodes after it.
 - `SurfaceReplace(start, end)` is resolved by `state.nodes.index(op.start)`
-  (`surface.py:173,177`) — **membership and position in the node list, never a
+  (`surface.py`) — **membership and position in the node list, never a
   numeric range**. A seq that is a real log event but not a surface node is
   refused.
-- `compaction.py:1242-1243` builds `shadowed_seqs = nodes[:cutoff]` — a slice of
+- `compaction.py` builds `shadowed_seqs = nodes[:cutoff]` — a slice of
   the node tuple, already sparse in seq space.
 
 **Nothing anywhere enumerates `range(start, end)`.** `end - start == len(shadowed)`
@@ -221,7 +221,7 @@ position.** Swapping the id type is mechanical there. The real work is elsewhere
 
 ## 4. Blast radius
 
-`seq` is three roles fused (`events.py:122`, `session.py:295`, `session.py:245`):
+`seq` is three roles fused (`events.py` and `session.py`):
 
 | | Role | Needs |
 |---|---|---|
@@ -236,39 +236,39 @@ position.** Swapping the id type is mechanical there. The real work is elsewhere
 
 | # | Site | What it asserts |
 |---|---|---|
-| 1 | `session.py:295` | identity minted from position |
-| 2 | `session.py:404-408` `_readmit` | `seq == index`, the gate every seed takes |
-| 3 | `surface.py:224` + `:301` + `:272` + `:326-329` | `expected_seq` contiguity, three times; `_processed` is simultaneously count, index and expected seq |
-| 4 | `session.py:353`; `surface.py:201`; `compaction.py` ×7 | node seqs dereferenced as `log[seq]` — **no `seq → event` map exists**; the largest single work item |
-| 5 | `surface.py:154` | `source >= event.seq` — the one true arithmetic comparison ("sources must be earlier"). Companion: `compaction.py:738` |
-| 6 | `store.py:210,217,230,243-279` | fork boundary is a positional int and the cut is a prefix slice — *this is the feature being added* |
-| 7 | `repair.py:110,148,156,169` | closers minted by `last.seq + 1`, and must land exactly at `len(events)…` to pass #2 |
-| 8 | `turso.py:69,146,181` | `seq INTEGER PRIMARY KEY` is the rowid **and** the read-back order |
-| 9 | `ph_app/wire.py:156-176` `index_at_or_before` | "nearest preceding" transcript↔trajectory join — ambiguous across siblings by construction |
-| 10 | `ph_app/agents.py:362-365,411,515` | live/replay dedupe by `>` on a total order |
+| 1 | `session.py` | identity minted from position |
+| 2 | `session.py` `_readmit` | `seq == index`, the gate every seed takes |
+| 3 | `surface.py` (four sites) | `expected_seq` contiguity, three times; `_processed` is simultaneously count, index and expected seq |
+| 4 | `session.py`; `surface.py`; `compaction.py` ×7 | node seqs dereferenced as `log[seq]` — **no `seq → event` map exists**; the largest single work item |
+| 5 | `surface.py` | `source >= event.seq` — the one true arithmetic comparison ("sources must be earlier"). Companion: `compaction.py` |
+| 6 | `store.py` | fork boundary is a positional int and the cut is a prefix slice — *this is the feature being added* |
+| 7 | `repair.py` | closers minted by `last.seq + 1`, and must land exactly at `len(events)…` to pass #2 |
+| 8 | `turso.py` | `seq INTEGER PRIMARY KEY` is the rowid **and** the read-back order |
+| 9 | `ph_app/wire.py` `index_at_or_before` | "nearest preceding" transcript↔trajectory join — ambiguous across siblings by construction |
+| 10 | `ph_app/agents.py` | live/replay dedupe by `>` on a total order |
 
 ### Mechanical — different key type only
 
 - Every type declaration (~20 sites).
 - **`SurfaceReplace` resolution** — membership + node-list position (§3).
-- All `source_event_seqs` producers and consumers **except** `surface.py:154`.
+- All `source_event_seqs` producers and consumers **except** `surface.py`.
   Verified: 7 files, 13 hits, no producer builds a contiguous range.
 - All 8 `SessionFoldCache` users plus `folds.py` — they want log **length**.
 - All `seed_length` slice consumers — counts.
 - The whole daemon paging/cursor protocol. The cursor carries `session.seq`,
-  which **is** `len(log)` — an offset, never an id (`protocol.py:161,179-180`).
+  which **is** `len(log)` — an offset, never an id (`protocol.py`).
   Only the field name misleads.
 - `checkpoints()` dict key; `ref_for(session, agent, seq)` — which **already
   carries `agent_id`**, so a compound key maps naturally.
-- `/revert <seq>` CLI parse/format (`revert.py:58` uses `isdigit()`).
+- `/revert <seq>` CLI parse/format (`revert.py` uses `isdigit()`).
 - The `-1` "no seq" sentinel contract (~6 sites).
-- `SESSION_FORMAT_VERSION` bump — **mandatory**: `wire.py:59` sets
+- `SESSION_FORMAT_VERSION` bump — **mandatory**: `wire.py` sets
   `extra="forbid"`, so any added envelope field is refused by an older reader.
 
 ### Free wins
 
 - `Session.first_live_seq` — written, read only by tests.
-- `ph_rlm/subagents.py:406` `targetSeq` — records a *child's* seq into the
+- `ph_rlm/subagents.py` `targetSeq` — records a *child's* seq into the
   *parent's* log. **Zero consumers**, and already ill-defined. A compound id
   fixes it.
 - `ph-runtime-guest` — zero `seq` references.
@@ -321,7 +321,7 @@ materialised into the same list. Verified.
 
 Cross-lineage references — a parent citing a subagent's event — are
 `(session_id, seq)`. Both halves already exist. This also repairs
-`ph_rlm/subagents.py:406`'s `targetSeq`, which today writes a *child's* seq into
+`ph_rlm/subagents.py`'s `targetSeq`, which today writes a *child's* seq into
 the *parent's* log with no session qualifier and no consumers.
 
 ### 5.3 What actually has to change
@@ -330,12 +330,12 @@ the *parent's* log with no session qualifier and no consumers.
 
 | Site | Change |
 |---|---|
-`ph/persistence/jsonl.py:155` `JsonlSessionStore.read` | follow the chain and concatenate. **This is the Protocol method**, so resume, `stored_survivors`, the daemon and everything else inherit it for free |
-`ph_app/tui/trajectory_app.py:67` | calls `read_session(path)` directly, bypassing the Protocol — needs the chain read or a switch to the Protocol |
+`ph/persistence/jsonl.py` `JsonlSessionStore.read` | follow the chain and concatenate. **This is the Protocol method**, so resume, `stored_survivors`, the daemon and everything else inherit it for free |
+`ph_app/tui/trajectory_app.py` | calls `read_session(path)` directly, bypassing the Protocol — needs the chain read or a switch to the Protocol |
 
 Plus:
 
-- `SessionStore.fork` stops slicing (`store.py:230`) and instead records the
+- `SessionStore.fork` stops slicing (`store.py`) and instead records the
   reference. `_fork_seed`'s validation — the open-turn refusal, the contiguity
   check — is still wanted; only the copy goes.
 - `TursoSessionStore.read` gets the same chain walk.
@@ -355,7 +355,7 @@ becomes unreadable.
 Mitigations, in order of preference:
 
 - **Refuse to remove a session that has descendants.** The predicate already
-  exists: `descendants()` in `ph/seams/subagents.py:1014` walks
+  exists: `descendants()` in `ph/seams/subagents.py` walks
   `(id, parent)` pairs, and `stored()` already surfaces `parent` on every
   `StoredSession` from a header peek both backends already pay for. So the check
   is available without new state.
@@ -424,7 +424,7 @@ Each step is independently useful and independently revertible.
    A no-op on today's data — every session has `parent_session is None` or a
    fully-copied prefix — so it can land and be exercised before anything depends
    on it. Add the loud refusal for a missing ancestor here.
-3. **Point the trajectory view at the Protocol** (`trajectory_app.py:67`), so
+3. **Point the trajectory view at the Protocol** (`trajectory_app.py`), so
    only one code path reads a session.
 4. **Stop copying in `fork`.** Keep `_fork_seed`'s validation, drop the slice,
    write the reference. This is the step that delivers O(1) forks; steps 2–3 make
@@ -447,14 +447,14 @@ tree identity, a compound key, or a Turso migration.
   into a self-contained file? Purely a syscall-cost question (§5.4b), not
   correctness.
 - **Does `fork` still need the open-turn refusal?** `_fork_seed` refuses a
-  boundary inside an open turn (`store.py:225`). Under reference-forking the
+  boundary inside an open turn (`store.py`). Under reference-forking the
   same rule should hold — a lineage that begins mid-turn is not resumable — but
   it is now a validation on a *reference* rather than on a copy.
 - **Retention.** An abandoned branch still costs a file, though now a small one.
   `ph workspaces gc` is the existing precedent for age-bounded collection of
   exactly this shape, and step 5 gives it the "has descendants" predicate.
 - **Does anything outside this repo read a session file directly?**
-  `daemon/client.py:5` names dsh as a consumer. A chained file is not readable by
+  `daemon/client.py` names dsh as a consumer. A chained file is not readable by
   a naive reader, and `SESSION_FORMAT_VERSION` is the mechanism for saying so —
   though note reference-forking adds no envelope field, so only *forked* sessions
   change shape.

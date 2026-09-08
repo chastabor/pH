@@ -78,7 +78,7 @@ async def _enforcing(mount: Any, tmp_path: Path) -> tuple[Any, Any]:
 async def _confined_write(ctx: Any, workspace: Any, target: Path) -> tuple[int, str]:
     """A raw `open()` under the workspace's own confinement.
 
-    `scrub_env(extra=workspace.env)` matches `test_containment_ladder.py:46` — the
+    `scrub_env(extra=workspace.env)` matches `test_containment_ladder.py` — the
     workspace carries `redirection_env`, and a spawn that dropped it would confine
     a process the harness never runs.
     """
