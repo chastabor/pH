@@ -1,0 +1,21 @@
+# ph-text-index: `text_index` and `text_search`, over `ph-base`.
+#
+# A bundle rather than rows a profile spells by hand, for the reason
+# `ph-code-graph`'s says: `available_profiles()` gates a profile on whether its
+# *bundles* resolve, so a profile layering this one is hidden on an install
+# without this distribution instead of being offered and then failing at mount.
+#
+# **Both rows, and both enabled.** The seam registers no tools until an embedder
+# is claimed (see the package's module docstring), so a bundle that shipped only
+# `text-index` would mount a service and advertise nothing — the failure would
+# be a silence, not an error. A deployment that wants the seam with an embedder
+# of its own disables `text-index-local` and mounts its own provider row; that
+# is one line, and it is the case the seam/provider split exists for.
+
+- id: text-index
+  name: text-index
+
+# The `sentence-transformers` provider. Its model downloads on first use, not at
+# mount, so layering this bundle costs nothing until something indexes.
+- id: text-index-local
+  name: text-index-local

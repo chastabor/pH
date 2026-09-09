@@ -276,7 +276,16 @@ async def probe_overlay(ctx: Context, scratch: Path) -> OverlayProbe:
 
 @dataclass(slots=True)
 class AgentFsProvider:
-    """The `overlay` kind: one copy-on-write view of the tree per agent."""
+    """The `overlay` kind: one copy-on-write view of the tree per agent.
+
+    **Declares no `vcs`, on purpose** — see `ph.seams.changes`. The overlay's own
+    change log would be the obvious backend for the change filter, and it is
+    unreadable while the overlay is mounted, which is whenever an agent is using
+    it. What works instead is that the mountpoint serves the base's `.git`, so
+    the filter's probe finds git and git reports the delta layer's writes as the
+    uncommitted changes they are. Declaring `vcs` here would override that probe
+    and swap a working backend for an unreadable one.
+    """
 
     ctx: Context
     root: Path

@@ -242,6 +242,60 @@ async def test_glob_and_grep_skip_the_usual_noise(tmp_path: Path) -> None:
     assert matches[0].line == 2
 
 
+async def test_collect_names_files_and_expands_directories(tmp_path: Path) -> None:
+    """The shape a bulk reader wants, which `glob` does not quite give.
+
+    Two indexers arrived within a week with this loop written out — same
+    `is_dir()` branch, same paragraph about `glob` returning absolute paths, and
+    already drifted on the limit. The assertions here are the three properties
+    they each needed: directories expand by pattern, a file argument is taken as
+    itself, and everything comes back in the spelling it will be *stored* in.
+    """
+    fs = await _mounted(tmp_path)
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "a.py").write_text("a = 1\n")
+    (tmp_path / "pkg" / "b.py").write_text("b = 2\n")
+    (tmp_path / "pkg" / "notes.md").write_text("prose\n")
+    (tmp_path / "top.py").write_text("t = 3\n")
+
+    found = await fs.collect(["pkg", "top.py"], "**/*.py", scope=DEPLOYMENT)
+
+    # Workspace-relative, never absolute: an absolute path in a stored record
+    # puts the machine and the run into the conversation (`named`).
+    assert found == ["pkg/a.py", "pkg/b.py", "top.py"]
+    assert all(not Path(one).is_absolute() for one in found)
+
+
+async def test_collect_deduplicates_overlapping_arguments(tmp_path: Path) -> None:
+    """An indexer handed the same file twice would index it twice."""
+    fs = await _mounted(tmp_path)
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "a.py").write_text("a = 1\n")
+
+    found = await fs.collect(["pkg", "pkg/a.py", "."], "**/*.py", scope=DEPLOYMENT)
+
+    assert found == ["pkg/a.py"]
+
+
+async def test_collect_honours_the_screens(tmp_path: Path) -> None:
+    """It walks through `glob`, so a policy row's screen still decides.
+
+    The property that makes a bulk reader a tool rather than an exfiltration
+    primitive: a path a screen refuses must not reach the caller, and therefore
+    must not reach whatever the caller was about to read it into.
+    """
+    fs = await _mounted(tmp_path)
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "keep.py").write_text("k = 1\n")
+    (tmp_path / "pkg" / "secret.py").write_text("s = 2\n")
+    fs.screen(
+        lambda path, name, agent, is_dir: "skip" if name == "secret.py" else "yield",
+        scope=fs.ctx,
+    )
+
+    assert await fs.collect(["pkg"], "**/*.py", scope=DEPLOYMENT) == ["pkg/keep.py"]
+
+
 async def test_an_invalid_regular_expression_is_reported_not_raised_raw(
     tmp_path: Path,
 ) -> None:

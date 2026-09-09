@@ -53,6 +53,7 @@ from .subprocess import SubprocessSpawnSpec
 from .workspace import (
     BRANCH_PREFIX,
     EXCLUDE,
+    Backend,
     ContainmentTier,
     DeclineReason,
     Stray,
@@ -137,6 +138,12 @@ class GitWorktreeProvider:
     outside the repository, so a checkout is never itself a candidate for the
     walk the agent runs over its own tree."""
     tier: ContainmentTier = field(default="worktree", init=False)
+    vcs: Backend = field(default="git", init=False)
+    """This tier is git-backed, so an indexer can ask git what changed.
+
+    `ph.seams.changes.VersionedProvider`, declared rather than probed for that
+    Protocol's stated reason — and it cannot be inferred from `Workspace.kind`,
+    which is `worktree` for the jj tier too."""
     _toplevels: dict[Path, Path | None] = field(default_factory=dict, init=False)
     _pinned: dict[Path, str] = field(default_factory=dict, init=False)
     """Workspace root → the tree its last restore point pinned.

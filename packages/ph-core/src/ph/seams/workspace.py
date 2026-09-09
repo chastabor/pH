@@ -63,6 +63,7 @@ __all__ = [
     "CHECKPOINT",
     "PROJECT_PROVISION_FILE",
     "ArtifactProvider",
+    "Backend",
     "CheckpointingProvider",
     "ChildWorkspaceMissing",
     "CollectVerdict",
@@ -74,7 +75,9 @@ __all__ = [
     "LifecycleConfig",
     "ReclaimingProvider",
     "SharedWorkspaceProvider",
+    "SnapshottingProvider",
     "Stray",
+    "VersionedProvider",
     "Workspace",
     "WorkspaceAccess",
     "WorkspaceDeclined",
@@ -680,6 +683,49 @@ class CheckpointingProvider(Protocol):
     async def capture(self, workspace: Workspace) -> str | None: ...
 
     async def restore(self, workspace: Workspace, token: str) -> tuple[str, ...]: ...
+
+
+Backend: TypeAlias = Literal["git", "jj", ""]
+"""Which version control a tier is backed by, or `""` for none of them.
+
+Here rather than in `ph.seams.changes`, which is the module that consumes it: a
+tier stating what backs it is describing *itself*, and importing the change
+filter to do so made the two tiers depend on an indexing helper — the wrong way
+round, and the reason this moved.
+"""
+
+
+@runtime_checkable
+class VersionedProvider(Protocol):
+    """A provider that knows which version control backs the tree it hands out.
+
+    An optional capability as its own Protocol — `ReclaimingProvider`'s shape and
+    its reason. **`Workspace.kind` cannot answer this**: the git and jj tiers both
+    hand back `worktree`, so the provider is the only thing that can say. A tier
+    declaring nothing falls through to `ph.seams.changes`'s filesystem probe,
+    which is the `shared` case and therefore the common one.
+    """
+
+    vcs: Backend
+
+
+@runtime_checkable
+class SnapshottingProvider(Protocol):
+    """A tier whose version control commits the tree in order to *read* it.
+
+    jj is the one that does: it snapshots the working copy on any command, which
+    is what makes `ph.seams.changes`'s jj backend a single call — and, in the same
+    breath, means a read adopts whatever is untracked. `auto_track` exists to keep
+    the seam's own provisioned materials (E14) out of that commit, and it can only
+    be applied by the tier, which is the only thing that knows what it provisioned.
+
+    So a caller that needs the snapshot asks for it **here** rather than reaching
+    for the raw `jj` helper, whose own docstring sends callers through the
+    provider for exactly this reason. A tier that does not declare this capability
+    is one whose reads cost the tree nothing.
+    """
+
+    async def snapshotting(self, cwd: Path, *args: str) -> tuple[int, str, str]: ...
 
 
 @dataclass(frozen=True, slots=True)

@@ -80,6 +80,7 @@ from .diagnostics import Diagnostic, contribute
 from .subprocess import SubprocessSpawnSpec, first_line
 from .workspace import (
     BRANCH_PREFIX,
+    Backend,
     ContainmentTier,
     DeclineReason,
     Stray,
@@ -244,6 +245,10 @@ class JjWorkspaceProvider:
     repository for `workspace_git`'s reason: a checkout inside `base` is walked by
     the agent's own `glob` and nested one level deeper by every child."""
     tier: ContainmentTier = field(default="worktree", init=False)
+    vcs: Backend = field(default="jj", init=False)
+    """This tier is jj-backed. See `workspace_git`'s field and
+    `ph.seams.changes.VersionedProvider`: `Workspace.kind` is `worktree` for both
+    tiers, so the provider is the only thing that can say which."""
     _roots: dict[Path, Path | None] = field(default_factory=dict, init=False)
     """`base` → the root of the jj workspace containing it, asked once.
 
@@ -715,6 +720,18 @@ class JjWorkspaceProvider:
         """
         materials = self._base_materials(cwd) if provisioned is None else provisioned
         return await jj(self.ctx, cwd, *auto_track(materials), *args)
+
+    async def snapshotting(self, cwd: Path, *args: str) -> tuple[int, str, str]:
+        """`SnapshottingProvider`: a call that may commit this tree, fileset applied.
+
+        `_commit` under the name a caller outside this module can ask for. The
+        change filter (`ph.seams.changes`) needs the snapshot — it is what makes
+        one `jj diff` cover uncommitted work — and needed a way to get it that
+        does not reach past `auto_track`, which is the whole of E14 at this tier.
+        Public because the capability is; thin because the decision it carries
+        was already made once, in `_commit`.
+        """
+        return await self._commit(cwd, *args)
 
     async def _log(
         self,

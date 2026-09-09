@@ -69,6 +69,18 @@ Named for `TUI_LAYERS`' reason four lines up: `rlm-stable` *is* "rlm plus
 stabilize", and re-listing the layers would let the two drift while a comment
 went on claiming they could not."""
 
+RLM_STABLE_LAYERS: tuple[Layer, ...] = (
+    *RLM_LAYERS,
+    Bundle("stabilize"),
+    PROFILE_DIR / "rlm-stable.yaml",
+)
+"""Everything, with the gates on — and named for the reason the two above are.
+
+`rlm-indexed` *is* "rlm-stable plus the indexing bundles", and the first draft
+of it re-listed these three by hand, which is exactly the drift `RLM_LAYERS`
+was introduced to stop: a row added to `rlm-stable` would silently have stopped
+reaching a profile whose comment claimed to be built from it."""
+
 
 PROFILES: dict[str, tuple[Layer, ...]] = {
     "base": (BASE,),
@@ -88,7 +100,20 @@ PROFILES: dict[str, tuple[Layer, ...]] = {
     # profile that turns on the two rows those bundles ship disabled — a bundle
     # that armed them on layering would make "I want offload" mean "and also a
     # tool, and also a corpus".
-    "rlm-stable": (*RLM_LAYERS, Bundle("stabilize"), PROFILE_DIR / "rlm-stable.yaml"),
+    "rlm-stable": RLM_STABLE_LAYERS,
+    # `rlm-stable` plus the two indexing bundles: the RLM asks a codebase and a
+    # document corpus about themselves instead of reading them (`code_graph`,
+    # `text_search`). Under Code Mode both arrive as `await tools.<name>(...)`
+    # with no work from either package — every registered tool is in the SDK
+    # listing, which is what C1 means.
+    #
+    # **Its own profile rather than rows added to `rlm-stable`**, because
+    # composability is decided by whether a profile's *bundles* resolve: adding
+    # them there would make `rlm-stable` unavailable on an install without both
+    # distributions, taking a working profile away to add an optional feature.
+    # Here, an install missing one is simply not offered this profile, and
+    # `resolve_profile` names the package to install.
+    "rlm-indexed": (*RLM_STABLE_LAYERS, Bundle("code-graph"), Bundle("text-index")),
 }
 
 

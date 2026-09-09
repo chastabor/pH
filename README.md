@@ -147,6 +147,67 @@ attachments, your profile overlays), `PH_CACHE` (`~/.cache/ph` — safe to delet
 wholesale) and `PH_RUNTIME` (the daemon socket). `ph doctor` prints where all
 three resolved, and which tier `PH_RUNTIME` landed in.
 
+## Optional plugins
+
+Packages in this workspace that ship rows no profile mounts by default, because
+each brings a third-party dependency not every deployment wants. Add a row and
+they are there:
+
+| package | rows | tools |
+|---|---|---|
+| [`ph-code-graph`](packages/ph-code-graph/) | `code-graph` | `code_index` / `code_graph` — a tree-sitter code graph: search by prose, find definitions, callers, callees, transitive impact, biggest symbols. Every answer is a `path:start-end`. |
+| [`ph-text-index`](packages/ph-text-index/) | `text-index`, `text-index-local` | `text_index` / `text_search` — semantic retrieval over documents on a local turbovec index, answering with the passage **and** its `path:start-end`. |
+
+Each registers a **bundle**, so `--profile rlm-indexed` is `rlm-stable` plus
+both of them — the RLM asking a codebase and a corpus about themselves instead
+of reading them. Under Code Mode they arrive as `await tools.code_graph(...)`
+and `await tools.text_search(...)`, because every registered tool is in the
+generated SDK listing:
+
+```bash
+ph --profile rlm-indexed --provider llama --model <model> --mode tui
+```
+
+An install missing either distribution is simply not offered that profile —
+`ph doctor` lists what this install can compose — rather than being offered one
+that fails at mount. Layer one on its own with `--patch`:
+
+```bash
+ph --patch '{insert: [{id: code-graph, name: code-graph}]}' --profile llama -p "..."
+```
+
+`ph config --row code-graph` prints what each row accepts, and all of them
+report to `ph doctor`. Each package's README is the honest account of what its
+dependencies can and cannot do — worth reading before relying on one.
+
+**Provision before an agent needs it.** Both plugins fetch something on first
+use — grammars, an embedding model — and finding that out mid-turn is the wrong
+time. Each ships a command a person triggers, and reports readiness to
+`ph doctor`:
+
+```bash
+/code-graph status     /code-graph install      # tree-sitter grammars
+/text-index status     /text-index install      # the embedding model
+```
+
+`ph-text-index` additionally takes `preload: true`, which loads the model at
+mount and refuses the mount if it cannot — for a daemon or a scheduled run,
+where nobody is present to type either command. Both plugins also install a
+`SKILL.md`, so an RLM sees one catalog line and reads the page only when it
+needs it.
+
+Anything either plugin caches lives under `$PH_CACHE` — grammars, the model
+weights, the indexes — so `ph doctor` can name it and deleting that root
+reclaims it.
+
+**Neither plugin watches the filesystem.** An index changes when its tool runs,
+and at no other moment. Re-running is cheap because both ask **git or jj** what
+changed first ([`ph.seams.changes`](docs/seams/README.md)) — a file the version
+control vouches for is never re-read, and for `text_index` never re-embedded.
+Which of the two answers is the workspace provider's to state, so a `jj` tier
+gets jj and a `git` worktree gets git; a tree under neither falls back to
+content hashing and is merely slower.
+
 ## Diagnostics
 
 ```bash

@@ -35,7 +35,7 @@ from __future__ import annotations
 import logging
 import os
 import re
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
@@ -667,6 +667,107 @@ class FsService:
         base = self.resolve(root, agent=agent) if root is not None else self.root_for(agent)
         decide = self._decider(agent, scope=scope)
         return await anyio.to_thread.run_sync(lambda: list(_walk(base, pattern, limit, decide)))
+
+    async def collect(
+        self,
+        paths: Sequence[str],
+        pattern: str,
+        *,
+        scope: Boundary,
+        limit: int = 1_000,
+        agent: Any = None,
+    ) -> list[str]:
+        """The files `paths` names — a directory expanded by `pattern` — as `named`.
+
+        The shape every **bulk** reader wants and `glob` does not quite give.
+        `glob` takes one root and answers with **absolute** paths (it matches the
+        pattern against the walk-relative slice but yields the full one), while a
+        caller with a list of arguments that may each be a file or a directory
+        wants one de-duplicated list in the spelling it will store and report.
+
+        Here rather than in each caller because two arrived within a week — the
+        code-graph indexer and the text-index one — with the same loop, the same
+        `is_dir()` branch, and the same paragraph explaining that `glob` returns
+        absolute paths. They had already drifted on the `limit`. A third would
+        have copied whichever it read first.
+
+        **`named`, not absolute**, and that is the part worth centralising: an
+        absolute path in a stored record or a tool result puts the machine and
+        the run into the conversation, so replaying a session against a fresh
+        workspace changes every one of them and moves the provider's cached
+        prefix for a difference the conversation cannot see (`named`).
+
+        Sorted and de-duplicated, so two overlapping arguments name a file once —
+        an indexer that saw a document twice would either do the work twice or
+        rely on a replace being idempotent.
+
+        **`limit` is the whole call's budget, not each argument's.** Both callers
+        pass a row's `max_files`, documented as "how many files one call will
+        consider"; forwarding it to `glob` per argument meant `paths: [a, b, c]`
+        considered three times that, so the one knob a deployment has for
+        bounding an indexing call did not bound it. `glob` keeps its own per-walk
+        cap — this spends against the remainder.
+
+        The spelling is a string slice rather than `named` per result, for
+        `ph.paths.is_under`'s reason: `glob` yields absolute paths under a root
+        this already knows, and `named`'s `resolve` + `relative_to` cost 44.8 µs
+        each — 0.9 s of event-loop time for a 20 000-file walk, to recompute a
+        prefix the walk had. `named` stays the fallback for anything that somehow
+        lands outside, which is the case a slice cannot answer.
+        """
+        base = f"{self.root_for(agent)}/"
+        found: list[str] = []
+        for one in paths:
+            target = self.resolve(one, agent=agent)
+            if not target.is_dir():
+                found.append(self.named(target, agent=agent))
+                continue
+            remaining = limit - len(found)
+            if remaining <= 0:
+                # The budget is spent, but keep walking the arguments: a file
+                # named outright is not a walk and should not be dropped because
+                # a directory ahead of it filled the quota.
+                continue
+            for path in await self.glob(
+                pattern, root=one, scope=scope, limit=remaining, agent=agent
+            ):
+                spelled = str(path)
+                found.append(
+                    spelled[len(base) :]
+                    if spelled.startswith(base)
+                    else self.named(path, agent=agent)
+                )
+        return sorted(set(found))
+
+    def skip_reason(self, path: str | Path, *, max_bytes: int, agent: Any = None) -> str:
+        """Why a bulk reader should pass `path` over. `""` when it should read it.
+
+        `collect`'s companion, and here for the same reason: both indexers wrote
+        this preamble out — resolve, `stat`, compare, skip with a sentence — and
+        the two copies had already drifted three ways in code written a week
+        apart. They disagreed on the limit sentence, on the `OSError` one (one
+        of them printed `None` whenever `strerror` was unset), and on how the
+        `stat` was threaded. A third caller would have copied whichever it read.
+
+        **A skip, not a raise**, which is what makes it a different door from
+        `read_bytes`' `max_bytes`: an indexing call over a directory must not
+        fail because it found a minified bundle, it must report what it passed
+        over. And a caller who never learns what was skipped cannot tell a quiet
+        corpus from a quiet failure.
+
+        Synchronous, and the `stat` is inline exactly as `read_bytes` does it: a
+        `to_thread` hop is 60.6 µs against a ~2 µs syscall, so threading a size
+        guard cost more than the ~38 µs read it exists to avoid — 1.2 s of it
+        across a 20 000-file tree, paid to save nothing.
+        """
+        target = self.resolve(path, agent=agent)
+        try:
+            size = target.stat().st_size
+        except OSError as error:
+            return f"cannot be read ({error.strerror or error})"
+        if size > max_bytes:
+            return f"{size} bytes, past the {max_bytes}-byte limit"
+        return ""
 
     async def grep(
         self,

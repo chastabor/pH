@@ -9,10 +9,30 @@ dependencies = [
     "ph-rlm",
     "ph-runtime-guest",
     "ph-stabilize",
+    "ph-text-index",
+    "ph-code-graph",
 ]
 
 [tool.uv]
 package = false
+
+# **torch from the CPU wheel index.** `ph-text-index` depends on
+# `sentence-transformers`, which depends on `torch`, whose default wheels bundle
+# CUDA: measured here as 2.6 GB of `nvidia-*` plus 398 MB of `triton` beside a
+# 770 MB torch, in a 4.2 GB environment. The embedding model runs on the CPU —
+# `SentenceTransformer` picks a device at load and this deployment has no GPU
+# path — so every one of those bytes is downloaded, stored and never executed.
+#
+# `explicit = true` so *only* the packages named in `[tool.uv.sources]` come from
+# here: an index that served everything would silently shadow PyPI for any name
+# it happened to carry, which is a supply-chain surface nobody asked for.
+#
+# A deployment that does want GPU embedding deletes these two blocks; nothing
+# else references them, and `ph-text-index` is unchanged either way.
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
 
 [tool.uv.workspace]
 members = ["packages/*"]
@@ -23,6 +43,8 @@ ph-app = { workspace = true }
 ph-rlm = { workspace = true }
 ph-runtime-guest = { workspace = true }
 ph-stabilize = { workspace = true }
+ph-text-index = { workspace = true }
+ph-code-graph = { workspace = true }
 
 [dependency-groups]
 dev = [
@@ -55,6 +77,8 @@ src = [
     "packages/ph-rlm/src",
     "packages/ph-runtime-guest/src",
     "packages/ph-stabilize/src",
+    "packages/ph-text-index/src",
+    "packages/ph-code-graph/src",
 ]
 
 [tool.ruff.lint]
@@ -75,8 +99,8 @@ strict = true
 # subprocess protocol lives, and a config that checked only `ph` would have let
 # the guest drift untyped. `packages` rather than `.` because the test trees hold
 # several modules named `conftest`, which mypy refuses as duplicates.
-mypy_path = "packages/ph-core/src:packages/ph-app/src:packages/ph-rlm/src:packages/ph-runtime-guest/src:packages/ph-stabilize/src"
-packages = ["ph", "ph_app", "ph_rlm", "ph_runtime", "ph_stabilize"]
+mypy_path = "packages/ph-core/src:packages/ph-app/src:packages/ph-rlm/src:packages/ph-runtime-guest/src:packages/ph-stabilize/src:packages/ph-text-index/src:packages/ph-code-graph/src"
+packages = ["ph", "ph_app", "ph_rlm", "ph_runtime", "ph_stabilize", "ph_text_index", "ph_code_graph"]
 namespace_packages = true
 explicit_package_bases = true
 
@@ -86,6 +110,8 @@ testpaths = [
     "packages/ph-app/tests",
     "packages/ph-rlm/tests",
     "packages/ph-stabilize/tests",
+    "packages/ph-text-index/tests",
+    "packages/ph-code-graph/tests",
     "tests",
 ]
 addopts = "-ra"

@@ -50,6 +50,18 @@ child starts from its parent's work in progress), `seams/workspace_agentfs.py` (
 copy-on-write overlay), `seams/workspace_scratch.py` (the `sandbox` rung's kind),
 `seams/workspace_provision.py` (making a fresh tree usable).
 
+`seams/changes.py` publishes no key either, and is not a provider: it is the
+question *"which of these files changed since I last looked"*, answered by
+asking git or jj instead of re-reading the tree. Which of the two answers is the
+**workspace provider's** to state — `Workspace.kind` cannot, because the git and
+jj tiers both hand back `worktree` — so each declares `vcs` through
+`VersionedProvider`, and a tier that declares nothing falls through to a probe of
+the root. The `overlay` tier is deliberately among those: its own change log
+cannot be read while it is mounted, and the mountpoint serves the base's `.git`,
+so the probe finds a backend that works. Consumed by the indexing plugins
+(`ph-code-graph`, `ph-text-index`); it is a *filter*, never a replacement for a
+caller's own content hash.
+
 ## What reaches the model
 
 | service | module | |

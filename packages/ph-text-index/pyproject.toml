@@ -1,0 +1,69 @@
+[build-system]
+requires = ["hatchling>=1.26"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ph-text-index"
+version = "0.0.1"
+description = "pH plugin: `text_index` and `text_search`, semantic retrieval over documents on a turbovec index."
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+# All three are hard dependencies, deliberately: **installing this plugin is how
+# a deployment gets the embedder**, so an install that left the model out would
+# leave `text-index-local` refusing to mount and the tools unregistered — a
+# package whose only two rows do nothing.
+#
+# It is the expensive choice and worth naming: `sentence-transformers` brings
+# torch, which is most of a gigabyte, and it lands in every environment that
+# resolves this package including CI. The alternative is one line — move it to
+# an `[project.optional-dependencies] local = [...]` extra, as `ph-core` does
+# with `otel` — and the cost of *that* is that `pip install ph-text-index` no
+# longer gives you a working index. The seam/provider split is what keeps the
+# choice cheap either way: nothing but `text-index-local` imports it, and the
+# tests run against a stub embedder rather than a model.
+dependencies = [
+    "ph-core",
+    "turbovec>=1.0",
+    "numpy>=1.20",
+    "sentence-transformers>=3.0",
+    # **Named directly, though `sentence-transformers` already requires it.** A
+    # `[tool.uv.sources]` entry only redirects a dependency the *declaring*
+    # project names, and torch reaches us transitively — so without this line
+    # the CPU-index pin below is silently ignored and the CUDA wheels come back.
+    "torch>=2.2",
+]
+
+# What a model with an `auto_map` needs beyond the base install. `einops` is
+# pure Python and small; it is an extra rather than a dependency because only
+# some models' remote code imports it — and because the failure without it is
+# the one that proves pre-provisioning has to *load* the model rather than just
+# fetch it: nomic downloads its weights and its code successfully, then raises
+# `ImportError: ... not found in your environment: einops` at load.
+[project.optional-dependencies]
+nomic = ["einops>=0.7"]
+
+[project.entry-points."ph.bundles"]
+text-index = "ph_text_index:BUNDLE"
+
+[project.entry-points."ph.plugins"]
+text-index = "ph_text_index:apply"
+text-index-local = "ph_text_index:local"
+
+[tool.uv.sources]
+ph-core = { workspace = true }
+# The embedding model runs on the CPU — `SentenceTransformer` picks its device at
+# load and this package offers no GPU path — while torch's default wheels bundle
+# CUDA: measured at 2.6 GB of `nvidia-*` plus 398 MB of `triton` beside a 770 MB
+# torch, in a 4.2 GB environment. Every one of those bytes was downloaded,
+# stored, and never executed.
+#
+# The index itself is declared in the workspace root with `explicit = true`, so
+# it serves only the names that ask for it by hand — an index that answered for
+# everything would shadow PyPI for any name it happened to carry.
+#
+# A deployment that wants GPU embedding drops this line and re-locks.
+torch = { index = "pytorch-cpu" }
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ph_text_index"]

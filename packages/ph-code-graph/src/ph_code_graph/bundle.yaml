@@ -1,0 +1,21 @@
+# ph-code-graph: `code_index` and `code_graph`, over `ph-base`.
+#
+# A bundle rather than a row a profile spells by hand, and the reason is
+# `available_profiles()`: a profile's composability is decided by whether its
+# *bundles* resolve, so a profile that layers this one is correctly hidden on an
+# install without this distribution — and the refusal names the package to
+# install. A row named directly in a profile document gets no such check: the
+# profile would be offered and then fail at mount, which is precisely what
+# `ph_app.profiles` says two predicates for one question always produces.
+#
+# One row. `ph-code-graph` exists to register two tools, and they arrive
+# together because `code_graph` without `code_index` is a query over an index
+# nothing built.
+
+# Enabled, unlike `tool-todo` and `rlm-context-loader` in their bundles. Those
+# are off because layering their bundle for something *else* — offload,
+# compaction — must not also hand the model a tool. Nothing else is in here:
+# layering this bundle has exactly one meaning, so a row that stood down would
+# make `--profile rlm-indexed` a no-op with a comment explaining why.
+- id: code-graph
+  name: code-graph
