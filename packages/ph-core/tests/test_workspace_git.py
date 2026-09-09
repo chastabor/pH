@@ -30,9 +30,9 @@ import pytest
 from ph.seams.subprocess import SubprocessSpawnSpec, scrub_env
 from ph.seams.workspace import redirection_env, workspace_survivors
 from ph.seams.workspace_git import sanitize_ref, tree_hash
-from ph.testing import git, git_repo, needs_git
+from ph.testing.git import git, git_repo
 
-pytestmark = [pytest.mark.anyio, needs_git]
+pytestmark = [pytest.mark.anyio, pytest.mark.needs_git]
 
 
 TIER_ROW = {"insert": [{"id": "workspace-git-worktree", "name": "workspace-git-worktree"}]}

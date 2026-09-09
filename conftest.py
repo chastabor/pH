@@ -12,6 +12,7 @@ took a root of their own and remembered to dispose it were each re-deriving
 
 from __future__ import annotations
 
+import shutil
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,38 @@ from ph.cordis import Context, Profile, load_profile_documents
 from ph.cordis.loader import compose_rows
 
 MountProfile = Callable[..., Awaitable[Context]]
+
+NEEDS_BINARY = {
+    "needs_git": ("git", "the worktree tier needs git"),
+    "needs_jj": ("jj", "the jj tier needs jj"),
+}
+"""The markers that mean "this test drives a real binary", and what it needs.
+
+Registered in `pyproject.toml`; skipped below. Here rather than beside the
+fixtures they go with, because `ph.testing.git` and `ph.testing.jj` — where
+those fixtures live — ship inside the `ph-core` wheel, and a `pytest.mark`
+constant there is an `import pytest` on the import path of three plugin rows a
+deployment mounts (`llm-fake` above all, which `headless` carries). An install
+without pytest could not compose its default profile. A marker costs the wheel
+nothing, and the collection hook is a place the wheel does not reach."""
+
+
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    """Skip the tests whose binary this host does not have.
+
+    One decision per binary for the whole run, rather than the `skipif` constant
+    this replaced: two modules imported that constant and the third to drive real
+    git forgot it, which on a machine without git turned a clean skip into a
+    dozen errors. A marker cannot be forgotten the same way — it is spelled at
+    the test, and the hook finds every test that carries it.
+    """
+    for marker, (binary, reason) in NEEDS_BINARY.items():
+        if shutil.which(binary) is not None:
+            continue
+        skip = pytest.mark.skip(reason=reason)
+        for item in items:
+            if marker in item.keywords:
+                item.add_marker(skip)
 
 
 @pytest.fixture(autouse=True)

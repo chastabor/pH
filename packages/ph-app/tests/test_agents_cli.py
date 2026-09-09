@@ -135,7 +135,7 @@ async def test_until_idle_exits_non_zero_when_the_last_turn_errored(
     made to fail at the provider, so the loop records `turn/end{error}` the way it
     would for a real outage rather than the test asserting on a synthetic record.
     """
-    from ph.testing.fake_adapter import FakeAdapter
+    from ph.llm.fake import FakeAdapter
 
     async def exploding(self: Any, options: Any) -> Any:
         raise RuntimeError("provider is down")

@@ -10,7 +10,7 @@ the real out-of-process CPython runtime lands in Phase 3 (D19).
 It declares `persistence: "none"` and therefore owes no `kernel/snapshot`
 events, which is the honest answer for something with no namespace to keep.
 
-@module ph.testing.stub_runtime
+@module ph.seams.code_runtime_stub
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..cordis import Context, plugin
-from ..seams.code_runtime import CodeRunRequest, CodeRunResult
+from .code_runtime import CodeRunRequest, CodeRunResult
 
 __all__ = ["StubCodeRuntime", "apply"]
 

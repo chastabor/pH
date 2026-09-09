@@ -25,9 +25,10 @@ from typing import Any
 import pytest
 
 from ph.seams.workspace import WorkspaceRecord
-from ph.testing import FAKE_OPTIONS, git, git_repo, needs_git
+from ph.testing import FAKE_OPTIONS
+from ph.testing.git import git, git_repo
 
-pytestmark = [pytest.mark.anyio, needs_git]
+pytestmark = [pytest.mark.anyio, pytest.mark.needs_git]
 
 ROWS = (
     {"insert": [{"id": "workspace-git-worktree", "name": "workspace-git-worktree"}]},

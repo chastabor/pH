@@ -56,7 +56,7 @@ from ph.seams.subagents import (
 from ph.seams.workspace import workspace_survivors
 from ph.session import derive_event_message
 from ph.testing import FAKE_OPTIONS, StubWorkspaceProvider, skill
-from ph.testing.git import WORKTREE_ROWS, git_repo, needs_git
+from ph.testing.git import WORKTREE_ROWS, git_repo
 from ph_rlm.subagents import PROVIDER_NAME, TASK_PREFIX, delegation_depth
 
 pytestmark = pytest.mark.anyio
@@ -780,7 +780,7 @@ class _Gate:
         self.held.clear()
 
     def patch(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        from ph.testing.fake_adapter import FakeAdapter
+        from ph.llm.fake import FakeAdapter
 
         original = FakeAdapter.stream
         gate = self
@@ -1162,7 +1162,7 @@ async def test_a_child_no_provider_can_resume_is_settled_not_left_queued(
 # ------------------------------------------------- a child asked a second thing --
 
 
-@needs_git
+@pytest.mark.needs_git
 async def test_a_re_addressed_child_comes_back_to_its_own_work(mount: Any, tmp_path: Path) -> None:
     """A second question reaches the child that answered the first, tree and all.
 
@@ -1197,7 +1197,7 @@ async def test_a_re_addressed_child_comes_back_to_its_own_work(mount: Any, tmp_p
     assert (again.root / "child-work.txt").read_text(encoding="utf-8").startswith("what the first")
 
 
-@needs_git
+@pytest.mark.needs_git
 async def test_a_re_addressed_child_is_no_wider_than_it_was_admitted(
     mount: Any, tmp_path: Path
 ) -> None:

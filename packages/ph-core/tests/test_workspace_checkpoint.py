@@ -53,16 +53,11 @@ import pytest
 
 from ph.seams.workspace import CHECKPOINT, checkpoints
 from ph.seams.workspace_git import pre_run_ref
-from ph.testing import (
-    git,
-    git_repo,
-    needs_git,
-    run_tool,
-    worktree_agent,
-)
+from ph.testing import run_tool
+from ph.testing.git import git, git_repo, worktree_agent
 from ph.tools.registry import RUN_CODE
 
-pytestmark = [pytest.mark.anyio, needs_git]
+pytestmark = [pytest.mark.anyio, pytest.mark.needs_git]
 
 
 async def _checkpointed(ctx: Any, session: Any, agent: Any, call_id: str = "c1") -> int:

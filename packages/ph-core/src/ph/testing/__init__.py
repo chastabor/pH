@@ -1,7 +1,34 @@
-"""`ph.testing` — fake and replay adapters, builders, a stub runtime and tier."""
+"""`ph.testing` — the builders, stubs and fixtures a test stands a profile up with.
+
+**Nothing here is mounted by a plugin row.** The fake adapter, the replay adapter
+and the stub code runtime are rows a deployment can mount by name, so they live
+with the seams they implement (`ph.llm.fake`, `ph.llm.replay`,
+`ph.seams.code_runtime_stub`) and are re-exported below for tests. What is left
+is scaffolding: no shipped module imports it, which is what lets it depend on
+whatever a test needs.
+
+`.git` and `.jj` are the exception to the re-export, and deliberately: they drive
+real binaries, their fixtures are only useful to a test that carries the matching
+`needs_git`/`needs_jj` marker, and a name that reads `git` here would shadow the
+submodule it came from. A caller names them — `from ph.testing.git import
+git_repo` — the way `ph-rlm`'s suite already did.
+
+@module ph.testing
+"""
 
 from __future__ import annotations
 
+from ..llm.fake import FakeAdapter, text_script
+from ..llm.replay import (
+    REPLAY_ROW,
+    RecordedStep,
+    ReplayAdapter,
+    recorded_steps,
+    shared_prefix,
+    text_chunks,
+    tool_call_chunks,
+)
+from ..seams.code_runtime_stub import StubCodeRuntime
 from .anthropic_wire import anthropic_reply
 from .builders import (
     FAKE_OPTIONS,
@@ -27,21 +54,8 @@ from .builders import (
     write_reference_fork,
 )
 from .diagnostics import report_section
-from .fake_adapter import FakeAdapter, text_script
 from .folds import VerifyingFoldCache, assert_fold_laws, check_fold_laws, prefix_of
-from .git import WORKTREE_ROWS, git, git_repo, needs_git, worktree_agent
-from .jj import JJ_ROWS, jj, jj_agent, jj_repo, needs_jj
-from .replay_adapter import (
-    REPLAY_ROW,
-    RecordedStep,
-    ReplayAdapter,
-    recorded_steps,
-    shared_prefix,
-    text_chunks,
-    tool_call_chunks,
-)
 from .skills import skill, write_skill
-from .stub_runtime import StubCodeRuntime
 from .stub_sandbox import StubSandboxProvider
 from .stub_subagent import StubSubagentProvider
 from .stub_workspace import (
@@ -52,9 +66,7 @@ from .stub_workspace import (
 
 __all__ = [
     "FAKE_OPTIONS",
-    "JJ_ROWS",
     "REPLAY_ROW",
-    "WORKTREE_ROWS",
     "FakeAdapter",
     "RecordedStep",
     "ReplayAdapter",
@@ -71,13 +83,6 @@ __all__ = [
     "assistant_payload",
     "boundary_for",
     "check_fold_laws",
-    "git",
-    "git_repo",
-    "jj",
-    "jj_agent",
-    "jj_repo",
-    "needs_git",
-    "needs_jj",
     "parked_gate",
     "plugin_payload",
     "prefix_of",
@@ -102,7 +107,6 @@ __all__ = [
     "workspace_log",
     "workspace_retained",
     "workspace_seam",
-    "worktree_agent",
     "write_reference_fork",
     "write_skill",
 ]

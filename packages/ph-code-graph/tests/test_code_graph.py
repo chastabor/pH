@@ -41,16 +41,9 @@ from typing import Any
 import pytest
 
 from ph.llm.types import text_of
-from ph.testing import (
-    FAKE_OPTIONS,
-    git,
-    git_repo,
-    jj_repo,
-    needs_git,
-    needs_jj,
-    report_section,
-    run_tool,
-)
+from ph.testing import FAKE_OPTIONS, report_section, run_tool
+from ph.testing.git import git, git_repo
+from ph.testing.jj import jj_repo
 from ph_code_graph._extract import (
     INHERITS,
     Definition,
@@ -1077,7 +1070,7 @@ def test_the_grammar_cache_release_restores_the_base_it_replaced(
 # ------------------------------------------------- the version-control filter ----
 
 
-@needs_git
+@pytest.mark.needs_git
 async def test_a_reindex_under_git_never_opens_an_unchanged_file(
     mount: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1108,7 +1101,7 @@ async def test_a_reindex_under_git_never_opens_an_unchanged_file(
     assert reads == [], f"git vouched for the file and it was read anyway: {reads}"
 
 
-@needs_git
+@pytest.mark.needs_git
 async def test_an_edited_file_is_still_read_and_reindexed(mount: Any, tmp_path: Path) -> None:
     """The safe direction. git's index still holds the old blob id for it, so
     this is `status` doing its job — see `ph.seams.changes`."""
@@ -1130,7 +1123,7 @@ async def test_an_edited_file_is_still_read_and_reindexed(mount: Any, tmp_path: 
     assert found.value["symbols"], "the new symbol is in the graph"
 
 
-@needs_jj
+@pytest.mark.needs_jj
 async def test_a_reindex_under_jj_never_opens_an_unchanged_file(
     mount: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -98,9 +98,16 @@ session-checkpoint-policy = "ph.persistence.checkpoint_policy:apply"
 llm-retry = "ph.llm.retry:apply"
 media-degrade = "ph.llm.media:apply"
 # testing and invariants
-llm-fake = "ph.testing.fake_adapter:apply"
-code-runtime-stub = "ph.testing.stub_runtime:apply"
-llm-replay = "ph.testing.replay_adapter:apply"
+#
+# The first three are test-facing *rows* whose modules are not, and the paths
+# say so: a row is mountable, so it lives with the seam it implements, while
+# `ph.testing` is scaffolding nothing shipped may import. `llm-fake` is the one
+# that made the rule — `headless`, the default profile, mounts it, so an install
+# with no pytest could not compose its own default while this pointed into the
+# test package.
+llm-fake = "ph.llm.fake:apply"
+code-runtime-stub = "ph.seams.code_runtime_stub:apply"
+llm-replay = "ph.llm.replay:apply"
 tools-code-mode = "ph.tools.code_mode:apply"
 agent-loop-invariant = "ph.agent_loop.invariant:apply"
 session-invariant = "ph.session.invariant:apply"

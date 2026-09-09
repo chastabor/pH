@@ -32,9 +32,11 @@ import pytest
 
 from ph.seams.workspace import CHECKPOINT, WorkspaceRecord
 from ph.seams.workspace_jj import _needs_the_tree
-from ph.testing import FAKE_OPTIONS, git, jj, jj_agent, jj_repo, needs_jj
+from ph.testing import FAKE_OPTIONS
+from ph.testing.git import git
+from ph.testing.jj import jj, jj_agent, jj_repo
 
-pytestmark = [pytest.mark.anyio, needs_jj]
+pytestmark = [pytest.mark.anyio, pytest.mark.needs_jj]
 
 
 TIER_ROW = {"insert": [{"id": "workspace-jj", "name": "workspace-jj"}]}
@@ -202,7 +204,7 @@ async def test_a_directory_jj_does_not_manage_declines_and_the_seam_falls_back(
     declines and the person keeps a shared workspace, rather than acquiring a
     repository layout nobody asked for.
     """
-    from ph.testing import git_repo
+    from ph.testing.git import git_repo
 
     ctx = await mount(TIER_ROW)
     base = await git_repo(ctx, tmp_path / "plain")

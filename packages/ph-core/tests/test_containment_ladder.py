@@ -38,7 +38,8 @@ import pytest
 
 from ph.seams.containment import TIERS
 from ph.seams.subprocess import SubprocessSpawnSpec, scrub_env
-from ph.testing import WORKTREE_ROWS, needs_git, report_section, worktree_agent
+from ph.testing import report_section
+from ph.testing.git import WORKTREE_ROWS, worktree_agent
 
 pytestmark = pytest.mark.anyio
 
@@ -63,7 +64,7 @@ async def _write(ctx: Any, workspace: Any, target: str) -> tuple[int, str]:
 # ------------------------------------------------------------------- bounds --
 
 
-@needs_git
+@pytest.mark.needs_git
 async def test_a_relative_raw_write_is_bounded_by_the_tree(mount: Any, tmp_path: Path) -> None:
     """A relative path resolves against the process's cwd, and under `worktree`
     that cwd is the agent's own checkout — which is the whole of what the rung
@@ -81,7 +82,7 @@ async def test_a_relative_raw_write_is_bounded_by_the_tree(mount: Any, tmp_path:
 # ----------------------------------------------------------- does NOT bound --
 
 
-@needs_git
+@pytest.mark.needs_git
 async def test_an_absolute_raw_write_escapes_the_tree(mount: Any, tmp_path: Path) -> None:
     """E13, asserted so the table cannot regress.
 
@@ -113,7 +114,7 @@ async def test_an_absolute_raw_write_escapes_the_tree(mount: Any, tmp_path: Path
 # --------------------------------------------------------------------- buys --
 
 
-@needs_git
+@pytest.mark.needs_git
 async def test_an_ephemeral_tree_is_discarded_with_its_work(mount: Any, tmp_path: Path) -> None:
     """Revertibility, through the path a real agent takes.
 

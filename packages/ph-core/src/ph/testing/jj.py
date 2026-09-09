@@ -15,19 +15,12 @@ which is arithmetic of ours to stub.
 
 from __future__ import annotations
 
-import shutil
 from pathlib import Path
 from typing import Any
 
-import pytest
-
 from ..seams.workspace_jj import jj
 
-__all__ = ["JJ_ROWS", "jj", "jj_agent", "jj_repo", "needs_jj"]
-
-needs_jj = pytest.mark.skipif(shutil.which("jj") is None, reason="the jj tier needs jj")
-"""Shared for `needs_git`'s reason: the third module to drive a real binary forgot
-the marker, and on a machine without it a clean skip became a dozen errors."""
+__all__ = ["JJ_ROWS", "jj", "jj_agent", "jj_repo"]
 
 JJ_ROWS: tuple[dict[str, Any], ...] = (
     {"insert": [{"id": "workspace-jj", "name": "workspace-jj"}]},

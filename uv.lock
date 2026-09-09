@@ -1524,7 +1524,7 @@ provides-extras = ["nomic"]
 [[package]]
 name = "ph-workspace"
 version = "0.0.0"
-source = { virtual = "." }
+source = { editable = "." }
 dependencies = [
     { name = "ph-app" },
     { name = "ph-code-graph" },

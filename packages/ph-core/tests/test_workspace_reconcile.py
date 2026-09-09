@@ -27,12 +27,6 @@ import pytest
 from ph.seams.workspace import workspace_leaks
 from ph.session import Session
 from ph.testing import (
-    WORKTREE_ROWS,
-    git,
-    needs_git,
-    worktree_agent,
-)
-from ph.testing import (
     workspace_acquired as _acquired,
 )
 from ph.testing import (
@@ -41,6 +35,7 @@ from ph.testing import (
 from ph.testing import (
     workspace_log as _log,
 )
+from ph.testing.git import WORKTREE_ROWS, git, worktree_agent
 
 pytestmark = pytest.mark.anyio
 
@@ -122,7 +117,7 @@ def test_each_agent_is_folded_separately() -> None:
 # ---------------------------------------------------------------------- gate --
 
 
-@needs_git
+@pytest.mark.needs_git
 async def test_a_crash_between_acquire_and_dispose_is_reconciled_on_the_next_open(
     mount: Any, tmp_path: Path
 ) -> None:
@@ -148,7 +143,7 @@ async def test_a_crash_between_acquire_and_dispose_is_reconciled_on_the_next_ope
     assert str(leaked) not in out, "git still has the worktree registered"
 
 
-@needs_git
+@pytest.mark.needs_git
 async def test_a_leak_whose_tree_is_already_gone_still_closes_its_pair(
     mount: Any, tmp_path: Path
 ) -> None:
@@ -168,7 +163,7 @@ async def test_a_leak_whose_tree_is_already_gone_still_closes_its_pair(
     assert closing[-1].data["kept"] is False, "a tree that is gone was reported as kept"
 
 
-@needs_git
+@pytest.mark.needs_git
 async def test_a_dirty_leak_reaches_the_branch_rather_than_being_discarded(
     mount: Any, tmp_path: Path
 ) -> None:
@@ -196,7 +191,7 @@ async def test_a_dirty_leak_reaches_the_branch_rather_than_being_discarded(
     assert closing[-1].data["kept"] is True
 
 
-@needs_git
+@pytest.mark.needs_git
 async def test_forking_does_not_reclaim_the_parents_live_worktree(
     mount: Any, tmp_path: Path
 ) -> None:
@@ -219,7 +214,7 @@ async def test_forking_does_not_reclaim_the_parents_live_worktree(
     assert workspace.root.is_dir(), "forking reclaimed the parent's live worktree"
 
 
-@needs_git
+@pytest.mark.needs_git
 async def test_a_held_workspace_is_never_reconciled(mount: Any, tmp_path: Path) -> None:
     """Belt and braces, on the seam's own knowledge. `live()` exists so
     `/workspaces` can ask "is this tree anybody's" before offering to delete a

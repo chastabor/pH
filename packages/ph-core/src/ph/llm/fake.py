@@ -6,7 +6,7 @@ exercised against the real contract rather than a shortcut. Phase 1's
 `llm-replay` (P1-24) replaces the *script* with a recorded session and keeps
 this shape.
 
-@module ph.testing.fake_adapter
+@module ph.llm.fake
 """
 
 from __future__ import annotations
@@ -17,8 +17,8 @@ from dataclasses import dataclass, field, replace
 from typing import Any
 
 from ..cordis import Context, plugin
-from ..llm.adapter import ResolvedModel
-from ..llm.types import (
+from .adapter import ResolvedModel
+from .types import (
     BlockEnd,
     BlockStart,
     Finish,

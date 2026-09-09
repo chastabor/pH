@@ -48,7 +48,12 @@ confined command may reach beyond its workspace), `seams/workspace_git.py` (the
 `worktree` tier), `seams/workspace_jj.py` (the same tier over Jujutsu, where a
 child starts from its parent's work in progress), `seams/workspace_agentfs.py` (a
 copy-on-write overlay), `seams/workspace_scratch.py` (the `sandbox` rung's kind),
-`seams/workspace_provision.py` (making a fresh tree usable).
+`seams/workspace_provision.py` (making a fresh tree usable),
+`seams/code_runtime_stub.py` (the `code-runtime-stub` row: it runs a registered
+Python callable with the bindings bound, which is how the governance half of
+Code Mode is tested without a runtime — it lives here rather than in
+`ph.testing` because a row a deployment can mount must not sit in a package
+nothing shipped may import).
 
 `seams/changes.py` publishes no key either, and is not a provider: it is the
 question *"which of these files changed since I last looked"*, answered by

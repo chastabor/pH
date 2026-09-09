@@ -275,7 +275,7 @@ async def test_a_failed_turn_is_named_beside_an_idle_status(
     rides beside it, so a client polling the list can tell "answered" from "the
     last answer was an error", which `--until-idle` could not.
     """
-    from ph.testing.fake_adapter import FakeAdapter
+    from ph.llm.fake import FakeAdapter
 
     async def exploding(self: Any, options: Any) -> Any:
         raise RuntimeError("provider is down")

@@ -16,22 +16,12 @@ deregisters — not our arithmetic about it.
 
 from __future__ import annotations
 
-import shutil
 from pathlib import Path
 from typing import Any
 
-import pytest
-
 from ..seams.workspace_git import git
 
-__all__ = ["WORKTREE_ROWS", "git", "git_repo", "needs_git", "worktree_agent"]
-
-needs_git = pytest.mark.skipif(shutil.which("git") is None, reason="the worktree tier needs git")
-"""Shared, because the third module to drive real git forgot it.
-
-Two modules carried this marker and the next one did not, which on a machine
-without git turns a clean skip into a dozen errors — exactly the drift this
-module exists to stop."""
+__all__ = ["WORKTREE_ROWS", "git", "git_repo", "worktree_agent"]
 
 WORKTREE_ROWS: tuple[dict[str, Any], ...] = (
     {"insert": [{"id": "workspace-git-worktree", "name": "workspace-git-worktree"}]},

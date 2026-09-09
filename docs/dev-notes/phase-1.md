@@ -37,7 +37,7 @@ table describes.
 | P1-21 | `ctx.spill_store` with digest naming and a retrieval hint | `ph/seams/spill.py` |
 | P1-22 | `read`/`write`/`edit`/`glob`/`grep`/`bash` with cards; AGENTS.md discovery | `ph/tools/builtin/` |
 | P1-23 | `ctx.jobs`, `ctx.settings`, `ctx.skills` | `ph/seams/{jobs,settings,skills}.py` |
-| P1-24 | `llm-replay` + the prefix-stability assertion | `ph/testing/replay_adapter.py`, `tests/test_prefix_stability.py` |
+| P1-24 | `llm-replay` + the prefix-stability assertion | `ph/llm/replay.py`, `tests/test_prefix_stability.py` |
 | P1-25 | `json` / `transcript` / `rpc` modes, provider profiles | `ph_app/modes/`, `ph_app/profiles/` |
 
 **Definition of done, met:** the pipeline ordering tests pass; crash-repair

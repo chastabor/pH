@@ -84,14 +84,8 @@ from ph.seams.workspace_agentfs import (
 )
 from ph.seams.workspace_git import GitWorktreeProvider, tree_hash
 from ph.seams.workspace_jj import JjWorkspaceProvider
-from ph.testing import (
-    FAKE_OPTIONS,
-    StubCheckpointingProvider,
-    StubWorkspaceProvider,
-    git,
-    git_repo,
-    needs_git,
-)
+from ph.testing import FAKE_OPTIONS, StubCheckpointingProvider, StubWorkspaceProvider
+from ph.testing.git import git, git_repo
 
 pytestmark = pytest.mark.anyio
 
@@ -422,7 +416,7 @@ async def _export(ctx: Any, agent_id: str) -> str:
     )
 
 
-@needs_git
+@pytest.mark.needs_git
 async def test_an_export_lands_on_a_branch_rooted_at_what_the_agent_saw(
     mount: Any, tmp_path: Path
 ) -> None:
@@ -456,7 +450,7 @@ async def test_an_export_lands_on_a_branch_rooted_at_what_the_agent_saw(
     assert (base / "a1-new.py").is_file(), "an added file reaches the project too"
 
 
-@needs_git
+@pytest.mark.needs_git
 async def test_git_finds_the_conflict_so_the_export_does_not_have_to(
     mount: Any, tmp_path: Path
 ) -> None:
@@ -487,7 +481,7 @@ async def test_git_finds_the_conflict_so_the_export_does_not_have_to(
     assert "<<<<<<<" in (base / "shared.py").read_text(encoding="utf-8")
 
 
-@needs_git
+@pytest.mark.needs_git
 async def test_an_export_carries_symlinks_rather_than_flattening_them(
     mount: Any, tmp_path: Path
 ) -> None:
@@ -524,7 +518,7 @@ async def test_an_export_carries_symlinks_rather_than_flattening_them(
     assert out.startswith("120000"), "git records it as a symlink, not a regular file"
 
 
-@needs_git
+@pytest.mark.needs_git
 async def test_an_export_refuses_rather_than_reusing_a_branch(mount: Any, tmp_path: Path) -> None:
     """A second export onto a taken name would discard whatever is on it."""
     ctx = await _overlaid(mount, tmp_path)
@@ -586,7 +580,7 @@ async def test_a_crashed_agents_overlay_is_reclaimed(mount: Any, tmp_path: Path)
     assert not await is_mount(workspace.root), "and the mount is gone, not merely forgotten"
 
 
-@needs_git
+@pytest.mark.needs_git
 async def test_the_seam_exports_an_overlay_without_knowing_which_tier_it_is(
     mount: Any, tmp_path: Path
 ) -> None:

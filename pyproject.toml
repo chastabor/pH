@@ -1,3 +1,15 @@
+# **The root is a buildable, empty distribution.** Not because anything here
+# needs compiling — there is no `src/` at the root and the wheel ships zero
+# modules — but because `uv tool install` installs a *package*, and a workspace
+# root without a build backend is not one ("does not support being built").
+# Building nothing is the point: this distribution is its dependency list, so
+# `uv tool install .` resolves the seven members and their transitive pins into
+# one tool environment, and `uv tool upgrade`/`uninstall` address the whole
+# deployment under a single name.
+[build-system]
+requires = ["hatchling>=1.26"]
+build-backend = "hatchling.build"
+
 [project]
 name = "ph-workspace"
 version = "0.0.0"
@@ -13,8 +25,30 @@ dependencies = [
     "ph-code-graph",
 ]
 
-[tool.uv]
-package = false
+# **The same entry point `ph-app` already declares, restated.** `uv tool
+# install` links only the executables of the package it was asked for, not of
+# its dependencies — a root with no `[project.scripts]` installs the whole
+# harness and then reports that it provides no commands. Redeclaring is safe
+# rather than a conflict: both wheels generate the identical launcher (`from
+# ph_app.cli import main`), so whichever is written second is the same file.
+# `ph-app` keeps its own copy so `pip install ph-app` still gives you a `ph`.
+[project.scripts]
+ph = "ph_app.cli:main"
+
+# Nothing to select: `bypass-selection` is how hatchling is told that a wheel
+# with no packages and no modules is intended, instead of guessing at a
+# directory named after the project and failing when it finds none.
+[tool.hatch.build.targets.wheel]
+bypass-selection = true
+
+# The sdist has to be told separately, because `bypass-selection` governs the
+# wheel alone and hatchling's default sdist is "everything git does not ignore":
+# measured here at 15 MB across 558 files — `packages/`, `plans/`, `docs/`,
+# `uv.lock` and `.codegraph/`, the whole repository — wrapped around a wheel
+# that is 2 KB of metadata. This distribution *is* its dependency list, so the
+# manifest that carries the list is the only file that belongs in it.
+[tool.hatch.build.targets.sdist]
+only-include = ["pyproject.toml"]
 
 # **torch from the CPU wheel index.** `ph-text-index` depends on
 # `sentence-transformers`, which depends on `torch`, whose default wheels bundle
@@ -117,6 +151,14 @@ testpaths = [
 addopts = "-ra"
 markers = [
     "e2e: end-to-end scenario tests",
+    # The two tiers that drive a real binary rather than a stub. Declared here
+    # and skipped in `conftest.pytest_collection_modifyitems`, so the decision
+    # "is git installed" is made once for the whole suite instead of by a
+    # `skipif` constant that the third module to need it forgot to import — and
+    # so `ph.testing.git`/`ph.testing.jj`, which ship inside `ph-core`, hold no
+    # pytest import at all.
+    "needs_git: drives a real git binary",
+    "needs_jj: drives a real jj binary",
 ]
 
 [tool.coverage.run]

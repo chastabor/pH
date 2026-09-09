@@ -41,7 +41,8 @@ from ph.seams.changes import (
     backend_for,
     tree_state,
 )
-from ph.testing import git, git_repo, jj_repo, needs_git, needs_jj
+from ph.testing.git import git, git_repo
+from ph.testing.jj import jj_repo
 
 pytestmark = pytest.mark.anyio
 
@@ -171,7 +172,7 @@ def test_the_protocol_matches_a_provider_that_declares_the_attribute() -> None:
 # --------------------------------------------------------------- against git ----
 
 
-@needs_git
+@pytest.mark.needs_git
 async def test_git_vouches_for_a_committed_file(mount: Any, tmp_path: Path) -> None:
     """The win: a clean file is proved unchanged without being opened."""
     ctx = await mount()
@@ -188,7 +189,7 @@ async def test_git_vouches_for_a_committed_file(mount: Any, tmp_path: Path) -> N
     assert state.vouches_for("a.py", stored)
 
 
-@needs_git
+@pytest.mark.needs_git
 async def test_git_refuses_to_vouch_for_a_modified_file(mount: Any, tmp_path: Path) -> None:
     """**The reason `suspect` exists.**
 
@@ -212,7 +213,7 @@ async def test_git_refuses_to_vouch_for_a_modified_file(mount: Any, tmp_path: Pa
     assert not after.vouches_for("a.py", stored)
 
 
-@needs_git
+@pytest.mark.needs_git
 async def test_git_refuses_to_vouch_for_an_untracked_file(mount: Any, tmp_path: Path) -> None:
     ctx = await mount()
     root = await git_repo(ctx, tmp_path / "repo")
@@ -224,7 +225,7 @@ async def test_git_refuses_to_vouch_for_an_untracked_file(mount: Any, tmp_path: 
     assert not state.vouches_for("fresh.py", "")
 
 
-@needs_git
+@pytest.mark.needs_git
 async def test_git_treats_both_ends_of_a_rename_as_suspect(mount: Any, tmp_path: Path) -> None:
     """A caller may hold a record under either name, so neither is vouched for."""
     ctx = await mount()
@@ -239,7 +240,7 @@ async def test_git_treats_both_ends_of_a_rename_as_suspect(mount: Any, tmp_path:
     assert "old.py" in state.suspect and "new.py" in state.suspect
 
 
-@needs_git
+@pytest.mark.needs_git
 async def test_git_answers_in_the_asked_about_trees_spelling(mount: Any, tmp_path: Path) -> None:
     """**A subdirectory is not the repository, and the two git commands disagree.**
 
@@ -285,7 +286,7 @@ async def test_git_answers_in_the_asked_about_trees_spelling(mount: Any, tmp_pat
 # ---------------------------------------------------------------- against jj ----
 
 
-@needs_jj
+@pytest.mark.needs_jj
 async def test_jj_reports_a_token_and_vouches_for_nothing_on_a_first_run(
     mount: Any, tmp_path: Path
 ) -> None:
@@ -305,7 +306,7 @@ async def test_jj_reports_a_token_and_vouches_for_nothing_on_a_first_run(
     assert not state.vouches_for("a.py", ""), "a first run proves nothing"
 
 
-@needs_jj
+@pytest.mark.needs_jj
 async def test_jj_vouches_for_everything_it_did_not_diff(mount: Any, tmp_path: Path) -> None:
     """One call, and it covers **uncommitted** work — jj snapshots on any command."""
     ctx = await mount()
@@ -326,7 +327,7 @@ async def test_jj_vouches_for_everything_it_did_not_diff(mount: Any, tmp_path: P
     assert after.token and after.token != token, "the snapshot moved"
 
 
-@needs_jj
+@pytest.mark.needs_jj
 async def test_jj_vouches_for_nothing_when_the_token_is_unusable(
     mount: Any, tmp_path: Path
 ) -> None:
@@ -346,7 +347,7 @@ async def test_jj_vouches_for_nothing_when_the_token_is_unusable(
     assert not state.vouches_for("a.py", "")
 
 
-@needs_jj
+@pytest.mark.needs_jj
 async def test_a_jj_tree_is_reported_as_jj_not_git(mount: Any, tmp_path: Path) -> None:
     """`jj git init` leaves a `.git` too, so the order in `_probed` is load-bearing."""
     ctx = await mount()
@@ -364,7 +365,7 @@ mounts it, and for that module's reason: the overlay root then comes from `$PH_H
 which the `mount` fixture already points at `tmp_path`."""
 
 
-@needs_git
+@pytest.mark.needs_git
 async def test_an_overlay_answers_git_from_inside_its_own_mount(mount: Any, tmp_path: Path) -> None:
     """**The third backend that should not exist.**
 

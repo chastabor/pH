@@ -15,7 +15,7 @@ Replay is strict on purpose: running out of recorded steps is an error rather
 than a fallback to a canned reply. A replay that quietly invented output would
 make a passing test meaningless.
 
-@module ph.testing.replay_adapter
+@module ph.llm.replay
 """
 
 from __future__ import annotations
@@ -25,8 +25,9 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..cordis import Context, plugin
-from ..llm.adapter import LlmError, ResolvedModel
-from ..llm.types import (
+from ..session import SessionEvent
+from .adapter import LlmError, ResolvedModel
+from .types import (
     BlockEnd,
     BlockStart,
     Finish,
@@ -37,7 +38,6 @@ from ..llm.types import (
     ToolCallBlock,
     chunk_from_wire,
 )
-from ..session import SessionEvent
 
 __all__ = [
     "REPLAY_ROW",

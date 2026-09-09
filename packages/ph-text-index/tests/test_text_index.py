@@ -43,16 +43,9 @@ import pytest
 
 from ph.cordis import DEPLOYMENT
 from ph.llm.types import text_of
-from ph.testing import (
-    FAKE_OPTIONS,
-    git,
-    git_repo,
-    jj_repo,
-    needs_git,
-    needs_jj,
-    report_section,
-    run_tool,
-)
+from ph.testing import FAKE_OPTIONS, report_section, run_tool
+from ph.testing.git import git, git_repo
+from ph.testing.jj import jj_repo
 from ph_text_index._chunk import chunk_text
 from ph_text_index._store import IndexMismatch, TextIndex
 
@@ -911,7 +904,7 @@ async def test_only_the_description_rides_the_prompt(mount: Any, tmp_path: Path)
 # ------------------------------------------------- the version-control filter ----
 
 
-@needs_git
+@pytest.mark.needs_git
 async def test_git_stops_an_unchanged_document_being_re_embedded(
     mount: Any, tmp_path: Path
 ) -> None:
@@ -944,7 +937,7 @@ async def test_git_stops_an_unchanged_document_being_re_embedded(
     assert "not re-embedded" in text_of(again.content)
 
 
-@needs_git
+@pytest.mark.needs_git
 async def test_an_edited_document_is_re_embedded(mount: Any, tmp_path: Path) -> None:
     """The safe direction, and it must survive an *uncommitted* edit — which is
     `status`'s job, since git's index still holds the old blob id."""
@@ -967,7 +960,7 @@ async def test_an_edited_document_is_re_embedded(mount: Any, tmp_path: Path) -> 
     assert embedder.calls > before, "an edited document must be re-embedded"
 
 
-@needs_jj
+@pytest.mark.needs_jj
 async def test_jj_stops_an_unchanged_document_being_re_embedded(mount: Any, tmp_path: Path) -> None:
     """No commit needed — jj snapshots the working copy on any command."""
     ctx, embedder = await _mounted(mount, tmp_path)

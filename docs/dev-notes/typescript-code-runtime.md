@@ -24,7 +24,7 @@ renderer = ctx.code_runtime.sdk_renderer(language)
 ```
 
 Every runtime pH ships is Python — `ph_rlm.kernel.manager` declares
-`language: ClassVar[str] = "python"`, and `ph.testing.stub_runtime` the same — so
+`language: ClassVar[str] = "python"`, and `ph.seams.code_runtime_stub` the same — so
 `render_typescript_sdk` is registered under a key nothing ever asks for. It is
 reachable from tests and from nowhere else.
 
