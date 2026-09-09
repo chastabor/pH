@@ -30,6 +30,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from ph.agent.types import AgentHandle
 from ph.seams.shell import ShellResult
 from ph.text import truncation_marker
 from ph.tools.builtin.bash_tool import TIMED_OUT
@@ -99,7 +100,7 @@ def shell_of(ctx: Any) -> Any:
     return shell
 
 
-async def run_shell(shell: Any, session: Any, agent: Any, command: str) -> ShellResult:
+async def run_shell(shell: Any, session: Any, agent: AgentHandle, command: str) -> ShellResult:
     """Append, run, append. Returns what ran, for a caller that must reply.
 
     `cwd` comes back *from the seam* rather than being derived here: `run`

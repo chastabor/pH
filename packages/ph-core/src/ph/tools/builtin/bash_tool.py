@@ -17,6 +17,7 @@ from typing import Any
 from pydantic import Field
 
 from ...cordis import Context, plugin
+from ...llm.types import ContentBlock
 from ...text import truncation_marker
 from ..definition import ToolModel, ToolOutput, ToolRunContext, define_tool, text_content
 from ..presentation import ToolCallView, ToolResultView
@@ -59,7 +60,7 @@ class BashValue(ToolModel):
     timed_out: bool = False
 
 
-def _render(args: Any, value: Any) -> Any:
+def _render(args: Any, value: Any) -> list[ContentBlock]:
     parts: list[str] = []
     if value["stdout"]:
         parts.append(value["stdout"].rstrip())
@@ -78,7 +79,7 @@ def _render(args: Any, value: Any) -> Any:
 
 
 @plugin("tool-bash", inject=["tools", "shell"])
-async def apply(ctx: Context, config: Any) -> None:
+async def apply(ctx: Context, config: None) -> None:
     """Register the bash tool."""
 
     async def run_command(args: BashArgs, run: ToolRunContext) -> Any:

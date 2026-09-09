@@ -10,13 +10,16 @@ shape is duck-typed by `normalize_plugin`, not enforced by a base class.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any, overload
 
 from pydantic import BaseModel
 
 from .errors import LoaderError
+
+if TYPE_CHECKING:
+    from .context import Context
 
 __all__ = ["PluginSpec", "normalize_plugin", "plugin"]
 
@@ -27,17 +30,37 @@ class PluginSpec:
 
     name: str
     apply: Callable[..., Any]
+    """Erased on purpose, and the erasure is the same one `ToolDefinition.output`
+    carries: a spec lives in a table beside every other row, so the config type
+    `plugin()` checked is not recoverable from here. The decorator's overload is
+    what holds a body to the model it declares — this field is what the loader
+    calls, and it calls every row through one signature."""
     inject: tuple[str, ...] = ()
     config_model: type[BaseModel] | None = None
 
-    def resolve_config(self, raw: Any) -> Any:
+    def resolve_config(self, raw: Any) -> BaseModel | None:
         """Validate a row's raw config against the plugin's model.
 
-        A plugin without a model receives the row's config verbatim, which is
-        how a plugin whose config is a plain mapping (or absent) works.
+        **A plugin without a model takes no config, and is handed `None`.** It
+        used to be handed the row's config verbatim, which made a `config:` block
+        under a row that never reads one a silent no-op: the profile said
+        something, the mount agreed, and nothing happened. Fifty-two rows in this
+        tree ignore their config; the four that read it raw now declare a model.
+        So a non-empty config on a model-less row is refused, naming the row and
+        the keys — the same sentence `extra="forbid"` gives a mistyped key under a
+        row that *does* have a model. An empty mapping is treated as absent, since
+        `config: {}` says nothing either way.
         """
         model = self.config_model
-        if model is None or isinstance(raw, model):
+        if model is None:
+            if raw is None or raw == {}:
+                return None
+            given = sorted(raw) if isinstance(raw, dict) else type(raw).__name__
+            raise LoaderError(
+                f'row "{self.name}" takes no config, but the profile gave it {given}; '
+                "remove the config block, or address a row that has options"
+            )
+        if isinstance(raw, model):
             return raw
         if raw is None:
             return model()
@@ -46,6 +69,18 @@ class PluginSpec:
         return model.model_validate(raw)
 
 
+@overload
+def plugin(
+    name: str, *, inject: Sequence[str] = ()
+) -> Callable[
+    [Callable[[Context, None], Awaitable[None]]], Callable[[Context, None], Awaitable[None]]
+]: ...
+@overload
+def plugin[C: BaseModel](
+    name: str, *, inject: Sequence[str] = (), config: type[C]
+) -> Callable[
+    [Callable[[Context, C], Awaitable[None]]], Callable[[Context, C], Awaitable[None]]
+]: ...
 def plugin(
     name: str, *, inject: Sequence[str] = (), config: type[BaseModel] | None = None
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
@@ -55,6 +90,13 @@ def plugin(
     @plugin("session", inject=["llm"], config=SessionConfig)
     async def apply(ctx: Context, config: SessionConfig) -> None: ...
     ```
+
+    **Overloaded on `config=`, so the body's second parameter is checked against
+    the model the decorator names.** Forty-five rows declare a model and read
+    `config.field` in the body; before this, a row that declared `Config` and
+    annotated `config: OtherConfig` type-checked, and the first field read at
+    mount was where the difference surfaced. A row with no model takes `None`,
+    and `resolve_config` above is what makes that annotation true.
     """
 
     def decorate(fn: Callable[..., Any]) -> Callable[..., Any]:

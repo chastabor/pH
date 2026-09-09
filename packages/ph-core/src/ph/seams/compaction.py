@@ -30,8 +30,9 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Literal, Protocol, TypeAlias, runtime_checkable
+from typing import Literal, Protocol, TypeAlias, runtime_checkable
 
+from ..agent.types import AgentHandle
 from ..cordis import Boundary, Context, Disposer, Running, boundary_of, plugin, running
 from ..session import Session
 from ._registry import claim_entry, claim_slot
@@ -102,12 +103,14 @@ class CompactionEngine(Protocol):
     """A compaction backend: it owns trigger policy, retention and summarizing."""
 
     async def compact_if_needed(
-        self, agent: Any, trigger: CompactionTrigger
+        self, agent: AgentHandle, trigger: CompactionTrigger
     ) -> CompactionResult | None:
         """Compact only if this engine's own policy says to, else `None`."""
         ...
 
-    async def compact_now(self, agent: Any, *, instructions: str = "") -> CompactionResult | None:
+    async def compact_now(
+        self, agent: AgentHandle, *, instructions: str = ""
+    ) -> CompactionResult | None:
         """Compact useful history regardless of pressure; `None` when there is none.
 
         `instructions` is the person's own account of what they are about to
@@ -186,7 +189,7 @@ class CompactionSeam:
         return self.engine
 
     async def compact_if_needed(
-        self, agent: Any, trigger: CompactionTrigger
+        self, agent: AgentHandle, trigger: CompactionTrigger
     ) -> CompactionResult | None:
         """Automatic policy. Absent an engine this is a no-op, never an error.
 
@@ -199,7 +202,9 @@ class CompactionSeam:
         with running(self.engine_by):
             return await self.engine.compact_if_needed(agent, trigger)
 
-    async def compact_now(self, agent: Any, *, instructions: str = "") -> CompactionResult | None:
+    async def compact_now(
+        self, agent: AgentHandle, *, instructions: str = ""
+    ) -> CompactionResult | None:
         """An explicit request. Absent an engine this *is* an error.
 
         Unlike the automatic path: somebody asked for something the deployment
@@ -282,6 +287,6 @@ class CompactionSeam:
 
 
 @plugin("compaction")
-async def apply(ctx: Context, config: Any) -> None:
+async def apply(ctx: Context, config: None) -> None:
     """Mount the compaction seam definition. No engine ships in `ph-base`."""
     ctx.provide("compaction", CompactionSeam(ctx=ctx))

@@ -25,6 +25,7 @@ from ph.cordis.loader import (
     interpolate,
     safe_yaml_load,
 )
+from ph.wire import WireModel
 
 pytestmark = pytest.mark.anyio
 
@@ -319,13 +320,17 @@ def _realm_module(name: str) -> None:
     copy from the shared one by something other than identity.
     """
 
-    @plugin("t-fs")
-    async def fs_provider(ctx: Context, config: object) -> None:
-        root = (config or {}).get("root", "shared") if isinstance(config, dict) else "shared"
-        ctx.provide("t_fs", {"root": root, "owner": ctx.path})
+    class FsConfig(WireModel):
+        root: str = "shared"
+
+    # A model, because a row that reads config has to say so (P8-04): the loader
+    # refuses a `config:` block under a row that declares none.
+    @plugin("t-fs", config=FsConfig)
+    async def fs_provider(ctx: Context, config: FsConfig) -> None:
+        ctx.provide("t_fs", {"root": config.root, "owner": ctx.path})
 
     @plugin("t-reader", inject=["t_fs"])
-    async def reader(ctx: Context, config: object) -> None:
+    async def reader(ctx: Context, config: None) -> None:
         ctx.provide("t_seen", ctx.t_fs)
 
     _fake_module(name, fs_provider=fs_provider, reader=reader)

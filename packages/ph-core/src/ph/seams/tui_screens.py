@@ -231,7 +231,7 @@ class TuiScreenRegistry:
 
 
 @plugin("tui-screens")
-async def apply(ctx: Context, config: Any) -> None:
+async def apply(ctx: Context, config: None) -> None:
     """Mount the screen registry.
 
     In `ph-base` rather than in a front-end profile: the seam is the same rule

@@ -30,6 +30,7 @@ from typing import Any
 
 import anyio
 
+from ..agent.types import AgentHandle
 from ..cancel import CancelToken
 from ..cordis import Context
 from ..llm.types import Message, ToolCallBlock, new_message_id
@@ -64,7 +65,7 @@ class _GroupOutcome:
 
 async def execute_tool_calls(
     ctx: Context,
-    agent: Any,
+    agent: AgentHandle,
     turn: int,
     step: int,
     tool_calls: list[ToolCallBlock],
@@ -75,7 +76,11 @@ async def execute_tool_calls(
 ) -> BatchOutcome:
     """Run one step's calls, committing results in model order."""
     tools: ToolRuntime = ctx.tools
-    session: Session = agent.session
+    session = agent.session
+    if session is None:
+        # The Protocol admits a session-less handle because `StubAgent` is one;
+        # a batch has nowhere to record its calls without a log.
+        raise RuntimeError(f'agent "{agent.id}" has no session to record tool calls in')
     planned = [
         _Planned(
             block=block,

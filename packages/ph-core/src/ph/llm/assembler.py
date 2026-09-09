@@ -22,10 +22,13 @@ from typing import Any
 from .types import (
     BlockEnd,
     BlockStart,
+    ContentBlock,
     Finish,
     FinishReason,
+    Message,
     ReasoningBlock,
     ReasoningDelta,
+    StreamChunk,
     TextBlock,
     TextDelta,
     TokenUsage,
@@ -45,7 +48,7 @@ class _Partial:
     tool_call_id: str | None = None
     tool_call_name: str | None = None
     tool_call_arguments: str = ""
-    block: Any = None
+    block: ContentBlock | None = None
     """Set by `block-end` — authoritative, and freezes the partial."""
 
 
@@ -59,7 +62,7 @@ class BlockAssembler:
     _finish: FinishReason | None = None
     _replay_state: dict[str, Any] | None = None
 
-    def push(self, chunk: Any) -> None:
+    def push(self, chunk: StreamChunk) -> None:
         """Feed one chunk, in stream order."""
         if isinstance(chunk, BlockStart):
             if chunk.index not in self._partials:
@@ -106,7 +109,7 @@ class BlockAssembler:
             self._order.append(index)
         return partial
 
-    def _assemble(self, partial: _Partial, index: int) -> Any:
+    def _assemble(self, partial: _Partial, index: int) -> ContentBlock:
         if partial.block is not None:
             return partial.block
         if partial.block_type == "text":
@@ -121,7 +124,7 @@ class BlockAssembler:
             )
         raise ValueError(f'cannot assemble incomplete block of type "{partial.block_type}"')
 
-    def blocks(self) -> list[Any]:
+    def blocks(self) -> list[ContentBlock]:
         """Every seen block, in stream order.
 
         Max-token truncation drops tool calls: a call whose arguments were cut
@@ -133,21 +136,35 @@ class BlockAssembler:
             return [block for block in assembled if block.type != "tool-call"]
         return assembled
 
-    def interrupted_blocks(self) -> list[Any]:
+    def interrupted_blocks(self) -> list[ContentBlock]:
         """The prefix an interrupted stream can safely finalize.
 
         Text and reasoning with non-whitespace content, in stream order. Tool
         calls are omitted because interruption precedes dispatch — keeping one
         would require a fabricated result.
         """
-        kept: list[Any] = []
+        kept: list[ContentBlock] = []
         for index in self._order:
             partial = self._partials[index]
-            kind = getattr(partial.block, "type", None) or partial.block_type
+            # **The kind is decided before assembling, and that ordering is
+            # load-bearing.** `_assemble` raises on a `block_type` outside the
+            # four it knows, and `BlockStart.block_type` is a `str` the replay
+            # path passes through from the wire — so assembling first would turn
+            # an unrecognised block from an adapter into a raise on the *cancel*
+            # path, which is where a raise costs most. It also builds a model per
+            # in-flight tool call to discard it: 38 µs against 2 µs at 32 calls.
+            #
+            # The closed block's own `type` wins over the partial's when there is
+            # one, which is what the `getattr` this replaced was for — now a
+            # typed read, because `block` is `ContentBlock | None` rather than
+            # `Any`.
+            kind = partial.block.type if partial.block is not None else partial.block_type
             if kind not in ("text", "reasoning"):
                 continue
             block = self._assemble(partial, index)
-            if block.text.strip() != "":
+            # Narrows for the checker what `kind` established for the reader:
+            # `block_type` is a `str`, so mypy cannot prove this redundant.
+            if isinstance(block, (TextBlock, ReasoningBlock)) and block.text.strip() != "":
                 kept.append(block)
         return kept
 
@@ -165,7 +182,7 @@ class BlockAssembler:
     def replay_state(self) -> dict[str, Any] | None:
         return self._replay_state
 
-    def message(self, *, provider: str, model: str) -> Any:
+    def message(self, *, provider: str, model: str) -> Message:
         """The assembled assistant message."""
         return create_assistant_message(
             content=self.blocks(),

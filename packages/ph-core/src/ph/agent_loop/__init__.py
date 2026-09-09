@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from functools import partial
 
+from ..agent.registry import DriverFactory
 from ..cordis import Context, plugin
 from ..wire import WireModel
 from .driver import AgentCancelled, ReactLoopAgent
@@ -25,5 +26,9 @@ class Config(WireModel):
 @plugin("agent-loop", config=Config, inject=["agents", "llm", "sessions", "system_prompt"])
 async def apply(ctx: Context, config: Config) -> None:
     """Register `ReactLoopAgent` as the driver `ctx.agents.create()` uses."""
-    factory = partial(ReactLoopAgent, max_parallel_tool_calls=config.max_parallel_tool_calls)
+    # Annotated, so mypy holds the driver to `AgentDriver` here — `ctx.agents` is
+    # untyped, so `register_driver` would take anything.
+    factory: DriverFactory = partial(
+        ReactLoopAgent, max_parallel_tool_calls=config.max_parallel_tool_calls
+    )
     ctx.add_disposer(ctx.agents.register_driver(factory), label="agent-loop")

@@ -41,7 +41,7 @@ from pydantic import Field
 
 from ...cordis import Context, plugin
 from ...llm.media import is_attachable
-from ...llm.types import MediaBlock, PluginSource, create_user_message
+from ...llm.types import ContentBlock, MediaBlock, PluginSource, create_user_message
 from ...seams.attachments import OCTET_STREAM, mime_of
 from ...wire import WireModel
 from ..definition import ToolModel, ToolOutput, ToolRunContext, define_tool, text_content
@@ -105,7 +105,7 @@ class AttachValue(ToolModel):
     height: int | None = None
 
 
-def _render(args: Any, value: Any) -> Any:
+def _render(args: Any, value: Any) -> list[ContentBlock]:
     """The sentence the model reads, which has to say where the file went.
 
     A confirmation alone would leave the model to guess whether it is looking at

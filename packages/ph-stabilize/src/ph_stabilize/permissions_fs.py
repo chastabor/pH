@@ -60,6 +60,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal, TypeAlias
 
+from ph.agent.types import AgentHandle
 from ph.cordis import Context, plugin
 from ph.paths import canonical, is_under
 from ph.seams.approval import denial_reason
@@ -217,7 +218,7 @@ class FsPermissions:
     tests — reports unconfined, which is the fail-closed direction and true.
     """
 
-    def _prefix(self, agent: Any) -> str:
+    def _prefix(self, agent: AgentHandle | None) -> str:
         return _prefix_of(self.roots(agent))
 
     @property
@@ -263,13 +264,19 @@ class FsPermissions:
             rows.append((", ".join(rule.paths), f"{rule.mode} on {operations}{where}"))
         return rows
 
-    def decide(self, operation: Operation, path: Path, agent: Any = None) -> Rule | None:
+    def decide(
+        self, operation: Operation, path: Path, agent: AgentHandle | None = None
+    ) -> Rule | None:
         """The first rule that matches, or `None` for the default allow."""
         posix = path.as_posix()
         return self._decide_from(self._spellings(posix, agent), operation, posix, agent)
 
     def _decide_from(
-        self, candidates: tuple[str, ...], operation: Operation, path: str, agent: Any
+        self,
+        candidates: tuple[str, ...],
+        operation: Operation,
+        path: str,
+        agent: AgentHandle | None,
     ) -> Rule | None:
         """`decide` over spellings already computed, for a caller that has them.
 
@@ -300,13 +307,19 @@ class FsPermissions:
         return None
 
     def _objection_to(
-        self, candidates: tuple[str, ...], operation: Operation, path: str, agent: Any
+        self,
+        candidates: tuple[str, ...],
+        operation: Operation,
+        path: str,
+        agent: AgentHandle | None,
     ) -> Rule | None:
         """`objection` over spellings already computed. See `_decide_from`."""
         rule = self._decide_from(candidates, operation, path, agent)
         return rule if rule is not None and rule.mode != "allow" else None
 
-    def objection(self, operation: Operation, path: Path, agent: Any = None) -> Rule | None:
+    def objection(
+        self, operation: Operation, path: Path, agent: AgentHandle | None = None
+    ) -> Rule | None:
         """The first rule that would *stop* this, or `None`.
 
         `decide` answers "which rule spoke"; this answers "did it say no", which
@@ -317,7 +330,7 @@ class FsPermissions:
         posix = path.as_posix()
         return self._objection_to(self._spellings(posix, agent), operation, posix, agent)
 
-    def conceals(self, path: Path, agent: Any = None) -> bool:
+    def conceals(self, path: Path, agent: AgentHandle | None = None) -> bool:
         """Whether a listing must not reveal this path.
 
         `interrupt` conceals as well as `deny`: enumeration cannot ask, and the
@@ -326,7 +339,7 @@ class FsPermissions:
         """
         return self.objection("read", path, agent) is not None
 
-    def screen(self, path: str, name: str, agent: Any, is_dir: bool) -> WalkDecision:
+    def screen(self, path: str, name: str, agent: AgentHandle, is_dir: bool) -> WalkDecision:
         """What the walk may do with this path — the `ctx.fs.screen` contract (P6-19).
 
         Two questions, not one. For a file it is `conceals`. For a **directory** it is
@@ -367,7 +380,7 @@ class FsPermissions:
         spellings: tuple[str, ...],
         operation: Operation,
         path: str,
-        agent: Any,
+        agent: AgentHandle | None,
         *,
         honour_scope: bool,
         require_head: bool,
@@ -415,7 +428,9 @@ class FsPermissions:
                 return True
         return False
 
-    def deletion_reason(self, path: Path, *, recursive: bool, agent: Any = None) -> str | None:
+    def deletion_reason(
+        self, path: Path, *, recursive: bool, agent: AgentHandle | None = None
+    ) -> str | None:
         """Why this delete must not happen, or `None`.
 
         A non-recursive delete is an ordinary first-match question. A recursive
@@ -444,7 +459,7 @@ class FsPermissions:
             return RECURSIVE_DENIAL.format(path=path)
         return None
 
-    def prompt(self, rule: Rule, operation: Operation, path: Path, agent: Any) -> str:
+    def prompt(self, rule: Rule, operation: Operation, path: Path, agent: AgentHandle) -> str:
         """The sentence an `interrupt` puts in front of a person.
 
         A rule's own `description` wins where it has one. Otherwise a scoped rule
@@ -461,7 +476,7 @@ class FsPermissions:
                 return OUTSIDE_REASON.format(operation=operation, path=path, root=workspace.root)
         return INTERRUPT_REASON.format(operation=operation, path=path)
 
-    def _outside_workspace(self, path: Path, agent: Any) -> bool:
+    def _outside_workspace(self, path: Path, agent: AgentHandle | None) -> bool:
         """Whether this write is leaving the workspace the seam gave this agent.
 
         `None` — no workspace — means there is no scope to be outside of, so a
@@ -517,7 +532,7 @@ class FsPermissions:
             return True
         return not any(is_under(resolved, root) for root in roots)
 
-    def _spellings(self, absolute: str, agent: Any = None) -> tuple[str, ...]:
+    def _spellings(self, absolute: str, agent: AgentHandle | None = None) -> tuple[str, ...]:
         """Both ways to name this path: absolute, and relative to the workspace.
 
         A prefix strip rather than `Path.relative_to` — see `_prefix`. A path

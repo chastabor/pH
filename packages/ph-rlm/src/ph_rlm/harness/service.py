@@ -40,6 +40,7 @@ from typing import Any
 import anyio
 from filelock import FileLock
 
+from ph.agent.types import AgentHandle
 from ph.cordis import Context
 from ph.paths import write_text_under
 from ph.session import Session, SessionFoldCache
@@ -251,7 +252,7 @@ class HarnessService:
         *,
         scope: HarnessScope = "local",
         session: Session | None = None,
-        agent: Any = None,
+        agent: AgentHandle | None = None,
     ) -> RefinementRecord:
         """Validate, then record. The record is the state; nothing else is.
 
@@ -319,7 +320,7 @@ class HarnessService:
             metadata=edit.metadata or (before.metadata if before else {}),
         )
 
-    async def _approved(self, agent: Any) -> bool:
+    async def _approved(self, agent: AgentHandle | None) -> bool:
         """H3: a global edit asks. A local one never reaches here."""
         approval = self.ctx.get("approval")
         if approval is None or agent is None:
@@ -369,7 +370,7 @@ class HarnessService:
     # ------------------------------------------------------------- rollback --
 
     async def rollback(
-        self, refine_id: str, *, session: Session | None, agent: Any = None
+        self, refine_id: str, *, session: Session | None, agent: AgentHandle | None = None
     ) -> RefinementRecord:
         """H6: the inverse of one refinement — that record, read backwards.
 

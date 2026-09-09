@@ -11,7 +11,7 @@ ran under — which is the question anyone reviewing a session asks first.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Literal, TypeAlias, cast
+from typing import Literal, TypeAlias, cast
 
 from ..cordis import Context, plugin
 from ..session import Session
@@ -88,6 +88,6 @@ class PermissionPresetService:
 
 
 @plugin("permission-presets")
-async def apply(ctx: Context, config: Any) -> None:
+async def apply(ctx: Context, config: None) -> None:
     """Mount the permission-preset mapping."""
     ctx.provide("permission_presets", PermissionPresetService(ctx=ctx))

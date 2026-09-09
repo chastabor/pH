@@ -35,6 +35,7 @@ from ..cordis import Context, plugin
 from ..paths import resolve_roots
 from ..session import Session, SessionEvent, SessionHeader
 from ..session.json import dumps
+from ..wire import WireModel
 from .families import locate_under, logs_under, path_under
 from .lease import claim_file
 from .lineage import materialise
@@ -402,11 +403,17 @@ async def resume_session(ctx: Any, session_id: str) -> Any:
     return session
 
 
-@plugin("session-persistence-jsonl", inject=["sessions"])
-async def apply(ctx: Context, config: Any) -> None:
+class Config(WireModel):
+    """Row config for `session-persistence-jsonl`."""
+
+    root: str | None = None
+    """Where the logs live; `$PH_HOME/sessions` when unset."""
+
+
+@plugin("session-persistence-jsonl", inject=["sessions"], config=Config)
+async def apply(ctx: Context, config: Config) -> None:
     """Mount the JSONL backend and wire it to the session firehose."""
-    root_setting = config.get("root") if isinstance(config, dict) else None
-    root = Path(root_setting) if root_setting else resolve_roots().sessions_dir()
+    root = Path(config.root) if config.root else resolve_roots().sessions_dir()
     # Annotated, so mypy checks this backend against the Protocol *with
     # signatures* — which the runtime `isinstance` gate cannot: a
     # `runtime_checkable` Protocol compares names only.

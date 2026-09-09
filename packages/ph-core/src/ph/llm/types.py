@@ -178,10 +178,10 @@ ContentBlock: TypeAlias = Annotated[
 
 ToolResultBlock.model_rebuild()
 
-_CONTENT_BLOCKS: TypeAdapter[list[Any]] = TypeAdapter(list[ContentBlock])
+_CONTENT_BLOCKS: TypeAdapter[list[ContentBlock]] = TypeAdapter(list[ContentBlock])
 
 
-def content_from_wire(blocks: Any) -> list[Any]:
+def content_from_wire(blocks: Any) -> list[ContentBlock]:
     """Validate a list of content blocks read back from the log."""
     return _CONTENT_BLOCKS.validate_python(blocks)
 
@@ -518,7 +518,7 @@ class ToolCallDelta(WireDataclass):
 @dataclass(frozen=True, slots=True)
 class BlockEnd(WireDataclass):
     index: int
-    block: Any
+    block: ContentBlock
     type: Literal["block-end"] = "block-end"
 
 
@@ -548,7 +548,7 @@ consumer sees it — so a consumer never has to handle both shapes.
 """
 
 
-def chunk_from_wire(wire: Any) -> Any:
+def chunk_from_wire(wire: Any) -> StreamChunk:
     """Rebuild one stream chunk from its logged JSON form (replay fidelity).
 
     A malformed chunk is reported as `ValueError` naming its kind, so a replay
@@ -583,7 +583,7 @@ def chunk_from_wire(wire: Any) -> Any:
     raise ValueError(f"unknown stream chunk type {kind!r}")
 
 
-def is_token_delta(chunk: Any) -> bool:
+def is_token_delta(chunk: StreamChunk) -> bool:
     """Whether a chunk carries visible output — the first-token boundary.
 
     Empty deltas (heartbeats, empty tool-call frames) do not count.

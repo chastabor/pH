@@ -41,7 +41,7 @@ __all__ = ["apply"]
 
 
 @plugin("session-checkpoint-policy", inject=["sessions"])
-async def apply(ctx: Context, config: Any) -> None:
+async def apply(ctx: Context, config: None) -> None:
     """Install the semantic checkpoints."""
 
     async def before_request(request: GenerateOptions, next_: Callable[..., Any]) -> Any:

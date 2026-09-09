@@ -482,7 +482,7 @@ class SkillService:
 
 
 @plugin("skills")
-async def apply(ctx: Context, config: Any) -> None:
+async def apply(ctx: Context, config: None) -> None:
     """Mount the skills seam."""
     ctx.provide("skills", SkillService(ctx=ctx))
 

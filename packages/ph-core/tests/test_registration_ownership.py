@@ -1323,8 +1323,28 @@ def _provider_fields() -> set[str]:
             hint = hints.get(entry.name)
             for part in typing.get_args(hint) or (hint,):
                 if inspect.isclass(part) and getattr(part, "_is_protocol", False):
+                    if not _has_callable_member(part):
+                        # **A Protocol of pure reads is not a provider surface.**
+                        # The discriminator above is the type, which cannot by
+                        # itself tell a provider from a *handle carried as data*:
+                        # `AgentHandle` declares three read-only properties and no
+                        # verbs, so there is no body behind it to bind — ever —
+                        # and nine `agent` fields would otherwise each need a
+                        # table row saying "read, never invoked". A method-bearing
+                        # Protocol on a data field still asks (`_Child.agent` is
+                        # an `AgentDriver`), so nothing is dropped silently.
+                        continue
                     names.add(f"{cls.__name__}.{entry.name}")
     return names
+
+
+def _has_callable_member(protocol: type) -> bool:
+    """Whether this Protocol declares anything a registry could *invoke*."""
+    return any(
+        callable(member) and not isinstance(member, property)
+        for name, member in vars(protocol).items()
+        if not name.startswith("_")
+    )
 
 
 BOUND: dict[str, str] = {
@@ -1398,6 +1418,19 @@ UNBOUND: dict[str, str] = {
     "InboxNotifications.discarded": "a callback back into the caller that supplied it",
     "InboxNotifications.inserted": "a callback back into the caller that supplied it",
     "_Entry.unobserve": "teardown; runs as its scope unwinds",
+    # A steerable handle the *caller* supplied, not a body this seam registered.
+    # `AgentDriver` declares verbs, so the walk asks about it — correctly, since
+    # the filter above cannot tell a registration from an object passed in — and
+    # the answer is that `parent.inject(...)` is the parent agent's own method,
+    # running in the parent's own scope. There is no registering row to bind and
+    # no lifetime of ours to offer: binding one would name this seam as the owner
+    # of a turn belonging to the agent that asked for the child.
+    "SubagentRequest.parent": "the asking agent's own handle; its verbs run in its own scope",
+    # The roster. The one thing the registry calls on an entry is `dispose`, which
+    # is teardown (below); `run` is the loop itself — the body that *establishes*
+    # bindings for everything else — and it is driven by the front end that owns
+    # the turn, not by this table.
+    "AgentRegistry._agents": "the roster; `dispose` is teardown and `run` is the loop itself",
     # --- teardown ------------------------------------------------------------
     # A disposer runs *while* a scope is being unwound. Binding one would offer
     # a lifetime to register on at the moment that lifetime is ending, which is

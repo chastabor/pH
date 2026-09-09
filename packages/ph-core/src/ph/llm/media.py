@@ -244,7 +244,7 @@ def record_oversized(session: Session, provider: str, notices: list[dict[str, An
 
 
 @plugin("media-degrade", inject=["llm", "sessions"])
-async def apply(ctx: Context, config: Any) -> None:
+async def apply(ctx: Context, config: None) -> None:
     """Replace media the routed model cannot read, before any adapter sees it."""
 
     async def degrade(options: GenerateOptions, next_: Callable[..., Any]) -> Any:

@@ -13,13 +13,19 @@ a listener's signature *is* the contract: the limits and permissions plugins
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Literal, TypeAlias
+from typing import TYPE_CHECKING, Literal, Protocol, TypeAlias
 
 from ..llm.types import LlmCallConfig, LlmFailure, Message
 from ..wire import WireDataclass
 
+if TYPE_CHECKING:
+    from ..cordis import Context
+    from ..session import Session
+
 __all__ = [
     "AgentCancelCause",
+    "AgentDriver",
+    "AgentHandle",
     "AgentOptions",
     "AgentStatus",
     "PreStepDecision",
@@ -31,6 +37,54 @@ __all__ = [
 ]
 
 AgentStatus: TypeAlias = Literal["idle", "running"]
+
+
+class AgentHandle(Protocol):
+    """What a seam, a tool body or a waterfall payload may assume about an agent.
+
+    Three read-only facts, and deliberately no more: this is the surface the
+    seams actually read — codegraph over the tree finds `id`, `ctx` and `session`
+    and nothing else outside the registry and the daemon — and it is the surface
+    `ph.testing.StubAgent` has, so a test can stand in an agent without standing
+    up a loop. A Protocol rather than the driver class for two reasons that
+    reinforce each other: two implementations exist (the loop and the stub), and
+    the driver imports this module, so naming it here would be a cycle.
+
+    Properties rather than attributes, so that a driver whose `session` is a
+    `Session` satisfies a reader that accepts `Session | None`: a Protocol
+    attribute is settable and therefore invariant, and would refuse exactly the
+    implementation this describes.
+    """
+
+    @property
+    def id(self) -> str: ...
+    @property
+    def ctx(self) -> Context: ...
+    @property
+    def session(self) -> Session | None: ...
+    @property
+    def options(self) -> AgentOptions: ...
+
+
+class AgentDriver(AgentHandle, Protocol):
+    """What the registry, the daemon and a supervising row may *do* to an agent.
+
+    The handle plus the verbs — the surface `AgentRegistry.create` hands back and
+    `ph_app`'s supervisor drives. Separate from `AgentHandle` because most callers
+    have no business steering: a seam that could reach `cancel` through a
+    parameter typed for reading is a seam that will, eventually.
+    """
+
+    @property
+    def status(self) -> AgentStatus: ...
+    def steer(self, message: Message) -> None: ...
+    def inject(self, message: Message) -> None: ...
+    def followup(self, message: Message) -> None: ...
+    def interject(self, message: Message) -> None: ...
+    def cancel(self, cause: AgentCancelCause, *, keep_inbox: bool = False) -> None: ...
+    async def run(self) -> None: ...
+    async def prompt(self, text: str) -> None: ...
+    async def dispose(self) -> None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,7 +113,7 @@ class TurnEndReason(WireDataclass):
 class PreStepRequest:
     """`agent/pre-step`: the batch about to enter a step, before the decision."""
 
-    agent: Any
+    agent: AgentHandle
     messages: tuple[Message, ...]
     turn: int
     step: int
@@ -83,7 +137,7 @@ class PreStepDecision:
 class RequestProposal:
     """`agent/request`: the call config the loop proposes for one request."""
 
-    agent: Any
+    agent: AgentHandle
     turn: int
     step: int
     config: LlmCallConfig
@@ -93,7 +147,7 @@ class RequestProposal:
 class RequestFailure:
     """`agent/request-error`: a request that ended in `error` or `aborted`."""
 
-    agent: Any
+    agent: AgentHandle
     turn: int
     step: int
     provider: str

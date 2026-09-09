@@ -240,6 +240,6 @@ class UserQuestionService:
 
 
 @plugin("user-questions")
-async def apply(ctx: Context, config: Any) -> None:
+async def apply(ctx: Context, config: None) -> None:
     """Mount the user-question seam."""
     ctx.provide("user_questions", UserQuestionService(ctx=ctx))

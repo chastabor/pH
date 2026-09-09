@@ -21,7 +21,6 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass, field
-from typing import Any
 
 from ..cordis import Context, plugin
 from ..wire import WireModel
@@ -93,6 +92,6 @@ class CredentialService:
 
 
 @plugin("credentials-env")
-async def apply(ctx: Context, config: Any) -> None:
+async def apply(ctx: Context, config: None) -> None:
     """Mount the environment-backed credential resolver."""
     ctx.provide("credentials", CredentialService(ctx=ctx))

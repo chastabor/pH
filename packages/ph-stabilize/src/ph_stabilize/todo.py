@@ -633,7 +633,7 @@ def _parallel_write_todos(session: Session | None) -> bool:
 
 
 @plugin("tool-todo", inject=["tools", "system_prompt"])
-async def apply(ctx: Context, config: Any) -> None:
+async def apply(ctx: Context, config: None) -> None:
     """Register the tool, its prompt section, its context and its one rule."""
 
     async def write_todos(args: WriteTodosArgs, run: ToolRunContext) -> Any:

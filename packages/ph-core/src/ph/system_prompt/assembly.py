@@ -20,8 +20,9 @@ from __future__ import annotations
 import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any, TypeAlias
+from typing import TypeAlias
 
+from ..agent.types import AgentHandle
 from ..cordis import (
     Boundary,
     Context,
@@ -120,7 +121,7 @@ class AssembleContext:
     `ToolExecutionInput.scope` is a `Boundary` because a caller builds it;
     `ToolExecution.scope` is a `Context` because the pipeline hands it on. Input
     states, downstream carries."""
-    agent: Any = None
+    agent: AgentHandle | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -271,7 +272,9 @@ class SystemPromptService:
         # invokes the value as a body, and needs `by.owner` to bind it (P6-29).
         return [entry for entry in bucket if entry.by.layer.reaches(target)]
 
-    async def assemble(self, scope: Boundary, *, agent: Any = None) -> PromptAssembly:
+    async def assemble(
+        self, scope: Boundary, *, agent: AgentHandle | None = None
+    ) -> PromptAssembly:
         """Collect, order, interpolate, then run the assemble waterfall.
 
         **The boundary is a parameter and the payload is built here** — the one narrowing
@@ -360,6 +363,6 @@ class SystemPromptService:
 
 
 @plugin("system-prompt")
-async def apply(ctx: Context, config: Any) -> None:
+async def apply(ctx: Context, config: None) -> None:
     """Mount the system-prompt assembly seam."""
     ctx.provide("system_prompt", SystemPromptService(ctx=ctx))

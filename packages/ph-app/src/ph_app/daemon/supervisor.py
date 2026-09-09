@@ -36,7 +36,7 @@ import anyio
 from anyio.abc import TaskGroup
 from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
 
-from ph.agent.types import AgentOptions
+from ph.agent.types import AgentDriver, AgentOptions
 from ph.cordis import Context, Profile
 from ph.llm.types import AttachmentRef
 from ph.paths import resolve_roots
@@ -198,7 +198,7 @@ class Root:
     id: str
     ctx: Context
     session: Session
-    agent: Any
+    agent: AgentDriver
     wake: MemoryObjectSendStream[None]
     """Tells the root's task there is something in the inbox.
 

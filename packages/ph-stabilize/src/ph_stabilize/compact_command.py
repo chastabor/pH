@@ -49,7 +49,7 @@ promise nobody can check."""
 
 
 @plugin("command-compact", inject=["commands", "compaction"])
-async def apply(ctx: Context, config: Any) -> None:
+async def apply(ctx: Context, config: None) -> None:
     """Register `/compact`."""
 
     async def compact(argument: str, invocation: Any) -> str:

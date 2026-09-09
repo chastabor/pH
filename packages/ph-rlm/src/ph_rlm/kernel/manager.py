@@ -50,6 +50,7 @@ from typing import Any, ClassVar, Literal, Protocol
 import anyio
 import anyio.abc
 
+from ph.agent.types import AgentHandle
 from ph.cancel import CancelToken, is_cancelled
 from ph.cordis import Context, Disposer, plugin
 from ph.paths import resolve_roots
@@ -1006,7 +1007,7 @@ class PythonCodeRuntime:
             log.warning("ph_rlm.kernel: workspace lookup failed for %s", agent_id, exc_info=True)
             return None
 
-    def remember_scope(self, agent: Any) -> None:
+    def remember_scope(self, agent: AgentHandle) -> None:
         """Note an agent's scope, so its kernel can be owned by it."""
         agent_id = getattr(agent, "id", None)
         scope = getattr(agent, "ctx", None)

@@ -21,13 +21,14 @@ from __future__ import annotations
 
 import inspect
 import json
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field, replace
 from dataclasses import replace as dataclasses_replace
 from typing import Any, Literal, TypeAlias
 
 from pydantic import BaseModel, ConfigDict
 
+from ..agent.types import AgentHandle
 from ..cancel import CancelToken
 from ..cordis import Boundary, Context, Running
 from ..llm.types import ContentBlock, Message, TextBlock, ToolSchema
@@ -90,7 +91,7 @@ class ToolModel(BaseModel):
 SchemaDeclaration: TypeAlias = "type[BaseModel] | dict[str, Any]"
 
 
-def text_content(text: str) -> list[Any]:
+def text_content(text: str) -> list[ContentBlock]:
     """The one-block content most tools return."""
     return [TextBlock(text=text)]
 
@@ -99,13 +100,28 @@ def text_content(text: str) -> list[Any]:
 class ToolOutput:
     """A tool's canonical output declaration.
 
-    `render` is a pure projection from validated arguments and value to content.
+    `render` is a pure projection from arguments and value to content.
     `presentation_meta` is the tool's private durable payload, computed only for
     top-level calls (a nested Code Mode dispatch has no card of its own).
+
+    **Both sides are `Any`, and each for its own reason.** The arguments are not
+    the model the body received: the registry calls `render` with
+    `execution.arguments` — the frozen wire mapping — and `present_call` with
+    `parse_arguments(...)`, which hands back the raw *string* when the model's
+    JSON was malformed. So a renderer reads `args.get("path")` where the body two
+    lines above it read `args.path`, and typing both as the model type-checks
+    only until you reach the six renderers that call `.get`.
+
+    The value is `Any` because nothing in this tree says otherwise: every body
+    returns `Any` and all 24 named renderers annotate `value: Any`, so a `V`
+    threaded through here solved to `Any` at every call site — a generic that
+    checked `Any` against `Any` while costing three copies of a 17-parameter
+    signature to carry. It comes back when a value can be the output *model*,
+    which waits on the kernel codec (plan P8-02, issues 1 and 2).
     """
 
     schema: SchemaDeclaration
-    render: Callable[[Any, Any], Sequence[Any]]
+    render: Callable[[Any, Any], Sequence[ContentBlock]]
     presentation_meta: Callable[[Any, Any], Any] | None = None
 
 
@@ -127,7 +143,7 @@ class ToolFailure:
 class ToolResult:
     """The settled outcome handed to `present_result`."""
 
-    content: tuple[Any, ...]
+    content: tuple[ContentBlock, ...]
     is_error: bool
     meta: Any = None
 
@@ -142,7 +158,7 @@ class ToolExecutionResult:
     """
 
     is_error: bool
-    content: tuple[Any, ...]
+    content: tuple[ContentBlock, ...]
     value: Any = None
     error: ToolFailure | None = None
     meta: Any = None
@@ -222,7 +238,7 @@ class ToolExecutionInput:
     available the default comes off, and the sentence above becomes true rather
     than aspirational."""
     session: Session | None = None
-    agent: Any = None
+    agent: AgentHandle | None = None
     """The agent to route an approval prompt to, when there is one."""
     root_call_id: str | None = None
     """The model-requested call owning this execution tree; defaults to `call_id`."""
@@ -251,7 +267,7 @@ class ToolExecution:
     token: object
     scope: Context
     session: Session | None = None
-    agent: Any = None
+    agent: AgentHandle | None = None
     parent: object | None = None
     signal: CancelToken | None = None
     """The live cancellation view. A `tools/execute` wrapper may replace it for
@@ -445,9 +461,13 @@ class ToolDefinition:
     parameters: dict[str, Any]
     """JSON Schema for the arguments, exactly as the model receives it."""
     output: ToolOutput
+    """The argument model `define_tool` checked is not recoverable from here: a
+    definition lives in a registry beside every other tool, so the type is erased
+    at the table and the checking happens at the constructor, where the body and
+    its declared `parameters` meet. The same shape as `PluginSpec.apply`."""
     execute: Callable[[Any, ToolRunContext], Any]
     finalize_content: (
-        Callable[[ToolExecution, ToolExecutionResult], Sequence[Any] | None] | None
+        Callable[[ToolExecution, ToolExecutionResult], Sequence[ContentBlock] | None] | None
     ) = None
     """Synchronous last-mile content transform, invoked exactly once for every
     normalized outcome — pipeline failures that bypass `tools/post-execute`
@@ -527,7 +547,7 @@ class ToolDefinition:
         """The model-facing schema. Nothing else about the tool reaches the wire."""
         return ToolSchema(name=self.name, description=self.description, parameters=self.parameters)
 
-    def render(self, args: Any, value: Any) -> tuple[Any, ...]:
+    def render(self, args: Any, value: Any) -> tuple[ContentBlock, ...]:
         """Project a validated value into model-facing content."""
         violations = validate_json_schema_value(self.output.schema, value)
         if violations:
@@ -592,16 +612,16 @@ class TransportPresentation:
         )
 
 
-def define_tool(
+def define_tool[A: BaseModel](
     name: str,
     description: str,
     *,
-    parameters: SchemaDeclaration,
+    parameters: type[A] | dict[str, Any],
     output: ToolOutput | SchemaDeclaration,
-    execute: Callable[..., Any],
-    render: Callable[[Any, Any], Sequence[Any]] | None = None,
+    execute: Callable[[A, ToolRunContext], Awaitable[Any] | Any],
+    render: Callable[[Any, Any], Sequence[ContentBlock]] | None = None,
     presentation_meta: Callable[[Any, Any], Any] | None = None,
-    finalize_content: Callable[..., Sequence[Any] | None] | None = None,
+    finalize_content: Callable[..., Sequence[ContentBlock] | None] | None = None,
     timeout_ms: int | None = None,
     self_limits: bool = False,
     arguments_disposable: bool = False,
@@ -616,6 +636,16 @@ def define_tool(
     When `parameters` is a pydantic model the body receives a **validated model
     instance**, so a tool never hand-checks its own input; a raw schema dict
     passes the parsed value through and the tool owns validation.
+
+    **Generic in `A`, and that is the whole of the checking.** `A` is inferred
+    from `parameters` when it is a model, so a body annotated with a different
+    model than the one declared beside it is an error here, at the declaration,
+    rather than a validation failure at the first call. Only the body sees it —
+    `ToolOutput` says why the renderers cannot. A raw-schema tool leaves `A` to
+    be inferred from its body, which is `Any`, and is checked exactly as loosely
+    as it was declared.
+
+    The value side is deliberately not parameterised; `ToolOutput` argues that.
     """
     resolved_output = (
         output

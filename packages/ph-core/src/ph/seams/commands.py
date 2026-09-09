@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from functools import partial
 from typing import Any
 
+from ..agent.types import AgentHandle
 from ..cordis import Context, Disposer, Running, events, maybe_await, plugin, running
 from ..session import Session
 from ..wire import WireModel, declarable
@@ -85,7 +86,7 @@ class CommandContext:
     policy read, and its own docstring notes that getting it wrong "ran in the
     *unsafe* direction". The boundary is stated at the top of the dispatch; there
     is no reason for the bottom to guess."""
-    agent: Any = None
+    agent: AgentHandle | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,7 +155,7 @@ class CommandRegistry:
         *,
         scope: Context | None = None,
         session: Session | None = None,
-        agent: Any = None,
+        agent: AgentHandle | None = None,
     ) -> str | None:
         """Run one `/name argument` line. Returns the text to show the human.
 
@@ -242,6 +243,6 @@ class CommandRegistry:
 
 
 @plugin("commands")
-async def apply(ctx: Context, config: Any) -> None:
+async def apply(ctx: Context, config: None) -> None:
     """Mount the command registry."""
     ctx.provide("commands", CommandRegistry(ctx=ctx))

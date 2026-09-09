@@ -51,6 +51,7 @@ import anyio
 from pydantic import Field
 
 from ph.cordis import Context, MountRefusal, plugin
+from ph.llm.types import ContentBlock
 from ph.paths import default_cache_path, resolve_roots
 from ph.seams._registry import contribute_via
 from ph.seams.changes import tree_state
@@ -324,7 +325,7 @@ def _doc(one: dict[str, Any]) -> str:
     return f"  — {doc[0][:70]}" if doc else ""
 
 
-def _render_index(args: Any, value: Any) -> Any:
+def _render_index(args: Any, value: Any) -> list[ContentBlock]:
     if args.get("forget"):
         return text_content(
             f"Removed {count_of(value['removed'], 'file')} from the index. "
@@ -358,7 +359,7 @@ def _ambiguity(value: Any) -> str:
     )
 
 
-def _render_graph(args: Any, value: Any) -> Any:
+def _render_graph(args: Any, value: Any) -> list[ContentBlock]:
     mode = value["mode"]
     if mode in ("search", "define"):
         if not value["symbols"]:

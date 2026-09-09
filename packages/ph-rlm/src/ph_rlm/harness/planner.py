@@ -28,8 +28,8 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Any
 
+from ph.agent.types import AgentHandle
 from ph.cordis import Context
 from ph.llm.structured import SchemaViolation, ask_for_shape
 from ph.llm.types import GenerateOptions, create_message, text_of
@@ -166,7 +166,7 @@ class RefinementPlanner:
 
     # ------------------------------------------------------------- the gate --
 
-    async def review(self, session: Session, agent: Any) -> ReviewVerdict:
+    async def review(self, session: Session, agent: AgentHandle) -> ReviewVerdict:
         """H7's cheap pass: is this conversation worth planning over?
 
         Fails *closed* in the cheap direction — an unparseable answer means no
@@ -189,7 +189,7 @@ class RefinementPlanner:
     async def plan(
         self,
         session: Session,
-        agent: Any,
+        agent: AgentHandle,
         *,
         scope: HarnessScope = "local",
         instructions: str = "",
@@ -277,7 +277,7 @@ class RefinementPlanner:
     # ------------------------------------------------------------ the call --
 
     async def _shaped[Shape: WireModel](
-        self, agent: Any, session: Session, *, system: str, user: str, shape: type[Shape]
+        self, agent: AgentHandle, session: Session, *, system: str, user: str, shape: type[Shape]
     ) -> Shape:
         """One non-loop model call that must come back as `shape`.
 

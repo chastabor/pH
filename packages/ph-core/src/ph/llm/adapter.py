@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from ..cordis import Context, Running, events, plugin, running
-from .types import Finish, FinishReason, GenerateOptions, LlmFailure
+from .types import Finish, FinishReason, GenerateOptions, LlmFailure, StreamChunk
 
 __all__ = [
     "AdapterHandle",
@@ -183,7 +183,7 @@ def resolved(route: MediaRoute, *, structured_output: bool) -> ResolvedModel:
 class LlmAdapter(Protocol):
     """The one required method is `stream`; `resolve_model` is optional."""
 
-    def stream(self, options: GenerateOptions) -> AsyncIterator[Any]: ...
+    def stream(self, options: GenerateOptions) -> AsyncIterator[StreamChunk]: ...
 
 
 @dataclass(slots=True)
@@ -274,10 +274,10 @@ class LlmRuntime:
             resolved = resolver(provider, model)
         return resolved if isinstance(resolved, ResolvedModel) else ResolvedModel()
 
-    async def stream(self, options: GenerateOptions) -> AsyncIterator[Any]:
+    async def stream(self, options: GenerateOptions) -> AsyncIterator[StreamChunk]:
         """Dispatch one request through the `llm/stream` waterfall."""
 
-        async def inner(request: GenerateOptions) -> AsyncIterator[Any]:
+        async def inner(request: GenerateOptions) -> AsyncIterator[StreamChunk]:
             handle = self._route(request.provider)
             with running(handle.by):
                 return _normalized(handle.adapter.stream(request), request)
@@ -286,7 +286,9 @@ class LlmRuntime:
         return result  # type: ignore[no-any-return]
 
 
-async def _normalized(source: AsyncIterator[Any], request: GenerateOptions) -> AsyncIterator[Any]:
+async def _normalized(
+    source: AsyncIterator[StreamChunk], request: GenerateOptions
+) -> AsyncIterator[StreamChunk]:
     """Turn an adapter raise into a terminal `finish{error}`.
 
     The loop's contract is that a stream always ends with a finish. Without this
@@ -307,6 +309,6 @@ async def _normalized(source: AsyncIterator[Any], request: GenerateOptions) -> A
 
 
 @plugin("llm")
-async def apply(ctx: Context, config: Any) -> None:
+async def apply(ctx: Context, config: None) -> None:
     """Mount the model adapter seam."""
     ctx.provide("llm", LlmRuntime(ctx=ctx))

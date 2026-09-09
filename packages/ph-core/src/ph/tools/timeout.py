@@ -26,7 +26,7 @@ __all__ = ["apply"]
 
 
 @plugin("tools-timeout", inject=["tools"])
-async def apply(ctx: Context, config: Any) -> None:
+async def apply(ctx: Context, config: None) -> None:
     """Bound every dispatch whose tool declared `timeout_ms`."""
 
     async def bounded(execution: ToolExecution, next_: Callable[..., Any]) -> Any:

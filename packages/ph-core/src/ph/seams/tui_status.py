@@ -160,6 +160,6 @@ class TuiStatusRegistry:
 
 
 @plugin("tui-status")
-async def apply(ctx: Context, config: object) -> None:
+async def apply(ctx: Context, config: None) -> None:
     """Mount the footer's registration seam. No field ships in `ph-base`."""
     ctx.provide("tui_status", TuiStatusRegistry(ctx=ctx))

@@ -56,6 +56,7 @@ import anyio
 from pydantic import Field
 
 from ph.cordis import Context, plugin
+from ph.llm.types import ContentBlock
 from ph.session import Session
 from ph.system_prompt.assembly import ORDER_TOOL_GUIDANCE, PromptSection
 from ph.tools import ToolModel, define_tool, text_content
@@ -463,7 +464,7 @@ class HeadArgs(ToolModel):
     lines: int = 40
 
 
-def _render_matches(_args: Any, value: Any) -> Any:
+def _render_matches(_args: Any, value: Any) -> list[ContentBlock]:
     matches = value.get("matches") or []
     if not matches:
         return text_content("no matches")
@@ -473,11 +474,11 @@ def _render_matches(_args: Any, value: Any) -> Any:
     return text_content(body)
 
 
-def _render_chunk(_args: Any, value: Any) -> Any:
+def _render_chunk(_args: Any, value: Any) -> list[ContentBlock]:
     return text_content(f"chunk {value['index'] + 1} of {value['chunks']}\n\n{value['text']}")
 
 
-def _render_head(_args: Any, value: Any) -> Any:
+def _render_head(_args: Any, value: Any) -> list[ContentBlock]:
     if value.get("document"):
         return text_content(f"{value['document']}\n\n{value['text']}")
     manifest = value.get("manifest") or []

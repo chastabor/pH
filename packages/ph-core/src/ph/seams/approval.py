@@ -27,6 +27,7 @@ from typing import Any, Literal, TypeAlias, cast, get_args
 
 from pydantic import Field
 
+from ..agent.types import AgentHandle
 from ..cancel import CancelToken, is_cancelled
 from ..cordis import Context, Disposer, events, plugin
 from ..session import Session
@@ -285,7 +286,7 @@ class ApprovalService:
     async def request(
         self,
         *,
-        agent: Any,
+        agent: AgentHandle,
         tool_name: str,
         call_id: str | None = None,
         reason: str | None = None,
@@ -402,6 +403,6 @@ class ApprovalService:
 
 
 @plugin("approval")
-async def apply(ctx: Context, config: Any) -> None:
+async def apply(ctx: Context, config: None) -> None:
     """Mount the approval seam."""
     ctx.provide("approval", ApprovalService(ctx=ctx))

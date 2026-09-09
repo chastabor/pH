@@ -44,6 +44,7 @@ from ph.llm.types import (
     LlmFailure,
     ReasoningBlock,
     ReasoningDelta,
+    StreamChunk,
     TextBlock,
     TextDelta,
     TokenUsage,
@@ -354,7 +355,7 @@ class AnthropicAdapter:
             body["stop_sequences"] = list(options.stop)
         return body, handles
 
-    async def stream(self, options: GenerateOptions) -> AsyncIterator[Any]:
+    async def stream(self, options: GenerateOptions) -> AsyncIterator[StreamChunk]:
         state = _StreamState()
         body, handles = await self._body(options)
         referenced = list(handles.values())

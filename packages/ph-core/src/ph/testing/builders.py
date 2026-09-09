@@ -13,11 +13,11 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import anyio
 
-from ..agent.types import AgentOptions
+from ..agent.types import AgentHandle, AgentOptions
 from ..cordis import DEPLOYMENT, Boundary, Context
 from ..llm.types import ContextForm, PluginSource
 from ..persistence.jsonl import HEADER_LINE_TYPE, locate_session, session_path
@@ -87,7 +87,7 @@ def simple_tool(
     )
 
 
-def boundary_for(scope: Boundary | None, agent: Any) -> Boundary:
+def boundary_for(scope: Boundary | None, agent: AgentHandle) -> Boundary:
     """What a test meant, when it did not say (P6-32).
 
     The agent's own scope, which is what a test almost always means; `DEPLOYMENT`
@@ -146,7 +146,7 @@ async def run_tool(
     name: str,
     arguments: Any = None,
     *,
-    agent: Any,
+    agent: AgentHandle,
     scope: Boundary | None = None,
     session: Any = None,
     call_id: str = "call-1",
@@ -213,7 +213,12 @@ def tool_runtime() -> tuple[Context, ToolRuntime]:
 
 
 class StubAgent:
-    """The minimum an approval prompt or a tool call needs of an agent."""
+    """The minimum an approval prompt or a tool call needs of an agent.
+
+    Exactly `AgentHandle`, and held to it below: a stub that drifts from the
+    surface the seams read would let every test that uses it pass against a
+    shape no real agent has.
+    """
 
     def __init__(
         self, ctx: Context | None = None, session: Session | None = None, agent_id: str = "agent-a"
@@ -222,6 +227,10 @@ class StubAgent:
         self.session = session
         self.id = agent_id
         self.options = FAKE_OPTIONS
+
+
+if TYPE_CHECKING:
+    _STUB_IS_A_HANDLE: AgentHandle = StubAgent()
 
 
 def user_payload(text: str, message_id: str = "m1") -> dict[str, Any]:

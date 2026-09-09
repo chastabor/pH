@@ -43,6 +43,7 @@ from typing import Any, Literal
 
 import anyio
 
+from ..agent.types import AgentHandle
 from ..cordis import Boundary, Context, Disposer, Running, boundary_of, events, plugin, running
 from ..session import Session
 from ..tools.errors import FailureKind, HarnessError
@@ -149,7 +150,7 @@ class _Screen:
     owner: Context
 
 
-def _scope_of(agent: Any) -> Context | None:
+def _scope_of(agent: AgentHandle) -> Context | None:
     """An agent's own scope, for the workspace root — or `None` for no agent.
 
     Duck-typed rather than importing the agent: `ph.seams.fs` sits below
@@ -187,7 +188,7 @@ class ReadIntent:
 
     path: Path
     scope: Context
-    agent: Any = None
+    agent: AgentHandle | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -198,7 +199,7 @@ class WriteIntent:
     content: str
     creating: bool
     scope: Context
-    agent: Any = None
+    agent: AgentHandle | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -210,7 +211,7 @@ class EditIntent:
     new_text: str
     replace_all: bool
     scope: Context
-    agent: Any = None
+    agent: AgentHandle | None = None
 
 
 class FsDenied(HarnessError, PermissionError):
@@ -308,7 +309,7 @@ class FsService:
             label="fs.rebase",
         )
 
-    def root_for(self, agent: Any = None) -> Path:
+    def root_for(self, agent: AgentHandle | None = None) -> Path:
         """This agent's root — its cwd, and what `bash` and `glob` run against.
 
         A resolver that raises falls back to `root` rather than failing the
@@ -334,7 +335,7 @@ class FsService:
             return self.root
         return resolved or self.root
 
-    def named(self, path: str | Path, *, agent: Any = None) -> str:
+    def named(self, path: str | Path, *, agent: AgentHandle | None = None) -> str:
         """How a path should be *written down* — relative to this agent's root.
 
         `resolve`'s inverse, and the form every path that reaches the model or
@@ -363,7 +364,7 @@ class FsService:
         except ValueError:
             return str(resolved)
 
-    def resolve(self, path: str | Path, *, agent: Any = None) -> Path:
+    def resolve(self, path: str | Path, *, agent: AgentHandle | None = None) -> Path:
         """Resolve against the agent's workspace root.
 
         A relative path is the agent's business; an absolute one is passed
@@ -412,7 +413,7 @@ class FsService:
         entry = _Screen(decide=decide, owner=scope)
         return claim_entry(scope, self._screens, entry, label="fs.screen")
 
-    def _decider(self, agent: Any, *, scope: Boundary) -> WalkDecider | None:
+    def _decider(self, agent: AgentHandle | None, *, scope: Boundary) -> WalkDecider | None:
         """This walk's screens, filtered and with its agent bound — or `None`.
 
         Resolved **once per walk, not once per path**: the visibility filter is
@@ -458,7 +459,7 @@ class FsService:
         scope: Boundary,
         offset: int = 0,
         limit: int | None = 2_000,
-        agent: Any = None,
+        agent: AgentHandle | None = None,
         session: Session | None = None,
     ) -> FileSlice:
         """Read a line window, after `fs/read-intent` allows it."""
@@ -488,7 +489,7 @@ class FsService:
         *,
         scope: Boundary,
         max_bytes: int | None = None,
-        agent: Any = None,
+        agent: AgentHandle | None = None,
         session: Session | None = None,
     ) -> bytes:
         """Read a whole file as bytes, after `fs/read-intent` allows it (P7-01).
@@ -539,7 +540,9 @@ class FsService:
         self._observe(target, session, agent)
         return content
 
-    def _observe(self, target: Path, session: Session | None, agent: Any = None) -> None:
+    def _observe(
+        self, target: Path, session: Session | None, agent: AgentHandle | None = None
+    ) -> None:
         """Remember this file's mtime, and record the read.
 
         The dict is keyed by the resolved `Path` because it answers a question
@@ -566,7 +569,7 @@ class FsService:
         content: str,
         *,
         scope: Boundary,
-        agent: Any = None,
+        agent: AgentHandle | None = None,
         session: Session | None = None,
     ) -> Path:
         """Write a whole file, after `fs/write-intent` allows it."""
@@ -592,7 +595,7 @@ class FsService:
         *,
         scope: Boundary,
         replace_all: bool = False,
-        agent: Any = None,
+        agent: AgentHandle | None = None,
         session: Session | None = None,
     ) -> int:
         """Replace text in place, after `fs/edit-intent` allows it.
@@ -662,7 +665,7 @@ class FsService:
         scope: Boundary,
         root: str | Path | None = None,
         limit: int = 1_000,
-        agent: Any = None,
+        agent: AgentHandle | None = None,
     ) -> list[str]:
         base = self.resolve(root, agent=agent) if root is not None else self.root_for(agent)
         decide = self._decider(agent, scope=scope)
@@ -675,7 +678,7 @@ class FsService:
         *,
         scope: Boundary,
         limit: int = 1_000,
-        agent: Any = None,
+        agent: AgentHandle | None = None,
     ) -> list[str]:
         """The files `paths` names — a directory expanded by `pattern` — as `named`.
 
@@ -739,7 +742,9 @@ class FsService:
                 )
         return sorted(set(found))
 
-    def skip_reason(self, path: str | Path, *, max_bytes: int, agent: Any = None) -> str:
+    def skip_reason(
+        self, path: str | Path, *, max_bytes: int, agent: AgentHandle | None = None
+    ) -> str:
         """Why a bulk reader should pass `path` over. `""` when it should read it.
 
         `collect`'s companion, and here for the same reason: both indexers wrote
@@ -777,7 +782,7 @@ class FsService:
         root: str | Path | None = None,
         glob: str = "**/*",
         limit: int = 200,
-        agent: Any = None,
+        agent: AgentHandle | None = None,
     ) -> list[GrepMatch]:
         base = self.resolve(root, agent=agent) if root is not None else self.root_for(agent)
         decide = self._decider(agent, scope=scope)
@@ -1015,7 +1020,7 @@ async def apply(ctx: Context, config: Config) -> None:
 
 
 @plugin("fs-read-before-edit", inject=["fs"])
-async def read_before_edit(ctx: Context, config: Any) -> None:
+async def read_before_edit(ctx: Context, config: None) -> None:
     """Refuse an edit to a file this session has not read since it last changed.
 
     Its own row, not a rule inside `edit`, for two reasons: a deployment can

@@ -35,8 +35,8 @@ from __future__ import annotations
 
 import logging
 import secrets
-from typing import Any
 
+from ..agent.types import AgentDriver
 from ..cordis import Context, plugin
 from ..llm.types import PluginSource, create_user_message
 from ..seams.commands import CommandContext, CommandDefinition
@@ -70,7 +70,7 @@ class Config(WireModel):
 
 
 async def run_gates(
-    ctx: Context, session: Session, agent: Any, state: GoalState, goals: GoalService
+    ctx: Context, session: Session, agent: AgentDriver, state: GoalState, goals: GoalService
 ) -> tuple[bool, list[str]]:
     """Run this goal's gates against the current tree. Returns `(passed, notes)`.
 
@@ -107,7 +107,7 @@ async def apply(ctx: Context, config: Config) -> None:
     def budget_of() -> dict[str, int]:
         return config.model_dump()
 
-    async def keep_going(agent: Any, turn: int) -> None:
+    async def keep_going(agent: AgentDriver, turn: int) -> None:
         """The driver: decide whether this turn is allowed to be the last one."""
         session = getattr(agent, "session", None)
         if session is None:

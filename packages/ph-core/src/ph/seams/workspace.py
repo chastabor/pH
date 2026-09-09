@@ -44,6 +44,7 @@ from typing import Any, Literal, Protocol, TypeAlias, runtime_checkable
 import anyio
 from pydantic import Field
 
+from ..agent.types import AgentHandle
 from ..cordis import Context, Disposer, Running, maybe_await, plugin, running, safe_yaml_load
 from ..paths import canonical, default_home_path
 from ..session import Session
@@ -260,8 +261,13 @@ def workspace_policy(workspace: Workspace) -> SandboxPolicy:
     )
 
 
-def workspace_of(ctx: Context, agent: Any) -> Workspace | None:
+def workspace_of(ctx: Context, agent: AgentHandle | str | None) -> Workspace | None:
     """This agent's workspace, asked of a seam that may not be mounted.
+
+    **A handle, a bare id, or nothing.** The body always accepted all three —
+    `rlm-prompt` passes the id it was given, the fs resolver passes whatever it
+    holds — and `Any` was hiding that this is one function answering for two
+    calling conventions (plan P8-03, issue 3).
 
     The question written once, for the five callers that had it: the prompt line,
     `bash`, the kernel, the spawn path and the fs resolver.
@@ -1924,7 +1930,7 @@ async def lifecycle(ctx: Context, config: LifecycleConfig) -> None:
     it.
     """
 
-    def root_of(agent: Any) -> Path | None:
+    def root_of(agent: AgentHandle) -> Path | None:
         workspace = workspace_of(ctx, agent)
         return None if workspace is None else workspace.root
 
@@ -2032,7 +2038,7 @@ async def apply(ctx: Context, config: Config) -> None:
 
 
 @plugin("workspace-reconcile", inject=["workspace"])
-async def reconcile(ctx: Context, config: Any) -> None:
+async def reconcile(ctx: Context, config: None) -> None:
     """Run the seam's reconciliation whenever a session is opened (F6).
 
     **On `session/created`, which is also the resume path** — `sessions.adopt`

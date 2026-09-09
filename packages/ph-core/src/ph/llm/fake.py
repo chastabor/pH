@@ -12,11 +12,14 @@ this shape.
 from __future__ import annotations
 
 import itertools
-from collections.abc import AsyncIterator, Callable, Sequence
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field, replace
-from typing import Any
+from typing import Annotated
+
+from pydantic import Field
 
 from ..cordis import Context, plugin
+from ..wire import WireModel
 from .adapter import ResolvedModel
 from .types import (
     BlockEnd,
@@ -24,6 +27,7 @@ from .types import (
     Finish,
     FinishReason,
     GenerateOptions,
+    StreamChunk,
     TextBlock,
     TextDelta,
     TokenUsage,
@@ -60,7 +64,7 @@ class FakeAdapter:
     capability added there needs no second declaration here."""
     requests: list[GenerateOptions] = field(default_factory=list)
 
-    async def stream(self, options: GenerateOptions) -> AsyncIterator[Any]:
+    async def stream(self, options: GenerateOptions) -> AsyncIterator[StreamChunk]:
         self.requests.append(options)
         text = self.respond(options)
         yield BlockStart(index=0, block_type="text")
@@ -98,15 +102,22 @@ def _estimate_tokens(options: GenerateOptions) -> int:
     return characters // 4
 
 
-@plugin("llm-fake", inject=["llm"])
-async def apply(ctx: Context, config: Any) -> None:
+class Config(WireModel):
+    """Row config for `llm-fake`: which routes it answers, and with what."""
+
+    providers: Annotated[tuple[str, ...], Field(min_length=1)] = ("fake",)
+    """`min_length`, so `providers: []` is refused rather than silently read as
+    the default. The raw-dict reading this replaced substituted for any falsy
+    value, which is the quiet no-op this row's own config rules now reject."""
+    replies: tuple[str, ...] = ()
+
+
+@plugin("llm-fake", inject=["llm"], config=Config)
+async def apply(ctx: Context, config: Config) -> None:
     """Register the fake adapter for the routes a profile names."""
-    providers: Sequence[str] = ("fake",)
-    replies: Sequence[str] = ()
-    if isinstance(config, dict):
-        providers = tuple(config.get("providers") or providers)
-        replies = tuple(config.get("replies") or ())
-    adapter = FakeAdapter(respond=text_script(*replies) if replies else text_script("ok"))
-    handle = ctx.llm.register_adapter(providers, adapter)
+    adapter = FakeAdapter(
+        respond=text_script(*config.replies) if config.replies else text_script("ok")
+    )
+    handle = ctx.llm.register_adapter(config.providers, adapter)
     ctx.provide("llm_fake", adapter)
     ctx.add_disposer(handle.dispose, label="llm-fake")

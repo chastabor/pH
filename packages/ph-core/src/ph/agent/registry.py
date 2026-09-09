@@ -14,11 +14,17 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any
 
 from ..cordis import Context, events, plugin
 from ..session import Session
-from .types import AgentOptions, PreStepRequest, RequestFailure, RequestProposal
+from .types import (
+    AgentDriver,
+    AgentHandle,
+    AgentOptions,
+    PreStepRequest,
+    RequestFailure,
+    RequestProposal,
+)
 
 __all__ = ["AgentRegistry", "apply"]
 
@@ -68,7 +74,7 @@ events.declare(
     doc="Last chance to keep a turn alive; a listener objects by steering.",
 )
 
-DriverFactory = Callable[[Context, Session, AgentOptions], Any]
+DriverFactory = Callable[[Context, Session, AgentOptions], AgentDriver]
 """Builds a driver inside an already-created agent scope."""
 
 
@@ -78,7 +84,7 @@ class AgentRegistry:
 
     ctx: Context
     driver_factory: DriverFactory | None = None
-    _agents: dict[str, Any] = field(default_factory=dict)
+    _agents: dict[str, AgentDriver] = field(default_factory=dict)
 
     def register_driver(self, factory: DriverFactory) -> Callable[[], None]:
         """Claim the driver used by `create()`.
@@ -95,8 +101,12 @@ class AgentRegistry:
         return release
 
     def create(
-        self, session: Session, options: AgentOptions | None = None, *, parent: Any = None
-    ) -> Any:
+        self,
+        session: Session,
+        options: AgentOptions | None = None,
+        *,
+        parent: AgentHandle | None = None,
+    ) -> AgentDriver:
         """Build an agent and the scope it owns.
 
         **`parent` puts the child's scope inside its parent's** (P6-27), which is what
@@ -134,7 +144,7 @@ class AgentRegistry:
         scope.emit("agent/session-start", agent, session)
         return agent
 
-    def get(self, agent_id: str) -> Any | None:
+    def get(self, agent_id: str) -> AgentDriver | None:
         """The live agent by id, or `None`. The symmetric read to `ctx.sessions.get`.
 
         A plugin that has an agent id — a runtime keyed by it, a policy folding
@@ -143,11 +153,11 @@ class AgentRegistry:
         """
         return self._agents.get(agent_id)
 
-    def list(self) -> list[Any]:
+    def list(self) -> list[AgentDriver]:
         """Every live agent, for a sweep that must visit all of them."""
         return list(self._agents.values())
 
-    def _forget(self, agent: Any) -> None:
+    def _forget(self, agent: AgentDriver) -> None:
         """Drop the roster entry and announce it, once, whoever unwound the scope.
 
         Both doors reach here: `dispose(agent_id)` below, and a parent scope
@@ -171,6 +181,6 @@ class AgentRegistry:
 
 
 @plugin("agent", inject=["sessions"])
-async def apply(ctx: Context, config: Any) -> None:
+async def apply(ctx: Context, config: None) -> None:
     """Mount the agent registry."""
     ctx.provide("agents", AgentRegistry(ctx=ctx))

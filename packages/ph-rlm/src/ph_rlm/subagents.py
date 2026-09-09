@@ -49,7 +49,7 @@ from typing import Any
 import anyio
 from pydantic import Field
 
-from ph.agent.types import AgentCancelCause, AgentOptions
+from ph.agent.types import AgentCancelCause, AgentDriver, AgentHandle, AgentOptions
 from ph.cordis import Context, Disposer, plugin
 from ph.llm.adapter import LlmError
 from ph.llm.types import CONTEXT_SUMMARY_MAX_CHARS, PluginSource, create_user_message, text_of
@@ -154,7 +154,7 @@ class _Child:
     options: AgentOptions
     """The child's resolved options, because at rehydration time the parent agent
     may be gone and `reasoning_effort` survives nowhere else."""
-    agent: Any = None
+    agent: AgentDriver | None = None
     session: Session | None = None
     unobserve: Disposer | None = None
     job_id: str | None = None
@@ -189,10 +189,27 @@ class RlmChildProvider:
 
     # ------------------------------------------------------------ admission --
 
+    @staticmethod
+    def _parent_session(parent: AgentHandle) -> Session:
+        """The delegating agent's log, which every admission path needs.
+
+        `AgentHandle.session` is optional because a handle need not have bound one
+        — `ph.testing.StubAgent` is one that has not — while everything below
+        needs the parent's log: the depth is folded from it, the child's header
+        cites it, and the concurrency slot is keyed by it. Refused at the door
+        rather than asserted, because it is a fact about the *caller*, and
+        admission is where this seam says no (its two neighbours raise the same
+        error for a depth limit and an empty prompt).
+        """
+        session = parent.session
+        if session is None:
+            raise SubagentSpawnError("a subagent needs a parent with a session to delegate from")
+        return session
+
     async def start(self, request: SubagentRequest) -> SubagentRun:
         """Admit a child. Returns before it answers (the whole point)."""
         parent = request.parent
-        parent_session: Session = parent.session
+        parent_session = self._parent_session(parent)
         depth = delegation_depth(parent_session)
         if depth >= self.depth_limit:
             # Prime Agent's wording; a model that has seen this text before
@@ -234,7 +251,7 @@ class RlmChildProvider:
         build a child under — the seam's sweep is starting a *root*, and one
         unrecoverable child must not stop the rest from coming back.
         """
-        parent_session: Session | None = getattr(request.parent, "session", None)
+        parent_session = request.parent.session
         if parent_session is None:
             return None
         depth = delegation_depth(parent_session)
@@ -276,7 +293,7 @@ class RlmChildProvider:
         instruction simply appears twice.
         """
         parent = request.parent
-        parent_session: Session = parent.session
+        parent_session = self._parent_session(parent)
         prompt = request.prompt.strip()
         provider_name, model, effort = self._resolve_model(request, parent)
 
@@ -393,7 +410,9 @@ class RlmChildProvider:
             )
         return name
 
-    def _resolve_model(self, request: SubagentRequest, parent: Any) -> tuple[str, str, str | None]:
+    def _resolve_model(
+        self, request: SubagentRequest, parent: AgentHandle
+    ) -> tuple[str, str, str | None]:
         """The child's model, with **no fallback** on an explicit selector.
 
         Falling back would answer the parent's question on a model it did not
@@ -423,7 +442,7 @@ class RlmChildProvider:
     # ------------------------------------------------------------- lifecycle --
 
     async def _attach(
-        self, child: _Child, parent: Any, *, cause: StatusCause | None = None
+        self, child: _Child, parent: AgentDriver, *, cause: StatusCause | None = None
     ) -> None:
         """Wire a live child to its parent and start driving it.
 
@@ -450,7 +469,7 @@ class RlmChildProvider:
             # parent's children cannot starve another root's — and the wait, the
             # release on every ending and the queue's own lifetime are the seam's
             # to get right rather than this provider's to re-derive.
-            slot=None if limit is None else (parent.session.id, limit),
+            slot=None if limit is None else (self._parent_session(parent).id, limit),
             # Written only when there was actually a wait. An admitted child with
             # no status already reads as `queued` to the roster; this is the record
             # for the case where that is true *for a reason*.
@@ -500,7 +519,7 @@ class RlmChildProvider:
         await self._attach(child, parent, cause="rehydrated")
         return True
 
-    async def _runtime(self, child: _Child, parent: Any, session: Session) -> None:
+    async def _runtime(self, child: _Child, parent: AgentHandle, session: Session) -> None:
         """Everything a child needs re-established around a fresh agent.
 
         **One list, because it has been discovered twice.** A child's agent is not
@@ -521,12 +540,14 @@ class RlmChildProvider:
         """
         # A fresh scope means a fresh ceiling: the filters applied at admission
         # were disposed with the scope that settled (P4-13b).
-        child.run.scope = child.agent.ctx
+        agent = child.agent
+        assert agent is not None, "a child is re-asked only after it has an agent"
+        child.run.scope = agent.ctx
         if child.run.grant is not None:
-            child.run.grant.apply(self.ctx, child.agent.ctx)
+            child.run.grant.apply(self.ctx, agent.ctx)
         # The access the **admission** recorded, never a caller's: nothing about
         # being asked a second question may widen what the first was allowed.
-        await self._workspace(parent, child.agent, session, child.run.requested_access)
+        await self._workspace(parent, agent, session, child.run.requested_access)
 
     def _awaiter(self, child: _Child) -> Any:
         async def wait() -> SubagentResult:
@@ -576,7 +597,9 @@ class RlmChildProvider:
             # roster folds status last-write-wins and a woken child that is
             # working must not read as not-running.
             self._status(child, "running", **({"cause": cause} if cause else {}))
-            await child.agent.run()
+            agent = child.agent
+            assert agent is not None, "a child runs only after it has an agent"
+            await agent.run()
             answer = _last_assistant_text(child.session)
             child.result = SubagentResult(status="done", answer=answer)
             self._status(
@@ -718,8 +741,8 @@ class RlmChildProvider:
 
     async def _workspace(
         self,
-        parent: Any,
-        child_agent: Any,
+        parent: AgentHandle,
+        child_agent: AgentHandle,
         child_session: Session,
         access: Access,
     ) -> tuple[Access, DowngradeReason | None]:

@@ -251,7 +251,7 @@ reading a file"); what it costs is the fork action, exactly as `ph trajectory
 
 
 @plugin("tui-screen-trajectory", inject=["tui_screens", "sessions"])
-async def apply(ctx: Context, config: Any) -> None:
+async def apply(ctx: Context, config: None) -> None:
     """Contribute the trajectory to whatever front end is drawing.
 
     `scope=ctx` is this row's activation scope, and it is what makes the

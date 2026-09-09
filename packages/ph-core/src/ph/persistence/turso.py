@@ -48,6 +48,7 @@ from ..paths import resolve_roots
 from ..seams.diagnostics import Diagnostic, contribute
 from ..session import Session, SessionEvent, SessionHeader
 from ..session.json import dumps
+from ..wire import WireModel
 from .families import locate_under, logs_under, path_under
 from .lease import claim_file
 from .lineage import materialise
@@ -363,11 +364,17 @@ class TursoSessionStore:
         return connection
 
 
-@plugin("session-persistence-turso", inject=["sessions"])
-async def apply(ctx: Context, config: Any) -> None:
+class Config(WireModel):
+    """Row config for `session-persistence-turso`."""
+
+    root: str | None = None
+    """Where the logs live; `$PH_HOME/sessions` when unset."""
+
+
+@plugin("session-persistence-turso", inject=["sessions"], config=Config)
+async def apply(ctx: Context, config: Config) -> None:
     """Mount the Turso backend and wire it to the session firehose."""
-    setting = config.get("root") if isinstance(config, dict) else None
-    root = Path(setting) if setting else resolve_roots().sessions_dir()
+    root = Path(config.root) if config.root else resolve_roots().sessions_dir()
     # Annotated, so mypy checks this backend against the Protocol *with
     # signatures* — which the runtime `isinstance` gate cannot, a
     # `runtime_checkable` Protocol comparing names only.

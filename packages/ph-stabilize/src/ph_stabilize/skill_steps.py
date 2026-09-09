@@ -38,6 +38,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
+from ph.agent.types import AgentDriver
 from ph.cordis import Context, plugin
 from ph.llm.types import PluginSource, create_user_message
 from ph.session import Session
@@ -188,7 +189,7 @@ def nudges_since_plan(session: Session) -> int:
 
 
 @plugin("skill-steps")
-async def apply(ctx: Context, config: Any) -> None:
+async def apply(ctx: Context, config: None) -> None:
     """Seed a read skill's steps, and object while they are unfinished.
 
     No `inject`: the body registers two listeners and touches no service. `inject`
@@ -214,7 +215,7 @@ async def apply(ctx: Context, config: Any) -> None:
         # fold and the sidebar two things to draw.
         session.append("todo/write", {"todos": grown})
 
-    async def keep_going(agent: Any, turn: int) -> None:
+    async def keep_going(agent: AgentDriver, turn: int) -> None:
         session = getattr(agent, "session", None)
         if not isinstance(session, Session):
             return

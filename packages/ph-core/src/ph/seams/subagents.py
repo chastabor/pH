@@ -35,6 +35,7 @@ from typing import Any, Literal, Protocol, TypeAlias, cast, runtime_checkable
 
 from pydantic import Field
 
+from ..agent.types import AgentDriver
 from ..cordis import Context, Disposer, Running, plugin, running
 from ..session import Session, SessionFoldCache
 from ..system_prompt.assembly import PromptSection
@@ -220,7 +221,7 @@ class SubagentRequest:
     """
 
     prompt: str
-    parent: Any
+    parent: AgentDriver
     scope: Context | None = None
     """The boundary this delegation is made **from** (P6-31).
 
@@ -836,7 +837,7 @@ class SubagentService:
         run = next((one for one in self._runs.values() if one.session_id == session_id), None)
         return bool(run is not None and await self.rehydrate(run.id))
 
-    async def resume_children(self, parent: Any, *, retry_limit: int) -> Sequence[str]:
+    async def resume_children(self, parent: AgentDriver, *, retry_limit: int) -> Sequence[str]:
         """What a resumed root owes the children in its log (P5-04). Returns the revived.
 
         Two opposite answers to two states, which is why this exists rather than
@@ -873,7 +874,7 @@ class SubagentService:
         (`ph_app.daemon.recovery.CHILD_RETRY_LIMIT`), which is where somebody
         tuning restart behaviour will already be looking.
         """
-        session = getattr(parent, "session", None)
+        session = parent.session
         if session is None:
             return []
         # One fold for both halves. Read again after the appends below it would
@@ -911,7 +912,9 @@ class SubagentService:
             )
         return await self._readmit_children(parent, roster)
 
-    async def _readmit_children(self, parent: Any, roster: Mapping[str, Any]) -> Sequence[str]:
+    async def _readmit_children(
+        self, parent: AgentDriver, roster: Mapping[str, Any]
+    ) -> Sequence[str]:
         """Put this parent's un-run children back to work. `resume_children`'s second half.
 
         A daemon that stopped between a child's admission and its first turn left
@@ -956,7 +959,7 @@ class SubagentService:
         return revived
 
     async def _readmit_one(
-        self, parent: Any, run_id: str, row: Mapping[str, Any]
+        self, parent: AgentDriver, run_id: str, row: Mapping[str, Any]
     ) -> SubagentRun | None:
         """One child, through the admission path it originally took."""
         owner = str(row.get("owner") or "")
@@ -1096,7 +1099,7 @@ async def presets(ctx: Context, config: PresetConfig) -> None:
 
 
 @plugin("subagents", inject=["sessions"])
-async def apply(ctx: Context, config: Any) -> None:
+async def apply(ctx: Context, config: None) -> None:
     """Mount the subagent seam definition. No provider ships in ph-base."""
     service = SubagentService(ctx=ctx)
     ctx.provide("subagents", service)

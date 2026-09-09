@@ -30,8 +30,9 @@ still let a human's `/refine` through.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Literal, TypeAlias
+from typing import Literal, TypeAlias
 
+from ph.agent.types import AgentHandle
 from ph.cordis import Context, events
 from ph.session import Session
 
@@ -71,7 +72,7 @@ class RefineRequest:
     """What a veto listener is shown."""
 
     session: Session
-    agent: Any
+    agent: AgentHandle
     scope: HarnessScope
     trigger: RefineTrigger
     instructions: str = ""

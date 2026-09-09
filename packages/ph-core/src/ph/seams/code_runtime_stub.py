@@ -81,7 +81,7 @@ class _Namespace:
 
 
 @plugin("code-runtime-stub", inject=["code_runtime"])
-async def apply(ctx: Context, config: Any) -> None:
+async def apply(ctx: Context, config: None) -> None:
     """Register the stub runtime and expose it for a test to script."""
     runtime = StubCodeRuntime()
     ctx.code_runtime.register(runtime)

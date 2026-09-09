@@ -64,7 +64,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from ph.agent.types import PreStepDecision, RequestErrorAction, RequestFailure
+from ph.agent.types import AgentHandle, PreStepDecision, RequestErrorAction, RequestFailure
 from ph.agent_loop import AgentCancelled
 from ph.cancel import Cancelled
 from ph.cordis import DEPLOYMENT, Context, plugin
@@ -615,7 +615,7 @@ class SummarizeEngine:
     # ------------------------------------------------------------- the seam --
 
     async def compact_if_needed(
-        self, agent: Any, trigger: CompactionTrigger
+        self, agent: AgentHandle, trigger: CompactionTrigger
     ) -> CompactionResult | None:
         """Automatic policy. Never raises — and that is enforced, not intended.
 
@@ -641,7 +641,7 @@ class SummarizeEngine:
             return None
 
     async def _automatic(
-        self, agent: Any, session: Session, trigger: CompactionTrigger
+        self, agent: AgentHandle, session: Session, trigger: CompactionTrigger
     ) -> CompactionResult | None:
         """The policy itself, unguarded — the guard is its caller's."""
         meter = self.ctx.token_meter
@@ -665,7 +665,9 @@ class SummarizeEngine:
             return None
         return await self._compact(agent, session, trigger)
 
-    async def compact_now(self, agent: Any, *, instructions: str = "") -> CompactionResult | None:
+    async def compact_now(
+        self, agent: AgentHandle, *, instructions: str = ""
+    ) -> CompactionResult | None:
         """`/compact [instructions]`: compact useful history whatever the pressure.
 
         Raises rather than declining quietly, because a person asked and is owed
@@ -721,7 +723,7 @@ class SummarizeEngine:
 
     async def _compact(
         self,
-        agent: Any,
+        agent: AgentHandle,
         session: Session,
         trigger: CompactionTrigger,
         *,
@@ -801,7 +803,7 @@ class SummarizeEngine:
 
     # ------------------------------------------------- argument truncation --
 
-    def _elides_arguments(self, agent: Any) -> Callable[[str], bool]:
+    def _elides_arguments(self, agent: AgentHandle) -> Callable[[str], bool]:
         """Whether a named tool's call arguments may be elided, asked of the tool.
 
         `ToolDefinition.arguments_disposable`, with the config list as an
@@ -822,7 +824,11 @@ class SummarizeEngine:
         return elides
 
     def truncate_arguments(
-        self, agent: Any, session: Session, trigger: CompactionTrigger, baseline: TokenBaseline
+        self,
+        agent: AgentHandle,
+        session: Session,
+        trigger: CompactionTrigger,
+        baseline: TokenBaseline,
     ) -> tuple[int, ...]:
         """Elide long call arguments in retained history (§7.4 item 2).
 
@@ -902,7 +908,7 @@ class SummarizeEngine:
 
     # -------------------------------------------------------- the overflow clip --
 
-    async def clip_overflow_tail(self, agent: Any) -> tuple[int, ...]:
+    async def clip_overflow_tail(self, agent: AgentHandle) -> tuple[int, ...]:
         """Shrink the trailing tool-result batch before summarizing (§7.4 item 7).
 
         The case that motivates it is the one summarization is least able to help: a step
@@ -1003,7 +1009,7 @@ class SummarizeEngine:
 
     async def _summarize(
         self,
-        agent: Any,
+        agent: AgentHandle,
         session: Session,
         plan: _Plan,
         instructions: str,
@@ -1050,7 +1056,7 @@ class SummarizeEngine:
         summary, usage = await self._call(self._direct(session, agent, rendered, extras))
         return summary, usage, "direct-after-replay"
 
-    def _extras(self, session: Session, agent: Any, instructions: str) -> str:
+    def _extras(self, session: Session, agent: AgentHandle, instructions: str) -> str:
         """The blocks pH adds to upstream's instruction: state notes and focus."""
         # The agent's own boundary, or the deployment — spelled, because
         # `or self.ctx` is the widening and P6-32 buys nothing if the call
@@ -1094,7 +1100,9 @@ class SummarizeEngine:
             purpose="compaction",
         )
 
-    def _direct(self, session: Session, agent: Any, rendered: str, extras: str) -> GenerateOptions:
+    def _direct(
+        self, session: Session, agent: AgentHandle, rendered: str, extras: str
+    ) -> GenerateOptions:
         """The self-contained shape: upstream's prompt, no tools, no cache hit.
 
         Routed from the agent's own options rather than the header, because this
@@ -1150,7 +1158,7 @@ class SummarizeEngine:
 
     async def _land(
         self,
-        agent: Any,
+        agent: AgentHandle,
         session: Session,
         trigger: CompactionTrigger,
         plan: _Plan,

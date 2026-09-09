@@ -428,6 +428,6 @@ def fork_boundaries(log: Sequence[SessionEvent]) -> set[int]:
 
 
 @plugin("session")
-async def apply(ctx: Context, config: Any) -> None:
+async def apply(ctx: Context, config: None) -> None:
     """Mount the session store."""
     ctx.provide("sessions", SessionStore(ctx=ctx))

@@ -78,7 +78,7 @@ class AskUserValue(ToolModel):
 
 
 @plugin("tool-ask-user", inject=["tools", "user_questions"])
-async def apply(ctx: Context, config: Any) -> None:
+async def apply(ctx: Context, config: None) -> None:
     """Register the question tool."""
 
     async def ask_user(args: AskUserArgs, run: ToolRunContext) -> Any:

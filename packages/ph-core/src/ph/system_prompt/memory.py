@@ -36,8 +36,9 @@ import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from stat import S_ISREG
-from typing import Any, TypeAlias
+from typing import TypeAlias
 
+from ..agent.types import AgentHandle
 from ..cordis import Context, plugin
 from ..paths import resolve_roots
 from .assembly import AssembleContext, PromptContext
@@ -166,7 +167,7 @@ class MemoryFiles:
     a few hundred microseconds, which is not worth an LRU.
     """
 
-    def root(self, agent: Any) -> Path:
+    def root(self, agent: AgentHandle | None) -> Path:
         fs = self.ctx.get("fs")
         if fs is None:
             return Path.cwd()
@@ -189,7 +190,7 @@ class MemoryFiles:
 
 
 @plugin("memory-agents-md", inject=["system_prompt"])
-async def apply(ctx: Context, config: Any) -> None:
+async def apply(ctx: Context, config: None) -> None:
     """Contribute discovered `AGENTS.md` files as a post-cache snapshot."""
     # Resolved once: `$PH_HOME` is a process constant, and asking for it per
     # assembly costs a `stat` or two on a path that cannot have moved.

@@ -31,6 +31,7 @@ from typing import Any
 from pydantic import Field
 
 from ...cordis import Context, plugin
+from ...llm.types import ContentBlock
 from ...seams.subagents import (
     Access,
     SubagentRequest,
@@ -118,7 +119,7 @@ class Config(WireModel):
     """
 
 
-def _render(_args: Any, value: Any) -> Any:
+def _render(_args: Any, value: Any) -> list[ContentBlock]:
     parts = [str(value.get("answer") or "(the child produced no answer)")]
     if value.get("note"):
         parts.append(str(value["note"]))

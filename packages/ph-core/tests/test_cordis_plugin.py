@@ -162,14 +162,18 @@ def test_a_config_that_is_not_a_model_is_refused_at_the_door() -> None:
 # -------------------------------------------------------------- the config --
 
 
-def test_a_plugin_without_a_model_receives_the_row_verbatim() -> None:
-    """Which is how a row whose config is a plain mapping works at all: there is
-    no model to validate against, so the plugin is handed exactly what the
-    profile wrote."""
+def test_a_plugin_without_a_model_takes_no_config() -> None:
+    """A row that declares no model reads no config, so a block under it was a
+    silent no-op: the profile said something and nothing happened. It is refused
+    by name instead — the sentence `extra="forbid"` gives a mistyped key under a
+    row that *has* a model. An empty mapping says nothing and is treated as the
+    absent block it amounts to."""
     spec = PluginSpec(name="row", apply=_apply)
-    raw = {"anything": [1, 2]}
 
-    assert spec.resolve_config(raw) is raw
+    assert spec.resolve_config(None) is None
+    assert spec.resolve_config({}) is None
+    with pytest.raises(LoaderError, match=r'row "row" takes no config.*anything'):
+        spec.resolve_config({"anything": [1, 2]})
 
 
 def test_an_absent_config_becomes_the_model_s_defaults() -> None:

@@ -32,7 +32,7 @@ class ModelVisibleNotLoggedError(AssertionError):
 
 
 @plugin("agent-loop-invariant", inject=["sessions"])
-async def apply(ctx: Context, config: Any) -> None:
+async def apply(ctx: Context, config: None) -> None:
     """Assert `messages == derive_messages()` on every loop request."""
 
     async def check(request: GenerateOptions, next_: Callable[[], Any]) -> Any:

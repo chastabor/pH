@@ -22,10 +22,13 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Annotated, Any
+
+from pydantic import Field
 
 from ..cordis import Context, plugin
 from ..session import SessionEvent
+from ..wire import WireModel
 from .adapter import LlmError, ResolvedModel
 from .types import (
     BlockEnd,
@@ -33,6 +36,7 @@ from .types import (
     Finish,
     FinishReason,
     GenerateOptions,
+    StreamChunk,
     TextBlock,
     TextDelta,
     ToolCallBlock,
@@ -83,7 +87,7 @@ def shared_prefix(previous: GenerateOptions, current: GenerateOptions) -> int | 
     return shared
 
 
-def tool_call_chunks(call_id: str, name: str, arguments: str) -> tuple[Any, ...]:
+def tool_call_chunks(call_id: str, name: str, arguments: str) -> tuple[StreamChunk, ...]:
     """The chunk triple a model emits for one tool call, ending the step on `tool-calls`."""
     return (
         BlockStart(index=0, block_type="tool-call"),
@@ -92,7 +96,7 @@ def tool_call_chunks(call_id: str, name: str, arguments: str) -> tuple[Any, ...]
     )
 
 
-def text_chunks(text: str) -> tuple[Any, ...]:
+def text_chunks(text: str) -> tuple[StreamChunk, ...]:
     """The chunk quartet a model emits for a text reply, ending the step on `stop`."""
     return (
         BlockStart(index=0, block_type="text"),
@@ -108,12 +112,12 @@ class RecordedStep:
 
     turn: int
     step: int
-    chunks: tuple[Any, ...]
+    chunks: tuple[StreamChunk, ...]
 
 
 def recorded_steps(events: Sequence[SessionEvent]) -> list[RecordedStep]:
     """Group a log's `assistant/chunk` events into per-step streams, in order."""
-    grouped: dict[tuple[int, int], list[Any]] = {}
+    grouped: dict[tuple[int, int], list[StreamChunk]] = {}
     order: list[tuple[int, int]] = []
     for event in events:
         if event.type != "assistant/chunk":
@@ -146,7 +150,7 @@ class ReplayAdapter:
     def exhausted(self) -> bool:
         return self.cursor >= len(self.steps)
 
-    async def stream(self, options: GenerateOptions) -> AsyncIterator[Any]:
+    async def stream(self, options: GenerateOptions) -> AsyncIterator[StreamChunk]:
         self.requests.append(options)
         if self.exhausted:
             # Strict: inventing output here would make a replay test pass while
@@ -165,13 +169,18 @@ class ReplayAdapter:
         return ResolvedModel(context_window=self.context_window)
 
 
-@plugin("llm-replay", inject=["llm"])
-async def apply(ctx: Context, config: Any) -> None:
+class Config(WireModel):
+    """Row config for `llm-replay`: the routes the recording answers for."""
+
+    providers: Annotated[tuple[str, ...], Field(min_length=1)] = ("replay",)
+    """`min_length` for `llm-fake`'s stated reason: an empty list is a mistake to
+    report, not a falsy value to read as the default."""
+
+
+@plugin("llm-replay", inject=["llm"], config=Config)
+async def apply(ctx: Context, config: Config) -> None:
     """Register a replay adapter; a test loads its recording."""
-    providers = ("replay",)
-    if isinstance(config, dict) and config.get("providers"):
-        providers = tuple(config["providers"])
     adapter = ReplayAdapter()
-    handle = ctx.llm.register_adapter(providers, adapter)
+    handle = ctx.llm.register_adapter(config.providers, adapter)
     ctx.provide("llm_replay", adapter)
     ctx.add_disposer(handle.dispose, label="llm-replay")

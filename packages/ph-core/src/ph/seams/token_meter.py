@@ -198,6 +198,6 @@ class TokenMeter:
 
 
 @plugin("token-meter")
-async def apply(ctx: Context, config: Any) -> None:
+async def apply(ctx: Context, config: None) -> None:
     """Mount the token meter."""
     ctx.provide("token_meter", TokenMeter(ctx=ctx))

@@ -14,8 +14,8 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
+from ..agent.types import AgentHandle
 from ..cordis import Context, plugin
 from .sandbox import ConfinedArgv, SandboxPolicy
 from .subprocess import SubprocessSpawnSpec, platform_shell
@@ -70,7 +70,7 @@ class ShellService:
         command: str,
         *,
         cwd: Path | None = None,
-        agent: Any = None,
+        agent: AgentHandle | None = None,
         timeout_ms: int | None = None,
         policy: SandboxPolicy | None = None,
         scope: Context | None = None,
@@ -152,6 +152,6 @@ class ShellService:
 
 
 @plugin("shell-local", inject=["subprocess"])
-async def apply(ctx: Context, config: Any) -> None:
+async def apply(ctx: Context, config: None) -> None:
     """Mount the local shell provider."""
     ctx.provide("shell", ShellService(ctx=ctx))
