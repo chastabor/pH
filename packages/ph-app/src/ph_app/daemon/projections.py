@@ -34,6 +34,7 @@ from __future__ import annotations
 from typing import Any
 
 from ph.cordis import DEPLOYMENT
+from ph.keys import COMMANDS, CREDENTIALS, TOOLS, TUI_SCREENS, TUI_STATUS
 
 from ..sessions import SessionSummary, session_summaries
 
@@ -55,7 +56,7 @@ def readings_of(root: Any) -> list[dict[str, Any]]:
     30 Hz tick, which exists for the spinner and would otherwise ask this
     question thirty times a second to get the same answer.
     """
-    registry = root.ctx.get("tui_status")
+    registry = root.ctx.get(TUI_STATUS)
     if registry is None:
         return []
     return [one.to_wire() for one in registry.readings(root.session)]
@@ -69,7 +70,7 @@ def commands_of(root: Any) -> list[dict[str, Any]]:
     runs it, in the root's own context — which is also the only place it could
     work, since a command body reaches for seams that live there.
     """
-    registry = root.ctx.get("commands")
+    registry = root.ctx.get(COMMANDS)
     if registry is None:
         return []
     return [one.schema().to_wire() for one in registry.list()]
@@ -84,7 +85,7 @@ def screens_of(root: Any) -> list[dict[str, Any]]:
     P5-15's other half and is deferred to P7-07; saying so here is the point,
     because a projection that silently dropped `build` would look complete.
     """
-    registry = root.ctx.get("tui_screens")
+    registry = root.ctx.get(TUI_SCREENS)
     if registry is None:
         return []
     return [one.schema().to_wire() for one in registry.list()]
@@ -97,7 +98,7 @@ def tools_of(root: Any) -> list[dict[str, Any]]:
     offers, which is the question a front end is asking. An agent's narrowed view
     is that agent's business and is not what a footer or a palette shows.
     """
-    tools = root.ctx.get("tools")
+    tools = root.ctx.get(TOOLS)
     if tools is None:
         return []
     return [schema.to_wire() for schema in tools.schemas(scope=DEPLOYMENT)]
@@ -114,7 +115,7 @@ def credentials_of(root: Any, names: list[str]) -> dict[str, bool]:
     scope chain per name, which is what the in-process caller did by looping over
     a predicate.
     """
-    service = root.ctx.get("credentials")
+    service = root.ctx.get(CREDENTIALS)
     if service is None:
         return dict.fromkeys(names, False)
     return {name: bool(service.has(service.reference(name))) for name in names}

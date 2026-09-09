@@ -25,6 +25,7 @@ from __future__ import annotations
 from typing import Any
 
 from ..cordis import Context, plugin
+from ..keys import SKILLS
 from .invariants import Invariant, contribute
 
 __all__ = ["apply", "violations"]
@@ -36,16 +37,16 @@ def violations(ctx: Context) -> list[str]:
     Asked of the service rather than computed here: see `SkillService.stale_reach`
     for why the check lives with the cache it checks.
     """
-    return list(ctx.skills.stale_reach())
+    return list(ctx.require(SKILLS).stale_reach())
 
 
-@plugin("skills-invariant", inject=["skills"])
+@plugin("skills-invariant", inject=[SKILLS])
 async def apply(ctx: Context, _config: Any) -> None:
     """Declare the reach cache's half of I6, pollable.
 
-    `inject=["skills"]` because an unmet key means the row never activates, so a
+    `inject=[SKILLS]` because an unmet key means the row never activates, so a
     profile that drops the skills registry drops this invariant with it. Guarding
-    on `ctx.get("skills") is None` instead would report `holds` about a registry
+    on `ctx.get(SKILLS) is None` instead would report `holds` about a registry
     that is not there — "a lie shaped like reassurance", which is the one thing
     this seam's two-kinds distinction exists to prevent.
     """

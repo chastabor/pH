@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from typing import Literal, TypeAlias, cast
 
 from ..cordis import Context, plugin
+from ..keys import APPROVAL, PERMISSION_PRESETS, SANDBOX
 from ..session import Session
 from .approval import ApprovalPolicy
 from .sandbox import SandboxMode
@@ -71,10 +72,10 @@ class PermissionPresetService:
         self.active = name
         if session is not None:
             session.append("permission/preset", {"preset": name})
-            sandbox = self.ctx.get("sandbox")
+            sandbox = self.ctx.get(SANDBOX)
             if sandbox is not None:
                 sandbox.set_mode(session, preset.sandbox_mode)
-            approval = self.ctx.get("approval")
+            approval = self.ctx.get(APPROVAL)
             if approval is not None:
                 approval.set_policy(session, preset.approval_policy)
         return preset
@@ -90,4 +91,4 @@ class PermissionPresetService:
 @plugin("permission-presets")
 async def apply(ctx: Context, config: None) -> None:
     """Mount the permission-preset mapping."""
-    ctx.provide("permission_presets", PermissionPresetService(ctx=ctx))
+    ctx.provide(PERMISSION_PRESETS, PermissionPresetService(ctx=ctx))

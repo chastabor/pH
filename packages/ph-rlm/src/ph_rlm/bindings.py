@@ -34,6 +34,7 @@ from __future__ import annotations
 from typing import Any
 
 from ph.cordis import Context, plugin
+from ph.keys import SUBAGENTS, TOOLS
 from ph.llm.types import ContentBlock
 from ph.seams.code_runtime import CodeBindingNamespace
 from ph.seams.subagents import (
@@ -47,6 +48,7 @@ from ph.tools import ToolModel, ToolOutput, define_tool, text_content
 from ph.tools.code_mode import CodeBindingsRequest, ToolCallError, governed_binding
 from ph.wire import WireModel
 
+from .keys import RLM_CHILDREN
 from .subagents import PROVIDER_NAME
 
 __all__ = ["NAMESPACE", "Config", "apply"]
@@ -128,13 +130,15 @@ def _render_handle(_args: Any, value: Any) -> list[ContentBlock]:
     return text_content("\n".join(lines))
 
 
-@plugin("rlm-bindings", config=Config, inject=["tools", "subagents", "rlm_children"])
+@plugin("rlm-bindings", config=Config, inject=[TOOLS, SUBAGENTS, RLM_CHILDREN])
 async def apply(ctx: Context, config: Config) -> None:
     """Register the `rlm_*` tools and group them as the `rlm` code namespace."""
 
+    tools = ctx.require(TOOLS)
+
     async def run_child(args: RunArgs, run: Any) -> Any:
         try:
-            handle = await ctx.subagents.start(
+            handle = await ctx.require(SUBAGENTS).start(
                 config.provider,
                 SubagentRequest(
                     prompt=args.prompt,
@@ -169,19 +173,19 @@ async def apply(ctx: Context, config: Config) -> None:
     def list_children(_args: Any, run: Any) -> Any:
         """The roster, folded from the parent's own log — never a side table."""
         session = run.session
-        rows = list(ctx.subagents.roster(session).values()) if session is not None else []
+        rows = list(ctx.require(SUBAGENTS).roster(session).values()) if session is not None else []
         return {"children": rows}
 
     async def delete_child(args: DeleteArgs, run: Any) -> Any:
         session = run.session
         removed = (
-            await ctx.rlm_children.delete(session, args.child_id, reason=args.reason)
+            await ctx.require(RLM_CHILDREN).delete(session, args.child_id, reason=args.reason)
             if session is not None
             else False
         )
         return {"deleted": removed, "childId": args.child_id}
 
-    ctx.tools.register(
+    tools.register(
         define_tool(
             RUN_TOOL,
             _RUN_DESCRIPTION,
@@ -190,7 +194,7 @@ async def apply(ctx: Context, config: Config) -> None:
             execute=run_child,
         )
     )
-    ctx.tools.register(
+    tools.register(
         define_tool(
             LIST_TOOL,
             "Your children: name, id, status, and whether each was deleted.",
@@ -201,7 +205,7 @@ async def apply(ctx: Context, config: Config) -> None:
             is_concurrency_safe=True,
         )
     )
-    ctx.tools.register(
+    tools.register(
         define_tool(
             DELETE_TOOL,
             "Revoke a child. Its transcript stays on disk; the roster keeps a tombstone.",
@@ -214,7 +218,7 @@ async def apply(ctx: Context, config: Config) -> None:
 
     def namespace(request: CodeBindingsRequest) -> CodeBindingNamespace:
         """`rlm.run` / `.list_subagents` / `.delete_subagent`, bound to the run."""
-        view = ctx.tools.view(request.scope)
+        view = ctx.require(TOOLS).view(request.scope)
         specs = (
             ("run", RUN_TOOL, True),
             ("list_subagents", LIST_TOOL, False),
@@ -233,7 +237,7 @@ async def apply(ctx: Context, config: Config) -> None:
             bindings=tuple(bindings),
         )
 
-    ctx.tools.register_code_namespace(NAMESPACE, namespace)
+    tools.register_code_namespace(NAMESPACE, namespace)
 
 
 def _render_roster(_args: Any, value: Any) -> list[ContentBlock]:

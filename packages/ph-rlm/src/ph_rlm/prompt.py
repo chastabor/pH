@@ -24,12 +24,14 @@ from __future__ import annotations
 from typing import Any
 
 from ph.cordis import Context, plugin
+from ph.keys import SESSIONS, SUBAGENTS, SYSTEM_PROMPT, TOOLS
 from ph.seams.subagents import reachable_family
 from ph.seams.workspace import workspace_of
 from ph.system_prompt.assembly import ORDER_TOOL_GUIDANCE, PromptContext, PromptSection
 from ph_runtime.cell import MAGIC_PREFIXES
 
 from .bindings import RUN_TOOL
+from .keys import RLM_CHILDREN
 from .presentation import IPYTHON
 from .subagents import RLM_MAX_DEPTH, TASK_PREFIX, delegation_depth
 
@@ -136,9 +138,11 @@ agent lifecycle has taken a workspace and which tier answered.
 """
 
 
-@plugin("rlm-prompt", inject=["system_prompt", "tools", "sessions", "subagents"])
+@plugin("rlm-prompt", inject=[SYSTEM_PROMPT, TOOLS, SESSIONS, SUBAGENTS])
 async def apply(ctx: Context, _config: Any) -> None:
     """Contribute the doctrine sections and the volatile-facts snapshot."""
+
+    prompt = ctx.require(SYSTEM_PROMPT)
 
     def delegation(request: Any) -> str:
         """The delegation rules, and only when the agent can actually delegate.
@@ -148,7 +152,7 @@ async def apply(ctx: Context, _config: Any) -> None:
         that denied `rlm_run` alone would otherwise drop it from the listing
         while this section kept teaching it.
         """
-        return DELEGATION if ctx.tools.view(request.scope).visible.get(RUN_TOOL) else ""
+        return DELEGATION if ctx.require(TOOLS).view(request.scope).visible.get(RUN_TOOL) else ""
 
     def child_doctrine(request: Any) -> str:
         session = getattr(request.agent, "session", None)
@@ -173,15 +177,15 @@ async def apply(ctx: Context, _config: Any) -> None:
         lines.append(f"Conversation log: {session.id}")
         lines.extend(_workspace(ctx, getattr(request.agent, "id", "")))
 
-        sessions = ctx.sessions.list()
+        sessions = ctx.require(SESSIONS).list()
         family = [
-            f"{role} {ctx.subagents.name_of(sessions, agent_id)}"
+            f"{role} {ctx.require(SUBAGENTS).name_of(sessions, agent_id)}"
             for agent_id, role in sorted(reachable_family(sessions, session.id).items())
             if role != "self"
         ]
         if family:
             lines.append(f"Reachable agents: {', '.join(family)}")
-        children = ctx.subagents.roster(session)
+        children = ctx.require(SUBAGENTS).roster(session)
         if children:
             lines.append(
                 "Your children: "
@@ -193,16 +197,12 @@ async def apply(ctx: Context, _config: Any) -> None:
             )
         return "\n".join(lines)
 
-    ctx.system_prompt.section(
-        PromptSection(name="rlm:doctrine", order=ORDER_RLM_DOCTRINE, text=DOCTRINE)
-    )
-    ctx.system_prompt.section(
+    prompt.section(PromptSection(name="rlm:doctrine", order=ORDER_RLM_DOCTRINE, text=DOCTRINE))
+    prompt.section(
         PromptSection(name="rlm:delegation", order=ORDER_RLM_DELEGATION, text=delegation)
     )
-    ctx.system_prompt.section(
-        PromptSection(name="rlm:child", order=ORDER_RLM_CHILD, text=child_doctrine)
-    )
-    ctx.system_prompt.context(PromptContext(name="rlm:session", order=10, text=facts))
+    prompt.section(PromptSection(name="rlm:child", order=ORDER_RLM_CHILD, text=child_doctrine))
+    prompt.context(PromptContext(name="rlm:session", order=10, text=facts))
 
 
 def _workspace(ctx: Context, agent_id: str) -> list[str]:
@@ -248,5 +248,5 @@ def _depth_limit(ctx: Context) -> int:
     the provider refuses. The `None` branch is load-bearing: the doctrine row can
     mount in a deployment with no delegation provider at all.
     """
-    provider = ctx.get("rlm_children")
+    provider = ctx.get(RLM_CHILDREN)
     return RLM_MAX_DEPTH if provider is None else int(provider.depth_limit)

@@ -51,6 +51,7 @@ from pydantic import Field
 
 from ph.agent.types import AgentCancelCause, AgentDriver, AgentHandle, AgentOptions
 from ph.cordis import Context, Disposer, plugin
+from ph.keys import AGENTS, FS, JOBS, LLM, SESSION_PERSISTENCE, SESSIONS, SUBAGENTS, WORKSPACE
 from ph.llm.adapter import LlmError
 from ph.llm.types import CONTEXT_SUMMARY_MAX_CHARS, PluginSource, create_user_message, text_of
 from ph.persistence import resume_session
@@ -74,6 +75,8 @@ from ph.seams.workspace import discards_writes, project_access, workspace_surviv
 from ph.session import Session, derive_event_message
 from ph.session.json import thaw_json
 from ph.wire import WireModel
+
+from .keys import RLM_CHILDREN
 
 __all__ = [
     "MAX_NAME_CHARS",
@@ -223,7 +226,10 @@ class RlmChildProvider:
             raise SubagentSpawnError("a subagent needs a prompt describing its task")
 
         run_id = f"child-{secrets.token_hex(6)}"
-        taken = [str(row.get("name")) for row in self.ctx.subagents.roster(parent_session).values()]
+        taken = [
+            str(row.get("name"))
+            for row in self.ctx.require(SUBAGENTS).roster(parent_session).values()
+        ]
         name = self._resolve_name(request.name, prompt, run_id, taken)
         return await self._admit(
             request,
@@ -308,9 +314,9 @@ class RlmChildProvider:
         try:
             # `parent=` nests the child's scope inside its parent's (P6-27), so
             # the ceiling is inherited rather than applied.
-            child_agent = self.ctx.agents.create(child_session, options, parent=parent)
+            child_agent = self.ctx.require(AGENTS).create(child_session, options, parent=parent)
         except Exception as error:
-            self.ctx.sessions.dispose(child_session.id)
+            self.ctx.require(SESSIONS).dispose(child_session.id)
             raise SubagentSpawnError(f"the child agent could not be created: {error}") from error
 
         granted, downgrade = await self._workspace(
@@ -380,11 +386,11 @@ class RlmChildProvider:
         that already holds this id appends, so creating over it puts `seq`
         backwards mid-file and the log stops being readable at all (P5-03).
         """
-        store = self.ctx.get("session_persistence")
+        store = self.ctx.get(SESSION_PERSISTENCE)
         if store is not None and store.exists(session_id):
             resumed: Session = await resume_session(self.ctx, session_id)
             return resumed
-        created: Session = self.ctx.sessions.create(
+        created: Session = self.ctx.require(SESSIONS).create(
             session_id,
             meta={
                 "parentSession": parent_session.id,
@@ -431,7 +437,7 @@ class RlmChildProvider:
         # request rather than at admission. What matters either way is that
         # nothing substitutes a different model.
         try:
-            self.ctx.llm.adapter_for(provider_name)
+            self.ctx.require(LLM).adapter_for(provider_name)
         except LlmError as error:
             raise SubagentSpawnError(
                 f'provider "{provider_name}" has no registered adapter, so a child cannot '
@@ -456,7 +462,7 @@ class RlmChildProvider:
         # `ctx.jobs`, which detaches rather than running inline: the job gives the
         # run an id, a cancel and `job/*` events for free, and a subagent is the
         # seam's own example of work that outlives the step that started it.
-        job = await self.ctx.jobs.start(
+        job = await self.ctx.require(JOBS).start(
             kind="subagent",
             label=f"{child.run.name} ({child.run.id})",
             run=lambda _job: self._drive(child, cause=cause),
@@ -497,7 +503,7 @@ class RlmChildProvider:
             # `_release` both pops `_children` and calls `forget()`, so the
             # service's own lookup refuses it first.
             return False
-        session = self.ctx.sessions.get(child.run.session_id)
+        session = self.ctx.require(SESSIONS).get(child.run.session_id)
         if session is None:
             log.debug("ph_rlm.subagents: %s has no live session to rehydrate", run_id)
             return False
@@ -507,11 +513,11 @@ class RlmChildProvider:
         # not a degradation. Below `agents.create` this guard would leave an agent
         # and a scope behind: an orphan under the registry root, holding the
         # deployment-wide ceiling, that nothing would ever dispose.
-        parent = self.ctx.agents.get(child.run.parent_id)
+        parent = self.ctx.require(AGENTS).get(child.run.parent_id)
         if parent is None:
             log.debug("ph_rlm.subagents: %s has no live parent to own its drive", run_id)
             return False
-        child.agent = self.ctx.agents.create(session, child.options, parent=parent)
+        child.agent = self.ctx.require(AGENTS).create(session, child.options, parent=parent)
         await self._runtime(child, parent, session)
         # A fresh gate, which the awaiter already on the run reads at await time —
         # its closure holds the `_Child`, not the old Event.
@@ -676,7 +682,7 @@ class RlmChildProvider:
         row or a child whose tier declined are both ordinary. The seam answers
         `False` rather than raising for exactly this caller.
         """
-        seam = self.ctx.get("workspace")
+        seam = self.ctx.get(WORKSPACE)
         if seam is not None and child.agent is not None:
             seam.retain(child.agent.id, "")
 
@@ -694,13 +700,13 @@ class RlmChildProvider:
         if child.job_id is not None:
             # Released, not abandoned: the work finished, so the entry goes
             # without the job being reported as cancelled.
-            self.ctx.jobs.forget(child.job_id)
+            self.ctx.require(JOBS).forget(child.job_id)
             child.job_id = None
         agent, child.agent, child.session = child.agent, None, None
         if agent is None:
             return
         try:
-            await self.ctx.agents.dispose(agent.id)
+            await self.ctx.require(AGENTS).dispose(agent.id)
         except Exception:  # pragma: no cover - teardown must not mask an outcome
             log.debug("ph_rlm.subagents: disposing child %s failed", child.run.id, exc_info=True)
 
@@ -711,7 +717,7 @@ class RlmChildProvider:
         the child's own log already records what it did, so the notice is dropped
         rather than raising inside a detached task.
         """
-        parent = self.ctx.agents.get(parent_session.id)
+        parent = self.ctx.require(AGENTS).get(parent_session.id)
         if parent is None:
             return
         parent.inject(
@@ -764,7 +770,7 @@ class RlmChildProvider:
         is ever merged, so what it was granted of the project is `read` — the
         seam's own reading of `repo_writable`, applied one level up.
         """
-        seam = self.ctx.get("workspace")
+        seam = self.ctx.get(WORKSPACE)
         if seam is None:
             # A profile with no workspace row at all. The conservative claim is
             # the only honest one: nothing here can enforce a writable repo, so
@@ -777,7 +783,7 @@ class RlmChildProvider:
             # workspace: "where does this agent's relative path land" already has
             # one implementation, and a second one in this package is the one
             # that must not disagree with it.
-            base=self.ctx.fs.root_for(parent),
+            base=self.ctx.require(FS).root_for(parent),
             access=access,
             session=child_session,
             # The child's own scope: a revoked or finished child releases its
@@ -838,7 +844,7 @@ class RlmChildProvider:
             # never settle and `ctx.drain()` waits for it — a revocation that
             # hangs the teardown. Harmless for a child already running: its agent
             # is what stops that one, one line down.
-            self.ctx.jobs.cancel(child.job_id)
+            self.ctx.require(JOBS).cancel(child.job_id)
         if child.agent is not None:
             child.agent.cancel(AgentCancelCause(kind="parent"))
         # A terminal state for the roster: a revoked child is not merely absent,
@@ -849,7 +855,7 @@ class RlmChildProvider:
         # `get`, not attribute access: on the parent-teardown path this runs while
         # scopes are unwinding, and the seam's own provision may already be gone —
         # a teardown that raised would abort the rest of the unwind.
-        registry = self.ctx.get("subagents")
+        registry = self.ctx.get(SUBAGENTS)
         if registry is not None:
             registry.forget(run_id)
         parent_session.append(DELETED, {"runId": run_id, "reason": reason})
@@ -901,10 +907,10 @@ def _last_assistant_text(session: Session | None) -> str:
 @plugin(
     "rlm-subagent-provider",
     config=Config,
-    inject=["subagents", "agents", "sessions", "jobs", "llm"],
+    inject=[SUBAGENTS, AGENTS, SESSIONS, JOBS, LLM],
 )
 async def apply(ctx: Context, config: Config) -> None:
     """Register the `rlm-child` provider and expose it for the bindings row."""
     provider = RlmChildProvider(ctx=ctx, config=config)
-    ctx.subagents.register_provider(PROVIDER_NAME, provider)
-    ctx.provide("rlm_children", provider)
+    ctx.require(SUBAGENTS).register_provider(PROVIDER_NAME, provider)
+    ctx.provide(RLM_CHILDREN, provider)

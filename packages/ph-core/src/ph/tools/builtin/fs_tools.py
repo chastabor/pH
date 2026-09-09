@@ -24,6 +24,7 @@ from typing import Any
 from pydantic import Field
 
 from ...cordis import Context, plugin
+from ...keys import FS, TOOLS
 from ...llm.types import ContentBlock
 from ...text import count_of
 from ..definition import ToolModel, ToolOutput, ToolRunContext, define_tool, text_content
@@ -140,10 +141,10 @@ GLOB_LIMIT = 1_000
 GREP_LIMIT = 200
 
 
-@plugin("tool-fs", inject=["tools", "fs"])
+@plugin("tool-fs", inject=[TOOLS, FS])
 async def apply(ctx: Context, config: None) -> None:
     """Register the filesystem tools."""
-    fs = ctx.fs
+    fs = ctx.require(FS)
 
     async def read(args: ReadArgs, run: ToolRunContext) -> Any:
         window = await fs.read(
@@ -272,4 +273,4 @@ async def apply(ctx: Context, config: None) -> None:
             **simple_views("search", "Grep", "pattern"),
         ),
     ):
-        ctx.tools.register(definition)
+        ctx.require(TOOLS).register(definition)

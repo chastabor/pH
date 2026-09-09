@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from ph.keys import ATTACHMENTS
 from ph.llm.types import AttachmentRef, MediaBlock, Message, create_user_message
 
 from .wire import obj
@@ -50,7 +51,7 @@ async def ingest(ctx: Any, paths: Sequence[Path | str]) -> tuple[AttachmentRef, 
     """
     if not paths:
         return ()
-    store = ctx.get("attachments")
+    store = ctx.get(ATTACHMENTS)
     if store is None:
         raise AttachmentUnavailable(
             "this profile mounts no attachment store, so files cannot be attached"

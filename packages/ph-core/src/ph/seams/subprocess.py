@@ -44,6 +44,7 @@ import anyio.abc
 from pydantic import Field
 
 from ..cordis import Context, plugin
+from ..keys import SUBPROCESS
 from ..wire import WireModel
 
 __all__ = [
@@ -494,7 +495,7 @@ def _stdio(mode: Stdio) -> Any:
 async def apply(ctx: Context, config: Config) -> None:
     """Mount the local subprocess provider."""
     ctx.provide(
-        "subprocess",
+        SUBPROCESS,
         SubprocessService(
             ctx=ctx,
             max_output=config.max_output_bytes,

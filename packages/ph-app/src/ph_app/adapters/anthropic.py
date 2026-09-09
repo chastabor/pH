@@ -34,6 +34,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ph.cordis import Context, plugin
+from ph.keys import ATTACHMENTS, CREDENTIALS, LLM, UPLOADS
 from ph.llm.adapter import LlmError, ResolvedModel, resolved
 from ph.llm.types import (
     BlockEnd,
@@ -299,7 +300,7 @@ class AnthropicAdapter:
         `FILE_EXPIRED` retries the same dead handle until the budget is gone.
         """
         handles = await load_handles(
-            self.ctx.get("uploads"),
+            self.ctx.get(UPLOADS),
             options.messages,
             provider=self.config.provider,
             mimes=frozenset(self.config.uploads),
@@ -307,7 +308,7 @@ class AnthropicAdapter:
         )
         # After the handles and skipping them: a referenced file must not also be
         # read and encoded, which is the cost uploading exists to remove.
-        media = await load_media(self.ctx.get("attachments"), options.messages, skip=handles.keys())
+        media = await load_media(self.ctx.get(ATTACHMENTS), options.messages, skip=handles.keys())
         caching = self.config.cache_control
         messages = [_to_anthropic(message, media, handles) for message in options.messages]
         if caching:
@@ -597,13 +598,13 @@ def _to_anthropic(
     return {"role": role, "content": blocks or [{"type": "text", "text": ""}]}
 
 
-@plugin("llm-anthropic", config=Config, inject=["llm", "credentials"])
+@plugin("llm-anthropic", config=Config, inject=[LLM, CREDENTIALS])
 async def apply(ctx: Context, config: Config) -> None:
     """Register the Anthropic route."""
     adapter = AnthropicAdapter(ctx=ctx, config=config)
-    handle = ctx.llm.register_adapter([config.provider], adapter)
+    handle = ctx.require(LLM).register_adapter([config.provider], adapter)
     ctx.add_disposer(handle.dispose, label=f"llm({config.provider})")
-    uploads = ctx.get("uploads")
+    uploads = ctx.get(UPLOADS)
     if uploads is not None and config.uploads:
         # Only when this route references files. Registering an uploader a route
         # never uses would put a file API behind a provider name that has not

@@ -17,6 +17,7 @@ from pathlib import Path
 
 from ..agent.types import AgentHandle
 from ..cordis import Context, plugin
+from ..keys import FS, SANDBOX, SHELL, SUBPROCESS
 from .sandbox import ConfinedArgv, SandboxPolicy
 from .subprocess import SubprocessSpawnSpec, platform_shell
 from .workspace import workspace_of, workspace_policy
@@ -86,10 +87,11 @@ class ShellService:
 
         `cwd` overrides, for a caller that means somewhere specific.
         """
+        subprocess_service = self.ctx.require(SUBPROCESS)
         argv = (*platform_shell(), command)
         workspace = workspace_of(self.ctx, agent)
         if cwd is None:
-            fs = self.ctx.get("fs")
+            fs = self.ctx.get(FS)
             cwd = Path.cwd() if fs is None else fs.root_for(agent)
         if policy is None and workspace is not None:
             # The agent's own workspace as the writable root (E6), but *only*
@@ -98,7 +100,7 @@ class ShellService:
             # turn every shell command into a `SANDBOX_UNAVAILABLE` denial. The
             # policy is the same set `workspace-write-scope` prompts about, so
             # the two describe one boundary.
-            sandbox = self.ctx.get("sandbox")
+            sandbox = self.ctx.get(SANDBOX)
             if sandbox is not None and sandbox.available:
                 policy = workspace_policy(workspace)
             else:
@@ -118,7 +120,7 @@ class ShellService:
             # Requesting confinement and getting none is an error, not a
             # fallback: see ph.seams.sandbox. The agent goes with it so a host
             # the proxy refuses is recorded in this agent's session.
-            confined = self.ctx.sandbox.confine(argv, policy, agent=agent_id)
+            confined = self.ctx.require(SANDBOX).confine(argv, policy, agent=agent_id)
             argv = confined.argv
             confined_by = confined.backend
         spec = SubprocessSpawnSpec(
@@ -128,30 +130,32 @@ class ShellService:
             # Additive, not wholesale: the redirection variables are the only
             # thing being said here, and a command that inherited nothing else
             # would not find its own toolchain.
-            env=self.ctx.subprocess.env(extra=workspace.env)
+            env=subprocess_service.env(extra=workspace.env)
             if workspace and workspace.env
             else None,
         )
-        outcome = await self.ctx.subprocess.run(spec, scope=scope)
+        outcome = await subprocess_service.run(spec, scope=scope)
         if confined is not None and outcome.exit_code != 0:
             # stderr first: that is where these sentences come from, and passing the
             # streams separately avoids joining up to 16 MiB per confined command.
             # Only for a command that failed — see `report_denial`.
-            self.ctx.sandbox.report_denial(confined, (outcome.stderr, outcome.stdout), agent_id)
+            self.ctx.require(SANDBOX).report_denial(
+                confined, (outcome.stderr, outcome.stdout), agent_id
+            )
         return ShellResult(
             exit_code=outcome.exit_code,
             stdout=outcome.stdout,
             stderr=outcome.stderr,
             dropped=outcome.dropped,
             timed_out=outcome.timed_out,
-            cap=self.ctx.subprocess.max_output,
+            cap=subprocess_service.max_output,
             argv=argv,
             cwd=str(cwd),
             confined_by=confined_by,
         )
 
 
-@plugin("shell-local", inject=["subprocess"])
+@plugin("shell-local", inject=[SUBPROCESS])
 async def apply(ctx: Context, config: None) -> None:
     """Mount the local shell provider."""
-    ctx.provide("shell", ShellService(ctx=ctx))
+    ctx.provide(SHELL, ShellService(ctx=ctx))

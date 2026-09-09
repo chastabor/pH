@@ -12,17 +12,18 @@ the registry without one. The bridge is what joins them, and it passes the
 from __future__ import annotations
 
 from ..cordis import Context, plugin
+from ..keys import SYSTEM_PROMPT, TOOLS
 from ..llm.types import ToolSchema
 
 __all__ = ["apply"]
 
 
-@plugin("tools-prompt", inject=["tools", "system_prompt"])
+@plugin("tools-prompt", inject=[TOOLS, SYSTEM_PROMPT])
 async def apply(ctx: Context, config: None) -> None:
     """Contribute the visible tool schemas for whichever scope is assembling."""
 
     def schemas(scope: Context) -> list[ToolSchema]:
-        visible: list[ToolSchema] = ctx.tools.schemas(scope=scope)
+        visible: list[ToolSchema] = ctx.require(TOOLS).schemas(scope=scope)
         return visible
 
-    ctx.system_prompt.tools(schemas)
+    ctx.require(SYSTEM_PROMPT).tools(schemas)

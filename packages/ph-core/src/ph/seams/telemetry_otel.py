@@ -30,6 +30,7 @@ from __future__ import annotations
 from typing import Any
 
 from ..cordis import Context, MountRefusal, plugin
+from ..keys import SESSION_TELEMETRY
 from ..session import dumps
 from ..wire import WireModel
 from .diagnostics import Diagnostic, contribute
@@ -80,7 +81,7 @@ class Config(WireModel):
     endpoint: str = ""
 
 
-@plugin("session-telemetry-otel", inject=["session_telemetry"], config=Config)
+@plugin("session-telemetry-otel", inject=[SESSION_TELEMETRY], config=Config)
 async def apply(ctx: Context, config: Config) -> None:
     """Register the exporter as a sink, or refuse with a reason."""
     try:
@@ -123,7 +124,7 @@ async def apply(ctx: Context, config: Config) -> None:
     # Through `add_sink`, never `ctx.on("session-telemetry/record", …)`: the
     # sink list is fanned out *after* the waterfall settles, so this cannot see
     # a record the redactors have not finished with. A listener could.
-    ctx.session_telemetry.add_sink(ship, scope=ctx)
+    ctx.require(SESSION_TELEMETRY).add_sink(ship, scope=ctx)
     ctx.add_disposer(provider.shutdown, label="telemetry.otel")
 
     contribute(

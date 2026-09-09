@@ -27,14 +27,14 @@ one re-export away.
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
     from ..cordis import Context
 
-from ..cordis import Context, Disposer, Running
+from ..cordis import Context, Disposer, Running, ServiceKey
 
-__all__ = ["claim_entry", "claim_key", "claim_slot"]
+__all__ = ["Registers", "claim_entry", "claim_key", "claim_slot", "contribute_item"]
 
 
 def claim_key[T](
@@ -137,10 +137,47 @@ def claim_slot(by: Running, holder: Any, attribute: str, value: Any, *, label: s
     return by.owner.add_disposer(release, label=label)
 
 
-def contribute_via(
-    ctx: Context, key: str, item: Any, *, label: str, method: str = "register"
+class Registers[T](Protocol):
+    """A service whose door is `register(item, *, scope=…)`.
+
+    Ten of them in this tree — `diagnostics`, `invariants`, `commands`, `skills`,
+    `tui_status`, `tui_screens`, `compaction`, `code_runtime`, `ph.tools` and
+    `ph_text_index` — all spelling `register(self, item, *, scope) -> Disposer`.
+    An unnamed Protocol every seam already obeys is one worth naming: it is what
+    lets `contribute_item` read the door off the key instead of making each
+    caller restate it.
+
+    `item` is positional-only, because the ten spell its *name* differently
+    (`diagnostic`, `invariant`, `skill`, `definition`, `provider`) and none of
+    them is called by keyword.
+    """
+
+    def register(self, item: T, /, *, scope: Context | None = None) -> Disposer: ...
+
+
+def contribute_item[T](ctx: Context, key: ServiceKey[Registers[T]], item: T, *, label: str) -> None:
+    """Register `item` on the service at `key` once it exists — the common case.
+
+    `contribute_via`'s shape with the closure removed. Seven callers had written
+    `lambda service, scope: service.register(item, scope=scope)` by hand, which
+    is the door restated at each site — and one of them then needed a *binder*
+    exported from `ph.seams.skills`, because a lambda built in a loop reads its
+    free variable when the contribution finally runs and every skill registered
+    the last one. Passing the item is what makes that impossible: it is bound at
+    the call, so there is no free variable to be late.
+
+    `contribute_via` stays for a door that is not `register` — `ctx.subagents`
+    and `ctx.tools` both spell theirs `guard` — which is one call site today.
+    """
+    contribute_via(
+        ctx, key, lambda service, scope: service.register(item, scope=scope), label=label
+    )
+
+
+def contribute_via[S](
+    ctx: Context, key: ServiceKey[S], contribute: Callable[[S, Context], object], *, label: str
 ) -> None:
-    """Register `item` on the service at `key` once it exists — mounted yet or not.
+    """Run `contribute(service, scope)` once the service at `key` exists — mounted yet or not.
 
     **Through `ctx.inject` rather than a `ctx.get` at `apply` time**, which is the
     difference between a contribution that works and one that works if the rows
@@ -153,19 +190,26 @@ def contribute_via(
     Optional, still: a hard `inject=[key]` on the contributing row would make the
     *report* a precondition for the thing being reported on.
 
-    The unwind comes free: `register` is handed a child scope that disposes when
-    the key goes away or the row unloads, so the contribution leaves with whatever
-    answers it and no caller has to remember `scope=`.
+    The unwind comes free: the contribution is handed a child scope that disposes
+    when the key goes away or the row unloads, so it leaves with whatever answers
+    it and no caller has to remember `scope=`.
+
+    **The caller passes the call, not the name of a method.** This took an `item`
+    and a `method: str` and dispatched `getattr(service, method)(item)`, which no
+    checker follows — so a renamed `SkillService.register` broke at mount for all
+    eight callers, which is the failure P8-05 exists to end one layer down. `S`
+    comes from the key, so `contribute(skills, scope)` is an ordinary call mypy
+    resolves; the `method` hatch, which existed solely because `ctx.subagents`'
+    door is called `guard`, disappears with the string.
 
     Here beside `claim_key` for the same reason it is: this rule was written by
     hand in two seams with a paragraph of prose each explaining why, and a third
     seam wanting it would copy whichever it read first — and a fourth then wrote
     it in a *downstream package*, where the next reader finds the copy before the
-    rule. `method` is what lets that one back in: a registry whose door is not
-    called `register` — `ctx.subagents.guard` — needed nothing else.
+    rule.
     """
 
     def register(scope: Context) -> None:
-        getattr(getattr(scope, key), method)(item, scope=scope)
+        contribute(scope.require(key), scope)
 
     ctx.inject([key], register, label=label)

@@ -16,6 +16,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from ..cordis import Context, events, plugin
+from ..keys import AGENT, AGENTS, SESSIONS
 from ..session import Session
 from .types import (
     AgentDriver,
@@ -127,7 +128,7 @@ class AgentRegistry:
         base = owner if isinstance(owner, Context) else self.ctx
         scope = base.scope(f"agent:{session.id}")
         agent = self.driver_factory(scope, session, options or AgentOptions())
-        scope.provide("agent", agent)
+        scope.provide(AGENT, agent)
         self._agents[agent.id] = agent
         # **The roster entry is an effect of the scope it describes**, which it
         # had to become the moment P6-27 nested agents: `dispose(agent_id)` used
@@ -180,7 +181,7 @@ class AgentRegistry:
         await agent.ctx.dispose()
 
 
-@plugin("agent", inject=["sessions"])
+@plugin("agent", inject=[SESSIONS])
 async def apply(ctx: Context, config: None) -> None:
     """Mount the agent registry."""
-    ctx.provide("agents", AgentRegistry(ctx=ctx))
+    ctx.provide(AGENTS, AgentRegistry(ctx=ctx))

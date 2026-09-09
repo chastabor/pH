@@ -31,6 +31,7 @@ from dataclasses import dataclass
 
 from ph.agent.types import AgentHandle
 from ph.cordis import Context
+from ph.keys import LLM
 from ph.llm.structured import SchemaViolation, ask_for_shape
 from ph.llm.types import GenerateOptions, create_message, text_of
 from ph.session import Session
@@ -299,7 +300,7 @@ class RefinementPlanner:
         if not provider or not model:
             raise PlannerError("the agent has no model route to plan a refinement with")
 
-        resolved = self.ctx.llm.resolve_model(provider, model)
+        resolved = self.ctx.require(LLM).resolve_model(provider, model)
         request = GenerateOptions(
             provider=provider,
             model=model,
@@ -319,7 +320,7 @@ class RefinementPlanner:
         )
         try:
             return await ask_for_shape(
-                self.ctx.llm.stream, request, shape, enforced=resolved.structured_output
+                self.ctx.require(LLM).stream, request, shape, enforced=resolved.structured_output
             )
         except SchemaViolation as violation:
             raise PlannerError(str(violation)) from violation

@@ -36,6 +36,7 @@ from datetime import datetime
 from typing import Any, Literal, TypeAlias
 
 from ..cordis import Context, plugin
+from ..keys import SCHEDULE
 from ..paths import resolve_roots
 from ..session import Session, SessionFoldCache, now_ms
 from ..wire import WireModel
@@ -452,7 +453,7 @@ class Config(WireModel):
 async def apply(ctx: Context, config: Config) -> None:
     """Publish `ctx.schedule`."""
     service = ScheduleService(index=ScheduleIndex(resolve_roots().home) if config.index else None)
-    ctx.provide("schedule", service)
+    ctx.provide(SCHEDULE, service)
     # The cache is bounded by live sessions, and this is what makes that true —
     # the same line `subagents` uses for the same reason.
     ctx.on("session/disposed", lambda session: service.forget_session(session.id))

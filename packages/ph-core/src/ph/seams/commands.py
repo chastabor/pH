@@ -19,6 +19,7 @@ from typing import Any
 
 from ..agent.types import AgentHandle
 from ..cordis import Context, Disposer, Running, events, maybe_await, plugin, running
+from ..keys import COMMANDS
 from ..session import Session
 from ..wire import WireModel, declarable
 from ._registry import claim_key
@@ -245,4 +246,4 @@ class CommandRegistry:
 @plugin("commands")
 async def apply(ctx: Context, config: None) -> None:
     """Mount the command registry."""
-    ctx.provide("commands", CommandRegistry(ctx=ctx))
+    ctx.provide(COMMANDS, CommandRegistry(ctx=ctx))

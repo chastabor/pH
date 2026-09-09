@@ -49,6 +49,7 @@ from typing import Any, Literal
 from pydantic import Field
 
 from ph.cordis import Context, plugin
+from ph.keys import SYSTEM_PROMPT, TOOLS
 from ph.llm.types import ToolCallBlock
 from ph.session import Session, derive_event_message, thaw_json
 from ph.system_prompt.assembly import (
@@ -632,7 +633,7 @@ def _parallel_write_todos(session: Session | None) -> bool:
 # ------------------------------------------------------------------- the row --
 
 
-@plugin("tool-todo", inject=["tools", "system_prompt"])
+@plugin("tool-todo", inject=[TOOLS, SYSTEM_PROMPT])
 async def apply(ctx: Context, config: None) -> None:
     """Register the tool, its prompt section, its context and its one rule."""
 
@@ -657,7 +658,7 @@ async def apply(ctx: Context, config: None) -> None:
             session.append("todo/write", {"todos": todos})
         return {"todos": todos}
 
-    ctx.tools.register(
+    ctx.require(TOOLS).register(
         define_tool(
             TOOL_NAME,
             WRITE_TODOS_TOOL_DESCRIPTION,
@@ -706,7 +707,7 @@ async def apply(ctx: Context, config: None) -> None:
 
     ctx.on("tools/pre-execute", refuse_parallel_calls)
 
-    ctx.system_prompt.section(
+    ctx.require(SYSTEM_PROMPT).section(
         PromptSection(
             name="write-todos",
             # After the tool guidance the catalog itself contributes: this is
@@ -726,7 +727,7 @@ async def apply(ctx: Context, config: None) -> None:
     # every plan update (A12). Materialized after retained history, which is
     # also where it belongs to be read — the state as of now, after the
     # conversation that produced it.
-    ctx.system_prompt.context(PromptContext(name="todos", text=current_list))
+    ctx.require(SYSTEM_PROMPT).context(PromptContext(name="todos", text=current_list))
 
 
 def _counts(todos: list[Any], *, bare: int = 0) -> str:

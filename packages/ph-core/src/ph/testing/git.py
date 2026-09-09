@@ -19,6 +19,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from ..keys import AGENTS, SESSIONS, WORKSPACE
 from ..seams.workspace_git import git
 
 __all__ = ["WORKTREE_ROWS", "git", "git_repo", "worktree_agent"]
@@ -54,9 +55,9 @@ async def worktree_agent(
     (base / "tracked.txt").write_text("original\n", encoding="utf-8")
     await git(ctx, base, "add", "-A")
     await git(ctx, base, "commit", "-m", "content")
-    session = ctx.sessions.create("s1")
-    agent = ctx.agents.create(session, FAKE_OPTIONS)
-    workspace = await ctx.workspace.acquire(
+    session = ctx.require(SESSIONS).create("s1")
+    agent = ctx.require(AGENTS).create(session, FAKE_OPTIONS)
+    workspace = await ctx.require(WORKSPACE).acquire(
         session_id="s1", agent_id=agent.id, base=base, access="write", session=session
     )
     assert workspace.kind == "worktree", "these tests need a real checkout"

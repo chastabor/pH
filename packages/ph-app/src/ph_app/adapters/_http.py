@@ -23,6 +23,7 @@ from typing import Any
 import httpx
 
 from ph.cordis import Context
+from ph.keys import CREDENTIALS
 from ph.llm.adapter import LlmError
 from ph.llm.types import CONTEXT_WINDOW_EXCEEDED, FILE_EXPIRED, LlmFailure
 
@@ -41,7 +42,7 @@ def resolve_secret(ctx: Context, env_name: str, provider: str) -> str:
     The value goes into a local that goes out of scope with the request. Nothing
     that travelled to get here held it.
     """
-    credentials = ctx.get("credentials")
+    credentials = ctx.get(CREDENTIALS)
     if credentials is None:
         raise LlmError("ctx.credentials is not mounted", "NO_CREDENTIALS")
     secret = credentials.resolve(credentials.reference(env_name))

@@ -51,6 +51,7 @@ from typing import Any, Literal, Protocol, TypeAlias, cast, get_args, runtime_ch
 from pydantic import Field
 
 from ..cordis import Context, Disposer, Running, plugin, running
+from ..keys import AGENTS, SANDBOX
 from ..paths import canonical
 from ..session import Session
 from ..tools.errors import FailureKind, HarnessError
@@ -449,15 +450,25 @@ class SandboxProvider(Protocol):
     fail in silently.
     """
 
-    enforcement: Enforcement
-    backend: str
-    """What this backend is called — `bwrap`, `sandbox-exec`.
+    @property
+    def enforcement(self) -> Enforcement: ...
 
-    A *declared* name, beside `enforcement` and readable for the same reason: a
-    consumer that wants to tell a person what is confining them had only
-    `type(provider).__name__`, which is a Python class name derived rather than
-    stated, and which no seam contract promises. `ConfinedArgv.backend` is this
-    field rather than a literal each `confine` repeats."""
+    @property
+    def backend(self) -> str:
+        """What this backend is called — `bwrap`, `sandbox-exec`.
+
+        A *declared* name, beside `enforcement` and readable for the same
+        reason: a consumer that wants to tell a person what is confining them
+        had only `type(provider).__name__`, which is a Python class name derived
+        rather than stated, and which no seam contract promises.
+        `ConfinedArgv.backend` is this field rather than a literal each
+        `confine` repeats.
+
+        Both are properties rather than attributes — `CodeRuntime` says why —
+        because both backends expose them as read-only, which a settable
+        Protocol member refuses.
+        """
+        ...
 
     def confine(self, argv: tuple[str, ...], policy: SandboxPolicy) -> ConfinedArgv: ...
 
@@ -758,7 +769,7 @@ class SandboxSeam:
         session.append(DENIED, denial.record(agent))
 
     def _session_of(self, agent: str | None) -> Session | None:
-        agents = self.ctx.get("agents")
+        agents = self.ctx.get(AGENTS)
         if agents is None or not agent:
             return None
         found = agents.get(agent)
@@ -777,7 +788,7 @@ def enforcement_of(ctx: Context) -> Enforcement | None:
     partial boundary is not confinement at all. Two operator-facing statements
     about one fact, in two packages, is the drift this seam exists to prevent.
     """
-    seam = ctx.get("sandbox")
+    seam = ctx.get(SANDBOX)
     return None if seam is None else seam.enforcement
 
 
@@ -790,7 +801,7 @@ def allowed_paths_of(ctx: Context) -> tuple[Path, ...]:
     backend now allows, or the prompt boundary and the enforced one describe two
     different sets (E6).
     """
-    seam = ctx.get("sandbox")
+    seam = ctx.get(SANDBOX)
     return () if seam is None else seam.allowed_paths()
 
 
@@ -803,4 +814,4 @@ class Config(WireModel):
 @plugin("sandbox-policy", config=Config)
 async def apply(ctx: Context, config: Config) -> None:
     """Mount the sandbox seam with policy resolution and no backend."""
-    ctx.provide("sandbox", SandboxSeam(ctx=ctx, default_mode=config.default_mode))
+    ctx.provide(SANDBOX, SandboxSeam(ctx=ctx, default_mode=config.default_mode))

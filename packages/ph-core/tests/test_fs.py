@@ -65,7 +65,8 @@ from typing import Any
 
 import pytest
 
-from ph.cordis import DEPLOYMENT, Context
+from ph.cordis import DEPLOYMENT, Context, Profile
+from ph.keys import FS
 from ph.seams.fs import (
     Config as FsConfig,
 )
@@ -681,3 +682,39 @@ async def test_a_read_records_the_workspace_relative_name(mount: Any, tmp_path: 
     observed = [one for one in session.events if one.type == "fs/observed"]
     assert [one.data["path"] for one in observed] == ["notes.md"]
     assert str(project) not in repr([one.data for one in session.events])
+
+
+async def test_the_root_ladder_is_config_then_project_then_cwd(tmp_path: Path) -> None:
+    """Three answers, most specific first — the rule `fs-local` states in prose.
+
+    Mounted bare rather than through the `mount` fixture, which pins `fs.root`
+    to `tmp_path` deliberately: pinning it is what this test has to *not* do, so
+    that the middle rung is reachable at all. That middle rung is P5-14's whole
+    point — a daemon mounts one composition once per session, and those sessions
+    are in different repositories — and it had no test until the provision moved
+    onto `Profile.mount`, where a caller can express it.
+
+    Sabotage: drop `project=` from the first rung and it reads the checkout this
+    suite runs in. Dropping it from the second changes nothing, which is the
+    ordering this test exists to state.
+    """
+    project = tmp_path / "repo"
+    project.mkdir()
+    stated = tmp_path / "stated"
+    stated.mkdir()
+
+    async def root(*, project: Path | None = None, **config: str) -> Path:
+        """The root one bare `fs-local` mount resolves to, disposed either way."""
+        entry: dict[str, Any] = {"id": "fs", "name": "fs-local"}
+        if config:
+            entry["config"] = config
+        ctx = Context()
+        try:
+            await Profile.from_documents([("t", [entry])]).mount(ctx, project=project)
+            return ctx.require(FS).root_for()
+        finally:
+            await ctx.dispose()
+
+    assert await root(project=project) == project, "the project the mount was given"
+    assert await root(project=project, root=str(stated)) == stated, "a deployment outranks it"
+    assert await root() == Path.cwd(), "and with neither, the process's own directory"

@@ -33,6 +33,7 @@ import anyio
 from ..agent.types import AgentHandle
 from ..cancel import CancelToken
 from ..cordis import Context
+from ..keys import TOOLS
 from ..llm.types import Message, ToolCallBlock, new_message_id
 from ..session import Session, SurfaceIntent, dumps
 from .definition import ToolExecutionInput, ToolExecutionResult, aborted_result
@@ -75,7 +76,7 @@ async def execute_tool_calls(
     max_parallel: int = 10,
 ) -> BatchOutcome:
     """Run one step's calls, committing results in model order."""
-    tools: ToolRuntime = ctx.tools
+    tools: ToolRuntime = ctx.require(TOOLS)
     session = agent.session
     if session is None:
         # The Protocol admits a session-less handle because `StubAgent` is one;

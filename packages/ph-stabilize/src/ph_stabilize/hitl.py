@@ -51,6 +51,7 @@ from typing import Any, Final, Literal
 from pydantic import Field
 
 from ph.cordis import Context, plugin
+from ph.keys import APPROVAL, TOOLS
 from ph.seams.approval import ApprovalDecisionName
 from ph.session import Session
 from ph.tools.definition import Ask, ToolExecution
@@ -199,7 +200,7 @@ def _mode(session: Session | None, config: Config) -> ApprovalMode:
     return recorded if recorded in ("manual", "auto", "yolo") else config.mode
 
 
-@plugin("hitl", inject=["approval"], config=Config)
+@plugin("hitl", inject=[APPROVAL], config=Config)
 async def apply(ctx: Context, config: Config) -> None:
     """Ask a human before a configured call runs."""
 
@@ -212,7 +213,7 @@ async def apply(ctx: Context, config: Config) -> None:
         name, and the lookup is scope-aware because an agent-shadowed registration
         is a different tool with the same name.
         """
-        view = ctx.tools.view(execution.scope)
+        view = ctx.require(TOOLS).view(execution.scope)
         rule = config.interrupt_on.get(execution.name)
         if rule is None and execution.name == view.transport_name:
             rule = config.interrupt_on.get(RUN_CODE)

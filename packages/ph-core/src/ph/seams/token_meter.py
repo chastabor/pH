@@ -25,6 +25,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..cordis import Context, plugin
+from ..keys import TOKEN_METER
 from ..llm.types import AttachmentRef, Message, TokenUsage, attachment_of
 from ..session import Session
 
@@ -200,4 +201,4 @@ class TokenMeter:
 @plugin("token-meter")
 async def apply(ctx: Context, config: None) -> None:
     """Mount the token meter."""
-    ctx.provide("token_meter", TokenMeter(ctx=ctx))
+    ctx.provide(TOKEN_METER, TokenMeter(ctx=ctx))

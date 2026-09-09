@@ -19,6 +19,7 @@ import anyio
 
 from ..agent.types import AgentHandle, AgentOptions
 from ..cordis import DEPLOYMENT, Boundary, Context
+from ..keys import SKILLS, TOOLS
 from ..llm.types import ContextForm, PluginSource
 from ..persistence.jsonl import HEADER_LINE_TYPE, locate_session, session_path
 from ..seams.skills import SkillService
@@ -169,7 +170,7 @@ async def run_tool(
     """
     from ..tools.definition import ToolExecutionInput
 
-    return await ctx.tools.execute(
+    return await ctx.require(TOOLS).execute(
         ToolExecutionInput(
             call_id=call_id,
             name=name,
@@ -200,7 +201,7 @@ def skill_service() -> tuple[Context, SkillService]:
     """
     root = Context()
     service = SkillService(ctx=root)
-    root.provide("skills", service)
+    root.provide(SKILLS, service)
     return root, service
 
 
@@ -208,7 +209,7 @@ def tool_runtime() -> tuple[Context, ToolRuntime]:
     """A root context with a bare registry provided as `tools`."""
     root = Context()
     runtime = ToolRuntime(ctx=root)
-    root.provide("tools", runtime)
+    root.provide(TOOLS, runtime)
     return root, runtime
 
 

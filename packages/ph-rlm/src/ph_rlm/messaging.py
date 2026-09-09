@@ -39,6 +39,7 @@ from typing import Any
 import anyio
 
 from ph.cordis import Context, plugin
+from ph.keys import AGENTS, SESSIONS, SUBAGENTS, TOOLS
 from ph.llm.types import ContentBlock, PluginSource, create_user_message, new_message_id, text_of
 from ph.seams.code_runtime import CodeBindingNamespace
 from ph.seams.subagents import FamilyRole, reachable_family
@@ -46,6 +47,8 @@ from ph.session import Session, derive_event_message
 from ph.tools import ToolModel, ToolOutput, define_tool, text_content
 from ph.tools.code_mode import CodeBindingsRequest, ToolCallError, governed_binding
 from ph.wire import WireModel
+
+from .keys import RLM_CHILDREN
 
 __all__ = [
     "MAX_MESSAGE_CHARS",
@@ -182,13 +185,14 @@ def _label(role: FamilyRole, name: str) -> str:
     return role if role in ("parent", "self") else f"{role}:{name}"
 
 
-@plugin("rlm-messaging", config=Config, inject=["tools", "sessions", "agents", "subagents"])
+@plugin("rlm-messaging", config=Config, inject=[TOOLS, SESSIONS, AGENTS, SUBAGENTS])
 async def apply(ctx: Context, config: Config) -> None:
     """Register the send/observe tools, the family guard, and the two namespaces."""
+    tools = ctx.require(TOOLS)
     limiter = _Limiter(capacity=config.rate_capacity, refill_seconds=config.rate_refill_seconds)
 
     def family(agent_id: str) -> dict[str, FamilyRole]:
-        return reachable_family(ctx.sessions.list(), agent_id)
+        return reachable_family(ctx.require(SESSIONS).list(), agent_id)
 
     def resolve(sender_id: str, args: Any) -> tuple[str | None, str]:
         """`(target_id, refusal)` — the one resolution the guard and the body share.
@@ -242,7 +246,7 @@ async def apply(ctx: Context, config: Config) -> None:
             return OUT_OF_REACH
         return None
 
-    ctx.tools.guard(family_guard)
+    tools.guard(family_guard)
 
     # ------------------------------------------------------------- the tools --
 
@@ -272,15 +276,15 @@ async def apply(ctx: Context, config: Config) -> None:
                 "backpressure, not a refusal.",
             )
 
-        target = ctx.agents.get(target_id)
+        target = ctx.require(AGENTS).get(target_id)
         if target is None:
             # A settled child kept its session, its log and its roster row; what
             # it lost was the agent that holds an inbox. Waking it is the seam's
             # job (P3-13), and addressing one is exactly the trigger the plan
             # names — so a send to a finished child works rather than telling the
             # sender to go read a transcript.
-            await ctx.subagents.ensure_addressable(target_id)
-            target = ctx.agents.get(target_id)
+            await ctx.require(SUBAGENTS).ensure_addressable(target_id)
+            target = ctx.require(AGENTS).get(target_id)
         if target is None:
             raise ToolCallError(
                 SEND_TOOL,
@@ -317,7 +321,7 @@ async def apply(ctx: Context, config: Config) -> None:
         )
         # A child answering its parent is a reply, which is what decides whether
         # the parent gets a "finished without replying" notice.
-        children = ctx.get("rlm_children")
+        children = ctx.get(RLM_CHILDREN)
         if children is not None and sender_role == "child":
             children.mark_replied(sender_id)
         return Receipt(
@@ -336,7 +340,7 @@ async def apply(ctx: Context, config: Config) -> None:
                 "agentId": agent_id,
                 "role": role,
                 "name": _display(ctx, agent_id),
-                "running": ctx.agents.get(agent_id) is not None,
+                "running": ctx.require(AGENTS).get(agent_id) is not None,
             }
             for agent_id, role in sorted(family(sender_id).items())
             if role != "self"
@@ -357,13 +361,13 @@ async def apply(ctx: Context, config: Config) -> None:
         role = family(sender_id).get(args.agent_id)
         if role is None or role == "self":
             raise ToolCallError(OBSERVE_GET_TOOL, OUT_OF_REACH)
-        session = ctx.sessions.get(args.agent_id)
+        session = ctx.require(SESSIONS).get(args.agent_id)
         if session is None:
             raise ToolCallError(OBSERVE_GET_TOOL, f"no session for {args.agent_id}")
         limit = max(1, min(args.limit, config.observe_max_messages))
         return {"agentId": args.agent_id, "role": role, "messages": _transcript(session, limit)}
 
-    ctx.tools.register(
+    tools.register(
         define_tool(
             SEND_TOOL,
             "Send a message to your parent, a sibling, or one of your children. It "
@@ -373,7 +377,7 @@ async def apply(ctx: Context, config: Config) -> None:
             execute=send,
         )
     )
-    ctx.tools.register(
+    tools.register(
         define_tool(
             LIST_TOOL,
             "The agents you may address: parent, siblings, children.",
@@ -384,7 +388,7 @@ async def apply(ctx: Context, config: Config) -> None:
             is_concurrency_safe=True,
         )
     )
-    ctx.tools.register(
+    tools.register(
         define_tool(
             OBSERVE_LIST_TOOL,
             "The agents whose transcripts you may read.",
@@ -395,7 +399,7 @@ async def apply(ctx: Context, config: Config) -> None:
             is_concurrency_safe=True,
         )
     )
-    ctx.tools.register(
+    tools.register(
         define_tool(
             OBSERVE_GET_TOOL,
             "The recent messages of one agent you may reach.",
@@ -425,8 +429,8 @@ async def apply(ctx: Context, config: Config) -> None:
             (("list", OBSERVE_LIST_TOOL), ("get", OBSERVE_GET_TOOL)),
         )
 
-    ctx.tools.register_code_namespace(MESSAGE_NAMESPACE, message_namespace)
-    ctx.tools.register_code_namespace(OBSERVE_NAMESPACE, observe_namespace)
+    tools.register_code_namespace(MESSAGE_NAMESPACE, message_namespace)
+    tools.register_code_namespace(OBSERVE_NAMESPACE, observe_namespace)
 
 
 # ----------------------------------------------------------------- helpers --
@@ -439,7 +443,7 @@ def _namespace(
     description: str,
     specs: tuple[tuple[str, str], ...],
 ) -> CodeBindingNamespace:
-    view = ctx.tools.view(request.scope)
+    view = ctx.require(TOOLS).view(request.scope)
     bindings = [
         governed_binding(request, public, definition)
         for public, tool_name in specs
@@ -471,7 +475,7 @@ def _display(ctx: Context, agent_id: str) -> str:
     needs the same answer, and two copies is how a prompt names one agent while a
     send delivers to another.
     """
-    return str(ctx.subagents.name_of(ctx.sessions.list(), agent_id))
+    return str(ctx.require(SUBAGENTS).name_of(ctx.require(SESSIONS).list(), agent_id))
 
 
 def _transcript(session: Session, limit: int) -> list[dict[str, Any]]:

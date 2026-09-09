@@ -45,6 +45,7 @@ from pydantic import Field
 
 from ..cancel import CancelToken
 from ..cordis import Context, events, maybe_await, plugin
+from ..keys import CODE_RUNTIME, SYSTEM_PROMPT, TOOLS
 from ..seams.code_runtime import CodeBinding, CodeBindingNamespace, CodeRunRequest
 from ..session import Session
 from ..session.json import freeze_json_value, thaw_json
@@ -314,12 +315,12 @@ class Config(WireModel):
     max_parallel_sub_calls: int = 10
 
 
-@plugin("tools-code-mode", config=Config, inject=["tools", "code_runtime", "system_prompt"])
+@plugin("tools-code-mode", config=Config, inject=[TOOLS, CODE_RUNTIME, SYSTEM_PROMPT])
 async def apply(ctx: Context, config: Config) -> None:
     """Register the reserved transport, the shipped SDK renderers, and the prompt section."""
-    tools: ToolRuntime = ctx.tools
-    ctx.code_runtime.register_sdk_renderer("python", render_python_sdk)
-    ctx.code_runtime.register_sdk_renderer("typescript", render_typescript_sdk)
+    tools: ToolRuntime = ctx.require(TOOLS)
+    ctx.require(CODE_RUNTIME).register_sdk_renderer("python", render_python_sdk)
+    ctx.require(CODE_RUNTIME).register_sdk_renderer("typescript", render_typescript_sdk)
 
     async def run_code(args: Any, run: ToolRunContext) -> Any:
         # `Mapping`, not `dict`: accepted arguments are frozen into a
@@ -327,7 +328,7 @@ async def apply(ctx: Context, config: Config) -> None:
         program = args.get("program") if isinstance(args, Mapping) else None
         if not isinstance(program, str) or not program.strip():
             raise ToolCallError(run.name, "program must be a non-empty string")
-        runtime = ctx.code_runtime.require()
+        runtime = ctx.require(CODE_RUNTIME).require()
         bridge = DispatchBridge(
             tools=tools,
             ctx=ctx,
@@ -379,11 +380,11 @@ async def apply(ctx: Context, config: Config) -> None:
 
     async def sdk_section(request: Any) -> str:
         scope: Context = request.scope
-        runtime = ctx.code_runtime.provider
+        runtime = ctx.require(CODE_RUNTIME).provider
         if runtime is None:
             return ""
         language = getattr(runtime, "language", "python")
-        renderer = ctx.code_runtime.sdk_renderer(language)
+        renderer = ctx.require(CODE_RUNTIME).sdk_renderer(language)
         if renderer is None:
             raise RuntimeError(
                 f'no tools:sdk renderer for language "{language}"; Code Mode cannot describe '
@@ -394,7 +395,7 @@ async def apply(ctx: Context, config: Config) -> None:
         described = await _namespaces(tools, CodeBindingsRequest(scope=scope))
         return f"{code_only_rule(transport)}\n\n{renderer(described)}"
 
-    ctx.system_prompt.section(
+    ctx.require(SYSTEM_PROMPT).section(
         PromptSection(name="tools:sdk", order=ORDER_TOOL_GUIDANCE, text=sdk_section)
     )
 

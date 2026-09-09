@@ -53,6 +53,7 @@ from typing import Literal, TypeAlias
 import anyio
 
 from ..cordis import Context, plugin
+from ..keys import SUBPROCESS, WORKSPACE
 from ..paths import default_home_path
 from ..wire import WireModel
 from .containment import TIERS, TierDescription
@@ -155,9 +156,9 @@ async def run(ctx: Context, program: str, cwd: Path, *args: str) -> tuple[int, s
     as in the filesystem they see.
     """
     spec = SubprocessSpawnSpec(
-        argv=(program, *args), cwd=cwd, env=ctx.subprocess.env(extra={"LC_ALL": "C"})
+        argv=(program, *args), cwd=cwd, env=ctx.require(SUBPROCESS).env(extra={"LC_ALL": "C"})
     )
-    outcome = await ctx.subprocess.run(spec)
+    outcome = await ctx.require(SUBPROCESS).run(spec)
     return outcome.exit_code, outcome.stdout, outcome.stderr
 
 
@@ -498,7 +499,7 @@ class Config(WireModel):
     `glob` and nested one level deeper by every child."""
 
 
-@plugin("workspace-agentfs", inject=["workspace", "subprocess"], config=Config)
+@plugin("workspace-agentfs", inject=[WORKSPACE, SUBPROCESS], config=Config)
 async def apply(ctx: Context, config: Config) -> None:
     """Probe the host, and claim the workspace slot only if the overlay isolates.
 
@@ -534,7 +535,7 @@ async def apply(ctx: Context, config: Config) -> None:
     if not result.isolates:
         log.info("ph.seams.workspace_agentfs: declining — %s", result.because)
         return
-    ctx.workspace.register_provider(AgentFsProvider(ctx=ctx, root=root, probe=result))
+    ctx.require(WORKSPACE).register_provider(AgentFsProvider(ctx=ctx, root=root, probe=result))
 
 
 ORIGIN = "origin"

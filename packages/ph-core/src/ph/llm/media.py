@@ -33,6 +33,7 @@ from dataclasses import replace
 from typing import Any
 
 from ..cordis import Context, plugin
+from ..keys import ATTACHMENTS, LLM, SESSIONS
 from ..session import Session
 from .adapter import ResolvedModel
 from .types import AttachmentRef, GenerateOptions, Message, TextBlock, attachment_of
@@ -243,18 +244,18 @@ def record_oversized(session: Session, provider: str, notices: list[dict[str, An
     return _record_once(session, "attachment/oversized", provider, notices)
 
 
-@plugin("media-degrade", inject=["llm", "sessions"])
+@plugin("media-degrade", inject=[LLM, SESSIONS])
 async def apply(ctx: Context, config: None) -> None:
     """Replace media the routed model cannot read, before any adapter sees it."""
 
     async def degrade(options: GenerateOptions, next_: Callable[..., Any]) -> Any:
-        store = ctx.get("attachments")
-        route = ctx.llm.resolve_model(options.provider, options.model)
+        store = ctx.get(ATTACHMENTS)
+        route = ctx.require(LLM).resolve_model(options.provider, options.model)
         messages, degraded = degrade_media(options.messages, store, route)
         oversized = oversized_notices(messages, route)
         if not degraded and not oversized:
             return await next_()
-        raw = ctx.sessions.get(options.session_id) if options.session_id else None
+        raw = ctx.require(SESSIONS).get(options.session_id) if options.session_id else None
         session = raw if isinstance(raw, Session) else None
         # Logged only when the notice was *new*, which is the same condition the
         # append is under: a warning repeated on every step for the life of the

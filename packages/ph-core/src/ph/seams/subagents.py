@@ -37,6 +37,7 @@ from pydantic import Field
 
 from ..agent.types import AgentDriver
 from ..cordis import Context, Disposer, Running, plugin, running
+from ..keys import AGENTS, SESSIONS, SKILLS, SUBAGENT_PRESETS, SUBAGENTS, SYSTEM_PROMPT, TOOLS
 from ..session import Session, SessionFoldCache
 from ..system_prompt.assembly import PromptSection
 from ..tools.registry import ToolRestriction
@@ -582,8 +583,8 @@ class SubagentService:
         the three agree by construction rather than by re-derivation.
         """
         parent_scope = boundary if boundary is not None else self._delegating_boundary(request)
-        skills = self.ctx.get("skills")
-        tools = self.ctx.get("tools")
+        skills = self.ctx.get(SKILLS)
+        tools = self.ctx.get(TOOLS)
         return (
             tuple(sorted(skills.reach(parent_scope))) if skills is not None else (),
             tuple(tools.names(scope=parent_scope)) if tools is not None else (),
@@ -664,7 +665,7 @@ class SubagentService:
         """
         if request.preset is None:
             return request
-        service = self.ctx.get("subagent_presets")
+        service = self.ctx.get(SUBAGENT_PRESETS)
         preset = service.get(request.preset) if service is not None else None
         if preset is None:
             offered = ", ".join(service.names()) if service is not None else ""
@@ -695,7 +696,7 @@ class SubagentService:
         """
         held_skills, held_tools = held if held is not None else self.held_by(request, boundary)
         named = request.skills
-        skills = self.ctx.get("skills")
+        skills = self.ctx.get(SKILLS)
         target = boundary if boundary is not None else self._delegating_boundary(request)
         return Grant(
             skills=named if named is not None else held_skills,
@@ -832,7 +833,7 @@ class SubagentService:
         three hops itself, which is how the second caller forgets the
         revoked-child refusal.
         """
-        if self.ctx.agents.get(session_id) is not None:
+        if self.ctx.require(AGENTS).get(session_id) is not None:
             return True
         run = next((one for one in self._runs.values() if one.session_id == session_id), None)
         return bool(run is not None and await self.rehydrate(run.id))
@@ -1095,14 +1096,14 @@ class SubagentPresetService:
 @plugin("subagent-presets", config=PresetConfig)
 async def presets(ctx: Context, config: PresetConfig) -> None:
     """Publish the deployment's named child kinds. None ship in `ph-base`."""
-    ctx.provide("subagent_presets", SubagentPresetService(presets=dict(config.presets)))
+    ctx.provide(SUBAGENT_PRESETS, SubagentPresetService(presets=dict(config.presets)))
 
 
-@plugin("subagents", inject=["sessions"])
+@plugin("subagents", inject=[SESSIONS])
 async def apply(ctx: Context, config: None) -> None:
     """Mount the subagent seam definition. No provider ships in ph-base."""
     service = SubagentService(ctx=ctx)
-    ctx.provide("subagents", service)
+    ctx.provide(SUBAGENTS, service)
     # A disposed session's last projection is a value nobody can reach; the cache
     # is bounded either way, but holding it is holding it for nothing.
     ctx.on("session/disposed", lambda session: service.forget_session(session.id))
@@ -1149,13 +1150,13 @@ class Grant:
         never be narrowed below a parent that registered on its own scope. What still
         holds is that a scope cannot filter itself.
         """
-        skills = ctx.get("skills")
+        skills = ctx.get(SKILLS)
         if skills is not None:
             skills.restrict(SkillRestriction(allow=frozenset(self.skills)), scope=scope)
-        tools = ctx.get("tools")
+        tools = ctx.get(TOOLS)
         if tools is not None:
             tools.restrict(ToolRestriction(allow=frozenset(self.tools)), scope=scope)
-        prompt = ctx.get("system_prompt")
+        prompt = ctx.get(SYSTEM_PROMPT)
         if self.brief and prompt is not None:
             prompt.section(
                 PromptSection(name="subagent:brief", text=self.brief, order=ORDER_BRIEF),

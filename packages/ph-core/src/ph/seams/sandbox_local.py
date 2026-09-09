@@ -76,6 +76,7 @@ from urllib.parse import quote
 import anyio
 
 from ..cordis import Context, plugin
+from ..keys import SANDBOX, SUBPROCESS
 from ..paths import default_home_path, resolve_roots
 from ..resources import temporary_directory
 from ..wire import WireModel
@@ -650,8 +651,8 @@ async def probe_sandbox(ctx: Context, backend: LocalBackend, scratch: Path) -> S
         confined = backend.confine(
             ("/bin/sh", "-c", f"echo landed > {inside}; echo escaped > {outside}"), policy
         )
-        probe = await ctx.subprocess.run(
-            SubprocessSpawnSpec(argv=confined.argv, cwd=work, env=ctx.subprocess.env())
+        probe = await ctx.require(SUBPROCESS).run(
+            SubprocessSpawnSpec(argv=confined.argv, cwd=work, env=ctx.require(SUBPROCESS).env())
         )
         err = probe.stderr
         landed, host = await anyio.to_thread.run_sync(verdict)
@@ -701,9 +702,9 @@ async def probe_egress(
     policy = SandboxPolicy(mode="workspace-write", workspace_root=str(work), egress=bridge)
     try:
         confined = backend.confine(backend.egress_probe(bridge), policy)
-        probe = await ctx.subprocess.run(
+        probe = await ctx.require(SUBPROCESS).run(
             SubprocessSpawnSpec(
-                argv=confined.argv, cwd=work, env=ctx.subprocess.env(), timeout_ms=10_000
+                argv=confined.argv, cwd=work, env=ctx.require(SUBPROCESS).env(), timeout_ms=10_000
             )
         )
         answer = first_line(probe.stdout)
@@ -794,7 +795,9 @@ class _Egress:
         path = await egress_socket_path(ctx)
         # The door is the backend's to declare (`Door`): a namespace gets a shim
         # on the unix socket, a deny-list backend gets the proxy on loopback too.
-        proxy = EgressProxy(path=path, permits=ctx.sandbox.permits, loopback=backend.needs_loopback)
+        proxy = EgressProxy(
+            path=path, permits=ctx.require(SANDBOX).permits, loopback=backend.needs_loopback
+        )
         try:
             await proxy.start()
         except OSError as error:
@@ -819,12 +822,12 @@ class _Egress:
             return
 
         def denied(host: str, port: int, agent: str | None) -> None:
-            ctx.sandbox.record_denial(
+            ctx.require(SANDBOX).record_denial(
                 Denial(kind="network", via="proxy", host=host, port=port), agent=agent
             )
 
         proxy.on_denied = denied
-        ctx.sandbox.register_egress(bridge)
+        ctx.require(SANDBOX).register_egress(bridge)
         self.proxy = proxy
 
 
@@ -835,7 +838,7 @@ class Config(WireModel):
     """Where the probes do their work. `$PH_HOME/sandbox` by default."""
 
 
-@plugin("sandbox-local", inject=["sandbox", "subprocess"], config=Config)
+@plugin("sandbox-local", inject=[SANDBOX, SUBPROCESS], config=Config)
 async def apply(ctx: Context, config: Config) -> None:
     """Probe the host, and claim the sandbox slot only if the kernel enforced it.
 
@@ -879,5 +882,5 @@ async def apply(ctx: Context, config: Config) -> None:
     if backend is None or not result.confines:
         log.info("ph.seams.sandbox_local: declining — %s", result.because)
         return
-    ctx.sandbox.register_provider(backend)
+    ctx.require(SANDBOX).register_provider(backend)
     await egress.mount(ctx, backend, scratch)

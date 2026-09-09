@@ -40,6 +40,7 @@ from typing import Any
 from pydantic import Field
 
 from ...cordis import Context, plugin
+from ...keys import ATTACHMENTS, FS, TOOLS
 from ...llm.media import is_attachable
 from ...llm.types import ContentBlock, MediaBlock, PluginSource, create_user_message
 from ...seams.attachments import OCTET_STREAM, mime_of
@@ -120,7 +121,7 @@ def _render(args: Any, value: Any) -> list[ContentBlock]:
     return text_content(f"Attached {value['path']} ({size}). It follows this result.")
 
 
-@plugin("tool-attach", config=Config, inject=["tools", "fs", "attachments"])
+@plugin("tool-attach", config=Config, inject=[TOOLS, FS, ATTACHMENTS])
 async def apply(ctx: Context, config: Config) -> None:
     """Register the attach tool.
 
@@ -130,10 +131,11 @@ async def apply(ctx: Context, config: Config) -> None:
     to put a file has been taught a capability the deployment does not have, and
     pays prompt tokens for the lesson on every request.
     """
-    store = ctx.attachments
+    store = ctx.require(ATTACHMENTS)
 
     async def attach(args: AttachArgs, run: ToolRunContext) -> Any:
-        target = ctx.fs.resolve(args.path, agent=run.agent)
+        fs = ctx.require(FS)
+        target = fs.resolve(args.path, agent=run.agent)
         mime = mime_of(target.name)
         if not is_attachable(mime):
             # Before the gate, and cheap: this is a statement about the argument,
@@ -143,7 +145,7 @@ async def apply(ctx: Context, config: Config) -> None:
             # than the literal `application/octet-stream`.
             named = "no recognisable type" if mime == OCTET_STREAM else mime
             raise HarnessError(f"{args.path} is {named}. {REACH_FOR_READ}", "NOT_ATTACHABLE")
-        content = await ctx.fs.read_bytes(
+        content = await fs.read_bytes(
             args.path,
             scope=run.scope,
             agent=run.agent,
@@ -161,7 +163,7 @@ async def apply(ctx: Context, config: Config) -> None:
             )
         )
         return {
-            "path": ctx.fs.named(target, agent=run.agent),
+            "path": fs.named(target, agent=run.agent),
             "attachment_id": ref.attachment_id,
             "mime": ref.mime,
             "bytes": ref.bytes,
@@ -169,7 +171,7 @@ async def apply(ctx: Context, config: Config) -> None:
             "height": ref.height,
         }
 
-    ctx.tools.register(
+    ctx.require(TOOLS).register(
         define_tool(
             "attach",
             "Attach an image, audio file, video or PDF from the workspace so you can see it. "

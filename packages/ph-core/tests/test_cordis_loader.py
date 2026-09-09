@@ -12,12 +12,14 @@ from __future__ import annotations
 
 import sys
 import types
+from pathlib import Path
 from typing import Any
 
 import pytest
 
 from ph.cordis import Context, Disposer, LoaderError, plugin
 from ph.cordis.loader import (
+    PROJECT_ROOT,
     Profile,
     _state,
     compose_rows,
@@ -562,3 +564,34 @@ async def test_reconfigure_refuses_what_it_cannot_do_honestly(mount: Any) -> Non
         await ctx.mount.reconfigure("nonesuch", {})
     with pytest.raises(LoaderError, match="is disabled by"):
         await ctx.mount.reconfigure("sandbox-allow", {})
+
+
+# ------------------------------------------------ where a mount works (P5-14) --
+
+
+async def test_a_mount_provides_the_project_it_was_given(tmp_path: Path) -> None:
+    """`project=` is the door for "where this mount works".
+
+    It was `ctx.provide("project_root", …)` *before* `mount`, done only by
+    `ph_app.runtime` — an ordering no signature stated, so every other caller of
+    `mount` (the tests, the plugins' own mounts, an embedder) had no way to say
+    it and silently got the process's directory. Beside `ctx.mount` now, because
+    it is the same kind of fact: true of this mount, needed while rows apply.
+    """
+    ctx = Context()
+    await Profile.from_documents([]).mount(ctx, project=tmp_path)
+
+    assert ctx.require(PROJECT_ROOT) == tmp_path
+    await ctx.dispose()
+
+
+async def test_a_mount_given_no_project_provides_none() -> None:
+    """Absent rather than defaulted here: `fs-local` owns the fallback, and a
+    `Path.cwd()` frozen at mount time would be a different answer from the one a
+    row computes when it applies."""
+    ctx = Context()
+    await Profile.from_documents([]).mount(ctx)
+
+    # `has` is the stronger of the two: it also rules out a provided `None`.
+    assert not ctx.has(PROJECT_ROOT)
+    await ctx.dispose()

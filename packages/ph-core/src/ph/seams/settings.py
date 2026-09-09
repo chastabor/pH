@@ -19,6 +19,7 @@ from typing import Any
 import anyio
 
 from ..cordis import Context, plugin
+from ..keys import SETTINGS
 from ..paths import default_home_path, write_text_under
 from ..wire import WireModel
 
@@ -83,4 +84,4 @@ class Config(WireModel):
 async def apply(ctx: Context, config: Config) -> None:
     """Mount the local settings store."""
     path = default_home_path(config.path, "settings.json")
-    ctx.provide("settings", SettingsService(ctx=ctx, path=path))
+    ctx.provide(SETTINGS, SettingsService(ctx=ctx, path=path))

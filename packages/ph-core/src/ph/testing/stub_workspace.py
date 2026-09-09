@@ -23,6 +23,7 @@ from hashlib import blake2b
 from pathlib import Path
 from typing import Any
 
+from ..keys import SESSIONS, WORKSPACE
 from ..seams.workspace import ContainmentTier, Workspace, WorkspaceAccess, WorkspaceKind
 
 __all__ = ["StubCheckpointingProvider", "StubWorkspaceProvider", "acquire_for_role"]
@@ -140,13 +141,14 @@ async def acquire_for_role(ctx: Any, base: Path, *, child: bool = False) -> Any:
     makes a workspace" is a contradiction, and what differs per role is whether
     the caller asks for one.
     """
-    if ctx.workspace.provider is None:
-        ctx.workspace.register_provider(StubWorkspaceProvider(root=base / "trees"))
-    session = ctx.sessions.create(
+    workspace_seam = ctx.require(WORKSPACE)
+    if workspace_seam.provider is None:
+        workspace_seam.register_provider(StubWorkspaceProvider(root=base / "trees"))
+    session = ctx.require(SESSIONS).create(
         "child-session" if child else "root-session",
         meta={"origin": "subagent"} if child else None,
     )
-    return await ctx.workspace.acquire(
+    return await workspace_seam.acquire(
         session_id=session.id,
         agent_id="child" if child else "root",
         base=base,

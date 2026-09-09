@@ -40,6 +40,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..cordis import Context, Disposer, events, plugin
+from ..keys import USER_QUESTIONS
 from ..session import Session
 from ..wire import WireModel
 from ._registry import claim_entry
@@ -242,4 +243,4 @@ class UserQuestionService:
 @plugin("user-questions")
 async def apply(ctx: Context, config: None) -> None:
     """Mount the user-question seam."""
-    ctx.provide("user_questions", UserQuestionService(ctx=ctx))
+    ctx.provide(USER_QUESTIONS, UserQuestionService(ctx=ctx))

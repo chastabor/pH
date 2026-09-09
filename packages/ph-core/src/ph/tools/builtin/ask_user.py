@@ -30,6 +30,7 @@ from typing import Any
 from pydantic import Field
 
 from ...cordis import Context, plugin
+from ...keys import TOOLS, USER_QUESTIONS
 from ...seams.user_questions import UserQuestion
 from ..definition import ToolModel, ToolOutput, ToolRunContext, define_tool, text_content
 from ..presentation import ToolCallView, ToolResultView
@@ -77,12 +78,12 @@ class AskUserValue(ToolModel):
     answered: bool
 
 
-@plugin("tool-ask-user", inject=["tools", "user_questions"])
+@plugin("tool-ask-user", inject=[TOOLS, USER_QUESTIONS])
 async def apply(ctx: Context, config: None) -> None:
     """Register the question tool."""
 
     async def ask_user(args: AskUserArgs, run: ToolRunContext) -> Any:
-        answer = await ctx.user_questions.ask(
+        answer = await ctx.require(USER_QUESTIONS).ask(
             UserQuestion(
                 question=args.question,
                 options=args.options,
@@ -97,7 +98,7 @@ async def apply(ctx: Context, config: None) -> None:
         )
         return {"answer": answer, "answered": answer is not None}
 
-    ctx.tools.register(
+    ctx.require(TOOLS).register(
         define_tool(
             "ask_user",
             DESCRIPTION,

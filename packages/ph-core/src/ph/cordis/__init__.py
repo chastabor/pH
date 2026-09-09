@@ -37,6 +37,7 @@ from .errors import (
     UndeclaredEventError,
 )
 from .events import DispatchMode, EventDeclaration, EventRegistry, events
+from .key import ServiceKey, service_name
 from .loader import (
     ENTRY_POINT_GROUP,
     Mount,
@@ -77,6 +78,7 @@ __all__ = [
     "Row",
     "Running",
     "ServiceConflictError",
+    "ServiceKey",
     "ServiceNotFoundError",
     "UndeclaredEventError",
     "boundary_of",
@@ -94,4 +96,5 @@ __all__ = [
     "resolve_plugin",
     "running",
     "safe_yaml_load",
+    "service_name",
 ]

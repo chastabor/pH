@@ -47,6 +47,7 @@ from pathlib import Path
 import anyio
 
 from ..cordis import Context, plugin
+from ..keys import SUBPROCESS, WORKSPACE
 from ..paths import canonical, default_home_path, is_under
 from ..wire import WireModel
 from .subprocess import SubprocessSpawnSpec
@@ -100,9 +101,11 @@ async def git(
     off git's words, would depend on the operator's locale.
     """
     spec = SubprocessSpawnSpec(
-        argv=("git", *args), cwd=cwd, env=ctx.subprocess.env(extra={"LC_ALL": "C", **(env or {})})
+        argv=("git", *args),
+        cwd=cwd,
+        env=ctx.require(SUBPROCESS).env(extra={"LC_ALL": "C", **(env or {})}),
     )
-    outcome = await ctx.subprocess.run(spec)
+    outcome = await ctx.require(SUBPROCESS).run(spec)
     return outcome.exit_code, outcome.stdout, outcome.stderr
 
 
@@ -631,7 +634,7 @@ class Config(WireModel):
     deeper by every child."""
 
 
-@plugin("workspace-git-worktree", inject=["workspace", "subprocess"], config=Config)
+@plugin("workspace-git-worktree", inject=[WORKSPACE, SUBPROCESS], config=Config)
 async def apply(ctx: Context, config: Config) -> None:
     """Register the worktree tier as the workspace provider.
 
@@ -640,7 +643,7 @@ async def apply(ctx: Context, config: Config) -> None:
     this module's.
     """
     provider = GitWorktreeProvider(ctx=ctx, root=default_home_path(config.root, "worktrees"))
-    ctx.workspace.register_provider(provider, scope=ctx)
+    ctx.require(WORKSPACE).register_provider(provider, scope=ctx)
 
 
 # ------------------------------------------------- per-run restore points --

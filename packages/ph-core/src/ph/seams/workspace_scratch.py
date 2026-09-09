@@ -31,6 +31,7 @@ from pathlib import Path
 import anyio
 
 from ..cordis import Context, plugin
+from ..keys import SANDBOX, WORKSPACE
 from .diagnostics import Diagnostic, contribute
 from .sandbox import enforcement_of
 from .workspace import ContainmentTier, Workspace, WorkspaceAccess, redirection_env
@@ -76,7 +77,7 @@ class ReadonlyScratchProvider:
         )
 
 
-@plugin("workspace-readonly-scratch", inject=["workspace", "sandbox"])
+@plugin("workspace-readonly-scratch", inject=[WORKSPACE, SANDBOX])
 async def apply(ctx: Context, _config: object) -> None:
     """Claim the `sandbox` rung on `profile/mounted`, once a backend can enforce it."""
     contribute(
@@ -94,7 +95,7 @@ async def apply(ctx: Context, _config: object) -> None:
         if because is not None:
             log.info("ph.seams.workspace_scratch: declining — %s", because)
             return
-        ctx.workspace.register_provider(ReadonlyScratchProvider())
+        ctx.require(WORKSPACE).register_provider(ReadonlyScratchProvider())
 
     ctx.on("profile/mounted", claim)
 

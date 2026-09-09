@@ -17,6 +17,7 @@ from __future__ import annotations
 from typing import Any
 
 from ..cordis import Context, plugin
+from ..keys import SESSIONS
 from ..seams.invariants import Invariant, contribute
 
 __all__ = ["apply", "violations"]
@@ -24,14 +25,14 @@ __all__ = ["apply", "violations"]
 
 def violations(ctx: Context) -> list[str]:
     """Every live session whose projections disagree with its log."""
-    return [detail for session in ctx.sessions.list() for detail in session.stale()]
+    return [detail for session in ctx.require(SESSIONS).list() for detail in session.stale()]
 
 
-@plugin("session-invariant", inject=["sessions"])
+@plugin("session-invariant", inject=[SESSIONS])
 async def apply(ctx: Context, _config: Any) -> None:
     """Declare the session half of I6, pollable.
 
-    `inject=["sessions"]` for the reason `skills-invariant` states: a deployment
+    `inject=[SESSIONS]` for the reason `skills-invariant` states: a deployment
     with no session store has nothing for this to be true *of*, and reporting it
     as holding would be an overstatement about the one thing the log is supposed
     to be the source of.

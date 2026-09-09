@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from ..cordis import Context, Running, events, plugin, running
+from ..keys import LLM
 from .types import Finish, FinishReason, GenerateOptions, LlmFailure, StreamChunk
 
 __all__ = [
@@ -311,4 +312,4 @@ async def _normalized(
 @plugin("llm")
 async def apply(ctx: Context, config: None) -> None:
     """Mount the model adapter seam."""
-    ctx.provide("llm", LlmRuntime(ctx=ctx))
+    ctx.provide(LLM, LlmRuntime(ctx=ctx))

@@ -45,6 +45,7 @@ import anyio
 
 from ..agent.types import AgentHandle
 from ..cordis import Boundary, Context, Disposer, Running, boundary_of, events, plugin, running
+from ..keys import FS, PROJECT_ROOT
 from ..session import Session
 from ..tools.errors import FailureKind, HarnessError
 from ..wire import WireModel
@@ -990,7 +991,7 @@ async def apply(ctx: Context, config: Config) -> None:
     # different repositories, so the directory cannot come from the profile
     # (P5-14). `Path.cwd()` is the process's own, which is right for a mode that
     # is *in* the project and was silently wrong for every root a daemon held.
-    provided = ctx.get("project_root")
+    provided = ctx.get(PROJECT_ROOT)
     if config.root:
         root = Path(config.root).expanduser()
     elif provided is not None:
@@ -998,7 +999,7 @@ async def apply(ctx: Context, config: Config) -> None:
     else:
         root = Path.cwd()
     service = FsService(ctx=ctx, root=root)
-    ctx.provide("fs", service)
+    ctx.provide(FS, service)
     ignored = frozenset(_IGNORED_PARTS if config.ignore is None else config.ignore)
     if not ignored:
         return
@@ -1019,7 +1020,7 @@ async def apply(ctx: Context, config: Config) -> None:
     service.screen(ignore, scope=ctx)
 
 
-@plugin("fs-read-before-edit", inject=["fs"])
+@plugin("fs-read-before-edit", inject=[FS])
 async def read_before_edit(ctx: Context, config: None) -> None:
     """Refuse an edit to a file this session has not read since it last changed.
 
@@ -1027,7 +1028,7 @@ async def read_before_edit(ctx: Context, config: None) -> None:
     drop it, and it applies to *every* editing tool rather than the one that
     remembered to check.
     """
-    fs: FsService = ctx.fs
+    fs: FsService = ctx.require(FS)
 
     async def gate(intent: EditIntent, next_: Callable[[], Any]) -> Any:
         observed = fs.observed_mtime(intent.path)

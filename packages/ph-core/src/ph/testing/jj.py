@@ -18,6 +18,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from ..keys import AGENTS, FS, SESSIONS
 from ..seams.workspace_jj import jj
 
 __all__ = ["JJ_ROWS", "jj", "jj_agent", "jj_repo"]
@@ -69,6 +70,6 @@ async def jj_agent(mount: Any, *extra_rows: dict[str, Any]) -> tuple[Any, Any, A
     from ..testing import FAKE_OPTIONS
 
     ctx = await mount(*JJ_ROWS, *extra_rows)
-    base = await jj_repo(ctx, ctx.fs.root)
-    session = ctx.sessions.create("s1")
-    return ctx, base, session, ctx.agents.create(session, FAKE_OPTIONS)
+    base = await jj_repo(ctx, ctx.require(FS).root)
+    session = ctx.require(SESSIONS).create("s1")
+    return ctx, base, session, ctx.require(AGENTS).create(session, FAKE_OPTIONS)

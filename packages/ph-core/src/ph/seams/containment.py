@@ -40,6 +40,7 @@ from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
 from ..cordis import Context, MountRefusal, plugin
+from ..keys import CONTAINMENT, WORKSPACE
 from ..wire import WireModel
 from .diagnostics import Diagnostic, contribute
 from .sandbox import enforcement_of
@@ -207,7 +208,7 @@ class ContainmentService:
         the finding; a colour would let a reader skip the sentence, and the
         sentence is what stops a tier's name from overstating it (E1).
         """
-        workspace = self.ctx.get("workspace")
+        workspace = self.ctx.get(WORKSPACE)
         root: ContainmentTier = "advisory"
         child: ContainmentTier = "advisory"
         if workspace is not None:
@@ -304,7 +305,7 @@ async def apply(ctx: Context, config: Config) -> None:
         child_tier=config.child_tier,
         strict=config.strict,
     )
-    ctx.provide("containment", containment)
+    ctx.provide(CONTAINMENT, containment)
     # A listener rather than a call here, so the verdict is taken once the whole
     # profile is composed — and so a *second* row wanting to refuse a deployment
     # registers one too, instead of another `if` in whoever starts the process.

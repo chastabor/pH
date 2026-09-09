@@ -34,6 +34,7 @@ from ..cordis import (
     plugin,
     running,
 )
+from ..keys import SYSTEM_PROMPT
 from ..llm.types import ContextSnapshotSection, ToolSchema
 from ..seams._registry import claim_entry
 
@@ -59,7 +60,7 @@ PromptText: TypeAlias = "str | Callable[[AssembleContext], str | Awaitable[str]]
 
 The **request**, not just the scope: a section that needs the agent — the RLM
 child doctrine, which applies only below depth 0 — would otherwise have to
-recover it from `scope.get("agent")`, which means a bundle in another package
+recover it from `scope.get(AGENT)`, which means a bundle in another package
 knowing how `ph.agent.registry` provisions it, and silently rendering nothing
 whenever an assembly runs outside an agent scope. `AssembleContext` already
 carries both; handing it over costs one parameter.
@@ -113,7 +114,7 @@ class AssembleContext:
     A `Context`, never a `Boundary` — this payload is what a *provider* receives,
     not what a caller states. `assemble` takes the `Boundary` and narrows it
     once, so a provider is handed a real scope and `PromptText`'s documented
-    `scope.get("agent")` shape type-checks. Typed `Boundary` it did not: mypy
+    `scope.get(AGENT)` shape type-checks. Typed `Boundary` it did not: mypy
     reported `Item "Deployment" … has no attribute "get"` against the very
     pattern that alias's own docstring holds up as the thing a provider writes.
 
@@ -365,4 +366,4 @@ class SystemPromptService:
 @plugin("system-prompt")
 async def apply(ctx: Context, config: None) -> None:
     """Mount the system-prompt assembly seam."""
-    ctx.provide("system_prompt", SystemPromptService(ctx=ctx))
+    ctx.provide(SYSTEM_PROMPT, SystemPromptService(ctx=ctx))

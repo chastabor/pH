@@ -30,6 +30,7 @@ from pydantic import Field
 from ..agent.types import AgentHandle
 from ..cancel import CancelToken, is_cancelled
 from ..cordis import Context, Disposer, events, plugin
+from ..keys import APPROVAL
 from ..session import Session
 from ..wire import WireModel
 
@@ -405,4 +406,4 @@ class ApprovalService:
 @plugin("approval")
 async def apply(ctx: Context, config: None) -> None:
     """Mount the approval seam."""
-    ctx.provide("approval", ApprovalService(ctx=ctx))
+    ctx.provide(APPROVAL, ApprovalService(ctx=ctx))

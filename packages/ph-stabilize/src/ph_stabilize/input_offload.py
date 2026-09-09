@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Any
 
 from ph.cordis import Context, plugin
+from ph.keys import SPILL_STORE
 from ph.llm.types import PluginSource, create_user_message, text_of
 from ph.seams.spill import SpillClaim
 from ph.session import (
@@ -101,10 +102,12 @@ def _pending(session: Session, config: Config) -> tuple[SessionEvent, str] | Non
     return (event, text) if over_token_limit(text, config.token_limit) else None
 
 
-@plugin("input-offload", inject=["spill_store"], config=Config)
+@plugin("input-offload", inject=[SPILL_STORE], config=Config)
 async def apply(ctx: Context, config: Config) -> None:
     """Replace an oversized pasted message on the surface, not in the log."""
-    ctx.spill_store.claim(SpillClaim.under_session("input-offload", "offload/input-spilled"))
+    ctx.require(SPILL_STORE).claim(
+        SpillClaim.under_session("input-offload", "offload/input-spilled")
+    )
 
     async def offload(proposal: Any, next_: Any) -> Any:
         session: Session | None = getattr(proposal.agent, "session", None)
@@ -112,7 +115,7 @@ async def apply(ctx: Context, config: Config) -> None:
         if session is None or pending is None:
             return await next_(proposal)
         event, text = pending
-        ref = await ctx.spill_store.try_save_text(
+        ref = await ctx.require(SPILL_STORE).try_save_text(
             owner=session.id,
             source="pasted message",
             # Named by the seq it replaces rather than upstream's uuid: the

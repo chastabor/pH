@@ -42,6 +42,7 @@ import typer
 from rich.filesize import decimal
 
 from ph.cordis import Profile
+from ph.keys import ATTACHMENTS, SESSION_PERSISTENCE, UPLOADS
 from ph.seams.attachments import MIN_AGE, AttachmentSurvey, collect_attachments, survey_attachments
 
 from .console import emit, fail_unmounted
@@ -124,12 +125,12 @@ async def _collect(profile: Profile, *, min_age: float, remove: bool) -> str:
     sweep the default directory of a deployment that does not use it.
     """
     async with mounted(profile) as ctx:
-        store = ctx.get("attachments")
-        persistence = ctx.get("session_persistence")
+        store = ctx.get(ATTACHMENTS)
+        persistence = ctx.get(SESSION_PERSISTENCE)
         if store is None or persistence is None:
             missing = "attachment store" if store is None else "session store"
             return f"this profile mounts no {missing}, so there is nothing to account for"
-        uploads = ctx.get("uploads")
+        uploads = ctx.get(UPLOADS)
         survey = survey_attachments(store, persistence, uploads=uploads, min_age=min_age)
         # **One summary sentence, always.** An early "nothing to collect" return
         # here read the counts and not `safe`, so a store with a torn log and

@@ -24,12 +24,13 @@ from __future__ import annotations
 from typing import Any
 
 from ..cordis import Context, plugin
+from ..keys import MOUNT
 from .diagnostics import ORDER_SELF_ASSESSMENT, Diagnostic, contribute
 
 __all__ = ["apply"]
 
 
-@plugin("topology", inject=["mount"])
+@plugin("topology", inject=[MOUNT])
 async def apply(ctx: Context, _config: Any) -> None:
     """Offer the mount's account of itself as a section."""
     contribute(
@@ -37,7 +38,7 @@ async def apply(ctx: Context, _config: Any) -> None:
         Diagnostic(
             id="topology",
             title="Topology",
-            read=ctx.mount.topology,
+            read=ctx.require(MOUNT).topology,
             # After every reading and before the self-assessment, which asks
             # for exactly this: meet the deployment's account of itself first.
             order=ORDER_SELF_ASSESSMENT - 10,

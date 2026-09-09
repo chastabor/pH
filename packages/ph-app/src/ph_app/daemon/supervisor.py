@@ -38,6 +38,7 @@ from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStre
 
 from ph.agent.types import AgentDriver, AgentOptions
 from ph.cordis import Context, Profile
+from ph.keys import AGENTS, SCHEDULE, SESSION_PERSISTENCE, SESSIONS, SUBAGENTS, TOOLS, WORKSPACE
 from ph.llm.types import AttachmentRef
 from ph.paths import resolve_roots
 from ph.persistence import resumption_of
@@ -593,7 +594,7 @@ class Supervisor:
             )
             session = await self._session_for(ctx, root_id, cwd=cwd)
             options = AgentOptions(provider=self.provider, model=self.model)
-            agent = ctx.agents.create(session, options)
+            agent = ctx.require(AGENTS).create(session, options)
             wake, waiting = anyio.create_memory_object_stream[None](max_buffer_size=WAKE_SLOTS)
             root = Root(
                 id=root_id,
@@ -629,7 +630,7 @@ class Supervisor:
             # caught mid-turn are settled rather than re-run — see
             # `resume_children`. In the table first, because a readmitted child
             # starts a drive job owned by this root's scope.
-            subagents = ctx.get("subagents")
+            subagents = ctx.get(SUBAGENTS)
             if subagents is not None:
                 revived = await subagents.resume_children(agent, retry_limit=CHILD_RETRY_LIMIT)
                 if revived:
@@ -656,10 +657,10 @@ class Supervisor:
                 # from the definitions mounted right now, and an event is what
                 # the log said. Gated *here* rather than inside `presentation_of`
                 # because this runs per appended event — every streamed chunk —
-                # and Python evaluates `ctx.get("tools")` before the function
+                # and Python evaluates `ctx.get(TOOLS)` before the function
                 # that would have rejected the event anyway.
                 if event.type in CARD_EVENTS:
-                    view = presentation_of(ctx.get("tools"), source, event)
+                    view = presentation_of(ctx.get(TOOLS), source, event)
                     if view is not None:
                         payload["presentation"] = view
                 root.publish("session.event", payload)
@@ -807,7 +808,7 @@ class Supervisor:
         while True:
             try:
                 await root.agent.run()
-                await root.ctx.sessions.flush(root.session)
+                await root.ctx.require(SESSIONS).flush(root.session)
                 if root.recovery.attempts:
                     # Only after a ladder was actually climbed, so an ordinary
                     # turn writes nothing. This is what clears the count, and it
@@ -846,7 +847,7 @@ class Supervisor:
         for a person who just asked to create one: they would get a silent
         success and a schedule that never fires.
         """
-        seam = root.ctx.get("schedule")
+        seam = root.ctx.get(SCHEDULE)
         if seam is None:
             raise ScheduleUnavailable(f'root "{root.id}" has no schedule seam mounted')
         return seam
@@ -894,7 +895,7 @@ class Supervisor:
         it — the tick, the heartbeat and the passivation predicate — and each
         had its own copy of the name, the guard and the read.
         """
-        schedule = root.ctx.get("schedule")
+        schedule = root.ctx.get(SCHEDULE)
         return [] if schedule is None else list(schedule.live(root.session))
 
     async def rehydrate(self, *, now: int | None = None) -> list[str]:
@@ -978,7 +979,7 @@ class Supervisor:
         store may not have read.
         """
         for root in self.roots.values():
-            store = root.ctx.get("session_persistence")
+            store = root.ctx.get(SESSION_PERSISTENCE)
             if store is not None:
                 found: Path | None = store.directory()
                 return found
@@ -1026,7 +1027,7 @@ class Supervisor:
         stamp = now if now is not None else now_ms()
         fired: list[str] = []
         for root in list(self.roots.values()):
-            schedule = root.ctx.get("schedule")
+            schedule = root.ctx.get(SCHEDULE)
             if schedule is None:
                 continue
             # The whole per-root body, not just the claim: `claim` barely raises
@@ -1062,7 +1063,7 @@ class Supervisor:
         for root in list(self.roots.values()):
             live = self._live_schedules(root)
             if live:
-                root.ctx.schedule.heartbeat(root.session, now=stamp, live=len(live))
+                root.ctx.require(SCHEDULE).heartbeat(root.session, now=stamp, live=len(live))
                 await self._flush(root)
 
     async def announce_unreachable(self, note: dict[str, Any]) -> None:
@@ -1107,7 +1108,7 @@ class Supervisor:
         log left its context undisposed.
         """
         try:
-            await root.ctx.sessions.flush(root.session)
+            await root.ctx.require(SESSIONS).flush(root.session)
         except Exception:
             log.warning("ph_app.daemon: root %s could not flush its retry", root.id, exc_info=True)
 
@@ -1138,7 +1139,7 @@ class Supervisor:
         try:
             # Through the seam, which is safe here for the reason the lookup above
             # is *not*: `workspace_of` already answered, so the row is mounted.
-            await root.ctx.workspace.restore(workspace, tree)
+            await root.ctx.require(WORKSPACE).restore(workspace, tree)
         except Exception:
             log.warning(
                 "ph_app.daemon: root %s could not be restored to %s", root.id, tree, exc_info=True
@@ -1266,7 +1267,7 @@ class Supervisor:
         # whole-log walk. That is what saves the root this returns `False` for —
         # idle, unwatched, one unsettled child — which would otherwise re-fold
         # every sixty seconds for the life of the daemon.
-        subagents = root.ctx.get("subagents")
+        subagents = root.ctx.get(SUBAGENTS)
         roster = subagents.roster(root.session) if subagents is not None else {}
         if any(child_is_live(child) for child in roster.values()):
             return False
@@ -1326,12 +1327,12 @@ class Supervisor:
             "ph_app.daemon: passivating root %s after %d minutes idle", root.id, idle_ms // 60_000
         )
         self.roots.pop(root.id, None)
-        subagents = root.ctx.get("subagents")
+        subagents = root.ctx.get(SUBAGENTS)
         if subagents is not None:
             # The cached roster would outlive the root otherwise: the seam keys
             # its fold by session id and nothing else tells it this one is gone.
             subagents.forget_session(root.id)
-        schedule = root.ctx.get("schedule")
+        schedule = root.ctx.get(SCHEDULE)
         if schedule is not None:
             schedule.forget_session(root.id)
         await root.wake.aclose()

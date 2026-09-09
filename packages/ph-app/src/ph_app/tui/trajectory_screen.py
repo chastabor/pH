@@ -29,6 +29,7 @@ from textual.screen import Screen
 from textual.widgets import DataTable, Static
 
 from ph.cordis import Context, plugin
+from ph.keys import SESSIONS, TUI_SCREENS
 from ph.seams.tui_screens import ScreenDefinition
 from ph.session import Session, SessionForkError
 
@@ -250,7 +251,7 @@ reading a file"); what it costs is the fork action, exactly as `ph trajectory
 """
 
 
-@plugin("tui-screen-trajectory", inject=["tui_screens", "sessions"])
+@plugin("tui-screen-trajectory", inject=[TUI_SCREENS, SESSIONS])
 async def apply(ctx: Context, config: None) -> None:
     """Contribute the trajectory to whatever front end is drawing.
 
@@ -258,13 +259,13 @@ async def apply(ctx: Context, config: None) -> None:
     registration an effect of *this row* — unloading it takes the screen, its
     `/trajectory` command and its key with it (I2).
     """
-    ctx.tui_screens.register(
+    ctx.require(TUI_SCREENS).register(
         ScreenDefinition(
             id=SCREEN_ID,
             label="Trajectory",
             order=10,
             key=TRAJECTORY_KEY,
-            build=_BuildTrajectory(sessions=ctx.sessions),
+            build=_BuildTrajectory(sessions=ctx.require(SESSIONS)),
         ),
         scope=ctx,
     )

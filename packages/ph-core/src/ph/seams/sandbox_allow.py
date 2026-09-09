@@ -23,13 +23,14 @@ from __future__ import annotations
 from pathlib import Path
 
 from ..cordis import Context, plugin
+from ..keys import SANDBOX
 from .diagnostics import Diagnostic, contribute
 from .sandbox import Allowances, SandboxSeam
 
 __all__ = ["apply", "describe", "describe_paths"]
 
 
-@plugin("sandbox-allow", inject=["sandbox"], config=Allowances)
+@plugin("sandbox-allow", inject=[SANDBOX], config=Allowances)
 async def apply(ctx: Context, config: Allowances) -> None:
     """Register the deployment's allowances and say what they are.
 
@@ -39,13 +40,13 @@ async def apply(ctx: Context, config: Allowances) -> None:
     command's equality check had become a rule this row's registration had to
     remember.
     """
-    ctx.sandbox.register_allowances(config)
+    ctx.require(SANDBOX).register_allowances(config)
     contribute(
         ctx,
         Diagnostic(
             id="sandbox-allow",
             title="Sandbox allowances",
-            read=lambda: describe(ctx.sandbox),
+            read=lambda: describe(ctx.require(SANDBOX)),
             order=16,
         ),
     )

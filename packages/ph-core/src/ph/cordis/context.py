@@ -43,12 +43,13 @@ from collections.abc import Awaitable, Callable, Iterator, MutableMapping, Seque
 from contextlib import suppress
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
-from typing import Any, TypeAlias
+from typing import Any, TypeAlias, overload
 
 import anyio
 
 from .errors import InactiveScopeError, ServiceConflictError, ServiceNotFoundError
 from .events import events as event_registry
+from .key import ServiceKey, service_name, service_names
 from .plugin import PluginSpec, normalize_plugin
 
 __all__ = [
@@ -838,30 +839,40 @@ class Context:
 
     # ------------------------------------------------------------- services --
 
-    def provide(self, key: str, service: object) -> Disposer:
+    @overload
+    def provide[T](self, key: ServiceKey[T], service: T) -> Disposer: ...
+    @overload
+    def provide(self, key: str, service: object) -> Disposer: ...
+    def provide(self, key: str | ServiceKey[Any], service: object) -> Disposer:
         """Claim `ctx.<key>` for `service` in this context's provisioning realm.
 
         Returns a disposer registered as an effect of the calling scope, so the
         service unregisters when its plugin unloads (invariant I2).
+
+        **Overloaded on the key, and the typed arm is where a seam's contract is
+        checked.** `provide(LLM, adapter)` refuses anything that is not an
+        `LlmRuntime` at type-check time; the `str` arm takes an `object`, as it
+        always did, for the caller that has only a name.
         """
         self._assert_active()
+        name = service_name(key)
         target = self._provide_to
-        existing = target._services.get(key)
+        existing = target._services.get(name)
         if existing is not None:
             raise ServiceConflictError(
-                f'service "{key}" is already provided in realm {target.path} '
+                f'service "{name}" is already provided in realm {target.path} '
                 f"by {existing.owner.path}"
             )
-        target._services[key] = _Provision(value=service, owner=self)
+        target._services[name] = _Provision(value=service, owner=self)
         self._runtime.dirty = True
 
         def unprovide() -> None:
-            current = target._services.get(key)
+            current = target._services.get(name)
             if current is not None and current.value is service:
-                del target._services[key]
+                del target._services[name]
                 self._runtime.dirty = True
 
-        return self.add_disposer(unprovide, label=f"provide({key})")
+        return self.add_disposer(unprovide, label=f"provide({name})")
 
     def _provision(self, key: str) -> Any:
         """Resolve `key` most-specific-first up the scope chain."""
@@ -871,22 +882,50 @@ class Context:
                 return provision.value
         return _MISSING
 
-    def get(self, key: str, default: Any = None) -> Any:
-        value = self._provision(key)
+    @overload
+    def get[T](self, key: ServiceKey[T], default: T | None = None) -> T | None: ...
+    @overload
+    def get(self, key: str, default: Any = None) -> Any: ...
+    def get(self, key: str | ServiceKey[Any], default: Any = None) -> Any:
+        """The service under `key`, or `default` — the optional read.
+
+        Typed through the key: `ctx.get(ATTACHMENTS)` is an `AttachmentStore |
+        None`, so the `if store is None` a caller writes next is checked rather
+        than habitual.
+        """
+        value = self._provision(service_name(key))
         return default if value is _MISSING else value
 
-    def has(self, key: str) -> bool:
-        return self._provision(key) is not _MISSING
+    def has(self, key: str | ServiceKey[Any]) -> bool:
+        return self._provision(service_name(key)) is not _MISSING
+
+    @overload
+    def require[T](self, key: ServiceKey[T]) -> T: ...
+    @overload
+    def require(self, key: str) -> Any: ...
+    def require(self, key: str | ServiceKey[Any]) -> Any:
+        """The service under `key`, or `ServiceNotFoundError` — the required read.
+
+        The typed spelling of `ctx.llm`: same lookup, same refusal, and the
+        result is an `LlmRuntime` rather than `Any`. Named for what it does on
+        absence — the seams' own `require()` methods set the precedent — so a
+        reader can tell a call that may get `None` (`get`) from one that cannot.
+        """
+        name = service_name(key)
+        value = self._provision(name)
+        if value is _MISSING:
+            raise ServiceNotFoundError(f'no service "{name}" is provided at or above {self.path}')
+        return value
 
     def __getattr__(self, key: str) -> Any:
         # Never intercept private/dunder lookups: doing so turns a missing
         # attribute during __init__ into unbounded recursion.
         if key.startswith("_"):
             raise AttributeError(key)
-        value = self._provision(key)
-        if value is _MISSING:
-            raise ServiceNotFoundError(f'no service "{key}" is provided at or above {self.path}')
-        return value
+        # The untyped sugar. It stays for scripts and for the reads a seam makes
+        # of a service it cannot name without a cycle; `require` is the same
+        # lookup with a type on it.
+        return self.require(key)
 
     # -------------------------------------------------------------- effects --
 
@@ -951,7 +990,11 @@ class Context:
         return ForkScope(self, normalize_plugin(plugin), config)
 
     def inject(
-        self, keys: Sequence[str], fn: Callable[[Context], Any], *, label: str = "inject"
+        self,
+        keys: Sequence[str | ServiceKey[Any]],
+        fn: Callable[[Context], Any],
+        *,
+        label: str = "inject",
     ) -> Disposer:
         """Run `fn(scope)` once every key in `keys` is available.
 
@@ -963,7 +1006,7 @@ class Context:
 
     def _register_dependent(
         self,
-        keys: Sequence[str],
+        keys: Sequence[str | ServiceKey[Any]],
         activate: Callable[[Context], Any],
         *,
         label: str,
@@ -972,7 +1015,11 @@ class Context:
         """The one registration path for plugins and injections alike."""
         self._assert_active()
         dependent = _Dependent(
-            ctx=self, keys=tuple(keys), activate=activate, label=label, module=module
+            ctx=self,
+            keys=service_names(keys),
+            activate=activate,
+            label=label,
+            module=module,
         )
         self._runtime.dependents.append(dependent)
         self._runtime.dirty = True

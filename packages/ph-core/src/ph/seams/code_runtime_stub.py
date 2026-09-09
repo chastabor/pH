@@ -21,7 +21,8 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..cordis import Context, plugin
-from .code_runtime import CodeRunRequest, CodeRunResult
+from ..keys import CODE_RUNTIME, CODE_RUNTIME_STUB
+from .code_runtime import CodeRunRequest, CodeRunResult, Isolation, Persistence
 
 __all__ = ["StubCodeRuntime", "apply"]
 
@@ -31,8 +32,8 @@ class StubCodeRuntime:
     """Runs a registered Python callable as if it were a model-authored program."""
 
     language: str = "python"
-    isolation: str = "in-process"
-    persistence: str = "none"
+    isolation: Isolation = "in-process"
+    persistence: Persistence = "none"
     programs: dict[str, Callable[..., Any]] = field(default_factory=dict)
     logs: list[str] = field(default_factory=list)
 
@@ -80,9 +81,9 @@ class _Namespace:
         raise AttributeError(f"{self.namespace.name}.{name} is not a binding")
 
 
-@plugin("code-runtime-stub", inject=["code_runtime"])
+@plugin("code-runtime-stub", inject=[CODE_RUNTIME])
 async def apply(ctx: Context, config: None) -> None:
     """Register the stub runtime and expose it for a test to script."""
     runtime = StubCodeRuntime()
-    ctx.code_runtime.register(runtime)
-    ctx.provide("code_runtime_stub", runtime)
+    ctx.require(CODE_RUNTIME).register(runtime)
+    ctx.provide(CODE_RUNTIME_STUB, runtime)

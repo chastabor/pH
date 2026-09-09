@@ -39,8 +39,9 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..cordis import Context, Disposer, Running, plugin, running
+from ..keys import DIAGNOSTICS
 from ._names import require_slug
-from ._registry import claim_key, contribute_via
+from ._registry import claim_key, contribute_item
 
 __all__ = [
     "ID_MAX",
@@ -151,10 +152,10 @@ def contribute(ctx: Context, diagnostic: Diagnostic) -> None:
     to have here, and a deployment that removed the compaction row must not
     thereby lose kernel snapshots".
     """
-    contribute_via(ctx, "diagnostics", diagnostic, label=f"diagnostic({diagnostic.id})")
+    contribute_item(ctx, DIAGNOSTICS, diagnostic, label=f"diagnostic({diagnostic.id})")
 
 
 @plugin("diagnostics")
 async def apply(ctx: Context, _config: Any) -> None:
     """Mount the registration seam. No section ships in `ph-base`."""
-    ctx.provide("diagnostics", DiagnosticsRegistry(ctx=ctx))
+    ctx.provide(DIAGNOSTICS, DiagnosticsRegistry(ctx=ctx))

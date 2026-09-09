@@ -6,6 +6,7 @@ from functools import partial
 
 from ..agent.registry import DriverFactory
 from ..cordis import Context, plugin
+from ..keys import AGENTS, LLM, SESSIONS, SYSTEM_PROMPT
 from ..wire import WireModel
 from .driver import AgentCancelled, ReactLoopAgent
 
@@ -23,7 +24,7 @@ class Config(WireModel):
     max_parallel_tool_calls: int = 10
 
 
-@plugin("agent-loop", config=Config, inject=["agents", "llm", "sessions", "system_prompt"])
+@plugin("agent-loop", config=Config, inject=[AGENTS, LLM, SESSIONS, SYSTEM_PROMPT])
 async def apply(ctx: Context, config: Config) -> None:
     """Register `ReactLoopAgent` as the driver `ctx.agents.create()` uses."""
     # Annotated, so mypy holds the driver to `AgentDriver` here — `ctx.agents` is
@@ -31,4 +32,4 @@ async def apply(ctx: Context, config: Config) -> None:
     factory: DriverFactory = partial(
         ReactLoopAgent, max_parallel_tool_calls=config.max_parallel_tool_calls
     )
-    ctx.add_disposer(ctx.agents.register_driver(factory), label="agent-loop")
+    ctx.add_disposer(ctx.require(AGENTS).register_driver(factory), label="agent-loop")

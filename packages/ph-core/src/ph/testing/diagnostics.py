@@ -12,11 +12,13 @@ from __future__ import annotations
 
 from typing import Any
 
+from ..keys import DIAGNOSTICS
+
 __all__ = ["report_section"]
 
 
 def report_section(ctx: Any, title: str) -> dict[str, str]:
     """One section of `ctx.diagnostics.report()`, as label → value."""
-    sections = dict(ctx.diagnostics.report())
+    sections = dict(ctx.require(DIAGNOSTICS).report())
     assert title in sections, f"no {title!r} section in {list(sections)}"
     return dict(sections[title])

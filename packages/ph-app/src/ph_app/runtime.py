@@ -16,6 +16,7 @@ from pathlib import Path
 
 from ph.agent.types import AgentOptions
 from ph.cordis import Context, Profile
+from ph.keys import AGENTS, SESSION_PERSISTENCE, SESSIONS
 from ph.persistence import ClaimingStore, SessionBusy, resume_session
 from ph.seams.telemetry import ops_record
 from ph.session import Session, new_session_id
@@ -36,22 +37,16 @@ async def mounted(profile: Profile, *, project: Path | None = None) -> AsyncIter
     one became is `ctx.mount`.
 
     `project` is **where this mount works** — the directory a session's own
-    header names — and it is provided before the first row for the reason
-    `Profile.mount` provides `ctx.mount` there: it is a fact about *this* mount
-    that a row needs while applying. `fs-local` reads it as its root, and
-    `workspace-lifecycle` then branches its worktrees from it and discovers that
-    project's provisioning.
-
-    A per-mount value and not a profile setting, because one daemon mounts one
-    composition many times, once per session, and those sessions are in
-    different repositories (P5-14). Composing a profile per root instead would
-    re-import every plugin to change one path.
+    header names — and it is handed to `Profile.mount`, which provides it beside
+    `ctx.mount`. `ph.cordis.loader.PROJECT_ROOT` carries the argument for why it
+    is a per-mount fact rather than a profile setting; this function only has to
+    pass it on. It used to be provided *here*, before the row loop, which made
+    the ordering an unwritten protocol every other caller of `mount` had to know
+    and none of them did.
     """
     ctx = Context()
     try:
-        if project is not None:
-            ctx.provide("project_root", project)
-        await profile.mount(ctx)
+        await profile.mount(ctx, project=project)
         yield ctx
     finally:
         # Disposal is structural: every registration and every acquired
@@ -87,7 +82,7 @@ async def open_session(
     working directory, which is not the caller's.
     """
     resolved = session_id or new_session_id()
-    store = ctx.get("session_persistence")
+    store = ctx.get(SESSION_PERSISTENCE)
     if isinstance(store, ClaimingStore):
         try:
             await store.claim(resolved, scope=ctx)
@@ -117,7 +112,7 @@ async def open_session(
     if store is not None and store.exists(resolved):
         session: Session = await resume_session(ctx, resolved)
         return session
-    created: Session = ctx.sessions.create(resolved, meta={"cwd": cwd} if cwd else None)
+    created: Session = ctx.require(SESSIONS).create(resolved, meta={"cwd": cwd} if cwd else None)
     return created
 
 
@@ -152,8 +147,8 @@ async def prompted(
         # Before the agent exists: a file that cannot be read should fail the
         # command, not a turn — nothing is logged and there is nothing to unwind.
         refs = await ingest(ctx, attachments)
-        agent = ctx.agents.create(session, AgentOptions(provider=provider, model=model))
+        agent = ctx.require(AGENTS).create(session, AgentOptions(provider=provider, model=model))
         agent.followup(prompt_message(prompt, refs))
         await agent.run()
-        await ctx.sessions.flush(session)
+        await ctx.require(SESSIONS).flush(session)
         yield ctx, session

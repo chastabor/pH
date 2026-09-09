@@ -38,6 +38,7 @@ from anyio.abc import ByteStream
 
 from ph.agent.types import AgentCancelCause
 from ph.cordis import Profile
+from ph.keys import ATTACHMENTS, COMMANDS, CREDENTIALS, PERMISSION_PRESETS, TOOLS
 from ph.lingering import RuntimeLifetime, lifetime, socket_identity
 from ph.llm.types import AttachmentRef
 from ph.paths import resolve_roots
@@ -511,7 +512,7 @@ class _Connection:
         return {"sessionId": root.id, "staged": staged}
 
     async def _prepare_command(self, root: Any, params: dict[str, Any]) -> Any:
-        registry = root.ctx.get("commands")
+        registry = root.ctx.get(COMMANDS)
         if registry is None:
             raise SeamAbsent("this deployment has no commands")
         return registry
@@ -561,7 +562,7 @@ class _Connection:
         return await self.server.supervisor.shell(root.id, shell, command)
 
     async def _prepare_preset(self, root: Any, params: dict[str, Any]) -> Any:
-        presets = root.ctx.get("permission_presets")
+        presets = root.ctx.get(PERMISSION_PRESETS)
         if presets is None:
             raise SeamAbsent("this deployment has no permission presets")
         return presets
@@ -571,7 +572,7 @@ class _Connection:
         return {"sessionId": root.id, "preset": applied.name}
 
     async def _prepare_credential(self, root: Any, params: dict[str, Any]) -> Any:
-        service = root.ctx.get("credentials")
+        service = root.ctx.get(CREDENTIALS)
         if service is None:
             raise SeamAbsent("this deployment stores no credentials")
         return service
@@ -605,7 +606,7 @@ class _Connection:
         opposite rules for a missing store, one staging anything and one refusing
         everything.
         """
-        store = root.ctx.get("attachments")
+        store = root.ctx.get(ATTACHMENTS)
         if store is None:
             raise SeamAbsent("this deployment stores no attachments")
         return store
@@ -679,7 +680,7 @@ class _Connection:
         root = self._root(session_id)
         start = resume_at(root.session, cursor)
         page = root.session.events_from(start, SNAPSHOT_EVENTS)
-        tools = root.ctx.get("tools")
+        tools = root.ctx.get(TOOLS)
         events = [event.to_wire(thaw=False) for event in page]
         # **The same sidecar the relay attaches**, because a client must not see
         # one transcript live and a different one on replay. Keyed by seq and

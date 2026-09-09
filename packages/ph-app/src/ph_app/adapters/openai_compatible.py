@@ -30,6 +30,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ph.cordis import Context, plugin
+from ph.keys import ATTACHMENTS, CREDENTIALS, LLM, UPLOADS
 from ph.llm.adapter import LlmError, ResolvedModel, resolved
 from ph.llm.types import (
     AttachmentRef,
@@ -215,7 +216,7 @@ class OpenAiCompatibleAdapter:
     async def _body(self, options: GenerateOptions) -> tuple[dict[str, Any], dict[str, str]]:
         """The request, and the provider file ids it was built from — see `anthropic`."""
         handles = await load_handles(
-            self.ctx.get("uploads"),
+            self.ctx.get(UPLOADS),
             options.messages,
             provider=self.profile.provider,
             # **Intersected with what this renderer can reference**, which is
@@ -231,7 +232,7 @@ class OpenAiCompatibleAdapter:
             mimes=frozenset(self.profile.uploads) & _FILE_MIMES,
             session_id=options.session_id,
         )
-        media = await load_media(self.ctx.get("attachments"), options.messages, skip=handles.keys())
+        media = await load_media(self.ctx.get(ATTACHMENTS), options.messages, skip=handles.keys())
         messages: list[dict[str, Any]] = []
         if options.system:
             messages.append({"role": "system", "content": options.system})
@@ -551,13 +552,13 @@ def _to_openai(
     return [{"role": "user", "content": text_of(message.content)}]
 
 
-@plugin("llm-openai-compatible", config=Config, inject=["llm", "credentials"])
+@plugin("llm-openai-compatible", config=Config, inject=[LLM, CREDENTIALS])
 async def apply(ctx: Context, config: Config) -> None:
     """Register every configured OpenAI-compatible route."""
-    uploads = ctx.get("uploads")
+    uploads = ctx.get(UPLOADS)
     for profile in config.profiles:
         adapter = OpenAiCompatibleAdapter(ctx=ctx, profile=profile)
-        handle = ctx.llm.register_adapter([profile.provider], adapter)
+        handle = ctx.require(LLM).register_adapter([profile.provider], adapter)
         ctx.add_disposer(handle.dispose, label=f"llm({profile.provider})")
         if uploads is not None and profile.uploads:
             # Only for a route that references files. Most servers speaking this

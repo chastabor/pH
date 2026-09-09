@@ -42,6 +42,7 @@ from typing import Any, Protocol
 
 import anyio
 
+from ph.keys import APPROVAL, USER_QUESTIONS
 from ph.llm.types import user_text
 from ph.seams.approval import ApprovalAnswer, ApprovalRequest, answer_from_wire
 from ph.seams.user_questions import UserQuestion
@@ -93,10 +94,10 @@ class AskDesk:
         runs outside any row's `apply`.
         """
         disposers: list[Callable[[], Any]] = []
-        approval = self.root.ctx.get("approval")
+        approval = self.root.ctx.get(APPROVAL)
         if approval is not None:
             disposers.append(approval.register_answerer(self.answer_approval))
-        questions = self.root.ctx.get("user_questions")
+        questions = self.root.ctx.get(USER_QUESTIONS)
         if questions is not None:
             # `reachable`, unlike the approval seam's registration, because the
             # two failure modes differ: an unanswerable approval must fail closed

@@ -60,6 +60,7 @@ from ..agent.types import (
 )
 from ..cancel import Cancelled, CancelToken
 from ..cordis import Context
+from ..keys import LLM, SYSTEM_PROMPT
 from ..llm.adapter import LlmError
 from ..llm.assembler import BlockAssembler
 from ..llm.types import (
@@ -268,7 +269,7 @@ class ReactLoopAgent:
     async def _pre_step(self, target: InboxTarget, turn: int, step: int) -> _PreparedStep:
         self._throw_if_cancelled()
         claimed = self.inbox.claim(target, turn)
-        assembly = await self.ctx.system_prompt.assemble(self.ctx, agent=self)
+        assembly = await self.ctx.require(SYSTEM_PROMPT).assemble(self.ctx, agent=self)
         self._throw_if_cancelled()
         context_message = self._project_context(assembly)
         messages = (*claimed, context_message) if context_message is not None else tuple(claimed)
@@ -393,7 +394,7 @@ class ReactLoopAgent:
             assembler = BlockAssembler()
             chunk_seqs: list[int] = []
             try:
-                stream = await self.ctx.llm.stream(request)
+                stream = await self.ctx.require(LLM).stream(request)
                 self._throw_if_cancelled()
                 async for chunk in stream:
                     self._throw_if_cancelled()
@@ -545,7 +546,7 @@ class ReactLoopAgent:
         elif baseline is None or not header_equals(baseline, header):
             session.append("request/header", {"header": header.to_wire(), "reason": "change"})
 
-        resolved = self.ctx.llm.resolve_model(proposed.provider, proposed.model)
+        resolved = self.ctx.require(LLM).resolve_model(proposed.provider, proposed.model)
         request_context = RequestContext(
             provider=proposed.provider, model=proposed.model, context_window=resolved.context_window
         )

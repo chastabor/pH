@@ -40,6 +40,7 @@ from typing import TypeAlias
 
 from ..agent.types import AgentHandle
 from ..cordis import Context, plugin
+from ..keys import FS, SYSTEM_PROMPT
 from ..paths import resolve_roots
 from .assembly import AssembleContext, PromptContext
 
@@ -168,7 +169,7 @@ class MemoryFiles:
     """
 
     def root(self, agent: AgentHandle | None) -> Path:
-        fs = self.ctx.get("fs")
+        fs = self.ctx.get(FS)
         if fs is None:
             return Path.cwd()
         root: Path = fs.root_for(agent)
@@ -189,12 +190,12 @@ class MemoryFiles:
         return rendered
 
 
-@plugin("memory-agents-md", inject=["system_prompt"])
+@plugin("memory-agents-md", inject=[SYSTEM_PROMPT])
 async def apply(ctx: Context, config: None) -> None:
     """Contribute discovered `AGENTS.md` files as a post-cache snapshot."""
     # Resolved once: `$PH_HOME` is a process constant, and asking for it per
     # assembly costs a `stat` or two on a path that cannot have moved.
     memory = MemoryFiles(ctx=ctx, home=resolve_roots().home)
-    ctx.system_prompt.context(
+    ctx.require(SYSTEM_PROMPT).context(
         PromptContext(name="memory", order=ORDER_MEMORY, text=memory.text), scope=ctx
     )

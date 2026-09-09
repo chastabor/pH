@@ -31,6 +31,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol, TypeAlias, runtime_checkable
 
 from ..cordis import Context, Disposer, Running, plugin, running
+from ..keys import CODE_RUNTIME
 from ._registry import claim_key, claim_slot
 
 __all__ = [
@@ -206,11 +207,22 @@ class CodeRuntime(Protocol):
     `language`, `isolation` and `persistence` are read-only descriptors a
     consumer branches on; `declares_kernel_snapshots` is the promise the seam
     checks.
+
+    **Properties, because "read-only descriptor" has to be said in the type
+    too.** Declared as plain attributes they were *settable*, which a checker
+    reads as invariant and instance-level — so the real runtime, whose
+    `language` and `isolation` are `ClassVar`s and whose `persistence` is the
+    narrower `Literal["namespace"]`, did not satisfy the very Protocol it is
+    registered against, and neither did the stub. `ctx.code_runtime` was `Any`,
+    so `register(provider)` was never checked and nobody knew (plan P8-05).
     """
 
-    language: str
-    isolation: Isolation
-    persistence: Persistence
+    @property
+    def language(self) -> str: ...
+    @property
+    def isolation(self) -> Isolation: ...
+    @property
+    def persistence(self) -> Persistence: ...
 
     async def run(self, request: CodeRunRequest) -> CodeRunResult: ...
 
@@ -233,7 +245,7 @@ class CodeRuntimeSeam:
 
     def register(self, provider: CodeRuntime, *, scope: Context | None = None) -> Disposer:
         """Claim the runtime. Enforces the persistence obligation (D6)."""
-        persistence = getattr(provider, "persistence", "none")
+        persistence = provider.persistence
         if (
             persistence == "namespace"
             and getattr(provider, "declares_kernel_snapshots", False) is not True
@@ -294,4 +306,4 @@ class CodeRuntimeSeam:
 @plugin("code-runtime")
 async def apply(ctx: Context, config: None) -> None:
     """Mount the code-runtime seam definition. No provider ships in Phase 1."""
-    ctx.provide("code_runtime", CodeRuntimeSeam(ctx=ctx))
+    ctx.provide(CODE_RUNTIME, CodeRuntimeSeam(ctx=ctx))

@@ -33,6 +33,7 @@ from dataclasses import dataclass, field
 from typing import Literal, TypeAlias
 
 from ..cordis import Context, Disposer, Running, plugin, running
+from ..keys import TUI_STATUS
 from ..session import Session
 from ..wire import WireModel
 from ._names import require_slug
@@ -162,4 +163,4 @@ class TuiStatusRegistry:
 @plugin("tui-status")
 async def apply(ctx: Context, config: None) -> None:
     """Mount the footer's registration seam. No field ships in `ph-base`."""
-    ctx.provide("tui_status", TuiStatusRegistry(ctx=ctx))
+    ctx.provide(TUI_STATUS, TuiStatusRegistry(ctx=ctx))

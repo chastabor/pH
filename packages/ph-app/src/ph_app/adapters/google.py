@@ -43,6 +43,7 @@ from typing import Any
 import anyio
 
 from ph.cordis import Context, plugin
+from ph.keys import ATTACHMENTS, CREDENTIALS, LLM, UPLOADS
 from ph.llm.adapter import LlmError, ResolvedModel, resolved
 from ph.llm.types import (
     AttachmentRef,
@@ -425,13 +426,13 @@ class GoogleAdapter:
     async def _body(self, options: GenerateOptions) -> tuple[dict[str, Any], dict[str, str]]:
         """The request, and the provider file ids it was built from — see `anthropic`."""
         handles = await load_handles(
-            self.ctx.get("uploads"),
+            self.ctx.get(UPLOADS),
             options.messages,
             provider=self.config.provider,
             mimes=frozenset(self.config.uploads),
             session_id=options.session_id,
         )
-        media = await load_media(self.ctx.get("attachments"), options.messages, skip=handles.keys())
+        media = await load_media(self.ctx.get(ATTACHMENTS), options.messages, skip=handles.keys())
         names = _call_names(options.messages)
         contents = [
             content
@@ -763,13 +764,13 @@ def _to_usage(raw: dict[str, Any]) -> TokenUsage:
     )
 
 
-@plugin("llm-google", config=Config, inject=["llm", "credentials"])
+@plugin("llm-google", config=Config, inject=[LLM, CREDENTIALS])
 async def apply(ctx: Context, config: Config) -> None:
     """Register the Google route."""
     adapter = GoogleAdapter(ctx=ctx, config=config)
-    handle = ctx.llm.register_adapter([config.provider], adapter)
+    handle = ctx.require(LLM).register_adapter([config.provider], adapter)
     ctx.add_disposer(handle.dispose, label=f"llm({config.provider})")
-    uploads = ctx.get("uploads")
+    uploads = ctx.get(UPLOADS)
     if uploads is not None and config.uploads:
         ctx.add_disposer(
             uploads.register_uploader(config.provider, adapter),

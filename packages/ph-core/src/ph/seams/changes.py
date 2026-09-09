@@ -113,6 +113,7 @@ from pathlib import Path
 from typing import Any
 
 from ..cordis import Context
+from ..keys import WORKSPACE
 from .workspace import Backend, SnapshottingProvider, VersionedProvider
 
 __all__ = [
@@ -211,7 +212,7 @@ def _tier(ctx: Context) -> Any:
     full re-read, with nothing failing — which is what these Protocols exist to
     stop happening by accident.
     """
-    seam = ctx.get("workspace")
+    seam = ctx.get(WORKSPACE)
     return None if seam is None else seam.provider
 
 

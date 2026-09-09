@@ -35,6 +35,7 @@ import yaml
 from .context import Context, ForkScope
 from .errors import LoaderError
 from .events import events
+from .key import ServiceKey
 
 __all__ = [
     "ENTRY_POINT_GROUP",
@@ -522,12 +523,18 @@ class Profile:
         """The composed row list, for `--dump-config`."""
         return [row.to_dump() for row in self.rows]
 
-    async def mount(self, ctx: Context) -> Mount:
+    async def mount(self, ctx: Context, *, project: Path | None = None) -> Mount:
         """Mount every enabled row onto `ctx`, settle the tree, and return the mount.
 
         Rows mount in file order, but nothing runs until `reconcile()`:
         activation is service-availability driven, so a row that needs `llm`
         waits for whichever row provides it regardless of where it sits.
+
+        `project` is where this mount works — see `PROJECT_ROOT`, which it
+        provides beside `ctx.mount` and for the same reason. Omitted, nothing is
+        provided and `fs-local` falls back to the process's own directory, which
+        is right for a host that *is* in the project and wrong for a daemon
+        holding roots in several.
 
         **The `Mount` is provided as `ctx.mount` before the first row**: `ph.seams`
         may import `ph.cordis` and never the reverse, so this is how the
@@ -539,7 +546,9 @@ class Profile:
         process.
         """
         mount = Mount(profile=self, root=ctx)
-        ctx.provide("mount", mount)
+        ctx.provide(MOUNT, mount)
+        if project is not None:
+            ctx.provide(PROJECT_ROOT, project)
         forks = mount.forks
         by_id = {row.id: row for row in self.rows}
         for row in self.enabled_rows():
@@ -595,6 +604,29 @@ class Profile:
         # precisely the profile that orders things that way.
         await ctx.serial("profile/mounted")
         return mount
+
+
+MOUNT: ServiceKey[Mount] = ServiceKey("mount")
+"""The mount itself, provided before the first row so a seam can ask the
+composition what it is (`ph.seams.topology`)."""
+
+PROJECT_ROOT: ServiceKey[Path] = ServiceKey("project_root")
+"""Where this mount works: the directory a session's own header names (P5-14).
+
+**Declared and provided beside `MOUNT` because it is the same kind of fact** —
+something true of *this* mount rather than of the profile, needed by a row while
+it applies. `fs-local` reads it as its root, and `workspace-lifecycle` then
+branches its worktrees from it. A profile setting could not carry it: one daemon
+mounts one composition many times, once per session, and those sessions are in
+different repositories; composing a profile per root would re-import every
+plugin to change one path.
+
+It lived in `ph.keys` and was provided by `ph_app.runtime` — the key in the
+package that reads it, the provision in the package above. That split made the
+fact reachable only through an undocumented protocol (provide it, *then* mount),
+so every other caller of `Profile.mount` — the tests, the plugins' own mounts, a
+library embedder — had no way to say where it worked and silently took
+`Path.cwd()`. Now the door that needs it takes it."""
 
 
 @dataclass(slots=True)

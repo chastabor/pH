@@ -42,6 +42,7 @@ from filelock import FileLock
 
 from ph.agent.types import AgentHandle
 from ph.cordis import Context
+from ph.keys import APPROVAL, CODE_RUNTIME, SESSIONS, TOOLS
 from ph.paths import write_text_under
 from ph.session import Session, SessionFoldCache
 from ph.session.json import dumps
@@ -216,7 +217,7 @@ class HarnessService:
         A silent cell — no bindings, no dispatch records — because this is the
         harness checking itself, not the model calling something.
         """
-        runtime = self.ctx.get("code_runtime")
+        runtime = self.ctx.get(CODE_RUNTIME)
         if runtime is None:
             # A mounted seam with no provider is the seam's own error to word:
             # `runtime.run` raises it, and the except below reports it.
@@ -240,7 +241,7 @@ class HarnessService:
         if entry.reference is None:
             return None
         name = entry.reference.callable
-        if self.ctx.tools.view(scope).visible.get(name) is not None:
+        if self.ctx.require(TOOLS).view(scope).visible.get(name) is not None:
             return f"await tools.{name}(...)"
         return f"{entry.reference.module}.{name}(...)"
 
@@ -322,7 +323,7 @@ class HarnessService:
 
     async def _approved(self, agent: AgentHandle | None) -> bool:
         """H3: a global edit asks. A local one never reaches here."""
-        approval = self.ctx.get("approval")
+        approval = self.ctx.get(APPROVAL)
         if approval is None or agent is None:
             # Fail closed (B3): a global edit with nowhere to ask is not approved.
             return False
@@ -459,7 +460,7 @@ class HarnessService:
         drift**: nothing requires a session to have projected, and an alarm loudest
         where the feature is used least is one people learn to ignore.
         """
-        sessions = self.ctx.get("sessions")
+        sessions = self.ctx.get(SESSIONS)
         if sessions is None:
             return []
         return [

@@ -61,7 +61,8 @@ from pathlib import Path
 from typing import Any, Literal, TypeAlias
 
 from ph.agent.types import AgentHandle
-from ph.cordis import Context, plugin
+from ph.cordis import Context, ServiceKey, plugin
+from ph.keys import APPROVAL, FS
 from ph.paths import canonical, is_under
 from ph.seams.approval import denial_reason
 from ph.seams.diagnostics import Diagnostic, contribute
@@ -177,6 +178,10 @@ class Config(WireModel):
     rules: tuple[Rule, ...] = ()
     """Evaluated in order, first match wins, default allow. Empty by default:
     layering the bundle must not start refusing file access."""
+
+
+FS_PERMISSIONS: ServiceKey[FsPermissions] = ServiceKey("fs_permissions")
+"""The permission table, for the rows and tools that consult it."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -593,12 +598,12 @@ def _under(inner: str, outer: str) -> bool:
     return inner == outer or inner.startswith(f"{outer}/")
 
 
-@plugin("permissions-fs", inject=["fs"], config=Config)
+@plugin("permissions-fs", inject=[FS], config=Config)
 async def apply(ctx: Context, config: Config) -> None:
     """Attach the rules to `ctx.fs`."""
-    fs: FsService = ctx.fs
+    fs: FsService = ctx.require(FS)
     permissions = FsPermissions(rules=config.rules, roots=fs.root_for, ctx=ctx)
-    ctx.provide("fs_permissions", permissions)
+    ctx.provide(FS_PERMISSIONS, permissions)
 
     # Offered before the no-rules return below: "nothing is refused here, and
     # here is how far that goes" is the reading a person most needs, and it is
@@ -676,7 +681,7 @@ async def _ask(
     model that cannot tell a human's "no" from a missing channel cannot tell
     which one is worth re-planning around.
     """
-    approval = ctx.get("approval")
+    approval = ctx.get(APPROVAL)
     subject = f"{operation} of {intent.path}"
     if approval is None or intent.agent is None:
         return denial_reason("unavailable", subject)

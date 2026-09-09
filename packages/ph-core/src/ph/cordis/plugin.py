@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any, overload
 from pydantic import BaseModel
 
 from .errors import LoaderError
+from .key import ServiceKey, service_names
 
 if TYPE_CHECKING:
     from .context import Context
@@ -71,23 +72,26 @@ class PluginSpec:
 
 @overload
 def plugin(
-    name: str, *, inject: Sequence[str] = ()
+    name: str, *, inject: Sequence[str | ServiceKey[Any]] = ()
 ) -> Callable[
     [Callable[[Context, None], Awaitable[None]]], Callable[[Context, None], Awaitable[None]]
 ]: ...
 @overload
 def plugin[C: BaseModel](
-    name: str, *, inject: Sequence[str] = (), config: type[C]
+    name: str, *, inject: Sequence[str | ServiceKey[Any]] = (), config: type[C]
 ) -> Callable[
     [Callable[[Context, C], Awaitable[None]]], Callable[[Context, C], Awaitable[None]]
 ]: ...
 def plugin(
-    name: str, *, inject: Sequence[str] = (), config: type[BaseModel] | None = None
+    name: str,
+    *,
+    inject: Sequence[str | ServiceKey[Any]] = (),
+    config: type[BaseModel] | None = None,
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     """Mark a function as a plugin body.
 
     ```python
-    @plugin("session", inject=["llm"], config=SessionConfig)
+    @plugin("session", inject=[LLM], config=SessionConfig)
     async def apply(ctx: Context, config: SessionConfig) -> None: ...
     ```
 
@@ -101,7 +105,10 @@ def plugin(
 
     def decorate(fn: Callable[..., Any]) -> Callable[..., Any]:
         fn.__ph_plugin__ = PluginSpec(  # type: ignore[attr-defined]
-            name=name, apply=fn, inject=tuple(inject), config_model=config
+            name=name,
+            apply=fn,
+            inject=service_names(inject),
+            config_model=config,
         )
         return fn
 
@@ -132,6 +139,6 @@ def normalize_plugin(source: Any) -> PluginSpec:
     return PluginSpec(
         name=str(name),
         apply=apply,
-        inject=tuple(getattr(source, "inject", ()) or ()),
+        inject=service_names(getattr(source, "inject", ()) or ()),
         config_model=config_model,
     )

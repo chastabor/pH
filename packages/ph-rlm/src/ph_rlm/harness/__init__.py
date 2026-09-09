@@ -36,11 +36,13 @@ import logging
 from typing import Any
 
 from ph.cordis import Context, plugin
+from ph.keys import AGENTS, COMMANDS, JOBS, LLM, SESSIONS, SYSTEM_PROMPT, TOOLS
 from ph.paths import resolve_roots
 from ph.seams.commands import CommandDefinition
 from ph.system_prompt.assembly import PromptContext
 from ph.wire import WireModel
 
+from ..keys import HARNESS
 from .auto import (
     CONSIDERED,
     COOLDOWN_MINUTES,
@@ -147,12 +149,12 @@ def render_state(state: HarnessState, *, per_kind: int, refinements: int) -> str
 @plugin(
     "rlm-harness",
     config=Config,
-    inject=["system_prompt", "commands", "tools", "sessions", "agents", "llm", "jobs"],
+    inject=[SYSTEM_PROMPT, COMMANDS, TOOLS, SESSIONS, AGENTS, LLM, JOBS],
 )
 async def apply(ctx: Context, config: Config) -> None:
     """Mount the harness: the state, the prompt section, `/refine`, auto-refine."""
     service = HarnessService(ctx=ctx, directory=resolve_roots().harness_dir())
-    ctx.provide("harness", service)
+    ctx.provide(HARNESS, service)
     planner = RefinementPlanner(
         ctx=ctx,
         service=service,
@@ -177,7 +179,7 @@ async def apply(ctx: Context, config: Config) -> None:
             refinements=config.max_refinements,
         )
 
-    ctx.system_prompt.context(PromptContext(name="rlm:harness", order=20, text=section))
+    ctx.require(SYSTEM_PROMPT).context(PromptContext(name="rlm:harness", order=20, text=section))
 
     # ----------------------------------------------------------- the pass --
 
@@ -249,11 +251,11 @@ async def apply(ctx: Context, config: Config) -> None:
                 # Released, not abandoned: the work is over, so the entry goes
                 # rather than sitting in the table until the agent does. Without
                 # this an auto-refining session accretes one job per pass.
-                ctx.jobs.forget(job.id)
+                ctx.require(JOBS).forget(job.id)
 
         running.add(request.session.id)
         try:
-            return await ctx.jobs.start(
+            return await ctx.require(JOBS).start(
                 kind="refine",
                 label=f"refine {request.session.id} ({request.trigger})",
                 run=body,
@@ -310,7 +312,7 @@ async def apply(ctx: Context, config: Config) -> None:
         # pass precisely so an answer nobody would otherwise see is visible.
         return f"refining the {scope} harness in the background ({job.id})"
 
-    ctx.commands.register(
+    ctx.require(COMMANDS).register(
         CommandDefinition(
             name="refine",
             summary="Refine the Continual Harness, or roll a refinement back.",
@@ -339,7 +341,7 @@ async def apply(ctx: Context, config: Config) -> None:
         # The loop agent's id is its session's id, so the registry answers the
         # session→agent hop directly — its own docstring warns against keeping
         # a side table where `get` already is one.
-        agent = ctx.agents.get(session.id)
+        agent = ctx.require(AGENTS).get(session.id)
         if agent is None:
             return
         await start(RefineRequest(session=session, agent=agent, scope="local", trigger=trigger))

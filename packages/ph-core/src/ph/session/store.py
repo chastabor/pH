@@ -23,6 +23,7 @@ from datetime import UTC, datetime
 from typing import Any, Literal
 
 from ..cordis import Context, Disposer, events, plugin
+from ..keys import SESSIONS
 from .events import SessionEvent, now_ms
 from .session import Session, SessionHeader, SessionKind
 
@@ -430,4 +431,4 @@ def fork_boundaries(log: Sequence[SessionEvent]) -> set[int]:
 @plugin("session")
 async def apply(ctx: Context, config: None) -> None:
     """Mount the session store."""
-    ctx.provide("sessions", SessionStore(ctx=ctx))
+    ctx.provide(SESSIONS, SessionStore(ctx=ctx))

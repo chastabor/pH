@@ -35,8 +35,9 @@ import anyio
 import yaml
 
 from ..cordis import Context, plugin
+from ..keys import COMMANDS, MOUNT, SANDBOX, TUI_STATUS
 from ..paths import resolve_roots, write_text_under
-from ..seams._registry import contribute_via
+from ..seams._registry import contribute_item
 from ..seams.commands import CommandDefinition
 from ..seams.invariants import contribute_fold_cache
 from ..seams.sandbox import DENIED, Allowances, NetworkAllowance, NetworkMode
@@ -115,7 +116,7 @@ class _Sandbox:
     # -------------------------------------------------------------- reading --
 
     def show(self) -> str:
-        seam = self.ctx.sandbox
+        seam = self.ctx.require(SANDBOX)
         lines: list[str] = []
         if seam.provider is None:
             lines.append(
@@ -181,18 +182,20 @@ class _Sandbox:
     ) -> str:
         """Apply an edit live, then keep it — and say which of the two happened."""
         row = self._row()
-        current = self.ctx.sandbox.allowances or Allowances()
+        current = self.ctx.require(SANDBOX).allowances or Allowances()
         updated = mutate(current)
         if updated == current:
             return unchanged
         config = updated.to_wire()
-        await self.ctx.mount.reconfigure(row.id, config)
+        await self.ctx.require(MOUNT).reconfigure(row.id, config)
         kept = await self._persist(row.id, config)
-        return f"{said}; {self.ctx.sandbox.network_posture()}. {kept}"
+        return f"{said}; {self.ctx.require(SANDBOX).network_posture()}. {kept}"
 
     def _row(self) -> Any:
         rows = [
-            row for row in self.ctx.mount.profile.rows if row.name == ROW_NAME and not row.disabled
+            row
+            for row in self.ctx.require(MOUNT).profile.rows
+            if row.name == ROW_NAME and not row.disabled
         ]
         if not rows:
             raise _Refused(
@@ -203,7 +206,7 @@ class _Sandbox:
 
     async def _persist(self, row_id: str, config: dict[str, Any]) -> str:
         """Write the drop-in, or say why the change lives only in this process."""
-        name = self.ctx.mount.profile.name
+        name = self.ctx.require(MOUNT).profile.name
         if not name:
             return (
                 "Not saved: this deployment runs a profile file rather than a named profile; "
@@ -309,7 +312,7 @@ class _Denials:
         return StatusReading(text=f"sandbox: {count_of(denied, 'refusal')}", level="warning")
 
 
-@plugin("sandbox-commands", inject=["commands", "sandbox", "mount"])
+@plugin("sandbox-commands", inject=[COMMANDS, SANDBOX, MOUNT])
 async def apply(ctx: Context, _config: Any) -> None:
     """Register `/sandbox`, and the footer reading that says refusals happened."""
 
@@ -327,7 +330,7 @@ async def apply(ctx: Context, _config: Any) -> None:
             return str(refusal)
         return USAGE
 
-    ctx.commands.register(
+    ctx.require(COMMANDS).register(
         CommandDefinition(
             name="sandbox",
             summary="Show what confined commands may reach, and change it without a restart.",
@@ -337,9 +340,9 @@ async def apply(ctx: Context, _config: Any) -> None:
         scope=ctx,
     )
     denials = _Denials()
-    contribute_via(
+    contribute_item(
         ctx,
-        "tui_status",
+        TUI_STATUS,
         StatusField(id="sandbox", read=denials.reading, order=12),
         label="sandbox(status)",
     )

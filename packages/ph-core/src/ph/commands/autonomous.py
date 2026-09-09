@@ -38,6 +38,7 @@ import secrets
 
 from ..agent.types import AgentDriver
 from ..cordis import Context, plugin
+from ..keys import COMMANDS, GOALS, SHELL, WORKSPACE
 from ..llm.types import PluginSource, create_user_message
 from ..seams.commands import CommandContext, CommandDefinition
 from ..seams.goals import Goal, GoalService, GoalState
@@ -84,7 +85,7 @@ async def run_gates(
     # one token by design, so asking `capture` is what keeps a gate memo and a
     # `/revert` from disagreeing about whether the work changed — and it is what
     # gives a jj deployment a fingerprint at all.
-    tree = "" if workspace is None else (await ctx.workspace.capture(workspace) or "")
+    tree = "" if workspace is None else (await ctx.require(WORKSPACE).capture(workspace) or "")
     notes: list[str] = []
     passed = True
     for gate in state.goal.gates:
@@ -92,7 +93,7 @@ async def run_gates(
             notes.append(f"{gate}: still failing (unchanged since it last ran)")
             passed = False
             continue
-        result = await ctx.shell.run(gate, agent=agent)
+        result = await ctx.require(SHELL).run(gate, agent=agent)
         ok = result.exit_code == 0
         goals.record_gate(session, state.goal.id, gate=gate, tree=tree, passed=ok)
         notes.append(f"{gate}: {'passed' if ok else 'failed'}")
@@ -100,7 +101,7 @@ async def run_gates(
     return passed, notes
 
 
-@plugin("autonomous", inject=["commands", "goals", "shell"], config=Config)
+@plugin("autonomous", inject=[COMMANDS, GOALS, SHELL], config=Config)
 async def apply(ctx: Context, config: Config) -> None:
     """Register `/autonomous`, and the turn-stopping policy that drives it."""
 
@@ -112,7 +113,7 @@ async def apply(ctx: Context, config: Config) -> None:
         session = getattr(agent, "session", None)
         if session is None:
             return
-        goals: GoalService = ctx.goals
+        goals: GoalService = ctx.require(GOALS)
         state = goals.open(session)
         if state is None:
             return
@@ -153,7 +154,7 @@ async def apply(ctx: Context, config: Config) -> None:
         session = invocation.session
         if session is None:
             return "no session"
-        goals: GoalService = ctx.goals
+        goals: GoalService = ctx.require(GOALS)
         objective, _, gate_text = argument.partition(" -- ")
         objective = objective.strip()
         state = goals.open(session)
@@ -179,7 +180,7 @@ async def apply(ctx: Context, config: Config) -> None:
         )
         return _status(goals.states(session)[goal.id])
 
-    ctx.commands.register(
+    ctx.require(COMMANDS).register(
         CommandDefinition(
             name="autonomous",
             summary="Work toward a goal until its gates pass or a budget stops it.",

@@ -22,6 +22,7 @@ import anyio
 
 from ph.agent.types import AgentOptions
 from ph.cordis import DEPLOYMENT, Profile
+from ph.keys import AGENTS, SESSIONS, TOOLS
 from ph.session import Session, SessionEvent, dumps
 
 from ..protocol import capabilities, notification, respond
@@ -66,12 +67,12 @@ class RpcServer:
         if method == "session/prompt":
             return await self._prompt(params)
         if method == "session/events":
-            session = self.ctx.sessions.require(params["sessionId"])
+            session = self.ctx.require(SESSIONS).require(params["sessionId"])
             return {"events": [event.to_wire() for event in session.events]}
         if method == "tools/list":
             # `DEPLOYMENT` (P6-32): RPC mode advertises what the deployment
             # offers, before any agent exists to narrow it.
-            schemas = self.ctx.tools.schemas(scope=DEPLOYMENT)
+            schemas = self.ctx.require(TOOLS).schemas(scope=DEPLOYMENT)
             return {"tools": [schema.to_wire() for schema in schemas]}
         if method == "shutdown":
             return {"ok": True}
@@ -87,13 +88,13 @@ class RpcServer:
 
     async def _prompt(self, params: dict[str, Any]) -> dict[str, Any]:
         session_id = params.get("sessionId")
-        session = self.ctx.sessions.get(session_id) if session_id else None
+        session = self.ctx.require(SESSIONS).get(session_id) if session_id else None
         if session is None:
             session = await open_session(self.ctx, session_id)
             self._attach(session)
         agent = self._agents.get(session.id)
         if agent is None:
-            agent = self.ctx.agents.create(
+            agent = self.ctx.require(AGENTS).create(
                 session,
                 AgentOptions(
                     provider=params.get("provider") or self.provider,
@@ -103,7 +104,7 @@ class RpcServer:
             self._agents[session.id] = agent
         self._notify("session.status", {"sessionId": session.id, "status": "running"})
         await agent.prompt(str(params.get("prompt", "")))
-        await self.ctx.sessions.flush(session)
+        await self.ctx.require(SESSIONS).flush(session)
         self._notify("session.status", {"sessionId": session.id, "status": "idle"})
         return {"sessionId": session.id, "events": len(session.events)}
 

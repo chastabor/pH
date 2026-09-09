@@ -42,6 +42,7 @@ from functools import partial
 from typing import Any, TypeAlias
 
 from ..cordis import Context, Disposer, events, plugin
+from ..keys import TUI_SCREENS
 from ..wire import WireModel, declarable
 from ._names import require_slug
 from ._registry import claim_entry, claim_key
@@ -238,4 +239,4 @@ async def apply(ctx: Context, config: None) -> None:
     every other seam follows, and a headless run that mounts a row registering a
     screen nothing draws needs no special case for it.
     """
-    ctx.provide("tui_screens", TuiScreenRegistry(ctx=ctx))
+    ctx.provide(TUI_SCREENS, TuiScreenRegistry(ctx=ctx))

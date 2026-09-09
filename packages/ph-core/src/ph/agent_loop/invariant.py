@@ -21,6 +21,7 @@ from collections.abc import Callable
 from typing import Any
 
 from ..cordis import Context, plugin
+from ..keys import SESSIONS
 from ..llm.types import GenerateOptions
 from ..seams.invariants import Invariant, contribute
 
@@ -31,12 +32,19 @@ class ModelVisibleNotLoggedError(AssertionError):
     """A loop request carried messages that are not the session's derivation."""
 
 
-@plugin("agent-loop-invariant", inject=["sessions"])
+@plugin("agent-loop-invariant", inject=[SESSIONS])
 async def apply(ctx: Context, config: None) -> None:
     """Assert `messages == derive_messages()` on every loop request."""
 
     async def check(request: GenerateOptions, next_: Callable[[], Any]) -> Any:
-        session = ctx.sessions.get(request.session_id) if request.is_loop_request else None
+        # `is_loop_request` implies a session id, but through a property the
+        # checker cannot see into; the explicit test is what lets `get` be typed.
+        session_id = request.session_id
+        session = (
+            ctx.require(SESSIONS).get(session_id)
+            if session_id is not None and request.is_loop_request
+            else None
+        )
         if session is not None:
             derived = session.derive_messages()
             sent = request.messages

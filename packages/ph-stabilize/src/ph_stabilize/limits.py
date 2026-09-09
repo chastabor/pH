@@ -43,6 +43,7 @@ from pydantic import Field
 
 from ph.agent.types import PreStepDecision
 from ph.cordis import Context, plugin
+from ph.keys import SESSIONS, SUBAGENTS, TUI_STATUS
 from ph.llm.types import ToolResultBlock
 from ph.seams._registry import contribute_via
 from ph.seams.invariants import contribute_fold_cache
@@ -424,7 +425,7 @@ def _record(session: Session, kind: str, detail: dict[str, Any]) -> None:
     session.append("limits/exceeded", {"limit": kind, **detail})
 
 
-@plugin("limits", inject=["sessions"], config=Config)
+@plugin("limits", inject=[SESSIONS], config=Config)
 async def apply(ctx: Context, config: Config) -> None:
     """Arm the model-call limit, the tool-call limit and the breaker."""
     counts = SessionFoldCache(counts_of, extend=_extend)
@@ -571,7 +572,7 @@ async def apply(ctx: Context, config: Config) -> None:
             level="warning" if fraction >= WARN_FRACTION else "normal",
         )
 
-    status = ctx.get("tui_status")
+    status = ctx.get(TUI_STATUS)
     if status is not None:
         status.register(StatusField(id="limits", read=_reading, order=10), scope=ctx)
 
@@ -608,4 +609,9 @@ async def apply(ctx: Context, config: Config) -> None:
     # registered at all when nothing is capped, so a spawn pays no guard for a
     # ceiling nobody chose.
     if not config.children.unlimited:
-        contribute_via(ctx, "subagents", refuse_child, label="limits-children", method="guard")
+        contribute_via(
+            ctx,
+            SUBAGENTS,
+            lambda subagents, scope: subagents.guard(refuse_child, scope=scope),
+            label="limits-children",
+        )

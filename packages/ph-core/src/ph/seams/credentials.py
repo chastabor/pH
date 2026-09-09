@@ -23,6 +23,7 @@ import os
 from dataclasses import dataclass, field
 
 from ..cordis import Context, plugin
+from ..keys import CREDENTIALS
 from ..wire import WireModel
 
 __all__ = ["CredentialRef", "CredentialService", "SecretValue", "apply"]
@@ -94,4 +95,4 @@ class CredentialService:
 @plugin("credentials-env")
 async def apply(ctx: Context, config: None) -> None:
     """Mount the environment-backed credential resolver."""
-    ctx.provide("credentials", CredentialService(ctx=ctx))
+    ctx.provide(CREDENTIALS, CredentialService(ctx=ctx))

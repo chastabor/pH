@@ -31,6 +31,7 @@ from itertools import islice
 from typing import Any
 
 from ..cordis import Context, plugin
+from ..keys import COMMANDS, SUBPROCESS, TOOLS, WORKSPACE
 from ..seams.commands import CommandDefinition
 from ..seams.workspace import checkpoints, workspace_of
 from ..session import Session
@@ -42,7 +43,7 @@ log = logging.getLogger("ph.commands.revert")
 USAGE = "usage: /revert <seq>   (/revert with no argument lists the restore points)"
 
 
-@plugin("workspace-revert", inject=["commands", "workspace", "subprocess"])
+@plugin("workspace-revert", inject=[COMMANDS, WORKSPACE, SUBPROCESS])
 async def apply(ctx: Context, _config: Any) -> None:
     """Register `/revert`."""
 
@@ -51,7 +52,7 @@ async def apply(ctx: Context, _config: Any) -> None:
         if session is None:
             return "refusing: /revert needs a session to read restore points from"
         workspace = workspace_of(ctx, invocation.agent)
-        if workspace is not None and not ctx.workspace.can_checkpoint(workspace):
+        if workspace is not None and not ctx.require(WORKSPACE).can_checkpoint(workspace):
             # **A refusal, not "no restore points in this session"** (P6-20's own
             # gate). That sentence is true of a kind that cannot checkpoint and
             # useless: it reads as "not yet", so a person waits for one to appear.
@@ -86,7 +87,7 @@ async def apply(ctx: Context, _config: Any) -> None:
                 f"{point['agentId']!r}, which does not hold a workspace here"
             )
         try:
-            removed = await ctx.workspace.restore(workspace, str(point["tree"]))
+            removed = await ctx.require(WORKSPACE).restore(workspace, str(point["tree"]))
         except FileNotFoundError as gone:
             # The write-ahead window (A10): the event was appended before the ref
             # that keeps the tree alive, so a crash in between leaves a restore
@@ -102,7 +103,7 @@ async def apply(ctx: Context, _config: Any) -> None:
         lines.extend(_not_undone(ctx, invocation.scope, session, call_id))
         return "\n".join(lines)
 
-    ctx.commands.register(
+    ctx.require(COMMANDS).register(
         CommandDefinition(
             name="revert",
             summary="Restore this agent's workspace to a per-run checkpoint.",
@@ -162,7 +163,7 @@ def _covered(ctx: Context, name: str, scope: Any) -> bool:
     the global builtin's `True` and a dispatch that reached past the tree would
     never have been listed.
     """
-    definition = ctx.tools.get(name, scope=scope)
+    definition = ctx.require(TOOLS).get(name, scope=scope)
     return bool(definition is not None and definition.effects_confined_to_workspace)
 
 

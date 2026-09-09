@@ -30,8 +30,11 @@ import anyio
 from pydantic import Field
 
 from ph.cordis import Context, plugin
+from ph.keys import SKILLS
 from ph.seams.skills import Skill, discover_skills
 from ph.wire import WireModel
+
+from .keys import PYTHON_RUNTIME
 
 __all__ = ["Config", "PythonSkill", "apply"]
 
@@ -104,7 +107,7 @@ def _module_name(directory: Path) -> str | None:
     return str(name).replace("-", "_") if isinstance(name, str) and name else None
 
 
-@plugin("rlm-skills-python", config=Config, inject=["skills", "python_runtime"])
+@plugin("rlm-skills-python", config=Config, inject=[SKILLS, PYTHON_RUNTIME])
 async def apply(ctx: Context, config: Config) -> None:
     """Discover skills, register them, and make their packages importable.
 
@@ -124,9 +127,9 @@ async def apply(ctx: Context, config: Config) -> None:
         return
 
     for one in found:
-        ctx.skills.register(one.skill.model_copy(update={"hint": one.hint}), scope=ctx)
+        ctx.require(SKILLS).register(one.skill.model_copy(update={"hint": one.hint}), scope=ctx)
 
-    runtime = ctx.python_runtime
+    runtime = ctx.require(PYTHON_RUNTIME)
     requirements = tuple(one.requirement for one in found if one.requirement is not None)
     modules = tuple(one.module for one in found if one.module is not None)
     runtime.skills = (*runtime.skills, *requirements)

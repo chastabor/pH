@@ -71,6 +71,7 @@ from typing import Any, Protocol
 import anyio
 
 from ..cordis import Context, Disposer, Running, plugin, running
+from ..keys import ATTACHMENTS, SESSIONS, UPLOADS
 from ..llm.types import AttachmentRef
 from ..paths import resolve_roots
 from ..session import now_ms
@@ -258,7 +259,7 @@ class UploadRegistry:
         if cached is not None:
             return cached
         entry = self.uploaders.get(provider)
-        store = self.ctx.get("attachments")
+        store = self.ctx.get(ATTACHMENTS)
         if entry is None or store is None:
             return None
         content = await store.load_bytes(ref)
@@ -271,7 +272,7 @@ class UploadRegistry:
         return handle
 
     def _session(self, session_id: str | None) -> Any:
-        sessions = self.ctx.get("sessions")
+        sessions = self.ctx.get(SESSIONS)
         return None if sessions is None or session_id is None else sessions.get(session_id)
 
     def stale(self, referenced: Container[str]) -> tuple[Path, ...]:
@@ -335,4 +336,4 @@ def _write(path: Path, payload: str) -> None:
 async def apply(ctx: Context, config: Config) -> None:
     """Mount the handle cache. Uploaders come from the adapter rows."""
     root = Path(config.root).expanduser() if config.root else resolve_roots().cache / "uploads"
-    ctx.provide("uploads", UploadRegistry(ctx=ctx, root=root))
+    ctx.provide(UPLOADS, UploadRegistry(ctx=ctx, root=root))

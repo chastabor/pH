@@ -34,6 +34,7 @@ from typing import Literal, Protocol, TypeAlias, runtime_checkable
 
 from ..agent.types import AgentHandle
 from ..cordis import Boundary, Context, Disposer, Running, boundary_of, plugin, running
+from ..keys import COMPACTION
 from ..session import Session
 from ._registry import claim_entry, claim_slot
 
@@ -289,4 +290,4 @@ class CompactionSeam:
 @plugin("compaction")
 async def apply(ctx: Context, config: None) -> None:
     """Mount the compaction seam definition. No engine ships in `ph-base`."""
-    ctx.provide("compaction", CompactionSeam(ctx=ctx))
+    ctx.provide(COMPACTION, CompactionSeam(ctx=ctx))

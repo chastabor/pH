@@ -53,6 +53,7 @@ import anyio.abc
 from ph.agent.types import AgentHandle
 from ph.cancel import CancelToken, is_cancelled
 from ph.cordis import Context, Disposer, plugin
+from ph.keys import CODE_RUNTIME
 from ph.paths import resolve_roots
 from ph.seams.code_runtime import (
     CodeBinding,
@@ -69,6 +70,7 @@ from ph.tools.code_mode import CodeRunFailure, ToolCallError
 from ph.tools.errors import error_message
 from ph.wire import WireModel
 
+from ..keys import PYTHON_RUNTIME
 from .codec import decode, encode
 from .journal import JOURNAL_NAME, OrphanJournal
 from .protocol import (
@@ -1165,7 +1167,7 @@ class Config(KernelLimits):
     sweep_orphans: bool = True
 
 
-@plugin("code-runtime-python", config=Config, inject=["code_runtime"])
+@plugin("code-runtime-python", config=Config, inject=[CODE_RUNTIME])
 async def apply(ctx: Context, config: Config) -> None:
     """Register the runtime, and sweep strays from a run that was hard-killed."""
     roots = resolve_roots()
@@ -1198,8 +1200,8 @@ async def apply(ctx: Context, config: Config) -> None:
         return runtime.aclose
 
     await ctx.effect(enter, label="code-runtime-python")
-    ctx.provide("python_runtime", runtime)
-    ctx.code_runtime.register(runtime)
+    ctx.provide(PYTHON_RUNTIME, runtime)
+    ctx.require(CODE_RUNTIME).register(runtime)
 
     # The namespace *is* the agent id, so a kernel is scoped exactly like the
     # agent's tools, its inbox and its log — and released by the same unwinding.

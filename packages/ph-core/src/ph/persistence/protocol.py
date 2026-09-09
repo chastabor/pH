@@ -25,6 +25,7 @@ from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
+from ..keys import SESSION_PERSISTENCE, SESSIONS
 from ..seams.diagnostics import Diagnostic, contribute
 from ..session import Session, SessionEvent, SessionHeader
 from .lineage import lineage_faults
@@ -254,10 +255,10 @@ def attach(ctx: Any, store: SessionPersistence) -> None:
     sessions". That is the failure mode `SessionPersistence`'s own docstring
     gives as the reason for typing the Protocol.
     """
-    ctx.provide("session_persistence", store)
+    ctx.provide(SESSION_PERSISTENCE, store)
     # Catch-up: a row (re)activated after sessions already exist owes them the
     # same buffering a freshly created one gets.
-    for session in ctx.sessions.list():
+    for session in ctx.require(SESSIONS).list():
         store.track(session)
     ctx.on("session/created", store.track)
     ctx.on("session/event", store.record)

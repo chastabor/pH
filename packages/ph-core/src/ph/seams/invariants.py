@@ -46,8 +46,9 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..cordis import Context, Disposer, Running, plugin, running
+from ..keys import INVARIANTS, SESSIONS
 from ._names import require_slug
-from ._registry import claim_key, contribute_via
+from ._registry import claim_key, contribute_item
 from .diagnostics import ORDER_SELF_ASSESSMENT, Diagnostic
 from .diagnostics import contribute as contribute_diagnostic
 
@@ -206,10 +207,10 @@ def contribute(ctx: Context, invariant: Invariant) -> None:
 
     `contribute_via` carries the rule and the reason. The sharper form of it here:
     an invariant nobody can see is the same, to a reader, as one nobody enforces —
-    and a hard `inject=["invariants"]` would make *declaring* an invariant a
+    and a hard `inject=[INVARIANTS]` would make *declaring* an invariant a
     precondition for *enforcing* it, which inverts the two.
     """
-    contribute_via(ctx, "invariants", invariant, label=f"invariant({invariant.id})")
+    contribute_item(ctx, INVARIANTS, invariant, label=f"invariant({invariant.id})")
 
 
 ORDER_FOLD_CACHE = 15
@@ -247,7 +248,7 @@ def contribute_fold_cache(
         # cached answer that could be serving anybody, so `[]` is the honest
         # answer rather than a reassuring one — `HarnessService.stale_projections`
         # reads its sessions the same way and says so for the same reason.
-        sessions = ctx.get("sessions")
+        sessions = ctx.get(SESSIONS)
         return [] if sessions is None else stale(sessions.list())
 
     contribute(
@@ -265,7 +266,7 @@ def contribute_fold_cache(
 async def apply(ctx: Context, _config: Any) -> None:
     """Mount the registration seam. No invariant ships in `ph-base` from here."""
     registry = InvariantRegistry(ctx=ctx)
-    ctx.provide("invariants", registry)
+    ctx.provide(INVARIANTS, registry)
     contribute_diagnostic(
         ctx,
         Diagnostic(

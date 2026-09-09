@@ -52,10 +52,11 @@ from typing import Any, Literal
 import anyio
 from pydantic import Field
 
-from ph.cordis import Context, Disposer, MountRefusal, Running, plugin
+from ph.cordis import Context, Disposer, MountRefusal, Running, ServiceKey, plugin
+from ph.keys import COMMANDS, FS, SKILLS, TOOLS
 from ph.llm.types import ContentBlock
 from ph.paths import default_cache_path, resolve_roots
-from ph.seams._registry import claim_slot, contribute_via
+from ph.seams._registry import claim_slot, contribute_item
 from ph.seams.changes import TreeState, tree_state
 from ph.seams.commands import CommandDefinition
 from ph.seams.diagnostics import Diagnostic, contribute
@@ -264,6 +265,10 @@ async def provision(provider: Embedder) -> tuple[bool, str]:
 
 
 # --------------------------------------------------------------------- seam ----
+
+
+TEXT_INDEX: ServiceKey[TextIndexSeam] = ServiceKey("text_index")
+"""The text index, for `/text-index` and the tools it backs."""
 
 
 @dataclass(slots=True)
@@ -499,10 +504,10 @@ def offer_skills(ctx: Context) -> None:
     """
     root = Path(__file__).parent / "skills"
     for skill in discover_skills([str(root)], source="ph-text-index"):
-        contribute_via(ctx, "skills", skill, label=f"skill({skill.name})")
+        contribute_item(ctx, SKILLS, skill, label=f"skill({skill.name})")
 
 
-@plugin("text-index", inject=["tools", "fs"], config=Config)
+@plugin("text-index", inject=[TOOLS, FS], config=Config)
 async def apply(ctx: Context, config: Config) -> None:
     """Mount the seam, and register the tools once an embedder exists."""
     import importlib.util
@@ -511,11 +516,11 @@ async def apply(ctx: Context, config: Config) -> None:
         raise MountRefusal(MISSING_TURBOVEC)
 
     seam = TextIndexSeam(ctx=ctx, config=config)
-    ctx.provide("text_index", seam)
+    ctx.provide(TEXT_INDEX, seam)
 
     async def index_tool(args: IndexArgs, run: ToolRunContext) -> Any:
         store = await seam.index()
-        documents = await ctx.fs.collect(
+        documents = await ctx.require(FS).collect(
             args.paths,
             args.glob or config.glob,
             scope=run.scope,
@@ -536,7 +541,7 @@ async def apply(ctx: Context, config: Config) -> None:
         # the loop below is correct either way — it just does the work again.
         state = TreeState()
         if not args.forget:
-            state = await tree_state(ctx, ctx.fs.root_for(run.agent), since=store.token)
+            state = await tree_state(ctx, ctx.require(FS).root_for(run.agent), since=store.token)
 
         async with seam.locked():
             for path in documents:
@@ -613,7 +618,7 @@ async def apply(ctx: Context, config: Config) -> None:
 
     def register(scope: Context) -> None:
         """Offer the tools, now that something can produce a vector."""
-        scope.tools.register(
+        scope.require(TOOLS).register(
             define_tool(
                 "text_index",
                 INDEX_DESCRIPTION,
@@ -635,7 +640,7 @@ async def apply(ctx: Context, config: Config) -> None:
         )
         # The skill goes on the same scope as the tools it describes.
         offer_skills(scope)
-        scope.tools.register(
+        scope.require(TOOLS).register(
             define_tool(
                 "text_search",
                 SEARCH_DESCRIPTION,
@@ -679,20 +684,16 @@ async def apply(ctx: Context, config: Config) -> None:
         ok, sentence = await provision(seam.provider)
         return sentence if ok else f"{sentence}\n(weights would go under {weights})"
 
-    # `contribute_via` rather than a hand-written `ctx.inject(["commands"], ...)`:
-    # that is this helper's body verbatim, and writing it out in a downstream
-    # package is the failure its own docstring predicts. It still waits for the
-    # key, so a headless `ph -p` that mounts no command registry loads the row
-    # anyway — a capability must not refuse to load for want of a human surface.
-    contribute_via(
+    command = CommandDefinition(
+        name="text-index",
+        summary="Download and load the embedding model, or report whether it is ready.",
+        argument_hint="[install|status]",
+        run=install,
+    )
+    contribute_item(
         ctx,
-        "commands",
-        CommandDefinition(
-            name="text-index",
-            summary="Download and load the embedding model, or report whether it is ready.",
-            argument_hint="[install|status]",
-            run=install,
-        ),
+        COMMANDS,
+        command,
         label="text-index command",
     )
 
@@ -712,10 +713,10 @@ async def _passages(
     ctx: Context, seam: TextIndexSeam, path: str, run: ToolRunContext
 ) -> tuple[list[Chunk], str | None]:
     """One document's passages, or the reason it was skipped."""
-    refused = ctx.fs.skip_reason(path, max_bytes=seam.config.max_bytes, agent=run.agent)
+    refused = ctx.require(FS).skip_reason(path, max_bytes=seam.config.max_bytes, agent=run.agent)
     if refused:
         return [], refused
-    slice_ = await ctx.fs.read(
+    slice_ = await ctx.require(FS).read(
         path,
         # The whole file, which is what `limit=None` means here — a passage index
         # over a truncated document would answer confidently about the first two
@@ -733,7 +734,7 @@ async def _passages(
     return chunks, None if chunks else "is empty"
 
 
-@plugin("text-index-local", inject=["text_index"], config=LocalConfig)
+@plugin("text-index-local", inject=[TEXT_INDEX], config=LocalConfig)
 async def local(ctx: Context, config: LocalConfig) -> None:
     """Register a local `sentence-transformers` model as the embedder."""
     import importlib.util
@@ -767,4 +768,4 @@ async def local(ctx: Context, config: LocalConfig) -> None:
             raise MountRefusal(f"text-index-local was asked to preload and could not: {sentence}")
         log.info("ph_text_index: %s", sentence)
 
-    contribute_via(ctx, "text_index", embedder, label=f"embedder({config.model})")
+    contribute_item(ctx, TEXT_INDEX, embedder, label=f"embedder({config.model})")

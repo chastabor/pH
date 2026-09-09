@@ -44,10 +44,13 @@ from dataclasses import dataclass
 from typing import Any, Final, Literal, TypeAlias
 
 from ph.cordis import Context, plugin
+from ph.keys import AGENTS, COMPACTION, SESSIONS, SPILL_STORE
 from ph.seams.compaction import CompactionNote
 from ph.seams.spill import SpillClaim
 from ph.session import Session
 from ph.wire import WireModel
+
+from .keys import KERNEL_SNAPSHOTS, PYTHON_RUNTIME
 
 __all__ = [
     "INLINE_BLOB_MAX",
@@ -161,7 +164,7 @@ class KernelSnapshotPolicy:
         id are not the same string, so deriving one from the other is not
         available either.
         """
-        agent = self.ctx.agents.get(namespace)
+        agent = self.ctx.require(AGENTS).get(namespace)
         session = getattr(agent, "session", None)
         return session if isinstance(session, Session) else None
 
@@ -213,7 +216,7 @@ class KernelSnapshotPolicy:
                 kind="snap", var=name, digest=digest, bytes=len(payload), blob=blob, tag=tag
             )
             return inline, None
-        spill = self.ctx.get("spill_store")
+        spill = self.ctx.get(SPILL_STORE)
         if spill is None:
             return (
                 SnapshotRecord(
@@ -239,7 +242,7 @@ class KernelSnapshotPolicy:
         return spilled, payload
 
     async def _write_blob(self, namespace: str, record: SnapshotRecord, payload: bytes) -> None:
-        spill = self.ctx.get("spill_store")
+        spill = self.ctx.get(SPILL_STORE)
         if spill is None:
             return
         try:
@@ -274,7 +277,7 @@ class KernelSnapshotPolicy:
         if record.blob is not None:
             payload = base64.b64decode(record.blob)
         elif record.locator is not None:
-            spill = self.ctx.get("spill_store")
+            spill = self.ctx.get(SPILL_STORE)
             if spill is None:
                 return None
             try:
@@ -341,7 +344,7 @@ class Config(WireModel):
     inline_blob_max: int = INLINE_BLOB_MAX
 
 
-@plugin("rlm-kernel-snapshot", config=Config, inject=["sessions", "python_runtime"])
+@plugin("rlm-kernel-snapshot", config=Config, inject=[SESSIONS, PYTHON_RUNTIME])
 async def apply(ctx: Context, config: Config) -> None:
     """Wire the policy to the runtime provider and to session open.
 
@@ -351,8 +354,8 @@ async def apply(ctx: Context, config: Config) -> None:
     driven, so naming the real dependency is also what orders the two rows.
     """
     policy = KernelSnapshotPolicy(ctx=ctx, inline_blob_max=config.inline_blob_max)
-    ctx.provide("kernel_snapshots", policy)
-    ctx.python_runtime.snapshots = policy
+    ctx.provide(KERNEL_SNAPSHOTS, policy)
+    ctx.require(PYTHON_RUNTIME).snapshots = policy
 
     def claim_kernel_blobs(scope: Context) -> None:
         """Contribute this row's blobs to the seam's open-time sweep (P6-15).
@@ -362,7 +365,7 @@ async def apply(ctx: Context, config: Config) -> None:
         reads `None` under a profile that orders `spill-local` later — a sweep that
         silently collects nothing.
         """
-        scope.spill_store.claim(
+        scope.require(SPILL_STORE).claim(
             SpillClaim(
                 label="rlm-kernel-snapshot",
                 event_type="kernel/snapshot",
@@ -372,7 +375,7 @@ async def apply(ctx: Context, config: Config) -> None:
             scope=scope,
         )
 
-    ctx.inject(["spill_store"], claim_kernel_blobs, label="rlm-kernel-spill-claim")
+    ctx.inject([SPILL_STORE], claim_kernel_blobs, label="rlm-kernel-spill-claim")
 
     def announce_live_variables(scope: Context) -> None:
         """Tell a compaction summary what the kernel still holds (G10, P4-03).
@@ -383,8 +386,8 @@ async def apply(ctx: Context, config: Config) -> None:
         appears the note registers; when it goes, the scope disposes and takes
         the registration with it.
         """
-        scope.compaction.note(
+        scope.require(COMPACTION).note(
             CompactionNote(name="rlm:live-variables", text=render_live_variables), scope=scope
         )
 
-    ctx.inject(["compaction"], announce_live_variables, label="rlm-compaction-note")
+    ctx.inject([COMPACTION], announce_live_variables, label="rlm-compaction-note")

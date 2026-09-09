@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ph.cordis import Profile
+from ph.keys import SESSION_PERSISTENCE
 from ph.llm.types import text_of
 
 from ..runtime import prompted
@@ -55,7 +56,7 @@ async def run_print(
             for message in session.transcript()
             if message.role == "assistant" and text_of(message.content)
         )
-        persistence = ctx.get("session_persistence")
+        persistence = ctx.get(SESSION_PERSISTENCE)
         return PrintResult(
             session_id=session.id,
             text=text,

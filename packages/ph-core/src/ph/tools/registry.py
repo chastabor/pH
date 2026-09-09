@@ -40,6 +40,7 @@ from ..cordis import (
     plugin,
     running,
 )
+from ..keys import APPROVAL, TOOLS
 from ..llm.types import ToolSchema, text_of
 from ..seams._restriction import NameFilter
 from ..seams.approval import Edited, Responded, denial_reason
@@ -893,7 +894,7 @@ class ToolRuntime:
         the pipeline's own decisions and neither capability is reachable only
         through approval.
         """
-        approval = self.ctx.get("approval")
+        approval = self.ctx.get(APPROVAL)
         name = execution.name
         if approval is None:
             return Deny(
@@ -1116,7 +1117,10 @@ def register_when_composed(ctx: Context, build: Callable[[], ToolDefinition | No
         # "already claimed at the deployment layer" and nothing more. That is
         # the check this always made; a true is-it-taken-*anywhere* audit is a
         # per-layer question no single boundary answers.
-        if definition is not None and ctx.tools.get(definition.name, scope=DEPLOYMENT) is None:
+        if (
+            definition is not None
+            and ctx.require(TOOLS).get(definition.name, scope=DEPLOYMENT) is None
+        ):
             # No `scope=`. It carried a `scope=ctx` until P6-25, and that was
             # the tell: a listener firing after `apply` had returned saw no
             # activation, so the registration would have landed on the tool
@@ -1124,7 +1128,7 @@ def register_when_composed(ctx: Context, build: Callable[[], ToolDefinition | No
             # was that somebody remembered. Dispatch now runs a listener as an
             # effect of the scope that registered it, so the ordinary call is
             # the correct one here as everywhere else.
-            ctx.tools.register(definition)
+            ctx.require(TOOLS).register(definition)
 
     ctx.on("profile/mounted", once)
 
@@ -1132,4 +1136,4 @@ def register_when_composed(ctx: Context, build: Callable[[], ToolDefinition | No
 @plugin("tools", config=Config)
 async def apply(ctx: Context, config: Config) -> None:
     """Mount the tool registry."""
-    ctx.provide("tools", ToolRuntime(ctx=ctx, default_mode=config.mode))
+    ctx.provide(TOOLS, ToolRuntime(ctx=ctx, default_mode=config.mode))

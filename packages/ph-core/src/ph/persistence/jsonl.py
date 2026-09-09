@@ -32,6 +32,7 @@ import anyio
 from pydantic import ValidationError
 
 from ..cordis import Context, plugin
+from ..keys import SESSION_PERSISTENCE, SESSIONS
 from ..paths import resolve_roots
 from ..session import Session, SessionEvent, SessionHeader
 from ..session.json import dumps
@@ -374,7 +375,7 @@ async def resume_session(ctx: Any, session_id: str) -> Any:
     # Through the Protocol, not through this backend's filename: a store that
     # keeps sessions in a database has no path to build, and `resume_session` is
     # the one function every host calls to pick work back up.
-    header, events = ctx.session_persistence.read(session_id)
+    header, events = ctx.require(SESSION_PERSISTENCE).read(session_id)
     closers = interrupted_turn_closers(events)
     revived = Session(session_id, seed=[*events, *closers], header=header, durable=len(events))
     # `durable=len(events)`: **what the store already holds is `events`, and
@@ -384,7 +385,7 @@ async def resume_session(ctx: Any, session_id: str) -> Any:
     # durability from "the file exists" dropped them and left a gap in the seq
     # space, which `_readmit` refuses — so the session resumed once and never
     # again. Said here because this is the only place that knows the difference.
-    session = ctx.sessions.adopt(revived)
+    session = ctx.require(SESSIONS).adopt(revived)
     # Recorded, not just returned. A resume is a fact about *provenance* — this
     # process picked up work somebody else started — and it is not derivable
     # from anything else in the log: a session that was reopened and one that
@@ -410,7 +411,7 @@ class Config(WireModel):
     """Where the logs live; `$PH_HOME/sessions` when unset."""
 
 
-@plugin("session-persistence-jsonl", inject=["sessions"], config=Config)
+@plugin("session-persistence-jsonl", inject=[SESSIONS], config=Config)
 async def apply(ctx: Context, config: Config) -> None:
     """Mount the JSONL backend and wire it to the session firehose."""
     root = Path(config.root) if config.root else resolve_roots().sessions_dir()

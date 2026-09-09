@@ -23,6 +23,7 @@ from typing import Any
 import anyio
 
 from ..cordis import Context, Disposer, plugin
+from ..keys import SPILL_STORE
 from ..paths import default_home_path
 from ..session import Session
 from ..wire import WireModel
@@ -251,7 +252,7 @@ async def apply(ctx: Context, config: Config) -> None:
     """Mount the local spill store."""
     root = default_home_path(config.root, "spill")
     store = SpillStore(ctx=ctx, root=root)
-    ctx.provide("spill_store", store)
+    ctx.provide(SPILL_STORE, store)
 
     async def sweep_on_open(session: Session) -> None:
         """The one open-time sweep, owned by the store rather than by a producer."""

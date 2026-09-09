@@ -31,6 +31,7 @@ from typing import Any
 import anyio
 
 from ..cordis import Context, plugin
+from ..keys import SESSIONS
 from ..wire import WireModel
 from .types import CONTEXT_WINDOW_EXCEEDED, EMPTY_RESPONSE, FILE_EXPIRED, LlmFailure
 
@@ -78,7 +79,7 @@ class Config(WireModel):
     max_delay_ms: int = 20_000
 
 
-@plugin("llm-retry", config=Config, inject=["sessions"])
+@plugin("llm-retry", config=Config, inject=[SESSIONS])
 async def apply(ctx: Context, config: Config) -> None:
     """Retry transient request failures with bounded backoff."""
     settings = config

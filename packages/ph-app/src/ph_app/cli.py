@@ -38,6 +38,7 @@ from rich.table import Table
 from ph.cordis import LoaderError, MountRefusal, Profile, import_plugin_modules
 from ph.cordis.catalog import config_catalog
 from ph.cordis.events import events as event_registry
+from ph.keys import DIAGNOSTICS
 from ph.lingering import lifetime
 from ph.paths import RuntimeDirError, resolve_roots
 from ph.seams.diagnostics import DiagnosticsRegistry
@@ -353,7 +354,7 @@ async def _report(profile: Profile) -> list[tuple[str, list[tuple[str, str]]]]:
     (`ph.seams.topology`), so the registry is the only source.
     """
     async with mounted(profile) as ctx:
-        registry: DiagnosticsRegistry | None = ctx.get("diagnostics")
+        registry: DiagnosticsRegistry | None = ctx.get(DIAGNOSTICS)
         if registry is None:
             # Rule 6, in the seam's place: with no `diagnostics` row nothing can
             # report, and an empty report reads as "nothing wrong".

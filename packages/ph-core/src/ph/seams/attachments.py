@@ -47,6 +47,7 @@ from typing import Any
 import anyio
 
 from ..cordis import Context, plugin
+from ..keys import ATTACHMENTS
 from ..llm.dimensions import IMAGE_MIMES, image_dimensions
 from ..llm.types import AttachmentRef
 from ..paths import default_home_path
@@ -297,7 +298,7 @@ def _write(directory: Path, path: Path, payload: bytes) -> None:
 async def apply(ctx: Context, config: Config) -> None:
     """Mount the local attachment store."""
     root = default_home_path(config.root, "attachments")
-    ctx.provide("attachments", AttachmentStore(ctx=ctx, root=root))
+    ctx.provide(ATTACHMENTS, AttachmentStore(ctx=ctx, root=root))
 
 
 # ------------------------------------------------------------- collection --

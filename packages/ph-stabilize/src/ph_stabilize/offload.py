@@ -40,6 +40,7 @@ from __future__ import annotations
 from typing import Any
 
 from ph.cordis import Context, plugin
+from ph.keys import SPILL_STORE, TOOLS
 from ph.llm.types import text_of
 from ph.seams.spill import SpillClaim
 from ph.session import Session
@@ -180,7 +181,7 @@ async def spill_tool_result(
     `None` is the fail-open path both callers need: an offload that cannot store
     the content must not be the reason the model loses it. The seam logs why.
     """
-    ref = await ctx.spill_store.try_save_text(
+    ref = await ctx.require(SPILL_STORE).try_save_text(
         owner=session.id,
         source=source,
         suggested_name=f"large_tool_results/{call_id}",
@@ -201,10 +202,12 @@ async def spill_tool_result(
     )
 
 
-@plugin("tool-result-offload", inject=["tools", "spill_store"], config=Config)
+@plugin("tool-result-offload", inject=[TOOLS, SPILL_STORE], config=Config)
 async def apply(ctx: Context, config: Config) -> None:
     """Replace an oversized result with a preview and a path to the rest."""
-    ctx.spill_store.claim(SpillClaim.under_session("tool-result-offload", "offload/spilled"))
+    ctx.require(SPILL_STORE).claim(
+        SpillClaim.under_session("tool-result-offload", "offload/spilled")
+    )
 
     async def offload(execution: ToolExecution, result: ToolExecutionResult, next_: Any) -> Any:
         decision = await next_(execution, result)
@@ -251,7 +254,7 @@ async def apply(ctx: Context, config: Config) -> None:
         """
         if execution.name in config.excluded_tools:
             return True
-        definition = ctx.tools.get(execution.name, scope=execution.scope)
+        definition = ctx.require(TOOLS).get(execution.name, scope=execution.scope)
         return bool(definition is not None and definition.self_limits)
 
     ctx.on("tools/post-execute", offload)

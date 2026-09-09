@@ -26,6 +26,7 @@ from __future__ import annotations
 from typing import Any
 
 from ph.cordis import Context, plugin
+from ph.keys import COMMANDS, COMPACTION
 from ph.seams.commands import CommandDefinition
 from ph.seams.compaction import CompactionError
 from ph.text import count_of
@@ -48,7 +49,7 @@ codes pH's seam actually defines — a phrase for a code nothing raises is a
 promise nobody can check."""
 
 
-@plugin("command-compact", inject=["commands", "compaction"])
+@plugin("command-compact", inject=[COMMANDS, COMPACTION])
 async def apply(ctx: Context, config: None) -> None:
     """Register `/compact`."""
 
@@ -64,7 +65,7 @@ async def apply(ctx: Context, config: None) -> None:
             # know something about what comes next that the summarizer cannot
             # read off the conversation. The engine decides what to do with it;
             # this row only passes it on and lets the log record it.
-            result = await ctx.compaction.compact_now(agent, instructions=argument.strip())
+            result = await ctx.require(COMPACTION).compact_now(agent, instructions=argument.strip())
         except CompactionError as error:
             # `.get` rather than a lookup: a future code without a phrase should
             # still say something true, and the exception's own message is the
@@ -77,7 +78,7 @@ async def apply(ctx: Context, config: None) -> None:
             f"(~{result.shadowed_tokens} tokens)"
         )
 
-    ctx.commands.register(
+    ctx.require(COMMANDS).register(
         CommandDefinition(
             name="compact",
             summary="Replace older conversation history with a summary.",

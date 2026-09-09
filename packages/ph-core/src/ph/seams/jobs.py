@@ -50,6 +50,7 @@ from pydantic import Field
 
 from ..cancel import CancelToken
 from ..cordis import Context, Disposer, events, maybe_await, plugin
+from ..keys import JOBS
 from ..wire import WireModel
 
 __all__ = [
@@ -400,4 +401,4 @@ class Config(WireModel):
 @plugin("jobs-local", config=Config)
 async def apply(ctx: Context, config: Config) -> None:
     """Mount the local job runner."""
-    ctx.provide("jobs", JobService(ctx=ctx, caps=dict(config.concurrency)))
+    ctx.provide(JOBS, JobService(ctx=ctx, caps=dict(config.concurrency)))

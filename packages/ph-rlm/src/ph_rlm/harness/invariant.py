@@ -21,12 +21,14 @@ from typing import Any
 from ph.cordis import Context, plugin
 from ph.seams.invariants import Invariant, contribute, contribute_fold_cache
 
+from ..keys import HARNESS
+
 __all__ = ["apply", "stale_folds", "violations"]
 
 
 def violations(ctx: Context) -> list[str]:
     """Every written projection that no longer equals the fold behind it."""
-    harness = ctx.get("harness")
+    harness = ctx.get(HARNESS)
     return [] if harness is None else list(harness.stale_projections())
 
 
@@ -37,15 +39,15 @@ def stale_folds(ctx: Context, sessions: Any) -> list[str]:
     one the value the file is written from. Declared here beside its sibling so a
     reader meets the harness's two I6 claims together.
     """
-    harness = ctx.get("harness")
+    harness = ctx.get(HARNESS)
     return [] if harness is None else list(harness.stale_folds(sessions))
 
 
-@plugin("harness-invariant", inject=["harness"])
+@plugin("harness-invariant", inject=[HARNESS])
 async def apply(ctx: Context, _config: Any) -> None:
     """Declare I6's harness half, pollable.
 
-    `inject=["harness"]` because, unlike the *declaration* seam, the thing being
+    `inject=[HARNESS]` because, unlike the *declaration* seam, the thing being
     checked is a hard precondition: an invariant about a projection no row
     produces is not a weaker promise, it is a meaningless one.
     """

@@ -41,6 +41,7 @@ from typing import Any, Literal, TypeAlias, cast, get_args
 from pydantic import Field
 
 from ..cordis import Context, plugin
+from ..keys import GOALS
 from ..llm.types import TokenUsage
 from ..session import Session, SessionFoldCache
 from ..wire import WireModel
@@ -350,7 +351,7 @@ class GoalService:
 async def apply(ctx: Context, _config: Any) -> None:
     """Publish `ctx.goals`."""
     service = GoalService()
-    ctx.provide("goals", service)
+    ctx.provide(GOALS, service)
     ctx.on("session/disposed", lambda session: service.forget_session(session.id))
     contribute_fold_cache(
         ctx, id="goal-fold-cache", subject="goal table", stale=service.stale_folds

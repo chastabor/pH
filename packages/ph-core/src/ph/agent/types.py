@@ -21,6 +21,7 @@ from ..wire import WireDataclass
 if TYPE_CHECKING:
     from ..cordis import Context
     from ..session import Session
+    from .inbox import Inbox
 
 __all__ = [
     "AgentCancelCause",
@@ -77,6 +78,8 @@ class AgentDriver(AgentHandle, Protocol):
 
     @property
     def status(self) -> AgentStatus: ...
+    @property
+    def inbox(self) -> Inbox: ...
     def steer(self, message: Message) -> None: ...
     def inject(self, message: Message) -> None: ...
     def followup(self, message: Message) -> None: ...

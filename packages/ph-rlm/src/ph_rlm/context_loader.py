@@ -56,11 +56,14 @@ import anyio
 from pydantic import Field
 
 from ph.cordis import Context, plugin
+from ph.keys import FS, SYSTEM_PROMPT, TOOLS
 from ph.llm.types import ContentBlock
 from ph.session import Session
 from ph.system_prompt.assembly import ORDER_TOOL_GUIDANCE, PromptSection
 from ph.tools import ToolModel, define_tool, text_content
 from ph.wire import WireModel
+
+from .keys import CONTEXT_CORPUS
 
 __all__ = [
     "LOADED",
@@ -485,7 +488,7 @@ def _render_head(_args: Any, value: Any) -> list[ContentBlock]:
     return text_content("\n".join(f"- {row}" for row in manifest) or "the corpus is empty")
 
 
-@plugin("rlm-context-loader", config=Config, inject=["tools", "system_prompt"])
+@plugin("rlm-context-loader", config=Config, inject=[TOOLS, SYSTEM_PROMPT])
 async def apply(ctx: Context, config: Config) -> None:
     """Resolve the corpus, register the three queries, describe it in the prompt.
 
@@ -493,6 +496,7 @@ async def apply(ctx: Context, config: Config) -> None:
     `min_chars` decision — whether to offer the tools at all — cannot be made
     without knowing what the sources hold.
     """
+    tools = ctx.require(TOOLS)
     if not config.sources:
         log.debug("ph_rlm.context_loader: no sources configured; standing down")
         return
@@ -500,7 +504,7 @@ async def apply(ctx: Context, config: Config) -> None:
     # names agree with the paths `tools.read`/`grep`/`glob` accept — a deployment
     # that configures `fs-local`'s root would otherwise get a corpus resolved
     # against pH's process cwd while every other file tool looks elsewhere.
-    root = Path(getattr(ctx.get("fs"), "root", Path.cwd()))
+    root = Path(getattr(ctx.get(FS), "root", Path.cwd()))
     corpus = await anyio.to_thread.run_sync(_resolve, root, config.corpus, config.sources)
     if corpus.chars < config.min_chars:
         # Below the threshold the model is better served by `tools.read` and
@@ -513,7 +517,7 @@ async def apply(ctx: Context, config: Config) -> None:
         return
 
     service = ContextService(corpus=corpus)
-    ctx.provide("context_corpus", service)
+    ctx.provide(CONTEXT_CORPUS, service)
 
     def search(args: SearchArgs, _run: Any) -> Any:
         return corpus.search(
@@ -541,7 +545,7 @@ async def apply(ctx: Context, config: Config) -> None:
             document=document.name, text=document.lines(1, max(1, args.lines))
         ).to_wire()
 
-    ctx.tools.register(
+    tools.register(
         define_tool(
             SEARCH_TOOL,
             f"Search the loaded `{corpus.name}` corpus. Returns matching lines with "
@@ -553,7 +557,7 @@ async def apply(ctx: Context, config: Config) -> None:
             is_concurrency_safe=True,
         )
     )
-    ctx.tools.register(
+    tools.register(
         define_tool(
             CHUNKS_TOOL,
             f"Page through the loaded `{corpus.name}` corpus one chunk at a time.",
@@ -564,7 +568,7 @@ async def apply(ctx: Context, config: Config) -> None:
             is_concurrency_safe=True,
         )
     )
-    ctx.tools.register(
+    tools.register(
         define_tool(
             HEAD_TOOL,
             f"The start of one document in `{corpus.name}`, or the list of documents.",
@@ -585,4 +589,6 @@ async def apply(ctx: Context, config: Config) -> None:
         """
         return service.manifest(getattr(request.agent, "session", None))
 
-    ctx.system_prompt.section(PromptSection(name="rlm:context", order=ORDER_CONTEXT, text=section))
+    ctx.require(SYSTEM_PROMPT).section(
+        PromptSection(name="rlm:context", order=ORDER_CONTEXT, text=section)
+    )

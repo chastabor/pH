@@ -34,31 +34,32 @@ from typing import Any
 from ..agent.types import PreStepRequest
 from ..cancel import is_cancelled
 from ..cordis import Context, plugin
+from ..keys import SESSIONS
 from ..llm.types import GenerateOptions
 from ..tools.definition import ToolExecution, aborted_result
 
 __all__ = ["apply"]
 
 
-@plugin("session-checkpoint-policy", inject=["sessions"])
+@plugin("session-checkpoint-policy", inject=[SESSIONS])
 async def apply(ctx: Context, config: None) -> None:
     """Install the semantic checkpoints."""
 
     async def before_request(request: GenerateOptions, next_: Callable[..., Any]) -> Any:
         if request.session_id is not None:
-            session = ctx.sessions.get(request.session_id)
+            session = ctx.require(SESSIONS).get(request.session_id)
             if session is not None:
                 # Awaited, not scheduled: the point of a barrier is that the
                 # request cannot be in flight while the events that motivated it
                 # are still in a buffer.
-                await ctx.sessions.flush(session)
+                await ctx.require(SESSIONS).flush(session)
         return await next_()
 
     async def before_tool_body(execution: ToolExecution, next_: Callable[..., Any]) -> Any:
         if execution.session is None or execution.parent is not None:
             # A nested dispatch is already covered by its outer call's barrier.
             return await next_()
-        await ctx.sessions.flush(execution.session)
+        await ctx.require(SESSIONS).flush(execution.session)
         if is_cancelled(execution.signal):
             return aborted_result(started=False)
         return await next_()
@@ -67,7 +68,9 @@ async def apply(ctx: Context, config: None) -> None:
         decision = await next_()
         if getattr(decision, "kind", None) == "reject":
             # No request will follow to flush the previous step's results.
-            await ctx.sessions.flush(request.agent.session)
+            session = request.agent.session
+            if session is not None:
+                await ctx.require(SESSIONS).flush(session)
         return decision
 
     ctx.on("llm/stream", before_request)

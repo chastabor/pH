@@ -31,6 +31,7 @@ from typing import Any
 from pydantic import Field
 
 from ...cordis import Context, plugin
+from ...keys import SUBAGENTS, TOOLS
 from ...llm.types import ContentBlock
 from ...seams.subagents import (
     Access,
@@ -126,13 +127,13 @@ def _render(_args: Any, value: Any) -> list[ContentBlock]:
     return text_content("\n\n".join(parts))
 
 
-@plugin("subagent-task", config=Config, inject=["tools", "subagents"])
+@plugin("subagent-task", config=Config, inject=[TOOLS, SUBAGENTS])
 async def apply(ctx: Context, config: Config) -> None:
     """Register the blocking delegation tool, once a provider exists to run it."""
 
     async def delegate(provider: str, args: TaskArgs, run: ToolRunContext) -> Any:
         try:
-            handle = await ctx.subagents.start(
+            handle = await ctx.require(SUBAGENTS).start(
                 provider,
                 SubagentRequest(
                     prompt=args.prompt,
@@ -184,7 +185,7 @@ async def apply(ctx: Context, config: Config) -> None:
         refusal a caller reads names the provider the tool was actually built
         for rather than whatever is registered when it happens to fail.
         """
-        provider = ctx.subagents.resolve(config.provider or None)
+        provider = ctx.require(SUBAGENTS).resolve(config.provider or None)
         if provider is None:
             return None
         return define_tool(

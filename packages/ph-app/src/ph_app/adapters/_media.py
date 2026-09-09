@@ -27,6 +27,7 @@ import logging
 from collections.abc import Collection, Sequence
 from typing import Any
 
+from ph.keys import UPLOADS
 from ph.llm.adapter import LlmError
 from ph.llm.media import media_pointer_text
 from ph.llm.types import FILE_EXPIRED, Message, attachment_of
@@ -57,7 +58,7 @@ def forget_named_handle(
     be free to disagree about which half of the check is load-bearing, which is
     the half that keeps `FILE_EXPIRED` out of an infinite retry.
     """
-    uploads = ctx.get("uploads")
+    uploads = ctx.get(UPLOADS)
     message = str(error.failure.message)
     named = [handle for handle in referenced if handle in message]
     if uploads is None or not named:

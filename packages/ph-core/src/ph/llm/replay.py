@@ -27,6 +27,7 @@ from typing import Annotated, Any
 from pydantic import Field
 
 from ..cordis import Context, plugin
+from ..keys import LLM, LLM_REPLAY
 from ..session import SessionEvent
 from ..wire import WireModel
 from .adapter import LlmError, ResolvedModel
@@ -177,10 +178,10 @@ class Config(WireModel):
     report, not a falsy value to read as the default."""
 
 
-@plugin("llm-replay", inject=["llm"], config=Config)
+@plugin("llm-replay", inject=[LLM], config=Config)
 async def apply(ctx: Context, config: Config) -> None:
     """Register a replay adapter; a test loads its recording."""
     adapter = ReplayAdapter()
-    handle = ctx.llm.register_adapter(config.providers, adapter)
-    ctx.provide("llm_replay", adapter)
+    handle = ctx.require(LLM).register_adapter(config.providers, adapter)
+    ctx.provide(LLM_REPLAY, adapter)
     ctx.add_disposer(handle.dispose, label="llm-replay")

@@ -20,17 +20,18 @@ from typing import Any
 import anyio
 
 from ..cordis import Context, plugin
+from ..keys import TOOLS
 from .definition import ToolExecution, error_result
 
 __all__ = ["apply"]
 
 
-@plugin("tools-timeout", inject=["tools"])
+@plugin("tools-timeout", inject=[TOOLS])
 async def apply(ctx: Context, config: None) -> None:
     """Bound every dispatch whose tool declared `timeout_ms`."""
 
     async def bounded(execution: ToolExecution, next_: Callable[..., Any]) -> Any:
-        definition = ctx.tools.get(execution.name, scope=execution.scope)
+        definition = ctx.require(TOOLS).get(execution.name, scope=execution.scope)
         budget = getattr(definition, "timeout_ms", None)
         if budget is None:
             return await next_()

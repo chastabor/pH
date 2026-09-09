@@ -36,6 +36,7 @@ import anyio
 import typer
 
 from ph.cordis import Profile
+from ph.keys import SESSION_PERSISTENCE, WORKSPACE
 from ph.seams.workspace import Collectable, stored_survivors
 
 from .console import emit, fail_unmounted
@@ -84,8 +85,8 @@ async def _collect(profile: Profile, *, older_than: float, remove: bool, family:
     more than a release would.
     """
     async with mounted(profile) as ctx:
-        store = ctx.get("session_persistence")
-        seam = ctx.get("workspace")
+        store = ctx.get(SESSION_PERSISTENCE)
+        seam = ctx.get(WORKSPACE)
         if store is None or seam is None:
             # Two rows, one sentence: without a store there is nothing to fold,
             # and without the seam there is no provider to end a tree with. A

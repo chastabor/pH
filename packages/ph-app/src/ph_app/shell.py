@@ -31,6 +31,7 @@ from __future__ import annotations
 from typing import Any
 
 from ph.agent.types import AgentHandle
+from ph.keys import SHELL
 from ph.seams.shell import ShellResult
 from ph.text import truncation_marker
 from ph.tools.builtin.bash_tool import TIMED_OUT
@@ -94,7 +95,7 @@ def shell_of(ctx: Any) -> Any:
     the daemon the idempotence key is claimed between the two, and a refusal that
     happened after the claim would burn a retry the client still needs.
     """
-    shell = ctx.get("shell")
+    shell = ctx.get(SHELL)
     if shell is None:
         raise SeamAbsent("this deployment mounts no shell")
     return shell

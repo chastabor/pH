@@ -46,6 +46,7 @@ from pydantic import Field
 
 from ..agent.types import AgentHandle
 from ..cordis import Context, Disposer, Running, maybe_await, plugin, running, safe_yaml_load
+from ..keys import AGENTS, CONTAINMENT, FS, SESSION_PERSISTENCE, SESSIONS, TOOLS, WORKSPACE
 from ..paths import canonical, default_home_path
 from ..session import Session
 from ..tools.definition import ToolExecution
@@ -277,7 +278,7 @@ def workspace_of(ctx: Context, agent: AgentHandle | str | None) -> Workspace | N
     on with the process's own directory — a raising seam here would make an absent
     optional row fatal.
     """
-    seam = ctx.get("workspace")
+    seam = ctx.get(WORKSPACE)
     if seam is None or agent is None:
         return None
     agent_id = agent if isinstance(agent, str) else getattr(agent, "id", "")
@@ -485,9 +486,13 @@ class WorkspaceProvider(Protocol):
     probe: a provider whose method drifted would otherwise fail at runtime inside
     the seam's `except`, be reported to the operator as `shared`, and take the
     containment with it silently.
+
+    `tier` is a property for `CodeRuntime`'s reason: every tier declares it as a
+    frozen field, and a settable Protocol attribute refused all of them.
     """
 
-    tier: ContainmentTier
+    @property
+    def tier(self) -> ContainmentTier: ...
 
     async def acquire(
         self,
@@ -880,7 +885,7 @@ class WorkspaceSeam:
         """
         if self.provider is None:
             return "advisory"
-        containment = self.ctx.get("containment")
+        containment = self.ctx.get(CONTAINMENT)
         chosen = None if containment is None else containment.for_role(child=child)
         if chosen == "advisory":
             return "advisory"
@@ -931,7 +936,7 @@ class WorkspaceSeam:
         `doctor`'s own reason: a profile that cannot answer one question must still
         answer the rest.
         """
-        store = self.ctx.get("session_persistence")
+        store = self.ctx.get(SESSION_PERSISTENCE)
         if store is None:
             return "unknown — no session store is mounted"
         survivors, touched = stored_survivors(store)
@@ -1103,7 +1108,7 @@ class WorkspaceSeam:
         a provider and never mentioned containment gets that provider: layering it *was*
         the choice.
         """
-        containment = self.ctx.get("containment")
+        containment = self.ctx.get(CONTAINMENT)
         if containment is None:
             return None
         child = session is not None and session.header.origin == "subagent"
@@ -1120,7 +1125,7 @@ class WorkspaceSeam:
         knows the answer, so the seam asks it. A disposed scope is declined for
         `owner_for`'s reason: a registration on a dead lifetime is one nothing unwinds.
         """
-        agents = self.ctx.get("agents")
+        agents = self.ctx.get(AGENTS)
         agent = agents.get(agent_id) if agents is not None else None
         owner = getattr(agent, "ctx", None)
         return owner if isinstance(owner, Context) and owner.active else None
@@ -1913,7 +1918,7 @@ class LifecycleConfig(WireModel):
     all because its root already *is* the base."""
 
 
-@plugin("workspace-lifecycle", inject=["workspace", "fs"], config=LifecycleConfig)
+@plugin("workspace-lifecycle", inject=[WORKSPACE, FS], config=LifecycleConfig)
 async def lifecycle(ctx: Context, config: LifecycleConfig) -> None:
     """Give every agent a workspace, and point `ctx.fs` at it.
 
@@ -1934,18 +1939,18 @@ async def lifecycle(ctx: Context, config: LifecycleConfig) -> None:
         workspace = workspace_of(ctx, agent)
         return None if workspace is None else workspace.root
 
-    ctx.fs.rebase(root_of, scope=ctx)
+    ctx.require(FS).rebase(root_of, scope=ctx)
 
     # The profile's list and the project's, composed here rather than by two
     # registrations: `provision()` accepts many contributors, and this row is
     # simply the one that knows about both sources.
-    entries = [*config.provision, *discover_provisioning(ctx.fs.root)]
+    entries = [*config.provision, *discover_provisioning(ctx.require(FS).root)]
     if entries:
-        ctx.workspace.provision(entries, scope=ctx)
+        ctx.require(WORKSPACE).provision(entries, scope=ctx)
 
     async def ensure(request: Any, next_: Callable[..., Any]) -> Any:
         agent = request.agent
-        if ctx.workspace.of(agent.id) is None:
+        if ctx.require(WORKSPACE).of(agent.id) is None:
             if agent.session.header.origin == "subagent":
                 # Refused rather than answered: see `ChildWorkspaceMissing`. The
                 # test is the seam's own — `_chosen_tier` reads the same field to
@@ -1956,13 +1961,13 @@ async def lifecycle(ctx: Context, config: LifecycleConfig) -> None:
                     "are its parent's to decide and arrive with the spawn, so acquiring one "
                     "here would grant it more than its admission recorded"
                 )
-            await ctx.workspace.acquire(
+            await ctx.require(WORKSPACE).acquire(
                 session_id=agent.session.id,
                 agent_id=agent.id,
                 # The process's directory, never `fs.root_for(agent)`: that is
                 # the workspace we are about to take, and branching a worktree
                 # from the previous one would nest a checkout per turn.
-                base=ctx.fs.root,
+                base=ctx.require(FS).root,
                 access=config.access,
                 session=agent.session,
                 # The agent's own scope, so the worktree is released when the
@@ -2032,12 +2037,12 @@ async def apply(ctx: Context, config: Config) -> None:
         shared=SharedWorkspaceProvider(),
         scratch_root=default_home_path(config.scratch, "scratch"),
     )
-    ctx.provide("workspace", seam)
+    ctx.provide(WORKSPACE, seam)
 
     contribute(ctx, Diagnostic(id="workspaces", title="Workspaces", read=seam.describe, order=20))
 
 
-@plugin("workspace-reconcile", inject=["workspace"])
+@plugin("workspace-reconcile", inject=[WORKSPACE])
 async def reconcile(ctx: Context, config: None) -> None:
     """Run the seam's reconciliation whenever a session is opened (F6).
 
@@ -2052,12 +2057,12 @@ async def reconcile(ctx: Context, config: None) -> None:
     """
     # Catch-up, for the reason `session-persistence-jsonl` does the same: a row
     # activated after sessions already exist owes them what a fresh one gets.
-    for session in ctx.sessions.list():
-        await ctx.workspace.reconcile(session)
-    ctx.on("session/created", ctx.workspace.reconcile)
+    for session in ctx.require(SESSIONS).list():
+        await ctx.require(WORKSPACE).reconcile(session)
+    ctx.on("session/created", ctx.require(WORKSPACE).reconcile)
 
 
-@plugin("workspace-checkpoint", inject=["tools", "workspace"])
+@plugin("workspace-checkpoint", inject=[TOOLS, WORKSPACE])
 async def checkpoint_policy(ctx: Context, _config: Any) -> None:
     """Take a restore point before every code run that has a workspace to save.
 
@@ -2080,14 +2085,14 @@ async def checkpoint_policy(ctx: Context, _config: Any) -> None:
         # have one. The guard is inside the `try` on purpose — reading the tool view
         # is itself a call that must not take a cell down.
         try:
-            view = ctx.tools.view(execution.scope)
+            view = ctx.require(TOOLS).view(execution.scope)
             workspace = workspace_of(ctx, execution.agent)
             if (
                 execution.session is not None
                 and execution.name == view.transport_name
                 and workspace is not None
             ):
-                await ctx.workspace.checkpoint(
+                await ctx.require(WORKSPACE).checkpoint(
                     workspace,
                     session=execution.session,
                     agent_id=getattr(execution.agent, "id", ""),

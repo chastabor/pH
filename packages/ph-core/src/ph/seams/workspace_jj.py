@@ -73,6 +73,7 @@ from pathlib import Path
 import anyio
 
 from ..cordis import Context, plugin
+from ..keys import SUBPROCESS, WORKSPACE
 from ..paths import default_home_path, is_under
 from ..wire import WireModel
 from .containment import TIERS, TierDescription
@@ -122,9 +123,11 @@ async def jj(
     make out loud.
     """
     spec = SubprocessSpawnSpec(
-        argv=("jj", *args), cwd=cwd, env=ctx.subprocess.env(extra={"LC_ALL": "C", **(env or {})})
+        argv=("jj", *args),
+        cwd=cwd,
+        env=ctx.require(SUBPROCESS).env(extra={"LC_ALL": "C", **(env or {})}),
     )
-    outcome = await ctx.subprocess.run(spec)
+    outcome = await ctx.require(SUBPROCESS).run(spec)
     return outcome.exit_code, outcome.stdout, outcome.stderr
 
 
@@ -783,7 +786,7 @@ class JjWorkspaceProvider:
         provisioned into at all — so the empty answer is the right one rather than a
         gap.
         """
-        seam = self.ctx.get("workspace")
+        seam = self.ctx.get(WORKSPACE)
         if seam is None:
             return ()
         for workspace in seam.live():
@@ -996,7 +999,7 @@ class Config(WireModel):
     on purpose — the same reason the worktree tier gives."""
 
 
-@plugin("workspace-jj", inject=["workspace", "subprocess"], config=Config)
+@plugin("workspace-jj", inject=[WORKSPACE, SUBPROCESS], config=Config)
 async def apply(ctx: Context, config: Config) -> None:
     """Claim the workspace slot, but only where jj is installed.
 
@@ -1037,6 +1040,6 @@ async def apply(ctx: Context, config: Config) -> None:
     if installed is None:
         log.info("ph.seams.workspace_jj: declining — jj is not installed")
         return
-    ctx.workspace.register_provider(
+    ctx.require(WORKSPACE).register_provider(
         JjWorkspaceProvider(ctx=ctx, root=default_home_path(config.root, "jj")), scope=ctx
     )

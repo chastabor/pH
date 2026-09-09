@@ -24,6 +24,7 @@ from __future__ import annotations
 from typing import Any
 
 from ..cordis import Context, plugin
+from ..keys import TOOLS
 from ..seams.invariants import Invariant, contribute
 
 __all__ = ["apply", "violations"]
@@ -35,15 +36,15 @@ def violations(ctx: Context) -> list[str]:
     Asked of the registry rather than computed here: see `ToolRegistry.stale_views`
     for why the check lives with the cache it checks.
     """
-    return list(ctx.tools.stale_views())
+    return list(ctx.require(TOOLS).stale_views())
 
 
-@plugin("tools-invariant", inject=["tools"])
+@plugin("tools-invariant", inject=[TOOLS])
 async def apply(ctx: Context, _config: Any) -> None:
     """Declare the view cache's half of I6, pollable.
 
-    `inject=["tools"]` for the reason `skills-invariant` states: guarding on
-    `ctx.get("tools") is None` would report this invariant as *holding* in a
+    `inject=[TOOLS]` for the reason `skills-invariant` states: guarding on
+    `ctx.get(TOOLS) is None` would report this invariant as *holding* in a
     deployment that has no tool registry, which is the reassuring answer given
     where it is least earned. An unmet key means the row never activates, so the
     invariant leaves the report with its subject.

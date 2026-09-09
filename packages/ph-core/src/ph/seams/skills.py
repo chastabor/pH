@@ -43,6 +43,7 @@ from ..cordis import (
     plugin,
     safe_yaml_load,
 )
+from ..keys import SKILLS, SYSTEM_PROMPT, TOOLS
 from ..system_prompt.assembly import ORDER_TOOL_GUIDANCE, AssembleContext, PromptSection
 from ..tools.definition import ToolModel, ToolOutput, ToolRunContext, define_tool, text_content
 from ..tools.presentation import simple_views
@@ -484,7 +485,7 @@ class SkillService:
 @plugin("skills")
 async def apply(ctx: Context, config: None) -> None:
     """Mount the skills seam."""
-    ctx.provide("skills", SkillService(ctx=ctx))
+    ctx.provide(SKILLS, SkillService(ctx=ctx))
 
 
 # ------------------------------------------------------- the format on disk --
@@ -853,7 +854,7 @@ class Config(WireModel):
     rather than this row's to assume."""
 
 
-@plugin("skills-progressive", config=Config, inject=["skills", "system_prompt", "tools"])
+@plugin("skills-progressive", config=Config, inject=[SKILLS, SYSTEM_PROMPT, TOOLS])
 async def progressive(ctx: Context, config: Config) -> None:
     """Catalog in the prompt, body on demand (G9).
 
@@ -867,8 +868,9 @@ async def progressive(ctx: Context, config: Config) -> None:
     if config.paths:
         # Threaded because a scan is `glob` plus an open per candidate, and mount
         # is on the event loop that a TUI is about to draw on.
+        registry = ctx.require(SKILLS)
         for skill in await anyio.to_thread.run_sync(discover_skills, config.paths):
-            ctx.skills.register(skill, scope=ctx)
+            registry.register(skill, scope=ctx)
 
     def catalog(request: AssembleContext) -> str:
         # Per assembly *and* per agent: a child narrowed at spawn (P4-13b) must
@@ -876,14 +878,14 @@ async def progressive(ctx: Context, config: Config) -> None:
         # things to try and fail at. The `skill` tool is checked the same way,
         # because the two can legitimately disagree for one deployment.
         return render_catalog(
-            ctx.skills.list(request.scope),
+            ctx.require(SKILLS).list(request.scope),
             # Scoped too: a child narrowed away from the `skill` tool must not be
             # told in prose to call it. Telling a model to use something absent
             # from its schema reads as the model's mistake, not the profile's.
-            tool=ctx.tools.get("skill", scope=request.scope) is not None,
+            tool=ctx.require(TOOLS).get("skill", scope=request.scope) is not None,
         )
 
-    ctx.system_prompt.section(
+    ctx.require(SYSTEM_PROMPT).section(
         PromptSection(name="skills", order=ORDER_SKILLS, text=catalog), scope=ctx
     )
 
@@ -894,14 +896,16 @@ async def progressive(ctx: Context, config: Config) -> None:
         # `request.scope` while this read `getattr(run.agent, "ctx", None)`, the
         # approval-routing target. `run.scope` is a non-optional `Context` and
         # was sitting two lines away, which is the shape `fs_tools` had.
+        skills = ctx.require(SKILLS)
+        tools = ctx.require(TOOLS)
         scope = run.scope
-        skill = ctx.skills.get(args.name, scope)
-        body = ctx.skills.body(args.name, scope)
+        skill = skills.get(args.name, scope)
+        body = skills.body(args.name, scope)
         if skill is None or body is None:
             # Named, because "unknown skill" and "this skill has no readable
             # body" are different problems for the model: one is a typo it can
             # fix from the catalog, the other is a deployment fault it cannot.
-            known = ", ".join(one.name for one in ctx.skills.list(scope)) or "none"
+            known = ", ".join(one.name for one in skills.list(scope)) or "none"
             raise ValueError(f"no readable skill named {args.name!r}; available: {known}")
         # Rendered, not raw: a declared input is filled in before the model reads
         # the instruction that uses it, and arguments that do not satisfy the
@@ -933,7 +937,7 @@ async def progressive(ctx: Context, config: Config) -> None:
             # Resolved against the same scope the body was fetched with, so the
             # catalog, the gate and this answer one question in one voice.
             "missing_tools": [
-                name for name in skill.allowed_tools if ctx.tools.get(name, scope=scope) is None
+                name for name in skill.allowed_tools if tools.get(name, scope=scope) is None
             ],
         }
 
@@ -948,7 +952,7 @@ async def progressive(ctx: Context, config: Config) -> None:
         # (P6-32): the question is whether this *deployment* installed any skills
         # at all, asked once at mount to decide whether the tool exists. It is
         # not a per-agent question and there is no agent yet to ask it for.
-        if not ctx.skills.list(DEPLOYMENT):
+        if not ctx.require(SKILLS).list(DEPLOYMENT):
             return None
         return define_tool(
             "skill",

@@ -24,7 +24,7 @@ import json
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field, replace
 from dataclasses import replace as dataclasses_replace
-from typing import Any, Literal, TypeAlias
+from typing import TYPE_CHECKING, Any, Literal, TypeAlias
 
 from pydantic import BaseModel, ConfigDict
 
@@ -33,6 +33,9 @@ from ..cancel import CancelToken
 from ..cordis import Boundary, Context, Running
 from ..llm.types import ContentBlock, Message, TextBlock, ToolSchema
 from ..session import Session
+
+if TYPE_CHECKING:
+    from ..seams.approval import ApprovalDecisionName
 from .errors import (
     TOOL_ABORTED,
     TOOL_ABORTED_BEFORE_DISPATCH,
@@ -413,11 +416,15 @@ class Respond:
 @dataclass(frozen=True, slots=True)
 class Ask:
     reason: str | None = None
-    allowed_decisions: tuple[str, ...] = ()
+    allowed_decisions: tuple[ApprovalDecisionName, ...] = ()
     """Which of `approve | edit | reject | respond` a front end should offer.
-    (`ph.seams.approval.ApprovalDecisionName` names them; spelled as bare strings
-    here so the tools pipeline does not have to import the seam that consumes an
-    `Ask` — the dependency runs the other way.)
+
+    **The approval seam's own vocabulary**, under `TYPE_CHECKING` so the tools
+    pipeline still imports nothing from the seam that consumes an `Ask` — the
+    dependency runs the other way, and the name costs nothing to borrow. It was
+    `tuple[str, ...]` until `ctx.require(APPROVAL)` gave the call a type: a
+    policy row could name a fifth decision and find out at the first ask (plan
+    P8-05, issue 18).
 
     Empty means all of them. Carried from the row that asked to the answerer
     that prompts, because *what may be decided* is a policy question and a front

@@ -68,6 +68,7 @@ from ph.agent.types import AgentHandle, PreStepDecision, RequestErrorAction, Req
 from ph.agent_loop import AgentCancelled
 from ph.cancel import Cancelled
 from ph.cordis import DEPLOYMENT, Context, plugin
+from ph.keys import COMPACTION, LLM, SPILL_STORE, TOKEN_METER, TOOLS
 from ph.llm import BlockAssembler
 from ph.llm.types import (
     CONTEXT_WINDOW_EXCEEDED,
@@ -644,7 +645,7 @@ class SummarizeEngine:
         self, agent: AgentHandle, session: Session, trigger: CompactionTrigger
     ) -> CompactionResult | None:
         """The policy itself, unguarded — the guard is its caller's."""
-        meter = self.ctx.token_meter
+        meter = self.ctx.require(TOKEN_METER)
         baseline: TokenBaseline = meter.baseline(session)
         if trigger == "pressure" and not self._under_pressure(baseline):
             return None
@@ -773,10 +774,11 @@ class SummarizeEngine:
             # assistant message again. Summarizing it would spend a model call
             # to shadow silence with a paragraph about silence.
             return None
+        meter = self.ctx.require(TOKEN_METER)
         return _Plan(
             shadowed_seqs=nodes[:cutoff],
             messages=shadowed,
-            shadowed_tokens=sum(self.ctx.token_meter.measure(one) for one in shadowed),
+            shadowed_tokens=sum(meter.measure(one) for one in shadowed),
             kept=len(nodes) - cutoff,
         )
 
@@ -796,7 +798,7 @@ class SummarizeEngine:
         kept = 0
         for index in range(len(projected) - 1, -1, -1):
             message = projected[index]
-            kept += 0 if message is None else self.ctx.token_meter.measure(message)
+            kept += 0 if message is None else self.ctx.require(TOKEN_METER).measure(message)
             if kept > budget:
                 return min(ceiling, index + 1)
         return 0
@@ -818,7 +820,7 @@ class SummarizeEngine:
         def elides(name: str) -> bool:
             if name in extra:
                 return True
-            definition = self.ctx.tools.get(name, scope=scope)
+            definition = self.ctx.require(TOOLS).get(name, scope=scope)
             return bool(definition is not None and definition.arguments_disposable)
 
         return elides
@@ -936,7 +938,7 @@ class SummarizeEngine:
             return ()
         budget = self._clip_budget(session)
         measured = sum(
-            self.ctx.token_meter.measure(message)
+            self.ctx.require(TOKEN_METER).measure(message)
             for message in (derive_event_message(events[seq]) for seq in tail)
             if message is not None
         )
@@ -1064,7 +1066,9 @@ class SummarizeEngine:
         # from an agent is the shape that row blesses; defaulting the
         # *widest* one is the shape it deletes.
         own = getattr(agent, "ctx", None)
-        notes = self.ctx.compaction.notes(session, scope=own if own is not None else DEPLOYMENT)
+        notes = self.ctx.require(COMPACTION).notes(
+            session, scope=own if own is not None else DEPLOYMENT
+        )
         blocks = [NOTES_PROMPT.format(notes="\n\n".join(notes))] if notes else []
         if instructions.strip():
             blocks.append(FOCUS_PROMPT.format(instructions=instructions.strip()))
@@ -1133,7 +1137,7 @@ class SummarizeEngine:
         blocks rather than pasting them into the summary.
         """
         assembler = BlockAssembler()
-        async for chunk in await self.ctx.llm.stream(request):
+        async for chunk in await self.ctx.require(LLM).stream(request):
             assembler.push(chunk)
         if assembler.finish.kind == "error":
             failure = assembler.finish.failure
@@ -1149,7 +1153,7 @@ class SummarizeEngine:
             return messages, False
         used = 0
         for index in range(len(messages) - 1, -1, -1):
-            used += self.ctx.token_meter.measure(messages[index])
+            used += self.ctx.require(TOKEN_METER).measure(messages[index])
             if used > budget:
                 return messages[index + 1 :] or messages[-1:], True
         return messages, False
@@ -1169,7 +1173,7 @@ class SummarizeEngine:
     ) -> CompactionResult:
         """Write the history, record the accounting, then replace the surface."""
         history = render_for_summary(plan.messages, trimmed=False)
-        ref = await self.ctx.spill_store.try_save_text(
+        ref = await self.ctx.require(SPILL_STORE).try_save_text(
             owner=session.id,
             source="conversation history",
             suggested_name=f"{HISTORY_PREFIX}/{session.seq}.md",
@@ -1268,15 +1272,17 @@ class SummarizeEngine:
 
 @plugin(
     "compaction-summarize",
-    inject=["compaction", "token_meter", "llm", "spill_store", "tools"],
+    inject=[COMPACTION, TOKEN_METER, LLM, SPILL_STORE, TOOLS],
     config=Config,
 )
 async def apply(ctx: Context, config: Config) -> None:
     """Register the engine and arm the two automatic triggers."""
-    ctx.spill_store.claim(SpillClaim.under_session("compaction-summarize", "compaction/summarized"))
+    ctx.require(SPILL_STORE).claim(
+        SpillClaim.under_session("compaction-summarize", "compaction/summarized")
+    )
 
     engine = SummarizeEngine(ctx=ctx, config=config)
-    ctx.compaction.register(engine)
+    ctx.require(COMPACTION).register(engine)
 
     async def on_pre_step(request: Any, next_: Any) -> Any:
         decision = await next_(request)

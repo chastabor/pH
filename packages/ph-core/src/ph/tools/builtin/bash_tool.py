@@ -17,6 +17,7 @@ from typing import Any
 from pydantic import Field
 
 from ...cordis import Context, plugin
+from ...keys import SHELL, TOOLS
 from ...llm.types import ContentBlock
 from ...text import truncation_marker
 from ..definition import ToolModel, ToolOutput, ToolRunContext, define_tool, text_content
@@ -78,7 +79,7 @@ def _render(args: Any, value: Any) -> list[ContentBlock]:
     return text_content("\n".join(parts) if parts else "(no output)")
 
 
-@plugin("tool-bash", inject=["tools", "shell"])
+@plugin("tool-bash", inject=[TOOLS, SHELL])
 async def apply(ctx: Context, config: None) -> None:
     """Register the bash tool."""
 
@@ -86,7 +87,9 @@ async def apply(ctx: Context, config: None) -> None:
         # The agent, not a directory: `ctx.shell` resolves the cwd and the
         # workspace environment from it, so this tool states who is running
         # rather than re-deriving where (D21, E2).
-        result = await ctx.shell.run(args.command, agent=run.agent, timeout_ms=args.timeout_ms)
+        result = await ctx.require(SHELL).run(
+            args.command, agent=run.agent, timeout_ms=args.timeout_ms
+        )
         return {
             "command": args.command,
             "exit_code": result.exit_code,
@@ -98,7 +101,7 @@ async def apply(ctx: Context, config: None) -> None:
             "timed_out": result.timed_out,
         }
 
-    ctx.tools.register(
+    ctx.require(TOOLS).register(
         define_tool(
             "bash",
             DESCRIPTION,

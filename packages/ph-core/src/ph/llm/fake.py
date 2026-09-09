@@ -19,6 +19,7 @@ from typing import Annotated
 from pydantic import Field
 
 from ..cordis import Context, plugin
+from ..keys import LLM, LLM_FAKE
 from ..wire import WireModel
 from .adapter import ResolvedModel
 from .types import (
@@ -112,12 +113,12 @@ class Config(WireModel):
     replies: tuple[str, ...] = ()
 
 
-@plugin("llm-fake", inject=["llm"], config=Config)
+@plugin("llm-fake", inject=[LLM], config=Config)
 async def apply(ctx: Context, config: Config) -> None:
     """Register the fake adapter for the routes a profile names."""
     adapter = FakeAdapter(
         respond=text_script(*config.replies) if config.replies else text_script("ok")
     )
-    handle = ctx.llm.register_adapter(config.providers, adapter)
-    ctx.provide("llm_fake", adapter)
+    handle = ctx.require(LLM).register_adapter(config.providers, adapter)
+    ctx.provide(LLM_FAKE, adapter)
     ctx.add_disposer(handle.dispose, label="llm-fake")

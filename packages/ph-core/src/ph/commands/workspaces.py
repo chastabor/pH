@@ -53,6 +53,7 @@ from pathlib import Path
 from typing import Any
 
 from ..cordis import Context, plugin
+from ..keys import COMMANDS, FS, SESSION_PERSISTENCE, WORKSPACE
 from ..seams.commands import CommandDefinition
 from ..seams.workspace import BRANCH_PREFIX as PREFIX
 from ..seams.workspace import stored_survivors
@@ -101,7 +102,7 @@ class KeptWorktree:
         return f"{self.agent_id:<16} {state:<11} {self.session_id:<14} {self.branch:<24} {where}"
 
 
-@plugin("workspace-commands", inject=["commands", "workspace", "fs"])
+@plugin("workspace-commands", inject=[COMMANDS, WORKSPACE, FS])
 async def apply(ctx: Context, _config: Any) -> None:
     """Register `/workspaces`.
 
@@ -113,7 +114,7 @@ async def apply(ctx: Context, _config: Any) -> None:
 
     async def workspaces(argument: str, invocation: Any) -> str:
         verb, _, rest = argument.strip().partition(" ")
-        view = _Workspaces(ctx=ctx, base=ctx.fs.root)
+        view = _Workspaces(ctx=ctx, base=ctx.require(FS).root)
         try:
             if verb in ("", "list"):
                 return await view.list()
@@ -127,7 +128,7 @@ async def apply(ctx: Context, _config: Any) -> None:
             return str(refusal)
         return USAGE
 
-    ctx.commands.register(
+    ctx.require(COMMANDS).register(
         CommandDefinition(
             name="workspaces",
             summary="List, export, merge or remove the branches agents left behind.",
@@ -208,8 +209,8 @@ class _Workspaces:
         branches = [ref for ref in await self._all_refs() if ref.startswith(PREFIX)]
         if not branches:
             return []
-        checkouts = await self.ctx.workspace.strays(self.base, with_status=with_status)
-        live = {workspace.ref for workspace in self.ctx.workspace.live() if workspace.ref}
+        checkouts = await self.ctx.require(WORKSPACE).strays(self.base, with_status=with_status)
+        live = {workspace.ref for workspace in self.ctx.require(WORKSPACE).live() if workspace.ref}
         rows = []
         for branch in branches:
             agent_id, session_id = _identify(branch)
@@ -229,7 +230,7 @@ class _Workspaces:
     async def _all_refs(self) -> list[str]:
         """Every ref the mounted tier knows, once per dispatch."""
         if not self._refs:
-            self._refs.append(await self.ctx.workspace.refs(self.base))
+            self._refs.append(await self.ctx.require(WORKSPACE).refs(self.base))
         return self._refs[0]
 
     async def find(self, name: str, *, with_status: bool = False) -> KeptWorktree:
@@ -264,7 +265,7 @@ class _Workspaces:
         """
         if not name:
             raise _Refused(USAGE)
-        store = self.ctx.get("session_persistence")
+        store = self.ctx.get(SESSION_PERSISTENCE)
         if store is None:
             return "refusing: nothing is storing sessions, so there are no records to export"
         survivors, _ = stored_survivors(store)
@@ -272,7 +273,7 @@ class _Workspaces:
         if row is None:
             known = ", ".join(sorted({one.agent_id for one in survivors})) or "none"
             return f"refusing: no workspace named {name!r} (known: {known})"
-        ref = await self.ctx.workspace.export(row)
+        ref = await self.ctx.require(WORKSPACE).export(row)
         if ref is None:
             return f"refusing: the mounted tier cannot export {name}"
         return f"exported {name} to {ref} — merge it with: /workspaces merge {ref}"
@@ -289,7 +290,7 @@ class _Workspaces:
         # The tier's own sentence when it is not a clean merge, and that is not always
         # a failure: jj records conflicts in the commit and exits zero, so "merged,
         # with conflicts at these paths" is a true answer only it can give.
-        trouble = await self.ctx.workspace.merge(self.base, branch)
+        trouble = await self.ctx.require(WORKSPACE).merge(self.base, branch)
         return trouble or f"merged {branch}"
 
     async def _branch_for(self, name: str) -> str:
@@ -337,7 +338,7 @@ class _Workspaces:
                 )
             removed = f"{row.agent_id} had no checkout"
         else:
-            refused = await self.ctx.workspace.discard(row.path)
+            refused = await self.ctx.require(WORKSPACE).discard(row.path)
             if refused:
                 return f"could not remove {row.path}: {refused}"
             removed = f"removed {row.path}"
@@ -345,7 +346,7 @@ class _Workspaces:
                 return removed
 
         force = "--force-branch" in flags
-        refused = await self.ctx.workspace.delete_ref(self.base, row.branch, force=force)
+        refused = await self.ctx.require(WORKSPACE).delete_ref(self.base, row.branch, force=force)
         if refused:
             # The refusal is the mechanism working, so it reads as a fact plus the
             # flag that overrides it — not as an error to decode. Both tiers refuse a

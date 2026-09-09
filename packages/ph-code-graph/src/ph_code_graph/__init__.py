@@ -50,10 +50,11 @@ from typing import Any, Literal
 import anyio
 from pydantic import Field
 
-from ph.cordis import Context, MountRefusal, plugin
+from ph.cordis import Context, MountRefusal, ServiceKey, plugin
+from ph.keys import COMMANDS, FS, SKILLS, TOOLS
 from ph.llm.types import ContentBlock
 from ph.paths import default_cache_path, resolve_roots
-from ph.seams._registry import contribute_via
+from ph.seams._registry import contribute_item
 from ph.seams.changes import tree_state
 from ph.seams.commands import CommandDefinition
 from ph.seams.diagnostics import Diagnostic, contribute
@@ -152,6 +153,10 @@ class Config(WireModel):
 # --------------------------------------------------------------------- seam ----
 
 
+CODE_GRAPH: ServiceKey[CodeGraphSeam] = ServiceKey("code_graph")
+"""The code graph, for `/code-graph` and the tools it backs."""
+
+
 @dataclass(slots=True)
 class CodeGraphSeam:
     """The service published as `ctx.code_graph`.
@@ -192,11 +197,11 @@ class CodeGraphSeam:
         """`ph doctor`'s section."""
         import tree_sitter
 
-        # No `hasattr` guard: the row declares `inject=["fs"]`, so `ctx.fs` is
+        # No `hasattr` guard: the row declares `inject=[FS]`, so `ctx.fs` is
         # present for as long as it is active — and a `Path.cwd()` fallback
         # answered with an index keyed to the process directory rather than the
         # workspace, which is worse than the traceback it avoided.
-        root = self.ctx.fs.root_for(None)
+        root = self.ctx.require(FS).root_for(None)
         store = self.store_for(root)
         rows = [
             ("tree-sitter", getattr(tree_sitter, "__version__", "installed")),
@@ -480,10 +485,10 @@ def offer_skills(ctx: Context) -> None:
     """
     root = Path(__file__).parent / "skills"
     for skill in discover_skills([str(root)], source="ph-code-graph"):
-        contribute_via(ctx, "skills", skill, label=f"skill({skill.name})")
+        contribute_item(ctx, SKILLS, skill, label=f"skill({skill.name})")
 
 
-@plugin("code-graph", inject=["tools", "fs"], config=Config)
+@plugin("code-graph", inject=[TOOLS, FS], config=Config)
 async def apply(ctx: Context, config: Config) -> None:
     """Mount the seam and register both tools."""
     import importlib.util
@@ -524,14 +529,15 @@ async def apply(ctx: Context, config: Config) -> None:
         ) from error
 
     seam = CodeGraphSeam(ctx=ctx, config=config, grammars=grammars)
-    ctx.provide("code_graph", seam)
+    ctx.provide(CODE_GRAPH, seam)
 
     def store(run: ToolRunContext) -> CodeGraphStore:
-        return seam.store_for(ctx.fs.root_for(run.agent))
+        return seam.store_for(ctx.require(FS).root_for(run.agent))
 
     async def index_tool(args: IndexArgs, run: ToolRunContext) -> Any:
+        fs = ctx.require(FS)
         book = store(run)
-        paths = await ctx.fs.collect(
+        paths = await fs.collect(
             args.paths,
             args.glob or config.glob,
             scope=run.scope,
@@ -559,7 +565,7 @@ async def apply(ctx: Context, config: Config) -> None:
             # answers is the workspace provider's to say (`ph.seams.changes`).
             parsers: dict[str, bool] = {}
             stored_token = await anyio.to_thread.run_sync(book.token)
-            state = await tree_state(ctx, ctx.fs.root_for(run.agent), since=stored_token)
+            state = await tree_state(ctx, fs.root_for(run.agent), since=stored_token)
             for path in paths:
                 run.raise_if_cancelled()
                 language = detect_language(path)
@@ -602,11 +608,11 @@ async def apply(ctx: Context, config: Config) -> None:
                     # sha256 per 136 files, which is ~1.2 s on a 20 000-file tree.
                     unchanged += 1
                     continue
-                refused = ctx.fs.skip_reason(path, max_bytes=config.max_bytes, agent=run.agent)
+                refused = fs.skip_reason(path, max_bytes=config.max_bytes, agent=run.agent)
                 if refused:
                     skipped.append({"path": path, "reason": refused})
                     continue
-                slice_ = await ctx.fs.read(
+                slice_ = await fs.read(
                     path,
                     limit=None,
                     scope=run.scope,
@@ -729,7 +735,7 @@ async def apply(ctx: Context, config: Config) -> None:
             **body,
         }
 
-    ctx.tools.register(
+    ctx.require(TOOLS).register(
         define_tool(
             "code_index",
             INDEX_DESCRIPTION,
@@ -743,7 +749,7 @@ async def apply(ctx: Context, config: Config) -> None:
             **simple_views("search", "Index code", "paths"),
         )
     )
-    ctx.tools.register(
+    ctx.require(TOOLS).register(
         define_tool(
             "code_graph",
             GRAPH_DESCRIPTION,
@@ -782,20 +788,16 @@ async def apply(ctx: Context, config: Config) -> None:
             )
         return f"all {count_of(len(ready), 'grammar')} ready under {seam.grammars}."
 
-    # `contribute_via` rather than a hand-written `ctx.inject(["commands"], ...)`:
-    # that is this helper's body verbatim, and writing it out in a downstream
-    # package is the failure its own docstring predicts. It still waits for the
-    # key rather than hard-injecting it, so a headless `ph -p` that mounts no
-    # command registry loads the row anyway.
-    contribute_via(
+    command = CommandDefinition(
+        name="code-graph",
+        summary="Make the tree-sitter grammars ready, or report whether they are.",
+        argument_hint="[install|status]",
+        run=install,
+    )
+    contribute_item(
         ctx,
-        "commands",
-        CommandDefinition(
-            name="code-graph",
-            summary="Make the tree-sitter grammars ready, or report whether they are.",
-            argument_hint="[install|status]",
-            run=install,
-        ),
+        COMMANDS,
+        command,
         label="code-graph command",
     )
 

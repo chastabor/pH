@@ -30,6 +30,7 @@ from typing import Any, Literal, TypeAlias
 import anyio
 
 from ..cordis import Context, Disposer, Running, events, maybe_await, plugin, running
+from ..keys import SESSION_TELEMETRY, SESSIONS
 from ..paths import default_home_path, write_text_under
 from ..session import Session, SessionEvent, dumps, now_ms
 from ..wire import WireModel
@@ -182,7 +183,7 @@ async def ops_record(
     for that reason, so reaching this from inside a sink drops the record rather
     than recursing.
     """
-    telemetry = ctx.get("session_telemetry")
+    telemetry = ctx.get(SESSION_TELEMETRY)
     if telemetry is None:
         return
     try:
@@ -198,11 +199,11 @@ class Config(WireModel):
     enabled: bool = True
 
 
-@plugin("session-telemetry", config=Config, inject=["sessions"])
+@plugin("session-telemetry", config=Config, inject=[SESSIONS])
 async def apply(ctx: Context, config: Config) -> None:
     """Mount the telemetry seam and, when enabled, the JSONL sink."""
     telemetry = SessionTelemetry(ctx=ctx)
-    ctx.provide("session_telemetry", telemetry)
+    ctx.provide(SESSION_TELEMETRY, telemetry)
 
     if config.enabled:
         path = default_home_path(config.path, "telemetry.jsonl")

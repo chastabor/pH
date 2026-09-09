@@ -38,6 +38,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from ph.cordis import Context, plugin
+from ph.keys import TOOLS
 from ph.text import count_of
 from ph.tools.code_mode import CodeCellValue
 from ph.tools.definition import ToolOutput, ToolResult, TransportPresentation, text_content
@@ -156,7 +157,7 @@ def _present_result(args: Any, result: ToolResult) -> ToolResultView:
     )
 
 
-@plugin("rlm-presentation", inject=["tools"])
+@plugin("rlm-presentation", inject=[TOOLS])
 async def apply(ctx: Context, _config: Any) -> None:
     """Present the transport as `ipython`, with the RLM cell projections.
 
@@ -164,7 +165,7 @@ async def apply(ctx: Context, _config: Any) -> None:
     the bundle's `tools` row, and claiming it again would put two rows on one
     cell — where the first disposal clears what the second still wants.
     """
-    ctx.tools.present_transport(
+    ctx.require(TOOLS).present_transport(
         TransportPresentation(
             name=IPYTHON,
             description=IPYTHON_DESCRIPTION,

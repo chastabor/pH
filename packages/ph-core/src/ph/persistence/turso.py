@@ -44,6 +44,7 @@ from typing import Any
 import anyio
 
 from ..cordis import Context, plugin
+from ..keys import SESSIONS
 from ..paths import resolve_roots
 from ..seams.diagnostics import Diagnostic, contribute
 from ..session import Session, SessionEvent, SessionHeader
@@ -371,7 +372,7 @@ class Config(WireModel):
     """Where the logs live; `$PH_HOME/sessions` when unset."""
 
 
-@plugin("session-persistence-turso", inject=["sessions"], config=Config)
+@plugin("session-persistence-turso", inject=[SESSIONS], config=Config)
 async def apply(ctx: Context, config: Config) -> None:
     """Mount the Turso backend and wire it to the session firehose."""
     root = Path(config.root) if config.root else resolve_roots().sessions_dir()
