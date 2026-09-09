@@ -10,14 +10,42 @@ anything else. [`DESIGN.md`](DESIGN.md) is the specification;
 
 ## Install
 
+**In the checkout**, to work on it:
+
 ```bash
 uv sync                 # the workspace (packages/*) plus the dev group
 uv run ph --help
 ```
 
-Python 3.12 or newer. Every example below says `ph`; prefix it with `uv run`, or
-activate `.venv`, whichever you prefer. `--mode web` additionally needs the web
-extra (`ph-app[web]`).
+**On your PATH**, to use it — after this, `ph` is a command like any other and
+needs neither the checkout nor `uv run`:
+
+```bash
+uv tool install .                        # every member: all ten profiles
+uv tool install ./packages/ph-app        # the CLI and core alone: seven of them
+uv tool install --editable .             # a PATH `ph` that tracks the checkout
+```
+
+uv prints where it put `ph` — `~/.local/bin` by default — and `uv tool
+update-shell` fixes a PATH that misses it. Afterwards the deployment answers to
+the distribution's name, so `uv tool upgrade ph-workspace` and `uv tool
+uninstall ph-workspace` address it (`ph-app` for the lean target). `--editable`
+reaches all seven members, not just the root, so a `git pull` is the whole
+upgrade.
+
+Which target is a size question, and `ph doctor` reports what you got. The
+workspace root is every member, so it brings the optional plugins' third-party
+dependencies — `sentence-transformers`, and torch behind it — for about 600 MB
+that composes every profile including `rlm-indexed`. `packages/ph-app` is about
+60 MB and composes `anthropic`, `base`, `deepseek`, `google`, `headless`,
+`llama` and `tui`; the `rlm*` profiles need `ph-rlm`, which it does not carry.
+
+`--mode web` needs the web extra either way — `uv tool install --with
+"ph-app[web]" .`, or `uv tool install "./packages/ph-app[web]"` for the lean
+target.
+
+Python 3.12 or newer. Every example below says `ph`: literal after a tool
+install, `uv run ph` in the checkout.
 
 ## Point it at a model
 
