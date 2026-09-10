@@ -28,7 +28,7 @@ from pydantic import Field
 
 from ..cordis import Context, plugin
 from ..keys import LLM, LLM_REPLAY
-from ..session import SessionEvent
+from ..session import SessionEvent, as_int, obj
 from ..wire import WireModel
 from .adapter import LlmError, ResolvedModel
 from .types import (
@@ -123,11 +123,11 @@ def recorded_steps(events: Sequence[SessionEvent]) -> list[RecordedStep]:
     for event in events:
         if event.type != "assistant/chunk":
             continue
-        key = (int(event.data["turn"]), int(event.data["step"]))
+        key = (as_int(event.data["turn"]), as_int(event.data["step"]))
         if key not in grouped:
             grouped[key] = []
             order.append(key)
-        grouped[key].append(chunk_from_wire(dict(event.data["chunk"])))
+        grouped[key].append(chunk_from_wire(dict(obj(event.data["chunk"]))))
     return [
         RecordedStep(turn=turn, step=step, chunks=tuple(grouped[(turn, step)]))
         for turn, step in order

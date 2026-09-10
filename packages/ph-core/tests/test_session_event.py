@@ -101,6 +101,17 @@ def test_from_wire_accepts_either_casing() -> None:
         {"type": "turn/start", "seq": 0, "time": 1, "data": {}, "extra": 1},
         {"type": "turn/start", "seq": 0, "time": 1, "data": {}, "ignorable": False},
         {"type": "user/message", "seq": 0, "time": 1, "data": {}, "surfaceOp": {"op": "x"}},
+        # A payload that is not an object. Every writer in this harness sends one
+        # (`Session.append` takes a `Mapping`) and every stored log has only
+        # objects — 5,172 events across 283 files, checked before this was
+        # tightened — so refusing the exception at the envelope is what lets
+        # `SessionEvent.data` be declared a `JsonObject` instead of narrowed by
+        # every reader that opens it.
+        {"type": "turn/start", "seq": 0, "time": 1, "data": []},
+        {"type": "turn/start", "seq": 0, "time": 1, "data": "text"},
+        {"type": "turn/start", "seq": 0, "time": 1, "data": 1},
+        {"type": "turn/start", "seq": 0, "time": 1, "data": None},
+        {"type": "turn/start", "seq": 0, "time": 1},
     ],
 )
 def test_malformed_envelopes_are_refused(wire: dict[str, object]) -> None:

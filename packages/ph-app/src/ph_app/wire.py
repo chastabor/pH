@@ -10,6 +10,10 @@ resume and silently see nothing live.
 Absence is normal too. The log is JSON, every field is optional to a reader, and a
 missing one must cost a row rather than the transcript.
 
+`obj` and `seq` were born here and now live in `ph.session.json`, re-exported:
+the frozen-or-plain question they answer is about the tree, not the app, and
+core readers chaining `data.get(...).get(...)` needed the same narrowing (P8-06).
+
 **In `ph_app`, not `ph_app.tui`.** `ph_app.tui.__init__` imports the Textual app,
 so a module under it cannot be read from without paying for the terminal framework
 — which a headless `ph agents attach` should never do to render a line of a log it
@@ -20,15 +24,17 @@ just received.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping
 from typing import Any
 
 from pydantic import ValidationError
 
+from ph.session import as_int, obj, seq
 from ph.tools import ToolCallView, ToolResultView
 from ph.tools.presentation import CARD_VIEWS
 
 __all__ = [
+    "as_int",
     "describe",
     "first",
     "index_at_or_before",
@@ -44,18 +50,6 @@ __all__ = [
     "text_of_wire",
     "view_of",
 ]
-
-
-def obj(value: Any) -> Mapping[str, Any]:
-    """A wire object, or an empty one."""
-    return value if isinstance(value, Mapping) else {}
-
-
-def seq(value: Any) -> Sequence[Any]:
-    """A wire list, or an empty one. A tuple in memory, a list on disk."""
-    if isinstance(value, str) or not isinstance(value, Sequence):
-        return ()
-    return value
 
 
 def first(value: Any) -> Mapping[str, Any]:

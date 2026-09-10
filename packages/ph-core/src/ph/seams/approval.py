@@ -248,11 +248,12 @@ def pending_approvals(session: Session) -> list[PendingApproval]:
     for event in session.events:
         if event.type == "approval/asked":
             key = str(event.data.get("callId") or event.data.get("toolName"))
+            call_id, reason = event.data.get("callId"), event.data.get("reason")
             asked[key] = PendingApproval(
                 seq=event.seq,
                 tool_name=str(event.data.get("toolName", "")),
-                call_id=event.data.get("callId"),
-                reason=event.data.get("reason"),
+                call_id=call_id if isinstance(call_id, str) else None,
+                reason=reason if isinstance(reason, str) else None,
             )
         elif event.type == "approval/decided":
             asked.pop(str(event.data.get("callId") or event.data.get("toolName")), None)

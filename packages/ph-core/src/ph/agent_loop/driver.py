@@ -75,7 +75,7 @@ from ..llm.types import (
     create_assistant_message,
     create_user_message,
 )
-from ..session import Session, SurfaceIntent
+from ..session import Session, SurfaceIntent, as_int
 from ..session.request_header import EpochHeader, RequestContext, canonical_header, header_equals
 from ..system_prompt.assembly import (
     PromptAssembly,
@@ -587,7 +587,7 @@ def _request_proposal(header: EpochHeader) -> LlmCallConfig:
 
 def _last_turn_of(session: Session) -> int:
     event = session.last_event_of("turn/start")
-    return int(event.data.get("turn", 0)) if event is not None else 0
+    return as_int(event.data.get("turn", 0)) if event is not None else 0
 
 
 def _error_chain(error: BaseException) -> str:

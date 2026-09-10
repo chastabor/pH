@@ -32,7 +32,7 @@ import anyio
 from ..cordis import Context, Disposer, Running, events, maybe_await, plugin, running
 from ..keys import SESSION_TELEMETRY, SESSIONS
 from ..paths import default_home_path, write_text_under
-from ..session import Session, SessionEvent, dumps, now_ms
+from ..session import Session, SessionEvent, as_int, dumps, now_ms
 from ..wire import WireModel
 from ._registry import claim_entry
 
@@ -131,7 +131,7 @@ class SessionTelemetry:
         costs no task. Only the first `assistant/chunk` per step does."""
         if event.type != "assistant/chunk":
             return True
-        step = (int(event.data.get("turn", 0)), int(event.data.get("step", 0)))
+        step = (as_int(event.data.get("turn", 0)), as_int(event.data.get("step", 0)))
         if self._last_chunked_step.get(session.id) == step:
             return False
         self._last_chunked_step[session.id] = step

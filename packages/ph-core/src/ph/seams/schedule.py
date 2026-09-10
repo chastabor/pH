@@ -38,7 +38,7 @@ from typing import Any, Literal, TypeAlias
 from ..cordis import Context, plugin
 from ..keys import SCHEDULE
 from ..paths import resolve_roots
-from ..session import Session, SessionFoldCache, now_ms
+from ..session import Session, SessionFoldCache, as_int, now_ms
 from ..wire import WireModel
 from .invariants import contribute_fold_cache
 from .schedule_index import ScheduleIndex
@@ -157,7 +157,7 @@ def schedules(session: Session) -> dict[str, ScheduleState]:
         elif event.type == TICK:
             state = found.get(str(data.get("id", "")))
             if state is not None:
-                state.last_tick = int(data.get("dueAt", 0))
+                state.last_tick = as_int(data.get("dueAt", 0))
     return found
 
 

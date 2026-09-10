@@ -31,7 +31,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from ..session import SessionEvent
+from ..session import SessionEvent, as_int, obj, seq
 from ..session.json import freeze_json_value
 
 __all__ = [
@@ -78,7 +78,7 @@ def interrupted_turn_closers(events: Sequence[SessionEvent]) -> list[SessionEven
 
     for event in events:
         if event.type == "turn/start":
-            open_turn = int(event.data.get("turn", 0))
+            open_turn = as_int(event.data.get("turn", 0))
             open_step = None
             pending.clear()
         elif event.type == "turn/end":
@@ -86,28 +86,28 @@ def interrupted_turn_closers(events: Sequence[SessionEvent]) -> list[SessionEven
             open_step = None
             pending.clear()
         elif event.type == "step/start":
-            open_step = int(event.data.get("step", 0))
+            open_step = as_int(event.data.get("step", 0))
         elif event.type == "step/end":
             pending.clear()
             open_step = None
         elif event.type == "assistant/message":
-            message = event.data.get("message") or {}
-            for block in message.get("content", ()):
+            content = seq(obj(event.data.get("message")).get("content"))
+            for block in (obj(one) for one in content):
                 if block.get("type") == "tool-call":
-                    pending[str(block.get("id"))] = _Pending(step=int(event.data.get("step", 0)))
+                    pending[str(block.get("id"))] = _Pending(step=as_int(event.data.get("step", 0)))
         elif event.type == "tool/call":
             entry = pending.get(str(event.data.get("callId")))
             if entry is not None:
                 entry.call_seq = event.seq
         elif event.type == "tool/result":
-            source = (event.data.get("message") or {}).get("source") or {}
+            source = obj(obj(event.data.get("message")).get("source"))
             pending.pop(str(source.get("callId")), None)
 
     if open_turn is None or not events:
         return []
 
     last = events[-1]
-    seq = last.seq + 1
+    next_seq = last.seq + 1
     time = last.time
     closers: list[SessionEvent] = []
 
@@ -116,7 +116,7 @@ def interrupted_turn_closers(events: Sequence[SessionEvent]) -> list[SessionEven
     for call_id, entry in pending.items():
         started = entry.call_seq is not None
         message = {
-            "id": f"interrupted-tool-result-{call_id}-{seq}",
+            "id": f"interrupted-tool-result-{call_id}-{next_seq}",
             "role": "user",
             "source": {"kind": "tool", "callId": call_id},
             "content": [
@@ -146,14 +146,14 @@ def interrupted_turn_closers(events: Sequence[SessionEvent]) -> list[SessionEven
         closers.append(
             SessionEvent(
                 type="tool/result",
-                seq=seq,
+                seq=next_seq,
                 time=time,
                 data=freeze_json_value(data),
                 surface_op="append",
                 source_event_seqs=(entry.call_seq,) if entry.call_seq is not None else None,
             )
         )
-        seq += 1
+        next_seq += 1
 
     # An open step must close before its turn: `turn/end` while a step is open
     # is itself an invariant violation, so repairing one must not create another.
@@ -161,16 +161,16 @@ def interrupted_turn_closers(events: Sequence[SessionEvent]) -> list[SessionEven
         closers.append(
             SessionEvent(
                 type="step/end",
-                seq=seq,
+                seq=next_seq,
                 time=time,
                 data=freeze_json_value({"turn": open_turn, "step": open_step}),
             )
         )
-        seq += 1
+        next_seq += 1
     closers.append(
         SessionEvent(
             type="turn/end",
-            seq=seq,
+            seq=next_seq,
             time=time,
             data=freeze_json_value({"turn": open_turn, "reason": {"kind": "interrupted"}}),
         )

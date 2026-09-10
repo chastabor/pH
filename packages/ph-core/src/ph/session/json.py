@@ -70,26 +70,75 @@ import json
 import math
 from collections.abc import Mapping, Sequence
 from types import MappingProxyType
-from typing import Any, TypeAlias
+from typing import Any, TypeAlias, overload
 
 __all__ = [
     "JSON_MAX_SAFE_INTEGER",
     "InvalidJsonValueError",
     "JsonEncoder",
+    "JsonObject",
     "JsonValue",
+    "PlainJsonValue",
+    "as_int",
     "dumps",
     "freeze_json_value",
     "is_json_value",
+    "obj",
+    "seq",
     "snapshot_json_value",
     "thaw_json",
 ]
 
-JsonValue: TypeAlias = "bool | int | float | str | list[Any] | dict[str, Any] | None"
+JsonValue: TypeAlias = (
+    "bool | int | float | str | Sequence[JsonValue] | Mapping[str, JsonValue] | None"
+)
+"""A lossless-JSON tree, in either of the two shapes this module produces.
+
+**Recursive, and over the abstract containers on purpose.** `list[Any] |
+dict[str, Any]` — what this was — said nothing past the first level and could
+not describe the frozen form at all, since a `MappingProxyType` is not a `dict`
+and a `tuple` is not a `list`; a reader typed against it was untyped one index
+down. `Sequence`/`Mapping` are true of both shapes — `tuple`/`MappingProxyType`
+in memory, `list`/`dict` on disk and after `thaw_json` — and they are covariant,
+so a producer holding `list[dict[str, Any]]` may hand it to `Session.append`
+where `list[JsonValue]`, being invariant, would have refused it.
+
+What the type does *not* say is "frozen". Nothing in the type system
+distinguishes the two shapes (the module docstring's P6-44 paragraph); a
+wrapper that carries its own proof is the deferred decision, and this alias is
+written so that wrapper can subtype it later without moving a reader.
+
+The wart is `str`: it is a `Sequence[str]`, and `str` is a `JsonValue`, so a
+reader narrowing with `isinstance(x, Sequence)` meets it. `seq` below is the
+one place that exclusion is spelled."""
+
+JsonObject: TypeAlias = "Mapping[str, JsonValue]"
+"""A JSON object — every event payload, and the shape `Session.append` takes."""
+
+PlainJsonValue: TypeAlias = (
+    "bool | int | float | str | list[PlainJsonValue] | dict[str, PlainJsonValue] | None"
+)
+"""The plain shape only: `list`/`dict` at every level, as `thaw_json` and
+`snapshot_json_value` build it and as a log reads back from disk.
+
+A second alias, because the first cannot say this. `JsonValue` is over the
+abstract containers so that it is true of the frozen tree too — and abstract
+containers cannot be assigned into. `compaction-summarize` thaws a payload
+precisely in order to rewrite one block of it, and a return typed `Sequence`
+would refuse the assignment the thaw exists to permit. A `PlainJsonValue` is a
+`JsonValue` (list is a Sequence, dict a Mapping), so a thawed tree still flows
+into `Session.append` without a cast; the reverse is not true, which is the
+point."""
 
 JSON_MAX_SAFE_INTEGER = 2**53 - 1
 """`Number.MAX_SAFE_INTEGER`. Beyond it a JavaScript reader loses precision."""
 
 _INFINITIES = (math.inf, -math.inf)
+
+_EMPTY_OBJECT: JsonObject = MappingProxyType({})
+"""`obj`'s answer to a missing field. Hoisted because it is 8% of that call, and
+read-only because a shared mutable empty is an aliasing hazard the moment a
+caller writes to a narrowed result."""
 
 
 class InvalidJsonValueError(ValueError):
@@ -122,7 +171,7 @@ class _Walker:
             parts.append(f"[{key}]" if isinstance(key, int) else (f".{key}" if parts else key))
         return InvalidJsonValueError("".join(parts), reason)
 
-    def walk(self, value: Any) -> Any:
+    def walk(self, value: object) -> JsonValue:
         if value is None or isinstance(value, bool):
             return value
         if isinstance(value, int):
@@ -149,15 +198,15 @@ class _Walker:
             return self._array(value)
         raise self._fail(f"{type(value).__name__} is not JSON")
 
-    def _enter(self, value: Any) -> None:
+    def _enter(self, value: object) -> None:
         identity = id(value)
         if identity in self._ancestors:
             raise self._fail("circular reference")
         self._ancestors.add(identity)
 
-    def _object(self, value: Mapping[Any, Any]) -> Any:
+    def _object(self, value: Mapping[Any, Any]) -> Mapping[str, JsonValue]:
         self._enter(value)
-        result: dict[str, Any] = {}
+        result: dict[str, JsonValue] = {}
         for key, item in value.items():
             if not isinstance(key, str):
                 raise self._fail(f"object key {key!r} is not a string")
@@ -167,9 +216,9 @@ class _Walker:
         self._ancestors.discard(id(value))
         return MappingProxyType(result) if self._freeze else result
 
-    def _array(self, value: Sequence[Any]) -> Any:
+    def _array(self, value: Sequence[Any]) -> Sequence[JsonValue]:
         self._enter(value)
-        result: list[Any] = []
+        result: list[JsonValue] = []
         for index, item in enumerate(value):
             self._trail.append(index)
             result.append(self.walk(item))
@@ -178,8 +227,17 @@ class _Walker:
         return tuple(result) if self._freeze else result
 
 
-def freeze_json_value(value: Any, *, frozen_input: bool = False) -> Any:
+@overload
+def freeze_json_value(value: Mapping[str, object], *, frozen_input: bool = False) -> JsonObject: ...
+@overload
+def freeze_json_value(value: object, *, frozen_input: bool = False) -> JsonValue: ...
+def freeze_json_value(value: object, *, frozen_input: bool = False) -> JsonValue:
     """Validate, detach and freeze in one pass — the append path's entry point.
+
+    Overloaded on the input's shape so that an object in is an object out: the
+    walker preserves shape, and `SessionEvent.data` is declared a `JsonObject`
+    because the envelope only admits one — a caller freezing a payload should
+    not have to narrow what it already knows.
 
     :param frozen_input: accept `MappingProxyType`/`tuple` containers as the
         object/array forms, for re-admitting a tree this module already froze.
@@ -188,12 +246,12 @@ def freeze_json_value(value: Any, *, frozen_input: bool = False) -> Any:
     return _Walker(freeze=True, frozen_input=frozen_input).walk(value)
 
 
-def snapshot_json_value(value: Any) -> Any:
+def snapshot_json_value(value: object) -> PlainJsonValue:
     """Validate and detach to a plain mutable copy, without freezing."""
-    return _Walker(freeze=False, frozen_input=False).walk(value)
+    return _Walker(freeze=False, frozen_input=False).walk(value)  # type: ignore[return-value]
 
 
-def is_json_value(value: Any) -> bool:
+def is_json_value(value: object) -> bool:
     """Test the same lossless boundary without keeping the copy."""
     try:
         _Walker(freeze=False, frozen_input=False).walk(value)
@@ -202,13 +260,93 @@ def is_json_value(value: Any) -> bool:
     return True
 
 
-def thaw_json(value: Any) -> Any:
-    """A plain mutable copy of a frozen tree, for callers that need `dict`/`list`."""
+@overload
+def thaw_json(value: Mapping[str, object]) -> dict[str, PlainJsonValue]: ...
+@overload
+def thaw_json(value: list[object] | tuple[object, ...]) -> list[PlainJsonValue]: ...
+@overload
+def thaw_json(value: object) -> PlainJsonValue: ...
+def thaw_json(value: object) -> PlainJsonValue:
+    """A plain mutable copy of a frozen tree, for callers that need `dict`/`list`.
+
+    Overloaded on the input's shape, as `freeze_json_value` is, so an object
+    thaws to a `dict` *in the type* — which is what a caller that thaws in order
+    to **mutate** needs: `compaction-summarize` rewrites one block of a thawed
+    `assistant/message` and re-appends it.
+
+    The array overload is selected by a `tuple` — the frozen array shape, which
+    is covariant — and **not** by a `list[str]` or any other concretely
+    parameterised list, because `list` is invariant and `list[str]` is not a
+    `list[object]`. Those fall through to the third overload and get the union.
+    No production caller passes a statically typed list, so this is a documented
+    limit rather than a gap to close.
+    """
     if isinstance(value, Mapping):
+        # No `str(key)`: `freeze_json_value` refuses a non-string key at the
+        # gate, so a tree from this module cannot have one, and the coercion
+        # measured at 11% of a 5,000-event thaw — which `to_wire` pays per
+        # event, per attached front end.
         return {key: thaw_json(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
         return [thaw_json(item) for item in value]
-    return value
+    return value  # type: ignore[return-value]  # a scalar this module admitted
+
+
+def as_int(value: object) -> int:
+    """`int()` of a JSON scalar, refusing a container with a sentence.
+
+    Twenty readers wrote `int(event.data.get("turn", 0))`, and with `data` typed
+    that is an `int()` of a union a `Mapping` belongs to — which `int()` refuses
+    at type-check, correctly: at runtime it would have raised a bare `TypeError`
+    three frames deep. Same coercions `int()` made (a `float` truncates, a
+    numeric `str` parses, a non-numeric one still raises `ValueError`); the one
+    change is that a container now fails with the field's shape in the message
+    rather than "int() argument must be…".
+    """
+    if type(value) is int:
+        # The whole point of the helper, and ~every call: a JSON integer, already
+        # an `int`, returned without the four-way `isinstance` walk behind it
+        # (33 ns against 86). `type(...) is int` excludes `bool` deliberately —
+        # it is a subclass, and it belongs on the coercing branch below.
+        return value
+    if isinstance(value, (bool, float, str)):
+        return int(value)
+    raise TypeError(f"expected a JSON number, got {type(value).__name__}")
+
+
+def obj(value: object) -> JsonObject:
+    """A JSON object, or an empty one — the reader's narrowing for a payload field.
+
+    Absence is normal: the log is JSON, every field is optional to a reader, and
+    a missing one must cost a row rather than the transcript. Here rather than in
+    `ph_app.wire`, where it was born, because the question it answers is about the
+    tree and not the app: a core reader chaining `data.get("message").get(...)`
+    needs exactly this narrowing, and had no typed way to say so.
+
+    **The test names the two shapes rather than asking the ABC.** `isinstance`
+    against `Mapping` goes through `ABCMeta.__instancecheck__`, and a
+    `MappingProxyType` — the in-memory form, so the common case — is its worst
+    input at 220 ns against 56 ns for the concrete pair. This runs per field per
+    event on the crash-repair scan and the TUI fold; measured over 8,499 events
+    the ABC form cost 3.2x the concrete one. Naming `dict` and `MappingProxyType`
+    is not a weakening either, because the D4 paragraph above says those are the
+    only two object shapes this module produces or reads.
+    """
+    return value if isinstance(value, (dict, MappingProxyType)) else _EMPTY_OBJECT
+
+
+def seq(value: object) -> Sequence[JsonValue]:
+    """A JSON array, or an empty one. A tuple in memory, a list on disk.
+
+    The frozen/plain duality is why this is a function and not an
+    `isinstance(value, list)` — a reader that tested for `list` worked on resume
+    and silently saw nothing live. Naming both shapes also makes the `str`
+    exclusion **structural** rather than a special case: `str` is a `Sequence`,
+    so an ABC test admits it and a reader that forgot iterated a word's letters
+    as rows; `str` is neither a `list` nor a `tuple`, so it simply falls out.
+    Same measurement as `obj`: 244 ns against 56 ns, per field per event.
+    """
+    return value if isinstance(value, (list, tuple)) else ()
 
 
 class JsonEncoder(json.JSONEncoder):
@@ -235,6 +373,6 @@ class JsonEncoder(json.JSONEncoder):
 _ENCODER = JsonEncoder()
 
 
-def dumps(value: Any) -> str:
+def dumps(value: object) -> str:
     """Canonical compact JSON for one log line or wire frame."""
     return _ENCODER.encode(value)

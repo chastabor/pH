@@ -65,7 +65,7 @@ from ph.tools import ToolCallView, ToolResult, ToolResultView
 from ph.tools.presentation import render_call_view, render_result_view
 
 from ..shell import shell_body
-from ..wire import media_labels, obj, one_line, result_block, seq, text_of_wire
+from ..wire import as_int, media_labels, obj, one_line, result_block, seq, text_of_wire
 from .state import ChatItem, ItemRole, ToolCard, TuiState
 
 __all__ = ["HANDLERS", "RECORDLESS", "REPLAY", "Frame", "TuiEventAdapter"]
@@ -199,7 +199,7 @@ class TuiEventAdapter:
             # The assembled `assistant/message` is authoritative on replay.
             return
         chunk = obj(event.data.get("chunk"))
-        turn, step = int(event.data.get("turn", 0)), int(event.data.get("step", 0))
+        turn, step = as_int(event.data.get("turn", 0)), as_int(event.data.get("step", 0))
         kind = chunk.get("type")
         if kind == "text-delta":
             self._append_stream(turn, step, "assistant", str(chunk.get("text", "")), event.seq)
@@ -237,7 +237,7 @@ class TuiEventAdapter:
             # silently — the mechanism-not-cause mistake this file already fixed
             # once, fifty lines up.
             return
-        turn, step = int(event.data.get("turn", 0)), int(event.data.get("step", 0))
+        turn, step = as_int(event.data.get("turn", 0)), as_int(event.data.get("step", 0))
         blocks = obj(event.data.get("message")).get("content")
         streamed = self.state.end_streaming(turn, step)
         text = text_of_wire(blocks)
@@ -368,7 +368,7 @@ class TuiEventAdapter:
     # ------------------------------------------------------------ lifecycle --
 
     def _on_turn_start(self, event: SessionEvent, frame: Frame) -> None:
-        self.state.turn = int(event.data.get("turn", 0))
+        self.state.turn = as_int(event.data.get("turn", 0))
         # Whatever was queued has been claimed into this turn.
         self.state.queued = 0
 
@@ -542,7 +542,7 @@ class TuiEventAdapter:
         # rendering a log a different build wrote, and a resumed transcript
         # should not be re-narrated with today's constants.
         attempt, of = event.data.get("attempt", "?"), event.data.get("of", "?")
-        seconds = int(event.data.get("delayMs", 0)) / 1000
+        seconds = as_int(event.data.get("delayMs", 0)) / 1000
         restored = " after restoring the tree" if event.data.get("restored") else ""
         reason = str(event.data.get("reason", "")).strip()
         detail = f": {reason}" if reason else ""
@@ -589,7 +589,7 @@ class TuiEventAdapter:
         the way back says only that something resumed, not that nothing was
         wrong.
         """
-        minutes = int(event.data.get("idleMs", 0)) // 60_000
+        minutes = as_int(event.data.get("idleMs", 0)) // 60_000
         self._row(
             "passivated",
             "notice",
@@ -627,14 +627,14 @@ class TuiEventAdapter:
         several missed fire times is a gap the reader can otherwise only infer
         from the clock.
         """
-        due, fired = int(event.data.get("dueAt", 0)), int(event.data.get("firedAt", 0))
+        due, fired = as_int(event.data.get("dueAt", 0)), as_int(event.data.get("firedAt", 0))
         late = (fired - due) // 1000
         delay = f", {late}s late" if late >= 1 else ""
         self._row("schedule", "notice", f"Scheduled run — {event.data.get('id', '')}{delay}", event)
 
     def _on_goal_set(self, event: SessionEvent, frame: Frame) -> None:
         """An autonomous run started, and what will decide it."""
-        gates = event.data.get("gates") or ()
+        gates = seq(event.data.get("gates"))
         decides = f" — gates: {', '.join(str(gate) for gate in gates)}" if gates else ""
         self._row(
             "goal", "notice", f"Working toward: {event.data.get('objective', '')}{decides}", event
@@ -730,7 +730,7 @@ class TuiEventAdapter:
         longer being shown all of them.
         """
         seqs = seq(event.data.get("seqs"))
-        saved = int(event.data.get("savedChars") or 0)
+        saved = as_int(event.data.get("savedChars") or 0)
         self._row(
             "compaction",
             "notice",
@@ -764,7 +764,7 @@ class TuiEventAdapter:
         self._row(
             "limits",
             "notice",
-            f"Stopped calling {tool} after {count_of(int(failures or 0), 'failure')} in a row.",
+            f"Stopped calling {tool} after {count_of(as_int(failures or 0), 'failure')} in a row.",
             event,
         )
 
@@ -885,7 +885,7 @@ class TuiEventAdapter:
         if row is None:
             return
         usage = obj(event.data.get("childUsage"))
-        row.tokens += int(usage.get("inputTokens") or 0) + int(usage.get("outputTokens") or 0)
+        row.tokens += as_int(usage.get("inputTokens") or 0) + as_int(usage.get("outputTokens") or 0)
 
     def _on_subagent_deleted(self, event: SessionEvent, frame: Frame) -> None:
         """A revoked child. The transcript stays on disk; the row says it went."""
@@ -898,7 +898,12 @@ class TuiEventAdapter:
     def _on_todo_write(self, event: SessionEvent, frame: Frame) -> None:
         # Emitted by ph-stabilize's `tool-todo` (P4-01); folded here so the
         # sidebar and the model's prompt context read one list.
-        self.state.todos = [thaw_json(todo) for todo in seq(event.data.get("todos"))]
+        # Malformed entries are *dropped*, matching `ph_stabilize.todo.todos_of`
+        # over the same payload — narrowing them to `{}` instead rendered a
+        # blank sidebar row for data the other reader discards.
+        self.state.todos = [
+            thaw_json(todo) for todo in seq(event.data.get("todos")) if isinstance(todo, Mapping)
+        ]
 
     def _on_offload_spilled(self, event: SessionEvent, frame: Frame) -> None:
         """An oversized result or pasted message was relocated (P4-02).
@@ -908,7 +913,7 @@ class TuiEventAdapter:
         the same thing the model was told.
         """
         locator = str(event.data.get("locator") or "")
-        size = int(event.data.get("bytes") or 0)
+        size = as_int(event.data.get("bytes") or 0)
         what = "Message" if event.type == "offload/input-spilled" else "Result"
         self._row(
             "offload",
@@ -919,7 +924,7 @@ class TuiEventAdapter:
 
     def _on_agent_inbox_spliced(self, event: SessionEvent, frame: Frame) -> None:
         inserted = len(seq(event.data.get("inserted")))
-        removed = int(event.data.get("removedCount", 0))
+        removed = as_int(event.data.get("removedCount", 0))
         self.state.queued = max(0, self.state.queued + inserted - removed)
 
 

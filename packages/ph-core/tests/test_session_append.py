@@ -14,7 +14,7 @@ from __future__ import annotations
 import math
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -70,6 +70,21 @@ def test_non_lossless_payloads_are_refused(payload: dict[str, object]) -> None:
     with pytest.raises(InvalidJsonValueError):
         session.append("turn/start", payload)
     assert session.seq == 0
+
+
+def test_a_non_object_payload_is_refused_at_the_write_door() -> None:
+    """The read door refuses one (`_EventWire.data` is an object), and the two
+    must agree. They did not at first: `SessionEvent.data` was declared a
+    `JsonObject` and nothing enforced it here, so a producer reaching this with
+    `Any` — a test tree outside mypy, a plugin built against an older signature —
+    appended a list, the bytes reached disk, and `from_wire` then refused the
+    record on resume. A log that cannot be reconstructed is the one failure A1
+    exists to prevent, so the refusal belongs on both doors."""
+    session = Session("s")
+    for payload in ([1, 2], "text", 7, None):
+        with pytest.raises(InvalidJsonValueError, match="must be a JSON object"):
+            session.append("turn/start", cast(Any, payload))
+    assert session.events == ()
 
 
 def test_cyclic_payloads_are_refused() -> None:

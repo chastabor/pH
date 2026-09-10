@@ -16,10 +16,15 @@ from .events import (
 from .folds import SessionFoldCache
 from .json import (
     InvalidJsonValueError,
+    JsonObject,
     JsonValue,
+    PlainJsonValue,
+    as_int,
     dumps,
     freeze_json_value,
     is_json_value,
+    obj,
+    seq,
     snapshot_json_value,
     thaw_json,
 )
@@ -61,7 +66,9 @@ __all__ = [
     "SURFACE_EVENT_TYPES",
     "EpochHeader",
     "InvalidJsonValueError",
+    "JsonObject",
     "JsonValue",
+    "PlainJsonValue",
     "RequestContext",
     "Session",
     "SessionEvent",
@@ -78,6 +85,7 @@ __all__ = [
     "SurfaceManager",
     "SurfaceOp",
     "SurfaceReplace",
+    "as_int",
     "canonical_header",
     "derive_event_message",
     "derive_transcript",
@@ -98,7 +106,9 @@ __all__ = [
     "is_surface_event",
     "new_session_id",
     "now_ms",
+    "obj",
     "open_turn_at",
+    "seq",
     "snapshot_json_value",
     "thaw_json",
 ]

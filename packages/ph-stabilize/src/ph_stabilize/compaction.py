@@ -62,7 +62,7 @@ import json
 import logging
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, cast
 
 from ph.agent.types import AgentHandle, PreStepDecision, RequestErrorAction, RequestFailure
 from ph.agent_loop import AgentCancelled
@@ -96,7 +96,7 @@ from ph.session import (
     thaw_json,
 )
 from ph.session.events import SurfaceReplace
-from ph.session.json import dumps
+from ph.session.json import dumps, obj, seq
 from ph.text import count_of
 from ph.wire import WireModel
 
@@ -470,8 +470,17 @@ def truncated_arguments(arguments: str, max_length: int) -> str | None:
     return None if elided == parsed else dumps(elided)
 
 
-def _elided_arguments(block: Any, elides: Callable[[str], bool], max_length: int) -> str | None:
-    """One block's replacement arguments, read from the *frozen* payload.
+def _elided_arguments(
+    block: Any, elides: Callable[[str], bool], max_length: int
+) -> tuple[str, int] | None:
+    """One block's replacement arguments and the length they replace, read from
+    the *frozen* payload.
+
+    The original length is returned rather than re-measured later because this
+    is the only pass that has proved `arguments` is a `str`. A caller that
+    re-derived it from the thawed copy would need a second narrowing whose
+    failure branch no test can reach — and whose arithmetic, if it ever did,
+    would report a *negative* saving into the row the TUI prints.
 
     Whole-string length first, which is a sound pre-filter and a cheap one: if
     the entire arguments JSON fits in `max_length`, no single value inside it can
@@ -485,7 +494,10 @@ def _elided_arguments(block: Any, elides: Callable[[str], bool], max_length: int
     arguments = block.get("arguments")
     if not isinstance(arguments, str) or len(arguments) <= max_length:
         return None
-    return truncated_arguments(arguments, max_length) if elides(str(block.get("name"))) else None
+    if not elides(str(block.get("name"))):
+        return None
+    shorter = truncated_arguments(arguments, max_length)
+    return None if shorter is None else (shorter, len(arguments))
 
 
 def truncated_assistant_payload(
@@ -507,10 +519,7 @@ def truncated_assistant_payload(
     last usage it sees and would have shown the same stale number. The usage
     belongs to the request that produced the original, which still has it.
     """
-    message = event.data.get("message") if isinstance(event.data, Mapping) else None
-    blocks = message.get("content") if isinstance(message, Mapping) else None
-    if not isinstance(blocks, (list, tuple)):
-        return None
+    blocks = seq(obj(event.data.get("message")).get("content"))
     elisions = {
         index: elided
         for index, block in enumerate(blocks)
@@ -518,12 +527,18 @@ def truncated_assistant_payload(
     }
     if not elisions:
         return None
+    saved = sum(before - len(elided) for elided, before in elisions.values())
     plain = thaw_json(event.data)
-    rewritten = plain["message"]["content"]
-    saved = 0
-    for index, elided in elisions.items():
-        saved += len(rewritten[index]["arguments"]) - len(elided)
-        rewritten[index] = {**rewritten[index], "arguments": elided}
+    # The frozen pass above proved the shape — a message whose `content` is a
+    # block list — and `thaw_json` preserves it exactly: object to `dict`, array
+    # to `list`, all the way down. So this is a claim already checked, and
+    # re-checking it would cost two branches no test can reach. `cast` is the
+    # honest spelling for that; `workspace.py`'s rule against casting a `Literal`
+    # off JSON is about an *unchecked* claim, which this is not.
+    message = cast("dict[str, Any]", plain["message"])
+    rewritten = cast("list[dict[str, Any]]", message["content"])
+    for index, (shorter, _before) in elisions.items():
+        rewritten[index] = {**rewritten[index], "arguments": shorter}
     plain.pop("usage", None)
     return plain, saved
 
@@ -856,8 +871,8 @@ class SummarizeEngine:
         elides = self._elides_arguments(agent)
         rewritten: list[int] = []
         saved = 0
-        for seq in nodes[:cutoff]:
-            event = events[seq]
+        for at in nodes[:cutoff]:
+            event = events[at]
             if event.type != "assistant/message":
                 continue
             replacement = truncated_assistant_payload(
@@ -869,9 +884,9 @@ class SummarizeEngine:
             session.append(
                 "assistant/message",
                 payload,
-                SurfaceIntent(surface_op=SurfaceReplace(replaces=(seq,)), source_event_seqs=(seq,)),
+                SurfaceIntent(surface_op=SurfaceReplace(replaces=(at,)), source_event_seqs=(at,)),
             )
-            rewritten.append(seq)
+            rewritten.append(at)
             saved += savings
         if not rewritten:
             return ()
@@ -945,9 +960,9 @@ class SummarizeEngine:
         if measured < budget:
             return ()
         clipped: list[int] = []
-        for seq in tail:
-            if await self._clip_one(session, events[seq]):
-                clipped.append(seq)
+        for at in tail:
+            if await self._clip_one(session, events[at]):
+                clipped.append(at)
         return tuple(clipped)
 
     def _clip_budget(self, session: Session) -> int:
@@ -986,8 +1001,9 @@ class SummarizeEngine:
             # that would grow is not part of shrinking it.
             return False
         payload = thaw_json(event.data)
-        blocks = payload.get("message", {}).get("content")
-        if not isinstance(blocks, list) or not blocks:
+        thawed = payload.get("message")
+        blocks = thawed.get("content") if isinstance(thawed, dict) else None
+        if not isinstance(blocks, list) or not blocks or not isinstance(blocks[0], dict):
             return False
         # Only the result block's content changes — everything else, the message
         # id included, must match: `Session.append` refuses a `tool/result`

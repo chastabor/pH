@@ -34,7 +34,7 @@ from typing import Any
 
 from ..cordis import Context, plugin
 from ..keys import ATTACHMENTS, LLM, SESSIONS
-from ..session import Session
+from ..session import Session, seq
 from .adapter import ResolvedModel
 from .types import AttachmentRef, GenerateOptions, Message, TextBlock, attachment_of
 
@@ -227,7 +227,7 @@ def _record_once(
     previous = session.latest(event_type)
     if (
         previous is not None
-        and [str(one) for one in previous.data.get("attachmentIds") or ()] == ids
+        and [str(one) for one in seq(previous.data.get("attachmentIds"))] == ids
     ):
         return False
     session.append(event_type, {"provider": provider, "attachmentIds": ids, "attachments": items})

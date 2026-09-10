@@ -31,7 +31,7 @@ from typing import Any
 
 import anyio
 
-from ..wire import obj, seq
+from ..wire import as_int, obj, seq
 from .client import DaemonClient
 
 __all__ = ["Followed", "first_of"]
@@ -82,7 +82,7 @@ class Followed:
         if method != "session.event":
             return
         event = obj(params.get("event"))
-        at = int(event.get("seq", -1))
+        at = as_int(event.get("seq", -1))
         if at <= self.seen:
             # Already shown by a snapshot page. Dropped by `seq` rather than by
             # remembering which frames were buffered, which is what makes the two
@@ -145,7 +145,7 @@ class Followed:
             views = obj(page.get("presentations"))
             self.on_events([(one, views.get(str(one.get("seq")))) for one in events], False)
             for event in events:
-                self.seen = max(self.seen, int(event.get("seq", self.seen)))
+                self.seen = max(self.seen, as_int(event.get("seq", self.seen)))
             if not page.get("more"):
                 return started
             cursor = page.get("cursor")

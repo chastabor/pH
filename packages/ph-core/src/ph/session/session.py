@@ -21,9 +21,9 @@ Ported from dsh `packages/core/session/src/index.ts`.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import PurePath
-from typing import Any, Literal, TypeAlias
+from typing import Literal, TypeAlias
 
 from pydantic import Field, NonNegativeInt, field_validator
 
@@ -32,7 +32,7 @@ from ..selectors import matches_any, parse_all
 from ..wire import WireModel
 from .derive import derive_event_message, derive_transcript
 from .events import SESSION_FORMAT_VERSION, SessionEvent, SurfaceIntent, now_ms
-from .json import freeze_json_value
+from .json import InvalidJsonValueError, JsonValue, freeze_json_value
 from .known_event_types import IGNORABLE_SESSION_EVENT_TYPES, KNOWN_SESSION_EVENT_TYPES
 from .request_header import (
     EpochHeader,
@@ -343,10 +343,16 @@ class Session:
     def append(
         self,
         event_type: str,
-        data: Any,
+        data: Mapping[str, JsonValue],
         surface: SurfaceIntent | None = None,
     ) -> SessionEvent:
         """Append one event and synchronously notify observers.
+
+        `data` is a `Mapping` of JSON values, and that is the producer's half of
+        A1 said in the type: a payload carrying a `Path`, a dataclass or a set is
+        an error here, at the call, where `freeze_json_value` would have raised
+        at runtime. The runtime gate stays — a type is not a proof about a value
+        that arrived as `Any` — but a producer that can be checked is.
 
         The hot path never blocks on I/O — persistence buffers asynchronously
         and drains on `session/flush`.
@@ -356,10 +362,23 @@ class Session:
         `IGNORABLE_SESSION_EVENT_TYPES` rather than passed here, so no two call
         sites can disagree about one type.
 
-        :raises InvalidJsonValueError: when `data` is not losslessly JSON.
+        :raises InvalidJsonValueError: when `data` is not losslessly JSON, or
+            is not a JSON **object**.
         :raises SurfaceError: when the surface metadata is wrong for this type.
         :raises RuntimeError: when re-entered during publication.
         """
+        if not isinstance(data, Mapping):
+            # `_EventWire` refuses a non-object payload on the way *in* from
+            # disk, and `SessionEvent.data` is declared a `JsonObject`. Without
+            # this the two doors disagree: a producer that reached here as `Any`
+            # — a test tree outside mypy, a plugin built against an older
+            # signature — appends a list, the bytes reach disk, and the session
+            # becomes unloadable at the next resume. A log that cannot be
+            # reconstructed is the one failure A1 exists to prevent, so the
+            # write door refuses what the read door refuses, in its vocabulary.
+            raise InvalidJsonValueError(
+                "", f"an event payload must be a JSON object, not {type(data).__name__}"
+            )
         event = SessionEvent(
             type=event_type,
             seq=len(self._log),

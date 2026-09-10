@@ -34,7 +34,16 @@ from typing import Any, Literal, TypeAlias
 from ph.session import Session, SessionEvent, fork_boundaries, is_replacement_surface_event
 from ph.session.request_header import parse_request_header
 
-from ..wire import describe, message_of, obj, one_line, result_block, source_of, text_of_wire
+from ..wire import (
+    as_int,
+    describe,
+    message_of,
+    obj,
+    one_line,
+    result_block,
+    source_of,
+    text_of_wire,
+)
 
 __all__ = [
     "HANDLERS",
@@ -227,7 +236,7 @@ class _Builder:
         self._system = system
 
     def on_message(self, event: SessionEvent, kind: RecordKind) -> None:
-        outer = obj(event.data)
+        outer = event.data
         message = message_of(event)
         source = _source_ref(message)
         text = _text(message.get("content"))
@@ -236,7 +245,7 @@ class _Builder:
         record_kind: RecordKind = "compacted" if is_replacement_surface_event(event) else kind
         if record_kind == "user" and source.kind == "plugin":
             record_kind = "context"
-        self.turn = int(outer.get("turn", self.turn)) or self.turn
+        self.turn = as_int(outer.get("turn", self.turn)) or self.turn
         self.add(
             kind=record_kind,
             source_seq=event.seq,
@@ -249,7 +258,7 @@ class _Builder:
         )
 
     def on_tool_call(self, event: SessionEvent) -> None:
-        data = obj(event.data)
+        data = event.data
         name = str(data.get("name") or "?")
         self.add(
             kind="tool",
@@ -278,7 +287,7 @@ class _Builder:
 
     def on_sub_dispatch(self, event: SessionEvent) -> None:
         """A Code Mode sub-call: `subtool`, the kind C2 exists to make visible."""
-        data = obj(event.data)
+        data = event.data
         name = str(data.get("name") or "?")
         text = _text(data.get("content"))
         self.add(
@@ -330,12 +339,12 @@ class _Builder:
 
 
 def _on_turn_start(builder: _Builder, event: SessionEvent) -> None:
-    builder.turn = int(obj(event.data).get("turn", 0))
+    builder.turn = as_int(event.data.get("turn", 0))
     builder.on_event(event, "turn start", f"turn {builder.turn}")
 
 
 def _on_turn_end(builder: _Builder, event: SessionEvent) -> None:
-    reason = obj(obj(event.data).get("reason")).get("kind") or "completed"
+    reason = obj(event.data.get("reason")).get("kind") or "completed"
     builder.on_event(event, "turn end", f"turn {builder.turn} — {reason}")
 
 

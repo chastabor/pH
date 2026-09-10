@@ -23,7 +23,7 @@ from typing import Annotated, Any, Literal, TypeAlias
 from pydantic import Field, StrictInt, field_validator
 
 from ..wire import WireDataclass, WireModel
-from .json import freeze_json_value, thaw_json
+from .json import JsonObject, freeze_json_value, thaw_json
 
 __all__ = [
     "SESSION_FORMAT_VERSION",
@@ -134,7 +134,13 @@ class _EventWire(WireModel):
     type: Annotated[str, Field(min_length=1)]
     seq: Seq
     time: Seq
-    data: Any
+    data: dict[str, Any]
+    """An object, refused otherwise. Every payload this harness writes is one —
+    `Session.append` takes a `Mapping` — and every log this repository carries,
+    the dsh replay fixtures included, has only objects: 5 172 events across 283
+    files, checked. Refusing the exception at the envelope is what lets
+    `SessionEvent.data` be declared a `JsonObject` rather than asserted one, so a
+    reader does not narrow the top level of every payload it opens."""
     ignorable: Literal[True] | None = None
     """Absent means required. A writer sets the marker only on purely
     informational records, so an explicit `false` is a writer that misunderstood
@@ -152,8 +158,13 @@ class SessionEvent(WireDataclass):
     """Monotonic sequence number within the session; always its log index."""
     time: int
     """Unix epoch milliseconds."""
-    data: Any
-    """The frozen, lossless-JSON payload that entered the log."""
+    data: JsonObject
+    """The frozen, lossless-JSON payload that entered the log.
+
+    Always an object — `_EventWire` refuses anything else — and typed as one, so
+    `event.data["turn"]` is a `JsonValue` a reader narrows rather than an `Any`
+    it hopes about. Frozen in memory (a `MappingProxyType` over tuples), plain
+    after `to_wire`; `JsonValue` covers both, deliberately."""
     ignorable: bool = False
     """Whether a reader that does not recognize `type` may safely skip it.
 
