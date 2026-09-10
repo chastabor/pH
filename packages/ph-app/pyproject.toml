@@ -11,6 +11,10 @@ requires-python = ">=3.12"
 license = "MIT"
 dependencies = [
     "ph-core",
+    # Declared although `ph-core` already requires it: `ph_app.daemon` imports
+    # `anyio` directly at 20-odd sites and `cancelsafe` is keyed to its
+    # internals, so arriving here transitively understated the coupling.
+    "anyio>=4.4,<5",
     "filelock>=3.15",
     "typer>=0.12",
     "rich>=13.0",

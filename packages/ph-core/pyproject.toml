@@ -10,7 +10,13 @@ readme = "README.md"
 requires-python = ">=3.12"
 license = "MIT"
 dependencies = [
-    "anyio>=4.4",
+    # Ceilinged, and the ceiling is load-bearing. `ph_app.daemon.cancelsafe`
+    # is keyed to how anyio registers a socket readiness wait — a bound
+    # `Future.set_result` handed to `loop.add_reader` — and `ph_rlm.kernel`
+    # depends on the *hardened* free `anyio.wait_readable` staying hardened.
+    # Neither is public API, so a major release that changes either should be
+    # a decision someone makes, not one a resolver makes for them.
+    "anyio>=4.4,<5",
     "croniter>=3.0",
     "filelock>=3.15",
     "pydantic>=2.9",

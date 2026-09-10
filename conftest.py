@@ -68,15 +68,32 @@ callback, which the traceback cannot: it arrives with no application frames at
 all, because by then nothing of ours is on the stack.
 
 **If `context:` names `Future.set_result(None)`, this is issue 58** and the
-mechanism is known: anyio's `_RawSocketMixin._wait_until_readable` registers
-that as an `add_reader` callback and removes the reader in a *done-callback*
-one loop iteration later, so a cancelled readiness wait can still be fired.
-That mixin is `UNIXSocketStream`, so the exposure is the **daemon** socket —
-`connect_unix`, `UNIXSocketListener.accept`, every `Peer` read. It is *not*
-`ph_rlm.kernel.manager._recv_line`, which this note used to name: that calls
-the free `anyio.wait_readable`, a different implementation that catches
-`InvalidStateError` and removes the reader synchronously. See issue 58 in
-`plans/Implementation_Plan.md` — no re-investigation needed.
+mechanism is known: anyio registers that bound method as an `add_reader`
+callback and removes the reader in a *done-callback* one loop iteration later,
+so a wait cancelled in the gap can still be fired. Five copies of that shape —
+`_RawSocketMixin._wait_until_readable` and `_wait_until_writable`,
+`UNIXSocketListener.accept`, and inline in `AsyncIOBackend.connect_unix` and
+`create_unix_datagram_socket` — so the exposure is the **daemon** socket:
+connecting, accepting, and every `Peer` read. Note the last three repeat the
+shape *inline* rather than inheriting the mixin's, which is what a first
+attempt at the guard got wrong. It is *not* `ph_rlm.kernel.manager._recv_line`,
+which this note used to name: that calls the free `anyio.wait_readable`, a
+different implementation that catches `InvalidStateError` for itself. See issue
+58 in `plans/Implementation_Plan.md` — no re-investigation needed.
+
+**And it is a *test* failure, not a production one.** The same race in a
+daemon reaches asyncio's default exception handler: one ERROR on the `asyncio`
+logger, and the process carries on — nothing propagates, and the read it fires
+on was already being abandoned by the cancellation. It fails a test only
+because anyio's `TestRunner` collects loop-callback exceptions and re-raises
+them on the shared session loop. So this is noise to be traced, not a fault to
+be chased: measured in issue 58.
+
+**And it should no longer be reachable at all.** `ph_app.daemon.cancelsafe`
+guards the event loop against exactly this registration, applied on import of
+`ph_app.daemon`. If a `Future.set_result(None)` handle still appears here, the
+guard has stopped binding — `test_cancelsafe` is what should have caught that,
+so check it before looking anywhere else.
 
 Any *other* callback is a new one, and the name above is the lead."""
 

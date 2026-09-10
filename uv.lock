@@ -1377,6 +1377,7 @@ name = "ph-app"
 version = "0.0.1"
 source = { editable = "packages/ph-app" }
 dependencies = [
+    { name = "anyio" },
     { name = "filelock" },
     { name = "httpx" },
     { name = "ph-core" },
@@ -1392,6 +1393,7 @@ web = [
 
 [package.metadata]
 requires-dist = [
+    { name = "anyio", specifier = ">=4.4,<5" },
     { name = "filelock", specifier = ">=3.15" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "ph-core", editable = "packages/ph-core" },
@@ -1440,7 +1442,7 @@ otel = [
 
 [package.metadata]
 requires-dist = [
-    { name = "anyio", specifier = ">=4.4" },
+    { name = "anyio", specifier = ">=4.4,<5" },
     { name = "croniter", specifier = ">=3.0" },
     { name = "filelock", specifier = ">=3.15" },
     { name = "opentelemetry-exporter-otlp-proto-http", marker = "extra == 'otel'", specifier = ">=1.27" },
@@ -1562,7 +1564,7 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "anyio", specifier = ">=4.4" },
+    { name = "anyio", specifier = ">=4.4,<5" },
     { name = "mypy", specifier = ">=1.11" },
     { name = "ph-app", extras = ["web"], editable = "packages/ph-app" },
     { name = "ph-core", extras = ["otel"], editable = "packages/ph-core" },
