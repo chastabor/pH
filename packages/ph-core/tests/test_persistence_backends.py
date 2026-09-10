@@ -90,6 +90,7 @@ from dataclasses import fields
 from pathlib import Path
 from typing import Any
 
+import anyio
 import pytest
 
 from ph.cordis import Context
@@ -984,3 +985,72 @@ async def test_a_claimed_session_refuses_a_second_writer_until_released(
     await first.dispose()
     await store.claim("s1", scope=second)
     await second.dispose()
+
+
+async def test_a_flush_that_does_not_happen_still_owes_its_events(
+    store: SessionPersistence,
+) -> None:
+    """A cancelled flush must not consume what it failed to write.
+
+    Both backends emptied the queue *before* awaiting the write, so a
+    cancellation delivered as the flush entered the thread pool — which is
+    precisely when passivation and teardown deliver one — dropped the batch and
+    never retried it. The file or table then had a **hole in its seq space**,
+    and the next resume died in `Session._readmit` with "seed must be contiguous
+    from 0": not a lost flush but a session that can never be opened again.
+
+    `move_on_after(0)` is the honest trigger rather than a patched writer:
+    `anyio.to_thread.run_sync` checkpoints before it queues the work, so a
+    scope that is already cancelled raises there with nothing written — the
+    exact window the bug lived in.
+
+    Sabotage: drop the `except` that restores `pending`, and this reads back a
+    log missing its middle.
+    """
+    session = _session(store, "owed")
+    for turn in range(4):
+        _append(store, session, "turn/start", {"turn": turn})
+
+    with anyio.move_on_after(0):
+        await store.flush(session)
+
+    # Nothing was written, so everything is still owed — and a later flush that
+    # does happen writes the whole log, contiguous from 0.
+    await store.flush(session)
+
+    _header, events = store.read("owed")
+    assert [event.seq for event in events] == list(range(len(session.events))), (
+        "the log came back with a hole where the cancelled flush had been"
+    )
+    Session("owed", seed=list(events), header=_header)  # the resume `_readmit` refuses
+
+
+async def test_a_failed_write_is_retried_rather_than_lost(
+    store: SessionPersistence, monkeypatch: Any
+) -> None:
+    """The other half of the same window: an `OSError` — a full disk, a
+    read-only mount — leaves the events owed rather than consumed."""
+    session = _session(store, "unwritable")
+    _append(store, session, "turn/start", {"turn": 0})
+
+    broken = True
+
+    def refuse(*_args: Any, **_kwargs: Any) -> None:
+        if broken:
+            raise OSError("no space left on device")
+
+    with monkeypatch.context() as patch:
+        if isinstance(store, JsonlSessionStore):
+            patch.setattr("ph.persistence.jsonl._append_and_sync", refuse)
+        else:
+            patch.setattr(type(store), "_write", staticmethod(refuse))
+        with pytest.raises(OSError):
+            await store.flush(session)
+
+    broken = False
+    await store.flush(session)
+
+    _header, events = store.read("unwritable")
+    assert [event.seq for event in events] == list(range(len(session.events))), (
+        "the refused write consumed the events instead of owing them"
+    )

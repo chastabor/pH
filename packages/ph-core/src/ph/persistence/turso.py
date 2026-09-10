@@ -149,12 +149,33 @@ class TursoSessionStore:
         buffer.pending.append(event)
 
     async def flush(self, session: Session) -> None:
+        """Write what is queued, or still owe it.
+
+        Emptied before the write so two overlapping flushes cannot both carry
+        the same rows, and put back if the write does not happen — the same
+        pairing `JsonlSessionStore.flush` explains at length, and reachable the
+        same way: `anyio.to_thread.run_sync` checkpoints before it queues the
+        work, so a cancellation arriving with passivation or teardown raises
+        with the rows already dropped from `pending`.
+
+        **Cheaper to be sure of here than in the JSONL backend**, because
+        `_write` is `INSERT OR REPLACE` keyed by `seq`: re-writing a row that
+        did land is a no-op, so restoring cannot duplicate anything. What it
+        prevents is a hole in the seq space, which `Session(seed=…)` refuses on
+        the next resume with *"seed must be contiguous from 0"*.
+        """
         buffer = self._buffers.get(session.id)
         if buffer is None or (buffer.header_written and not buffer.pending):
             return
+        header_owed = not buffer.header_written
         pending, buffer.pending = buffer.pending, []
         buffer.header_written = True
-        await anyio.to_thread.run_sync(self._write, session, pending)
+        try:
+            await anyio.to_thread.run_sync(self._write, session, pending)
+        except BaseException:
+            buffer.pending[:0] = pending
+            buffer.header_written = not header_owed
+            raise
 
     def _write(self, session: Session, events: list[SessionEvent]) -> None:
         cursor = self._connect(session.id).cursor()

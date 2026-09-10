@@ -163,18 +163,51 @@ class JsonlSessionStore:
         buffer.pending.append(event)
 
     async def flush(self, session: Session) -> None:
+        """Write what this log has and the file does not, or still owe it.
+
+        **The queue is emptied before the write and restored if the write does
+        not happen**, and both halves are load-bearing for different reasons.
+
+        *Before*, because two flushes can overlap — `checkpoint_policy` flushes
+        on an event while the supervisor flushes on passivation or shutdown —
+        and a second one that found the same events still queued would append
+        them twice. Clearing first makes the concurrent flush a no-op.
+
+        *Restored*, because clearing first is otherwise a way to lose them.
+        `anyio.to_thread.run_sync` begins with a checkpoint, so a cancellation
+        delivered as this flush enters the thread pool raises **before** the
+        work is queued — and passivation and teardown are exactly when
+        cancellation arrives. An `OSError` (a full disk, a read-only mount) has
+        the same shape. Either way the events were dropped from `pending` and
+        never written, so the file gains a hole in its seq space and the next
+        resume dies in `_readmit`: *"seed must be contiguous from 0"*. That is
+        not a lost flush, it is a session that can never be opened again —
+        which is the failure `track`'s docstring above describes a previous
+        incarnation of, from a different cause.
+
+        Prepended rather than appended on the way back, because `pending` is
+        ordered by seq and anything recorded while the write was in flight
+        belongs after what this flush was carrying.
+        """
         buffer = self._buffers.get(session.id)
         if buffer is None:
             return
         records: list[dict[str, Any]] = []
-        if not buffer.header_written:
+        header_owed = not buffer.header_written
+        if header_owed:
             records.append({"type": HEADER_LINE_TYPE, "header": session.header.to_wire()})
-        records.extend(event.to_wire(thaw=False) for event in buffer.pending)
+        owed = list(buffer.pending)
+        records.extend(event.to_wire(thaw=False) for event in owed)
         if not records:
             return
         buffer.pending.clear()
         buffer.header_written = True
-        await anyio.to_thread.run_sync(_append_and_sync, buffer.path, records)
+        try:
+            await anyio.to_thread.run_sync(_append_and_sync, buffer.path, records)
+        except BaseException:
+            buffer.pending[:0] = owed
+            buffer.header_written = not header_owed
+            raise
 
     # ------------------------------------------------------------- reading --
     #

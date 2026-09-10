@@ -12,6 +12,7 @@ took a root of their own and remembered to dispose it were each re-deriving
 
 from __future__ import annotations
 
+import os
 import shutil
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from pathlib import Path
@@ -38,6 +39,74 @@ constant there is an `import pytest` on the import path of three plugin rows a
 deployment mounts (`llm-fake` above all, which `headless` carries). An install
 without pytest could not compose its default profile. A marker costs the wheel
 nothing, and the collection hook is a place the wheel does not reach."""
+
+
+STRAY_CALLBACK_NOTE = """Raised by a callback the event loop ran *outside* any test.
+
+anyio's `TestRunner` collects those and re-raises them from whichever test next
+finishes, and every test here shares one session-wide loop — so **the test this
+failed is very likely not the cause**. The `context:` line above names the
+callback, which the traceback cannot: it arrives with no application frames at
+all, because by then nothing of ours is on the stack.
+
+**If `context:` names `Future.set_result(None)`, this is issue 58** and the
+cause is known: anyio's `_wait_until_readable` registers that as an
+`add_reader` callback and removes the reader in a *done-callback* one loop
+iteration later, so a cancelled readiness wait can still be fired. pH reaches
+it through `ph_rlm.kernel.manager._recv_line`, whose `wait_readable` is
+cancelled ~20x a second by `move_on_after(_CANCEL_POLL_SECONDS)`. See issue 58
+in `plans/Implementation_Plan.md` — no re-investigation needed.
+
+Any *other* callback is a new one, and the name above is the lead."""
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    """Make a stray event-loop callback name its own cause.
+
+    **The flake's worst property is misattribution, and that is what this
+    fixes.** A callback that raises after its test has finished is collected by
+    anyio's session-wide `TestRunner` and re-raised inside an unrelated test,
+    with a traceback holding no application frames — `self = None`, one line of
+    `asyncio/events.py`, nothing else. Twice now that has sent someone
+    investigating a test that was a bystander (issue 58, and the earlier
+    instance `daemon_helpers.close_clients` was written for).
+
+    So the exception gets a note carrying what the traceback lacks: which test
+    was running when the callback fired, and the callback itself. The failure is
+    left failing — a stray callback is a real defect and silencing it would be
+    the wrong trade — but it now points somewhere useful.
+
+    Wrapping anyio's handler rather than `loop.set_exception_handler`, because
+    the runner installs its own on every loop it makes and would overwrite ours.
+
+    **A heavier companion to this was tried and removed.** While issue 58's
+    callback was unknown, a wrapper on `asyncio.BaseEventLoop.call_soon`
+    recorded any `set_result` scheduled onto an already-resolved future,
+    schedule-time stack and all — and it is what identified the callback. That
+    made it a *hunting* tool: it monkeypatched stdlib for the whole test
+    process, and once the answer was known it was buying a second diagnosis of
+    a diagnosed bug. If a new stray ever needs the same treatment, it is worth
+    re-adding for the hunt and removing again after; leaving it armed is the
+    part that was not worth it.
+    """
+    from anyio._backends._asyncio import TestRunner
+
+    original = TestRunner._exception_handler
+
+    def attributing(runner: Any, loop: Any, context: dict[str, Any]) -> Any:
+        error = context.get("exception")
+        if isinstance(error, BaseException):
+            named = ", ".join(
+                f"{key}={context[key]!r}"
+                for key in ("message", "handle", "future", "task", "protocol", "transport")
+                if context.get(key) is not None
+            )
+            error.add_note(f"context: {named or context!r}")
+            error.add_note(f"running: {os.environ.get('PYTEST_CURRENT_TEST', '<none>')}")
+            error.add_note(STRAY_CALLBACK_NOTE)
+        return original(runner, loop, context)
+
+    TestRunner._exception_handler = attributing
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:

@@ -252,12 +252,21 @@ async def shut_down(path: Path) -> None:
     every test that spawns one.
     """
     client = await DaemonClient.connect(path)
-    async with anyio.create_task_group() as tasks:
-        tasks.start_soon(client.pump)
-        await client.call("initialize")
-        await client.notify("shutdown")
-        with anyio.fail_after(20):
-            await client.closed.wait()
+    try:
+        async with anyio.create_task_group() as tasks:
+            tasks.start_soon(client.pump)
+            await client.call("initialize")
+            await client.notify("shutdown")
+            with anyio.fail_after(20):
+                await client.closed.wait()
+    finally:
+        # `close_clients`' rule, which this was the one caller not following:
+        # the stream is what ends a pump, and a client left to the garbage
+        # collector is a socket closed at an arbitrary later moment — on the
+        # session-wide loop every test shares. That is the shape a stray
+        # callback comes from, and issue 58 is the standing row for one.
+        with suppress(Exception):
+            await client.aclose()
 
 
 def daemon_socket() -> Path:
