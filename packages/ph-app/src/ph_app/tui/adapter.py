@@ -52,6 +52,7 @@ from pydantic import ValidationError
 
 from ph.seams.subagents import downgrade_text, fold_subagent_event
 from ph.session import (
+    JsonObject,
     Session,
     SessionEvent,
     SurfaceReplace,
@@ -199,7 +200,7 @@ class TuiEventAdapter:
             # The assembled `assistant/message` is authoritative on replay.
             return
         chunk = as_obj(event.data.get("chunk"))
-        turn, step = as_int(event.data.get("turn", 0)), as_int(event.data.get("step", 0))
+        turn, step = as_int(event.data.get("turn")), as_int(event.data.get("step"))
         kind = chunk.get("type")
         if kind == "text-delta":
             self._append_stream(turn, step, "assistant", str(chunk.get("text", "")), event.seq)
@@ -237,7 +238,7 @@ class TuiEventAdapter:
             # silently — the mechanism-not-cause mistake this file already fixed
             # once, fifty lines up.
             return
-        turn, step = as_int(event.data.get("turn", 0)), as_int(event.data.get("step", 0))
+        turn, step = as_int(event.data.get("turn")), as_int(event.data.get("step"))
         blocks = as_obj(event.data.get("message")).get("content")
         streamed = self.state.end_streaming(turn, step)
         text = text_of_wire(blocks)
@@ -255,7 +256,7 @@ class TuiEventAdapter:
         if text:
             self._row("msg", "assistant", text, event, turn=turn)
 
-    def _count_usage(self, usage: Mapping[str, Any]) -> None:
+    def _count_usage(self, usage: JsonObject) -> None:
         """The provider's own count of the last request — the meter's `usage` baseline.
 
         Same four terms as `TokenMeter.baseline`; the meter's *estimate* branch
@@ -264,7 +265,7 @@ class TuiEventAdapter:
         if not usage:
             return
         self.state.tokens = sum(
-            int(usage.get(key) or 0)
+            as_int(usage.get(key))
             for key in ("inputTokens", "outputTokens", "cacheReadTokens", "cacheWriteTokens")
         )
 
@@ -368,7 +369,7 @@ class TuiEventAdapter:
     # ------------------------------------------------------------ lifecycle --
 
     def _on_turn_start(self, event: SessionEvent, frame: Frame) -> None:
-        self.state.turn = as_int(event.data.get("turn", 0))
+        self.state.turn = as_int(event.data.get("turn"))
         # Whatever was queued has been claimed into this turn.
         self.state.queued = 0
 
@@ -542,7 +543,7 @@ class TuiEventAdapter:
         # rendering a log a different build wrote, and a resumed transcript
         # should not be re-narrated with today's constants.
         attempt, of = event.data.get("attempt", "?"), event.data.get("of", "?")
-        seconds = as_int(event.data.get("delayMs", 0)) / 1000
+        seconds = as_int(event.data.get("delayMs")) / 1000
         restored = " after restoring the tree" if event.data.get("restored") else ""
         reason = str(event.data.get("reason", "")).strip()
         detail = f": {reason}" if reason else ""
@@ -589,7 +590,7 @@ class TuiEventAdapter:
         the way back says only that something resumed, not that nothing was
         wrong.
         """
-        minutes = as_int(event.data.get("idleMs", 0)) // 60_000
+        minutes = as_int(event.data.get("idleMs")) // 60_000
         self._row(
             "passivated",
             "notice",
@@ -627,7 +628,7 @@ class TuiEventAdapter:
         several missed fire times is a gap the reader can otherwise only infer
         from the clock.
         """
-        due, fired = as_int(event.data.get("dueAt", 0)), as_int(event.data.get("firedAt", 0))
+        due, fired = as_int(event.data.get("dueAt")), as_int(event.data.get("firedAt"))
         late = (fired - due) // 1000
         delay = f", {late}s late" if late >= 1 else ""
         self._row("schedule", "notice", f"Scheduled run — {event.data.get('id', '')}{delay}", event)
@@ -730,7 +731,7 @@ class TuiEventAdapter:
         longer being shown all of them.
         """
         seqs = as_seq(event.data.get("seqs"))
-        saved = as_int(event.data.get("savedChars") or 0)
+        saved = as_int(event.data.get("savedChars"))
         self._row(
             "compaction",
             "notice",
@@ -764,7 +765,7 @@ class TuiEventAdapter:
         self._row(
             "limits",
             "notice",
-            f"Stopped calling {tool} after {count_of(as_int(failures or 0), 'failure')} in a row.",
+            f"Stopped calling {tool} after {count_of(as_int(failures), 'failure')} in a row.",
             event,
         )
 
@@ -885,7 +886,7 @@ class TuiEventAdapter:
         if row is None:
             return
         usage = as_obj(event.data.get("childUsage"))
-        row.tokens += as_int(usage.get("inputTokens") or 0) + as_int(usage.get("outputTokens") or 0)
+        row.tokens += as_int(usage.get("inputTokens")) + as_int(usage.get("outputTokens"))
 
     def _on_subagent_deleted(self, event: SessionEvent, frame: Frame) -> None:
         """A revoked child. The transcript stays on disk; the row says it went."""
@@ -913,7 +914,7 @@ class TuiEventAdapter:
         the same thing the model was told.
         """
         locator = str(event.data.get("locator") or "")
-        size = as_int(event.data.get("bytes") or 0)
+        size = as_int(event.data.get("bytes"))
         what = "Message" if event.type == "offload/input-spilled" else "Result"
         self._row(
             "offload",
@@ -924,7 +925,7 @@ class TuiEventAdapter:
 
     def _on_agent_inbox_spliced(self, event: SessionEvent, frame: Frame) -> None:
         inserted = len(as_seq(event.data.get("inserted")))
-        removed = as_int(event.data.get("removedCount", 0))
+        removed = as_int(event.data.get("removedCount"))
         self.state.queued = max(0, self.state.queued + inserted - removed)
 
 

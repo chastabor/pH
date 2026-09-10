@@ -78,7 +78,7 @@ def interrupted_turn_closers(events: Sequence[SessionEvent]) -> list[SessionEven
 
     for event in events:
         if event.type == "turn/start":
-            open_turn = as_int(event.data.get("turn", 0))
+            open_turn = as_int(event.data.get("turn"))
             open_step = None
             pending.clear()
         elif event.type == "turn/end":
@@ -86,7 +86,7 @@ def interrupted_turn_closers(events: Sequence[SessionEvent]) -> list[SessionEven
             open_step = None
             pending.clear()
         elif event.type == "step/start":
-            open_step = as_int(event.data.get("step", 0))
+            open_step = as_int(event.data.get("step"))
         elif event.type == "step/end":
             pending.clear()
             open_step = None
@@ -94,7 +94,7 @@ def interrupted_turn_closers(events: Sequence[SessionEvent]) -> list[SessionEven
             content = as_seq(as_obj(event.data.get("message")).get("content"))
             for block in (as_obj(one) for one in content):
                 if block.get("type") == "tool-call":
-                    pending[str(block.get("id"))] = _Pending(step=as_int(event.data.get("step", 0)))
+                    pending[str(block.get("id"))] = _Pending(step=as_int(event.data.get("step")))
         elif event.type == "tool/call":
             entry = pending.get(str(event.data.get("callId")))
             if entry is not None:

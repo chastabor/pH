@@ -92,14 +92,14 @@ need it.
 
 ### 4. Freezing, in a language with no `Object.freeze`
 
-`append()` validates and detaches the payload (`snapshot_json_value`), then
+`append()` validates and detaches the payload (`freeze_json_value`), then
 converts it to a read-only view: mappings become `MappingProxyType`, sequences
 become tuples. `event.data["x"] = 1` raises.
 
-The consequence to remember: **frozen data must be thawed before it re-enters
-the snapshotter**, because `snapshot_json_value` deliberately refuses tuples (a
-tuple would silently come back a list). The fork/seed path does exactly that,
-and `SessionEvent.to_wire()` thaws on the way out.
+The consequence to remember: **frozen data must be thawed before it is written
+back**, because `freeze_json_value` deliberately refuses tuples (a tuple would
+silently come back a list). The fork/seed path does exactly that, and
+`SessionEvent.to_wire()` thaws on the way out.
 
 The rejection list is stricter than dsh's in one place: integers outside
 ±(2⁵³−1) are refused. Python's JSON survives them; a JavaScript reader does

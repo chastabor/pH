@@ -43,10 +43,10 @@ write. The TUI renders it with the `/sandbox` line that lifts it.
 from __future__ import annotations
 
 import logging
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Literal, Protocol, TypeAlias, cast, get_args, runtime_checkable
+from typing import Any, Literal, Protocol, TypeAlias, runtime_checkable
 
 from pydantic import Field
 
@@ -55,13 +55,15 @@ from ..keys import AGENTS, SANDBOX
 from ..paths import canonical
 from ..session import Session
 from ..tools.errors import FailureKind, HarnessError
-from ..wire import WireModel
+from ..wire import WireModel, literal_lookup
 from ._registry import claim_slot
 
 __all__ = [
     "DEFAULT_HOSTS",
     "DENIED",
+    "NETWORK_MODES",
     "NOTHING",
+    "SANDBOX_MODES",
     "Allowances",
     "ConfinedArgv",
     "Denial",
@@ -89,6 +91,16 @@ log = logging.getLogger("ph.seams.sandbox")
 SandboxMode: TypeAlias = Literal["read-only", "workspace-write", "danger-full-access"]
 Enforcement: TypeAlias = Literal["full", "partial"]
 NetworkMode: TypeAlias = Literal["off", "allowlist", "full"]
+
+SANDBOX_MODES: Mapping[str, SandboxMode] = literal_lookup(SandboxMode)
+"""Every `SandboxMode` by its own spelling — the read-side check for a value
+that arrived as a `str`. See `literal_lookup`."""
+
+NETWORK_MODES: Mapping[str, NetworkMode] = literal_lookup(NetworkMode)
+"""Every `NetworkMode` by its own spelling, and the same read-side check.
+
+Its own docstring rather than one shared with `SANDBOX_MODES` above: a string
+literal following two assignments documents only the second of them."""
 
 DENIED = "sandbox/denied"
 """The session event a refused boundary leaves behind. See `Denial`."""
@@ -558,8 +570,8 @@ class SandboxSeam:
             return explicit
         if session is not None:
             event = session.latest("sandbox/mode")
-            if event is not None and event.data.get("mode") in get_args(SandboxMode):
-                return cast(SandboxMode, event.data["mode"])
+            if event is not None:
+                return SANDBOX_MODES.get(str(event.data.get("mode", "")), self.default_mode)
         return self.default_mode
 
     def set_mode(self, session: Session, mode: SandboxMode) -> None:

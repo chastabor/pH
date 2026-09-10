@@ -503,3 +503,91 @@ def test_the_guest_never_imports_the_harness() -> None:
         if not line.startswith(("import ph_runtime", "from ph_runtime"))
     ]
     assert offenders == []
+
+
+async def test_a_running_cell_never_interrupts_the_frame_read(
+    make_kernel: MakeKernel, monkeypatch: Any
+) -> None:
+    """The reason the stop ladder's clock is a sibling task.
+
+    `_pump` used to sit in `move_on_after(_CANCEL_POLL_SECONDS)` so it could ask
+    between reads whether the caller had cancelled. The cost was not one scope
+    per socket read but **one per frame**: `_recv_line` returns straight out of
+    its buffer whenever a frame is already there, and a 64 KiB read of a chatty
+    cell carries many. Measured at 37.5 ms against 13.8 ms over 3,000 `log`
+    frames — 7.9 us each — for a deadline almost never reached.
+
+    Counted rather than asserted structurally: "does `_pump` contain a
+    `move_on_after`" is a fact about the source, and what matters is that a run
+    lasting many poll intervals interrupts the read **no** times.
+
+    **Not a guard against issue 58**, which is what this was first written as.
+    The mechanism there — `_RawSocketMixin._wait_until_readable` registering
+    `f.set_result` as the reader callback and removing the reader in a
+    done-callback a loop iteration later, so a cancelled wait can still be
+    fired on a cancelled future — belongs to `UNIXSocketStream` and
+    `connect_unix`, i.e. the daemon socket. `_recv_line` calls the *free*
+    `anyio.wait_readable`, a different implementation that catches
+    `InvalidStateError` and removes the reader synchronously inside the
+    callback. Cancelling it was always safe.
+
+    Sabotage: put the `move_on_after` back around the read, and `cancelled`
+    counts roughly `duration / _CANCEL_POLL_SECONDS`.
+    """
+    import anyio
+
+    from ph_rlm.kernel.manager import _CANCEL_POLL_SECONDS
+
+    original = anyio.wait_readable
+    cancelled = 0
+    waits = 0
+
+    async def counting(obj: Any) -> Any:
+        nonlocal cancelled, waits
+        waits += 1
+        try:
+            return await original(obj)
+        except anyio.get_cancelled_exc_class():
+            cancelled += 1
+            raise
+
+    monkeypatch.setattr(anyio, "wait_readable", counting)
+
+    kernel = await make_kernel()
+    # Long enough that the old poll would have fired many times over.
+    slept = 12 * _CANCEL_POLL_SECONDS
+    result = await kernel.run(f"import asyncio\nawait asyncio.sleep({slept})\n'done'", (), None)
+
+    assert result.value == "done", result.error
+    # The positive control: `cancelled == 0` also passes if the patch is never
+    # reached at all, which is what a future move of `_recv_line` onto a stream
+    # would do silently.
+    assert waits > 0, "the patched readiness wait was never reached; the test proves nothing"
+    assert cancelled == 0, (
+        f"the frame read was interrupted {cancelled} times during one run; "
+        "the poll is back on the read path and the per-frame scope with it"
+    )
+
+
+def test_a_run_records_how_it_ended_once_and_the_first_writer_wins() -> None:
+    """Three tasks end a run and they race by construction.
+
+    `_watch` can kill while `_pump` is blocked mid-frame, and `_teardown`
+    closing the socket is itself what wakes the pump — so a `done` frame
+    already buffered when the kill landed used to overwrite "the runtime was
+    killed" with the program's own value. Each writer assigned `error` and
+    `settled` directly and only `_on_closed` checked first, which made the
+    outcome depend on three call sites ordering themselves around each other.
+
+    Sabotage: drop the `if self.settled: return False` guard and the second
+    call's account replaces the first's.
+    """
+    from ph_rlm.kernel.manager import _ActiveRun
+
+    active = _ActiveRun(run_id=1, bindings={})
+    assert active.settle(error="killed") is True, "the first writer claims it"
+    assert active.settled
+
+    assert active.settle(value="done") is False, "and the second is told it did not"
+    assert active.error == "killed", "the kill is still the account the caller gets"
+    assert active.value is None, "and the late frame's value did not land beside it"

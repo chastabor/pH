@@ -29,7 +29,7 @@ import re
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, get_args
+from typing import Any
 
 import anyio
 import yaml
@@ -40,7 +40,7 @@ from ..paths import resolve_roots, write_text_under
 from ..seams._registry import contribute_item
 from ..seams.commands import CommandDefinition
 from ..seams.invariants import contribute_fold_cache
-from ..seams.sandbox import DENIED, Allowances, NetworkAllowance, NetworkMode
+from ..seams.sandbox import DENIED, NETWORK_MODES, Allowances, NetworkAllowance
 from ..seams.sandbox_allow import describe
 from ..seams.tui_status import StatusField, StatusReading
 from ..session import Session, SessionFoldCache
@@ -164,11 +164,13 @@ class _Sandbox:
         )
 
     async def network(self, mode: str) -> str:
-        # `get_args`, so a fourth `NetworkMode` cannot be accepted by the config
-        # model and silently refused here — the idiom `resolve_mode` already uses.
-        if mode not in get_args(NetworkMode):
+        # Through `NETWORK_MODES`, so a fourth `NetworkMode` cannot be accepted
+        # by the config model and silently refused here — the idiom
+        # `resolve_mode` already uses. Its narrowing is what retired the
+        # `type: ignore[assignment]` this had; `literal_lookup` says why.
+        chosen = NETWORK_MODES.get(mode)
+        if chosen is None:
             return USAGE
-        chosen: NetworkMode = mode  # type: ignore[assignment]
         return await self._change(
             lambda current: current.model_copy(
                 update={"network": current.network.model_copy(update={"mode": chosen})}

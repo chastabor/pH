@@ -28,11 +28,11 @@ side.
 
 from __future__ import annotations
 
-from typing import Any
-
 from ph.agent.types import AgentHandle
+from ph.cordis import Context
 from ph.keys import SHELL
-from ph.seams.shell import ShellResult
+from ph.seams.shell import ShellResult, ShellService
+from ph.session import JsonObject, Session, as_int
 from ph.text import truncation_marker
 from ph.tools.builtin.bash_tool import TIMED_OUT
 
@@ -57,7 +57,7 @@ what this kept back.
 """
 
 
-def shell_body(data: Any) -> str:
+def shell_body(data: JsonObject) -> str:
     """A `shell/result`'s streams as one column, the way a terminal shows them.
 
     **Rendered here, from the event, and not stored on it.** The log keeps the
@@ -78,7 +78,7 @@ def shell_body(data: Any) -> str:
     if data.get("timedOut"):
         parts.append(TIMED_OUT)
     if data.get("dropped"):
-        parts.append(truncation_marker(int(data["dropped"]), int(data.get("cap") or 0)).strip())
+        parts.append(truncation_marker(as_int(data["dropped"]), as_int(data.get("cap"))).strip())
     if data.get("clipped"):
         parts.append(f"[ph: the log keeps {SHELL_OUTPUT} bytes of each stream]")
     code = data.get("exitCode")
@@ -87,7 +87,7 @@ def shell_body(data: Any) -> str:
     return "\n".join(parts)
 
 
-def shell_of(ctx: Any) -> Any:
+def shell_of(ctx: Context) -> ShellService:
     """The shell seam, or the refusal for its absence.
 
     Resolved by the *caller* rather than inside `run_shell`, so a transport that
@@ -101,7 +101,9 @@ def shell_of(ctx: Any) -> Any:
     return shell
 
 
-async def run_shell(shell: Any, session: Any, agent: AgentHandle, command: str) -> ShellResult:
+async def run_shell(
+    shell: ShellService, session: Session, agent: AgentHandle, command: str
+) -> ShellResult:
     """Append, run, append. Returns what ran, for a caller that must reply.
 
     `cwd` comes back *from the seam* rather than being derived here: `run`
@@ -111,7 +113,7 @@ async def run_shell(shell: Any, session: Any, agent: AgentHandle, command: str) 
     run somewhere.
     """
     started = session.append("shell/command", {"command": command})
-    result: ShellResult = await shell.run(command, agent=agent)
+    result = await shell.run(command, agent=agent)
     session.append(
         "shell/result",
         {

@@ -85,7 +85,6 @@ __all__ = [
     "dumps",
     "freeze_json_value",
     "is_json_value",
-    "snapshot_json_value",
     "thaw_json",
 ]
 
@@ -118,8 +117,8 @@ JsonObject: TypeAlias = "Mapping[str, JsonValue]"
 PlainJsonValue: TypeAlias = (
     "bool | int | float | str | list[PlainJsonValue] | dict[str, PlainJsonValue] | None"
 )
-"""The plain shape only: `list`/`dict` at every level, as `thaw_json` and
-`snapshot_json_value` build it and as a log reads back from disk.
+"""The plain shape only: `list`/`dict` at every level, as `thaw_json` builds it
+and as a log reads back from disk.
 
 A second alias, because the first cannot say this. `JsonValue` is over the
 abstract containers so that it is true of the frozen tree too — and abstract
@@ -246,11 +245,6 @@ def freeze_json_value(value: object, *, frozen_input: bool = False) -> JsonValue
     return _Walker(freeze=True, frozen_input=frozen_input).walk(value)
 
 
-def snapshot_json_value(value: object) -> PlainJsonValue:
-    """Validate and detach to a plain mutable copy, without freezing."""
-    return _Walker(freeze=False, frozen_input=False).walk(value)  # type: ignore[return-value]
-
-
 def is_json_value(value: object) -> bool:
     """Test the same lossless boundary without keeping the copy."""
     try:
@@ -292,26 +286,61 @@ def thaw_json(value: object) -> PlainJsonValue:
     return value  # type: ignore[return-value]  # a scalar this module admitted
 
 
-def as_int(value: object) -> int:
-    """`int()` of a JSON scalar, refusing a container with a sentence.
+def as_int(value: object, default: int = 0) -> int:
+    """A JSON number as an `int`, or `default` — the reader's narrowing for one.
 
     Twenty readers wrote `int(event.data.get("turn", 0))`, and with `data` typed
-    that is an `int()` of a union a `Mapping` belongs to — which `int()` refuses
-    at type-check, correctly: at runtime it would have raised a bare `TypeError`
-    three frames deep. Same coercions `int()` made (a `float` truncates, a
-    numeric `str` parses, a non-numeric one still raises `ValueError`); the one
-    change is that a container now fails with the field's shape in the message
-    rather than "int() argument must be…".
+    that is an `int()` of a union a `Mapping` belongs to, which the checker
+    refuses. This is the third of the family, and it now answers the way the
+    other two do.
+
+    **It used to raise, and that was the odd one out.** `as_obj` and `as_seq`
+    answer a mis-shaped field with the empty container — "a missing one must
+    cost a row rather than the transcript" — while this raised a `TypeError` on
+    anything that was not a number. On `persistence.repair`,
+    `agent_loop.driver._last_turn_of` and `llm.replay.recorded_steps` that raise
+    is not contained: one mistyped numeric field in a log some other build wrote
+    turned a single unreadable row into a **failed resume**. One family, one
+    policy, and this is it.
+
+    **What the default is for.** `freeze_json_value` is a JSON-*ness* gate, not
+    a schema gate: it walks a payload for values JSON can round-trip, and a
+    `str`, a `None` or a list is one. `Session.append({"turn": "3"})` succeeds.
+    So the population reaching the default is not only a foreign build or a
+    hand-edited log — it includes a producer of ours writing the wrong type into
+    a numeric field — and a field that is simply absent, which is why `None`
+    takes it too and why the call sites pass `as_int(data.get("turn"))` rather
+    than defaulting twice.
+
+    That the default is *quiet* is right for a cosmetic number and a real cost
+    for a load-bearing one: a junk `turn` reaching `driver._last_turn_of` gives
+    a resumed run a duplicate turn number, which is worse than the failed resume
+    it replaced because nothing says so. Refusing it belongs at the row — a
+    typed payload for `turn/start` and `step/start` — which is issue 74's work
+    and not this helper's.
+
+    The coercions `int()` made are unchanged: a `float` truncates and a numeric
+    `str` parses. What changed is that a container, `None`, a non-numeric string
+    and a non-finite float now read as `default` instead of raising.
     """
     if type(value) is int:
-        # The whole point of the helper, and ~every call: a JSON integer, already
-        # an `int`, returned without the four-way `isinstance` walk behind it
-        # (33 ns against 86). `type(...) is int` excludes `bool` deliberately —
+        # The whole point of the helper, and ~every call: a JSON integer,
+        # already an `int`, returned without the `isinstance` walk behind it
+        # (22 ns against 110). `type(...) is int` excludes `bool` deliberately —
         # it is a subclass, and it belongs on the coercing branch below.
         return value
     if isinstance(value, (bool, float, str)):
-        return int(value)
-    raise TypeError(f"expected a JSON number, got {type(value).__name__}")
+        # Exactly what `int()` accepted. `NaN` and `±Infinity` are the reason
+        # this catches two exceptions rather than one: `json.loads` parses both
+        # from a log that spells them bare, and they raised straight through
+        # here — `ValueError` and `OverflowError` respectively — which left the
+        # hole this row set out to close while claiming one policy for the
+        # family. A try that never fires costs nothing measurable.
+        try:
+            return int(value)
+        except (ValueError, OverflowError):
+            return default
+    return default
 
 
 def as_obj(value: object) -> JsonObject:

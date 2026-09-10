@@ -21,9 +21,9 @@ back to the human.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Any, Literal, TypeAlias, cast, get_args
+from typing import Any, Literal, TypeAlias
 
 from pydantic import Field
 
@@ -32,9 +32,10 @@ from ..cancel import CancelToken, is_cancelled
 from ..cordis import Context, Disposer, events, plugin
 from ..keys import APPROVAL
 from ..session import Session
-from ..wire import WireModel
+from ..wire import WireModel, literal_lookup
 
 __all__ = [
+    "APPROVAL_OUTCOMES",
     "DENIAL_REASONS",
     "ApprovalAnswer",
     "ApprovalDecisionName",
@@ -57,6 +58,15 @@ log = logging.getLogger("ph.seams.approval")
 
 ApprovalOutcome: TypeAlias = Literal["allowed-once", "rejected", "cancelled", "unavailable"]
 """The four answers that carry no data. Only `allowed-once` proceeds (B3)."""
+
+APPROVAL_OUTCOMES: Mapping[str, ApprovalOutcome] = literal_lookup(ApprovalOutcome)
+"""Every `ApprovalOutcome` by its own spelling — the read-side check. See
+`literal_lookup`.
+
+Named for its alias rather than the bare `OUTCOMES` it started as, because
+`ph.seams.goals` declares one too and `permission_presets` imports from both
+seams — which is the collision the `as_int` rename existed to stop
+repeating."""
 
 ApprovalPolicy: TypeAlias = Literal["ask", "never"]
 
@@ -163,7 +173,7 @@ def answer_from_wire(raw: Any) -> ApprovalAnswer:
     misconfigured — and a garbled frame is the second of those, not the first.
     """
     if isinstance(raw, str):
-        return cast(ApprovalAnswer, raw) if raw in get_args(ApprovalOutcome) else "unavailable"
+        return APPROVAL_OUTCOMES.get(raw, "unavailable")
     if isinstance(raw, dict):
         kind = raw.get("kind")
         if kind == "edited":
@@ -334,12 +344,19 @@ class ApprovalService:
         except Exception:
             log.exception("ph.seams.approval: an answerer failed; denying")
             return "unavailable"
-        if not isinstance(outcome, (Edited, Responded)) and outcome not in get_args(
-            ApprovalOutcome
-        ):
+        # A waterfall returns `Any`, so this is the boundary. Through the lookup
+        # for the same reason as everywhere else — `literal_lookup` says why.
+        # `str(outcome)` rather than an `isinstance` guard: the only job that
+        # guard had was keeping an unhashable value out of `.get`, and the next
+        # line already `%r`s the same object.
+        answer: ApprovalAnswer | None = (
+            outcome
+            if isinstance(outcome, (Edited, Responded))
+            else APPROVAL_OUTCOMES.get(str(outcome))
+        )
+        if answer is None:
             log.error("ph.seams.approval: answerer returned %r; denying", outcome)
             return "unavailable"
-        answer = cast(ApprovalAnswer, outcome)
         # What *may* be decided is the asking row's policy, so the seam that owns
         # the fail-closed reading is the one that has to hold it: enforcing this
         # only in the front end would let a second answerer — an RPC one, a

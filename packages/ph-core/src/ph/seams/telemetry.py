@@ -131,7 +131,7 @@ class SessionTelemetry:
         costs no task. Only the first `assistant/chunk` per step does."""
         if event.type != "assistant/chunk":
             return True
-        step = (as_int(event.data.get("turn", 0)), as_int(event.data.get("step", 0)))
+        step = (as_int(event.data.get("turn")), as_int(event.data.get("step")))
         if self._last_chunked_step.get(session.id) == step:
             return False
         self._last_chunked_step[session.id] = step

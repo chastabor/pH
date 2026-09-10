@@ -45,6 +45,7 @@ from ph.paths import resolve_roots
 from ph.resources import GRACE_SECONDS
 from ph.seams.attachments import mime_for
 from ph.seams.schedule import Schedule
+from ph.seams.shell import ShellService
 from ph.session import now_ms
 from ph.wire import WireModel
 
@@ -590,7 +591,7 @@ class _Connection:
         )
         return {"sessionId": root.id, "shown": shown}
 
-    async def _prepare_shell(self, root: Root, params: ShellParams) -> tuple[Any, str]:
+    async def _prepare_shell(self, root: Root, params: ShellParams) -> tuple[ShellService, str]:
         """Resolve the seam and the command **before** the key is claimed.
 
         The seam check used to happen inside `act`, which is after `once()` has
@@ -604,7 +605,7 @@ class _Connection:
         return shell_of(root.ctx), command
 
     async def _act_shell(
-        self, root: Root, params: ShellParams, prepared: tuple[Any, str]
+        self, root: Root, params: ShellParams, prepared: tuple[ShellService, str]
     ) -> dict[str, Any]:
         """`!!<command>` — the person's own shell, in the session's workspace.
 

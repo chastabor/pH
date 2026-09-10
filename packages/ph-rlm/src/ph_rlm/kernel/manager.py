@@ -116,9 +116,13 @@ fd 3 (C10). Sized to hold a `maxSnapshotBytes` payload with base64 and JSON
 overhead."""
 
 _CANCEL_POLL_SECONDS = 0.05
-"""`CancelToken` is a polled flag, not an awaitable — it has to answer "was this
-cancelled" at points where nothing is pending, which a cancel scope cannot do. So
-the run waits on the settle event in short hops and checks the token between."""
+"""How often `_watch` asks whether the caller has cancelled.
+
+`CancelToken` is a polled flag, not an awaitable — it has to answer "was this
+cancelled" at points where nothing is pending, which a cancel scope cannot do,
+and `ph.cancel` deliberately offers no awaitable form. So something has to
+sleep and re-ask. What changed with `_watch` is only *who*: the reader used to
+interrupt itself at this cadence, and now a task that holds nothing does."""
 
 
 class KernelLimits(WireModel):
@@ -170,6 +174,31 @@ class _ActiveRun:
     or a dispatch being refused. Held here rather than in `_pump` because
     `_serve_call` starts the abort from its own task, and the escalation clock
     the pump runs has to be the same clock."""
+
+    def settle(self, *, error: str | None = None, value: Any = None) -> bool:
+        """Record how this run ended. **The first writer wins**; returns whether
+        this call was it.
+
+        Three places end a run — a `done` frame, the channel closing, and the
+        kill that follows an unresponsive abort — and they race by construction:
+        `_watch` can kill while `_pump` is blocked mid-frame, and `_teardown`
+        closing the socket is itself what wakes the pump. Each used to assign
+        `error` and `settled` directly, and only `_on_closed` checked first, so
+        the outcome depended on three call sites ordering themselves correctly
+        around each other. That ordering was load-bearing and invisible: a
+        `done` frame already buffered when the kill landed would overwrite "the
+        runtime was killed" with the program's own value, and nothing said so.
+
+        Idempotent here rather than ordered there, so the account the caller
+        sees is decided by which stop happened first and not by which task
+        happened to reach the assignment last.
+        """
+        if self.settled:
+            return False
+        self.error = error
+        self.value = value
+        self.settled = True
+        return True
 
 
 class SnapshotPolicy(Protocol):
@@ -515,8 +544,11 @@ class Kernel:
                 process = self._process
                 tasks.start_soon(self._drain, process.stdout if process else None, active)
                 tasks.start_soon(self._drain, process.stderr if process else None, active)
+                # The stop ladder's clock, as a sibling rather than as an
+                # interruption of the read — `_pump` says why.
+                tasks.start_soon(self._watch, active, token)
                 await self._send(RunFrame(id=active.run_id, program=program))
-                await self._pump(active, tasks, token)
+                await self._pump(active, tasks)
                 # The drains and any in-flight call tasks belong to this run.
                 tasks.cancel_scope.cancel()
 
@@ -536,30 +568,81 @@ class Kernel:
                 displays=tuple(active.displays),
             )
 
-    async def _pump(
-        self, active: _ActiveRun, tasks: anyio.abc.TaskGroup, token: CancelToken | None
-    ) -> None:
-        """Read this run's frames until it settles, checking cancellation between."""
+    async def _pump(self, active: _ActiveRun, tasks: anyio.abc.TaskGroup) -> None:
+        """Read this run's frames until it settles. Nothing interrupts the read.
+
+        **The scope it used to sit in was paid per frame, not per read.** The
+        body was wrapped in `move_on_after(_CANCEL_POLL_SECONDS)` so the loop
+        could ask two questions between reads — has the caller cancelled, and
+        has the abort grace expired — neither of which is about the socket. But
+        `_recv_line` returns straight out of its buffer whenever a frame is
+        already there, and a 64 KiB read of a chatty cell carries many: the
+        scope was entered and exited for every `log` frame, not every syscall.
+        Measured on a cell emitting 3,000 of them, **37.5 ms against 13.8 ms** —
+        2.7 times, or 7.9 µs a frame, for a deadline almost never reached.
+
+        So the clock moved to `_watch`, a sibling task that sleeps instead of
+        holding a socket. **What wakes this now** is the thing it is waiting on:
+        a settling frame, or the channel closing — `_teardown` calls
+        `notify_closing` before it closes, so a kill from `_watch` lands here as
+        `_recv_line` returning `None` on the next turn.
+
+        **On issue 58, which this was first written to fix: it does not, and the
+        attribution was wrong.** The claim was that cancelling the wait leaves
+        the fd wired — anyio's `_wait_until_readable` registers `f.set_result`
+        as the reader callback and removes the reader in a done-callback one
+        loop iteration later, so a queued readiness callback can fire
+        `set_result(None)` on a cancelled future and raise `InvalidStateError`
+        from a bare loop callback. That mechanism is real, and the captured
+        `<Handle Future.set_result(None)>` is its signature. It is not reachable
+        from here. `_recv_line` calls the *free* `anyio.wait_readable`, which is
+        `AsyncIOBackend.wait_readable` — a different implementation that wraps
+        `fut.set_result` in `except InvalidStateError: pass` and removes the
+        reader synchronously inside the callback. Cancelling it is safe. The
+        defective shape belongs to `_RawSocketMixin`, i.e. `UNIXSocketStream`,
+        `UNIXSocketListener.accept` and `connect_unix` — the **daemon** socket,
+        where the flake was observed both times. Issue 58 is still open and now
+        scoped there. This change stands on the measurement above instead.
+        """
         while not active.settled:
-            line: bytes | None = None
-            with anyio.move_on_after(_CANCEL_POLL_SECONDS):
-                line = await self._recv_line()
-                if line is None:
-                    self._on_closed(active)
-                    return
-            if line is not None:
-                frame = decode(line)
-                if frame is not None:
-                    # A forged or garbled frame is dropped. Raising here would let
-                    # the child crash the host on demand (C10).
-                    await self._handle(frame, active, tasks)
-                continue
-            if active.aborting_since is None and is_cancelled(token):
-                await self._begin_abort(active)
-            elif (
-                active.aborting_since is not None
-                and anyio.current_time() - active.aborting_since > self.cancel_grace
-            ):
+            line = await self._recv_line()
+            if line is None:
+                self._on_closed(active)
+                return
+            frame = decode(line)
+            if frame is not None:
+                # A forged or garbled frame is dropped. Raising here would let
+                # the child crash the host on demand (C10).
+                await self._handle(frame, active, tasks)
+
+    async def _watch(self, active: _ActiveRun, token: CancelToken | None) -> None:
+        """The stop ladder's clock, off the read path (C3).
+
+        The two questions `_pump` used to interrupt itself to ask, asked by
+        something that is only ever sleeping. Same 0.05 s cadence, so
+        cancellation is noticed as promptly as before — what changes is that
+        noticing it no longer costs a cancelled socket wait.
+
+        Concurrency with `_pump` is not new: `_serve_call` has always started an
+        abort from its own task, which is why `aborting_since` lives on
+        `_ActiveRun` rather than in the pump. This is a second caller of the
+        same shape.
+
+        `while True` rather than `while not active.settled`: the loop is started
+        before the first frame can arrive, so the entry test could never be
+        false, and the check that matters is the one *after* the sleep — a run
+        that settled while this task slept must not be sent a spurious
+        interrupt or killed. Written as an entry condition it reads as the
+        termination test and invites the real one to be deleted as redundant.
+        """
+        while True:
+            await anyio.sleep(_CANCEL_POLL_SECONDS)
+            if active.settled:
+                return
+            if active.aborting_since is None:
+                if is_cancelled(token):
+                    await self._begin_abort(active)
+            elif anyio.current_time() - active.aborting_since > self.cancel_grace:
                 # Neither the frame nor the signal reached it, which means the
                 # cell is spinning in Python and the guest's loop is starved.
                 # Killing costs the namespace; leaving it costs the session.
@@ -611,13 +694,19 @@ class Kernel:
         if process is not None and process.returncode is None:
             with suppress(ProcessLookupError, OSError):
                 process.kill()
+        # Settled before the teardown, because the teardown is what wakes the
+        # pump: `_teardown` closes the channel, `_recv_line` returns `None`,
+        # and `_on_closed` would otherwise be the first writer with a vaguer
+        # account of the same death. `settle` decides the rest — it cannot be
+        # overwritten once this has claimed it.
+        active.settle(
+            error=(
+                "the program did not stop when cancelled and the runtime was killed; "
+                "the namespace is gone"
+            )
+        )
         await self._teardown()
         self._reset_notice = True
-        active.error = (
-            "the program did not stop when cancelled and the runtime was killed; "
-            "the namespace is gone"
-        )
-        active.settled = True
 
     async def _restore(self, variables: list[dict[str, Any]]) -> dict[str, Any]:
         """Put snapshotted variables back before the next run (D17).
@@ -633,8 +722,12 @@ class Kernel:
         active = _ActiveRun(run_id=self._run_seq, bindings={})
         async with anyio.create_task_group() as tasks:
             await self._send(RestoreFrame(id=active.run_id, variables=variables))
+            # No `_watch`: a restore has no bindings, so no dispatch can be
+            # refused and nothing can start an abort — the clock would have
+            # nothing to read. `boot_timeout` is the bound here, and it is one
+            # cancellation at the end rather than a poll throughout.
             with anyio.move_on_after(self.boot_timeout):
-                await self._pump(active, tasks, None)
+                await self._pump(active, tasks)
             tasks.cancel_scope.cancel()
         return active.value if isinstance(active.value, dict) else {}
 
@@ -676,12 +769,16 @@ class Kernel:
             return
         error = frame.get("error")
         if isinstance(error, dict):
-            active.error = str(error.get("message") or error.get("kind") or "the program failed")
+            settled = active.settle(
+                error=str(error.get("message") or error.get("kind") or "the program failed")
+            )
         else:
-            active.value = frame.get("value")
-        if frame.get("truncated"):
+            settled = active.settle(value=frame.get("value"))
+        if settled and frame.get("truncated"):
+            # Only alongside an outcome this frame actually supplied: a
+            # `done` arriving after a kill describes a program the caller is
+            # not being told about, and its truncation flag with it.
             active.truncated = True
-        active.settled = True
 
     async def _serve_call(self, frame: CallFrame, active: _ActiveRun) -> None:
         """One binding call, back through the full tool pipeline (C1)."""
@@ -821,9 +918,8 @@ class Kernel:
         if self._alive:
             self._alive = False
             self._reset_notice = True
-        if active is not None and not active.settled:
-            active.error = "the runtime exited before the program finished"
-            active.settled = True
+        if active is not None:
+            active.settle(error="the runtime exited before the program finished")
 
     # ---------------------------------------------------------------- close --
 
@@ -849,6 +945,18 @@ class Kernel:
             if process.pid is not None:
                 self.journal.forget(process.pid)
         if self._sock is not None:
+            # `notify_closing` before the close, because `_pump`'s read has no
+            # timeout of its own any more and this is what ends it. Closing an
+            # fd with a `wait_readable` pending is not enough on epoll: the
+            # closed fd leaves the interest list silently, no event is ever
+            # delivered, and the future never resolves — so the pump would
+            # block forever on a channel that no longer exists. Today the
+            # child's EOF from `_kill_unresponsive`'s `process.kill()` usually
+            # arrives first, which is exactly the kind of incidental rescue
+            # that stops being true after an unrelated edit. anyio provides
+            # this call for the case and documents the ordering.
+            with suppress(OSError, ValueError):
+                anyio.notify_closing(self._sock)
             with suppress(OSError):
                 self._sock.close()
             self._sock = None

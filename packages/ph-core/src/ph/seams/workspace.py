@@ -39,7 +39,7 @@ import re
 from collections.abc import Awaitable, Callable, Container, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Literal, Protocol, TypeAlias, get_args, runtime_checkable
+from typing import Any, Literal, Protocol, TypeAlias, runtime_checkable
 
 import anyio
 from pydantic import Field
@@ -51,7 +51,7 @@ from ..paths import canonical, default_home_path
 from ..session import Session
 from ..tools.definition import ToolExecution
 from ..tools.errors import HarnessError
-from ..wire import WireModel
+from ..wire import WireModel, literal_lookup
 from . import workspace_provision
 from ._registry import claim_entry, claim_slot
 from .diagnostics import Diagnostic, contribute
@@ -1694,10 +1694,9 @@ def workspace_survivors(session: Session) -> list[WorkspaceRecord]:
             if reason or data.get("kept"):
                 closed.append(replace(record, closed=True, reason=reason))
             continue
-        # A Literal read off JSON is a claim to check, not a cast to make — and
-        # a lookup keyed by the Literal's own members *is* the check, so it needs
-        # no `cast` at all. Built once at import beside the alias rather than per
-        # event: `get_args` is not memoized and rebuilds its tuple on every call.
+        # A Literal read off JSON is a claim to check, not a cast to make.
+        # Built once at import beside the alias rather than per event:
+        # `get_args` is not memoized and rebuilds its tuple on every call.
         kind = _WORKSPACE_KINDS.get(str(data.get("kind", "")), "shared")
         if not fresh_root(kind):
             continue
@@ -1892,10 +1891,12 @@ nothing, and a fold over the pair must ignore it.
 
 _SURVIVOR_TYPES = frozenset({ACQUIRED, DISPOSED, RETAINED})
 
-_WORKSPACE_KINDS: Mapping[str, WorkspaceKind] = {kind: kind for kind in get_args(WorkspaceKind)}
+_WORKSPACE_KINDS: Mapping[str, WorkspaceKind] = literal_lookup(WorkspaceKind)
 """Every `WorkspaceKind` by its own spelling — the read-side check for a kind
-named in a stored log, which a different build may have written."""
-"""Hoisted out of the fold: tested once per event in the hot loop."""
+named in a stored log, which a different build may have written. See
+`literal_lookup`.
+
+Built here rather than in the fold: tested once per event in the hot loop."""
 
 PROJECT_PROVISION_FILE = ".ph-workspace.yml"
 """Where a repository states what its worktrees need (E14).

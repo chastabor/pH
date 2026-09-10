@@ -245,7 +245,7 @@ class _Builder:
         record_kind: RecordKind = "compacted" if is_replacement_surface_event(event) else kind
         if record_kind == "user" and source.kind == "plugin":
             record_kind = "context"
-        self.turn = as_int(outer.get("turn", self.turn)) or self.turn
+        self.turn = as_int(outer.get("turn")) or self.turn
         self.add(
             kind=record_kind,
             source_seq=event.seq,
@@ -339,7 +339,7 @@ class _Builder:
 
 
 def _on_turn_start(builder: _Builder, event: SessionEvent) -> None:
-    builder.turn = as_int(event.data.get("turn", 0))
+    builder.turn = as_int(event.data.get("turn"))
     builder.on_event(event, "turn start", f"turn {builder.turn}")
 
 

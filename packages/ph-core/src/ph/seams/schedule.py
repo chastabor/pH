@@ -157,7 +157,7 @@ def schedules(session: Session) -> dict[str, ScheduleState]:
         elif event.type == TICK:
             state = found.get(str(data.get("id", "")))
             if state is not None:
-                state.last_tick = as_int(data.get("dueAt", 0))
+                state.last_tick = as_int(data.get("dueAt"))
     return found
 
 

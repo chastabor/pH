@@ -36,7 +36,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
-from typing import Any, Literal, TypeAlias, cast, get_args
+from typing import Any, Literal, TypeAlias
 
 from pydantic import Field
 
@@ -44,12 +44,13 @@ from ..cordis import Context, plugin
 from ..keys import GOALS
 from ..llm.types import TokenUsage
 from ..session import Session, SessionFoldCache
-from ..wire import WireModel
+from ..wire import WireModel, literal_lookup
 from .invariants import contribute_fold_cache
 
 __all__ = [
     "CONTINUED",
     "GATE",
+    "GOAL_OUTCOMES",
     "SET",
     "SETTLED",
     "Budget",
@@ -89,6 +90,14 @@ budgets ran out with gates still failing; `abandoned` means a person stopped it.
 A loop that reported the second as the first would be claiming work it did not
 do, which is the failure this whole layer exists to make impossible.
 """
+
+GOAL_OUTCOMES: Mapping[str, Outcome] = literal_lookup(Outcome)
+"""Every `Outcome` by its own spelling — the read-side check. See `literal_lookup`.
+
+Named for its alias rather than the bare `OUTCOMES` it started as, because
+`ph.seams.approval` declares one too and the two seams are already imported
+side by side (`permission_presets`) — which is the collision the `as_int`
+rename existed to stop repeating."""
 
 
 class Budget(WireModel):
@@ -214,12 +223,9 @@ def fold_goal_event(found: dict[str, GoalState], event: Any) -> None:
             data.get("passed")
         )
     elif event.type == SETTLED:
-        # Against `get_args`, the way `sandbox` checks a mode read back out of
-        # `event.data`: the `Literal` constrains writers and dies at the payload
-        # boundary, so the declaration is what a reader checks rather than a
-        # list it restates.
-        outcome = str(data.get("outcome", ""))
-        current.outcome = cast(Outcome, outcome) if outcome in get_args(Outcome) else None
+        # Through the lookup, the way every other `Literal` read off a payload
+        # is checked. `literal_lookup` says why.
+        current.outcome = GOAL_OUTCOMES.get(str(data.get("outcome", "")))
     elif event.type == "turn/end":
         current.spent.turns += 1
     elif "usage" in data:

@@ -25,6 +25,7 @@ one compensation.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -47,12 +48,9 @@ from .client import DaemonClient
 
 __all__ = ["Followed", "first_of"]
 
-Sink = Callable[[Sequence[tuple[Mapping[str, Any], Any]], bool], None]
+log = logging.getLogger("ph_app.daemon.follow")
 
-StatusSink = Callable[[StatusFacts], None]
-"""Where a status frame goes. `StatusFacts` and not a mapping, because the three
-shapes that reach it — the attach reply, an `announce`, a bare `passivated` —
-are one type with optional fields rather than three dicts a reader must sniff."""
+Sink = Callable[[Sequence[tuple[Mapping[str, Any], Any]], bool], None]
 """Called with `(event, view)` pairs and whether they are arriving **live**.
 
 The pairs keep the card the daemon rendered *beside* the event, never merged into
@@ -62,6 +60,11 @@ validation and is dropped by the `except` that exists for unreadable frames.
 The flag says whether they are arriving live or being rebuilt — a distinction
 `TuiEventAdapter.Frame(live=…)` has drawn since P3, and one a consumer must not
 assume. `test_a_caught_up_page_is_folded_as_history_and_a_frame_as_live` is why."""
+
+StatusSink = Callable[[StatusFacts], None]
+"""Where a status frame goes. `StatusFacts` and not a mapping, because the three
+shapes that reach it — the attach reply, an `announce`, a bare `passivated` —
+are one type with optional fields rather than three dicts a reader must sniff."""
 
 
 @dataclass(slots=True)
@@ -112,7 +115,17 @@ class Followed:
                 self.on_status(notice)
             return
         event = notice.event
-        at = as_int(event.get("seq", -1))
+        at = as_int(event.get("seq"), -1)
+        if at < 0:
+            # The one reader here whose input never passed `freeze_json_value`:
+            # `SessionEventNotice.event` is carried by reference off the socket
+            # and nothing in this process validates its contents. A junk `seq`
+            # used to raise out of this call and `Peer._watch` logged it as "a
+            # notification this end could not read"; reading it as a default
+            # silently drops the frame instead, in a module where every other
+            # drop explains itself. Say so, once per frame, and keep the drop.
+            log.warning("ph_app.daemon.follow: a session event arrived with no readable seq")
+            return
         if at <= self.seen:
             # Already shown by a snapshot page. Dropped by `seq` rather than by
             # remembering which frames were buffered, which is what makes the two
@@ -179,7 +192,7 @@ class Followed:
             views = page.presentations
             self.on_events([(one, views.get(str(one.get("seq")))) for one in page.events], False)
             for event in page.events:
-                self.seen = max(self.seen, as_int(event.get("seq", self.seen)))
+                self.seen = max(self.seen, as_int(event.get("seq"), self.seen))
             if not page.more:
                 return started
             cursor = page.cursor

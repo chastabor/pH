@@ -25,7 +25,6 @@ from .json import (
     dumps,
     freeze_json_value,
     is_json_value,
-    snapshot_json_value,
     thaw_json,
 )
 from .known_event_types import IGNORABLE_SESSION_EVENT_TYPES, KNOWN_SESSION_EVENT_TYPES
@@ -109,6 +108,5 @@ __all__ = [
     "new_session_id",
     "now_ms",
     "open_turn_at",
-    "snapshot_json_value",
     "thaw_json",
 ]

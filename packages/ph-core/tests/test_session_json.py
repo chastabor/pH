@@ -29,7 +29,7 @@ from ph.session.json import as_int, as_obj, as_seq, freeze_json_value, thaw_json
 
 @pytest.mark.parametrize(
     ("value", "expected"),
-    [(7, 7), (7.9, 7), ("42", 42), (True, 1), (False, 0)],
+    [(7, 7), (7.9, 7), ("42", 42), (True, 1), (False, 0), (0, 0)],
 )
 def test_as_int_keeps_every_coercion_int_made(value: object, expected: int) -> None:
     """Twenty readers wrote `int(...)` of a payload field. The replacement must
@@ -37,24 +37,58 @@ def test_as_int_keeps_every_coercion_int_made(value: object, expected: int) -> N
     string parses, a bool is its integer — or a log that read yesterday would
     fail today."""
     assert as_int(value) == expected
-
-
-def test_as_int_still_raises_value_error_on_a_non_numeric_string() -> None:
-    with pytest.raises(ValueError):
-        as_int("many")
+    assert as_int(value, -1) == expected, "a real value is never the default"
 
 
 @pytest.mark.parametrize(
-    "container",
-    [None, [1], (1,), {"n": 1}, MappingProxyType({"n": 1})],
-    ids=["none", "list", "tuple", "dict", "mappingproxy"],
+    "junk",
+    [
+        None,
+        "many",
+        [1],
+        (1,),
+        {"n": 1},
+        MappingProxyType({"n": 1}),
+        float("nan"),
+        float("inf"),
+        float("-inf"),
+    ],
+    ids=[
+        "none",
+        "non-numeric",
+        "list",
+        "tuple",
+        "dict",
+        "mappingproxy",
+        "nan",
+        "inf",
+        "-inf",
+    ],
 )
-def test_as_int_refuses_a_container_naming_its_shape(container: object) -> None:
-    """The one behavioural change from bare `int()`: a container fails with the
-    field's actual type in the message rather than "int() argument must be a
-    string, a bytes-like object or a real number" from three frames down."""
-    with pytest.raises(TypeError, match=type(container).__name__):
-        as_int(container)
+def test_a_field_that_is_not_a_number_reads_as_the_default(junk: object) -> None:
+    """One family, one policy — and this is the half that changed (49b).
+
+    It used to raise: `TypeError` for a container, `ValueError` for a
+    non-numeric string. `as_obj` and `as_seq` answer a mis-shaped field with the
+    empty container instead, because "a missing one must cost a row rather than
+    the transcript" — and on `persistence.repair`, `driver._last_turn_of` and
+    `replay.recorded_steps` that raise was **not** contained: one mistyped
+    numeric field in a log another build wrote turned an unreadable row into a
+    failed resume.
+
+    `nan` and the two infinities are here because they are the shapes that
+    survived the first cut: `int()` raises `ValueError` for one and
+    `OverflowError` for the other, and only `ValueError` was caught, so a log
+    spelling `NaN` bare — which `json.loads` parses — still failed a resume
+    while the helper claimed one policy for the family.
+
+    `freeze_json_value` does **not** keep our own logs out of here. It is a
+    JSON-ness gate, not a schema gate: `Session.append({"turn": "3"})`
+    succeeds, so a producer of ours writing the wrong type into a numeric
+    field lands on the default too.
+    """
+    assert as_int(junk) == 0
+    assert as_int(junk, -1) == -1, "and the caller's own default is what it answers with"
 
 
 # ------------------------------------------------------------- obj / seq --

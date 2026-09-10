@@ -587,7 +587,7 @@ def _request_proposal(header: EpochHeader) -> LlmCallConfig:
 
 def _last_turn_of(session: Session) -> int:
     event = session.last_event_of("turn/start")
-    return as_int(event.data.get("turn", 0)) if event is not None else 0
+    return as_int(event.data.get("turn")) if event is not None else 0
 
 
 def _error_chain(error: BaseException) -> str:

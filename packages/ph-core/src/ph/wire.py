@@ -36,14 +36,46 @@ __all__ = [
     "WireModel",
     "declarable",
     "declarable_fields",
+    "literal_lookup",
     "validation_errors",
     "wire_alias",
 ]
+
+_Member = typing.TypeVar("_Member", bound=str)
 
 
 def wire_alias(field_name: str) -> str:
     """The one alias function. Exported so tests can pin mappings against it."""
     return to_camel(field_name)
+
+
+def literal_lookup(alias: object) -> collections.abc.Mapping[str, _Member]:
+    """Every member of a `Literal` by its own spelling — the read side of Q2.
+
+    A `Literal` constrains writers and dies at the payload boundary, so a reader
+    holding a `str` has to check. `raw in get_args(X)` is that check and does
+    **not** narrow, which is why every such site carried a `cast` beside it
+    asserting what the test had just established. Keyed by its members instead,
+    the lookup *is* the check and it narrows: `MODES.get(raw)` is the member or
+    `None`, with no cast to go stale, and a member added to the alias appears
+    here for free.
+
+    Six sites hand-rolled `{one: one for one in get_args(X)}` before this
+    existed, each carrying a copy of the paragraph above. The declaration is
+    still the single source — this only stops it being restated.
+
+    **The caller annotates, and must.** The member type comes from the
+    annotation, not the argument: `get_args` returns `tuple[Any, ...]`, and a
+    `Literal` alias is not a `type[X]`, so there is no way to read it off the
+    parameter without PEP 747's `TypeForm`. The bound is `str` so the
+    annotation cannot be something a `.get` would narrow wrongly, and omitting
+    it is a hard `error: Need type annotation` rather than a silent `Any` —
+    which is exactly the property the *narrowing* form of this helper
+    (`as_literal(raw, alias) -> X | None`) fails to have, and why that one is
+    not written here. Pairing the annotation with the wrong alias is not
+    policed, and was not policed in the hand-rolled form either.
+    """
+    return {one: one for one in typing.get_args(alias)}
 
 
 def validation_errors(error: ValidationError, *, root: str = "<root>") -> list[str]:
