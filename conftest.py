@@ -220,9 +220,20 @@ async def mount(tmp_path: Path) -> AsyncIterator[MountProfile]:
         # developer's own repository. That has happened three times in this
         # suite — a test repo inside the checkout, a stray `parent-tree`, and a
         # real worktree off `main` — and each time the fix was local. This is
-        # the guarantee stated once. A test that genuinely needs the cwd
-        # overrides the row.
-        patches: list[dict[str, Any]] = [{"id": "fs", "config": {"root": str(tmp_path)}}]
+        # the guarantee stated once.
+        #
+        # **Stated on the rung a daemon takes, not the one an operator takes.**
+        # It was a config patch on the `fs` row — `config.root`, the top rung of
+        # `fs-local`'s ladder — chosen before `Profile.mount` had a `project=`
+        # door. That pinned the root, but it meant the whole suite exercised the
+        # one rung production never uses, while the rung a daemon *does* use for
+        # every root it holds (P5-14) had a single test. Passing `project=` below
+        # runs all ~2,570 mounts through the production path instead. The
+        # override story is unchanged: a test that wants another root sets
+        # `config.root` in an overlay row, which outranks the project exactly as
+        # it outranks it for a deployment — and no shipped profile sets it, so
+        # nothing this fixture mounts can win against `tmp_path` by accident.
+        patches: list[dict[str, Any]] = []
         # Asked of the loader rather than re-read from the raw documents: which
         # entries are rows, which are patches and what `insert:`/`remove:` mean is
         # `compose_rows`' grammar, and a second copy of it here got `remove:` wrong.
@@ -236,11 +247,12 @@ async def mount(tmp_path: Path) -> AsyncIterator[MountProfile]:
             # there to patch: a test composing its own layers without `ph-base`
             # must not be refused over a row it never had.
             patches.append({"id": "sandbox-local", "disabled": True})
-        documents.append(("test-root", patches))
+        if patches:
+            documents.append(("test-root", patches))
         if overlay_rows:
             documents.append(("test-overlay", list(overlay_rows)))
         ctx = Context()
-        await Profile.from_documents(documents).mount(ctx)
+        await Profile.from_documents(documents).mount(ctx, project=tmp_path)
         roots.append(ctx)
         return ctx
 
