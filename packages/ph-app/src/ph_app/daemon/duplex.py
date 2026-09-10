@@ -55,15 +55,70 @@ from typing import Any
 import anyio
 from anyio.abc import ByteStream
 
-from ..protocol import DaemonGone, Dispatch, Frame, notification, request, respond, result_of
+from ph.wire import WireModel
+
+from ..payloads import SessionAsk
+from ..protocol import (
+    DaemonGone,
+    Dispatch,
+    Frame,
+    notification,
+    parse_params,
+    request,
+    respond,
+    result_of,
+)
 from .framing import FramingError, read_frames, write_frame
 
-__all__ = ["IN_FLIGHT", "OUTBOX", "Handler", "Notification", "Peer"]
+__all__ = ["IN_FLIGHT", "OUTBOX", "Handler", "Notification", "Peer", "answering"]
 
 log = logging.getLogger("ph_app.daemon.duplex")
 
 Notification = Callable[[str, dict[str, Any]], None]
+"""What this end does with an id-less frame the peer sent.
+
+`dict[str, Any]` because a frame the peer sent is a claim — `ph_app.protocol`'s
+module docstring is where that rule lives, and this is it applied to the
+observer. The models exist and the readers use them (`payloads.notice_of`);
+what the transport does not do is pretend a dict is one of them.
+
+The method travels beside the payload rather than inside it because JSON-RPC
+already carries it in the envelope, and this signature is the envelope's."""
+
 Handler = Callable[[dict[str, Any]], Awaitable[Any]]
+"""What this end will answer when the *peer* asks it something (P5-13).
+
+`dict` in for `Notification`'s reason. `answering` below is the typed door, so
+a handler body takes a model and returns one and this alias stays the
+transport's business."""
+
+
+def answering[A: SessionAsk](ask: type[A], answer: Callable[[A], Awaitable[WireModel]]) -> Handler:
+    """One typed ask handler, as the `Handler` the transport registers.
+
+    The client's mirror of the daemon's `parse_params` — literally, not by
+    analogy: it *is* `parse_params`, so a bad ask is refused with the same
+    named `invalid_params` and the same one-line sentence a bad request gets,
+    whichever direction it was travelling. Written by hand it was
+    `ApprovalAsk.model_validate(params)` at the top of each handler, whose bare
+    `ValidationError` carries no `code` — so `respond` sent it back as an
+    unnamed `-32000` with a multi-line pydantic dump for a message, which is the
+    error shape P8-07 spent a row deleting on the daemon's side.
+
+    Nothing dumps the reply here. `respond` turns a `WireModel` into a frame at
+    the one point a result becomes one, and its own comment says none of its
+    handlers spells `.to_wire()` at the `return` — this is a handler.
+
+    `A: SessionAsk` rather than `WireModel` for the `METHOD` the refusal names,
+    and because a *notice* has no reply to give: the bound is what stops one
+    being registered here.
+    """
+
+    async def handler(params: dict[str, Any]) -> WireModel:
+        return await answer(parse_params(ask.METHOD, ask, params))
+
+    return handler
+
 
 OUTBOX = 1024
 """Frames that may be queued for the wire before `tell` refuses.
@@ -126,6 +181,9 @@ class Peer:
     than only notice — `shutdown` is a notification by contract, so the only
     honest confirmation is the connection closing."""
     _asked: int = 0
+    _unwatchable: int = 0
+    """How many notifications this end has failed to read. The first is logged
+    with its traceback and the rest at debug — see `_watch`."""
     _pending: dict[str, _Pending] = field(default_factory=dict)
     _outbox: Any = None
     _inbox: Any = None
@@ -255,7 +313,7 @@ class Peer:
                     # `dispatch_notifications`. An end with no observer drops it
                     # here rather than spending a task to find out it has no body.
                     if self.on_notify is not None:
-                        self.on_notify(str(frame.get("method") or ""), frame.get("params") or {})
+                        self._watch(frame)
                     continue
                 # `respond` returns `None` for an id-less frame, so a dispatched
                 # notification runs its body and writes nothing back.
@@ -265,6 +323,36 @@ class Peer:
             # Unreadable framing ends the connection: after a bad frame there is
             # no way to know where the next one starts.
             log.info("ph_app.daemon: closing a connection — %s", error)
+
+    def _watch(self, frame: dict[str, Any]) -> None:
+        """Hand one notification to the observer, and survive what it does.
+
+        **A notification body must not be able to end the connection.** This
+        runs *inline on the read loop* — deliberately, since an observer is
+        cheap and spending a task per event is not — so anything it raises
+        unwinds `_read`, leaves the task group, and takes the socket with it.
+        The reader is a client's own code parsing a frame it may not recognise:
+        a notice carrying a field this build has never heard of raises out of
+        `model_validate`, and before this guard that killed `ph agents attach`
+        over a `session.staged` it does not even read.
+
+        The same judgement `_settle` makes about a late reply — "ending the
+        connection over it would punish a peer for a race it did not cause" —
+        applied to the other id-less path. A bad frame costs a frame, and says
+        so once: `exc_info` on the first, then quiet, because a daemon sending
+        one unreadable notice will send the next one too and a follower's
+        terminal is not the place to print the same traceback per event.
+        """
+        try:
+            self.on_notify(str(frame.get("method") or ""), frame.get("params") or {})  # type: ignore[misc]
+        except Exception:
+            log.log(
+                logging.WARNING if not self._unwatchable else logging.DEBUG,
+                "ph_app.daemon: dropping a notification this end could not read (%s)",
+                frame.get("method"),
+                exc_info=not self._unwatchable,
+            )
+            self._unwatchable += 1
 
     async def _handle(self, frame: dict[str, Any], limit: anyio.Semaphore) -> None:
         try:

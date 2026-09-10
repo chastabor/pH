@@ -50,7 +50,7 @@ bodies are what close that.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -71,6 +71,7 @@ from ph.wire import WireModel
 
 from ..attach import Tray, stage_bytes
 from ..daemon.client import DaemonClient
+from ..daemon.duplex import answering
 from ..daemon.follow import Followed, first_of
 from ..params import (
     CommandParams,
@@ -82,17 +83,17 @@ from ..params import (
     TrustAnswer,
 )
 from ..payloads import (
+    FED,
     ApprovalAsk,
     ApprovalAskReply,
     AttachReply,
     QuestionAsk,
     QuestionAskReply,
     SessionCommandsNotice,
-    SessionEventNotice,
     SessionScreensNotice,
     SessionStagedNotice,
-    SessionStatusNotice,
     StatusFacts,
+    notice_of,
 )
 from ..protocol import DaemonGone, NoParams, SessionParams
 from ..sessions import SessionSummary
@@ -289,7 +290,7 @@ class DaemonSession:
         deltas — the whole tray, the whole command list — so each is correct
         whatever order it arrives in and needs no buffer of its own.
         """
-        if method in (SessionEventNotice.METHOD, SessionStatusNotice.METHOD):
+        if method in FED:
             self.feed(method, params)
             return
         # Read off the raw frame, before any model sees it: "is this mine"
@@ -298,25 +299,29 @@ class DaemonSession:
         # others and parsing them to discard them is the work this skips.
         if params.get("sessionId") != self.session_id:
             return
-        if method == SessionCommandsNotice.METHOD:
-            notice = SessionCommandsNotice.model_validate(params)
+        # Validated once, through the table that owns method → payload, and
+        # narrowed by type below. Each branch used to name its own model beside
+        # its own `METHOD`, which is that pairing written out per reader. The
+        # feed route above is the exception and stays one: it is a question
+        # about *which sink*, answered before anything is parsed, because
+        # `Followed.pending` buffers frames it has not checked the owner of.
+        notice = notice_of(method, params)
+        if isinstance(notice, SessionCommandsNotice):
             self.remote_commands = [
                 _remote_command(self.client, self.session_id, one) for one in notice.commands
             ]
             self.host.state_changed()
-            return
-        if method == SessionScreensNotice.METHOD:
+        elif isinstance(notice, SessionScreensNotice):
             # Re-wired rather than merged: a screen's routes are a verb *and* a
             # key binding, and the key is registered on the app — so the old
             # ones have to be released before the new list is built.
-            self.screens = _screens_of(SessionScreensNotice.model_validate(params).screens)
+            self.screens = _screens_of(notice.screens)
             if self.app is not None:
                 self._wire_screens(self.app)
             self.host.state_changed()
-            return
-        if method == SessionStagedNotice.METHOD:
+        elif isinstance(notice, SessionStagedNotice):
             self._staged = Tray()
-            for ref in SessionStagedNotice.model_validate(params).staged:
+            for ref in notice.staged:
                 self._staged.stage(ref)
             self.host.state_changed()
 
@@ -560,8 +565,8 @@ async def attach_session(
     login screen asks for them when it opens, which is where the answer is read.
     """
     state = TuiState()
-    client.handlers[ApprovalAsk.METHOD] = _asking_approval(host)
-    client.handlers[QuestionAsk.METHOD] = _asking_question(host)
+    client.handlers[ApprovalAsk.METHOD] = answering(ApprovalAsk, _asking_approval(host))
+    client.handlers[QuestionAsk.METHOD] = answering(QuestionAsk, _asking_question(host))
     # `asks` **before** the attach: the desk joins a front end as it attaches, and
     # a client that declared nothing is never asked.
     await client.initialize("asks")
@@ -669,7 +674,7 @@ def _screens_of(schemas: Sequence[ScreenSchema]) -> dict[str, ScreenDefinition]:
     return found
 
 
-def _asking_approval(host: ModalHost) -> Any:
+def _asking_approval(host: ModalHost) -> Callable[[ApprovalAsk], Awaitable[ApprovalAskReply]]:
     """`approval/ask` → the modal, in a worker.
 
     `reason` travels back on the wire rather than being steered from here: the
@@ -677,25 +682,21 @@ def _asking_approval(host: ModalHost) -> Any:
     writing into somebody else's session.
     """
 
-    async def ask(params: dict[str, Any]) -> dict[str, Any]:
-        asked = ApprovalAsk.model_validate(params)
+    async def ask(asked: ApprovalAsk) -> ApprovalAskReply:
         outcome, reason = await host.ask_approval(asked.request)
         # Through the seam's own encoder: `Edited` and `Responded` are frozen
         # dataclasses, and putting one in a frame unencoded is a `TypeError`
         # inside the task group that answers the ask — which the desk reads as
         # "this front end cannot answer" and drops it for.
-        reply = ApprovalAskReply(answer=answer_to_wire(outcome), reason=reason or "")
-        return reply.to_wire()
+        return ApprovalAskReply(answer=answer_to_wire(outcome), reason=reason or "")
 
     return ask
 
 
-def _asking_question(host: ModalHost) -> Any:
+def _asking_question(host: ModalHost) -> Callable[[QuestionAsk], Awaitable[QuestionAskReply]]:
     """`question/ask` → the ask-user modal, in a worker."""
 
-    async def ask(params: dict[str, Any]) -> dict[str, Any]:
-        asked = QuestionAsk.model_validate(params)
-        reply = QuestionAskReply(answer=await host.ask_question(asked.question))
-        return reply.to_wire()
+    async def ask(asked: QuestionAsk) -> QuestionAskReply:
+        return QuestionAskReply(answer=await host.ask_question(asked.question))
 
     return ask

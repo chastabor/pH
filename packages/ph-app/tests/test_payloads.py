@@ -19,37 +19,38 @@ from __future__ import annotations
 
 import pytest
 
+from ph.seams.approval import ApprovalRequest
 from ph.seams.tui_status import StatusReading
+from ph_app import payloads
+from ph_app.daemon.duplex import answering
 from ph_app.payloads import (
+    NOTICES,
     ApprovalAsk,
-    AskSettledNotice,
+    ApprovalAskReply,
     AttachReply,
     MutationRepeated,
+    QuestionAsk,
     RootDescription,
-    SessionCommandsNotice,
-    SessionEventNotice,
     SessionNotice,
-    SessionScreensNotice,
-    SessionStagedNotice,
     SessionStatusNotice,
     SnapshotPage,
+    notice_of,
 )
-from ph_app.protocol import Cursor
+from ph_app.protocol import Cursor, InvalidParams
+
+pytestmark = pytest.mark.anyio
 
 CURSOR = Cursor(generation="1700000000000", sequence=4)
 
-NOTICES = [
-    SessionEventNotice,
-    SessionStatusNotice,
-    SessionCommandsNotice,
-    SessionScreensNotice,
-    SessionStagedNotice,
-    AskSettledNotice,
-    ApprovalAsk,
-]
+NOTICE_TYPES = [*NOTICES.values(), ApprovalAsk, QuestionAsk]
+"""Every payload that travels under a name of its own.
+
+Derived: the hand-written list had already drifted — it omitted `QuestionAsk`,
+so the one ask whose `METHOD` nothing else checked was the one this file exists
+to check."""
 
 
-@pytest.mark.parametrize("notice", NOTICES, ids=lambda one: one.__name__)
+@pytest.mark.parametrize("notice", NOTICE_TYPES, ids=lambda one: one.__name__)
 def test_every_notice_declares_the_name_it_travels_under(notice: type[SessionNotice]) -> None:
     """`Root.publish` reads this rather than taking it as a second argument —
     the two used to have to agree at eight call sites with nothing checking."""
@@ -136,3 +137,118 @@ def test_a_field_the_notice_does_not_take_is_refused() -> None:
     field is a failing test rather than one a reader silently drops."""
     with pytest.raises(ValueError):
         SessionStatusNotice.model_validate({"sessionId": "s", "status": "idle", "extra": 1})
+
+
+# ------------------------------------------------------- the notice family --
+
+
+def test_every_notice_is_reachable_by_its_method() -> None:
+    """`NOTICES` is the client's half of the daemon's `METHODS`, and the two
+    halves of a vocabulary have to be checked against each other or one grows.
+
+    Read off the module rather than restating the list: a seventh notice added
+    with a `METHOD` and forgotten in the table fails here, which is the only
+    place that can notice — the daemon would publish it and every reader would
+    silently drop it as unknown. No `key == METHOD` assertion, because `NOTICES`
+    is built by that comprehension: it could only fail if someone rewrote the
+    table as a literal, and a test that can only fail on a refactor of itself is
+    a tautology wearing a check's clothes.
+    """
+    assert set(NOTICES.values()) == {one for one in _notice_classes() if one.METHOD}
+
+
+def test_an_ask_cannot_be_registered_as_a_notice() -> None:
+    """The exclusion is the **type**, not an author's memory.
+
+    `SessionAsk` and `SessionNotice` are siblings under `SessionScoped`, so
+    `Mapping[str, type[SessionNotice]]` structurally cannot hold an ask — where
+    a denylist naming the two asks had to be edited for a third, and would have
+    failed pointing at the wrong fix when it wasn't. A reader that found
+    `approval/ask` among the notices would treat a question as an event and
+    never answer it."""
+    assert not issubclass(ApprovalAsk, SessionNotice)
+    assert not issubclass(QuestionAsk, SessionNotice)
+    assert ApprovalAsk.METHOD not in NOTICES and QuestionAsk.METHOD not in NOTICES
+    # And the ask half still names itself: `answering` reads `METHOD` for the
+    # refusal, so an ask without one would refuse under an empty method.
+    assert ApprovalAsk.METHOD and QuestionAsk.METHOD
+    assert "ask_id" in ApprovalAsk.model_fields and "ask_id" in QuestionAsk.model_fields
+
+
+def test_an_unknown_method_reads_as_nothing_rather_than_raising() -> None:
+    """A daemon newer than this client sends a notice this build has no model
+    for. That is a feature the client does not have, not an error."""
+    assert notice_of("session.invented-later", {"sessionId": "s"}) is None
+
+
+def test_a_known_method_comes_back_as_its_own_type() -> None:
+    read = notice_of(SessionStatusNotice.METHOD, {"sessionId": "s", "status": "idle"})
+    assert isinstance(read, SessionStatusNotice)
+    assert read.status == "idle"
+
+
+def _notice_classes() -> set[type[SessionNotice]]:
+    """Every notice declared in `ph_app.payloads`, read off the module.
+
+    Off the module rather than `SessionNotice.__subclasses__()`: that walks a
+    *process-global* registry, so a subclass defined in some other test would
+    join it and make this assertion depend on what else the run imported — the
+    order-dependent-failure shape issue 58 already documents once.
+    """
+    return {
+        one
+        for one in vars(payloads).values()
+        if isinstance(one, type) and issubclass(one, SessionNotice) and one is not SessionNotice
+    }
+
+
+# --------------------------------------------------------- the typed door --
+
+
+async def test_a_malformed_ask_is_refused_by_name_not_by_traceback() -> None:
+    """`answering`'s refusal path, which nothing exercised.
+
+    A handler that could not read its ask used to let pydantic's
+    `ValidationError` escape, and that carries no `code` — so `respond` sent it
+    back as an unnamed `-32000` whose message was a multi-line pydantic dump,
+    and `DaemonError.reason` arrived empty at the one end that needs to branch
+    on it. Going through `parse_params` makes the client's refusal the same
+    shape as the daemon's, in both directions.
+
+    The daemon's half of the bargain is `AskDesk._deliver`: `invalid_params`
+    keeps the front end joined, because a client that cannot read *this* ask can
+    still answer the next one of a different kind.
+    """
+    answered: list[ApprovalAsk] = []
+
+    async def answer(ask: ApprovalAsk) -> ApprovalAskReply:
+        answered.append(ask)
+        return ApprovalAskReply(answer="allow")
+
+    handler = answering(ApprovalAsk, answer)
+
+    with pytest.raises(InvalidParams) as refused:
+        await handler({"sessionId": "s"})  # no askId, no request
+
+    assert refused.value.code == "invalid_params"
+    assert ApprovalAsk.METHOD in str(refused.value), "the refusal names the method"
+    assert "askId" in str(refused.value), "and the field that was missing"
+    assert not answered, "a body must not run on an ask it could not read"
+
+
+async def test_a_well_formed_ask_reaches_the_body_as_its_model() -> None:
+    """And the reply goes back as a model — `respond` dumps it at the one point
+    a result becomes a frame, so the handler does not spell `.to_wire()`."""
+    seen: list[ApprovalAsk] = []
+
+    async def answer(ask: ApprovalAsk) -> ApprovalAskReply:
+        seen.append(ask)
+        return ApprovalAskReply(answer="allow", reason="because")
+
+    request = ApprovalRequest(tool_name="bash", call_id="c1")
+    reply = await answering(ApprovalAsk, answer)(
+        {"sessionId": "s", "askId": "a1", "request": request.to_wire()}
+    )
+
+    assert seen and seen[0].ask_id == "a1" and seen[0].request.tool_name == "bash"
+    assert isinstance(reply, ApprovalAskReply), "a model, not a dict — respond dumps it"

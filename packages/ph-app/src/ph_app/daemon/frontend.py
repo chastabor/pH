@@ -54,6 +54,7 @@ from ..payloads import (
     QuestionAsk,
     QuestionAskReply,
 )
+from ..protocol import DaemonError
 
 __all__ = ["AskDesk"]
 
@@ -224,6 +225,21 @@ class AskDesk:
     async def _deliver(self, who: FrontEnd, pending: PendingAsk) -> None:
         try:
             answer = await who.ask(pending.method, pending.params)
+        except DaemonError as refused:
+            if refused.reason == "invalid_params":
+                # It could not *read* this ask — a shape its build does not
+                # know — which says nothing about the next one of a different
+                # kind. Named rather than inferred from the message, which is
+                # what `InvalidParams` is for; kept joined, and logged loudly
+                # enough to find, because a front end silently answering
+                # nothing is how a person's modals stop appearing.
+                log.warning(
+                    "ph_app.daemon: a front end could not read %s — %s", pending.method, refused
+                )
+                return
+            log.debug("ph_app.daemon: a front end refused %s — %s", pending.method, refused)
+            self.front_ends.discard(who)
+            return
         except Exception:
             # A front end that cannot answer — a dead socket, a client that
             # refused the method — stops being asked. The question stays pending

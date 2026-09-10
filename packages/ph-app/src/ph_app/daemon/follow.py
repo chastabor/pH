@@ -33,11 +33,13 @@ import anyio
 
 from ..params import SnapshotParams
 from ..payloads import (
+    FED,
     AttachReply,
     SessionEventNotice,
     SessionStatusNotice,
     SnapshotPage,
     StatusFacts,
+    notice_of,
 )
 from ..protocol import Cursor
 from ..wire import as_int
@@ -94,12 +96,21 @@ class Followed:
         # others and parsing them to discard them is the work this skips.
         if params.get("sessionId") != self.session_id:
             return
-        if method == SessionStatusNotice.METHOD:
-            self.on_status(SessionStatusNotice.model_validate(params))
+        # Gated before the table: this reader wants two of the six notices, and
+        # `Root.publish` fans all of them to every subscriber — so without this
+        # a palette republish was fully validated and then thrown away.
+        if method not in FED:
             return
-        if method != SessionEventNotice.METHOD:
+        # Through the table that owns method → payload, then narrowed by type:
+        # a notice this build has no model for is `None`, which is a daemon
+        # newer than this client and a row to drop rather than a crash. Events
+        # first, because they are the hot one and an `isinstance` *hit* on the
+        # exact type takes a fast path a miss does not.
+        notice = notice_of(method, params)
+        if not isinstance(notice, SessionEventNotice):
+            if isinstance(notice, SessionStatusNotice):
+                self.on_status(notice)
             return
-        notice = SessionEventNotice.model_validate(params)
         event = notice.event
         at = as_int(event.get("seq", -1))
         if at <= self.seen:

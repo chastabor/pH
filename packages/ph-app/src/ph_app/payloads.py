@@ -37,6 +37,7 @@ shape is the tool registry's. Both are handed on to something that knows them.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any, ClassVar
 
 from pydantic import Field
@@ -53,6 +54,7 @@ from .protocol import Cursor
 from .sessions import SessionSummary
 
 __all__ = [
+    "NOTICES",
     "ApprovalAsk",
     "ApprovalAskReply",
     "AskSettledNotice",
@@ -64,17 +66,20 @@ __all__ = [
     "RootDetail",
     "RootListing",
     "RootStatusReply",
+    "SessionAsk",
     "SessionBrowse",
     "SessionCommandsNotice",
     "SessionEventNotice",
     "SessionNotice",
     "SessionReadingsReply",
+    "SessionScoped",
     "SessionScreensNotice",
     "SessionStagedNotice",
     "SessionStatusNotice",
     "SessionToolsReply",
     "SnapshotPage",
     "StatusFacts",
+    "notice_of",
 ]
 
 
@@ -273,19 +278,40 @@ class SessionBrowse(WireModel):
 # ----------------------------------------------------------- notifications --
 
 
-class SessionNotice(WireModel):
-    """Every notification names the root it is about, so a client watching more
-    than one can tell them apart — and drop what is not its own.
+class SessionScoped(WireModel):
+    """A frame about one root, in either direction.
 
     `METHOD` is the name this payload travels under, declared on the payload
     rather than passed beside it: `Root.publish` takes the notice and reads the
     name off it, so publishing a command list as `session.status` stops being a
     thing anyone can write. It was two arguments that had to agree, at eight
     call sites, with nothing checking that they did.
+
+    The base exists so that the two directions are **siblings rather than one
+    inheriting the other**. An ask is not a notification — it expects a reply —
+    and while `ApprovalAsk` subclassed `SessionNotice` the only thing keeping it
+    out of the notice table was an author remembering to omit it, plus a
+    denylist in the test saying so a second time. A reader that found
+    `approval/ask` among the notices would treat a question as an event and
+    never answer it; now `Mapping[str, type[SessionNotice]]` cannot hold one.
     """
 
     METHOD: ClassVar[str] = ""
     session_id: str
+
+
+class SessionNotice(SessionScoped):
+    """A frame the daemon *announces*: no reply, no id, watch or ignore."""
+
+
+class SessionAsk(SessionScoped):
+    """A frame the daemon *asks*: it expects a typed answer back.
+
+    `ask_id` lives here rather than on each ask — it was declared twice, and
+    `AskDesk` keys its pending table on it either way.
+    """
+
+    ask_id: str
 
 
 class SessionEventNotice(SessionNotice, _CarriesJson):
@@ -360,17 +386,76 @@ class AskSettledNotice(SessionNotice):
     ask_id: str
 
 
+NOTICES: Mapping[str, type[SessionNotice]] = {
+    one.METHOD: one
+    for one in (
+        SessionEventNotice,
+        SessionStatusNotice,
+        SessionCommandsNotice,
+        SessionScreensNotice,
+        SessionStagedNotice,
+        AskSettledNotice,
+    )
+}
+"""Wire method → the payload that travels under it, for a client reading frames.
+
+The client's half of the daemon's `METHODS`: the daemon has a table saying what
+each name *takes*, and this says what each name *carries*. Both dispatchers had
+the pairing written out branch by branch — `if method == X.METHOD: X.model_validate(...)`
+— which is the mechanism, once per reader, with nothing checking that a notice
+the daemon publishes has a reader that knows its model. `test_payloads` holds
+this against every `SessionNotice` subclass that declares a `METHOD`, so a
+seventh notice cannot be added without appearing here.
+
+The asks cannot appear here — `SessionAsk` is a sibling of `SessionNotice`,
+not a subclass — which is the point of the split: a reader that found
+`approval/ask` among the notices would treat a question as an event and never
+answer it.
+"""
+
+
+FED: frozenset[str] = frozenset({SessionEventNotice.METHOD, SessionStatusNotice.METHOD})
+"""The two a *feed* reads: the transcript's events and where the root is.
+
+Named once because two readers gate on it and both were spelling it inline —
+and because a class-attribute load off a pydantic model never specializes
+(`ModelMetaclass` defines `__getattr__`), so the tuple those branches built per
+notification measured 0.105 µs against 0.021 for this. The other four notices
+are palette and tray snapshots a feed has no use for; validating them to find
+that out measured **129x** the string test it replaced, on a `session.commands`
+carrying a 25-command palette."""
+
+
+def notice_of(method: str, params: dict[str, Any]) -> SessionNotice | None:
+    """One inbound frame as the payload its method declares, or `None`.
+
+    `None` for a method this build has no model for — a daemon newer than this
+    client, which a reader drops rather than crashes on. That is the one thing
+    the branch-by-branch form got right by accident and this states: an unknown
+    notification is not an error, it is a feature the client does not have.
+
+    A payload that does *not* parse still raises, and that is deliberate now
+    that it is survivable: `Peer._read` guards the notification body, so a bad
+    frame costs a frame and says so in the log rather than being swallowed
+    here — a dropped `session.event` is a hole in a transcript, which is worth
+    a line. `ph_app.wire.view_of` swallows for the opposite reason: a card that
+    will not parse costs a card, and the generic one drawn instead is plain
+    rather than wrong.
+    """
+    model = NOTICES.get(method)
+    return None if model is None else model.model_validate(params)
+
+
 # -------------------------------------------------------------------- asks --
 # The daemon → client direction, which is the only place the daemon is the one
 # building *request* params. Modelled here rather than in `ph_app.params`
 # because the client is what validates them.
 
 
-class ApprovalAsk(SessionNotice):
+class ApprovalAsk(SessionAsk):
     """`approval/ask` — put this to the person and tell me what they said."""
 
     METHOD: ClassVar[str] = "approval/ask"
-    ask_id: str
     request: ApprovalRequest
 
 
@@ -389,11 +474,10 @@ class ApprovalAskReply(WireModel):
     reason: str = ""
 
 
-class QuestionAsk(SessionNotice):
+class QuestionAsk(SessionAsk):
     """`question/ask` — the ask-user modal, over the socket."""
 
     METHOD: ClassVar[str] = "question/ask"
-    ask_id: str
     question: UserQuestion
 
 
