@@ -150,7 +150,11 @@ async def test_an_rpc_round_trip_in_the_sdk_shape(profile: Profile) -> None:
     assert replies[2]["result"]["sessionId"] == "rpc-1"
     assert replies[3]["result"]["events"] > 0
     assert {schema["name"] for schema in replies[4]["result"]["tools"]} >= {"read", "edit", "bash"}
-    assert replies[5]["result"] == {"ok": True}
+    # `shutdown` is a `Notify`: no reply model, so no result. A peer that sends
+    # it *with* an id — as this round trip does, to prove the body still runs —
+    # gets an acknowledged frame carrying nothing, where it used to carry an
+    # `{"ok": true}` nothing had asked for.
+    assert replies[5]["result"] is None
 
     # Streaming notifications carry the log's envelopes, not a rendering.
     events = [frame for frame in notifications if frame["method"] == "session.event"]

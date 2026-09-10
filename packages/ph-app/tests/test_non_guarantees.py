@@ -119,11 +119,11 @@ async def test_the_running_daemon_reports_them_beside_the_root_count(tmp_path: P
         await daemon.server.supervisor.start("two")
         status = daemon.server.status()
 
-        assert status["roots"] == 2, "the line that invites the assumption"
-        titles = [section["title"] for section in status["sections"]]
+        assert status.roots == 2, "the line that invites the assumption"
+        titles = [section.title for section in status.sections]
         assert "isolation" in titles, f"the daemon reports {titles}"
-        section = next(one for one in status["sections"] if one["title"] == "isolation")
-        rows = {row["label"]: row["value"] for row in section["rows"]}
+        section = next(one for one in status.sections if one.title == "isolation")
+        rows = {row.label: row.value for row in section.rows}
         assert rows == dict(NON_GUARANTEES), "the wire carries them verbatim, not a summary"
 
 
@@ -163,7 +163,7 @@ async def test_a_roots_own_crash_is_contained_and_the_process_is_the_boundary(
         # still answering — which is the containment the row claims.
         assert broken.status == "failed"
         assert healthy.status == "idle", "one root's crash is not another's"
-        assert daemon.server.status()["roots"] == 2
+        assert daemon.server.status().roots == 2
 
         await supervisor.prompt("healthy", "and you?")
         with anyio.fail_after(10):

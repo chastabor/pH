@@ -26,7 +26,12 @@ from ph.keys import AGENTS, SESSIONS, TOOLS
 from ph.session import Session, SessionEvent, dumps
 from ph.wire import WireModel
 
-from ..payloads import SessionEventNotice, SessionNotice, SessionStatusNotice
+from .. import verbs
+from ..payloads import (
+    SessionEventNotice,
+    SessionNotice,
+    SessionStatusNotice,
+)
 from ..protocol import (
     Frame,
     NoParams,
@@ -102,7 +107,16 @@ class RpcServer:
             # and discarded: a client's capability block means nothing to a
             # transport that will never ask it anything, but a stray field is
             # still a stray field.
-            parse_params(method, NoParams, params)
+            #
+            # **Through the verb, because `NoParams` contradicted that comment.**
+            # `WireModel` is `extra="forbid"`, so parsing against `NoParams`
+            # refused the `capabilities` list every client sends — including
+            # `DaemonClient.initialize`'s own frame — which made `initialize`
+            # two contracts under one name while `protocol.py` says "they are
+            # the same protocol". Verified: `parse_params("initialize",
+            # NoParams, {"capabilities": []})` came back `invalid_params:
+            # capabilities: Extra inputs are not permitted`.
+            verbs.INITIALIZE.parse(params)
             return capabilities("tools")
         if method == "session/new":
             # Open, not create: a peer naming a stored id resumes it, and one
@@ -124,8 +138,12 @@ class RpcServer:
             schemas = self.ctx.require(TOOLS).schemas(scope=DEPLOYMENT)
             return {"tools": [schema.to_wire() for schema in schemas]}
         if method == "shutdown":
-            parse_params(method, NoParams, params)
-            return {"ok": True}
+            verbs.SHUTDOWN.parse(params)
+            # Nothing, like the daemon's. `shutdown` is a `Notify`, so there is
+            # no reply model to build and `respond` sends no frame — which was
+            # the whole argument for the `{"ok": True}` literal this replaced
+            # being pointless rather than merely duplicated.
+            return None
         raise UnknownMethod(f'unknown method "{method}"')
 
     def _attach(self, session: Session) -> None:

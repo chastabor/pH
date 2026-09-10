@@ -50,7 +50,7 @@ from ph.seams.tui_status import StatusReading
 from ph.seams.user_questions import UserQuestion
 from ph.wire import WireModel, wire_alias
 
-from .protocol import Cursor
+from .protocol import CapabilityBlock, Cursor
 from .sessions import SessionSummary
 
 __all__ = [
@@ -59,24 +59,37 @@ __all__ = [
     "ApprovalAskReply",
     "AskSettledNotice",
     "AttachReply",
+    "AttachmentStored",
+    "CommandShown",
+    "CredentialStored",
+    "CredentialsHeldReply",
+    "DaemonConfigReply",
+    "DaemonStatusReply",
+    "DiagnosticRow",
+    "DiagnosticSection",
     "MutationRepeated",
+    "PresetApplied",
     "QuestionAsk",
     "QuestionAskReply",
     "RootDescription",
     "RootDetail",
     "RootListing",
     "RootStatusReply",
+    "ScheduleCancelled",
     "SessionAsk",
     "SessionBrowse",
     "SessionCommandsNotice",
+    "SessionDetached",
     "SessionEventNotice",
     "SessionNotice",
     "SessionReadingsReply",
+    "SessionSchedulesReply",
     "SessionScoped",
     "SessionScreensNotice",
     "SessionStagedNotice",
     "SessionStatusNotice",
     "SessionToolsReply",
+    "ShellReply",
     "SnapshotPage",
     "StatusFacts",
     "notice_of",
@@ -143,7 +156,29 @@ class StatusFacts(WireModel):
 # ----------------------------------------------------------------- replies --
 
 
-class RootDescription(WireModel):
+class SessionScoped(WireModel):
+    """A frame about one root, in either direction.
+
+    `METHOD` is the name this payload travels under, declared on the payload
+    rather than passed beside it: `Root.publish` takes the notice and reads the
+    name off it, so publishing a command list as `session.status` stops being a
+    thing anyone can write. It was two arguments that had to agree, at eight
+    call sites, with nothing checking that they did.
+
+    The base exists so that the two directions are **siblings rather than one
+    inheriting the other**. An ask is not a notification — it expects a reply —
+    and while `ApprovalAsk` subclassed `SessionNotice` the only thing keeping it
+    out of the notice table was an author remembering to omit it, plus a
+    denylist in the test saying so a second time. A reader that found
+    `approval/ask` among the notices would treat a question as an event and
+    never answer it; now `Mapping[str, type[SessionNotice]]` cannot hold one.
+    """
+
+    METHOD: ClassVar[str] = ""
+    session_id: str
+
+
+class RootDescription(SessionScoped):
     """`Root.describe()` — what a client is told about one root.
 
     One name per fact: `rootId` and `sessionId` were the same string (a root
@@ -151,7 +186,6 @@ class RootDescription(WireModel):
     client picking which of two spellings was authoritative.
     """
 
-    session_id: str
     status: str
     last_turn: str | None = None
     watchers: int
@@ -194,13 +228,26 @@ class RootDetail(RootDescription):
     failed: bool
 
 
-class RootStatusReply(RootDetail, _CarriesJson):
-    """`session/status` — one root in detail, with what is still going to fire."""
+class _CarriesSchedules(_CarriesJson):
+    """The `schedules` field, its by-reference rule and its reason, once.
+
+    Two replies carry what is still going to fire on a root — `session/status`
+    with the rest of the detail, `schedule/list` on its own — and they feed the
+    same consumer (`agents._print_schedules`). Declared twice, they were the
+    same field, the same `BY_REFERENCE` and the same paragraph, with the second
+    copy's prose pointing at the first.
+
+    The rows are `ph.seams.schedule.state_to_wire`'s hand-built ones. A model
+    for them is a ph-core change; until then they pass through as the JSON they
+    already are, which is what `BY_REFERENCE` is for.
+    """
 
     BY_REFERENCE: ClassVar[frozenset[str]] = frozenset({"schedules"})
     schedules: list[dict[str, Any]] = Field(default_factory=list)
-    """`ph.seams.schedule.state_to_wire`'s hand-built rows. A model for them is a
-    ph-core change; until then they pass through as the JSON they already are."""
+
+
+class RootStatusReply(RootDetail, _CarriesSchedules):
+    """`session/status` — one root in detail, with what is still going to fire."""
 
 
 class AttachReply(RootDescription):
@@ -217,7 +264,7 @@ class AttachReply(RootDescription):
         return super().facts().model_copy(update={"readings": self.readings})
 
 
-class SnapshotPage(_CarriesJson):
+class SnapshotPage(SessionScoped, _CarriesJson):
     """`session/snapshot` — one bounded page of history, and the next cursor.
 
     2048 events a page, so the rebuild `_CarriesJson` avoids is the largest
@@ -225,7 +272,6 @@ class SnapshotPage(_CarriesJson):
     """
 
     BY_REFERENCE: ClassVar[frozenset[str]] = frozenset({"events", "presentations"})
-    session_id: str
     events: list[dict[str, Any]] = Field(default_factory=list)
     """Session-event wire envelopes, validated by `SessionEvent.from_wire` where
     they are folded. Not re-declared here — see the module docstring."""
@@ -267,37 +313,170 @@ class SessionBrowse(WireModel):
     sessions: list[SessionSummary] = Field(default_factory=list)
 
 
-# **`daemon/status` is deliberately not modelled.** It is a diagnostics blob
-# with one producer and one reader (`ph agents doctor`'s table), and it carries
-# `DiagnosticsRegistry.report()`'s nested section shape verbatim — so a model
-# here would be a second declaration of that, for a reply nothing else reads.
-# The shapes worth a type are the ones with several producers or several
-# readers, which is what made `session.status` worth one.
+class DiagnosticRow(WireModel):
+    """One `(label, value)` of a diagnostic section.
+
+    Two named keys rather than a two-element array, which is the rule
+    `RootDescription` states about one name per fact: an array of pairs on the
+    wire has positional meaning, and positional meaning is what a reader gets
+    wrong."""
+
+    label: str
+    value: str
+
+
+class DiagnosticSection(WireModel):
+    """One titled block of `DiagnosticsRegistry.report()`, on the wire."""
+
+    title: str
+    rows: list[DiagnosticRow] = Field(default_factory=list)
+
+
+class DaemonStatusReply(CapabilityBlock):
+    """`daemon/status` — what the running process is, for `ph agents doctor`.
+
+    **This reverses issue 67(a), which left it deliberately unmodelled** on the
+    grounds that it had one producer, one reader, and carried `report()`'s
+    nested shape verbatim, so a model would be a second declaration of it. Two
+    things changed. The reply is now named by a `Verb`, and a verb whose reply
+    is `dict[str, Any]` is the `Verb[P, Any]` escape issue 74 said would be the
+    thing to delete afterwards — so the table is what makes it pay. And the
+    "second declaration" was not one: `report()` returns
+    `list[tuple[str, list[tuple[str, str]]]]`, a *tuple* shape that cannot
+    travel, so `DiagnosticSection` is the first declaration of the wire form and
+    the hand-rolled `as_obj`/`as_seq` decoder in `agents.py` was the second.
+    Naming it here deletes that decoder.
+    """
+
+    pid: int
+    socket: str
+    uptime_ms: int
+    roots: int
+    provider: str
+    model: str
+    passivate_after: float | None = None
+    """Seconds, or `None` for a daemon that never passivates. Optional because
+    the absence is a *setting* and not a missing field — `exclude_none` would
+    drop it, so the reader defaults it back to `None` and prints "off"."""
+    tick_every: float
+    sweep_every: float
+    heartbeat_every: float
+    watch_every: float
+    unreachable_since: int | None = None
+    """Set only once the socket stopped being this daemon's (P5-11). Absent is
+    the normal answer, which is why the row it feeds is absent too."""
+    sections: list[DiagnosticSection] = Field(default_factory=list)
+
+
+class DaemonConfigReply(_CarriesJson):
+    """`daemon/config` — the composed profile, row by row.
+
+    `rows` stays wire JSON rather than becoming a model: it is `Row.to_dump()`'s
+    shape, a heterogeneous dict whose `config` is whatever a person wrote in
+    their profile, and re-declaring it here would be the second spelling of
+    `ph.cordis.loader`'s own dump. Same rule as `SessionEventNotice.event` —
+    handed on to something that knows it.
+    """
+
+    BY_REFERENCE: ClassVar[frozenset[str]] = frozenset({"rows"})
+    rows: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class CredentialsHeldReply(SessionScoped):
+    """`credentials/held` — which of the named secrets the daemon's store has.
+
+    The names are the client's question, so the answer is keyed by them.
+    Booleans and never values: the whole point of asking the daemon rather than
+    reading a store locally is that the value never crosses the socket."""
+
+    held: dict[str, bool] = Field(default_factory=dict)
+
+
+class CredentialStored(SessionScoped):
+    """`credentials/store` — the name and the fact, never the value.
+
+    `_act_credential` states the rule this shape enforces: the secret is used
+    and not kept, never logged, never echoed here."""
+
+    name: str
+    stored: bool = True
+
+
+class SessionDetached(SessionScoped):
+    """`session/detach` — whether this client had in fact been attached.
+
+    Not an error when it was not: detach is what a client does while tidying up,
+    often twice, and a teardown path that raises is one nobody can write
+    correctly. The boolean is the honest answer to "did that do anything"."""
+
+    detached: bool = False
+
+
+class AttachmentStored(SessionScoped):
+    """`attachment/put` — the reference the client came for.
+
+    Content-addressed, so a second put of the same bytes stores once and is a
+    cheap way to *learn* the reference — which is why this is not a `MUTATIONS`
+    row: a `repeated` envelope would withhold exactly the field that is the
+    point."""
+
+    attachment: AttachmentRef
+
+
+class CommandShown(SessionScoped):
+    """`session/command` — the text a command wants shown to the person.
+
+    `None` for a command that shows nothing, which is `dispatch`'s own return.
+    The command's *record* is in the session log, where every other attached UI
+    reads it; this is only what the caller who typed it should see."""
+
+    shown: str | None = None
+
+
+class ShellReply(SessionScoped):
+    """`session/shell` — the exit code, and nothing else.
+
+    The output travels as `shell/command` and `shell/result` **events**, so
+    every attached UI reads it by the one route they all already watch.
+
+    **`ok` is a property, not a field, and that is a correction.** It was sent
+    as a second wire key on the grounds that "a front end branching on it
+    should not have to know that zero means success" — but no front end does:
+    the only production caller discards this reply, and `tui/adapter.py` reads
+    `ok` off the `shell/result` *event*, not from here. So it was a second
+    spelling of one fact with no consumer, and `ShellReply(exit_code=1,
+    ok=True)` validated — against the rule this file's neighbours state twice
+    ("one encoding of one fact, so nothing on the wire can disagree with
+    itself"). A `@computed_field` would have kept it on the wire, but
+    `extra="forbid"` then refuses the key back on `model_validate`, so a
+    computed field is unreadable by the client that has to parse this reply.
+    """
+
+    exit_code: int
+
+    @property
+    def ok(self) -> bool:
+        return self.exit_code == 0
+
+
+class PresetApplied(SessionScoped):
+    """`session/preset` — the preset that is now in force, by name."""
+
+    preset: str
+
+
+class ScheduleCancelled(SessionScoped):
+    """`schedule/cancel` — whether that schedule was still there to cancel."""
+
+    schedule_id: str
+    cancelled: bool = False
+
+
+class SessionSchedulesReply(SessionScoped, _CarriesSchedules):
+    """`schedule/list` — what is still going to fire on this root, and nothing else."""
 
 
 # ----------------------------------------------------------- notifications --
-
-
-class SessionScoped(WireModel):
-    """A frame about one root, in either direction.
-
-    `METHOD` is the name this payload travels under, declared on the payload
-    rather than passed beside it: `Root.publish` takes the notice and reads the
-    name off it, so publishing a command list as `session.status` stops being a
-    thing anyone can write. It was two arguments that had to agree, at eight
-    call sites, with nothing checking that they did.
-
-    The base exists so that the two directions are **siblings rather than one
-    inheriting the other**. An ask is not a notification — it expects a reply —
-    and while `ApprovalAsk` subclassed `SessionNotice` the only thing keeping it
-    out of the notice table was an author remembering to omit it, plus a
-    denylist in the test saying so a second time. A reader that found
-    `approval/ask` among the notices would treat a question as an event and
-    never answer it; now `Mapping[str, type[SessionNotice]]` cannot hold one.
-    """
-
-    METHOD: ClassVar[str] = ""
-    session_id: str
 
 
 class SessionNotice(SessionScoped):

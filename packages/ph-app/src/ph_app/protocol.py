@@ -32,15 +32,17 @@ about an inbound request is its `params`, and that check is `parse_params`: one
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from typing import Any, Literal, NotRequired, TypeAlias, TypedDict
 
-from pydantic import ValidationError
+from pydantic import Field, ValidationError
 
 from ph.wire import WireModel, validation_errors
 
 __all__ = [
     "PROTOCOL_VERSION",
     "SNAPSHOT_EVENTS",
+    "CapabilityBlock",
     "Cursor",
     "DaemonError",
     "DaemonGone",
@@ -51,6 +53,7 @@ __all__ = [
     "InvalidParams",
     "NoParams",
     "NotificationFrame",
+    "Notify",
     "Refusal",
     "ReplyFrame",
     "RequestFrame",
@@ -58,6 +61,7 @@ __all__ = [
     "SeamAbsent",
     "SessionParams",
     "UnknownMethod",
+    "Verb",
     "capabilities",
     "cursor_of",
     "cursor_text",
@@ -68,6 +72,7 @@ __all__ = [
     "respond",
     "result_of",
     "resume_at",
+    "served",
 ]
 
 PROTOCOL_VERSION = 1
@@ -260,7 +265,20 @@ class DaemonGone(DaemonError):
         super().__init__(message, "connection_closed")
 
 
-def capabilities(*names: str) -> dict[str, Any]:
+class CapabilityBlock(WireModel):
+    """`initialize` and `daemon/hello` — the version, and what this end serves.
+
+    Both names answer with one handler, so both verbs name this one reply. The
+    values are all `True` by construction (`protocol.capabilities` says why a
+    capability is present or absent rather than a flag), which is what makes
+    `dict[str, bool]` the honest declaration instead of a field per name.
+    """
+
+    protocol_version: int
+    capabilities: dict[str, bool] = Field(default_factory=dict)
+
+
+def capabilities(*names: str) -> CapabilityBlock:
     """The `initialize` reply, with whatever this transport adds.
 
     `sessions` and `streaming` are true of both; a transport that supervises
@@ -269,10 +287,22 @@ def capabilities(*names: str) -> dict[str, Any]:
     socket it happened to open. Names rather than `**kwargs`, because every
     value is `True` by construction: a capability is present or absent.
     """
-    return {
-        "protocolVersion": PROTOCOL_VERSION,
-        "capabilities": {"sessions": True, "streaming": True, **dict.fromkeys(names, True)},
-    }
+    return CapabilityBlock(protocol_version=PROTOCOL_VERSION, capabilities=served(*names))
+
+
+def served(*names: str) -> dict[str, bool]:
+    """The capability map alone, for a reply that *is* a `CapabilityBlock`.
+
+    `DaemonStatusReply` subclasses it, so `daemon/status` was building a whole
+    `CapabilityBlock` and unpacking two fields out of it — which named both a
+    second time, so a third field added to the block would reach `initialize`
+    and silently not reach `daemon/status`. Here the only thing said twice is
+    `PROTOCOL_VERSION`, which is a constant reference and cannot disagree with
+    itself. Split out rather than spreading `model_dump()` because a `**` spread
+    would take `pid`, `socket` and the ten cadences with it and stop mypy
+    checking any of them.
+    """
+    return {"sessions": True, "streaming": True, **dict.fromkeys(names, True)}
 
 
 def notification(method: str, params: dict[str, Any]) -> NotificationFrame:
@@ -344,7 +374,7 @@ def cursor_of(session: Any, sequence: int | None = None) -> Cursor:
     )
 
 
-def cursor_text(cursor: Any) -> str:
+def cursor_text(cursor: Cursor) -> str:
     """A cursor as `GENERATION:SEQ` — the form a person or a script hands back.
 
     Beside `cursor_of` for `cursor_of`'s own stated reason: the shape is a fact
@@ -352,9 +382,16 @@ def cursor_text(cursor: Any) -> str:
     is the same fact spelled for a terminal. It lived as an f-string in the CLI's
     status table and a `rpartition` in its option parser, 350 lines apart, with
     nothing tying the two.
+
+    **Takes the model, and this used to be `Any`** — a `dict`-or-nothing test
+    whose `else` branch returned `":"`. That was written when every caller held
+    a reply dict, and it went wrong the moment one held a `Cursor`: `ph agents
+    status` printed `--since :` and nothing complained, because `Any` accepts a
+    model and the `isinstance(cursor, dict)` test quietly failed. Issue 74's own
+    lesson, arriving inside issue 74 — a widened parameter is a check deleted,
+    and the deletion surfaces at the call site that changes.
     """
-    fields = cursor if isinstance(cursor, dict) else {}
-    return f"{fields.get('generation', '')}:{fields.get('sequence', '')}"
+    return f"{cursor.generation}:{cursor.sequence}"
 
 
 def parse_cursor(text: str, current: Any) -> Cursor | None:
@@ -418,6 +455,95 @@ def parse_params[P: WireModel](method: str, model: type[P], params: object) -> P
         raise InvalidParams(
             f"{method}: {'; '.join(validation_errors(error, root='params'))}"
         ) from error
+
+
+@dataclass(frozen=True, slots=True)
+class _Spoken[P: WireModel]:
+    """A wire method name bound to the params model it carries.
+
+    The half `Verb` and `Notify` share. Private because neither door takes it:
+    `DaemonClient.call` wants a `Verb` and `notify` wants a `Notify`, and the
+    whole point of there being two types is that the wrong one is refused. A
+    base they *both* satisfy would be a third door accepting either.
+    """
+
+    name: str
+    params: type[P]
+
+    def parse(self, params: object) -> P:
+        """The wire params as this method's model, or the refusal naming why.
+
+        On the method rather than at the dispatch, because the method is what
+        knows the model: the caller used to pass both, which is the pair these
+        types exist to stop being a pair.
+        """
+        return parse_params(self.name, self.params, params)
+
+
+@dataclass(frozen=True, slots=True)
+class Notify[P: WireModel](_Spoken[P]):
+    """A method with **no reply**: a name, its params, and nothing coming back.
+
+    `shutdown` is the one, and its hazard is why this type exists rather than a
+    `Verb` with an unread reply model. A request-with-reply would leave the
+    caller waiting on a frame the daemon is concurrently losing the ability to
+    write — so "stop" is not a question and does not get an id. But while
+    `shutdown` was a `Verb`, `client.call(SHUTDOWN, NoParams())` type-checked:
+    every one of the 19 call sites happened to use `notify`, and nothing made
+    that a rule. Now `call` cannot take this and `notify` cannot take a `Verb`,
+    so the hang is unexpressible rather than merely avoided.
+
+    It also deletes a model. `ShutdownAck` existed because a `Verb` must name a
+    reply type and the handler must return *something*, for a frame `respond`
+    computes and then drops because the id is `None` — eight lines describing a
+    reply nobody reads. A handler for one of these returns `None`, which is the
+    honest shape.
+
+    **Not a subtype of `Verb`, and `Verb` not a subtype of this.** Making one
+    extend the other would let `notify(SESSION_STATUS, …)` through, which runs
+    a method on the daemon and silently discards its answer — a different way
+    to be wrong about the same distinction.
+    """
+
+
+@dataclass(frozen=True, slots=True)
+class Verb[P: WireModel, R: WireModel](_Spoken[P]):
+    """One method: its name, what it takes, and what it answers — as one value.
+
+    **The three used to be three.** A name was a string literal at the call
+    site, the params model was named again in the server's table, and the reply
+    was whatever the handler happened to return — so
+    `client.call("session/status", SessionParams(session_id=s))` type-checked and
+    so did `client.call("sessions/list", SessionParams(...))`. P8-09 bought
+    field-spelling inside the params; it could not check that the params
+    belonged to the method, because nothing held the two together. A `Verb` is
+    that holding: `client.call(SESSION_STATUS, SessionParams(...))` cannot be
+    given another verb's params, and its reply arrives as
+    `RootStatusReply` rather than as a dict the caller re-narrows by hand.
+
+    Declared in `ph_app.verbs`, which both ends import — that is the whole
+    point, and the reason this class lives here rather than there: `protocol.py`
+    is what a transport may depend on, and a verb table that imported the
+    server's handlers could not be read by a client.
+
+    **Notifications are not verbs, and `METHOD` is not replaced.** A notice
+    already binds its name to its payload on the payload itself
+    (`SessionScoped.METHOD`), which is what let `Root.publish` take one argument
+    instead of two that had to agree. A `Verb` owning those names would put that
+    back, so it does not: verbs cover the request/reply half, and the emitted
+    half keeps the binding it has.
+    """
+
+    reply: type[R]
+
+    def read(self, wire: dict[str, Any]) -> R:
+        """A reply frame as this verb's model.
+
+        What retires `AttachReply.model_validate(await client.call(...))` — a
+        dump-then-reparse whose model was chosen by hand at the call site, and
+        so could be the wrong one with nothing to say so.
+        """
+        return self.reply.model_validate(wire)
 
 
 class NoParams(WireModel):

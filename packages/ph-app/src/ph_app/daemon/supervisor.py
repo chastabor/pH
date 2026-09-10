@@ -44,6 +44,7 @@ from ph.paths import resolve_roots
 from ph.persistence import resumption_of
 from ph.seams.schedule import Schedule, state_to_wire
 from ph.seams.schedule_index import Appointment, ScheduleIndex
+from ph.seams.shell import ShellService
 from ph.seams.subagents import child_is_live
 from ph.seams.workspace import latest_checkpoint, workspace_of
 from ph.session import Session, SessionEvent, now_ms
@@ -59,6 +60,7 @@ from ..payloads import (
     SessionScreensNotice,
     SessionStagedNotice,
     SessionStatusNotice,
+    ShellReply,
 )
 from ..protocol import Refusal, cursor_of
 from ..runtime import mounted, open_session
@@ -1220,7 +1222,7 @@ class Supervisor:
             root.wake.send_nowait(None)
         return root
 
-    async def shell(self, root_id: str, shell: Any, command: str) -> dict[str, Any]:
+    async def shell(self, root_id: str, shell: ShellService, command: str) -> ShellReply:
         """Run a person's own shell command in the session's workspace (P7-10).
 
         **In the root, not the client.** `ctx.shell` resolves the working
@@ -1236,7 +1238,7 @@ class Supervisor:
         """
         root = await self.start(root_id)
         result = await run_shell(shell, root.session, root.agent, command)
-        return {"sessionId": root.id, "exitCode": result.exit_code, "ok": result.exit_code == 0}
+        return ShellReply(session_id=root.id, exit_code=result.exit_code)
 
     def describe(self) -> list[RootDescription]:
         return [root.describe() for root in self.roots.values()]

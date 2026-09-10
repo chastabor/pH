@@ -69,6 +69,7 @@ from ph.seams.tui_status import StatusReading
 from ph.session import Session, SessionEvent, SessionHeader
 from ph.wire import WireModel
 
+from .. import verbs
 from ..attach import Tray, stage_bytes
 from ..daemon.client import DaemonClient
 from ..daemon.duplex import answering
@@ -86,7 +87,8 @@ from ..payloads import (
     FED,
     ApprovalAsk,
     ApprovalAskReply,
-    AttachReply,
+    CommandShown,
+    DaemonConfigReply,
     QuestionAsk,
     QuestionAskReply,
     SessionCommandsNotice,
@@ -95,9 +97,9 @@ from ..payloads import (
     StatusFacts,
     notice_of,
 )
-from ..protocol import DaemonGone, NoParams, SessionParams
+from ..protocol import DaemonGone, NoParams, SessionParams, Verb
 from ..sessions import SessionSummary
-from ..wire import as_obj, as_seq, view_of
+from ..wire import view_of
 from .adapter import Frame, TuiEventAdapter
 from .commands import action_command, local_commands
 from .frontend import ModalHost
@@ -344,8 +346,8 @@ class DaemonSession:
 
     async def browse_sessions(self) -> list[SessionSummary]:
         """The daemon's own list — stored logs and its live roots, already merged."""
-        reply = await self.client.call("sessions/browse", NoParams())
-        return [SessionSummary.model_validate(as_obj(one)) for one in as_seq(reply.get("sessions"))]
+        reply = await self.client.call(verbs.SESSIONS_BROWSE, NoParams())
+        return list(reply.sessions)
 
     def credential_held(self, name: str) -> bool:
         """From the last `credentials/held` answer — a fact about the *daemon's*
@@ -355,10 +357,10 @@ class DaemonSession:
 
     async def refresh_credentials(self, names: Sequence[str]) -> None:
         reply = await self.client.call(
-            "credentials/held",
+            verbs.CREDENTIALS_HELD,
             HeldCredentialsParams(session_id=self.session_id, names=list(names)),
         )
-        self.held = {str(key): bool(value) for key, value in as_obj(reply.get("held")).items()}
+        self.held = dict(reply.held)
 
     # ---------------------------------------------------------------- turns --
 
@@ -400,7 +402,9 @@ class DaemonSession:
         self._spawn(self.client.prompt(self.session_id, text))
 
     def cancel(self) -> None:
-        self._spawn(self.client.call("session/cancel", SessionParams(session_id=self.session_id)))
+        self._spawn(
+            self.client.call(verbs.SESSION_CANCEL, SessionParams(session_id=self.session_id))
+        )
 
     def _spawn(self, work: Any) -> None:
         """Run an awaitable from a sync caller, owned by the app's worker pool so
@@ -434,7 +438,7 @@ class DaemonSession:
         back off the same log as everybody else.
         """
         await self.client.mutate(
-            "session/shell", ShellParams(session_id=self.session_id, command=command)
+            verbs.SESSION_SHELL, ShellParams(session_id=self.session_id, command=command)
         )
 
     async def attach(self, paths: Sequence[str]) -> list[AttachmentRef]:
@@ -501,7 +505,7 @@ class DaemonSession:
     def set_preset(self, name: PresetName) -> None:
         self._spawn(
             self.client.mutate(
-                "session/preset", PresetParams(session_id=self.session_id, preset=name)
+                verbs.SESSION_PRESET, PresetParams(session_id=self.session_id, preset=name)
             )
         )
 
@@ -512,7 +516,7 @@ class DaemonSession:
         socket `daemon/config` has already answered."""
         self._spawn(
             self.client.mutate(
-                "credentials/store",
+                verbs.CREDENTIALS_STORE,
                 StoreCredentialParams(session_id=self.session_id, name=name, value=value),
             )
         )
@@ -539,7 +543,7 @@ class DaemonSession:
         shutdown is exactly when it does.
         """
         with suppress(DaemonGone), anyio.move_on_after(2.0):
-            await self.client.call("session/detach", SessionParams(session_id=self.session_id))
+            await self.client.call(verbs.SESSION_DETACH, SessionParams(session_id=self.session_id))
 
 
 async def attach_session(
@@ -578,22 +582,33 @@ async def attach_session(
     # attach reply will name, and taking it now is what lets the mirror be built
     # whole instead of re-keyed afterwards.
     created = await client.call(
-        "session/new",
+        verbs.SESSION_NEW,
         NewSessionParams(session_id=session_id, cwd=str(cwd) if cwd else None, trust=trust),
     )
-    generation = str(as_obj(created.get("cursor")).get("generation", ""))
+    generation = created.cursor.generation
 
-    replies: dict[str, dict[str, Any]] = {}
+    # Three startup reads at once, each through the one typed door and each
+    # landing in a slot of its own reply's type. The first draft kept a
+    # `dict[str, dict[str, Any]]` and decoded afterwards with
+    # `verbs.X.read(replies[verbs.X.name])` — which named the verb twice per
+    # line, so `verbs.COMMANDS_LIST.read(replies[verbs.SCREENS_LIST.name])`
+    # type-checked. That is the two-values-must-agree shape `Verb` exists to
+    # delete, reintroduced at the three sites that had opted out of `call`, and
+    # failing as a `ValidationError` at TUI startup rather than as a type error.
+    # A one-slot list per read is what a heterogeneous dict could not be.
+    async def fetch[P: WireModel, R: WireModel](verb: Verb[P, R], params: P, into: list[R]) -> None:
+        into.append(await client.call(verb, params))
 
-    async def fetch(method: str, params: WireModel) -> None:
-        replies[method] = await client.call(method, params)
-
+    configs: list[DaemonConfigReply] = []
+    listed_commands: list[SessionCommandsNotice] = []
+    listed_screens: list[SessionScreensNotice] = []
+    asked = SessionParams(session_id=session_id)
     async with anyio.create_task_group() as tasks:
-        tasks.start_soon(fetch, "daemon/config", NoParams())
-        for method in ("commands/list", "screens/list"):
-            tasks.start_soon(fetch, method, SessionParams(session_id=session_id))
+        tasks.start_soon(fetch, verbs.DAEMON_CONFIG, NoParams(), configs)
+        tasks.start_soon(fetch, verbs.COMMANDS_LIST, asked, listed_commands)
+        tasks.start_soon(fetch, verbs.SCREENS_LIST, asked, listed_screens)
 
-    config = replies["daemon/config"]
+    config = configs[0]
     front = DaemonSession(
         client=client,
         session_id=session_id,
@@ -602,20 +617,17 @@ async def attach_session(
         # sends the rendered view beside each event — see `Frame.view`.
         adapter=TuiEventAdapter(state=state),
         host=host,
-        config_rows=tuple(as_seq(config.get("rows"))),
+        config_rows=tuple(config.rows),
         remote_commands=[
-            _remote_command(client, session_id, one)
-            for one in SessionCommandsNotice.model_validate(replies["commands/list"]).commands
+            _remote_command(client, session_id, one) for one in listed_commands[0].commands
         ],
-        screens=_screens_of(SessionScreensNotice.model_validate(replies["screens/list"]).screens),
+        screens=_screens_of(listed_screens[0].screens),
         generation=int(generation) if generation.isdigit() else None,
     )
     client.peer.on_notify = front.dispatch
     # The attach reply carries the status, the route and the footer, so this is
     # the one frame the front end starts from.
-    attached = AttachReply.model_validate(
-        await client.call("session/attach", SessionParams(session_id=session_id))
-    )
+    attached = await client.call(verbs.SESSION_ATTACH, SessionParams(session_id=session_id))
     # Through the feed, which owns the rule that this reply is the first status
     # frame — the CLI reached for it separately and got a different answer.
     front.feed.seed(attached)
@@ -644,10 +656,13 @@ def _remote_command(
     async def elsewhere(argument: str, _context: Any) -> str | None:
         line = f"/{schema.name} {argument}".rstrip()
         reply = await client.mutate(
-            "session/command", CommandParams(session_id=session_id, line=line)
+            verbs.SESSION_COMMAND, CommandParams(session_id=session_id, line=line)
         )
-        shown = reply.get("shown")
-        return str(shown) if shown else None
+        # A repeat answers with a description and no `shown`, which is the one
+        # thing this caller wanted — so the union is narrowed rather than
+        # ignored, and a re-sent command says nothing instead of saying the
+        # wrong thing.
+        return reply.shown if isinstance(reply, CommandShown) else None
 
     return CommandDefinition(
         name=schema.name,

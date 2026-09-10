@@ -49,6 +49,7 @@ from ph.seams.shell import ShellService
 from ph.session import now_ms
 from ph.wire import WireModel
 
+from .. import verbs
 from ..params import (
     CancelScheduleParams,
     CommandParams,
@@ -67,31 +68,44 @@ from ..params import (
     TrustAnswer,
 )
 from ..payloads import (
+    AttachmentStored,
     AttachReply,
+    CommandShown,
+    CredentialsHeldReply,
+    CredentialStored,
+    DaemonConfigReply,
+    DaemonStatusReply,
+    DiagnosticRow,
+    DiagnosticSection,
     MutationRepeated,
+    PresetApplied,
     RootDescription,
     RootListing,
     RootStatusReply,
+    ScheduleCancelled,
     SessionBrowse,
-    SessionCommandsNotice,
+    SessionDetached,
     SessionNotice,
-    SessionReadingsReply,
-    SessionScreensNotice,
+    SessionSchedulesReply,
     SessionStagedNotice,
-    SessionToolsReply,
+    ShellReply,
     SnapshotPage,
 )
 from ..protocol import (
+    PROTOCOL_VERSION,
     SNAPSHOT_EVENTS,
+    CapabilityBlock,
     NoParams,
+    Notify,
     Refusal,
     SeamAbsent,
     SessionParams,
     UnknownMethod,
+    Verb,
     capabilities,
     cursor_of,
-    parse_params,
     resume_at,
+    served,
 )
 from ..shell import shell_of
 from ..trust import TrustStore, trust_path
@@ -153,7 +167,7 @@ roots walked.
 
 
 @dataclass(frozen=True, slots=True)
-class Mutation[P: MutationParams]:
+class Mutation[P: MutationParams, R: WireModel]:
     """One method that changes a root: what it takes, how to validate it, how to do it.
 
     Two halves rather than one body, and the seam is the idempotence key. The
@@ -164,35 +178,75 @@ class Mutation[P: MutationParams]:
     whatever it resolved, so a seam is looked up once and a refusal happens
     before any record is written.
 
-    `params` is the model the wire dict is checked against, and the check is the
-    wrapper's first move — before `start` resolves a root — so a malformed call
-    never mounts anything. Generic in it so each half is typed against its own
+    The `Verb` is the row's identity: it carries the name, the params model the
+    wire dict is checked against, and the reply. The check is the wrapper's
+    first move — before `start` resolves a root — so a malformed call never
+    mounts anything. Generic in both so each half is typed against its own
     method: `_act_prompt` reads `.prompt` and `.attachments`, and a half that
     read a field its method does not carry is a type error rather than a
     `KeyError` at the first real call.
+
+    **`act` returns the verb's reply and no longer `Any`** (issue 74). It was
+    `Awaitable[Any]` because "a verb answers with whatever its reply's type is —
+    a model where the reply has one, a dict where it is a per-method shape", and
+    the dicts are gone: every reply is a model, so the return is checkable and
+    an `act` that answered with another verb's model is now a type error here
+    rather than a client's `ValidationError` at the first real call.
     """
 
-    params: type[P]
+    verb: Verb[P, R]
     prepare: Callable[[_Connection, Root, P], Awaitable[Any]]
-    act: Callable[[_Connection, Root, P, Any], Awaitable[Any]]
-    """`Any` because a verb answers with whatever its reply's type is — a model
-    where the reply has one, a dict where it is a per-method shape. `respond`
-    dumps a model at the one point a result becomes a frame."""
+    """`Any` is the *plan*, not the reply: what `prepare` resolved and hands to
+    `act`. Each pair agrees on it by being written together, and no third party
+    ever sees it."""
+    act: Callable[[_Connection, Root, P, Any], Awaitable[R]]
 
 
 @dataclass(frozen=True, slots=True)
-class Method[P: WireModel]:
+class Method[P: WireModel, R: WireModel]:
     """One method that reads, or acts without an idempotence key.
 
     The same shape as `Mutation` minus the two-halves discipline, for the same
-    reason: a row names its params model beside its handler, so the handler is
-    typed against what the wire may carry and the *set* of methods is a value a
-    test can hold against the documented vocabulary — the argument
-    `tui/adapter.py`'s `HANDLERS` makes about event types.
+    reason: a row names its verb beside its handler, so the handler is typed
+    against both what the wire may carry and what it must answer with, and the
+    *set* of methods is a value a test can hold against the vocabulary — the
+    argument `tui/adapter.py`'s `HANDLERS` makes about event types.
     """
 
-    params: type[P]
-    handle: Callable[[_Connection, P], Awaitable[Any]]
+    verb: Verb[P, R]
+    handle: Callable[[_Connection, P], Awaitable[R]]
+
+
+@dataclass(frozen=True, slots=True)
+class Announced[P: WireModel]:
+    """One method that answers **nothing**: `shutdown`, and only ever it.
+
+    A sibling of `Method` rather than a `Method` whose `R` is some unread
+    model, because that model was the problem: `ShutdownAck` existed to give
+    the verb a reply type and the handler something to return, for a frame
+    `respond` computes and then drops because the id is `None`.
+
+    Its handler returns `None`, and `respond` sends nothing — which is what
+    lets the *type* carry the contract that "stop" is not a question. See
+    `ph_app.protocol.Notify`.
+
+    Rows of this shape sit in `METHODS` beside the others rather than in a
+    third table: `_dispatch` reads `.verb.parse` and `.handle` off either, so
+    one lookup still answers "is this a method the daemon knows".
+    """
+
+    verb: Notify[P]
+    handle: Callable[[_Connection, P], Awaitable[None]]
+
+
+type _Row = Method[Any, Any] | Announced[Any]
+"""A `METHODS` value: a method that answers, or the one that does not.
+
+A union rather than a base class both satisfy. `_dispatch` reads `.verb.parse`
+and `.handle` off either, which structural attribute access on a union gives
+for free — where a shared base would have to declare a `handle` returning
+`Awaitable[Any]`, putting back the `Any` the row types exist to remove.
+"""
 
 
 def _command_key(params: MutationParams) -> str:
@@ -358,24 +412,25 @@ class _Connection:
         the capability block rather than inferred from which socket answered.
 
         **Two tables, not a chain (P8-07).** Every method is a row naming its
-        params model and its handler — `MUTATIONS` for the ones that change a
-        root under an idempotence key, `METHODS` for everything else — so the
-        vocabulary is a value a test holds against the documented list, an
-        unknown method is a missed lookup rather than the last `else`, and each
-        handler receives its own parsed type. That last point is what makes the
-        handlers typeable at all: one function reading `params["sessionId"]`
-        under twenty-one `if`s could not give each branch a different static
-        type without a cast per branch, which is a dict with extra steps.
+        `Verb` and its handler — `MUTATIONS` for the ones that change a root
+        under an idempotence key, `METHODS` for everything else — so an
+        unknown method is a missed lookup rather than the last `else`, the
+        vocabulary is a value `test_daemon_methods` holds against the verbs it
+        is derived from, and each handler receives its own parsed type. That
+        last point is what makes the handlers typeable at all: one function
+        reading `params["sessionId"]` under twenty-one `if`s could not give
+        each branch a different static type without a cast per branch, which is
+        a dict with extra steps.
         """
         mutation = MUTATIONS.get(method)
         if mutation is not None:
-            return await self._mutate(method, mutation, params)
+            return await self._mutate(mutation, params)
         entry = METHODS.get(method)
         if entry is None:
             raise UnknownMethod(f'unknown method "{method}"')
-        return await entry.handle(self, parse_params(method, entry.params, params))
+        return await entry.handle(self, entry.verb.parse(params))
 
-    async def _mutate(self, method: str, mutation: Mutation[Any], params: dict[str, Any]) -> Any:
+    async def _mutate(self, mutation: Mutation[Any, Any], params: dict[str, Any]) -> Any:
         """Every method that changes a root goes through this one wrapper.
 
         Parse, resolve the root (through `start`, so acting on a passivated one
@@ -383,7 +438,7 @@ class _Connection:
         first so a malformed call is refused before a root is mounted for it.
         See `MUTATIONS` for why the key is claimed here and nowhere else.
         """
-        parsed = parse_params(method, mutation.params, params)
+        parsed = mutation.verb.parse(params)
         root = await self.server.supervisor.start(parsed.session_id)
         plan = await mutation.prepare(self, root, parsed)
         if not root.once(_command_key(parsed)):
@@ -392,9 +447,10 @@ class _Connection:
 
     # --- the methods -----------------------------------------------------------
     # One per row of `METHODS`, each taking its own params model. Read-only
-    # projections are not here: `_projection` builds theirs from `PROJECTIONS`.
+    # projections are not here: `_projection` builds both their handler and
+    # their row.
 
-    async def _initialize(self, params: InitializeParams) -> dict[str, Any]:
+    async def _initialize(self, params: InitializeParams) -> CapabilityBlock:
         # A property of the *client*, so it is said once here rather than
         # per-attach: whether a UI can put a modal in front of a person does
         # not vary by which session it is watching, and a per-attach flag let
@@ -449,18 +505,18 @@ class _Connection:
         # roots are held is the supervisor's own answer.
         return SessionBrowse(sessions=browse_of(self.server.supervisor))
 
-    async def _daemon_config(self, _params: NoParams) -> dict[str, Any]:
+    async def _daemon_config(self, _params: NoParams) -> DaemonConfigReply:
         # The composed profile, which is a property of the *daemon* and not
         # of any root: every root mounts the same composition.
-        return {"rows": list(self.server.supervisor.profile.dump())}
+        return DaemonConfigReply(rows=list(self.server.supervisor.profile.dump()))
 
-    async def _credentials_held(self, params: HeldCredentialsParams) -> dict[str, Any]:
+    async def _credentials_held(self, params: HeldCredentialsParams) -> CredentialsHeldReply:
         # `credentials/held` and `credentials/store`, not `session/credential`
         # and `session/credentials`: those were two names one letter apart for
         # opposite kinds, and the one that writes a secret is the last method
         # that should be easy to reach by typo.
         root = self._root(params.session_id)
-        return {"sessionId": root.id, "held": credentials_of(root, params.names)}
+        return CredentialsHeldReply(session_id=root.id, held=credentials_of(root, params.names))
 
     # The schedule seam over the wire (P5-06, P5-10). Create and cancel go
     # through the supervisor rather than the seam directly: both need the
@@ -470,29 +526,30 @@ class _Connection:
     async def _schedule_create(self, params: CreateScheduleParams) -> Schedule:
         return await self.server.supervisor.schedule(params.session_id, params.to_schedule())
 
-    async def _schedule_cancel(self, params: CancelScheduleParams) -> dict[str, Any]:
+    async def _schedule_cancel(self, params: CancelScheduleParams) -> ScheduleCancelled:
         cancelled = await self.server.supervisor.unschedule(params.session_id, params.schedule_id)
-        return {
-            "sessionId": params.session_id,
-            "scheduleId": params.schedule_id,
-            "cancelled": cancelled,
-        }
+        return ScheduleCancelled(
+            session_id=params.session_id,
+            schedule_id=params.schedule_id,
+            cancelled=cancelled,
+        )
 
-    async def _schedule_list(self, params: SessionParams) -> dict[str, Any]:
+    async def _schedule_list(self, params: SessionParams) -> SessionSchedulesReply:
         root = self._root(params.session_id)
-        return {"sessionId": root.id, "schedules": self.server.supervisor.scheduled(root)}
+        return SessionSchedulesReply(
+            session_id=root.id, schedules=self.server.supervisor.scheduled(root)
+        )
 
-    async def _daemon_status(self, _params: NoParams) -> dict[str, Any]:
+    async def _daemon_status(self, _params: NoParams) -> DaemonStatusReply:
         return self.server.status()
 
-    async def _shutdown(self, _params: NoParams) -> dict[str, Any]:
+    async def _shutdown(self, _params: NoParams) -> None:
         # Actually stops it, and takes no id by contract: a client awaiting
         # a reply would be waiting on a frame the daemon is concurrently
         # losing the ability to write. "Stop" is not a question.
         self.server.stop.set()
-        return {"ok": True}
 
-    async def _put(self, params: PutAttachmentParams) -> dict[str, Any]:
+    async def _put(self, params: PutAttachmentParams) -> AttachmentStored:
         """Store bytes a client read, and answer with the reference to them.
 
         **The client reads the file, not the daemon** — I-9's human door. A person
@@ -533,7 +590,7 @@ class _Connection:
             mime=mime_for(params.mime or "", name or ""),
             name=name,
         )
-        return {"sessionId": root.id, "attachment": ref.to_wire()}
+        return AttachmentStored(session_id=root.id, attachment=ref)
 
     # --- the mutation halves --------------------------------------------------
     # `prepare` validates and may refuse; nothing it does is an effect. `act` is
@@ -575,7 +632,7 @@ class _Connection:
 
     async def _act_command(
         self, root: Root, params: CommandParams, registry: CommandRegistry
-    ) -> dict[str, Any]:
+    ) -> CommandShown:
         """Run one `/name argument` line in the root's own context.
 
         **In the daemon, not the client**, because a command body reaches for
@@ -589,7 +646,7 @@ class _Connection:
             session=root.session,
             agent=root.agent,
         )
-        return {"sessionId": root.id, "shown": shown}
+        return CommandShown(session_id=root.id, shown=shown)
 
     async def _prepare_shell(self, root: Root, params: ShellParams) -> tuple[ShellService, str]:
         """Resolve the seam and the command **before** the key is claimed.
@@ -606,7 +663,7 @@ class _Connection:
 
     async def _act_shell(
         self, root: Root, params: ShellParams, prepared: tuple[ShellService, str]
-    ) -> dict[str, Any]:
+    ) -> ShellReply:
         """`!!<command>` — the person's own shell, in the session's workspace.
 
         The reply is the exit code; the *output* arrives as `shell/command` and
@@ -625,9 +682,9 @@ class _Connection:
 
     async def _act_preset(
         self, root: Root, params: PresetParams, presets: PermissionPresetService
-    ) -> dict[str, Any]:
+    ) -> PresetApplied:
         applied = presets.apply_preset(params.preset, session=root.session)
-        return {"sessionId": root.id, "preset": applied.name}
+        return PresetApplied(session_id=root.id, preset=applied.name)
 
     async def _prepare_credential(
         self, root: Root, params: StoreCredentialParams
@@ -639,12 +696,12 @@ class _Connection:
 
     async def _act_credential(
         self, root: Root, params: StoreCredentialParams, service: CredentialService
-    ) -> dict[str, Any]:
+    ) -> CredentialStored:
         # **The value is used and not kept.** It is never logged, never echoed
         # in the reply, and never reaches `describe()` — the reply is the name
         # and a boolean, which is everything a UI needs to redraw.
         service.provide_value(params.name, params.value)
-        return {"sessionId": root.id, "name": params.name, "stored": True}
+        return CredentialStored(session_id=root.id, name=params.name)
 
     def _attachments(self, root: Root, refs: list[AttachmentRef]) -> list[AttachmentRef]:
         """The refs a prompt named, checked against what this deployment holds.
@@ -788,7 +845,7 @@ class _Connection:
             **root.detail().model_dump(), schedules=self.server.supervisor.scheduled(root)
         )
 
-    async def _detach(self, params: SessionParams) -> dict[str, Any]:
+    async def _detach(self, params: SessionParams) -> SessionDetached:
         was_attached = params.session_id in self.attached
         self.attached.discard(params.session_id)
         root = self.server.supervisor.roots.get(params.session_id)
@@ -797,13 +854,17 @@ class _Connection:
         # Deliberately *not* an error when nothing was attached: detach is what a
         # client does while tidying up, often twice, and a teardown path that
         # raises is one nobody can write correctly.
-        return {"sessionId": params.session_id, "detached": was_attached}
+        return SessionDetached(session_id=params.session_id, detached=was_attached)
 
 
 def _projection[N: SessionNotice](
-    reply: type[N], key: str, fold: Callable[[Root], list[Any]]
-) -> Callable[[_Connection, SessionParams], Awaitable[N]]:
-    """A `METHODS` handler answering one projection with its own reply model.
+    verb: Verb[SessionParams, N], key: str, fold: Callable[[Root], list[Any]]
+) -> tuple[str, _Row]:
+    """One `METHODS` row answering a projection with its verb's reply model.
+
+    Returns the row rather than the handler, so each projection names its verb
+    **once**: wrapped in `_reading(...)` at the table it appeared twice on one
+    line, which is the shape `_unkeyed`/`_mutating` exist to remove.
 
     A factory rather than four near-identical handlers because the four differ
     only in a model, a key and a fold — and the closure holds exactly those,
@@ -819,27 +880,70 @@ def _projection[N: SessionNotice](
 
     async def handle(connection: _Connection, params: SessionParams) -> N:
         root = connection._root(params.session_id)
-        # `model_validate` rather than `reply(session_id=…, **{key: …})`: the
-        # field name is a parameter here, so a keyword spread is untypeable —
-        # and validating is what checks that the fold's rows match the model's
+        # Through the verb, so the model is named once: the row that routes this
+        # handler and the handler itself cannot disagree about what it answers.
+        # `read` rather than `reply(session_id=…, **{key: …})` because the field
+        # name is a parameter here, so a keyword spread is untypeable — and
+        # validating is what checks that the fold's rows match the model's
         # declared element type, which is the whole reason the model is named.
-        return reply.model_validate({"session_id": root.id, key: fold(root)})
+        return verb.read({"session_id": root.id, key: fold(root)})
 
-    return handle
+    return _unkeyed(verb, handle)
 
 
-MUTATIONS: dict[str, Mutation[Any]] = {
-    "session/prompt": Mutation(PromptParams, _Connection._prepare_prompt, _Connection._act_prompt),
-    "session/command": Mutation(
-        CommandParams, _Connection._prepare_command, _Connection._act_command
-    ),
-    "session/stage": Mutation(StageParams, _Connection._prepare_stage, _Connection._act_stage),
-    "session/shell": Mutation(ShellParams, _Connection._prepare_shell, _Connection._act_shell),
-    "session/preset": Mutation(PresetParams, _Connection._prepare_preset, _Connection._act_preset),
-    "credentials/store": Mutation(
-        StoreCredentialParams, _Connection._prepare_credential, _Connection._act_credential
-    ),
-}
+def _mutating[P: MutationParams, R: WireModel](
+    verb: Verb[P, R],
+    prepare: Callable[[_Connection, Root, P], Awaitable[Any]],
+    act: Callable[[_Connection, Root, P, Any], Awaitable[R]],
+) -> tuple[str, Mutation[Any, Any]]:
+    """One `MUTATIONS` row, keyed by its verb's name and **checked against it**.
+
+    A function rather than `{verb.name: Mutation(verb, ...)}` written inline,
+    and the reason is worth stating because the inline form looks identical and
+    checks nothing: the table's own annotation is the expected type of each
+    value, so `dict[str, Mutation[Any, Any]]` solves `P` and `R` to `Any` and
+    every handler fits every verb. Sabotage-checked — pairing `session/status`
+    with `_sessions_list` passed `mypy --strict` silently. Here the return type
+    names no type variable, so `P` and `R` can only come from the verb, and the
+    two halves are checked against it.
+    """
+    return verb.name, Mutation(verb, prepare, act)
+
+
+def _unkeyed[P: WireModel, R: WireModel](
+    verb: Verb[P, R], handle: Callable[[_Connection, P], Awaitable[R]]
+) -> tuple[str, _Row]:
+    """One `METHODS` row, checked against its verb. `_mutating` says why.
+
+    Named for the absence of an idempotence key rather than for reading:
+    `session/new`, `session/cancel`, `attachment/put` and both schedule verbs
+    all write. `verbs.UNKEYED` carries the same correction.
+    """
+    return verb.name, Method(verb, handle)
+
+
+def _announcing[P: WireModel](
+    verb: Notify[P], handle: Callable[[_Connection, P], Awaitable[None]]
+) -> tuple[str, _Row]:
+    """One `METHODS` row for a method with no reply. `_mutating` says why a
+    builder and not a literal; `Announced` says why a separate row type."""
+    return verb.name, Announced(verb, handle)
+
+
+MUTATIONS: dict[str, Mutation[Any, Any]] = dict(
+    (
+        _mutating(verbs.SESSION_PROMPT, _Connection._prepare_prompt, _Connection._act_prompt),
+        _mutating(verbs.SESSION_COMMAND, _Connection._prepare_command, _Connection._act_command),
+        _mutating(verbs.SESSION_STAGE, _Connection._prepare_stage, _Connection._act_stage),
+        _mutating(verbs.SESSION_SHELL, _Connection._prepare_shell, _Connection._act_shell),
+        _mutating(verbs.SESSION_PRESET, _Connection._prepare_preset, _Connection._act_preset),
+        _mutating(
+            verbs.CREDENTIALS_STORE,
+            _Connection._prepare_credential,
+            _Connection._act_credential,
+        ),
+    )
+)
 """Every method that changes a root, and the one place their idempotence lives.
 
 A client's `clientId`/`commandId` names a request; a reconnecting client that
@@ -857,47 +961,47 @@ reference a repeat must still return) and `session/new` (`start` is idempotent
 by id).
 """
 
-METHODS: dict[str, Method[Any]] = {
-    "initialize": Method(InitializeParams, _Connection._initialize),
-    "daemon/hello": Method(InitializeParams, _Connection._initialize),
-    "sessions/list": Method(NoParams, _Connection._sessions_list),
-    "sessions/browse": Method(NoParams, _Connection._sessions_browse),
-    "session/new": Method(NewSessionParams, _Connection._new_session),
-    "session/attach": Method(SessionParams, _Connection._attach),
-    "session/detach": Method(SessionParams, _Connection._detach),
-    "session/status": Method(SessionParams, _Connection._status),
-    "session/cancel": Method(SessionParams, _Connection._cancel),
-    "session/snapshot": Method(SnapshotParams, _Connection._snapshot),
-    "attachment/put": Method(PutAttachmentParams, _Connection._put),
-    "credentials/held": Method(HeldCredentialsParams, _Connection._credentials_held),
-    # The read-only projections (P5-14). What a front end used to read straight
-    # off `ctx`; each is a fold computed now, so a reconnecting client gets
-    # today's answer rather than one cached when somebody last wrote it down.
-    # See `projections.py`. Rows rather than a third table spliced in: they are
-    # `METHODS` rows like any other, and the table they came from was read
-    # exactly once, to build this one.
-    "session/readings": Method(
-        SessionParams, _projection(SessionReadingsReply, "readings", readings_of)
-    ),
-    "commands/list": Method(
-        SessionParams, _projection(SessionCommandsNotice, "commands", commands_of)
-    ),
-    "screens/list": Method(SessionParams, _projection(SessionScreensNotice, "screens", screens_of)),
-    "tools/list": Method(SessionParams, _projection(SessionToolsReply, "tools", tools_of)),
-    "schedule/create": Method(CreateScheduleParams, _Connection._schedule_create),
-    "schedule/cancel": Method(CancelScheduleParams, _Connection._schedule_cancel),
-    "schedule/list": Method(SessionParams, _Connection._schedule_list),
-    "daemon/config": Method(NoParams, _Connection._daemon_config),
-    "daemon/status": Method(NoParams, _Connection._daemon_status),
-    "shutdown": Method(NoParams, _Connection._shutdown),
-}
+METHODS: dict[str, _Row] = dict(
+    (
+        _unkeyed(verbs.INITIALIZE, _Connection._initialize),
+        _unkeyed(verbs.DAEMON_HELLO, _Connection._initialize),
+        _unkeyed(verbs.SESSIONS_LIST, _Connection._sessions_list),
+        _unkeyed(verbs.SESSIONS_BROWSE, _Connection._sessions_browse),
+        _unkeyed(verbs.SESSION_NEW, _Connection._new_session),
+        _unkeyed(verbs.SESSION_ATTACH, _Connection._attach),
+        _unkeyed(verbs.SESSION_DETACH, _Connection._detach),
+        _unkeyed(verbs.SESSION_STATUS, _Connection._status),
+        _unkeyed(verbs.SESSION_CANCEL, _Connection._cancel),
+        _unkeyed(verbs.SESSION_SNAPSHOT, _Connection._snapshot),
+        _unkeyed(verbs.ATTACHMENT_PUT, _Connection._put),
+        _unkeyed(verbs.CREDENTIALS_HELD, _Connection._credentials_held),
+        # The read-only projections (P5-14). What a front end used to read straight
+        # off `ctx`; each is a fold computed now, so a reconnecting client gets
+        # today's answer rather than one cached when somebody last wrote it down.
+        # See `projections.py`. Rows rather than a third table spliced in: they are
+        # `METHODS` rows like any other, and the table they came from was read
+        # exactly once, to build this one.
+        _projection(verbs.SESSION_READINGS, "readings", readings_of),
+        _projection(verbs.COMMANDS_LIST, "commands", commands_of),
+        _projection(verbs.SCREENS_LIST, "screens", screens_of),
+        _projection(verbs.TOOLS_LIST, "tools", tools_of),
+        _unkeyed(verbs.SCHEDULE_CREATE, _Connection._schedule_create),
+        _unkeyed(verbs.SCHEDULE_CANCEL, _Connection._schedule_cancel),
+        _unkeyed(verbs.SCHEDULE_LIST, _Connection._schedule_list),
+        _unkeyed(verbs.DAEMON_CONFIG, _Connection._daemon_config),
+        _unkeyed(verbs.DAEMON_STATUS, _Connection._daemon_status),
+        _announcing(verbs.SHUTDOWN, _Connection._shutdown),
+    )
+)
 """Every method that is not a mutation: what it takes, and what answers it.
 
 Disjoint from `MUTATIONS` by construction — a name in both would be dispatched as
 a mutation and the row here never reached — and the two together are the
-daemon's whole vocabulary, which `test_daemon_methods` holds against the
-documented list. `initialize` and `daemon/hello` are two names for one handler
-because the dsh SDK says the first and P5-01 said the second.
+daemon's whole vocabulary, which `test_daemon_methods` holds against
+`verbs.VOCABULARY`: that set is derived from the verb declarations, so what the
+check catches is a verb declared and never routed. `initialize` and
+`daemon/hello` are two names for one handler because the dsh SDK says the first
+and P5-01 said the second.
 """
 
 
@@ -960,7 +1064,7 @@ class DaemonServer:
     else is somebody else's — so this is set once, announced once, and read
     thereafter by `status` for whoever eventually gets to ask."""
 
-    def status(self) -> dict[str, Any]:
+    def status(self) -> DaemonStatusReply:
         """What this daemon is, for `ph agents doctor`.
 
         Everything here is read from the running process rather than re-derived
@@ -970,34 +1074,35 @@ class DaemonServer:
         nothing at all.
         """
         supervisor = self.supervisor
-        return {
-            **capabilities(*CAPABILITIES),
-            "pid": os.getpid(),
-            "socket": str(self.path),
-            "uptimeMs": now_ms() - self.started,
-            "roots": len(supervisor.roots),
-            "provider": supervisor.provider,
-            "model": supervisor.model,
-            "passivateAfter": supervisor.passivate_after,
-            "tickEvery": self.tick_every,
-            "sweepEvery": self.sweep_every,
-            "heartbeatEvery": self.heartbeat_every,
-            "watchEvery": self.watch_every,
-            "unreachableSince": self.unreachable_since,
-            # `DiagnosticsRegistry.report()`'s shape verbatim — a list of
-            # sections, each a title and `(label, value)` rows — carrying one
-            # built-in section today (P5-11's socket lifetime). One encoding of
-            # one fact, so nothing on the wire can disagree with itself and the
-            # client needs no bespoke decoder; P5-12 fills the same envelope from
-            # the daemon's *mounted* registry with no client change.
-            "sections": [
-                {
-                    "title": title,
-                    "rows": [{"label": label, "value": value} for label, value in rows],
-                }
+        return DaemonStatusReply(
+            protocol_version=PROTOCOL_VERSION,
+            capabilities=served(*CAPABILITIES),
+            pid=os.getpid(),
+            socket=str(self.path),
+            uptime_ms=now_ms() - self.started,
+            roots=len(supervisor.roots),
+            provider=supervisor.provider,
+            model=supervisor.model,
+            passivate_after=supervisor.passivate_after,
+            tick_every=self.tick_every,
+            sweep_every=self.sweep_every,
+            heartbeat_every=self.heartbeat_every,
+            watch_every=self.watch_every,
+            unreachable_since=self.unreachable_since,
+            # `report()`'s shape as models — a list of sections, each a title
+            # and `(label, value)` rows — carrying one built-in section today
+            # (P5-11's socket lifetime). One encoding of one fact, so nothing on
+            # the wire can disagree with itself and the client needs no bespoke
+            # decoder; P5-12 fills the same envelope from the daemon's *mounted*
+            # registry with no client change.
+            sections=[
+                DiagnosticSection(
+                    title=title,
+                    rows=[DiagnosticRow(label=label, value=value) for label, value in rows],
+                )
                 for title, rows in self.report()
             ],
-        }
+        )
 
     def report(self) -> list[tuple[str, list[tuple[str, str]]]]:
         """The daemon's own diagnostic sections, in `report()`'s shape.

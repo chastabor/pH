@@ -283,8 +283,10 @@ def test_the_since_parser_stamps_a_bare_sequence_and_keeps_a_full_cursor() -> No
         assert parse_cursor(bad, current) is None, bad
 
     # And the printed form round-trips through it, which is why the two live together.
-    assert cursor_text({"generation": "42", "sequence": 7}) == "42:7"
-    assert parse_cursor(cursor_text(current), {}) == Cursor(generation="1700000000000", sequence=40)
+    assert cursor_text(Cursor(generation="42", sequence=7)) == "42:7"
+    assert parse_cursor(cursor_text(Cursor.model_validate(current)), {}) == Cursor(
+        generation="1700000000000", sequence=40
+    )
 
 
 def test_the_cli_refuses_an_unparseable_since_with_exit_two() -> None:
@@ -636,11 +638,16 @@ def test_the_daemon_status_reply_is_json_and_says_what_it_is(
 
     facts = anyio.run(read)
     # Round-trips as JSON, because it does: every reply goes through `dumps`.
-    assert json.loads(json.dumps(facts))["socket"].endswith("daemon.sock")
-    assert facts["protocolVersion"] == 1
-    assert set(facts["capabilities"]) >= {"sessions", "streaming", "roots", "attach"}
-    assert facts["roots"] == 0
-    assert facts["uptimeMs"] >= 0
+    # Through `to_wire()`, which is what `respond` calls on its way to the
+    # frame — the reply is a `DaemonStatusReply` now (issue 74) and the thing
+    # this pins is that the *frame* it becomes still round-trips.
+    wire = json.loads(json.dumps(facts.to_wire()))
+    assert wire["socket"].endswith("daemon.sock")
+    assert wire["protocolVersion"] == 1
+    assert facts.protocol_version == 1
+    assert set(facts.capabilities) >= {"sessions", "streaming", "roots", "attach"}
+    assert facts.roots == 0
+    assert facts.uptime_ms >= 0
 
 
 async def test_the_follower_shows_each_event_once_and_in_the_log_s_order(
@@ -692,12 +699,14 @@ async def test_attach_reads_the_status_it_was_handed_rather_than_asking_again(
     called: list[str] = []
     original = DaemonClient.call
 
-    async def recording(self: Any, method: str, params: Any = None, /, **fields: Any) -> Any:
-        # `call`'s signature since P8-09: a params model positionally, or the
-        # keyword form for a caller with no model. The spy has to mirror both,
-        # or it drops whichever half it forgot.
-        called.append(method)
-        return await original(self, method, params, **fields)
+    async def recording(self: Any, verb: Any, params: Any = None, /, **fields: Any) -> Any:
+        # `call`'s two doors since issue 74: a `Verb` with its params
+        # positionally, or a bare name with the keyword form for a caller with
+        # no model. The spy has to mirror both, or it drops whichever half it
+        # forgot — and it records the *name* either way, which is what this test
+        # is about.
+        called.append(getattr(verb, "name", verb))
+        return await original(self, verb, params, **fields)
 
     monkeypatch.setattr(DaemonClient, "call", recording)
     async with _daemon(tmp_path, monkeypatch):

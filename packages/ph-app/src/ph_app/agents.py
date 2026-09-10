@@ -43,11 +43,12 @@ from ph.resources import GRACE_SECONDS
 from ph.seams.schedule import ScheduleKind
 from ph.selectors import Selector, matches_any
 
+from . import verbs
 from .console import TypeOption, console, fail, section, selectors_or_exit
 from .daemon.client import DaemonClient, Exchange, connected
 from .daemon.follow import Followed, first_of
 from .params import CancelScheduleParams, CreateScheduleParams
-from .payloads import AttachReply, StatusFacts
+from .payloads import DaemonStatusReply, StatusFacts
 from .protocol import (
     Cursor,
     DaemonError,
@@ -57,7 +58,7 @@ from .protocol import (
     cursor_text,
     parse_cursor,
 )
-from .wire import as_obj, as_seq, describe, message_of, one_line, result_block, text_of_wire
+from .wire import as_obj, describe, message_of, one_line, result_block, text_of_wire
 
 __all__ = ["agents_app"]
 
@@ -202,33 +203,7 @@ def _summary(kind: str, event: Mapping[str, Any]) -> str:
     return describe(data)
 
 
-def _sections(reported: Any) -> list[tuple[str, list[tuple[str, str]]]]:
-    """`daemon/status`' report envelope back into what `console.section` draws.
-
-    Two keys per row rather than a two-element array, for the reason
-    `Root.describe` gives about one name per fact: an array of pairs on the wire
-    is a shape whose meaning is positional, and positional meaning is what a
-    reader gets wrong.
-
-    Through `as_seq`, not `isinstance(…, list)`. That distinction is load-bearing
-    and `wire`'s docstring says why: a payload is a `list` off disk and a
-    **tuple** in memory, so a reader that tests for `list` works on resume and
-    silently sees nothing live — which for this section would be a socket
-    lifetime that renders as an empty table with no error at all.
-    """
-    return [
-        (
-            str(as_obj(one).get("title", "")),
-            [
-                (str(as_obj(row).get("label", "")), str(as_obj(row).get("value", "")))
-                for row in as_seq(as_obj(one).get("rows"))
-            ],
-        )
-        for one in as_seq(reported)
-    ]
-
-
-def _reachability(facts: Mapping[str, Any]) -> list[tuple[str, str]]:
+def _reachability(facts: DaemonStatusReply) -> list[tuple[str, str]]:
     """The row that only exists when the answer is bad (P5-11).
 
     Absent while the daemon can be reached, which is `Diagnostic.read`'s rule
@@ -241,7 +216,7 @@ def _reachability(facts: Mapping[str, Any]) -> list[tuple[str, str]]:
     went away, the daemon noticed, and this connection came in on a client that
     was already attached — or through a path somebody restored by hand.
     """
-    since = facts["unreachableSince"]
+    since = facts.unreachable_since
     if since is None:
         return []
     return [
@@ -390,8 +365,8 @@ def agents(ctx: typer.Context) -> None:
     """List the roots this daemon is running."""
     if ctx.invoked_subcommand is not None:
         return
-    listed = _ask(lambda client: client.call("sessions/list", NoParams()))
-    rows = listed["sessions"]
+    listed = _ask(lambda client: client.call(verbs.SESSIONS_LIST, NoParams()))
+    rows = listed.sessions
     if not rows:
         console.print("[dim]no roots running[/dim]")
         return
@@ -403,11 +378,11 @@ def agents(ctx: typer.Context) -> None:
     table.add_column("watchers", justify="right")
     for row in rows:
         table.add_row(
-            row["sessionId"],
-            row["status"],
-            str(row["lastTurn"] or ""),
-            str(as_obj(row.get("cursor")).get("sequence", "")),
-            str(row["watchers"]),
+            row.session_id,
+            row.status,
+            str(row.last_turn or ""),
+            str(row.cursor.sequence),
+            str(row.watchers),
         )
     console.print(table)
 
@@ -426,7 +401,7 @@ def send(
     dropped connection is safe rather than a second turn.
     """
     root = _ask(lambda client: client.prompt(session, prompt))
-    console.print(f"[dim]queued on {root['sessionId']} · {root['status']}[/dim]")
+    console.print(f"[dim]queued on {root.session_id} · {root.status}[/dim]")
 
 
 @agents_app.command()
@@ -501,9 +476,7 @@ def attach(
         # No cursor: the generation a snapshot cursor needs is what this reply
         # carries, so `from` is 0 here by construction and catch-up is paged from
         # `--since` against the generation the daemon just named.
-        attached = AttachReply.model_validate(
-            await client.call("session/attach", SessionParams(session_id=session))
-        )
+        attached = await client.call(verbs.SESSION_ATTACH, SessionParams(session_id=session))
         cursor = _since_cursor(since, attached.cursor)
         # The reply *is* a status frame, and for a root that was already idle it is
         # the only one there will ever be — so it goes through the feed rather than
@@ -531,7 +504,7 @@ def attach(
             # us has already dropped every subscription, and asking it to would
             # park on a reply nobody is left to send.
             if not client.closed.is_set():
-                await client.call("session/detach", SessionParams(session_id=session))
+                await client.call(verbs.SESSION_DETACH, SessionParams(session_id=session))
         if client.closed.is_set():
             raise DaemonGone
         if follow.last_turn == "error":
@@ -575,11 +548,11 @@ def schedule(
             raise typer.BadParameter("--cancel takes no timing flag")
         outcome = _ask(
             lambda client: client.call(
-                "schedule/cancel",
+                verbs.SCHEDULE_CANCEL,
                 CancelScheduleParams(session_id=session, schedule_id=cancel),
             )
         )
-        if not outcome["cancelled"]:
+        if not outcome.cancelled:
             fail(f"[red]no schedule {cancel!r} on {session}[/red]")
         console.print(f"[dim]cancelled {cancel}[/dim]")
         return
@@ -588,9 +561,9 @@ def schedule(
         raise typer.BadParameter("one of --at, --every or --cron, not several")
     if not timings:
         listed = _ask(
-            lambda client: client.call("schedule/list", SessionParams(session_id=session))
+            lambda client: client.call(verbs.SCHEDULE_LIST, SessionParams(session_id=session))
         )
-        _print_schedules(session, listed["schedules"])
+        _print_schedules(session, listed.schedules)
         return
     if not prompt:
         raise typer.BadParameter("a schedule needs --prompt: what to say when it fires")
@@ -598,7 +571,7 @@ def schedule(
     ((kind, spec),) = timings
     created = _ask(
         lambda client: client.call(
-            "schedule/create",
+            verbs.SCHEDULE_CREATE,
             CreateScheduleParams(
                 session_id=session,
                 schedule_id=schedule_id or f"sch-{secrets.token_hex(4)}",
@@ -608,7 +581,7 @@ def schedule(
             ),
         )
     )
-    console.print(f"[dim]scheduled {created['id']} · {kind} {spec}[/dim]")
+    console.print(f"[dim]scheduled {created.id} · {kind} {spec}[/dim]")
 
 
 def _print_schedules(session: str, rows: list[dict[str, Any]]) -> None:
@@ -641,28 +614,26 @@ def _print_schedules(session: str, rows: list[dict[str, Any]]) -> None:
 @agents_app.command()
 def status(session: Annotated[str, SESSION_ARGUMENT]) -> None:
     """What one root is doing, and what the log says about how it got there."""
-    row = _ask(lambda client: client.call("session/status", SessionParams(session_id=session)))
-    cursor = as_obj(row.get("cursor"))
-    schedules = row["schedules"]
+    row = _ask(lambda client: client.call(verbs.SESSION_STATUS, SessionParams(session_id=session)))
     console.print(
         section(
-            f"root {row['sessionId']}",
+            f"root {row.session_id}",
             (
-                ("status", str(row["status"])),
-                ("events", str(cursor.get("sequence", ""))),
-                ("generation", str(cursor.get("generation", ""))),
+                ("status", row.status),
+                ("events", str(row.cursor.sequence)),
+                ("generation", str(row.cursor.generation)),
                 # The two above in the one form `attach --since` can verify, spelled
                 # by the module that defines what a cursor is.
-                ("resume with", f"--since {cursor_text(cursor)}"),
-                ("watchers", str(row["watchers"])),
-                ("retry attempts", str(row["attempts"])),
-                ("given up", "yes" if row["failed"] else "no"),
-                ("schedules", str(len(schedules))),
+                ("resume with", f"--since {cursor_text(row.cursor)}"),
+                ("watchers", str(row.watchers)),
+                ("retry attempts", str(row.attempts)),
+                ("given up", "yes" if row.failed else "no"),
+                ("schedules", str(len(row.schedules))),
             ),
         )
     )
-    if schedules:
-        _print_schedules(session, schedules)
+    if row.schedules:
+        _print_schedules(session, row.schedules)
 
 
 @agents_app.command()
@@ -673,32 +644,32 @@ def doctor() -> None:
     from the running process, so what this reports is what is *in force* rather
     than what this invocation's flags and environment would have produced.
     """
-    facts = _ask(lambda client: client.call("daemon/status", NoParams()))
-    passivate = facts["passivateAfter"]
+    facts = _ask(lambda client: client.call(verbs.DAEMON_STATUS, NoParams()))
+    passivate = facts.passivate_after
     console.print(
         section(
             "pH daemon",
             (
-                ("socket", facts["socket"]),
-                ("pid", str(facts["pid"])),
-                ("uptime", _duration(facts["uptimeMs"])),
-                ("protocol", str(facts["protocolVersion"])),
-                ("capabilities", ", ".join(sorted(facts["capabilities"]))),
-                ("roots", str(facts["roots"])),
-                ("provider", f"{facts['provider']} · {facts['model']}"),
+                ("socket", facts.socket),
+                ("pid", str(facts.pid)),
+                ("uptime", _duration(facts.uptime_ms)),
+                ("protocol", str(facts.protocol_version)),
+                ("capabilities", ", ".join(sorted(facts.capabilities))),
+                ("roots", str(facts.roots)),
+                ("provider", f"{facts.provider} · {facts.model}"),
                 ("passivate after", "off" if passivate is None else _duration(passivate * 1000)),
-                ("tick", _duration(facts["tickEvery"] * 1000)),
-                ("sweep", _duration(facts["sweepEvery"] * 1000)),
-                ("heartbeat", _duration(facts["heartbeatEvery"] * 1000)),
-                ("socket watch", _duration(facts["watchEvery"] * 1000)),
+                ("tick", _duration(facts.tick_every * 1000)),
+                ("sweep", _duration(facts.sweep_every * 1000)),
+                ("heartbeat", _duration(facts.heartbeat_every * 1000)),
+                ("socket watch", _duration(facts.watch_every * 1000)),
                 *_reachability(facts),
             ),
         )
     )
     # A loop, because the envelope is a list: P5-12 adds the daemon's mounted
     # diagnostics to it and this side needs no change to render them.
-    for title, rows in _sections(facts["sections"]):
-        console.print(section(title, rows))
+    for reported in facts.sections:
+        console.print(section(reported.title, [(row.label, row.value) for row in reported.rows]))
 
 
 @agents_app.command()
@@ -714,7 +685,7 @@ def shutdown() -> None:
     """
 
     async def work(client: DaemonClient) -> None:
-        await client.notify("shutdown", NoParams())
+        await client.notify(verbs.SHUTDOWN, NoParams())
         # The same budget teardown itself is bounded by, plus room for the
         # unwinding around it: a daemon still inside its grace period has not
         # failed to stop, it is stopping.

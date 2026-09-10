@@ -108,7 +108,9 @@ async def test_the_output_and_the_exit_code_reach_the_log(tmp_path: Any) -> None
 
         reply = await _run(client, root, "echo out; echo err >&2; exit 3")
 
-        assert reply["exitCode"] == 3 and reply["ok"] is False
+        # `ok` is a property now, not a wire key: it was a second spelling of
+        # `exitCode` that nothing read and that could disagree with it.
+        assert reply["exitCode"] == 3 and "ok" not in reply
         result = root.session.latest("shell/result")
         assert result is not None
         # Apart on the log, because joining them is a presentation choice: a

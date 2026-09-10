@@ -622,7 +622,7 @@ async def test_the_client_makes_its_own_retries_safe(tmp_path: Path) -> None:
         await anyio.sleep(0.05)
         again = await _settled(client, "kappa", events=settled["cursor"]["sequence"])
 
-        assert first["sessionId"] == "kappa"
+        assert first.session_id == "kappa"
         assert again["cursor"]["sequence"] == settled["cursor"]["sequence"], (
             "the replayed command ran a second turn"
         )
@@ -1634,7 +1634,7 @@ async def test_daemon_status_says_it_cannot_be_reached_and_what_would_fix_it(
     socket = reaped_host() / "daemon.sock"
     async with running(tmp_path, path=socket) as daemon:
         healthy = daemon.server.status()
-        assert healthy["unreachableSince"] is None
+        assert healthy.unreachable_since is None
         # One encoding, not three. The reply used to carry `survivesLogout` and
         # `linger` beside the rendered rows; nothing but this assertion read
         # them, and a second spelling of one fact is one that can disagree.
@@ -1643,17 +1643,15 @@ async def test_daemon_status_says_it_cannot_be_reached_and_what_would_fix_it(
         # is the *daemon's* sections, and P5-12 added a second one the moment
         # after this row landed. A test that enumerates a list it does not own
         # fails for other rows' correct changes.
-        lifetime_section = next(
-            one for one in healthy["sections"] if one["title"] == "socket lifetime"
-        )
-        rows = {row["label"]: row["value"] for row in lifetime_section["rows"]}
+        lifetime_section = next(one for one in healthy.sections if one.title == "socket lifetime")
+        rows = {row.label: row.value for row in lifetime_section.rows}
         assert rows["survives logout"].startswith("no —"), "reaped host, no lingering"
         assert "off for someone" in rows["linger"]
         assert rows["enable it"] == "loginctl enable-linger someone"
 
         shutil.rmtree(tmp_path / "xdg")
         await daemon.server.check_reachable()
-        assert isinstance(daemon.server.status()["unreachableSince"], int)
+        assert isinstance(daemon.server.status().unreachable_since, int)
 
 
 async def test_a_hand_built_server_with_no_bound_socket_watches_nothing(
@@ -1676,7 +1674,7 @@ async def test_a_hand_built_server_with_no_bound_socket_watches_nothing(
         )
         assert built.identity is None
         assert await built.check_reachable() == ""
-        assert built.status()["unreachableSince"] is None
+        assert built.status().unreachable_since is None
         tasks.cancel_scope.cancel()
 
 

@@ -32,13 +32,13 @@ from typing import Any
 
 import anyio
 
+from .. import verbs
 from ..params import SnapshotParams
 from ..payloads import (
     FED,
     AttachReply,
     SessionEventNotice,
     SessionStatusNotice,
-    SnapshotPage,
     StatusFacts,
     notice_of,
 )
@@ -179,11 +179,9 @@ class Followed:
         """
         started: int | None = None
         while True:
-            page = SnapshotPage.model_validate(
-                await client.call(
-                    "session/snapshot",
-                    SnapshotParams(session_id=self.session_id, cursor=cursor),
-                )
+            page = await client.call(
+                verbs.SESSION_SNAPSHOT,
+                SnapshotParams(session_id=self.session_id, cursor=cursor),
             )
             if started is None:
                 started = page.started_at

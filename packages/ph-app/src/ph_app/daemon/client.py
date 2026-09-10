@@ -14,15 +14,17 @@ import secrets
 from collections.abc import Awaitable, Callable
 from dataclasses import InitVar, dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, overload
 
 import anyio
 from anyio.abc import ByteStream
 
 from ph.wire import WireModel
 
+from .. import verbs
 from ..params import InitializeParams, MutationParams, PromptParams
-from ..protocol import notification
+from ..payloads import MutationRepeated, RootDescription
+from ..protocol import CapabilityBlock, Notify, Verb, notification
 from .duplex import Handler, Notification, Peer
 
 __all__ = ["DaemonClient", "Exchange", "connected"]
@@ -86,7 +88,7 @@ class DaemonClient:
         """Read frames until the socket closes. Run this in a task group."""
         await self.peer.serve()
 
-    async def initialize(self, *capabilities: str) -> dict[str, Any]:
+    async def initialize(self, *capabilities: str) -> CapabilityBlock:
         """Trade capability blocks: what the daemon serves, what this end answers.
 
         Both directions in one call, because they are one negotiation. A client
@@ -95,9 +97,11 @@ class DaemonClient:
         alternative, a flag on each `session/attach`, let one client answer for
         one session and not another, which is not a thing a UI can be.
         """
-        return await self.call("initialize", InitializeParams(capabilities=list(capabilities)))
+        return await self.call(verbs.INITIALIZE, InitializeParams(capabilities=list(capabilities)))
 
-    async def mutate(self, method: str, params: MutationParams) -> dict[str, Any]:
+    async def mutate[P: MutationParams, R: WireModel](
+        self, verb: Verb[P, R], params: P
+    ) -> R | MutationRepeated:
         """One mutating call, stamped with this client's idempotence key.
 
         Every method in the daemon's `MUTATIONS` table needs a
@@ -111,51 +115,132 @@ class DaemonClient:
         The counter is this client's own, which is what makes a retry after a
         reconnect safe by default rather than by discipline.
 
-        Takes the method's own params model (P8-09), typed as `MutationParams`
-        so a verb that is *not* in the daemon's table cannot be sent through the
-        door that claims a key. The stamp goes on by `model_copy` rather than by
-        two more keyword arguments every caller had to remember.
+        **Takes the `Verb`, so the params cannot belong to another method** and
+        the reply arrives typed (issue 74). `P` is bound to `MutationParams`
+        rather than `WireModel`, which is what keeps a verb that is *not* in the
+        daemon's table out of the door that claims a key — the bound is the
+        check, where before it was the declared parameter type and a caller
+        passing the name of a non-mutation got no complaint. The stamp goes on
+        by `model_copy` rather than by two more keyword arguments every caller
+        had to remember.
+
+        **The reply is `R | MutationRepeated`, and that union is the honest
+        one.** A repeat answers with one shape for every verb (`MUTATIONS` says
+        why), and for the verbs whose own reply is a `RootDescription` the
+        repeat is a subtype — but `session/shell` answers with an exit code and
+        `credentials/store` with a name, so a caller that ignored the union
+        would be reading fields off a description that is not there. Narrow on
+        `isinstance(reply, MutationRepeated)`, which is the branch
+        `MutationRepeated.repeated` was always for.
         """
         self._commands += 1
         keyed = params.model_copy(update={"client_id": self.id, "command_id": str(self._commands)})
-        return await self.call(method, keyed)
+        wire = await self.peer.ask(verb.name, keyed.to_wire())
+        # The repeat is decided by the frame, not by the verb: the same verb
+        # answers either way, and `repeated` is the field that says which.
+        if wire.get("repeated"):
+            return MutationRepeated.model_validate(wire)
+        return verb.read(wire)
 
-    async def prompt(self, session_id: str, text: str) -> dict[str, Any]:
-        """Queue a turn. Keyed by `mutate`, which says why."""
-        return await self.mutate("session/prompt", PromptParams(session_id=session_id, prompt=text))
+    async def prompt(self, session_id: str, text: str) -> RootDescription:
+        """Queue a turn. Keyed by `mutate`, which says why.
+
+        `RootDescription` and not `RootDescription | MutationRepeated`, which is
+        what this said: `MutationRepeated` subclasses `RootDescription`, so that
+        union normalises to the left side and asked every caller to narrow
+        something the checker had already flattened. The repeat still arrives
+        here — it is simply already the type it claims to be, which is the
+        property `MutationRepeated`'s own docstring is about.
+        """
+        return await self.mutate(
+            verbs.SESSION_PROMPT, PromptParams(session_id=session_id, prompt=text)
+        )
+
+    @overload
+    async def call[P: WireModel, R: WireModel](self, verb: Verb[P, R], params: P, /) -> R: ...
+
+    @overload
+    async def call(self, method: str, /, **fields: Any) -> dict[str, Any]: ...
 
     async def call(
-        self, method: str, params: WireModel | None = None, /, **fields: Any
-    ) -> dict[str, Any]:
+        self, verb: str | Verb[Any, Any], params: WireModel | None = None, /, **fields: Any
+    ) -> Any:
         """One request, awaited to its reply. Raises what the server refused.
 
-        Two doors, and the model is the one to use. `client.call("session/status",
-        SessionParams(session_id=s))` is checked against what the daemon accepts
-        at *this* end, so a misspelled field is a type error here rather than the
-        `invalid_params` refusal P8-07 taught the daemon to send. The `**fields`
-        form stays for callers that have no model to build — a test sending a
-        deliberately malformed frame to exercise a refusal, which is most of what
-        `test_daemon_methods` does, and which a typed-only signature would make
-        unwritable.
+        **Two doors, and the `Verb` is the one to use.** `client.call(
+        SESSION_STATUS, SessionParams(session_id=s))` checks three things at
+        *this* end that were unchecked before: the field spellings (P8-09 bought
+        that), that the params belong to this method, and what comes back. The
+        old form `client.call("session/status", SessionParams(...))` type-checked
+        and so did `client.call("sessions/list", SessionParams(...))` — a name
+        and a model that had to agree with nothing to make them.
+
+        The reply is validated here, which is what retires
+        `AttachReply.model_validate(await client.call(...))`: the model was
+        chosen by hand beside the method name, so it could be the wrong one and
+        nothing would say so.
+
+        The `**fields` form stays, and is now the only door taking a bare name:
+        a caller with no model to build — a test sending a deliberately
+        malformed frame to exercise a refusal, which is most of what
+        `test_daemon_methods` does — would find a typed-only signature
+        unwritable. Because it takes no positional model, the mismatched pair
+        the first paragraph describes is not merely discouraged but
+        unexpressible.
 
         Positional-only, so a model can never be confused with a field named
         `params` on some future method.
         """
-        return await self.peer.ask(method, params.to_wire() if params is not None else fields)
+        if isinstance(verb, Verb):
+            return await self._exchange(verb, params)
+        return await self.peer.ask(verb, fields)
 
-    async def notify(self, method: str, params: WireModel | None = None, /, **fields: Any) -> None:
+    async def _exchange[P: WireModel, R: WireModel](self, verb: Verb[P, R], params: P | None) -> R:
+        """The verb door's body, where it can be checked.
+
+        An `@overload`ed function's implementation is typed against the union of
+        its signatures and returns `Any`, so nothing in `call` above checks that
+        the verb branch validates at all: sabotaged to `return wire`, dropping
+        the `verb.read` that is the whole point of the typed door, `mypy
+        --strict` passed on all 266 files. Here `R` is bound, so the body is
+        checked and that sabotage is an error.
+
+        `params` is `P | None` rather than `P` only because the implementation
+        signature above cannot express "required on this branch"; both overloads
+        declare it required, so the `{}` is unreachable through the public door.
+        """
+        return verb.read(await self.peer.ask(verb.name, params.to_wire() if params else {}))
+
+    @overload
+    async def notify[P: WireModel](self, verb: Notify[P], params: P, /) -> None: ...
+
+    @overload
+    async def notify(self, method: str, /, **fields: Any) -> None: ...
+
+    async def notify(
+        self, verb: str | Notify[Any], params: WireModel | None = None, /, **fields: Any
+    ) -> None:
         """Send a request that expects no reply.
 
         `shutdown` is the one that matters: a request-with-reply would have the
         caller waiting on a frame the daemon is in the middle of tearing down the
         ability to send. "Stop" is not a question, so it does not get an id.
 
+        **A `Notify`, not a `Verb`, and that is the pairing this door adds.**
+        While `SHUTDOWN` was a `Verb` with an unread reply model, the rule lived
+        in prose: `client.call(SHUTDOWN, NoParams())` type-checked, all 19 sites
+        used `notify` by convention, and the hang the paragraph above describes
+        was one edit away. The two doors now take different types, so neither
+        mistake is expressible — `call` refuses a `Notify` and this refuses a
+        `Verb`, which would otherwise run a method on the daemon and silently
+        drop its answer.
+
         Waits for room rather than refusing, unlike the daemon's `tell`: a client
         that cannot write has nobody to drop but itself.
         """
-        await self.peer.send(
-            notification(method, params.to_wire() if params is not None else fields)
-        )
+        name = verb.name if isinstance(verb, Notify) else verb
+        body = params.to_wire() if params is not None else fields
+        await self.peer.send(notification(name, body))
 
     async def aclose(self) -> None:
         await self.stream.aclose()

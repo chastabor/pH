@@ -26,10 +26,9 @@ from typing import TYPE_CHECKING, Any
 from ph.keys import ATTACHMENTS
 from ph.llm.types import AttachmentRef, MediaBlock, Message, create_user_message
 
-from .wire import as_obj
-
 if TYPE_CHECKING:  # pragma: no cover - a type, not a dependency
     from .daemon.client import DaemonClient
+from . import verbs
 from .params import PutAttachmentParams, StageParams
 
 __all__ = ["AttachmentUnavailable", "Tray", "ingest", "prompt_message", "stage_bytes"]
@@ -138,7 +137,7 @@ async def stage_bytes(
     asked for.
     """
     put = await client.call(
-        "attachment/put",
+        verbs.ATTACHMENT_PUT,
         PutAttachmentParams(
             session_id=session_id,
             name=name,
@@ -146,6 +145,7 @@ async def stage_bytes(
             content_b64=b64encode(content).decode(),
         ),
     )
-    reference = AttachmentRef.model_validate(as_obj(put.get("attachment")))
-    await client.mutate("session/stage", StageParams(session_id=session_id, attachment=reference))
-    return reference
+    await client.mutate(
+        verbs.SESSION_STAGE, StageParams(session_id=session_id, attachment=put.attachment)
+    )
+    return put.attachment
