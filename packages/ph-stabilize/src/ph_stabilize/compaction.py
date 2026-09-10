@@ -96,7 +96,7 @@ from ph.session import (
     thaw_json,
 )
 from ph.session.events import SurfaceReplace
-from ph.session.json import dumps, obj, seq
+from ph.session.json import as_obj, as_seq, dumps
 from ph.text import count_of
 from ph.wire import WireModel
 
@@ -519,7 +519,7 @@ def truncated_assistant_payload(
     last usage it sees and would have shown the same stale number. The usage
     belongs to the request that produced the original, which still has it.
     """
-    blocks = seq(obj(event.data.get("message")).get("content"))
+    blocks = as_seq(as_obj(event.data.get("message")).get("content"))
     elisions = {
         index: elided
         for index, block in enumerate(blocks)

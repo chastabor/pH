@@ -51,7 +51,7 @@ from pydantic import Field
 from ph.cordis import Context, plugin
 from ph.keys import SYSTEM_PROMPT, TOOLS
 from ph.llm.types import ToolCallBlock
-from ph.session import Session, derive_event_message, seq, thaw_json
+from ph.session import Session, as_seq, derive_event_message, thaw_json
 from ph.system_prompt.assembly import (
     ORDER_TOOL_GUIDANCE,
     AssembleContext,
@@ -323,7 +323,7 @@ def todos_of(session: Session | None) -> list[dict[str, Any]]:
     # `thaw_json` because the payload is frozen — a `MappingProxyType` is not a
     # `dict`, the bug this project has now been bitten by three times.
     thawed = thaw_json(event.data.get("todos"))
-    return [item for item in seq(thawed) if isinstance(item, dict)]
+    return [item for item in as_seq(thawed) if isinstance(item, dict)]
 
 
 def steps_of(todos: list[dict[str, Any]]) -> list[str]:
@@ -515,7 +515,7 @@ def _recorded(previous: Any) -> list[Mapping[str, Any]]:
     thaw would be paid twice per write to build something neither of them
     mutates. A `MappingProxyType` answers `.get` perfectly well.
     """
-    entries = seq(previous.data.get("todos")) if previous else ()
+    entries = as_seq(previous.data.get("todos")) if previous else ()
     return [one for one in entries if isinstance(one, Mapping)]
 
 

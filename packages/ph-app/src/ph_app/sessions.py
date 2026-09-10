@@ -38,7 +38,7 @@ from ph.persistence.jsonl import HEADER_LINE_TYPE, family_log, locate_session, s
 from ph.session import SessionHeader
 from ph.wire import WireModel
 
-from .wire import obj, text_of_wire
+from .wire import as_obj, text_of_wire
 
 __all__ = ["SessionSummary", "recorded_cwd", "session_summaries"]
 
@@ -185,7 +185,7 @@ def _summarize(path: Path, modified: float, size: int) -> SessionSummary | None:
                         family = header.family
                     continue
                 if record.get("type") == "user/message":
-                    text = text_of_wire(obj(record.get("data")).get("content")).strip()
+                    text = text_of_wire(as_obj(record.get("data")).get("content")).strip()
                     title = text.splitlines()[0][:72] if text else ""
                     break
     except OSError:

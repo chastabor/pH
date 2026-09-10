@@ -31,7 +31,7 @@ from typing import Any
 
 import anyio
 
-from ..wire import as_int, obj, seq
+from ..wire import as_int, as_obj, as_seq
 from .client import DaemonClient
 
 __all__ = ["Followed", "first_of"]
@@ -81,7 +81,7 @@ class Followed:
             return
         if method != "session.event":
             return
-        event = obj(params.get("event"))
+        event = as_obj(params.get("event"))
         at = as_int(event.get("seq", -1))
         if at <= self.seen:
             # Already shown by a snapshot page. Dropped by `seq` rather than by
@@ -137,12 +137,12 @@ class Followed:
         started: int | None = None
         while True:
             page = await client.call("session/snapshot", sessionId=self.session_id, cursor=cursor)
-            events = [obj(wire) for wire in seq(page.get("events"))]
+            events = [as_obj(wire) for wire in as_seq(page.get("events"))]
             if started is None:
                 started = int(page.get("from", 0))
             # Sparse and keyed by seq, which is how the daemon sends it: a page
             # is 2048 events and a turn contributes a handful of cards.
-            views = obj(page.get("presentations"))
+            views = as_obj(page.get("presentations"))
             self.on_events([(one, views.get(str(one.get("seq")))) for one in events], False)
             for event in events:
                 self.seen = max(self.seen, as_int(event.get("seq", self.seen)))

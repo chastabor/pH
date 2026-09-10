@@ -41,7 +41,7 @@ from pydantic import ValidationError
 from ph.agent.types import AgentDriver
 from ph.cordis import Context, plugin
 from ph.llm.types import PluginSource, create_user_message
-from ph.session import Session, obj
+from ph.session import Session, as_obj
 from ph.text import count_of
 
 from .todo import (
@@ -184,7 +184,7 @@ def nudges_since_plan(session: Session) -> int:
         1
         for event in session.events_from((previous.seq if previous else -1) + 1)
         if event.type == "user/message"
-        and str(obj(event.data.get("source")).get("plugin")) == PLUGIN
+        and str(as_obj(event.data.get("source")).get("plugin")) == PLUGIN
     )
 
 

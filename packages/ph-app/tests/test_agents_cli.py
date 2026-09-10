@@ -43,7 +43,7 @@ from daemon_helpers import Daemon, private_runtime, serving
 from typer.testing import CliRunner
 
 from ph_app.cli import app
-from ph_app.wire import obj
+from ph_app.wire import as_obj
 
 pytestmark = pytest.mark.anyio
 
@@ -185,7 +185,9 @@ async def test_since_skips_the_history_a_client_already_has(
         # out of the table `status` draws: this file's whole claim is that a
         # person reaches a run through the protocol, and a test that reached
         # around it would be proving something else.
-        head = obj((await client.call("session/status", sessionId="resumed"))["cursor"])["sequence"]
+        head = as_obj((await client.call("session/status", sessionId="resumed"))["cursor"])[
+            "sequence"
+        ]
 
         await _ph("agents", "send", "resumed", "the second thing")
         rest = await _ph("agents", "attach", "resumed", "--since", str(head), "--until-idle")
@@ -214,7 +216,7 @@ async def test_a_full_cursor_is_verified_and_a_stale_one_skips_nothing(
         client = await daemon.client()
         await _ph("agents", "send", "kept", "the first thing")
         await _ph("agents", "attach", "kept", "--until-idle")
-        cursor = obj((await client.call("session/status", sessionId="kept"))["cursor"])
+        cursor = as_obj((await client.call("session/status", sessionId="kept"))["cursor"])
         await _ph("agents", "send", "kept", "the second thing")
 
         right = await _ph(

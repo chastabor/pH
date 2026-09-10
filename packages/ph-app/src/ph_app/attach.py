@@ -26,7 +26,7 @@ from typing import TYPE_CHECKING, Any
 from ph.keys import ATTACHMENTS
 from ph.llm.types import AttachmentRef, MediaBlock, Message, create_user_message
 
-from .wire import obj
+from .wire import as_obj
 
 if TYPE_CHECKING:  # pragma: no cover - a type, not a dependency
     from .daemon.client import DaemonClient
@@ -143,6 +143,6 @@ async def stage_bytes(
         mime=mime,
         contentB64=b64encode(content).decode(),
     )
-    reference = obj(put.get("attachment"))
+    reference = as_obj(put.get("attachment"))
     await client.mutate("session/stage", session_id, attachment=reference)
     return AttachmentRef.model_validate(reference)

@@ -36,9 +36,9 @@ from ph.session.request_header import parse_request_header
 
 from ..wire import (
     as_int,
+    as_obj,
     describe,
     message_of,
-    obj,
     one_line,
     result_block,
     source_of,
@@ -271,7 +271,7 @@ class _Builder:
         )
 
     def on_tool_result(self, event: SessionEvent) -> None:
-        message = obj(event.data.get("message"))
+        message = as_obj(event.data.get("message"))
         result = result_block(message)
         _kind, call_id, _form = source_of(message)
         text = _text(result.get("content"))
@@ -321,7 +321,7 @@ class _Builder:
         a replayed log as on a live one, and a clock read at render time would
         not (A11).
         """
-        usage = obj(message.get("usage"))
+        usage = as_obj(message.get("usage"))
         output = usage.get("outputTokens")
         tokens = int(output) if isinstance(output, int) else None
         started, first_chunk = self._step_started, self._first_chunk
@@ -344,7 +344,7 @@ def _on_turn_start(builder: _Builder, event: SessionEvent) -> None:
 
 
 def _on_turn_end(builder: _Builder, event: SessionEvent) -> None:
-    reason = obj(event.data.get("reason")).get("kind") or "completed"
+    reason = as_obj(event.data.get("reason")).get("kind") or "completed"
     builder.on_event(event, "turn end", f"turn {builder.turn} — {reason}")
 
 

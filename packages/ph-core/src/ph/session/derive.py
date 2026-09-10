@@ -21,7 +21,7 @@ from collections.abc import Iterable
 
 from ..llm.types import Message
 from .events import SessionEvent
-from .json import obj
+from .json import as_obj
 from .surface import is_append_surface_event
 
 __all__ = ["derive_event_message", "derive_transcript"]
@@ -41,7 +41,7 @@ def derive_event_message(event: SessionEvent) -> Message | None:
     if event.type == "user/message":
         return Message.model_validate(event.data)
     if event.type == "assistant/message":
-        message = obj(event.data.get("message"))
+        message = as_obj(event.data.get("message"))
         # An empty-content assistant/message exists only to host a max-tokens
         # step's usage; injecting a content-less assistant turn into the
         # provider transcript is an error at several providers.

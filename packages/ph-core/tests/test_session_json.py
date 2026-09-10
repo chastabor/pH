@@ -6,7 +6,7 @@ over the abstract containers, true of both shapes the log takes — `tuple` and
 which is the point, and honesty has a cost at the read site: `int(data.get(
 "turn", 0))` is now an `int()` of a union a `Mapping` belongs to, and a chained
 `data.get("message").get("content")` is a `.get` on something that may be a
-string. `as_int`, `obj` and `seq` are the three narrowings the ~167 readers
+string. `as_int`, `as_obj` and `as_seq` are the three narrowings the ~167 readers
 needed, and this file pins what each promises.
 
 The overloads on `freeze_json_value` and `thaw_json` are claims to the checker
@@ -22,7 +22,7 @@ from types import MappingProxyType
 
 import pytest
 
-from ph.session.json import as_int, freeze_json_value, obj, seq, thaw_json
+from ph.session.json import as_int, as_obj, as_seq, freeze_json_value, thaw_json
 
 # ---------------------------------------------------------------- as_int --
 
@@ -65,16 +65,16 @@ def test_obj_returns_a_mapping_by_identity_in_either_shape() -> None:
     accident, and a plain dict read off disk must stay the dict it was."""
     frozen = MappingProxyType({"a": 1})
     plain = {"a": 1}
-    assert obj(frozen) is frozen
-    assert obj(plain) is plain
+    assert as_obj(frozen) is frozen
+    assert as_obj(plain) is plain
 
 
 @pytest.mark.parametrize("value", [None, "text", 3, 2.5, True, [1, 2], (1, 2)])
 def test_obj_answers_absence_with_an_empty_object(value: object) -> None:
     """A missing or mis-shaped field costs the reader a row, not the transcript;
-    the empty object lets `obj(x).get(...)` chain without a branch."""
-    assert obj(value) == {}
-    assert isinstance(obj(value), Mapping)
+    the empty object lets `as_obj(x).get(...)` chain without a branch."""
+    assert as_obj(value) == {}
+    assert isinstance(as_obj(value), Mapping)
 
 
 def test_seq_returns_an_array_by_identity_in_either_shape() -> None:
@@ -82,17 +82,17 @@ def test_seq_returns_an_array_by_identity_in_either_shape() -> None:
     list)` worked on resume and silently saw nothing live. Both pass."""
     frozen = (1, 2)
     plain = [1, 2]
-    assert seq(frozen) is frozen
-    assert seq(plain) is plain
+    assert as_seq(frozen) is frozen
+    assert as_seq(plain) is plain
 
 
 @pytest.mark.parametrize("value", [None, "abc", 3, {"a": 1}, MappingProxyType({"a": 1})])
 def test_seq_answers_absence_and_strings_with_an_empty_array(value: object) -> None:
     """`str` is a `Sequence[str]` and a `JsonValue`, so a reader narrowing with
     `isinstance(x, Sequence)` meets it and iterates a word's letters as rows.
-    `seq` is the one place that exclusion is spelled."""
-    assert seq(value) == ()
-    assert isinstance(seq(value), Sequence)
+    `as_seq` is the one place that exclusion is spelled."""
+    assert as_seq(value) == ()
+    assert isinstance(as_seq(value), Sequence)
 
 
 # -------------------------------------------------------- shape preservation --

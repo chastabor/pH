@@ -65,7 +65,7 @@ from ph.tools import ToolCallView, ToolResult, ToolResultView
 from ph.tools.presentation import render_call_view, render_result_view
 
 from ..shell import shell_body
-from ..wire import as_int, media_labels, obj, one_line, result_block, seq, text_of_wire
+from ..wire import as_int, as_obj, as_seq, media_labels, one_line, result_block, text_of_wire
 from .state import ChatItem, ItemRole, ToolCard, TuiState
 
 __all__ = ["HANDLERS", "RECORDLESS", "REPLAY", "Frame", "TuiEventAdapter"]
@@ -149,7 +149,7 @@ class TuiEventAdapter:
     # ------------------------------------------------------------ messages --
 
     def _on_user_message(self, event: SessionEvent, frame: Frame) -> None:
-        source = obj(event.data.get("source"))
+        source = as_obj(event.data.get("source"))
         kind = source.get("kind")
         content = event.data.get("content")
         text = text_of_wire(content)
@@ -198,7 +198,7 @@ class TuiEventAdapter:
         if not frame.live:
             # The assembled `assistant/message` is authoritative on replay.
             return
-        chunk = obj(event.data.get("chunk"))
+        chunk = as_obj(event.data.get("chunk"))
         turn, step = as_int(event.data.get("turn", 0)), as_int(event.data.get("step", 0))
         kind = chunk.get("type")
         if kind == "text-delta":
@@ -238,11 +238,11 @@ class TuiEventAdapter:
             # once, fifty lines up.
             return
         turn, step = as_int(event.data.get("turn", 0)), as_int(event.data.get("step", 0))
-        blocks = obj(event.data.get("message")).get("content")
+        blocks = as_obj(event.data.get("message")).get("content")
         streamed = self.state.end_streaming(turn, step)
         text = text_of_wire(blocks)
         thinking = text_of_wire(blocks, kind="reasoning")
-        self._count_usage(obj(event.data.get("usage")))
+        self._count_usage(as_obj(event.data.get("usage")))
         if frame.live and streamed is not None:
             # Finalize what streamed rather than adding a duplicate row.
             streamed.text = text if streamed.role == "assistant" else thinking
@@ -305,8 +305,8 @@ class TuiEventAdapter:
         card.input_text = view.body or ""
 
     def _on_tool_result(self, event: SessionEvent, frame: Frame) -> None:
-        message = obj(event.data.get("message"))
-        call_id = str(obj(message.get("source")).get("callId"))
+        message = as_obj(event.data.get("message"))
+        call_id = str(as_obj(message.get("source")).get("callId"))
         # One `tool_result` block carries both the text and the error flag; read
         # it once rather than indexing the content twice.
         result = result_block(message)
@@ -373,12 +373,12 @@ class TuiEventAdapter:
         self.state.queued = 0
 
     def _on_turn_end(self, event: SessionEvent, frame: Frame) -> None:
-        reason = obj(event.data.get("reason"))
+        reason = as_obj(event.data.get("reason"))
         kind = reason.get("kind")
         if kind in ("completed", None):
             return
         if kind == "error":
-            detail = obj(reason.get("error")).get("message", "the turn failed")
+            detail = as_obj(reason.get("error")).get("message", "the turn failed")
             self._row("err", "error", str(detail), event)
             return
         labels = {
@@ -634,7 +634,7 @@ class TuiEventAdapter:
 
     def _on_goal_set(self, event: SessionEvent, frame: Frame) -> None:
         """An autonomous run started, and what will decide it."""
-        gates = seq(event.data.get("gates"))
+        gates = as_seq(event.data.get("gates"))
         decides = f" — gates: {', '.join(str(gate) for gate in gates)}" if gates else ""
         self._row(
             "goal", "notice", f"Working toward: {event.data.get('objective', '')}{decides}", event
@@ -664,10 +664,10 @@ class TuiEventAdapter:
         variable that is *gone* is news, because the model is about to reference
         a name that no longer exists and will read the failure as its own bug.
         """
-        failed = [str(name) for name in seq(event.data.get("failed"))]
+        failed = [str(name) for name in as_seq(event.data.get("failed"))]
         if not failed:
             return
-        restored = len(seq(event.data.get("restored")))
+        restored = len(as_seq(event.data.get("restored")))
         self._row(
             "kernel",
             "notice",
@@ -685,8 +685,8 @@ class TuiEventAdapter:
         is the interesting half.
         """
         summary = str(event.data.get("summary") or "the harness")
-        edits = len(seq(event.data.get("appliedEdits")))
-        rejected = len(seq(event.data.get("rejected")))
+        edits = len(as_seq(event.data.get("appliedEdits")))
+        rejected = len(as_seq(event.data.get("rejected")))
         rolled = event.data.get("rollbackOf")
         text = (
             f"Rolled back {rolled}: {edits} edit(s) undone."
@@ -729,7 +729,7 @@ class TuiEventAdapter:
         sent, and this is the only place the transcript can say the model is no
         longer being shown all of them.
         """
-        seqs = seq(event.data.get("seqs"))
+        seqs = as_seq(event.data.get("seqs"))
         saved = as_int(event.data.get("savedChars") or 0)
         self._row(
             "compaction",
@@ -775,7 +775,7 @@ class TuiEventAdapter:
         The adapter also logs it, but a process log is not where anyone looks to
         understand a conversation.
         """
-        items = [obj(one) for one in seq(event.data.get("attachments"))]
+        items = [as_obj(one) for one in as_seq(event.data.get("attachments"))]
         if not items:
             return
         names = ", ".join(str(one.get("name") or one.get("mime") or "?") for one in items)
@@ -790,7 +790,7 @@ class TuiEventAdapter:
         error, but a reader must not confuse them — so the wording leads with
         what happened rather than with the file.
         """
-        items = [obj(one) for one in seq(event.data.get("attachments"))]
+        items = [as_obj(one) for one in as_seq(event.data.get("attachments"))]
         if not items:
             return
         first = items[0]
@@ -884,7 +884,7 @@ class TuiEventAdapter:
         row = self.state.subagents.get(str(event.data.get("runId")))
         if row is None:
             return
-        usage = obj(event.data.get("childUsage"))
+        usage = as_obj(event.data.get("childUsage"))
         row.tokens += as_int(usage.get("inputTokens") or 0) + as_int(usage.get("outputTokens") or 0)
 
     def _on_subagent_deleted(self, event: SessionEvent, frame: Frame) -> None:
@@ -902,7 +902,7 @@ class TuiEventAdapter:
         # over the same payload — narrowing them to `{}` instead rendered a
         # blank sidebar row for data the other reader discards.
         self.state.todos = [
-            thaw_json(todo) for todo in seq(event.data.get("todos")) if isinstance(todo, Mapping)
+            thaw_json(todo) for todo in as_seq(event.data.get("todos")) if isinstance(todo, Mapping)
         ]
 
     def _on_offload_spilled(self, event: SessionEvent, frame: Frame) -> None:
@@ -923,7 +923,7 @@ class TuiEventAdapter:
         )
 
     def _on_agent_inbox_spliced(self, event: SessionEvent, frame: Frame) -> None:
-        inserted = len(seq(event.data.get("inserted")))
+        inserted = len(as_seq(event.data.get("inserted")))
         removed = as_int(event.data.get("removedCount", 0))
         self.state.queued = max(0, self.state.queued + inserted - removed)
 

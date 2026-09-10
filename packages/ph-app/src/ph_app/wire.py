@@ -10,7 +10,8 @@ resume and silently see nothing live.
 Absence is normal too. The log is JSON, every field is optional to a reader, and a
 missing one must cost a row rather than the transcript.
 
-`obj` and `seq` were born here and now live in `ph.session.json`, re-exported:
+`as_obj` and `as_seq` were born here as `obj`/`seq` and now live in
+`ph.session.json`, re-exported:
 the frozen-or-plain question they answer is about the tree, not the app, and
 core readers chaining `data.get(...).get(...)` needed the same narrowing (P8-06).
 
@@ -29,22 +30,22 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from ph.session import as_int, obj, seq
+from ph.session import as_int, as_obj, as_seq
 from ph.tools import ToolCallView, ToolResultView
 from ph.tools.presentation import CARD_VIEWS
 
 __all__ = [
     "as_int",
+    "as_obj",
+    "as_seq",
     "describe",
     "first",
     "index_at_or_before",
     "matches_terms",
     "media_labels",
     "message_of",
-    "obj",
     "one_line",
     "result_block",
-    "seq",
     "source_of",
     "split_terms",
     "text_of_wire",
@@ -54,8 +55,8 @@ __all__ = [
 
 def first(value: Any) -> Mapping[str, Any]:
     """The first object of a wire list, or an empty one."""
-    items = seq(value)
-    return obj(items[0]) if items else {}
+    items = as_seq(value)
+    return as_obj(items[0]) if items else {}
 
 
 def text_of_wire(
@@ -70,7 +71,7 @@ def text_of_wire(
     behaviour described twice rather than two behaviours.
     """
     parts: list[str] = []
-    for block in seq(blocks):
+    for block in as_seq(blocks):
         if not isinstance(block, Mapping):
             continue
         block_kind = block.get("type")
@@ -89,8 +90,8 @@ def message_of(event: Any) -> Mapping[str, Any]:
     getting it wrong is silent — a message with no content rather than an error
     — so the knowledge lives here instead of in each reader.
     """
-    payload = obj(getattr(event, "data", event))
-    return obj(payload.get("message")) if "message" in payload else payload
+    payload = as_obj(getattr(event, "data", event))
+    return as_obj(payload.get("message")) if "message" in payload else payload
 
 
 def view_of(event_type: str, sidecar: Any) -> ToolCallView | ToolResultView | None:
@@ -124,7 +125,7 @@ def result_block(message: Any) -> Mapping[str, Any]:
     a terminal rendered blank. `message_of`'s docstring already names this class
     of mistake: getting it wrong is silent, so the knowledge lives here.
     """
-    return first(obj(message).get("content"))
+    return first(as_obj(message).get("content"))
 
 
 def describe(data: Any) -> str:
@@ -139,7 +140,7 @@ def describe(data: Any) -> str:
     Read frozen: this builds one truncated line, and deep-copying the payload to
     iterate its top level was a second full copy of the same tree.
     """
-    payload = obj(data)
+    payload = as_obj(data)
     return one_line(", ".join(f"{key}={value}" for key, value in payload.items() if value != ""))
 
 
@@ -150,7 +151,7 @@ def source_of(message: Any) -> tuple[str, str, str]:
     `MessageSource`; naming them in one place is what stops two readers
     disagreeing about who produced a record.
     """
-    source = obj(obj(message).get("source"))
+    source = as_obj(as_obj(message).get("source"))
     kind = str(source.get("kind") or "")
     name = str(source.get("plugin") or source.get("model") or source.get("callId") or "")
     return kind, name, str(source.get("form") or "")
@@ -224,10 +225,10 @@ def media_labels(blocks: Any) -> list[str]:
     has.
     """
     labels: list[str] = []
-    for block in seq(blocks):
+    for block in as_seq(blocks):
         if not isinstance(block, Mapping) or block.get("type") != "media":
             continue
-        attachment = obj(block.get("attachment"))
+        attachment = as_obj(block.get("attachment"))
         name = attachment.get("name") or attachment.get("attachmentId")
         labels.append(f"{attachment.get('mime') or 'file'} · {name}")
     return labels

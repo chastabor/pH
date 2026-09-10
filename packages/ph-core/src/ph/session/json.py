@@ -80,11 +80,11 @@ __all__ = [
     "JsonValue",
     "PlainJsonValue",
     "as_int",
+    "as_obj",
+    "as_seq",
     "dumps",
     "freeze_json_value",
     "is_json_value",
-    "obj",
-    "seq",
     "snapshot_json_value",
     "thaw_json",
 ]
@@ -109,8 +109,8 @@ wrapper that carries its own proof is the deferred decision, and this alias is
 written so that wrapper can subtype it later without moving a reader.
 
 The wart is `str`: it is a `Sequence[str]`, and `str` is a `JsonValue`, so a
-reader narrowing with `isinstance(x, Sequence)` meets it. `seq` below is the
-one place that exclusion is spelled."""
+reader narrowing with `isinstance(x, Sequence)` meets it. `as_seq` below is
+the one place that exclusion is spelled."""
 
 JsonObject: TypeAlias = "Mapping[str, JsonValue]"
 """A JSON object — every event payload, and the shape `Session.append` takes."""
@@ -136,7 +136,7 @@ JSON_MAX_SAFE_INTEGER = 2**53 - 1
 _INFINITIES = (math.inf, -math.inf)
 
 _EMPTY_OBJECT: JsonObject = MappingProxyType({})
-"""`obj`'s answer to a missing field. Hoisted because it is 8% of that call, and
+"""`as_obj`'s answer to a missing field. Hoisted because it is 8% of that call, and
 read-only because a shared mutable empty is an aliasing hazard the moment a
 caller writes to a narrowed result."""
 
@@ -314,7 +314,7 @@ def as_int(value: object) -> int:
     raise TypeError(f"expected a JSON number, got {type(value).__name__}")
 
 
-def obj(value: object) -> JsonObject:
+def as_obj(value: object) -> JsonObject:
     """A JSON object, or an empty one — the reader's narrowing for a payload field.
 
     Absence is normal: the log is JSON, every field is optional to a reader, and
@@ -335,7 +335,7 @@ def obj(value: object) -> JsonObject:
     return value if isinstance(value, (dict, MappingProxyType)) else _EMPTY_OBJECT
 
 
-def seq(value: object) -> Sequence[JsonValue]:
+def as_seq(value: object) -> Sequence[JsonValue]:
     """A JSON array, or an empty one. A tuple in memory, a list on disk.
 
     The frozen/plain duality is why this is a function and not an
@@ -344,7 +344,7 @@ def seq(value: object) -> Sequence[JsonValue]:
     exclusion **structural** rather than a special case: `str` is a `Sequence`,
     so an ABC test admits it and a reader that forgot iterated a word's letters
     as rows; `str` is neither a `list` nor a `tuple`, so it simply falls out.
-    Same measurement as `obj`: 244 ns against 56 ns, per field per event.
+    Same measurement as `as_obj`: 244 ns against 56 ns, per field per event.
     """
     return value if isinstance(value, (list, tuple)) else ()
 

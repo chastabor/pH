@@ -74,7 +74,7 @@ from ..daemon.client import DaemonClient
 from ..daemon.follow import Followed, first_of
 from ..protocol import DaemonGone
 from ..sessions import SessionSummary
-from ..wire import obj, seq, view_of
+from ..wire import as_obj, as_seq, view_of
 from .adapter import Frame, TuiEventAdapter
 from .commands import action_command, local_commands
 from .frontend import ModalHost
@@ -252,7 +252,7 @@ class DaemonSession:
         self.state.model = str(params.get("model") or self.state.model)
         if "readings" in params:
             self._readings = [
-                StatusReading.model_validate(obj(one)) for one in seq(params.get("readings"))
+                StatusReading.model_validate(as_obj(one)) for one in as_seq(params.get("readings"))
             ]
         status = str(params.get("status") or "")
         if status:
@@ -275,8 +275,8 @@ class DaemonSession:
             return
         if method == "session.commands":
             self.remote_commands = [
-                _remote_command(self.client, self.session_id, obj(one))
-                for one in seq(params.get("commands"))
+                _remote_command(self.client, self.session_id, as_obj(one))
+                for one in as_seq(params.get("commands"))
             ]
             self.host.state_changed()
             return
@@ -284,15 +284,15 @@ class DaemonSession:
             # Re-wired rather than merged: a screen's routes are a verb *and* a
             # key binding, and the key is registered on the app — so the old
             # ones have to be released before the new list is built.
-            self.screens = _screens_of(seq(params.get("screens")))
+            self.screens = _screens_of(as_seq(params.get("screens")))
             if self.app is not None:
                 self._wire_screens(self.app)
             self.host.state_changed()
             return
         if method == "session.staged":
             self._staged = Tray()
-            for wire in seq(params.get("staged")):
-                self._staged.stage(AttachmentRef.model_validate(obj(wire)))
+            for wire in as_seq(params.get("staged")):
+                self._staged.stage(AttachmentRef.model_validate(as_obj(wire)))
             self.host.state_changed()
 
     # ----------------------------------------------------------- projections --
@@ -315,7 +315,7 @@ class DaemonSession:
     async def browse_sessions(self) -> list[SessionSummary]:
         """The daemon's own list — stored logs and its live roots, already merged."""
         reply = await self.client.call("sessions/browse")
-        return [SessionSummary.model_validate(obj(one)) for one in seq(reply.get("sessions"))]
+        return [SessionSummary.model_validate(as_obj(one)) for one in as_seq(reply.get("sessions"))]
 
     def credential_held(self, name: str) -> bool:
         """From the last `credentials/held` answer — a fact about the *daemon's*
@@ -327,7 +327,7 @@ class DaemonSession:
         reply = await self.client.call(
             "credentials/held", sessionId=self.session_id, names=list(names)
         )
-        self.held = {str(key): bool(value) for key, value in obj(reply.get("held")).items()}
+        self.held = {str(key): bool(value) for key, value in as_obj(reply.get("held")).items()}
 
     # ---------------------------------------------------------------- turns --
 
@@ -540,7 +540,7 @@ async def attach_session(
     created = await client.call(
         "session/new", sessionId=session_id, cwd=str(cwd) if cwd else None, trust=trust
     )
-    generation = str(obj(created.get("cursor")).get("generation", ""))
+    generation = str(as_obj(created.get("cursor")).get("generation", ""))
 
     replies: dict[str, dict[str, Any]] = {}
 
@@ -561,12 +561,12 @@ async def attach_session(
         # sends the rendered view beside each event — see `Frame.view`.
         adapter=TuiEventAdapter(state=state),
         host=host,
-        config_rows=tuple(seq(config.get("rows"))),
+        config_rows=tuple(as_seq(config.get("rows"))),
         remote_commands=[
-            _remote_command(client, session_id, obj(one))
-            for one in seq(replies["commands/list"].get("commands"))
+            _remote_command(client, session_id, as_obj(one))
+            for one in as_seq(replies["commands/list"].get("commands"))
         ],
-        screens=_screens_of(seq(replies["screens/list"].get("screens"))),
+        screens=_screens_of(as_seq(replies["screens/list"].get("screens"))),
         generation=int(generation) if generation.isdigit() else None,
     )
     client.peer.on_notify = front.dispatch
@@ -583,7 +583,7 @@ async def attach_session(
     # until `Session(seed=…)` refused a log that did not start at 0 — which only
     # happens when somebody opens a screen. `ph agents attach` builds the same
     # shape for `--since`.
-    await front.feed.catch_up(client, {**obj(attached.get("cursor")), "sequence": 0})
+    await front.feed.catch_up(client, {**as_obj(attached.get("cursor")), "sequence": 0})
     front.feed.live()
     return front
 
@@ -622,7 +622,7 @@ def _screens_of(wire: Sequence[Any]) -> dict[str, ScreenDefinition]:
     local = {definition.id: definition for definition in LOCAL_SCREENS}
     found: dict[str, ScreenDefinition] = {}
     for entry in wire:
-        schema = ScreenSchema.model_validate(obj(entry))
+        schema = ScreenSchema.model_validate(as_obj(entry))
         mine = local.get(schema.id)
         if mine is None:
             log.debug("ph_app.tui: no local builder for screen %r", schema.id)
@@ -640,7 +640,7 @@ def _asking_approval(host: ModalHost) -> Any:
     """
 
     async def ask(params: dict[str, Any]) -> dict[str, Any]:
-        request = ApprovalRequest.model_validate(obj(params.get("request")))
+        request = ApprovalRequest.model_validate(as_obj(params.get("request")))
         outcome, reason = await host.ask_approval(request)
         # Through the seam's own encoder: `Edited` and `Responded` are frozen
         # dataclasses, and putting one in a frame unencoded is a `TypeError`
@@ -655,7 +655,7 @@ def _asking_question(host: ModalHost) -> Any:
     """`question/ask` → the ask-user modal, in a worker."""
 
     async def ask(params: dict[str, Any]) -> dict[str, Any]:
-        question = UserQuestion.model_validate(obj(params.get("question")))
+        question = UserQuestion.model_validate(as_obj(params.get("question")))
         return {"answer": await host.ask_question(question)}
 
     return ask

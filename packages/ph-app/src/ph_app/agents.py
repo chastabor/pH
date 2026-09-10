@@ -46,7 +46,7 @@ from .console import TypeOption, console, fail, section, selectors_or_exit
 from .daemon.client import DaemonClient, Exchange, connected
 from .daemon.follow import Followed, first_of
 from .protocol import DaemonError, DaemonGone, cursor_text, parse_cursor
-from .wire import describe, message_of, obj, one_line, result_block, seq, text_of_wire
+from .wire import as_obj, as_seq, describe, message_of, one_line, result_block, text_of_wire
 
 __all__ = ["agents_app"]
 
@@ -181,7 +181,7 @@ def _summary(kind: str, event: Mapping[str, Any]) -> str:
     says why a root stopped — which is the thing a person follows a remote run
     to find out.
     """
-    data = obj(event.get("data"))
+    data = as_obj(event.get("data"))
     if kind in ("user/message", "assistant/message"):
         return one_line(text_of_wire(message_of(data).get("content")))
     if kind == "tool/call":
@@ -199,7 +199,7 @@ def _sections(reported: Any) -> list[tuple[str, list[tuple[str, str]]]]:
     is a shape whose meaning is positional, and positional meaning is what a
     reader gets wrong.
 
-    Through `seq`, not `isinstance(…, list)`. That distinction is load-bearing
+    Through `as_seq`, not `isinstance(…, list)`. That distinction is load-bearing
     and `wire`'s docstring says why: a payload is a `list` off disk and a
     **tuple** in memory, so a reader that tests for `list` works on resume and
     silently sees nothing live — which for this section would be a socket
@@ -207,13 +207,13 @@ def _sections(reported: Any) -> list[tuple[str, list[tuple[str, str]]]]:
     """
     return [
         (
-            str(obj(one).get("title", "")),
+            str(as_obj(one).get("title", "")),
             [
-                (str(obj(row).get("label", "")), str(obj(row).get("value", "")))
-                for row in seq(obj(one).get("rows"))
+                (str(as_obj(row).get("label", "")), str(as_obj(row).get("value", "")))
+                for row in as_seq(as_obj(one).get("rows"))
             ],
         )
-        for one in seq(reported)
+        for one in as_seq(reported)
     ]
 
 
@@ -396,7 +396,7 @@ def agents(ctx: typer.Context) -> None:
             row["sessionId"],
             row["status"],
             str(row["lastTurn"] or ""),
-            str(obj(row.get("cursor")).get("sequence", "")),
+            str(as_obj(row.get("cursor")).get("sequence", "")),
             str(row["watchers"]),
         )
     console.print(table)
@@ -492,7 +492,7 @@ def attach(
         # carries, so `from` is 0 here by construction and catch-up is paged from
         # `--since` against the generation the daemon just named.
         attached = await client.call("session/attach", sessionId=session, cursor=None)
-        cursor = _since_cursor(since, obj(attached["cursor"]))
+        cursor = _since_cursor(since, as_obj(attached["cursor"]))
         # The reply *is* a status frame, and for a root that was already idle it is
         # the only one there will ever be — so it goes through the feed rather than
         # being read here. `_status` is then the single place that decides "idle
@@ -622,7 +622,7 @@ def _print_schedules(session: str, rows: list[dict[str, Any]]) -> None:
 def status(session: Annotated[str, SESSION_ARGUMENT]) -> None:
     """What one root is doing, and what the log says about how it got there."""
     row = _ask(lambda client: client.call("session/status", sessionId=session))
-    cursor = obj(row.get("cursor"))
+    cursor = as_obj(row.get("cursor"))
     schedules = row["schedules"]
     console.print(
         section(

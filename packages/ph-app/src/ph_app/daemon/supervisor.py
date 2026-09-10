@@ -54,7 +54,7 @@ from ..protocol import Refusal, cursor_of
 from ..runtime import mounted, open_session
 from ..sessions import recorded_cwd
 from ..shell import run_shell
-from ..wire import obj
+from ..wire import as_obj
 from .cards import CARD_EVENTS, presentation_of
 from .frontend import AskDesk
 from .projections import commands_of, readings_of, screens_of
@@ -321,7 +321,7 @@ class Root:
         through it; a fourth spelling here is the copy that gets missed.
         """
         event = self.session.latest("turn/end")
-        kind = obj(event.data.get("reason")).get("kind") if event is not None else None
+        kind = as_obj(event.data.get("reason")).get("kind") if event is not None else None
         return str(kind) if kind else None
 
     @property
