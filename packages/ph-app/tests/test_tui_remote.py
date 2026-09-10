@@ -27,9 +27,11 @@ import pytest
 from daemon_helpers import running, until
 from tui_helpers import StubHost
 
+from ph.seams.tui_status import StatusReading
 from ph.seams.user_questions import UserQuestion
 from ph.testing import StubAgent
 from ph_app.daemon.follow import Followed
+from ph_app.payloads import StatusFacts
 from ph_app.tui.adapter import TuiEventAdapter
 from ph_app.tui.commands import TUI_VERBS
 from ph_app.tui.remote import DaemonSession, attach_session
@@ -277,12 +279,12 @@ async def test_a_root_parked_on_a_person_is_not_shown_as_running(tmp_path: Path)
     async with running(tmp_path) as daemon:
         front, _ = await _front(daemon)
 
-        front._status({"status": "waiting"})
+        front._status(StatusFacts(status="waiting"))
 
         assert front.state.status == "waiting", "the daemon's word is kept, once"
         assert not front.state.busy, "and the spinner stops"
 
-        front._status({"status": "retrying"})
+        front._status(StatusFacts(status="retrying"))
 
         assert front.state.busy, "a retry is still work in flight"
 
@@ -298,7 +300,9 @@ async def test_the_footer_arrives_beside_the_status(tmp_path: Path) -> None:
     async with running(tmp_path) as daemon:
         front, _ = await _front(daemon)
 
-        front._status({"status": "idle", "readings": [{"text": "12k / 200k", "level": "warning"}]})
+        front._status(
+            StatusFacts(status="idle", readings=[StatusReading(text="12k / 200k", level="warning")])
+        )
 
         assert [(one.text, one.level) for one in front.status_readings()] == [
             ("12k / 200k", "warning")

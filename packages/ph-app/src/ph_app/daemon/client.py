@@ -19,6 +19,9 @@ from typing import Any
 import anyio
 from anyio.abc import ByteStream
 
+from ph.wire import WireModel
+
+from ..params import InitializeParams, MutationParams, PromptParams
 from ..protocol import notification
 from .duplex import Handler, Notification, Peer
 
@@ -92,9 +95,9 @@ class DaemonClient:
         alternative, a flag on each `session/attach`, let one client answer for
         one session and not another, which is not a thing a UI can be.
         """
-        return await self.call("initialize", capabilities=list(capabilities))
+        return await self.call("initialize", InitializeParams(capabilities=list(capabilities)))
 
-    async def mutate(self, method: str, session_id: str, **params: Any) -> dict[str, Any]:
+    async def mutate(self, method: str, params: MutationParams) -> dict[str, Any]:
         """One mutating call, stamped with this client's idempotence key.
 
         Every method in the daemon's `MUTATIONS` table needs a
@@ -107,25 +110,40 @@ class DaemonClient:
 
         The counter is this client's own, which is what makes a retry after a
         reconnect safe by default rather than by discipline.
+
+        Takes the method's own params model (P8-09), typed as `MutationParams`
+        so a verb that is *not* in the daemon's table cannot be sent through the
+        door that claims a key. The stamp goes on by `model_copy` rather than by
+        two more keyword arguments every caller had to remember.
         """
         self._commands += 1
-        return await self.call(
-            method,
-            sessionId=session_id,
-            clientId=self.id,
-            commandId=str(self._commands),
-            **params,
-        )
+        keyed = params.model_copy(update={"client_id": self.id, "command_id": str(self._commands)})
+        return await self.call(method, keyed)
 
     async def prompt(self, session_id: str, text: str) -> dict[str, Any]:
         """Queue a turn. Keyed by `mutate`, which says why."""
-        return await self.mutate("session/prompt", session_id, prompt=text)
+        return await self.mutate("session/prompt", PromptParams(session_id=session_id, prompt=text))
 
-    async def call(self, method: str, **params: Any) -> dict[str, Any]:
-        """One request, awaited to its reply. Raises what the server refused."""
-        return await self.peer.ask(method, params)
+    async def call(
+        self, method: str, params: WireModel | None = None, /, **fields: Any
+    ) -> dict[str, Any]:
+        """One request, awaited to its reply. Raises what the server refused.
 
-    async def notify(self, method: str, **params: Any) -> None:
+        Two doors, and the model is the one to use. `client.call("session/status",
+        SessionParams(session_id=s))` is checked against what the daemon accepts
+        at *this* end, so a misspelled field is a type error here rather than the
+        `invalid_params` refusal P8-07 taught the daemon to send. The `**fields`
+        form stays for callers that have no model to build — a test sending a
+        deliberately malformed frame to exercise a refusal, which is most of what
+        `test_daemon_methods` does, and which a typed-only signature would make
+        unwritable.
+
+        Positional-only, so a model can never be confused with a field named
+        `params` on some future method.
+        """
+        return await self.peer.ask(method, params.to_wire() if params is not None else fields)
+
+    async def notify(self, method: str, params: WireModel | None = None, /, **fields: Any) -> None:
         """Send a request that expects no reply.
 
         `shutdown` is the one that matters: a request-with-reply would have the
@@ -135,7 +153,9 @@ class DaemonClient:
         Waits for room rather than refusing, unlike the daemon's `tell`: a client
         that cannot write has nobody to drop but itself.
         """
-        await self.peer.send(notification(method, params))
+        await self.peer.send(
+            notification(method, params.to_wire() if params is not None else fields)
+        )
 
     async def aclose(self) -> None:
         await self.stream.aclose()

@@ -35,6 +35,10 @@ from typing import Any
 
 from ph.cordis import DEPLOYMENT
 from ph.keys import COMMANDS, CREDENTIALS, TOOLS, TUI_SCREENS, TUI_STATUS
+from ph.llm.types import ToolSchema
+from ph.seams.commands import CommandSchema
+from ph.seams.tui_screens import ScreenSchema
+from ph.seams.tui_status import StatusReading
 
 from ..sessions import SessionSummary, session_summaries
 
@@ -47,8 +51,15 @@ __all__ = [
     "tools_of",
 ]
 
+# **These return models, not their wire dicts (P8-08).** A projection is read by
+# two callers — the method that answers `commands/list`, and the notice that
+# announces a change — and each used to call `.to_wire()` itself, so the shape
+# reaching a client depended on which door it came through. The notice models in
+# `ph_app.payloads` declare `list[CommandSchema]`, so the dump happens once, in
+# `to_wire()`, at the edge.
 
-def readings_of(root: Any) -> list[dict[str, Any]]:
+
+def readings_of(root: Any) -> list[StatusReading]:
     """The footer, as the status seam currently reads it.
 
     A reading is a fold of the log, so this is cheap and correct to recompute; it
@@ -59,10 +70,10 @@ def readings_of(root: Any) -> list[dict[str, Any]]:
     registry = root.ctx.get(TUI_STATUS)
     if registry is None:
         return []
-    return [one.to_wire() for one in registry.readings(root.session)]
+    return list(registry.readings(root.session))
 
 
-def commands_of(root: Any) -> list[dict[str, Any]]:
+def commands_of(root: Any) -> list[CommandSchema]:
     """Every slash command a person may run against this root.
 
     `run` is deliberately not projected: it is a callable, and the client's job
@@ -73,10 +84,10 @@ def commands_of(root: Any) -> list[dict[str, Any]]:
     registry = root.ctx.get(COMMANDS)
     if registry is None:
         return []
-    return [one.schema().to_wire() for one in registry.list()]
+    return [one.schema() for one in registry.list()]
 
 
-def screens_of(root: Any) -> list[dict[str, Any]]:
+def screens_of(root: Any) -> list[ScreenSchema]:
     """The screens this deployment contributes, without their bodies.
 
     `build(session)` stays in the client and runs against the session it
@@ -88,10 +99,10 @@ def screens_of(root: Any) -> list[dict[str, Any]]:
     registry = root.ctx.get(TUI_SCREENS)
     if registry is None:
         return []
-    return [one.schema().to_wire() for one in registry.list()]
+    return [one.schema() for one in registry.list()]
 
 
-def tools_of(root: Any) -> list[dict[str, Any]]:
+def tools_of(root: Any) -> list[ToolSchema]:
     """What the model may call here, as `--mode rpc` already answers it.
 
     `DEPLOYMENT` and not an agent's scope (P6-32): this says what the deployment
@@ -101,7 +112,7 @@ def tools_of(root: Any) -> list[dict[str, Any]]:
     tools = root.ctx.get(TOOLS)
     if tools is None:
         return []
-    return [schema.to_wire() for schema in tools.schemas(scope=DEPLOYMENT)]
+    return list(tools.schemas(scope=DEPLOYMENT))
 
 
 def credentials_of(root: Any, names: list[str]) -> dict[str, bool]:
@@ -121,7 +132,7 @@ def credentials_of(root: Any, names: list[str]) -> dict[str, bool]:
     return {name: bool(service.has(service.reference(name))) for name in names}
 
 
-def browse_of(supervisor: Any) -> list[dict[str, Any]]:
+def browse_of(supervisor: Any) -> list[SessionSummary]:
     """Every session a person could open, stored and live, folded here (P5-14).
 
     **One list from the one process that can see both halves.** The logs are on
@@ -161,4 +172,4 @@ def browse_of(supervisor: Any) -> list[dict[str, Any]]:
         for root_id, root in sorted(held.items())
         if root_id not in known
     )
-    return [row.to_wire() for row in rows]
+    return list(rows)

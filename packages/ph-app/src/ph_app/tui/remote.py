@@ -53,7 +53,6 @@ import logging
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field
-from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -61,18 +60,41 @@ import anyio
 from textual.binding import Binding
 
 from ph.llm.types import AttachmentRef
-from ph.seams.approval import ApprovalRequest, answer_to_wire
+from ph.seams.approval import answer_to_wire
 from ph.seams.attachments import read_for_attach
 from ph.seams.commands import CommandDefinition, CommandSchema, parse_command_line
+from ph.seams.permission_presets import PresetName
 from ph.seams.tui_screens import ScreenDefinition, ScreenSchema
 from ph.seams.tui_status import StatusReading
-from ph.seams.user_questions import UserQuestion
 from ph.session import Session, SessionEvent, SessionHeader
+from ph.wire import WireModel
 
 from ..attach import Tray, stage_bytes
 from ..daemon.client import DaemonClient
 from ..daemon.follow import Followed, first_of
-from ..protocol import DaemonGone
+from ..params import (
+    CommandParams,
+    HeldCredentialsParams,
+    NewSessionParams,
+    PresetParams,
+    ShellParams,
+    StoreCredentialParams,
+    TrustAnswer,
+)
+from ..payloads import (
+    ApprovalAsk,
+    ApprovalAskReply,
+    AttachReply,
+    QuestionAsk,
+    QuestionAskReply,
+    SessionCommandsNotice,
+    SessionEventNotice,
+    SessionScreensNotice,
+    SessionStagedNotice,
+    SessionStatusNotice,
+    StatusFacts,
+)
+from ..protocol import DaemonGone, NoParams, SessionParams
 from ..sessions import SessionSummary
 from ..wire import as_obj, as_seq, view_of
 from .adapter import Frame, TuiEventAdapter
@@ -237,26 +259,25 @@ class DaemonSession:
                 log.exception("ph_app.tui: the adapter refused an event")
         self.host.state_changed()
 
-    def _status(self, params: Mapping[str, Any]) -> None:
+    def _status(self, facts: StatusFacts) -> None:
         """`session.status`, which carries the footer beside it.
 
         Pushed rather than polled because a reading is a fold of the log, so the
         moment worth re-reading them is the moment the agent moved. The TUI's own
         30 Hz tick stays client-local: it exists for the spinner.
+
+        `StatusFacts` is the three shapes that reach here as one type: the attach
+        reply states the route, an `announce` carries the footer, and a root
+        announcing `passivated` has neither. `None` is "this frame does not say",
+        so each field is kept rather than cleared — which is what the four
+        `params.get(...) or self.state.<x>` reads this replaced were spelling.
         """
-        # Read what the frame carries and leave what it does not. Both shapes
-        # reach here — the attach reply and a `session.status` notification — and
-        # they differ honestly: the reply states the route once, and a root
-        # announcing `passivated` or a retry has no footer to send.
-        self.state.provider = str(params.get("provider") or self.state.provider)
-        self.state.model = str(params.get("model") or self.state.model)
-        if "readings" in params:
-            self._readings = [
-                StatusReading.model_validate(as_obj(one)) for one in as_seq(params.get("readings"))
-            ]
-        status = str(params.get("status") or "")
-        if status:
-            self.state.status = status
+        self.state.provider = facts.provider or self.state.provider
+        self.state.model = facts.model or self.state.model
+        if facts.readings is not None:
+            self._readings = list(facts.readings)
+        if facts.status:
+            self.state.status = facts.status
             self._moved.set()
             self._moved = anyio.Event()
         self.host.state_changed()
@@ -268,31 +289,35 @@ class DaemonSession:
         deltas — the whole tray, the whole command list — so each is correct
         whatever order it arrives in and needs no buffer of its own.
         """
-        if method in ("session.event", "session.status"):
+        if method in (SessionEventNotice.METHOD, SessionStatusNotice.METHOD):
             self.feed(method, params)
             return
+        # Read off the raw frame, before any model sees it: "is this mine"
+        # is the one question that must be answered *without* validating,
+        # because a client watching one root receives notices for the
+        # others and parsing them to discard them is the work this skips.
         if params.get("sessionId") != self.session_id:
             return
-        if method == "session.commands":
+        if method == SessionCommandsNotice.METHOD:
+            notice = SessionCommandsNotice.model_validate(params)
             self.remote_commands = [
-                _remote_command(self.client, self.session_id, as_obj(one))
-                for one in as_seq(params.get("commands"))
+                _remote_command(self.client, self.session_id, one) for one in notice.commands
             ]
             self.host.state_changed()
             return
-        if method == "session.screens":
+        if method == SessionScreensNotice.METHOD:
             # Re-wired rather than merged: a screen's routes are a verb *and* a
             # key binding, and the key is registered on the app — so the old
             # ones have to be released before the new list is built.
-            self.screens = _screens_of(as_seq(params.get("screens")))
+            self.screens = _screens_of(SessionScreensNotice.model_validate(params).screens)
             if self.app is not None:
                 self._wire_screens(self.app)
             self.host.state_changed()
             return
-        if method == "session.staged":
+        if method == SessionStagedNotice.METHOD:
             self._staged = Tray()
-            for wire in as_seq(params.get("staged")):
-                self._staged.stage(AttachmentRef.model_validate(as_obj(wire)))
+            for ref in SessionStagedNotice.model_validate(params).staged:
+                self._staged.stage(ref)
             self.host.state_changed()
 
     # ----------------------------------------------------------- projections --
@@ -314,7 +339,7 @@ class DaemonSession:
 
     async def browse_sessions(self) -> list[SessionSummary]:
         """The daemon's own list — stored logs and its live roots, already merged."""
-        reply = await self.client.call("sessions/browse")
+        reply = await self.client.call("sessions/browse", NoParams())
         return [SessionSummary.model_validate(as_obj(one)) for one in as_seq(reply.get("sessions"))]
 
     def credential_held(self, name: str) -> bool:
@@ -325,7 +350,8 @@ class DaemonSession:
 
     async def refresh_credentials(self, names: Sequence[str]) -> None:
         reply = await self.client.call(
-            "credentials/held", sessionId=self.session_id, names=list(names)
+            "credentials/held",
+            HeldCredentialsParams(session_id=self.session_id, names=list(names)),
         )
         self.held = {str(key): bool(value) for key, value in as_obj(reply.get("held")).items()}
 
@@ -369,7 +395,7 @@ class DaemonSession:
         self._spawn(self.client.prompt(self.session_id, text))
 
     def cancel(self) -> None:
-        self._spawn(self.client.call("session/cancel", sessionId=self.session_id))
+        self._spawn(self.client.call("session/cancel", SessionParams(session_id=self.session_id)))
 
     def _spawn(self, work: Any) -> None:
         """Run an awaitable from a sync caller, owned by the app's worker pool so
@@ -402,7 +428,9 @@ class DaemonSession:
         output arrive as `shell/*` events, so the person who typed it reads it
         back off the same log as everybody else.
         """
-        await self.client.mutate("session/shell", self.session_id, command=command)
+        await self.client.mutate(
+            "session/shell", ShellParams(session_id=self.session_id, command=command)
+        )
 
     async def attach(self, paths: Sequence[str]) -> list[AttachmentRef]:
         """Read these files here and stage them on the root.
@@ -465,8 +493,12 @@ class DaemonSession:
             key()
         self._keys = []
 
-    def set_preset(self, name: str) -> None:
-        self._spawn(self.client.mutate("session/preset", self.session_id, preset=name))
+    def set_preset(self, name: PresetName) -> None:
+        self._spawn(
+            self.client.mutate(
+                "session/preset", PresetParams(session_id=self.session_id, preset=name)
+            )
+        )
 
     def store_credential(self, name: str, value: str) -> bool:
         """Hand a secret to the daemon. Never logged, on either side. `True`
@@ -474,7 +506,10 @@ class DaemonSession:
         returns; `False` in process means "nowhere to put it", which over a
         socket `daemon/config` has already answered."""
         self._spawn(
-            self.client.mutate("credentials/store", self.session_id, name=name, value=value)
+            self.client.mutate(
+                "credentials/store",
+                StoreCredentialParams(session_id=self.session_id, name=name, value=value),
+            )
         )
         return True
 
@@ -499,7 +534,7 @@ class DaemonSession:
         shutdown is exactly when it does.
         """
         with suppress(DaemonGone), anyio.move_on_after(2.0):
-            await self.client.call("session/detach", sessionId=self.session_id)
+            await self.client.call("session/detach", SessionParams(session_id=self.session_id))
 
 
 async def attach_session(
@@ -508,7 +543,7 @@ async def attach_session(
     *,
     host: ModalHost,
     cwd: Path | None = None,
-    trust: str = "",
+    trust: TrustAnswer = "",
 ) -> DaemonSession:
     """Start or resume a session on the daemon and catch this client up on it.
 
@@ -525,8 +560,8 @@ async def attach_session(
     login screen asks for them when it opens, which is where the answer is read.
     """
     state = TuiState()
-    client.handlers["approval/ask"] = _asking_approval(host)
-    client.handlers["question/ask"] = _asking_question(host)
+    client.handlers[ApprovalAsk.METHOD] = _asking_approval(host)
+    client.handlers[QuestionAsk.METHOD] = _asking_question(host)
     # `asks` **before** the attach: the desk joins a front end as it attaches, and
     # a client that declared nothing is never asked.
     await client.initialize("asks")
@@ -538,19 +573,20 @@ async def attach_session(
     # attach reply will name, and taking it now is what lets the mirror be built
     # whole instead of re-keyed afterwards.
     created = await client.call(
-        "session/new", sessionId=session_id, cwd=str(cwd) if cwd else None, trust=trust
+        "session/new",
+        NewSessionParams(session_id=session_id, cwd=str(cwd) if cwd else None, trust=trust),
     )
     generation = str(as_obj(created.get("cursor")).get("generation", ""))
 
     replies: dict[str, dict[str, Any]] = {}
 
-    async def fetch(method: str, **params: Any) -> None:
-        replies[method] = await client.call(method, **params)
+    async def fetch(method: str, params: WireModel) -> None:
+        replies[method] = await client.call(method, params)
 
     async with anyio.create_task_group() as tasks:
-        tasks.start_soon(fetch, "daemon/config")
+        tasks.start_soon(fetch, "daemon/config", NoParams())
         for method in ("commands/list", "screens/list"):
-            tasks.start_soon(partial(fetch, method, sessionId=session_id))
+            tasks.start_soon(fetch, method, SessionParams(session_id=session_id))
 
     config = replies["daemon/config"]
     front = DaemonSession(
@@ -563,16 +599,18 @@ async def attach_session(
         host=host,
         config_rows=tuple(as_seq(config.get("rows"))),
         remote_commands=[
-            _remote_command(client, session_id, as_obj(one))
-            for one in as_seq(replies["commands/list"].get("commands"))
+            _remote_command(client, session_id, one)
+            for one in SessionCommandsNotice.model_validate(replies["commands/list"]).commands
         ],
-        screens=_screens_of(as_seq(replies["screens/list"].get("screens"))),
+        screens=_screens_of(SessionScreensNotice.model_validate(replies["screens/list"]).screens),
         generation=int(generation) if generation.isdigit() else None,
     )
     client.peer.on_notify = front.dispatch
     # The attach reply carries the status, the route and the footer, so this is
     # the one frame the front end starts from.
-    attached = await client.call("session/attach", sessionId=session_id)
+    attached = AttachReply.model_validate(
+        await client.call("session/attach", SessionParams(session_id=session_id))
+    )
     # Through the feed, which owns the rule that this reply is the first status
     # frame — the CLI reached for it separately and got a different answer.
     front.feed.seed(attached)
@@ -583,13 +621,13 @@ async def attach_session(
     # until `Session(seed=…)` refused a log that did not start at 0 — which only
     # happens when somebody opens a screen. `ph agents attach` builds the same
     # shape for `--since`.
-    await front.feed.catch_up(client, {**as_obj(attached.get("cursor")), "sequence": 0})
+    await front.feed.catch_up(client, attached.cursor.model_copy(update={"sequence": 0}))
     front.feed.live()
     return front
 
 
 def _remote_command(
-    client: DaemonClient, session_id: str, wire: Mapping[str, Any]
+    client: DaemonClient, session_id: str, schema: CommandSchema
 ) -> CommandDefinition:
     """One of the daemon's commands, with a `run` that actually runs it — there.
 
@@ -597,11 +635,12 @@ def _remote_command(
     `run_command` see one kind of thing and dispatch it one way; which end
     executes a verb is the definition's business, not the caller's.
     """
-    schema = CommandSchema.model_validate(wire)
 
     async def elsewhere(argument: str, _context: Any) -> str | None:
         line = f"/{schema.name} {argument}".rstrip()
-        reply = await client.mutate("session/command", session_id, line=line)
+        reply = await client.mutate(
+            "session/command", CommandParams(session_id=session_id, line=line)
+        )
         shown = reply.get("shown")
         return str(shown) if shown else None
 
@@ -613,7 +652,7 @@ def _remote_command(
     )
 
 
-def _screens_of(wire: Sequence[Any]) -> dict[str, ScreenDefinition]:
+def _screens_of(schemas: Sequence[ScreenSchema]) -> dict[str, ScreenDefinition]:
     """The screens this deployment has *and* this client can draw.
 
     The wire supplies `label`, `order` and `key` — the deployment's own — and the
@@ -621,8 +660,7 @@ def _screens_of(wire: Sequence[Any]) -> dict[str, ScreenDefinition]:
     """
     local = {definition.id: definition for definition in LOCAL_SCREENS}
     found: dict[str, ScreenDefinition] = {}
-    for entry in wire:
-        schema = ScreenSchema.model_validate(as_obj(entry))
+    for schema in schemas:
         mine = local.get(schema.id)
         if mine is None:
             log.debug("ph_app.tui: no local builder for screen %r", schema.id)
@@ -640,13 +678,14 @@ def _asking_approval(host: ModalHost) -> Any:
     """
 
     async def ask(params: dict[str, Any]) -> dict[str, Any]:
-        request = ApprovalRequest.model_validate(as_obj(params.get("request")))
-        outcome, reason = await host.ask_approval(request)
+        asked = ApprovalAsk.model_validate(params)
+        outcome, reason = await host.ask_approval(asked.request)
         # Through the seam's own encoder: `Edited` and `Responded` are frozen
         # dataclasses, and putting one in a frame unencoded is a `TypeError`
         # inside the task group that answers the ask — which the desk reads as
         # "this front end cannot answer" and drops it for.
-        return {"answer": answer_to_wire(outcome), "reason": reason}
+        reply = ApprovalAskReply(answer=answer_to_wire(outcome), reason=reason or "")
+        return reply.to_wire()
 
     return ask
 
@@ -655,7 +694,8 @@ def _asking_question(host: ModalHost) -> Any:
     """`question/ask` → the ask-user modal, in a worker."""
 
     async def ask(params: dict[str, Any]) -> dict[str, Any]:
-        question = UserQuestion.model_validate(as_obj(params.get("question")))
-        return {"answer": await host.ask_question(question)}
+        asked = QuestionAsk.model_validate(params)
+        reply = QuestionAskReply(answer=await host.ask_question(asked.question))
+        return reply.to_wire()
 
     return ask

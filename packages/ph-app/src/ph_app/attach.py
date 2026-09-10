@@ -30,6 +30,7 @@ from .wire import as_obj
 
 if TYPE_CHECKING:  # pragma: no cover - a type, not a dependency
     from .daemon.client import DaemonClient
+from .params import PutAttachmentParams, StageParams
 
 __all__ = ["AttachmentUnavailable", "Tray", "ingest", "prompt_message", "stage_bytes"]
 
@@ -138,11 +139,13 @@ async def stage_bytes(
     """
     put = await client.call(
         "attachment/put",
-        sessionId=session_id,
-        name=name,
-        mime=mime,
-        contentB64=b64encode(content).decode(),
+        PutAttachmentParams(
+            session_id=session_id,
+            name=name,
+            mime=mime,
+            content_b64=b64encode(content).decode(),
+        ),
     )
-    reference = as_obj(put.get("attachment"))
-    await client.mutate("session/stage", session_id, attachment=reference)
-    return AttachmentRef.model_validate(reference)
+    reference = AttachmentRef.model_validate(as_obj(put.get("attachment")))
+    await client.mutate("session/stage", StageParams(session_id=session_id, attachment=reference))
+    return reference

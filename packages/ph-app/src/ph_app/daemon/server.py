@@ -44,9 +44,42 @@ from ph.llm.types import AttachmentRef
 from ph.paths import resolve_roots
 from ph.resources import GRACE_SECONDS
 from ph.seams.attachments import mime_for
+from ph.seams.schedule import Schedule
 from ph.session import now_ms
 from ph.wire import WireModel
 
+from ..params import (
+    CancelScheduleParams,
+    CommandParams,
+    CreateScheduleParams,
+    HeldCredentialsParams,
+    InitializeParams,
+    MutationParams,
+    NewSessionParams,
+    PresetParams,
+    PromptParams,
+    PutAttachmentParams,
+    ShellParams,
+    SnapshotParams,
+    StageParams,
+    StoreCredentialParams,
+    TrustAnswer,
+)
+from ..payloads import (
+    AttachReply,
+    MutationRepeated,
+    RootDescription,
+    RootListing,
+    RootStatusReply,
+    SessionBrowse,
+    SessionCommandsNotice,
+    SessionNotice,
+    SessionReadingsReply,
+    SessionScreensNotice,
+    SessionStagedNotice,
+    SessionToolsReply,
+    SnapshotPage,
+)
 from ..protocol import (
     SNAPSHOT_EVENTS,
     NoParams,
@@ -65,23 +98,6 @@ from .cards import CARD_EVENTS, presentation_of
 from .duplex import Peer
 from .framing import MAX_ATTACHMENT_BYTES, MAX_ATTACHMENT_SIZE
 from .launch import listening
-from .methods import (
-    CancelScheduleParams,
-    CommandParams,
-    CreateScheduleParams,
-    HeldCredentialsParams,
-    InitializeParams,
-    MutationParams,
-    NewSessionParams,
-    PresetParams,
-    PromptParams,
-    PutAttachmentParams,
-    ShellParams,
-    SnapshotParams,
-    StageParams,
-    StoreCredentialParams,
-    TrustAnswer,
-)
 from .projections import (
     browse_of,
     commands_of,
@@ -157,7 +173,10 @@ class Mutation[P: MutationParams]:
 
     params: type[P]
     prepare: Callable[[_Connection, Root, P], Awaitable[Any]]
-    act: Callable[[_Connection, Root, P, Any], Awaitable[dict[str, Any]]]
+    act: Callable[[_Connection, Root, P, Any], Awaitable[Any]]
+    """`Any` because a verb answers with whatever its reply's type is — a model
+    where the reply has one, a dict where it is a per-method shape. `respond`
+    dumps a model at the one point a result becomes a frame."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -355,9 +374,7 @@ class _Connection:
             raise UnknownMethod(f'unknown method "{method}"')
         return await entry.handle(self, parse_params(method, entry.params, params))
 
-    async def _mutate(
-        self, method: str, mutation: Mutation[Any], params: dict[str, Any]
-    ) -> dict[str, Any]:
+    async def _mutate(self, method: str, mutation: Mutation[Any], params: dict[str, Any]) -> Any:
         """Every method that changes a root goes through this one wrapper.
 
         Parse, resolve the root (through `start`, so acting on a passivated one
@@ -369,7 +386,7 @@ class _Connection:
         root = await self.server.supervisor.start(parsed.session_id)
         plan = await mutation.prepare(self, root, parsed)
         if not root.once(_command_key(parsed)):
-            return {**root.describe(), "repeated": True}
+            return MutationRepeated(**root.describe().model_dump())
         return await mutation.act(self, root, parsed, plan)
 
     # --- the methods -----------------------------------------------------------
@@ -396,10 +413,10 @@ class _Connection:
             )
         return capabilities(*CAPABILITIES)
 
-    async def _sessions_list(self, _params: NoParams) -> dict[str, Any]:
-        return {"sessions": self.server.supervisor.describe()}
+    async def _sessions_list(self, _params: NoParams) -> RootListing:
+        return RootListing(sessions=self.server.supervisor.describe())
 
-    async def _new_session(self, params: NewSessionParams) -> dict[str, Any]:
+    async def _new_session(self, params: NewSessionParams) -> RootDescription:
         # `cwd` is the client's, and the daemon is the one that mounts — so
         # it is said here rather than assumed from the daemon's own process,
         # which is somewhere neither the person nor their files are. `or None`
@@ -417,7 +434,7 @@ class _Connection:
             TrustStore(path=trust_path()).trust(Path(cwd))
         return root.describe()
 
-    async def _cancel(self, params: SessionParams) -> dict[str, Any]:
+    async def _cancel(self, params: SessionParams) -> RootDescription:
         # Not a `MUTATIONS` row: cancel is idempotent by construction, and a
         # key would make an honest retry answer `repeated` and leave the turn
         # running. `_root`, not `start`: nothing to stop on a passivated one.
@@ -425,11 +442,11 @@ class _Connection:
         root.agent.cancel(AgentCancelCause(kind="user"), keep_inbox=True)
         return root.describe()
 
-    async def _sessions_browse(self, _params: NoParams) -> dict[str, Any]:
+    async def _sessions_browse(self, _params: NoParams) -> SessionBrowse:
         # Daemon-level, not a `PROJECTIONS` row: it is not about one root.
         # Every root mounts the same profile and so the same store, and which
         # roots are held is the supervisor's own answer.
-        return {"sessions": browse_of(self.server.supervisor)}
+        return SessionBrowse(sessions=browse_of(self.server.supervisor))
 
     async def _daemon_config(self, _params: NoParams) -> dict[str, Any]:
         # The composed profile, which is a property of the *daemon* and not
@@ -449,9 +466,8 @@ class _Connection:
     # root mounted and the append flushed, and a schedule that lives only in
     # a buffer is one a restart forgets.
 
-    async def _schedule_create(self, params: CreateScheduleParams) -> dict[str, Any]:
-        created = await self.server.supervisor.schedule(params.session_id, params.to_schedule())
-        return created.to_wire()
+    async def _schedule_create(self, params: CreateScheduleParams) -> Schedule:
+        return await self.server.supervisor.schedule(params.session_id, params.to_schedule())
 
     async def _schedule_cancel(self, params: CancelScheduleParams) -> dict[str, Any]:
         cancelled = await self.server.supervisor.unschedule(params.session_id, params.schedule_id)
@@ -529,16 +545,16 @@ class _Connection:
 
     async def _act_prompt(
         self, root: Root, params: PromptParams, refs: list[AttachmentRef]
-    ) -> dict[str, Any]:
+    ) -> RootDescription:
         root = await self.server.supervisor.prompt(root.id, params.prompt, attachments=refs)
-        return dict(root.describe())
+        return root.describe()
 
     async def _prepare_stage(self, root: Root, params: StageParams) -> AttachmentRef:
         return self._known(self._store(root), params.attachment)
 
     async def _act_stage(
         self, root: Root, params: StageParams, ref: AttachmentRef
-    ) -> dict[str, Any]:
+    ) -> SessionStagedNotice:
         """Put an attachment in the composer's tray, for every attached UI.
 
         Not appended: un-submitted intent is not an act in the session, which is
@@ -546,9 +562,9 @@ class _Connection:
         because the tray is shared — a chip only the uploader can see is a
         composer nobody else can reason about.
         """
-        staged = [one.to_wire() for one in root.staged.stage(ref)]
-        root.publish("session.staged", {"sessionId": root.id, "staged": staged})
-        return {"sessionId": root.id, "staged": staged}
+        notice = SessionStagedNotice(session_id=root.id, staged=list(root.staged.stage(ref)))
+        root.publish(notice)
+        return notice
 
     async def _prepare_command(self, root: Root, params: CommandParams) -> CommandRegistry:
         registry = root.ctx.get(COMMANDS)
@@ -689,7 +705,7 @@ class _Connection:
             raise NoSuchSession(f'no session "{session_id}"')
         return root
 
-    async def _attach(self, params: SessionParams) -> dict[str, Any]:
+    async def _attach(self, params: SessionParams) -> AttachReply:
         """Subscribe to what happens *next*, and say where that starts.
 
         **Attach does not replay.** Streaming the gap here — one `session.event` frame per
@@ -718,16 +734,13 @@ class _Connection:
         # is never asked. See `test_a_watcher_that_is_not_a_front_end_is_never_asked`.
         if "asks" in self.declared and root.desk is not None:
             root.desk.join(self)
-        return {
-            **root.describe(),
-            # The footer, with the status it belongs to — the same pairing
-            # `session.status` makes, so a client that has just attached draws a
-            # complete one without a second call and without assembling a frame
-            # shape no wire message has.
-            "readings": readings_of(root),
-        }
+        # The footer, with the status it belongs to — the same pairing
+        # `session.status` makes, so a client that has just attached draws a
+        # complete one without a second call and without assembling a frame
+        # shape no wire message has.
+        return AttachReply(**root.describe().model_dump(), readings=readings_of(root))
 
-    async def _snapshot(self, params: SnapshotParams) -> dict[str, Any]:
+    async def _snapshot(self, params: SnapshotParams) -> SnapshotPage:
         """One bounded page of a session's history, and the cursor for the next."""
         root = self._root(params.session_id)
         start = resume_at(root.session, params.cursor)
@@ -746,21 +759,21 @@ class _Connection:
             if event.type in CARD_EVENTS
             and (view := presentation_of(tools, root.session, event)) is not None
         }
-        return {
-            "sessionId": root.id,
-            "events": events,
-            "presentations": presentations,
+        return SnapshotPage(
+            session_id=root.id,
+            events=events,
+            presentations=presentations,
             # Where the read actually began, which is not always where the cursor
             # asked: `resume_at` answers a cursor from another incarnation of the
             # log with 0. Sent rather than left to be inferred from the first
             # event's seq — that inference is `None` for an empty page, and
             # `resume_at`'s own docstring already promises the client will be told.
-            "from": start,
-            "cursor": cursor_of(root.session, start + len(events)).to_wire(),
-            "more": start + len(events) < root.session.seq,
-        }
+            started_at=start,
+            cursor=cursor_of(root.session, start + len(events)),
+            more=start + len(events) < root.session.seq,
+        )
 
-    async def _status(self, params: SessionParams) -> dict[str, Any]:
+    async def _status(self, params: SessionParams) -> RootStatusReply:
         """One root in detail — what `sessions/list` says, and why it says it.
 
         The listing carries what a table needs for every root; this carries what
@@ -770,7 +783,9 @@ class _Connection:
         no other way to be asked.
         """
         root = self._root(params.session_id)
-        return {**root.detail(), "schedules": self.server.supervisor.scheduled(root)}
+        return RootStatusReply(
+            **root.detail().model_dump(), schedules=self.server.supervisor.scheduled(root)
+        )
 
     async def _detach(self, params: SessionParams) -> dict[str, Any]:
         was_attached = params.session_id in self.attached
@@ -784,21 +799,30 @@ class _Connection:
         return {"sessionId": params.session_id, "detached": was_attached}
 
 
-def _projection(
-    key: str, fold: Callable[[Root], list[dict[str, Any]]]
-) -> Callable[[_Connection, SessionParams], Awaitable[dict[str, Any]]]:
-    """A `METHODS` handler that answers `{sessionId, <key>: <fold(root)>}`.
+def _projection[N: SessionNotice](
+    reply: type[N], key: str, fold: Callable[[Root], list[Any]]
+) -> Callable[[_Connection, SessionParams], Awaitable[N]]:
+    """A `METHODS` handler answering one projection with its own reply model.
 
     A factory rather than four near-identical handlers because the four differ
-    only in a key and a function — and the closure holds exactly those two,
+    only in a model, a key and a fold — and the closure holds exactly those,
     nothing of the request. (`Method.handle` receives no method name, so a
     single table-reading handler would have to add that parameter to all 22
     handlers in order to serve four.)
+
+    The reply models are the *same types* the notifications use for two of the
+    four: a client validates `commands/list`'s reply as a `SessionCommandsNotice`
+    because the reply and the notification are one shape. The server was the only
+    party that did not say so, and dumped rows by hand at this return.
     """
 
-    async def handle(connection: _Connection, params: SessionParams) -> dict[str, Any]:
+    async def handle(connection: _Connection, params: SessionParams) -> N:
         root = connection._root(params.session_id)
-        return {"sessionId": root.id, key: fold(root)}
+        # `model_validate` rather than `reply(session_id=…, **{key: …})`: the
+        # field name is a parameter here, so a keyword spread is untypeable —
+        # and validating is what checks that the fold's rows match the model's
+        # declared element type, which is the whole reason the model is named.
+        return reply.model_validate({"session_id": root.id, key: fold(root)})
 
     return handle
 
@@ -824,8 +848,9 @@ handlers spelled it, the third forgot — so it is applied here by construction:
 a method in this table gets the write-ahead guard whether its author thought of
 it or not, and one that is not in it cannot claim to be idempotent by key.
 
-The repeat reply has one shape, `{**describe(), "repeated": True}`, so a client
-branches on one field for every verb. Deliberately absent: `attachment/put`
+The repeat reply has one shape — `MutationRepeated`, a description carrying
+`repeated: true` — so a client branches on one field for every verb.
+Deliberately absent: `attachment/put`
 (content-addressed, so a retry is a no-op already, and its reply *is* the
 reference a repeat must still return) and `session/new` (`start` is idempotent
 by id).
@@ -850,10 +875,14 @@ METHODS: dict[str, Method[Any]] = {
     # See `projections.py`. Rows rather than a third table spliced in: they are
     # `METHODS` rows like any other, and the table they came from was read
     # exactly once, to build this one.
-    "session/readings": Method(SessionParams, _projection("readings", readings_of)),
-    "commands/list": Method(SessionParams, _projection("commands", commands_of)),
-    "screens/list": Method(SessionParams, _projection("screens", screens_of)),
-    "tools/list": Method(SessionParams, _projection("tools", tools_of)),
+    "session/readings": Method(
+        SessionParams, _projection(SessionReadingsReply, "readings", readings_of)
+    ),
+    "commands/list": Method(
+        SessionParams, _projection(SessionCommandsNotice, "commands", commands_of)
+    ),
+    "screens/list": Method(SessionParams, _projection(SessionScreensNotice, "screens", screens_of)),
+    "tools/list": Method(SessionParams, _projection(SessionToolsReply, "tools", tools_of)),
     "schedule/create": Method(CreateScheduleParams, _Connection._schedule_create),
     "schedule/cancel": Method(CancelScheduleParams, _Connection._schedule_cancel),
     "schedule/list": Method(SessionParams, _Connection._schedule_list),

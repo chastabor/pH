@@ -26,6 +26,7 @@ from ph.keys import AGENTS, SESSIONS, TOOLS
 from ph.session import Session, SessionEvent, dumps
 from ph.wire import WireModel
 
+from ..payloads import SessionEventNotice, SessionNotice, SessionStatusNotice
 from ..protocol import (
     Frame,
     NoParams,
@@ -79,8 +80,15 @@ class RpcServer:
         self.out.write(f"{dumps(payload)}\n")
         self.out.flush()
 
-    def _notify(self, method: str, params: dict[str, Any]) -> None:
-        self._write(notification(method, params))
+    def _notify(self, notice: SessionNotice) -> None:
+        """One notification, under the name its payload declares.
+
+        The same two shapes the daemon sends — a client reading this transport
+        and one reading the socket parse the frame the same way, which is what
+        "they are the same protocol" has to mean at the payload as well as at
+        the envelope.
+        """
+        self._write(notification(notice.METHOD, notice.to_wire()))
 
     async def handle(self, request: dict[str, Any]) -> None:
         reply = await respond(request, self._dispatch)
@@ -124,7 +132,7 @@ class RpcServer:
         def emit(source: Session, event: SessionEvent) -> None:
             if source.id != session.id:
                 return
-            self._notify("session.event", {"sessionId": source.id, "event": event.to_wire()})
+            self._notify(SessionEventNotice(session_id=source.id, event=event.to_wire()))
 
         self.ctx.on("session/event", emit)
 
@@ -144,10 +152,10 @@ class RpcServer:
                 ),
             )
             self._agents[session.id] = agent
-        self._notify("session.status", {"sessionId": session.id, "status": "running"})
+        self._notify(SessionStatusNotice(session_id=session.id, status="running"))
         await agent.prompt(params.prompt)
         await self.ctx.require(SESSIONS).flush(session)
-        self._notify("session.status", {"sessionId": session.id, "status": "idle"})
+        self._notify(SessionStatusNotice(session_id=session.id, status="idle"))
         return {"sessionId": session.id, "events": len(session.events)}
 
 

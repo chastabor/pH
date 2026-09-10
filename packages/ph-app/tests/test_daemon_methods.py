@@ -18,8 +18,12 @@ from typing import Any
 import pytest
 from daemon_helpers import running
 
-from ph_app.daemon.methods import MutationParams
 from ph_app.daemon.server import METHODS, MUTATIONS
+from ph_app.params import (
+    MutationParams,
+    NewSessionParams,
+    PromptParams,
+)
 from ph_app.protocol import DaemonError, SessionParams
 
 pytestmark = pytest.mark.anyio
@@ -170,3 +174,58 @@ async def test_an_unknown_method_is_still_its_own_refusal(tmp_path: Any) -> None
         with pytest.raises(DaemonError) as refused:
             await client.call("session/nonsense", sessionId="x")
         assert refused.value.reason == "unknown_method"
+
+
+# ------------------------------------------------------------- typed sends --
+
+
+async def test_a_model_and_the_keyword_form_put_the_same_frame_on_the_wire(
+    tmp_path: Any,
+) -> None:
+    """`call` has two doors and they must agree (P8-09).
+
+    The model door is the one production uses — a misspelled field is a type
+    error at the *sending* end rather than the daemon's `invalid_params` — and
+    the keyword door stays for callers with no model to build, which is most of
+    this file. A difference between them would make every test here evidence
+    about a path nothing ships.
+    """
+    async with running(tmp_path) as daemon:
+        client = await daemon.client()
+        await client.call("session/new", NewSessionParams(session_id="twinned"))
+
+        typed = await client.call("session/status", SessionParams(session_id="twinned"))
+        untyped = await client.call("session/status", sessionId="twinned")
+
+        assert typed == untyped
+
+
+async def test_a_mutation_is_keyed_by_the_client_without_the_caller_saying_so(
+    tmp_path: Any,
+) -> None:
+    """`mutate` stamps `clientId`/`commandId` onto the model.
+
+    The guard it buys is the point: a reconnecting client re-sends what it
+    cannot know landed, and an unkeyed retry runs the effect twice. Before the
+    stamp moved onto the model it was two keyword arguments every verb had to
+    remember — and `prompt` was the only one that did.
+    """
+    async with running(tmp_path) as daemon:
+        client = await daemon.client()
+        await client.call("session/new", NewSessionParams(session_id="keyed"))
+
+        first = await client.mutate(
+            "session/prompt", PromptParams(session_id="keyed", prompt="once")
+        )
+        assert "repeated" not in first
+
+        # The same counter value cannot recur on one client, so a repeat has to
+        # be sent as the frame a reconnect would send.
+        again = await client.call(
+            "session/prompt",
+            sessionId="keyed",
+            prompt="once",
+            clientId=client.id,
+            commandId="1",
+        )
+        assert again["repeated"] is True, "the stamp `mutate` applied is the one that guards"

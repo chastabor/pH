@@ -13,8 +13,8 @@ exactly the deployment Phase 5 exists for.
 request/reply/error shaping and the version; what a transport serves — one session
 over a pipe, or many supervised roots over a socket — is its own. So this module
 owns `respond`, `notify` and the capability block, and each server owns its method
-table — the daemon's parameter models are `ph_app.daemon.methods`, beside the
-table they belong to.
+table — the request params both servers check against are `ph_app.params`, and
+what the daemon emits is `ph_app.payloads`.
 
 **Two kinds of frame, typed two ways (P8-07).** A frame this side *builds* is one
 of the `TypedDict`s below: `notification`, `request` and `respond` return them,
@@ -458,7 +458,13 @@ async def respond(request_frame: dict[str, Any], dispatch: Dispatch) -> ReplyFra
     method = str(request_frame.get("method", ""))
     params = request_frame.get("params") or {}
     try:
-        result = await dispatch(method, params)
+        answer = await dispatch(method, params)
+        # A handler that answers with a model is dumped **here**, at the one
+        # point a result becomes a frame — so every handler either returns its
+        # reply's type or a plain dict, and none of them spells `.to_wire()`
+        # at the `return`. `dumps` cannot encode a model, so this is also the
+        # only place that could have gone wrong.
+        result = answer.to_wire() if isinstance(answer, WireModel) else answer
     except Exception as error:
         failure: ErrorBody = {"code": -32000, "message": str(error)}
         # A refusal a client is expected to *branch* on carries a name rather

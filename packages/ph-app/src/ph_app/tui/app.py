@@ -48,7 +48,7 @@ from textual.timer import Timer
 
 from ph.paths import resolve_roots
 from ph.seams.approval import ApprovalAnswer, ApprovalRequest
-from ph.seams.permission_presets import PRESETS
+from ph.seams.permission_presets import PRESET_NAMES
 from ph.seams.tui_status import StatusReading
 from ph.seams.user_questions import UserQuestion
 from ph.session import new_session_id
@@ -674,9 +674,13 @@ class PHTuiApp(App[str | None]):
 
     def _set_preset(self, chosen: str | None) -> None:
         front = self.front
-        if chosen is None or front is None or chosen not in PRESETS:
+        # The lookup *is* the membership test, and it narrows: `chosen not in
+        # PRESETS` checked the same thing and left the value a `str`, which the
+        # typed send then refused.
+        name = PRESET_NAMES.get(chosen or "")
+        if name is None or front is None:
             return
-        front.set_preset(chosen)
+        front.set_preset(name)
         self.state_changed()
 
     async def action_open_login(self) -> None:

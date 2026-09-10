@@ -21,6 +21,16 @@ is declared below (`ph_app.tui.remote`, `ph_app.agents`, `ph_app.attach`,
 `ph_app.daemon.follow`, `DaemonClient.mutate`'s idempotence pair), and the
 daemon's own tests send nothing else.
 
+**Beside `payloads.py`, not under `daemon/`.** Placing these with the table
+that reads them was the obvious choice and the wrong one: three front-end
+modules build request params — `attach.py` (the human door, whose layering test
+promises it "needs no daemon at all"), `agents.py` and `tui/remote.py` — so an
+owner-based home put a runtime edge from each of them into `ph_app.daemon.*`.
+Direction is the discriminator that was actually needed: what a client *sends*
+here, what the daemon *emits* in `payloads.py`, and the envelope both share in
+`protocol.py`. `FRONT_END_FORBIDS` can then name the whole `ph_app.daemon`
+subpackage instead of listing three modules.
+
 **The camelCase is the alias function's, not the field's.** `session_id` is
 `sessionId` on the wire, `content_b64` is `contentB64`, `schedule_id` is
 `scheduleId` — `ph.wire.wire_alias` in every case, so the spelling a client
@@ -34,7 +44,7 @@ gets pydantic's nested validation for free: a malformed reference is refused as
 `invalid_params` before the store is asked whether it holds one, so
 `attachment_unknown` is reserved for what it says.
 
-@module ph_app.daemon.methods
+@module ph_app.params
 """
 
 from __future__ import annotations
@@ -48,7 +58,7 @@ from ph.seams.permission_presets import PresetName
 from ph.seams.schedule import Schedule, ScheduleKind
 from ph.wire import WireModel
 
-from ..protocol import Cursor, SessionParams
+from .protocol import Cursor, SessionParams
 
 __all__ = [
     "CancelScheduleParams",

@@ -36,6 +36,7 @@ from typing import Any, Protocol
 
 from ph.llm.types import AttachmentRef
 from ph.seams.approval import ApprovalAnswer, ApprovalRequest
+from ph.seams.permission_presets import PresetName
 from ph.seams.tui_status import StatusReading
 from ph.seams.user_questions import UserQuestion
 from ph.session import Session
@@ -172,7 +173,7 @@ class FrontSession(Protocol):
         """
         ...
 
-    def set_preset(self, name: str) -> None:
+    def set_preset(self, name: PresetName) -> None:
         """Switch the permission preset. The service records it; the log carries it."""
         ...
 

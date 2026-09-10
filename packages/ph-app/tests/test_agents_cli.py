@@ -43,6 +43,7 @@ from daemon_helpers import Daemon, private_runtime, serving
 from typer.testing import CliRunner
 
 from ph_app.cli import app
+from ph_app.protocol import Cursor
 from ph_app.wire import as_obj
 
 pytestmark = pytest.mark.anyio
@@ -261,6 +262,11 @@ async def test_status_prints_the_cursor_attach_can_take_back(
         assert re.search(r"--since \d+:\d+", shown.output), shown.output
 
 
+_CURSOR = Cursor(generation="1700000000000", sequence=0)
+"""A position in a log nobody is reading — these tests are about what `seed`
+does with a *status*, and the cursor is only there because a reply carries one."""
+
+
 def test_the_since_parser_stamps_a_bare_sequence_and_keeps_a_full_cursor() -> None:
     """The parse is the protocol's, beside `cursor_of` and `resume_at` which define
     what a cursor is; `rpartition(":")` is unambiguous because the generation is an
@@ -288,9 +294,12 @@ def test_the_cli_refuses_an_unparseable_since_with_exit_two() -> None:
 
     from ph_app.agents import _since_cursor
 
-    assert _since_cursor("7", {"generation": "9"}) == {"generation": "9", "sequence": 7}
+    # Cursors in and out: `--since` is parsed against the position the attach
+    # reply named, and what comes back is what the typed send carries.
+    current = Cursor(generation="9", sequence=40)
+    assert _since_cursor("7", current) == Cursor(generation="9", sequence=7)
     with pytest.raises(typer.Exit) as refused:
-        _since_cursor("seven", {"generation": "9"})
+        _since_cursor("seven", current)
     assert refused.value.exit_code == 2
 
 
@@ -683,9 +692,12 @@ async def test_attach_reads_the_status_it_was_handed_rather_than_asking_again(
     called: list[str] = []
     original = DaemonClient.call
 
-    async def recording(self: Any, method: str, **params: Any) -> Any:
+    async def recording(self: Any, method: str, params: Any = None, /, **fields: Any) -> Any:
+        # `call`'s signature since P8-09: a params model positionally, or the
+        # keyword form for a caller with no model. The spy has to mirror both,
+        # or it drops whichever half it forgot.
         called.append(method)
-        return await original(self, method, **params)
+        return await original(self, method, params, **fields)
 
     monkeypatch.setattr(DaemonClient, "call", recording)
     async with _daemon(tmp_path, monkeypatch):
@@ -714,9 +726,14 @@ def test_the_attach_reply_is_the_first_status_and_stops_an_already_idle_root(
     attach and the *other* branch is the one that never runs.
     """
     from ph_app.agents import _Follow
+    from ph_app.payloads import AttachReply
 
     follow = _Follow(session_id="s", until_idle=True)
-    reply = {"sessionId": "s", "status": "idle", "lastTurn": "error", "cursor": {}}
+    # The reply's own type: `seed` takes an `AttachReply` since P8-08, so a test
+    # that hand-built the dict was pinning a shape the daemon no longer sends.
+    reply = AttachReply(
+        session_id="s", status="idle", last_turn="error", watchers=0, cursor=_CURSOR
+    )
 
     follow.feed.seed(reply)
 
@@ -731,10 +748,11 @@ def test_a_busy_root_is_seeded_without_ending_the_follow(capsys: Any) -> None:
     follow would pass the test above while making `attach` useless. The reply is
     still printed — a person is told what they attached to — and the wait stands."""
     from ph_app.agents import _Follow
+    from ph_app.payloads import AttachReply
 
     follow = _Follow(session_id="s", until_idle=True)
 
-    follow.feed.seed({"sessionId": "s", "status": "busy", "lastTurn": None, "cursor": {}})
+    follow.feed.seed(AttachReply(session_id="s", status="busy", watchers=0, cursor=_CURSOR))
 
     assert not follow.done.is_set()
     assert "busy" in capsys.readouterr().out

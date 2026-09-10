@@ -10,8 +10,9 @@ ran under — which is the question anyone reviewing a session asks first.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Literal, TypeAlias, cast
+from typing import Literal, TypeAlias
 
 from ..cordis import Context, plugin
 from ..keys import APPROVAL, PERMISSION_PRESETS, SANDBOX
@@ -19,7 +20,14 @@ from ..session import Session
 from .approval import ApprovalPolicy
 from .sandbox import SandboxMode
 
-__all__ = ["PRESETS", "PermissionPreset", "PermissionPresetService", "PresetName", "apply"]
+__all__ = [
+    "PRESETS",
+    "PRESET_NAMES",
+    "PermissionPreset",
+    "PermissionPresetService",
+    "PresetName",
+    "apply",
+]
 
 PresetName: TypeAlias = Literal["read-only", "workspace-write", "danger-full-access"]
 
@@ -55,6 +63,15 @@ PRESETS: dict[PresetName, PermissionPreset] = {
     ),
 }
 
+PRESET_NAMES: Mapping[str, PresetName] = {name: name for name in PRESETS}
+"""Every preset name by its own spelling.
+
+A person's pick arrives as a `str` — off a picker, off a wire — and this is the
+membership test that also *narrows* it, so the read site needs no `cast`. Like
+`ph.seams.workspace`'s `_WORKSPACE_KINDS`, and stricter: keyed off `PRESETS`
+rather than `get_args(PresetName)`, so a name the alias allows but no row
+implements is narrowed away here instead of raising a `KeyError` downstream."""
+
 
 @dataclass(slots=True)
 class PermissionPresetService:
@@ -83,8 +100,12 @@ class PermissionPresetService:
     def resolve(self, session: Session | None = None) -> PermissionPreset:
         if session is not None:
             event = session.latest("permission/preset")
-            if event is not None and event.data.get("preset") in PRESETS:
-                return PRESETS[cast(PresetName, event.data["preset"])]
+            # Through the lookup, which is the membership test *and* the
+            # narrowing — the `in PRESETS` / `cast` pair it replaced did the
+            # first and needed the second to say so.
+            name = PRESET_NAMES.get(str(event.data.get("preset", ""))) if event else None
+            if name is not None:
+                return PRESETS[name]
         return PRESETS[self.active]
 
 

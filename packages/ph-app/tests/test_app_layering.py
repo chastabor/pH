@@ -52,6 +52,11 @@ FRONT_END_FORBIDS = ("ph_app.daemon.server", "ph_app.daemon.supervisor")
 Not a weight argument — it is the boundary. A process serving browser tabs talks
 to a daemon over the socket; one that could *mount* a session would be a second
 supervisor holding leases the first one owns.
+
+Two names rather than the subpackage, because a front end *does* import
+`ph_app.daemon.client` — talking to the daemon over the socket is the whole
+arrangement. What it must not reach is the half that mounts. The human door
+below is the one that may name the package, and does.
 """
 
 
@@ -101,7 +106,16 @@ def test_the_human_door_needs_no_daemon_at_all() -> None:
     that has a client rather than only by things that live beside one. Nothing
     tested that guard, and a guard nobody tests is a guard somebody deletes while
     tidying imports.
+
+    **The whole subpackage, because this module needs none of it.** The list was
+    `daemon.client` plus the two above — an allowlist wearing a denylist's
+    clothes, since importing any *other* module under `ph_app.daemon` passed.
+    One did: the request-params models briefly lived at `ph_app.daemon.methods`,
+    so typing `stage_bytes`'s sends put a runtime edge from the human door into
+    the subpackage, and this test could not see it. The models moved to
+    `ph_app.params` — direction places them, not ownership — and naming the
+    package is the promise the docstring above was already making in words.
     """
-    dragged = _dragged_in("ph_app.attach", ("ph_app.daemon.client", *FRONT_END_FORBIDS))
+    dragged = _dragged_in("ph_app.attach", ("ph_app.daemon",))
 
     assert dragged == "[]", f"ph_app.attach dragged in {dragged}"

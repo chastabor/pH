@@ -31,12 +31,26 @@ from typing import Any
 
 import anyio
 
-from ..wire import as_int, as_obj, as_seq
+from ..params import SnapshotParams
+from ..payloads import (
+    AttachReply,
+    SessionEventNotice,
+    SessionStatusNotice,
+    SnapshotPage,
+    StatusFacts,
+)
+from ..protocol import Cursor
+from ..wire import as_int
 from .client import DaemonClient
 
 __all__ = ["Followed", "first_of"]
 
 Sink = Callable[[Sequence[tuple[Mapping[str, Any], Any]], bool], None]
+
+StatusSink = Callable[[StatusFacts], None]
+"""Where a status frame goes. `StatusFacts` and not a mapping, because the three
+shapes that reach it — the attach reply, an `announce`, a bare `passivated` —
+are one type with optional fields rather than three dicts a reader must sniff."""
 """Called with `(event, view)` pairs and whether they are arriving **live**.
 
 The pairs keep the card the daemon rendered *beside* the event, never merged into
@@ -59,7 +73,7 @@ class Followed:
 
     session_id: str
     on_events: Sink
-    on_status: Callable[[Mapping[str, Any]], None]
+    on_status: StatusSink
     """The raw `session.status` params; the caller reads what it wants from them."""
     seen: int = -1
     """The highest seq already shown. **`-1`, not `0`**: a log's first event *is*
@@ -74,14 +88,19 @@ class Followed:
         if self.pending is not None:
             self.pending.append((method, params))
             return
+        # Read off the raw frame, before any model sees it: "is this mine"
+        # is the one question that must be answered *without* validating,
+        # because a client watching one root receives notices for the
+        # others and parsing them to discard them is the work this skips.
         if params.get("sessionId") != self.session_id:
             return
-        if method == "session.status":
-            self.on_status(params)
+        if method == SessionStatusNotice.METHOD:
+            self.on_status(SessionStatusNotice.model_validate(params))
             return
-        if method != "session.event":
+        if method != SessionEventNotice.METHOD:
             return
-        event = as_obj(params.get("event"))
+        notice = SessionEventNotice.model_validate(params)
+        event = notice.event
         at = as_int(event.get("seq", -1))
         if at <= self.seen:
             # Already shown by a snapshot page. Dropped by `seq` rather than by
@@ -89,9 +108,9 @@ class Followed:
             # sources idempotent against each other.
             return
         self.seen = at
-        self.on_events([(event, params.get("presentation"))], True)
+        self.on_events([(event, notice.presentation)], True)
 
-    def seed(self, attached: Mapping[str, Any]) -> None:
+    def seed(self, attached: AttachReply) -> None:
         """Deliver the attach reply as this feed's first status.
 
         The reply is `root.describe()` plus the footer — the *same shape*
@@ -106,7 +125,7 @@ class Followed:
         already-idle cases print in one order instead of two — the difference that
         used to be settled by which side of a race a host landed on.
         """
-        self.on_status(attached)
+        self.on_status(attached.facts())
 
     def live(self) -> None:
         """Catch-up is done: go live, then release what arrived during it."""
@@ -114,7 +133,7 @@ class Followed:
         for method, params in held:
             self(method, params)
 
-    async def catch_up(self, client: DaemonClient, cursor: Any) -> int:
+    async def catch_up(self, client: DaemonClient, cursor: Cursor | None) -> int:
         """Page from `cursor` to the head, one sink call per page.
 
         Paged because `session/snapshot` is the only mechanism that catches up
@@ -136,19 +155,23 @@ class Followed:
         """
         started: int | None = None
         while True:
-            page = await client.call("session/snapshot", sessionId=self.session_id, cursor=cursor)
-            events = [as_obj(wire) for wire in as_seq(page.get("events"))]
+            page = SnapshotPage.model_validate(
+                await client.call(
+                    "session/snapshot",
+                    SnapshotParams(session_id=self.session_id, cursor=cursor),
+                )
+            )
             if started is None:
-                started = int(page.get("from", 0))
+                started = page.started_at
             # Sparse and keyed by seq, which is how the daemon sends it: a page
             # is 2048 events and a turn contributes a handful of cards.
-            views = as_obj(page.get("presentations"))
-            self.on_events([(one, views.get(str(one.get("seq")))) for one in events], False)
-            for event in events:
+            views = page.presentations
+            self.on_events([(one, views.get(str(one.get("seq")))) for one in page.events], False)
+            for event in page.events:
                 self.seen = max(self.seen, as_int(event.get("seq", self.seen)))
-            if not page.get("more"):
+            if not page.more:
                 return started
-            cursor = page.get("cursor")
+            cursor = page.cursor
 
 
 async def first_of(*events: anyio.Event) -> None:

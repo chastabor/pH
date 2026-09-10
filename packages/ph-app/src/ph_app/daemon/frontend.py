@@ -47,6 +47,14 @@ from ph.llm.types import user_text
 from ph.seams.approval import ApprovalAnswer, ApprovalRequest, answer_from_wire
 from ph.seams.user_questions import UserQuestion
 
+from ..payloads import (
+    ApprovalAsk,
+    ApprovalAskReply,
+    AskSettledNotice,
+    QuestionAsk,
+    QuestionAskReply,
+)
+
 __all__ = ["AskDesk"]
 
 log = logging.getLogger("ph_app.daemon.frontend")
@@ -154,20 +162,18 @@ class AskDesk:
         id, or the tool name when there is none — so a question re-posed after a
         restart is recognisably the one the log is still holding open.
         """
-        result = await self._ask(
-            "approval/ask",
-            request.call_id or request.tool_name,
-            {"request": request.to_wire()},
+        ask_id = request.call_id or request.tool_name
+        result = ApprovalAskReply.model_validate(
+            await self._ask(ApprovalAsk(session_id=self.root.id, ask_id=ask_id, request=request))
         )
-        reason = str(result.get("reason") or "")
-        if reason:
+        if reason := result.reason:
             # "No, use the existing helper" redirects a turn where a bare refusal
             # only stops it. Delivered as what it is — user input at the next step
             # boundary — rather than as a new event type, because the log's
             # vocabulary is fixed and a front end inventing one writes a log this
             # build cannot read.
             self.root.agent.steer(user_text(reason))
-        return answer_from_wire(result.get("answer"))
+        return answer_from_wire(result.answer)
 
     async def answer_question(self, question: UserQuestion, _next: Any = None) -> str | None:
         """`ctx.user_questions`' answerer, over the socket.
@@ -179,15 +185,16 @@ class AskDesk:
         second, weaker id scheme (a counter that restarts at 1 after a resume)
         for a value the seam already mints so that it cannot collide.
         """
-        result = await self._ask(
-            "question/ask", str(question.ask_id), {"question": question.to_wire()}
+        result = QuestionAskReply.model_validate(
+            await self._ask(
+                QuestionAsk(session_id=self.root.id, ask_id=str(question.ask_id), question=question)
+            )
         )
-        answer = result.get("answer")
-        return answer if isinstance(answer, str) else None
+        return result.answer
 
     # ------------------------------------------------------------ the ask --
 
-    async def _ask(self, method: str, ask_id: str, params: dict[str, Any]) -> dict[str, Any]:
+    async def _ask(self, ask: ApprovalAsk | QuestionAsk) -> dict[str, Any]:
         """Put one question to every front end and wait for the first answer.
 
         The fan-out has a task group of its own rather than borrowing the root's:
@@ -196,12 +203,12 @@ class AskDesk:
         front ends stop being waited on, and `ask.settled` tells them why.
         """
         pending = PendingAsk(
-            ask_id=ask_id,
-            method=method,
-            params={"sessionId": self.root.id, "askId": ask_id, **params},
+            ask_id=ask.ask_id,
+            method=ask.METHOD,
+            params=ask.to_wire(),
             answered=anyio.Event(),
         )
-        self.asks[ask_id] = pending
+        self.asks[ask.ask_id] = pending
         try:
             async with anyio.create_task_group() as tasks:
                 pending.tasks = tasks
@@ -211,7 +218,7 @@ class AskDesk:
                 tasks.cancel_scope.cancel()
         finally:
             pending.tasks = None
-            self.asks.pop(ask_id, None)
+            self.asks.pop(ask.ask_id, None)
         return pending.answer or {}
 
     async def _deliver(self, who: FrontEnd, pending: PendingAsk) -> None:
@@ -231,11 +238,11 @@ class AskDesk:
             return
         pending.answer = answer
         pending.answered.set()
-        settled = {"sessionId": self.root.id, "askId": pending.ask_id}
+        settled = AskSettledNotice(session_id=self.root.id, ask_id=pending.ask_id)
         for other in list(self.front_ends):
             if other is who:
                 continue
             try:
-                other.notify("ask.settled", settled)
+                other.notify(settled.METHOD, settled.to_wire())
             except Exception:
                 self.front_ends.discard(other)

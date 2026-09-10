@@ -40,12 +40,23 @@ from rich.table import Table
 from ph.lingering import lifetime
 from ph.paths import RuntimeDirError, resolve_roots
 from ph.resources import GRACE_SECONDS
+from ph.seams.schedule import ScheduleKind
 from ph.selectors import Selector, matches_any
 
 from .console import TypeOption, console, fail, section, selectors_or_exit
 from .daemon.client import DaemonClient, Exchange, connected
 from .daemon.follow import Followed, first_of
-from .protocol import DaemonError, DaemonGone, cursor_text, parse_cursor
+from .params import CancelScheduleParams, CreateScheduleParams
+from .payloads import AttachReply, StatusFacts
+from .protocol import (
+    Cursor,
+    DaemonError,
+    DaemonGone,
+    NoParams,
+    SessionParams,
+    cursor_text,
+    parse_cursor,
+)
 from .wire import as_obj, as_seq, describe, message_of, one_line, result_block, text_of_wire
 
 __all__ = ["agents_app"]
@@ -271,21 +282,21 @@ the silent omission the fallback in `_summary` exists to prevent.
 """
 
 
-def _since_cursor(raw: str, current: Mapping[str, Any]) -> dict[str, Any]:
+def _since_cursor(raw: str, current: Cursor) -> Cursor:
     """`--since` as a cursor the daemon can check, or exit 2.
 
     The parse is `ph_app.protocol.parse_cursor`, beside `cursor_of` and
     `resume_at` which define what a cursor is; what is the CLI's own is the
     refusal, and its code.
     """
-    cursor = parse_cursor(raw, current)
+    cursor = parse_cursor(raw, current.to_wire())
     if cursor is None:
         fail(
             f"[red]--since {raw!r} is not a cursor; use SEQ or GENERATION:SEQ as "
             "`ph agents status` prints it[/red]",
             code=2,
         )
-    return cursor.to_wire()
+    return cursor
 
 
 @dataclass(slots=True)
@@ -324,9 +335,8 @@ class _Follow:
         # a record read from a page reads the same as one that just arrived.
         self.write(event for event, _view in pairs)
 
-    def _status(self, params: Mapping[str, Any]) -> None:
-        status = params.get("status")
-        last = params.get("lastTurn")
+    def _status(self, facts: StatusFacts) -> None:
+        status, last = facts.status, facts.last_turn
         # Named when it is not the ordinary ending: `idle` after an error turn
         # reads as success, and this line is what `--until-idle` stops on.
         ended = f" · last turn {last}" if status == "idle" and last and last != "completed" else ""
@@ -380,7 +390,7 @@ def agents(ctx: typer.Context) -> None:
     """List the roots this daemon is running."""
     if ctx.invoked_subcommand is not None:
         return
-    listed = _ask(lambda client: client.call("sessions/list"))
+    listed = _ask(lambda client: client.call("sessions/list", NoParams()))
     rows = listed["sessions"]
     if not rows:
         console.print("[dim]no roots running[/dim]")
@@ -491,8 +501,10 @@ def attach(
         # No cursor: the generation a snapshot cursor needs is what this reply
         # carries, so `from` is 0 here by construction and catch-up is paged from
         # `--since` against the generation the daemon just named.
-        attached = await client.call("session/attach", sessionId=session)
-        cursor = _since_cursor(since, as_obj(attached["cursor"]))
+        attached = AttachReply.model_validate(
+            await client.call("session/attach", SessionParams(session_id=session))
+        )
+        cursor = _since_cursor(since, attached.cursor)
         # The reply *is* a status frame, and for a root that was already idle it is
         # the only one there will ever be — so it goes through the feed rather than
         # being read here. `_status` is then the single place that decides "idle
@@ -506,9 +518,9 @@ def attach(
             # `asked` events of *this* incarnation were discarded as already
             # seen. Advancing from what arrives shows the fallback instead.
             started = await follow.feed.catch_up(client, cursor)
-            if started < int(cursor["sequence"]):
+            if started < cursor.sequence:
                 console.print(
-                    f"[yellow]history starts at {started}, not {cursor['sequence']}: --since "
+                    f"[yellow]history starts at {started}, not {cursor.sequence}: --since "
                     "named a different incarnation of this log, so nothing was "
                     "skipped[/yellow]"
                 )
@@ -519,7 +531,7 @@ def attach(
             # us has already dropped every subscription, and asking it to would
             # park on a reply nobody is left to send.
             if not client.closed.is_set():
-                await client.call("session/detach", sessionId=session)
+                await client.call("session/detach", SessionParams(session_id=session))
         if client.closed.is_set():
             raise DaemonGone
         if follow.last_turn == "error":
@@ -552,16 +564,20 @@ def schedule(
     """
     # The chosen timing carried as the pair it becomes, rather than three bools
     # whose identity has to be reconstructed further down by a ternary chain.
-    timings = [
-        (kind, str(value))
-        for kind, value in (("once", at), ("interval", every), ("cron", cron))
-        if value
-    ]
+    # Keyed by the literal, so the comprehension keeps it: a bare tuple of pairs
+    # widens the three to `str`, and `schedule/create` takes the `ScheduleKind`
+    # the seam declares — without the annotation on the *source*, the CLI hands
+    # the typed send a value the daemon's own model would then refuse.
+    offered: dict[ScheduleKind, int | str | None] = {"once": at, "interval": every, "cron": cron}
+    timings = [(kind, str(value)) for kind, value in offered.items() if value]
     if cancel:
         if timings:
             raise typer.BadParameter("--cancel takes no timing flag")
         outcome = _ask(
-            lambda client: client.call("schedule/cancel", sessionId=session, scheduleId=cancel)
+            lambda client: client.call(
+                "schedule/cancel",
+                CancelScheduleParams(session_id=session, schedule_id=cancel),
+            )
         )
         if not outcome["cancelled"]:
             fail(f"[red]no schedule {cancel!r} on {session}[/red]")
@@ -571,7 +587,9 @@ def schedule(
     if len(timings) > 1:
         raise typer.BadParameter("one of --at, --every or --cron, not several")
     if not timings:
-        listed = _ask(lambda client: client.call("schedule/list", sessionId=session))
+        listed = _ask(
+            lambda client: client.call("schedule/list", SessionParams(session_id=session))
+        )
         _print_schedules(session, listed["schedules"])
         return
     if not prompt:
@@ -581,11 +599,13 @@ def schedule(
     created = _ask(
         lambda client: client.call(
             "schedule/create",
-            sessionId=session,
-            scheduleId=schedule_id or f"sch-{secrets.token_hex(4)}",
-            kind=kind,
-            spec=spec,
-            prompt=prompt,
+            CreateScheduleParams(
+                session_id=session,
+                schedule_id=schedule_id or f"sch-{secrets.token_hex(4)}",
+                kind=kind,
+                spec=spec,
+                prompt=prompt,
+            ),
         )
     )
     console.print(f"[dim]scheduled {created['id']} · {kind} {spec}[/dim]")
@@ -621,7 +641,7 @@ def _print_schedules(session: str, rows: list[dict[str, Any]]) -> None:
 @agents_app.command()
 def status(session: Annotated[str, SESSION_ARGUMENT]) -> None:
     """What one root is doing, and what the log says about how it got there."""
-    row = _ask(lambda client: client.call("session/status", sessionId=session))
+    row = _ask(lambda client: client.call("session/status", SessionParams(session_id=session)))
     cursor = as_obj(row.get("cursor"))
     schedules = row["schedules"]
     console.print(
@@ -653,7 +673,7 @@ def doctor() -> None:
     from the running process, so what this reports is what is *in force* rather
     than what this invocation's flags and environment would have produced.
     """
-    facts = _ask(lambda client: client.call("daemon/status"))
+    facts = _ask(lambda client: client.call("daemon/status", NoParams()))
     passivate = facts["passivateAfter"]
     console.print(
         section(
@@ -694,7 +714,7 @@ def shutdown() -> None:
     """
 
     async def work(client: DaemonClient) -> None:
-        await client.notify("shutdown")
+        await client.notify("shutdown", NoParams())
         # The same budget teardown itself is bounded by, plus room for the
         # unwinding around it: a daemon still inside its grace period has not
         # failed to stop, it is stopping.

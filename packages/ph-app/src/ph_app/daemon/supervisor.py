@@ -50,6 +50,16 @@ from ph.session import Session, SessionEvent, now_ms
 from ph.tools.errors import error_message
 
 from ..attach import Tray, prompt_message
+from ..payloads import (
+    RootDescription,
+    RootDetail,
+    SessionCommandsNotice,
+    SessionEventNotice,
+    SessionNotice,
+    SessionScreensNotice,
+    SessionStagedNotice,
+    SessionStatusNotice,
+)
 from ..protocol import Refusal, cursor_of
 from ..runtime import mounted, open_session
 from ..sessions import recorded_cwd
@@ -256,16 +266,26 @@ class Root:
     def unsubscribe(self, subscriber: Subscriber) -> None:
         self.subscribers.discard(subscriber)
 
-    def publish(self, event: str, payload: dict[str, Any]) -> None:
+    def publish(self, notice: SessionNotice) -> None:
         """Tell every watcher. A failing subscriber is dropped, not raised.
 
         A client whose socket died — or one that cannot keep up — must not take the root
         down with it, which is the inversion this row exists to prevent. Dropping happens
         *here*, where the subscriber list is, so the policy has one owner.
+
+        The notice carries the name it travels under (`SessionNotice.METHOD`), so
+        the method and its payload cannot disagree — they were two arguments at
+        eight call sites with nothing checking they matched.
         """
+        # Dumped **once**, above the loop, and the same dict handed to every
+        # watcher — which is what the hand-built payload did before it became a
+        # model. Inside the loop it was a re-serialize per subscriber: measured
+        # 3.70 / 5.00 / 6.26 ms for one turn at 1 / 3 / 5 watchers against a flat
+        # 3.7 hoisted. A fan-out must not be linear in the fan.
+        wire = notice.to_wire()
         for subscriber in list(self.subscribers):
             try:
-                subscriber(event, payload)
+                subscriber(notice.METHOD, wire)
             except Exception:
                 log.debug("ph_app.daemon: dropping a watcher of root %s", self.id)
                 self.subscribers.discard(subscriber)
@@ -399,7 +419,7 @@ class Root:
             },
         )
         self.recovery = replace(self.recovery, attempts=self.recovery.attempts + 1)
-        self.publish("session.status", {"sessionId": self.id, "status": "retrying"})
+        self.publish(SessionStatusNotice(session_id=self.id, status="retrying"))
 
     def recovered(self) -> None:
         """A retry worked, so the ladder clears — and says so in the log.
@@ -412,7 +432,7 @@ class Root:
         """
         self.session.append(RECOVERED, {"afterAttempts": self.recovery.attempts})
         self.recovery = Recovery(attempts=0, failed=False)
-        self.publish("session.status", {"sessionId": self.id, "status": self.status})
+        self.publish(SessionStatusNotice(session_id=self.id, status=self.status))
 
     def idle_for(self, now: int) -> int:
         """Milliseconds since anything happened in this session (P5-05).
@@ -440,7 +460,7 @@ class Root:
         a crash.
         """
         self.session.append(PASSIVATED, {"idleMs": idle_ms})
-        self.publish("session.status", {"sessionId": self.id, "status": "passivated"})
+        self.publish(SessionStatusNotice(session_id=self.id, status="passivated"))
 
     def unreachable(self, note: dict[str, Any]) -> None:
         """Record that the supervisor lost the socket it was bound to (P5-11).
@@ -467,10 +487,10 @@ class Root:
         """
         self.session.append(FAILED, {"attempts": attempts, "reason": reason})
         self.recovery = replace(self.recovery, failed=True)
-        self.publish("session.status", {"sessionId": self.id, "status": "failed"})
+        self.publish(SessionStatusNotice(session_id=self.id, status="failed"))
         log.error("ph_app.daemon: root %s failed after %d attempts — %s", self.id, attempts, reason)
 
-    def describe(self) -> dict[str, Any]:
+    def describe(self) -> RootDescription:
         """What a client is told about this root.
 
         One name per fact: `rootId` and `sessionId` were the same string (a root
@@ -478,23 +498,23 @@ class Root:
         client picking which of two spellings was authoritative.
         """
         options = getattr(self.agent, "options", None)
-        return {
-            "sessionId": self.session.id,
-            "status": self.status,
-            "lastTurn": self.last_turn,
-            "watchers": len(self.subscribers),
-            "cursor": cursor_of(self.session).to_wire(),
+        return RootDescription(
+            session_id=self.session.id,
+            status=self.status,
+            last_turn=self.last_turn,
+            watchers=len(self.subscribers),
+            cursor=cursor_of(self.session),
             # Which route this root is on. A client could otherwise not know
             # until the first turn, because the only other statement of it is
             # `request/context` — appended when a request is *built*. A front end
             # that has just attached has a footer to draw now, and "no model"
             # over a socket where the in-process one said `fake-1` was the whole
             # of a snapshot diff nobody could read.
-            "provider": getattr(options, "provider", "") or "",
-            "model": getattr(options, "model", "") or "",
-        }
+            provider=getattr(options, "provider", "") or "",
+            model=getattr(options, "model", "") or "",
+        )
 
-    def detail(self) -> dict[str, Any]:
+    def detail(self) -> RootDetail:
         """`describe`, plus what a client asking about *one* root wants.
 
         Here rather than assembled at the wire edge, which is where the two
@@ -504,11 +524,11 @@ class Root:
         ladder to `"retrying"` or `"failed"`, and this is where the rungs behind
         that answer are — so a new one is added once.
         """
-        return {
-            **self.describe(),
-            "attempts": self.recovery.attempts,
-            "failed": self.recovery.failed,
-        }
+        return RootDetail(
+            **self.describe().model_dump(),
+            attempts=self.recovery.attempts,
+            failed=self.recovery.failed,
+        )
 
 
 @dataclass(slots=True)
@@ -642,31 +662,35 @@ class Supervisor:
                 # watchers is work thrown away per event.
                 if not root.subscribers:
                     return
-                payload: dict[str, Any] = {
-                    "sessionId": root.id,
-                    # `thaw=False`: this payload's only destination is `dumps`,
-                    # which handles the frozen forms, and thawing deep-copies the
-                    # tree for nobody.
-                    "event": event.to_wire(thaw=False),
-                }
                 # Beside the event, never inside it: a rendered card is derived
                 # from the definitions mounted right now, and an event is what
                 # the log said. Gated *here* rather than inside `presentation_of`
                 # because this runs per appended event — every streamed chunk —
                 # and Python evaluates `ctx.get(TOOLS)` before the function
-                # that would have rejected the event anyway.
-                if event.type in CARD_EVENTS:
-                    view = presentation_of(ctx.get(TOOLS), source, event)
-                    if view is not None:
-                        payload["presentation"] = view
-                root.publish("session.event", payload)
+                # that would have rejected the event anyway. Resolved *before*
+                # the notice so a carded event costs one model rather than a
+                # model plus a `model_copy` of it.
+                view = (
+                    presentation_of(ctx.get(TOOLS), source, event)
+                    if event.type in CARD_EVENTS
+                    else None
+                )
+                root.publish(
+                    SessionEventNotice(
+                        session_id=root.id,
+                        # `thaw=False`: this payload's only destination is
+                        # `dumps`, which handles the frozen forms, and thawing
+                        # deep-copies the tree for nobody.
+                        event=event.to_wire(thaw=False),
+                        presentation=view,
+                    )
+                )
 
             def verbs() -> None:
                 """The command set changed, so say so. See `announce` above."""
                 if root.subscribers:
                     root.publish(
-                        "session.commands",
-                        {"sessionId": root.id, "commands": commands_of(root)},
+                        SessionCommandsNotice(session_id=root.id, commands=commands_of(root))
                     )
 
             def drew() -> None:
@@ -686,10 +710,7 @@ class Supervisor:
                 applying a delta.
                 """
                 if root.subscribers:
-                    root.publish(
-                        "session.screens",
-                        {"sessionId": root.id, "screens": screens_of(root)},
-                    )
+                    root.publish(SessionScreensNotice(session_id=root.id, screens=screens_of(root)))
 
             def announce(agent_: Any, status: str) -> None:
                 # Guarded like `relay` above, and for the same reason: reading
@@ -698,22 +719,21 @@ class Supervisor:
                 # skip.
                 if agent_ is agent and root.subscribers:
                     root.publish(
-                        "session.status",
-                        {
-                            "sessionId": root.id,
-                            "status": status,
+                        SessionStatusNotice(
+                            session_id=root.id,
+                            status=status,
                             # The agent's own account of the turn that just ended
                             # (P5-04): `idle` alone reads as success, and this is
                             # the moment a client waiting on idle decides.
-                            "lastTurn": root.last_turn,
+                            last_turn=root.last_turn,
                             # Beside the status because they change together and
                             # for the same reason: every reading is a fold of
                             # this log, so the moment worth re-reading them is
                             # the moment the agent moved. A client polling them
                             # on its own clock would ask constantly and learn
                             # nothing between turns.
-                            "readings": readings_of(root),
-                        },
+                            readings=readings_of(root),
+                        )
                     )
 
             # The session's own feed, not the store-wide `session/event` bus: a
@@ -1185,7 +1205,7 @@ class Supervisor:
         # it — see `Tray`.
         taken = root.staged.take()
         if taken:
-            root.publish("session.staged", {"sessionId": root.id, "staged": []})
+            root.publish(SessionStagedNotice(session_id=root.id))
         message = prompt_message(text, [*attachments, *taken])
         if reach == "next-turn":
             root.agent.followup(message)
@@ -1218,7 +1238,7 @@ class Supervisor:
         result = await run_shell(shell, root.session, root.agent, command)
         return {"sessionId": root.id, "exitCode": result.exit_code, "ok": result.exit_code == 0}
 
-    def describe(self) -> list[dict[str, Any]]:
+    def describe(self) -> list[RootDescription]:
         return [root.describe() for root in self.roots.values()]
 
     def passivatable(self, root: Root, *, now: int, after: float) -> bool:
