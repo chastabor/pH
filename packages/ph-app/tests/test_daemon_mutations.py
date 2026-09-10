@@ -24,7 +24,7 @@ from daemon_helpers import running, until
 from ph.llm.types import AttachmentRef
 from ph.seams.commands import CommandDefinition
 from ph.session import now_ms
-from ph_app.daemon.server import MUTATIONS, PROJECTIONS
+from ph_app.daemon.server import METHODS, MUTATIONS
 from ph_app.protocol import DaemonError
 
 pytestmark = pytest.mark.anyio
@@ -97,7 +97,11 @@ def test_every_mutation_has_a_case_here_and_no_projection_is_one() -> None:
     idempotence guard that makes its second call return no data.
     """
     assert set(CASES) == set(MUTATIONS)
-    assert not set(MUTATIONS) & set(PROJECTIONS)
+    # `METHODS` is everything that is not a mutation — the projections included,
+    # since they became rows there. A read in both tables would be dispatched as
+    # a mutation and handed an idempotence guard that makes its second call
+    # return no data.
+    assert not set(MUTATIONS) & set(METHODS)
 
 
 @pytest.mark.parametrize("method", sorted(MUTATIONS))

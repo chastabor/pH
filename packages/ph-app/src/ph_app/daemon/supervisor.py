@@ -338,10 +338,6 @@ class Root:
         """
         return str(self.session.header.created_at)
 
-    def cursor(self) -> dict[str, Any]:
-        """Where a client that has seen everything should resume from."""
-        return {"generation": self.generation, "sequence": self.session.seq}
-
     def accepted(self, command: str) -> bool:
         """Whether this exact command already ran for this client.
 
@@ -487,7 +483,7 @@ class Root:
             "status": self.status,
             "lastTurn": self.last_turn,
             "watchers": len(self.subscribers),
-            "cursor": cursor_of(self.session),
+            "cursor": cursor_of(self.session).to_wire(),
             # Which route this root is on. A client could otherwise not know
             # until the first turn, because the only other statement of it is
             # `request/context` — appended when a request is *built*. A front end

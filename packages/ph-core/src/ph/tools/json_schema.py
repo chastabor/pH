@@ -126,13 +126,12 @@ def validate_json_schema_value(schema: type[BaseModel] | dict[str, Any], value: 
     if isinstance(schema, type) and issubclass(schema, BaseModel):
         from pydantic import ValidationError
 
+        from ..wire import validation_errors
+
         try:
             schema.model_validate(value)
         except ValidationError as error:
-            return [
-                f"{'.'.join(str(part) for part in item['loc']) or '<root>'}: {item['msg']}"
-                for item in error.errors()
-            ]
+            return validation_errors(error)
         return []
     violations: list[str] = []
     _validate(schema, value, "", schema, violations)

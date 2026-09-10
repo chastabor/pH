@@ -285,7 +285,7 @@ def _since_cursor(raw: str, current: Mapping[str, Any]) -> dict[str, Any]:
             "`ph agents status` prints it[/red]",
             code=2,
         )
-    return cursor
+    return cursor.to_wire()
 
 
 @dataclass(slots=True)
@@ -491,7 +491,7 @@ def attach(
         # No cursor: the generation a snapshot cursor needs is what this reply
         # carries, so `from` is 0 here by construction and catch-up is paged from
         # `--since` against the generation the daemon just named.
-        attached = await client.call("session/attach", sessionId=session, cursor=None)
+        attached = await client.call("session/attach", sessionId=session)
         cursor = _since_cursor(since, as_obj(attached["cursor"]))
         # The reply *is* a status frame, and for a root that was already idle it is
         # the only one there will ever be — so it goes through the feed rather than

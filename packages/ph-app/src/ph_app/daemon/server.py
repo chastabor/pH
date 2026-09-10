@@ -31,7 +31,7 @@ from binascii import Error as BinasciiError
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import anyio
 from anyio.abc import ByteStream
@@ -44,15 +44,19 @@ from ph.llm.types import AttachmentRef
 from ph.paths import resolve_roots
 from ph.resources import GRACE_SECONDS
 from ph.seams.attachments import mime_for
-from ph.seams.schedule import Schedule
 from ph.session import now_ms
+from ph.wire import WireModel
 
 from ..protocol import (
     SNAPSHOT_EVENTS,
+    NoParams,
     Refusal,
     SeamAbsent,
+    SessionParams,
+    UnknownMethod,
     capabilities,
     cursor_of,
+    parse_params,
     resume_at,
 )
 from ..shell import shell_of
@@ -61,6 +65,23 @@ from .cards import CARD_EVENTS, presentation_of
 from .duplex import Peer
 from .framing import MAX_ATTACHMENT_BYTES, MAX_ATTACHMENT_SIZE
 from .launch import listening
+from .methods import (
+    CancelScheduleParams,
+    CommandParams,
+    CreateScheduleParams,
+    HeldCredentialsParams,
+    InitializeParams,
+    MutationParams,
+    NewSessionParams,
+    PresetParams,
+    PromptParams,
+    PutAttachmentParams,
+    ShellParams,
+    SnapshotParams,
+    StageParams,
+    StoreCredentialParams,
+    TrustAnswer,
+)
 from .projections import (
     browse_of,
     commands_of,
@@ -70,7 +91,13 @@ from .projections import (
     tools_of,
 )
 from .recovery import EPHEMERAL_QUIET, PASSIVATE_AFTER, WAKE_WITHIN
-from .supervisor import NON_GUARANTEES, Supervisor
+from .supervisor import NON_GUARANTEES, Root, Supervisor
+
+if TYPE_CHECKING:
+    from ph.seams.attachments import AttachmentStore
+    from ph.seams.commands import CommandRegistry
+    from ph.seams.credentials import CredentialService
+    from ph.seams.permission_presets import PermissionPresetService
 
 __all__ = ["DaemonServer", "serve"]
 
@@ -109,40 +136,52 @@ roots walked.
 
 
 @dataclass(frozen=True, slots=True)
-class Mutation:
-    """One method that changes a root: how to validate it, then how to do it.
+class Mutation[P: MutationParams]:
+    """One method that changes a root: what it takes, how to validate it, how to do it.
 
     Two halves rather than one body, and the seam is the idempotence key. The
     daemon claims the key *between* them — after `prepare` has had its chance to
     refuse, before `act` has had its chance to do anything — so a refusal never
     consumes a retry and a crash never loses one. Both halves receive the
-    connection, the root and the raw params; `prepare` hands `act` whatever it
-    resolved, so a seam is looked up once and a refusal happens before any
-    record is written.
+    connection, the root and the **parsed** params; `prepare` hands `act`
+    whatever it resolved, so a seam is looked up once and a refusal happens
+    before any record is written.
+
+    `params` is the model the wire dict is checked against, and the check is the
+    wrapper's first move — before `start` resolves a root — so a malformed call
+    never mounts anything. Generic in it so each half is typed against its own
+    method: `_act_prompt` reads `.prompt` and `.attachments`, and a half that
+    read a field its method does not carry is a type error rather than a
+    `KeyError` at the first real call.
     """
 
-    prepare: Callable[[Any, Any, dict[str, Any]], Awaitable[Any]]
-    act: Callable[[Any, Any, dict[str, Any], Any], Awaitable[dict[str, Any]]]
+    params: type[P]
+    prepare: Callable[[_Connection, Root, P], Awaitable[Any]]
+    act: Callable[[_Connection, Root, P, Any], Awaitable[dict[str, Any]]]
 
 
-PROJECTIONS: dict[str, tuple[str, Any]] = {
-    "session/readings": ("readings", readings_of),
-    "commands/list": ("commands", commands_of),
-    "screens/list": ("screens", screens_of),
-    "tools/list": ("tools", tools_of),
-}
-"""Method → (reply key, fold). Every one is `{sessionId, <key>: <fold(root)>}`."""
+@dataclass(frozen=True, slots=True)
+class Method[P: WireModel]:
+    """One method that reads, or acts without an idempotence key.
+
+    The same shape as `Mutation` minus the two-halves discipline, for the same
+    reason: a row names its params model beside its handler, so the handler is
+    typed against what the wire may carry and the *set* of methods is a value a
+    test can hold against the documented vocabulary — the argument
+    `tui/adapter.py`'s `HANDLERS` makes about event types.
+    """
+
+    params: type[P]
+    handle: Callable[[_Connection, P], Awaitable[Any]]
 
 
-def _command_key(params: dict[str, Any]) -> str:
+def _command_key(params: MutationParams) -> str:
     """A client's idempotence key, joined at the wire edge and only here.
 
     Two mutating methods take one now — `session/prompt` and `session/command` —
     and the f-string was written in both, which is what a comment three lines
     above one of them already claimed was not the case."""
-    command_id = str(params.get("commandId", ""))
-    client_id = str(params.get("clientId", ""))
-    return f"{client_id}:{command_id}" if command_id else ""
+    return f"{params.client_id}:{params.command_id}" if params.command_id else ""
 
 
 CAPABILITIES = (
@@ -178,12 +217,6 @@ class DaemonUnavailable(Refusal):
     """
 
     code = "daemon_unavailable"
-
-
-class UnknownMethod(Refusal):
-    """This server does not serve that name."""
-
-    code = "unknown_method"
 
 
 class AttachmentTooLarge(Refusal):
@@ -303,146 +336,146 @@ class _Connection:
         session here, and the dsh client already ships against these names. The
         supervisory additions (`daemon/hello`, `session/attach`) are declared in
         the capability block rather than inferred from which socket answered.
+
+        **Two tables, not a chain (P8-07).** Every method is a row naming its
+        params model and its handler — `MUTATIONS` for the ones that change a
+        root under an idempotence key, `METHODS` for everything else — so the
+        vocabulary is a value a test holds against the documented list, an
+        unknown method is a missed lookup rather than the last `else`, and each
+        handler receives its own parsed type. That last point is what makes the
+        handlers typeable at all: one function reading `params["sessionId"]`
+        under twenty-one `if`s could not give each branch a different static
+        type without a cast per branch, which is a dict with extra steps.
         """
-        supervisor = self.server.supervisor
-        if method in ("initialize", "daemon/hello"):
-            # A property of the *client*, so it is said once here rather than
-            # per-attach: whether a UI can put a modal in front of a person does
-            # not vary by which session it is watching, and a per-attach flag let
-            # the same client claim it for one root and not another — two answers
-            # to a question with one true answer.
-            self.declared = frozenset(str(name) for name in params.get("capabilities") or ())
-            # Named, because the failure is otherwise invisible: a client that
-            # declares `"ask"` is never joined to any desk, and every question
-            # its person should have answered is simply never asked.
-            unknown = self.declared - set(CAPABILITIES)
-            if unknown:
-                log.warning(
-                    "ph_app.daemon: a client declared %s, which this daemon does not serve; "
-                    "it serves %s",
-                    ", ".join(sorted(unknown)),
-                    ", ".join(CAPABILITIES),
-                )
-            return capabilities(*CAPABILITIES)
-        if method == "sessions/list":
-            return {"sessions": supervisor.describe()}
-        if method == "session/new":
-            # `cwd` is the client's, and the daemon is the one that mounts — so
-            # it is said here rather than assumed from the daemon's own process,
-            # which is somewhere neither the person nor their files are.
-            cwd = str(params["cwd"]) if params.get("cwd") else None
-            # The daemon mounts, so the daemon enforces — `ph_app.trust` says
-            # why. Only for a session created here: resuming one that exists is
-            # not a new decision about a new directory.
-            answered = str(params.get("trust") or "")
-            self._check_trust(cwd, answered)
-            root = await supervisor.start(str(params["sessionId"]), cwd=cwd)
-            if answered == "always" and cwd is not None:
-                # After the mount, not before: a directory is only worth
-                # recording once its profile has actually composed.
-                TrustStore(path=trust_path()).trust(Path(cwd))
-            return root.describe()
-        # --- mutations --------------------------------------------------------
-        # Every method that changes a root goes through one wrapper: resolve the
-        # root (through `start`, so acting on a passivated one brings it back),
-        # validate, claim the idempotence key, act. See `MUTATIONS`.
         mutation = MUTATIONS.get(method)
         if mutation is not None:
-            root = await supervisor.start(str(params["sessionId"]))
-            plan = await mutation.prepare(self, root, params)
-            if not root.once(_command_key(params)):
-                return {**root.describe(), "repeated": True}
-            return await mutation.act(self, root, params, plan)
-        if method == "attachment/put":
-            # Not a `MUTATIONS` row on purpose: content-addressed, so a retry is
-            # already a no-op — and its reply *is* the reference the client came
-            # for, which a `repeated` envelope would withhold.
-            return await self._put(params)
-        if method == "session/attach":
-            # Through `start`, so attaching to a *passivated* root brings it
-            # back rather than reporting it gone (P5-05). `start` returns the
-            # live root untouched when there is one, and resumes from the log
-            # when there is not — the same path `session/prompt` takes, which is
-            # what keeps rehydration one mechanism instead of two.
-            return self._attach(
-                await supervisor.start(str(params["sessionId"])), params.get("cursor")
+            return await self._mutate(method, mutation, params)
+        entry = METHODS.get(method)
+        if entry is None:
+            raise UnknownMethod(f'unknown method "{method}"')
+        return await entry.handle(self, parse_params(method, entry.params, params))
+
+    async def _mutate(
+        self, method: str, mutation: Mutation[Any], params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Every method that changes a root goes through this one wrapper.
+
+        Parse, resolve the root (through `start`, so acting on a passivated one
+        brings it back), validate, claim the idempotence key, act. The parse is
+        first so a malformed call is refused before a root is mounted for it.
+        See `MUTATIONS` for why the key is claimed here and nowhere else.
+        """
+        parsed = parse_params(method, mutation.params, params)
+        root = await self.server.supervisor.start(parsed.session_id)
+        plan = await mutation.prepare(self, root, parsed)
+        if not root.once(_command_key(parsed)):
+            return {**root.describe(), "repeated": True}
+        return await mutation.act(self, root, parsed, plan)
+
+    # --- the methods -----------------------------------------------------------
+    # One per row of `METHODS`, each taking its own params model. Read-only
+    # projections are not here: `_projection` builds theirs from `PROJECTIONS`.
+
+    async def _initialize(self, params: InitializeParams) -> dict[str, Any]:
+        # A property of the *client*, so it is said once here rather than
+        # per-attach: whether a UI can put a modal in front of a person does
+        # not vary by which session it is watching, and a per-attach flag let
+        # the same client claim it for one root and not another — two answers
+        # to a question with one true answer.
+        self.declared = frozenset(params.capabilities)
+        # Named, because the failure is otherwise invisible: a client that
+        # declares `"ask"` is never joined to any desk, and every question
+        # its person should have answered is simply never asked.
+        unknown = self.declared - set(CAPABILITIES)
+        if unknown:
+            log.warning(
+                "ph_app.daemon: a client declared %s, which this daemon does not serve; "
+                "it serves %s",
+                ", ".join(sorted(unknown)),
+                ", ".join(CAPABILITIES),
             )
-        if method == "session/status":
-            return self._status(str(params["sessionId"]))
-        if method == "session/cancel":
-            # Not a `MUTATIONS` row: cancel is idempotent by construction, and a
-            # key would make an honest retry answer `repeated` and leave the turn
-            # running. `_root`, not `start`: nothing to stop on a passivated one.
-            root = self._root(str(params["sessionId"]))
-            root.agent.cancel(AgentCancelCause(kind="user"), keep_inbox=True)
-            return root.describe()
-        # --- projections (P5-14) -------------------------------------------
-        # What a front end used to read straight off `ctx`. Each is a fold
-        # computed now, so a reconnecting client gets today's answer rather than
-        # one cached when somebody last wrote it down. See `projections.py`.
-        #
-        # A table rather than four more branches, because these four differ only
-        # in a key and a function: the next projection is a row here instead of
-        # three lines of chain, and the *set* of them is a value a test can hold.
-        projection = PROJECTIONS.get(method)
-        if projection is not None:
-            key, fold = projection
-            root = self._root(str(params["sessionId"]))
-            return {"sessionId": root.id, key: fold(root)}
-        if method == "sessions/browse":
-            # Daemon-level, not a `PROJECTIONS` row: it is not about one root.
-            # Every root mounts the same profile and so the same store, and which
-            # roots are held is the supervisor's own answer.
-            return {"sessions": browse_of(supervisor)}
-        if method == "daemon/config":
-            # The composed profile, which is a property of the *daemon* and not
-            # of any root: every root mounts the same composition.
-            return {"rows": list(supervisor.profile.dump())}
+        return capabilities(*CAPABILITIES)
+
+    async def _sessions_list(self, _params: NoParams) -> dict[str, Any]:
+        return {"sessions": self.server.supervisor.describe()}
+
+    async def _new_session(self, params: NewSessionParams) -> dict[str, Any]:
+        # `cwd` is the client's, and the daemon is the one that mounts — so
+        # it is said here rather than assumed from the daemon's own process,
+        # which is somewhere neither the person nor their files are. `or None`
+        # because a client that has no directory to name sends `""` or omits it,
+        # and both mean the same thing.
+        cwd = params.cwd or None
+        # The daemon mounts, so the daemon enforces — `ph_app.trust` says
+        # why. Only for a session created here: resuming one that exists is
+        # not a new decision about a new directory.
+        self._check_trust(cwd, params.trust)
+        root = await self.server.supervisor.start(params.session_id, cwd=cwd)
+        if params.trust == "always" and cwd is not None:
+            # After the mount, not before: a directory is only worth
+            # recording once its profile has actually composed.
+            TrustStore(path=trust_path()).trust(Path(cwd))
+        return root.describe()
+
+    async def _cancel(self, params: SessionParams) -> dict[str, Any]:
+        # Not a `MUTATIONS` row: cancel is idempotent by construction, and a
+        # key would make an honest retry answer `repeated` and leave the turn
+        # running. `_root`, not `start`: nothing to stop on a passivated one.
+        root = self._root(params.session_id)
+        root.agent.cancel(AgentCancelCause(kind="user"), keep_inbox=True)
+        return root.describe()
+
+    async def _sessions_browse(self, _params: NoParams) -> dict[str, Any]:
+        # Daemon-level, not a `PROJECTIONS` row: it is not about one root.
+        # Every root mounts the same profile and so the same store, and which
+        # roots are held is the supervisor's own answer.
+        return {"sessions": browse_of(self.server.supervisor)}
+
+    async def _daemon_config(self, _params: NoParams) -> dict[str, Any]:
+        # The composed profile, which is a property of the *daemon* and not
+        # of any root: every root mounts the same composition.
+        return {"rows": list(self.server.supervisor.profile.dump())}
+
+    async def _credentials_held(self, params: HeldCredentialsParams) -> dict[str, Any]:
         # `credentials/held` and `credentials/store`, not `session/credential`
         # and `session/credentials`: those were two names one letter apart for
         # opposite kinds, and the one that writes a secret is the last method
         # that should be easy to reach by typo.
-        if method == "credentials/held":
-            root = self._root(str(params["sessionId"]))
-            names = [str(one) for one in params.get("names") or ()]
-            return {"sessionId": root.id, "held": credentials_of(root, names)}
-        if method == "session/detach":
-            return self._detach(str(params["sessionId"]))
-        if method == "session/snapshot":
-            return self._snapshot(str(params["sessionId"]), params.get("cursor"))
-        # The schedule seam over the wire (P5-06, P5-10). Create and cancel go
-        # through the supervisor rather than the seam directly: both need the
-        # root mounted and the append flushed, and a schedule that lives only in
-        # a buffer is one a restart forgets.
-        if method == "schedule/create":
-            created = await supervisor.schedule(
-                str(params["sessionId"]),
-                Schedule(
-                    id=str(params["scheduleId"]),
-                    kind=params["kind"],
-                    spec=str(params["spec"]),
-                    prompt=str(params["prompt"]),
-                ),
-            )
-            return created.to_wire()
-        if method == "schedule/cancel":
-            session_id, schedule_id = str(params["sessionId"]), str(params["scheduleId"])
-            cancelled = await supervisor.unschedule(session_id, schedule_id)
-            return {"sessionId": session_id, "scheduleId": schedule_id, "cancelled": cancelled}
-        if method == "schedule/list":
-            root = self._root(str(params["sessionId"]))
-            return {"sessionId": root.id, "schedules": supervisor.scheduled(root)}
-        if method == "daemon/status":
-            return self.server.status()
-        if method == "shutdown":
-            # Actually stops it, and takes no id by contract: a client awaiting
-            # a reply would be waiting on a frame the daemon is concurrently
-            # losing the ability to write. "Stop" is not a question.
-            self.server.stop.set()
-            return {"ok": True}
-        raise UnknownMethod(f'unknown method "{method}"')
+        root = self._root(params.session_id)
+        return {"sessionId": root.id, "held": credentials_of(root, params.names)}
 
-    async def _put(self, params: dict[str, Any]) -> dict[str, Any]:
+    # The schedule seam over the wire (P5-06, P5-10). Create and cancel go
+    # through the supervisor rather than the seam directly: both need the
+    # root mounted and the append flushed, and a schedule that lives only in
+    # a buffer is one a restart forgets.
+
+    async def _schedule_create(self, params: CreateScheduleParams) -> dict[str, Any]:
+        created = await self.server.supervisor.schedule(params.session_id, params.to_schedule())
+        return created.to_wire()
+
+    async def _schedule_cancel(self, params: CancelScheduleParams) -> dict[str, Any]:
+        cancelled = await self.server.supervisor.unschedule(params.session_id, params.schedule_id)
+        return {
+            "sessionId": params.session_id,
+            "scheduleId": params.schedule_id,
+            "cancelled": cancelled,
+        }
+
+    async def _schedule_list(self, params: SessionParams) -> dict[str, Any]:
+        root = self._root(params.session_id)
+        return {"sessionId": root.id, "schedules": self.server.supervisor.scheduled(root)}
+
+    async def _daemon_status(self, _params: NoParams) -> dict[str, Any]:
+        return self.server.status()
+
+    async def _shutdown(self, _params: NoParams) -> dict[str, Any]:
+        # Actually stops it, and takes no id by contract: a client awaiting
+        # a reply would be waiting on a frame the daemon is concurrently
+        # losing the ability to write. "Stop" is not a question.
+        self.server.stop.set()
+        return {"ok": True}
+
+    async def _put(self, params: PutAttachmentParams) -> dict[str, Any]:
         """Store bytes a client read, and answer with the reference to them.
 
         **The client reads the file, not the daemon** — I-9's human door. A person
@@ -454,10 +487,14 @@ class _Connection:
 
         Content-addressed, so putting a file twice stores it once and the second
         put is a cheap way to *learn* the reference.
+
+        Not a `MUTATIONS` row on purpose: content-addressed, so a retry is
+        already a no-op — and its reply *is* the reference the client came
+        for, which a `repeated` envelope would withhold.
         """
-        root = self._root(str(params["sessionId"]))
+        root = self._root(params.session_id)
         store = self._store(root)
-        encoded = str(params.get("contentB64", ""))
+        encoded = params.content_b64
         # Checked before decoding, on the encoded length: base64 is 4/3 of the
         # bytes, so decoding first to measure would be the allocation this
         # refusal exists to avoid. Off by the two padding bytes, immaterial here.
@@ -470,13 +507,13 @@ class _Connection:
             content = b64decode(encoded, validate=True)
         except BinasciiError as error:
             raise Refusal(f"contentB64 is not valid base64: {error}") from error
-        name = str(params["name"]) if params.get("name") else None
+        name = params.name or None
         ref = await store.save_bytes(
             content=content,
             # A client that sent no `mime` still sent a name, and `mime_for` is
             # the one ladder both doors climb — an octet-stream default here made
             # a `.png` a document while `--attach` called it an image.
-            mime=mime_for(str(params.get("mime") or ""), name or ""),
+            mime=mime_for(params.mime or "", name or ""),
             name=name,
         )
         return {"sessionId": root.id, "attachment": ref.to_wire()}
@@ -487,19 +524,21 @@ class _Connection:
     # what makes a refusal *not* consume a retry: a prompt refused for an unknown
     # attachment, re-sent with a known one under the same key, must act.
 
-    async def _prepare_prompt(self, root: Any, params: dict[str, Any]) -> list[AttachmentRef]:
-        return self._attachments(root, params.get("attachments"))
+    async def _prepare_prompt(self, root: Root, params: PromptParams) -> list[AttachmentRef]:
+        return self._attachments(root, params.attachments)
 
-    async def _act_prompt(self, root: Any, params: dict[str, Any], refs: Any) -> dict[str, Any]:
-        root = await self.server.supervisor.prompt(
-            root.id, str(params.get("prompt", "")), attachments=refs
-        )
+    async def _act_prompt(
+        self, root: Root, params: PromptParams, refs: list[AttachmentRef]
+    ) -> dict[str, Any]:
+        root = await self.server.supervisor.prompt(root.id, params.prompt, attachments=refs)
         return dict(root.describe())
 
-    async def _prepare_stage(self, root: Any, params: dict[str, Any]) -> AttachmentRef:
-        return self._known(self._store(root), params["attachment"])
+    async def _prepare_stage(self, root: Root, params: StageParams) -> AttachmentRef:
+        return self._known(self._store(root), params.attachment)
 
-    async def _act_stage(self, root: Any, params: dict[str, Any], ref: Any) -> dict[str, Any]:
+    async def _act_stage(
+        self, root: Root, params: StageParams, ref: AttachmentRef
+    ) -> dict[str, Any]:
         """Put an attachment in the composer's tray, for every attached UI.
 
         Not appended: un-submitted intent is not an act in the session, which is
@@ -511,14 +550,14 @@ class _Connection:
         root.publish("session.staged", {"sessionId": root.id, "staged": staged})
         return {"sessionId": root.id, "staged": staged}
 
-    async def _prepare_command(self, root: Any, params: dict[str, Any]) -> Any:
+    async def _prepare_command(self, root: Root, params: CommandParams) -> CommandRegistry:
         registry = root.ctx.get(COMMANDS)
         if registry is None:
             raise SeamAbsent("this deployment has no commands")
         return registry
 
     async def _act_command(
-        self, root: Any, params: dict[str, Any], registry: Any
+        self, root: Root, params: CommandParams, registry: CommandRegistry
     ) -> dict[str, Any]:
         """Run one `/name argument` line in the root's own context.
 
@@ -528,14 +567,14 @@ class _Connection:
         attached UI will see it.
         """
         shown = await registry.dispatch(
-            str(params.get("line", "")),
+            params.line,
             scope=root.agent.ctx,
             session=root.session,
             agent=root.agent,
         )
         return {"sessionId": root.id, "shown": shown}
 
-    async def _prepare_shell(self, root: Any, params: dict[str, Any]) -> tuple[Any, str]:
+    async def _prepare_shell(self, root: Root, params: ShellParams) -> tuple[Any, str]:
         """Resolve the seam and the command **before** the key is claimed.
 
         The seam check used to happen inside `act`, which is after `once()` has
@@ -543,13 +582,13 @@ class _Connection:
         the client's retry on a refusal. That is precisely what the two halves
         are for.
         """
-        command = str(params.get("command", "")).strip()
+        command = params.command.strip()
         if not command:
             raise Refusal("a shell command cannot be empty")
         return shell_of(root.ctx), command
 
     async def _act_shell(
-        self, root: Any, params: dict[str, Any], prepared: tuple[Any, str]
+        self, root: Root, params: ShellParams, prepared: tuple[Any, str]
     ) -> dict[str, Any]:
         """`!!<command>` — the person's own shell, in the session's workspace.
 
@@ -561,44 +600,48 @@ class _Connection:
         shell, command = prepared
         return await self.server.supervisor.shell(root.id, shell, command)
 
-    async def _prepare_preset(self, root: Any, params: dict[str, Any]) -> Any:
+    async def _prepare_preset(self, root: Root, params: PresetParams) -> PermissionPresetService:
         presets = root.ctx.get(PERMISSION_PRESETS)
         if presets is None:
             raise SeamAbsent("this deployment has no permission presets")
         return presets
 
-    async def _act_preset(self, root: Any, params: dict[str, Any], presets: Any) -> dict[str, Any]:
-        applied = presets.apply_preset(str(params["preset"]), session=root.session)
+    async def _act_preset(
+        self, root: Root, params: PresetParams, presets: PermissionPresetService
+    ) -> dict[str, Any]:
+        applied = presets.apply_preset(params.preset, session=root.session)
         return {"sessionId": root.id, "preset": applied.name}
 
-    async def _prepare_credential(self, root: Any, params: dict[str, Any]) -> Any:
+    async def _prepare_credential(
+        self, root: Root, params: StoreCredentialParams
+    ) -> CredentialService:
         service = root.ctx.get(CREDENTIALS)
         if service is None:
             raise SeamAbsent("this deployment stores no credentials")
         return service
 
     async def _act_credential(
-        self, root: Any, params: dict[str, Any], service: Any
+        self, root: Root, params: StoreCredentialParams, service: CredentialService
     ) -> dict[str, Any]:
         # **The value is used and not kept.** It is never logged, never echoed
         # in the reply, and never reaches `describe()` — the reply is the name
         # and a boolean, which is everything a UI needs to redraw.
-        service.provide_value(str(params["name"]), str(params["value"]))
-        return {"sessionId": root.id, "name": str(params["name"]), "stored": True}
+        service.provide_value(params.name, params.value)
+        return {"sessionId": root.id, "name": params.name, "stored": True}
 
-    def _attachments(self, root: Any, raw: Any) -> list[AttachmentRef]:
+    def _attachments(self, root: Root, refs: list[AttachmentRef]) -> list[AttachmentRef]:
         """The refs a prompt named, checked against what this deployment holds.
 
         Refused rather than dropped: a reference from another machine, or to a
         blob a `gc` took, would otherwise send the turn as plain text with
         nothing saying the picture never went.
         """
-        if not raw:
+        if not refs:
             return []
         store = self._store(root)
-        return [self._known(store, one) for one in raw]
+        return [self._known(store, ref) for ref in refs]
 
-    def _store(self, root: Any) -> Any:
+    def _store(self, root: Root) -> AttachmentStore:
         """The attachment store, or the one refusal for its absence.
 
         One resolution for the three methods that need it, so "this deployment
@@ -611,14 +654,18 @@ class _Connection:
             raise SeamAbsent("this deployment stores no attachments")
         return store
 
-    def _known(self, store: Any, raw: Any) -> AttachmentRef:
-        """A reference the client sent, checked against what this deployment holds."""
-        ref = AttachmentRef.model_validate(raw)
+    def _known(self, store: AttachmentStore, ref: AttachmentRef) -> AttachmentRef:
+        """A reference the client sent, checked against what this deployment holds.
+
+        Presence only: the *shape* was the params model's to check, which is why
+        a malformed reference is `invalid_params` and this refusal is reserved
+        for a well-formed one nobody stored here.
+        """
         if not store.exists(ref):
             raise AttachmentUnknown(f"no attachment {ref.attachment_id} is stored here")
         return ref
 
-    def _check_trust(self, cwd: str | None, answer: str) -> None:
+    def _check_trust(self, cwd: str | None, answer: TrustAnswer) -> None:
         """Refuse a `cwd` nobody has vouched for. `ph_app.trust` says why.
 
         `"once"` mounts without recording; `"always"` is recorded by the caller,
@@ -636,13 +683,13 @@ class _Connection:
         if not store.trusted(project):
             raise UntrustedProject(f"{cwd} has not been trusted; ask, then send trust")
 
-    def _root(self, session_id: str) -> Any:
+    def _root(self, session_id: str) -> Root:
         root = self.server.supervisor.roots.get(session_id)
         if root is None:
             raise NoSuchSession(f'no session "{session_id}"')
         return root
 
-    def _attach(self, root: Any, cursor: Any) -> dict[str, Any]:
+    async def _attach(self, params: SessionParams) -> dict[str, Any]:
         """Subscribe to what happens *next*, and say where that starts.
 
         **Attach does not replay.** Streaming the gap here — one `session.event` frame per
@@ -654,9 +701,14 @@ class _Connection:
         live stream begins, and the client reads `session/snapshot` from its cursor up to
         that point. That also makes the 512 KiB-class bound apply to replay.
         """
-        # The root, not an id to look up again: `start` has just returned it, and
-        # re-deriving it would keep a `no_such_session` branch `start` has already
-        # made unreachable.
+        # Through `start`, so attaching to a *passivated* root brings it back
+        # rather than reporting it gone (P5-05). `start` returns the live root
+        # untouched when there is one, and resumes from the log when there is
+        # not — the same path `session/prompt` takes, which is what keeps
+        # rehydration one mechanism instead of two. There is no cursor to read:
+        # attach does not replay, so it does not take one — `SnapshotParams`
+        # says why the field was removed rather than accepted and ignored.
+        root = await self.server.supervisor.start(params.session_id)
         if root.id not in self.attached:
             self.attached.add(root.id)
             root.subscribe(self.notify)
@@ -675,10 +727,10 @@ class _Connection:
             "readings": readings_of(root),
         }
 
-    def _snapshot(self, session_id: str, cursor: Any) -> dict[str, Any]:
+    async def _snapshot(self, params: SnapshotParams) -> dict[str, Any]:
         """One bounded page of a session's history, and the cursor for the next."""
-        root = self._root(session_id)
-        start = resume_at(root.session, cursor)
+        root = self._root(params.session_id)
+        start = resume_at(root.session, params.cursor)
         page = root.session.events_from(start, SNAPSHOT_EVENTS)
         tools = root.ctx.get(TOOLS)
         events = [event.to_wire(thaw=False) for event in page]
@@ -695,7 +747,7 @@ class _Connection:
             and (view := presentation_of(tools, root.session, event)) is not None
         }
         return {
-            "sessionId": session_id,
+            "sessionId": root.id,
             "events": events,
             "presentations": presentations,
             # Where the read actually began, which is not always where the cursor
@@ -704,11 +756,11 @@ class _Connection:
             # event's seq — that inference is `None` for an empty page, and
             # `resume_at`'s own docstring already promises the client will be told.
             "from": start,
-            "cursor": cursor_of(root.session, start + len(events)),
+            "cursor": cursor_of(root.session, start + len(events)).to_wire(),
             "more": start + len(events) < root.session.seq,
         }
 
-    def _status(self, session_id: str) -> dict[str, Any]:
+    async def _status(self, params: SessionParams) -> dict[str, Any]:
         """One root in detail — what `sessions/list` says, and why it says it.
 
         The listing carries what a table needs for every root; this carries what
@@ -717,28 +769,51 @@ class _Connection:
         that follow — how many attempts, and what is still going to fire — have
         no other way to be asked.
         """
-        root = self._root(session_id)
+        root = self._root(params.session_id)
         return {**root.detail(), "schedules": self.server.supervisor.scheduled(root)}
 
-    def _detach(self, session_id: str) -> dict[str, Any]:
-        was_attached = session_id in self.attached
-        self.attached.discard(session_id)
-        root = self.server.supervisor.roots.get(session_id)
+    async def _detach(self, params: SessionParams) -> dict[str, Any]:
+        was_attached = params.session_id in self.attached
+        self.attached.discard(params.session_id)
+        root = self.server.supervisor.roots.get(params.session_id)
         if root is not None:
             root.unsubscribe(self.notify)
         # Deliberately *not* an error when nothing was attached: detach is what a
         # client does while tidying up, often twice, and a teardown path that
         # raises is one nobody can write correctly.
-        return {"sessionId": session_id, "detached": was_attached}
+        return {"sessionId": params.session_id, "detached": was_attached}
 
 
-MUTATIONS: dict[str, Mutation] = {
-    "session/prompt": Mutation(_Connection._prepare_prompt, _Connection._act_prompt),
-    "session/command": Mutation(_Connection._prepare_command, _Connection._act_command),
-    "session/stage": Mutation(_Connection._prepare_stage, _Connection._act_stage),
-    "session/shell": Mutation(_Connection._prepare_shell, _Connection._act_shell),
-    "session/preset": Mutation(_Connection._prepare_preset, _Connection._act_preset),
-    "credentials/store": Mutation(_Connection._prepare_credential, _Connection._act_credential),
+def _projection(
+    key: str, fold: Callable[[Root], list[dict[str, Any]]]
+) -> Callable[[_Connection, SessionParams], Awaitable[dict[str, Any]]]:
+    """A `METHODS` handler that answers `{sessionId, <key>: <fold(root)>}`.
+
+    A factory rather than four near-identical handlers because the four differ
+    only in a key and a function — and the closure holds exactly those two,
+    nothing of the request. (`Method.handle` receives no method name, so a
+    single table-reading handler would have to add that parameter to all 22
+    handlers in order to serve four.)
+    """
+
+    async def handle(connection: _Connection, params: SessionParams) -> dict[str, Any]:
+        root = connection._root(params.session_id)
+        return {"sessionId": root.id, key: fold(root)}
+
+    return handle
+
+
+MUTATIONS: dict[str, Mutation[Any]] = {
+    "session/prompt": Mutation(PromptParams, _Connection._prepare_prompt, _Connection._act_prompt),
+    "session/command": Mutation(
+        CommandParams, _Connection._prepare_command, _Connection._act_command
+    ),
+    "session/stage": Mutation(StageParams, _Connection._prepare_stage, _Connection._act_stage),
+    "session/shell": Mutation(ShellParams, _Connection._prepare_shell, _Connection._act_shell),
+    "session/preset": Mutation(PresetParams, _Connection._prepare_preset, _Connection._act_preset),
+    "credentials/store": Mutation(
+        StoreCredentialParams, _Connection._prepare_credential, _Connection._act_credential
+    ),
 }
 """Every method that changes a root, and the one place their idempotence lives.
 
@@ -754,6 +829,45 @@ branches on one field for every verb. Deliberately absent: `attachment/put`
 (content-addressed, so a retry is a no-op already, and its reply *is* the
 reference a repeat must still return) and `session/new` (`start` is idempotent
 by id).
+"""
+
+METHODS: dict[str, Method[Any]] = {
+    "initialize": Method(InitializeParams, _Connection._initialize),
+    "daemon/hello": Method(InitializeParams, _Connection._initialize),
+    "sessions/list": Method(NoParams, _Connection._sessions_list),
+    "sessions/browse": Method(NoParams, _Connection._sessions_browse),
+    "session/new": Method(NewSessionParams, _Connection._new_session),
+    "session/attach": Method(SessionParams, _Connection._attach),
+    "session/detach": Method(SessionParams, _Connection._detach),
+    "session/status": Method(SessionParams, _Connection._status),
+    "session/cancel": Method(SessionParams, _Connection._cancel),
+    "session/snapshot": Method(SnapshotParams, _Connection._snapshot),
+    "attachment/put": Method(PutAttachmentParams, _Connection._put),
+    "credentials/held": Method(HeldCredentialsParams, _Connection._credentials_held),
+    # The read-only projections (P5-14). What a front end used to read straight
+    # off `ctx`; each is a fold computed now, so a reconnecting client gets
+    # today's answer rather than one cached when somebody last wrote it down.
+    # See `projections.py`. Rows rather than a third table spliced in: they are
+    # `METHODS` rows like any other, and the table they came from was read
+    # exactly once, to build this one.
+    "session/readings": Method(SessionParams, _projection("readings", readings_of)),
+    "commands/list": Method(SessionParams, _projection("commands", commands_of)),
+    "screens/list": Method(SessionParams, _projection("screens", screens_of)),
+    "tools/list": Method(SessionParams, _projection("tools", tools_of)),
+    "schedule/create": Method(CreateScheduleParams, _Connection._schedule_create),
+    "schedule/cancel": Method(CancelScheduleParams, _Connection._schedule_cancel),
+    "schedule/list": Method(SessionParams, _Connection._schedule_list),
+    "daemon/config": Method(NoParams, _Connection._daemon_config),
+    "daemon/status": Method(NoParams, _Connection._daemon_status),
+    "shutdown": Method(NoParams, _Connection._shutdown),
+}
+"""Every method that is not a mutation: what it takes, and what answers it.
+
+Disjoint from `MUTATIONS` by construction — a name in both would be dispatched as
+a mutation and the row here never reached — and the two together are the
+daemon's whole vocabulary, which `test_daemon_methods` holds against the
+documented list. `initialize` and `daemon/hello` are two names for one handler
+because the dsh SDK says the first and P5-01 said the second.
 """
 
 

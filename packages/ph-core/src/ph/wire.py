@@ -28,15 +28,42 @@ import typing
 from types import MappingProxyType
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import BaseModel, ConfigDict, ValidationError, model_validator
 from pydantic.alias_generators import to_camel
 
-__all__ = ["WireDataclass", "WireModel", "declarable", "declarable_fields", "wire_alias"]
+__all__ = [
+    "WireDataclass",
+    "WireModel",
+    "declarable",
+    "declarable_fields",
+    "validation_errors",
+    "wire_alias",
+]
 
 
 def wire_alias(field_name: str) -> str:
     """The one alias function. Exported so tests can pin mappings against it."""
     return to_camel(field_name)
+
+
+def validation_errors(error: ValidationError, *, root: str = "<root>") -> list[str]:
+    """Pydantic's error list as sentences, one per violation, in validation order.
+
+    Here because two places render it and they were rendering it the same way by
+    coincidence: `validate_json_schema_value` for a tool's arguments, and
+    `ph_app.protocol.parse_params` for an RPC method's. What a person reads when
+    a call is refused should not depend on which door the call came through, and
+    the two copies would have drifted the first time either wanted the offending
+    input or the error's `type` in the text.
+
+    `root` is what to call a violation with no path — the whole value was wrong.
+    The two callers differ there and only there: a schema names it `<root>`, and
+    a method names it `params`, because that is what the caller sent.
+    """
+    return [
+        f"{'.'.join(str(part) for part in one['loc']) or root}: {one['msg']}"
+        for one in error.errors()
+    ]
 
 
 class WireModel(BaseModel):

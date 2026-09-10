@@ -16,6 +16,15 @@ runtime, and under `from __future__ import annotations` their `__required_keys__
 cannot see `NotRequired` — so they reported `namespaceId` as **required** while
 `FRAME_FIELDS` had it optional. A third copy that no test compared had already
 drifted, which is the argument against keeping one as documentation.
+
+**The host now has `TypedDict`s again, and the argument still holds — because
+they are not a copy.** Since P8-07 the host's inbound `FieldSpec` table is
+*derived* from its frame types through `get_type_hints(..., include_extras=True)`
+(which resolves the strings and keeps `NotRequired`, where `__required_keys__`
+does not), so on the host there is one declaration and the table is a view of
+it. `test_inbound_specs_are_the_frame_types_field_for_field` is what holds the
+derivation to the guest's table: if it ever read `NotRequired` wrong, `done`'s
+optional fields would come out required and the mirror would break here.
 """
 
 from __future__ import annotations
@@ -88,3 +97,24 @@ def test_boot_requires_every_limit() -> None:
         "maxValueBytes",
         "maxSnapshotBytes",
     } <= required
+
+
+def test_inbound_specs_are_the_frame_types_field_for_field() -> None:
+    """The host's `INBOUND` is derived from its `TypedDict`s; the guest's table is
+    hand-written. Agreeing field for field — including which are optional — is
+    the proof the derivation read `NotRequired`, which is exactly what a class's
+    `__required_keys__` cannot do under postponed annotations."""
+    for frame in sorted(host.GUEST_FRAMES):
+        required, optional = guest.FRAME_FIELDS[frame]
+        specs = host.INBOUND[frame]
+        assert {spec.name for spec in specs if spec.required} == required, frame
+        assert {spec.name for spec in specs if not spec.required} == optional, frame
+        # Every frame's tag is declared, and it is the field the codec selects on.
+        assert any(spec.name == "type" and spec.kind == "str" for spec in specs), frame
+
+
+def test_the_functional_frame_carries_dshs_keyword_named_field() -> None:
+    """`call` says `global`, which a class body cannot spell; the functional form
+    must still put it in the spec, or the codec would strip every call's target."""
+    assert "global" in {spec.name for spec in host.INBOUND["call"]}
+    assert host.FRAME_FIELDS["call"] == guest.FRAME_FIELDS["call"]

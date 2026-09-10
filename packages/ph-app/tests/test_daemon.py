@@ -532,7 +532,9 @@ async def test_a_cursor_from_another_log_reads_from_the_start(tmp_path: Path) ->
         stale = {"generation": "not-this-log", "sequence": settled["cursor"]["sequence"]}
 
         history = await _history(client, "eta", stale)
-        attached = await client.call("session/attach", sessionId="eta", cursor=stale)
+        # Attach takes no cursor — it does not replay, and catch-up is the
+        # paged read above from the point this reply names.
+        attached = await client.call("session/attach", sessionId="eta")
 
         assert len(history) == settled["cursor"]["sequence"], "a stale cursor skipped events"
         assert attached["cursor"]["generation"] != stale["generation"], "the reply names this log"

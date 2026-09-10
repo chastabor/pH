@@ -38,12 +38,12 @@ path in the message, which is the diagnosis this bug never got.
 from __future__ import annotations
 
 import json
-from typing import Any, Final
+from typing import Any, Final, cast
 
 from ph.session.json import JSON_MAX_SAFE_INTEGER
 from ph.wire import WireModel
 
-from .protocol import INBOUND, FieldKind
+from .protocol import INBOUND, FieldKind, InboundFrame
 
 __all__ = ["decode", "encode"]
 
@@ -86,8 +86,15 @@ def _coerce(value: Any, kind: FieldKind) -> Any:
     return value if isinstance(value, list) else _INVALID
 
 
-def decode(raw: str | bytes) -> dict[str, Any] | None:
-    """One inbound frame, rebuilt from its spec, or `None` if it is not one."""
+def decode(raw: str | bytes) -> InboundFrame | None:
+    """One inbound frame, rebuilt from its spec, or `None` if it is not one.
+
+    Typed as the `TypedDict` its spec was derived from, and the `cast` at the
+    end is where that claim is made: the loop below copies exactly the keys the
+    type names, each coerced to the type's declared shape or the frame refused,
+    so what is returned *is* the type — by construction of the spec, not by a
+    check the type system could see.
+    """
     try:
         frame = _decode_json(raw)
     except (ValueError, UnicodeDecodeError):
@@ -112,7 +119,7 @@ def decode(raw: str | bytes) -> dict[str, Any] | None:
                 return None
             continue
         rebuilt[spec.name] = coerced
-    return rebuilt
+    return cast("InboundFrame", rebuilt)
 
 
 def encode(frame: WireModel) -> bytes:

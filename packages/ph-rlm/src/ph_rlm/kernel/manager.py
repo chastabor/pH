@@ -77,7 +77,10 @@ from .protocol import (
     FD_ENV,
     PROTOCOL_VERSION,
     BootFrame,
+    CallFrame,
     CancelFrame,
+    DoneFrame,
+    InboundFrame,
     ReplyFrame,
     RestoreFrame,
     RunFrame,
@@ -459,14 +462,15 @@ class Kernel:
             if frame["type"] == "boot-ack":
                 if frame["protocol"] != PROTOCOL_VERSION:
                     return f"the runtime speaks protocol {frame['protocol']}"
-                limits = frame["limits"]
                 log.info(
                     "ph_rlm.kernel: %s ready on python %s, limits %s",
                     self.namespace,
                     frame["python"],
-                    limits,
+                    frame["limits"],
                 )
-                self.applied_limits = limits if isinstance(limits, dict) else {}
+                # No `isinstance`: the codec coerced `limits` to its declared
+                # `"obj"` or refused the frame, and the type now says so.
+                self.applied_limits = frame["limits"]
                 return None
             if frame["type"] == "fault":
                 return str(frame["message"])
@@ -637,28 +641,35 @@ class Kernel:
     # --------------------------------------------------------------- frames --
 
     async def _handle(
-        self, frame: dict[str, Any], active: _ActiveRun, tasks: anyio.abc.TaskGroup
+        self, frame: InboundFrame, active: _ActiveRun, tasks: anyio.abc.TaskGroup
     ) -> None:
-        kind = frame["type"]
-        if kind == "call":
+        # `frame["type"]` compared in place, not bound to a name first: the
+        # union narrows on the comparison, and mypy does not carry that through
+        # an intermediate variable — `InboundFrame`'s docstring says so.
+        if frame["type"] == "call":
             tasks.start_soon(self._serve_call, frame, active)
-        elif kind == "log":
+        elif frame["type"] == "log":
             active.logs.append(frame["text"])
             if frame.get("truncated"):
                 active.truncated = True
-        elif kind == "display":
-            active.displays.append(frame)
-        elif kind == "snapshot":
+        elif frame["type"] == "display":
+            # Converted here rather than widening the two ph-core types this
+            # flows into: a `TypedDict` is not a `dict` subtype, and a frame
+            # with no producer yet is a poor reason to loosen a wire-facing
+            # model in another package. `frame` is still a `DisplayFrame` to
+            # the checker on this line, so nothing goes unchecked.
+            active.displays.append(dict(frame))
+        elif frame["type"] == "snapshot":
             # Awaited, not spawned: the guest sends this *before* `done`, so the
             # namespace is durable before the model is told the cell finished.
             # The same rule as the checkpoint barriers (A4) — a side effect whose
             # record could not be written is worse than one that did not happen.
             if frame["id"] == active.run_id and self.snapshots is not None:
                 await self.snapshots.record(self.namespace, frame["id"], frame["variables"])
-        elif kind == "done":
+        elif frame["type"] == "done":
             self._settle(frame, active)
 
-    def _settle(self, frame: dict[str, Any], active: _ActiveRun) -> None:
+    def _settle(self, frame: DoneFrame, active: _ActiveRun) -> None:
         if frame["id"] != active.run_id:
             # A `done` for another run is a forged frame — the guest sends one
             # per run and only for the open one — so it settles nothing (C10).
@@ -672,7 +683,7 @@ class Kernel:
             active.truncated = True
         active.settled = True
 
-    async def _serve_call(self, frame: dict[str, Any], active: _ActiveRun) -> None:
+    async def _serve_call(self, frame: CallFrame, active: _ActiveRun) -> None:
         """One binding call, back through the full tool pipeline (C1)."""
         key = (frame["global"], frame["name"])
         binding = active.bindings.get(key)

@@ -266,18 +266,19 @@ def test_the_since_parser_stamps_a_bare_sequence_and_keeps_a_full_cursor() -> No
     what a cursor is; `rpartition(":")` is unambiguous because the generation is an
     integer timestamp. `None` for anything that is not two integers — what to do
     about that is the caller's, and for the CLI it is exit 2."""
-    from ph_app.protocol import cursor_text, parse_cursor
+    from ph_app.protocol import Cursor, cursor_text, parse_cursor
 
     current = {"generation": "1700000000000", "sequence": 40}
-    assert parse_cursor("7", current) == {"generation": "1700000000000", "sequence": 7}
-    assert parse_cursor("42:7", current) == {"generation": "42", "sequence": 7}
-    assert parse_cursor("0", current)["sequence"] == 0, "a real position, not a default"
+    assert parse_cursor("7", current) == Cursor(generation="1700000000000", sequence=7)
+    assert parse_cursor("42:7", current) == Cursor(generation="42", sequence=7)
+    bare = parse_cursor("0", current)
+    assert bare is not None and bare.sequence == 0, "a real position, not a default"
     for bad in ("seven", "a:7", "7:b", ":", "1:2:3x"):
         assert parse_cursor(bad, current) is None, bad
 
     # And the printed form round-trips through it, which is why the two live together.
     assert cursor_text({"generation": "42", "sequence": 7}) == "42:7"
-    assert parse_cursor(cursor_text(current), {}) == {"generation": "1700000000000", "sequence": 40}
+    assert parse_cursor(cursor_text(current), {}) == Cursor(generation="1700000000000", sequence=40)
 
 
 def test_the_cli_refuses_an_unparseable_since_with_exit_two() -> None:

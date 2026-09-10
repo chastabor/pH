@@ -10,11 +10,16 @@ The split inside this module is deliberate:
   names come from pH's one alias function rather than from string literals, and
   their field sets are *derived* from the models. The host cannot drift from its
   own outbound schema.
-* **Inbound** frames (guest → host) are declared as an explicit `FieldSpec`
-  table, because the guest is a hostile peer (C10) and the codec has to rebuild
-  every frame from a spec rather than parse it into a model. `extra="forbid"`
-  would *raise* on a forged field; the rule is that junk becomes `None` and the
-  handler never raises.
+* **Inbound** frames (guest → host) are `TypedDict`s, and the `FieldSpec` table
+  the codec rebuilds from — `INBOUND` — is *derived* from them (P8-07), the way
+  the outbound field sets are derived from the models. `TypedDict` rather than
+  `WireModel` on purpose: the guest is a hostile peer (C10) and the codec's rule
+  is that junk becomes `None` and a handler never raises, where a model's
+  `extra="forbid"` would *raise* on a forged field. A `TypedDict` is only a
+  type, and the dict `decode` rebuilds is exactly the dict the type describes —
+  every key it names and no other, each of its declared shape — so the name is
+  honest at the one point it is applied, and `manager.py` reads `frame["id"]`
+  off a `DoneFrame` rather than off a `dict[str, Any]`.
 
 `FRAME_FIELDS` is the union, and the mirror test compares it to the guest's.
 
@@ -24,7 +29,17 @@ The split inside this module is deliberate:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Final, Literal, TypeAlias
+from typing import (
+    Any,
+    Final,
+    Literal,
+    NotRequired,
+    TypeAlias,
+    TypedDict,
+    get_args,
+    get_origin,
+    get_type_hints,
+)
 
 from pydantic import BaseModel
 
@@ -40,14 +55,22 @@ __all__ = [
     "NAMESPACE_ENV",
     "PROTOCOL_FD",
     "PROTOCOL_VERSION",
+    "BootAckFrame",
     "BootFrame",
+    "CallFrame",
     "CancelFrame",
+    "DisplayFrame",
+    "DoneFrame",
+    "FaultFrame",
     "FieldKind",
     "FieldSpec",
+    "InboundFrame",
+    "LogFrame",
     "ReplyFrame",
     "RestoreFrame",
     "RunFrame",
     "ShutdownFrame",
+    "SnapshotFrame",
     "truncation_marker",
 ]
 
@@ -138,6 +161,9 @@ _OUTBOUND: Final[tuple[type[BaseModel], ...]] = (
 
 FieldKind: TypeAlias = Literal["int", "str", "bool", "obj", "list", "any"]
 
+_SCALARS: Final[dict[Any, FieldKind]] = {bool: "bool", int: "int", str: "str"}
+"""The scalar annotations `_kind_of` can name, and what the codec calls each."""
+
 
 @dataclass(frozen=True, slots=True)
 class FieldSpec:
@@ -148,46 +174,119 @@ class FieldSpec:
     required: bool = True
 
 
-INBOUND: Final[dict[str, tuple[FieldSpec, ...]]] = {
-    "boot-ack": (
-        FieldSpec("type", "str"),
-        FieldSpec("protocol", "int"),
-        FieldSpec("python", "str"),
-        FieldSpec("limits", "obj"),
-    ),
-    "call": (
-        FieldSpec("type", "str"),
-        FieldSpec("id", "int"),
-        FieldSpec("global", "str"),
-        FieldSpec("name", "str"),
-        FieldSpec("args", "obj"),
-    ),
-    "log": (
-        FieldSpec("type", "str"),
-        FieldSpec("stream", "str"),
-        FieldSpec("text", "str"),
-        FieldSpec("truncated", "bool", required=False),
-    ),
-    "display": (
-        FieldSpec("type", "str"),
-        FieldSpec("mime", "str"),
-        FieldSpec("data", "str"),
-        FieldSpec("meta", "obj", required=False),
-    ),
-    "snapshot": (
-        FieldSpec("type", "str"),
-        FieldSpec("id", "int"),
-        FieldSpec("variables", "list"),
-    ),
-    "done": (
-        FieldSpec("type", "str"),
-        FieldSpec("id", "int"),
-        FieldSpec("value", "any", required=False),
-        FieldSpec("error", "obj", required=False),
-        FieldSpec("truncated", "bool", required=False),
-    ),
-    "fault": (FieldSpec("type", "str"), FieldSpec("message", "str")),
-}
+# The seven frames a guest may send, as the shape each has *after* `decode` has
+# rebuilt it. `NotRequired` is the codec's `required=False`; a `dict[str, Any]`
+# is its `"obj"`, a `list[Any]` its `"list"`, `Any` its `"any"` — `_kind_of` is
+# the mapping, and a field of a shape it cannot name is an import-time error
+# rather than a frame the codec quietly accepts.
+
+
+class BootAckFrame(TypedDict):
+    type: Literal["boot-ack"]
+    protocol: int
+    python: str
+    limits: dict[str, Any]
+
+
+# Functional form for this one only: the wire key is `global` — dsh's name, and
+# the module docstring says why it stays — which a class body cannot spell.
+CallFrame = TypedDict(
+    "CallFrame",
+    {"type": Literal["call"], "id": int, "global": str, "name": str, "args": dict[str, Any]},
+)
+
+
+class LogFrame(TypedDict):
+    type: Literal["log"]
+    stream: str
+    text: str
+    truncated: NotRequired[bool]
+
+
+class DisplayFrame(TypedDict):
+    type: Literal["display"]
+    mime: str
+    data: str
+    meta: NotRequired[dict[str, Any]]
+
+
+class SnapshotFrame(TypedDict):
+    type: Literal["snapshot"]
+    id: int
+    variables: list[Any]
+
+
+class DoneFrame(TypedDict):
+    type: Literal["done"]
+    id: int
+    value: NotRequired[Any]
+    error: NotRequired[dict[str, Any]]
+    truncated: NotRequired[bool]
+
+
+class FaultFrame(TypedDict):
+    type: Literal["fault"]
+    message: str
+
+
+InboundFrame: TypeAlias = (
+    BootAckFrame | CallFrame | LogFrame | DisplayFrame | SnapshotFrame | DoneFrame | FaultFrame
+)
+"""What `decode` returns. A tagged union on `type`, so `if frame["type"] == "done":`
+narrows it — compared *directly*: mypy does not carry the narrowing through an
+intermediate `kind = frame["type"]`."""
+
+_INBOUND: Final[tuple[Any, ...]] = get_args(InboundFrame)
+"""The union's members, read off the union — so a frame added to `InboundFrame`
+cannot be missing from `INBOUND`. Listed separately it could be, and the symptom
+would be `decode` returning `None` for every instance of the new frame: the
+codec's "junk becomes `None`" rule firing on a frame that is not junk."""
+
+
+def _kind_of(annotation: Any) -> FieldKind:
+    """The codec's `FieldKind` for one declared field type — the whole mapping."""
+    if annotation is Any:
+        return "any"
+    if get_origin(annotation) is Literal:
+        return "str"  # every tag is a string, and `type` is the only Literal
+    # Identity, not `isinstance`: an annotation is a class, not a value, so
+    # `bool`/`int` need no ordering care here — `codec._coerce` is where that
+    # hazard lives, and it carries the comment.
+    if annotation in _SCALARS:
+        return _SCALARS[annotation]
+    origin = get_origin(annotation) or annotation
+    if origin is dict:
+        return "obj"
+    if origin is list:
+        return "list"
+    raise TypeError(f"no codec shape for an inbound field typed {annotation!r}")
+
+
+def _inbound_specs() -> dict[str, tuple[FieldSpec, ...]]:
+    """`INBOUND`, read off the frame types, so the declaration has one source.
+
+    **Through `get_type_hints`, never `__required_keys__`.** Under
+    `from __future__ import annotations` a class body's annotations are strings
+    when `TypedDict` builds the class, and it cannot see `NotRequired` inside a
+    string: on this interpreter every key then reports as required. That is the
+    exact drift the guest's own `TypedDict`s had before they were deleted
+    (`test_protocol_mirror` tells the story). `get_type_hints(...,
+    include_extras=True)` resolves the strings and keeps the qualifier.
+    """
+    specs: dict[str, tuple[FieldSpec, ...]] = {}
+    for frame in _INBOUND:
+        hints = get_type_hints(frame, include_extras=True)
+        fields: list[FieldSpec] = []
+        for name, hint in hints.items():
+            optional = get_origin(hint) is NotRequired
+            inner = get_args(hint)[0] if optional else hint
+            fields.append(FieldSpec(name, _kind_of(inner), required=not optional))
+        (tag,) = get_args(hints["type"])
+        specs[str(tag)] = tuple(fields)
+    return specs
+
+
+INBOUND: Final[dict[str, tuple[FieldSpec, ...]]] = _inbound_specs()
 
 
 def _outbound_fields() -> dict[str, tuple[frozenset[str], frozenset[str]]]:

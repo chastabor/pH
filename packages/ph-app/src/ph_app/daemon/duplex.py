@@ -1,8 +1,8 @@
 """One end of a two-way JSON-RPC connection, for both ends to be.
 
 `protocol.py` holds the *stateless* half of the vocabulary — how a request, a
-notification and a reply are shaped — and deliberately imports nothing. This is
-the stateful half: minting ids, remembering what is outstanding, deciding which
+notification and a reply are shaped — and deliberately imports nothing of the
+daemon's. This is the stateful half: minting ids, remembering what is outstanding, deciding which
 direction an inbound frame is going, serialising what goes out, and waking
 everybody when the socket ends.
 
@@ -55,7 +55,7 @@ from typing import Any
 import anyio
 from anyio.abc import ByteStream
 
-from ..protocol import DaemonGone, Dispatch, notification, request, respond, result_of
+from ..protocol import DaemonGone, Dispatch, Frame, notification, request, respond, result_of
 from .framing import FramingError, read_frames, write_frame
 
 __all__ = ["IN_FLIGHT", "OUTBOX", "Handler", "Notification", "Peer"]
@@ -143,7 +143,7 @@ class Peer:
         if self.closed.is_set():
             raise DaemonGone
         if self._outbox is None:
-            self._outbox, self._inbox = anyio.create_memory_object_stream[dict[str, Any]](
+            self._outbox, self._inbox = anyio.create_memory_object_stream[Frame](
                 max_buffer_size=OUTBOX
             )
         return self._outbox
@@ -162,8 +162,13 @@ class Peer:
         outbox = self._outbox or self._queue()
         outbox.send_nowait(notification(method, params))
 
-    async def send(self, frame: dict[str, Any]) -> None:
-        """Queue any frame, waiting for room. For an end with nobody to drop."""
+    async def send(self, frame: Frame) -> None:
+        """Queue any frame, waiting for room. For an end with nobody to drop.
+
+        A `Frame` — one of the four shapes this side builds — and not a dict:
+        what goes *out* is ours to get right, and the type is what checks it.
+        What comes *in* stays a `dict[str, Any]` (`_settle`, `result_of`),
+        because a peer's frame is a claim."""
         await self._queue().send(frame)
 
     async def ask(self, method: str, params: dict[str, Any]) -> dict[str, Any]:

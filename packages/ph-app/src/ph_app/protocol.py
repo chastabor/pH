@@ -13,7 +13,18 @@ exactly the deployment Phase 5 exists for.
 request/reply/error shaping and the version; what a transport serves — one session
 over a pipe, or many supervised roots over a socket — is its own. So this module
 owns `respond`, `notify` and the capability block, and each server owns its method
-table.
+table — the daemon's parameter models are `ph_app.daemon.methods`, beside the
+table they belong to.
+
+**Two kinds of frame, typed two ways (P8-07).** A frame this side *builds* is one
+of the `TypedDict`s below: `notification`, `request` and `respond` return them,
+the outbox carries them, and a builder that forgot `jsonrpc` or spelled `params`
+wrong is a type error rather than a peer's parse error. A frame the peer *sent*
+is a `dict[str, Any]` and stays one: it is a claim, read with `.get`, and giving
+it one of these names would be asserting what has not been checked — the same
+line `ph_rlm.kernel.codec` draws for the fd-3 channel (C10). What *is* checked
+about an inbound request is its `params`, and that check is `parse_params`: one
+`WireModel` per method, `extra="forbid"`, refusing with a named reason.
 
 @module ph_app.protocol
 """
@@ -21,21 +32,38 @@ table.
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from typing import Any
+from typing import Any, Literal, NotRequired, TypeAlias, TypedDict
+
+from pydantic import ValidationError
+
+from ph.wire import WireModel, validation_errors
 
 __all__ = [
     "PROTOCOL_VERSION",
     "SNAPSHOT_EVENTS",
+    "Cursor",
     "DaemonError",
     "DaemonGone",
     "Dispatch",
+    "ErrorBody",
+    "ErrorFrame",
+    "Frame",
+    "InvalidParams",
+    "NoParams",
+    "NotificationFrame",
     "Refusal",
+    "ReplyFrame",
+    "RequestFrame",
+    "ResultFrame",
     "SeamAbsent",
+    "SessionParams",
+    "UnknownMethod",
     "capabilities",
     "cursor_of",
     "cursor_text",
     "notification",
     "parse_cursor",
+    "parse_params",
     "request",
     "respond",
     "result_of",
@@ -64,7 +92,69 @@ real protection against an oversized frame.
 """
 
 Dispatch = Callable[[str, dict[str, Any]], Awaitable[Any]]
-"""A server's method table: `(method, params) -> result`, raising to refuse."""
+"""A server's method table: `(method, params) -> result`, raising to refuse.
+
+`params` arrives as the peer sent it. Narrowing it to the method's model is the
+table's first move — `parse_params` — and not this signature's, because the
+model depends on the method and the envelope does not know the vocabulary."""
+
+
+# ---------------------------------------------------------------- envelopes --
+# JSON-RPC 2.0's four shapes, as the `TypedDict`s this side builds. `Literal["2.0"]`
+# on each rather than a shared base: a `TypedDict` base with only `jsonrpc` would
+# let a reader accept "any frame" where every reader here wants one direction.
+
+
+class NotificationFrame(TypedDict):
+    """A frame with no `id`, which is what makes it a notification."""
+
+    jsonrpc: Literal["2.0"]
+    method: str
+    params: dict[str, Any]
+
+
+class RequestFrame(TypedDict):
+    """A frame that expects a reply. `id` is `int | str` because both ends mint
+    them — `request` says why."""
+
+    jsonrpc: Literal["2.0"]
+    id: int | str
+    method: str
+    params: dict[str, Any]
+
+
+class ErrorData(TypedDict):
+    """The one member pH puts under `error.data`: the refusal's name."""
+
+    reason: str
+
+
+class ErrorBody(TypedDict):
+    """JSON-RPC's error object. `data` is present exactly when the refusal named
+    itself — `respond` says why the code stays generic and the name does not."""
+
+    code: int
+    message: str
+    data: NotRequired[ErrorData]
+
+
+class ResultFrame(TypedDict):
+    jsonrpc: Literal["2.0"]
+    id: int | str
+    result: Any
+
+
+class ErrorFrame(TypedDict):
+    jsonrpc: Literal["2.0"]
+    id: int | str
+    error: ErrorBody
+
+
+ReplyFrame: TypeAlias = ResultFrame | ErrorFrame
+"""What `respond` returns for a request that wanted an answer."""
+
+Frame: TypeAlias = NotificationFrame | RequestFrame | ResultFrame | ErrorFrame
+"""Every frame this side builds — what the outbox carries and `write_frame` takes."""
 
 
 class Refusal(Exception):
@@ -105,6 +195,33 @@ class SeamAbsent(Refusal):
     """
 
     code = "seam_absent"
+
+
+class UnknownMethod(Refusal):
+    """This server does not serve that name.
+
+    Here rather than in either server, because both raise it and a client
+    branching on `unknown_method` must not have to know which transport
+    answered. It lived in `daemon/server.py`, which a front end may not import
+    (`test_app_layering`), so the stdio transport had grown a byte-identical
+    second copy — one refusal code, two definitions, nothing comparing them.
+    """
+
+    code = "unknown_method"
+
+
+class InvalidParams(Refusal):
+    """The request named a method this server serves, with params it does not take.
+
+    Its own code because the client's next move differs from `unknown_method`'s:
+    that one means "this daemon is older than you think", this one means "you
+    spelled the call wrong" — a missing `sessionId`, a field the method does not
+    take, a cursor that is not a cursor. Before P8-07 the first of those was a
+    `KeyError: 'sessionId'` rendered as the error message, which named the field
+    and nothing else, and the second was silently ignored.
+    """
+
+    code = "invalid_params"
 
 
 class DaemonError(RuntimeError):
@@ -158,12 +275,12 @@ def capabilities(*names: str) -> dict[str, Any]:
     }
 
 
-def notification(method: str, params: dict[str, Any]) -> dict[str, Any]:
+def notification(method: str, params: dict[str, Any]) -> NotificationFrame:
     """A frame with no id, which is what makes it a notification."""
     return {"jsonrpc": "2.0", "method": method, "params": params}
 
 
-def request(request_id: int | str, method: str, params: dict[str, Any]) -> dict[str, Any]:
+def request(request_id: int | str, method: str, params: dict[str, Any]) -> RequestFrame:
     """A frame that expects a reply — from either side.
 
     `int | str` because both ends mint ids now (P5-13): a client counts its own
@@ -192,22 +309,39 @@ def result_of(frame: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-def cursor_of(session: Any, sequence: int | None = None) -> dict[str, Any]:
-    """Where a reader has got to, as `{generation, sequence}`.
+class Cursor(WireModel):
+    """Where a reader has got to: `{generation, sequence}`.
 
     A sequence alone is only meaningful against the log that counted it, so it
     travels with the identity of that log. `generation` is the header's
-    `createdAt`: durable, already on the wire, stable across a resume — which
-    continues the same log — and different for anything that is not that log.
+    `createdAt` as a string: durable, already on the wire, stable across a resume
+    — which continues the same log — and different for anything that is not
+    that log.
+
+    A model rather than the dict it was, so the shape has one spelling: built
+    here by `cursor_of`, sent back inside a method's params, and read by
+    `resume_at` off the model rather than through two `isinstance` checks. A
+    client sends it as the dict `to_wire()` produced and the method's params
+    model rebuilds it — so a cursor that is not one is refused as
+    `invalid_params` at the edge, where a *stale* one (right shape, another
+    log's generation) is still answered by `resume_at` with 0.
+    """
+
+    generation: str
+    sequence: int
+
+
+def cursor_of(session: Any, sequence: int | None = None) -> Cursor:
+    """A session's position as a `Cursor`; `to_wire()` puts it in a reply.
 
     Here rather than on the daemon's `Root`, because it is a fact about a
     *session*: the stdio transport serves the same protocol and would otherwise
     have to re-derive it.
     """
-    return {
-        "generation": str(session.header.created_at),
-        "sequence": session.seq if sequence is None else sequence,
-    }
+    return Cursor(
+        generation=str(session.header.created_at),
+        sequence=session.seq if sequence is None else sequence,
+    )
 
 
 def cursor_text(cursor: Any) -> str:
@@ -223,7 +357,7 @@ def cursor_text(cursor: Any) -> str:
     return f"{fields.get('generation', '')}:{fields.get('sequence', '')}"
 
 
-def parse_cursor(text: str, current: Any) -> dict[str, Any] | None:
+def parse_cursor(text: str, current: Any) -> Cursor | None:
     """`GENERATION:SEQ` or a bare `SEQ`, as a cursor — or `None` if it is neither.
 
     Two spellings, and only one of them can be checked. The full form is a cursor
@@ -236,6 +370,9 @@ def parse_cursor(text: str, current: Any) -> dict[str, Any] | None:
     unambiguous. `None` rather than a raise: what to do about an unparseable
     cursor is the caller's — the CLI exits 2, and a front end reading a stored
     position would rather start from the beginning than fail to open.
+
+    Returns the model, not its dict: a caller putting it on the wire says
+    `.to_wire()` there, which is the one place the shape becomes JSON.
     """
     generation, separator, sequence = text.rpartition(":")
     if not separator:
@@ -243,10 +380,10 @@ def parse_cursor(text: str, current: Any) -> dict[str, Any] | None:
         generation, sequence = str(fields.get("generation", "")), text
     if not (sequence.isdigit() and generation.isdigit()):
         return None
-    return {"generation": generation, "sequence": int(sequence)}
+    return Cursor(generation=generation, sequence=int(sequence))
 
 
-def resume_at(session: Any, cursor: Any) -> int:
+def resume_at(session: Any, cursor: Cursor | None) -> int:
     """The index a cursor asks to resume from, or 0 when it cannot say.
 
     A cursor from another incarnation of the log is neither honoured nor
@@ -255,30 +392,75 @@ def resume_at(session: Any, cursor: Any) -> int:
     "you have seen nothing of *this* log" — the only safe reading of the two,
     and the reply says where it actually started so the client is not left
     inferring it from sequence numbers.
+
+    Shape is the params model's business, which is why there is no `isinstance`
+    here any more: a cursor that is not a cursor never reaches this.
     """
-    if not isinstance(cursor, dict):
-        return 0
-    if str(cursor.get("generation", "")) != str(session.header.created_at):
+    if cursor is None or cursor.generation != str(session.header.created_at):
         return 0
     seq: int = session.seq
-    return max(0, min(int(cursor.get("sequence", 0)), seq))
+    return max(0, min(cursor.sequence, seq))
 
 
-async def respond(request_frame: dict[str, Any], dispatch: Dispatch) -> dict[str, Any] | None:
+def parse_params[P: WireModel](method: str, model: type[P], params: object) -> P:
+    """A request's params as the method's model, or the refusal that names why.
+
+    One place for every server, so the sentence a client reads for a bad call is
+    the same over the socket and over stdio. `extra="forbid"` is inherited from
+    `WireModel`: a field the method does not take is refused rather than
+    ignored, because the ignored field was a client that believed it had said
+    something. Pydantic's error text is kept — it names the field and the
+    shape — under the method's name, which is what the reader is missing.
+    """
+    try:
+        return model.model_validate(params)
+    except ValidationError as error:
+        raise InvalidParams(
+            f"{method}: {'; '.join(validation_errors(error, root='params'))}"
+        ) from error
+
+
+class NoParams(WireModel):
+    """A method that takes none.
+
+    A model rather than skipping the parse, so that a stray field on one of
+    these is refused like a stray field anywhere else — the rule has no
+    exceptions, which is what makes it a rule. Here rather than in either
+    server's own table for `Cursor`'s reason: both transports have methods that
+    take nothing, so the shape is the protocol's.
+    """
+
+
+class SessionParams(WireModel):
+    """Every method about one session starts here.
+
+    The protocol's, for the same reason: `sessionId` is what a method about a
+    session is *about*, on either transport. What each server adds to it is its
+    own — the daemon's idempotence key, stdio's optional id — which is where
+    the two vocabularies genuinely differ.
+    """
+
+    session_id: str
+
+
+async def respond(request_frame: dict[str, Any], dispatch: Dispatch) -> ReplyFrame | None:
     """Run one request and shape its reply, or `None` if it wanted none.
 
     A failing method is *this call's* failure, not the connection's: an unknown
     method or a bad argument comes back as an error frame and the peer keeps
     talking. Framing errors are the transport's and end the stream, because
     after a bad frame there is no way to know where the next one starts.
+
+    The body runs **before** the `id` check, not after: an id-less frame is a
+    method whose answer nobody wants (`shutdown`), and its body still has to run.
     """
-    request_id = request_frame.get("id")
+    request_id: int | str | None = request_frame.get("id")
     method = str(request_frame.get("method", ""))
     params = request_frame.get("params") or {}
     try:
-        body: dict[str, Any] = {"result": await dispatch(method, params)}
+        result = await dispatch(method, params)
     except Exception as error:
-        failure: dict[str, Any] = {"code": -32000, "message": str(error)}
+        failure: ErrorBody = {"code": -32000, "message": str(error)}
         # A refusal a client is expected to *branch* on carries a name rather
         # than making the client match message text: `session_already_active`
         # (I-5) is a thing to retry elsewhere, and telling it from a typo in a
@@ -292,5 +474,9 @@ async def respond(request_frame: dict[str, Any], dispatch: Dispatch) -> dict[str
         reason = getattr(error, "code", "")
         if isinstance(reason, str) and reason:
             failure["data"] = {"reason": reason}
-        body = {"error": failure}
-    return None if request_id is None else {"jsonrpc": "2.0", "id": request_id, **body}
+        if request_id is None:
+            return None
+        return {"jsonrpc": "2.0", "id": request_id, "error": failure}
+    if request_id is None:
+        return None
+    return {"jsonrpc": "2.0", "id": request_id, "result": result}

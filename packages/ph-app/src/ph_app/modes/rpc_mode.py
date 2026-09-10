@@ -24,11 +24,45 @@ from ph.agent.types import AgentOptions
 from ph.cordis import DEPLOYMENT, Profile
 from ph.keys import AGENTS, SESSIONS, TOOLS
 from ph.session import Session, SessionEvent, dumps
+from ph.wire import WireModel
 
-from ..protocol import capabilities, notification, respond
+from ..protocol import (
+    Frame,
+    NoParams,
+    SessionParams,
+    UnknownMethod,
+    capabilities,
+    notification,
+    parse_params,
+    respond,
+)
 from ..runtime import mounted, open_session
 
 __all__ = ["RpcServer", "run_rpc"]
+
+
+# The stdio transport's own params (P8-07) — the two, and only the two, whose
+# contract genuinely differs from the daemon's: here `session/new` may omit the
+# id (one process, one peer, so "a fresh session" needs no name) and
+# `session/prompt` names the route, because there is no supervisor holding one.
+# A shared model would have to make both optional for the daemon too, which is
+# the daemon's `invalid_params` refusal quietly given away.
+#
+# The shapes both transports need are the protocol's, not a copy here:
+# `NoParams` and `SessionParams` come from `..protocol` beside `Cursor`, for
+# `Cursor`'s stated reason. "Each server owns its method table" is about the
+# table, not about re-declaring an empty model per server.
+
+
+class _NewParams(WireModel):
+    session_id: str | None = None
+
+
+class _PromptParams(WireModel):
+    session_id: str | None = None
+    prompt: str = ""
+    provider: str | None = None
+    model: str | None = None
 
 
 @dataclass(slots=True)
@@ -41,7 +75,7 @@ class RpcServer:
     model: str = "fake-1"
     _agents: dict[str, Any] = field(default_factory=dict)
 
-    def _write(self, payload: dict[str, Any]) -> None:
+    def _write(self, payload: Frame) -> None:
         self.out.write(f"{dumps(payload)}\n")
         self.out.flush()
 
@@ -56,27 +90,35 @@ class RpcServer:
     async def _dispatch(self, method: str, params: dict[str, Any]) -> Any:
         if method in ("initialize", "daemon/hello"):
             # The same block the daemon answers with, minus what stdio cannot
-            # do: one process, one peer, no supervision.
+            # do: one process, one peer, no supervision. The params are parsed
+            # and discarded: a client's capability block means nothing to a
+            # transport that will never ask it anything, but a stray field is
+            # still a stray field.
+            parse_params(method, NoParams, params)
             return capabilities("tools")
         if method == "session/new":
             # Open, not create: a peer naming a stored id resumes it, and one
             # another process holds is refused by name (P5-03).
-            session = await open_session(self.ctx, params.get("sessionId"))
+            opened = parse_params(method, _NewParams, params)
+            session = await open_session(self.ctx, opened.session_id)
             self._attach(session)
             return {"sessionId": session.id}
         if method == "session/prompt":
-            return await self._prompt(params)
+            return await self._prompt(parse_params(method, _PromptParams, params))
         if method == "session/events":
-            session = self.ctx.require(SESSIONS).require(params["sessionId"])
+            asked = parse_params(method, SessionParams, params)
+            session = self.ctx.require(SESSIONS).require(asked.session_id)
             return {"events": [event.to_wire() for event in session.events]}
         if method == "tools/list":
             # `DEPLOYMENT` (P6-32): RPC mode advertises what the deployment
             # offers, before any agent exists to narrow it.
+            parse_params(method, NoParams, params)
             schemas = self.ctx.require(TOOLS).schemas(scope=DEPLOYMENT)
             return {"tools": [schema.to_wire() for schema in schemas]}
         if method == "shutdown":
+            parse_params(method, NoParams, params)
             return {"ok": True}
-        raise ValueError(f'unknown method "{method}"')
+        raise UnknownMethod(f'unknown method "{method}"')
 
     def _attach(self, session: Session) -> None:
         def emit(source: Session, event: SessionEvent) -> None:
@@ -86,8 +128,8 @@ class RpcServer:
 
         self.ctx.on("session/event", emit)
 
-    async def _prompt(self, params: dict[str, Any]) -> dict[str, Any]:
-        session_id = params.get("sessionId")
+    async def _prompt(self, params: _PromptParams) -> dict[str, Any]:
+        session_id = params.session_id
         session = self.ctx.require(SESSIONS).get(session_id) if session_id else None
         if session is None:
             session = await open_session(self.ctx, session_id)
@@ -97,13 +139,13 @@ class RpcServer:
             agent = self.ctx.require(AGENTS).create(
                 session,
                 AgentOptions(
-                    provider=params.get("provider") or self.provider,
-                    model=params.get("model") or self.model,
+                    provider=params.provider or self.provider,
+                    model=params.model or self.model,
                 ),
             )
             self._agents[session.id] = agent
         self._notify("session.status", {"sessionId": session.id, "status": "running"})
-        await agent.prompt(str(params.get("prompt", "")))
+        await agent.prompt(params.prompt)
         await self.ctx.require(SESSIONS).flush(session)
         self._notify("session.status", {"sessionId": session.id, "status": "idle"})
         return {"sessionId": session.id, "events": len(session.events)}

@@ -16,7 +16,7 @@ talked to it. `MAX_LINE` turns that into a refused connection with a reason.
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from typing import Any
 
 import anyio
@@ -73,8 +73,13 @@ class FramingError(Exception):
     """
 
 
-async def write_frame(stream: ByteStream, payload: dict[str, Any]) -> None:
+async def write_frame(stream: ByteStream, payload: Mapping[str, object]) -> None:
     """Send one object.
+
+    `Mapping[str, object]` rather than a `protocol.Frame`, so this stays the
+    transport and not the vocabulary: every `TypedDict` is a `Mapping`, and a
+    module that framed only the four shapes it knew about would have to be
+    told about a fifth.
 
     `ph.session.dumps` rather than `json.dumps`: it is the canonical encoder,
     and a daemon that framed events differently from the log they came out of
