@@ -24,7 +24,7 @@ from daemon_helpers import running
 
 from ph_app import verbs
 from ph_app.daemon import server
-from ph_app.daemon.server import METHODS, MUTATIONS, Announced
+from ph_app.daemon.server import METHODS, MUTATIONS, Announced, Method
 from ph_app.params import (
     MutationParams,
     NewSessionParams,
@@ -111,7 +111,7 @@ def test_every_handler_answers_with_the_reply_its_verb_declares() -> None:
     projections = {"session/readings", "commands/list", "screens/list", "tools/list"}
     checked = 0
     for method, row in {**METHODS, **MUTATIONS}.items():
-        answers = getattr(row, "handle", None) or row.act
+        answers = row.handle if isinstance(row, Method | Announced) else row.act
         declared = answers.__annotations__.get("return")
         if method in projections:
             assert declared == "N", f"{method} is no longer a generic projection; guard it here"
@@ -267,7 +267,7 @@ async def test_a_malformed_mutation_is_refused_before_a_root_is_mounted(tmp_path
             await client.call("session/preset", sessionId="never-mounted", preset="bogus")
         assert refused.value.reason == "invalid_params"
         assert "preset" in str(refused.value), "an unknown preset names the field, not a KeyError"
-        assert "never-mounted" not in daemon.server.supervisor.roots
+        assert "never-mounted" not in daemon.running.supervisor.roots
 
 
 async def test_an_unknown_method_is_still_its_own_refusal(tmp_path: Any) -> None:

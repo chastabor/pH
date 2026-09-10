@@ -21,6 +21,7 @@ from typing import Any
 import pytest
 from stabilize_helpers import PROFILE, bash_call, events_of, result_text, row, run_tool_calls
 
+from ph.keys import AGENTS, SESSIONS, SUBAGENTS, TUI_STATUS
 from ph.llm.types import ToolCallBlock
 from ph.seams.subagents import ADMITTED, SubagentRequest, SubagentSpawnError
 from ph.session import Session, SurfaceIntent
@@ -30,6 +31,7 @@ from ph.session.known_event_types import (
 )
 from ph.testing import (
     FAKE_OPTIONS,
+    MountProfile,
     StubSubagentProvider,
     assert_fold_laws,
     tool_result_payload,
@@ -148,7 +150,7 @@ def test_the_counts_obey_the_fold_laws() -> None:
 # -------------------------------------------------------------- model calls --
 
 
-async def test_the_model_call_limit_ends_the_turn_and_says_why(mount: Any) -> None:
+async def test_the_model_call_limit_ends_the_turn_and_says_why(mount: MountProfile) -> None:
     """`exit: end` — the step is rejected and the log carries the reason.
 
     Asked of `agent/pre-step` over a session that has already spent its budget,
@@ -162,8 +164,8 @@ async def test_the_model_call_limit_ends_the_turn_and_says_why(mount: Any) -> No
     codebase refuses everywhere else — the person still sees it, as a notice.
     """
     ctx = await mount(row("limits", modelCalls={"turnLimit": 2}), profile=PROFILE)
-    session = ctx.sessions.create("capped")
-    agent = ctx.agents.create(session, FAKE_OPTIONS)
+    session = ctx.require(SESSIONS).create("capped")
+    agent = ctx.require(AGENTS).create(session, FAKE_OPTIONS)
     session.append("turn/start", {"turn": 1})
     session.append("step/start", {"turn": 1, "step": 1})
     session.append("step/start", {"turn": 1, "step": 2})
@@ -176,12 +178,12 @@ async def test_the_model_call_limit_ends_the_turn_and_says_why(mount: Any) -> No
     assert breach.ignorable
 
 
-async def test_the_session_limit_outlives_the_turn(mount: Any) -> None:
+async def test_the_session_limit_outlives_the_turn(mount: MountProfile) -> None:
     """Upstream's *thread* limit under pH's name: it does not reset at a turn
     boundary, which is the whole difference between the two."""
     ctx = await mount(row("limits", modelCalls={"sessionLimit": 3}), profile=PROFILE)
-    session = ctx.sessions.create("session-capped")
-    agent = ctx.agents.create(session, FAKE_OPTIONS)
+    session = ctx.require(SESSIONS).create("session-capped")
+    agent = ctx.require(AGENTS).create(session, FAKE_OPTIONS)
 
     await agent.prompt("one")
     await agent.prompt("two")
@@ -192,12 +194,12 @@ async def test_the_session_limit_outlives_the_turn(mount: Any) -> None:
     assert events_of(session, "limits/exceeded")
 
 
-async def test_error_raises_instead_of_ending(mount: Any) -> None:
+async def test_error_raises_instead_of_ending(mount: MountProfile) -> None:
     """`exit: error`. The turn does not end quietly — a deployment that would
     rather crash than truncate gets to say so."""
     ctx = await mount(row("limits", modelCalls={"turnLimit": 1, "exit": "error"}), profile=PROFILE)
-    session = ctx.sessions.create("raising")
-    agent = ctx.agents.create(session, FAKE_OPTIONS)
+    session = ctx.require(SESSIONS).create("raising")
+    agent = ctx.require(AGENTS).create(session, FAKE_OPTIONS)
     engine = ctx.get("limits")
 
     await agent.prompt("go")
@@ -208,11 +210,11 @@ async def test_error_raises_instead_of_ending(mount: Any) -> None:
     assert engine is None, "the row provides no service; it is listeners only"
 
 
-async def test_no_limit_is_the_default(mount: Any) -> None:
+async def test_no_limit_is_the_default(mount: MountProfile) -> None:
     """Layering the bundle must not start refusing anyone's long turn."""
     ctx = await mount(profile=PROFILE)
-    session = ctx.sessions.create("uncapped")
-    agent = ctx.agents.create(session, FAKE_OPTIONS)
+    session = ctx.require(SESSIONS).create("uncapped")
+    agent = ctx.require(AGENTS).create(session, FAKE_OPTIONS)
 
     for _ in range(6):
         await agent.prompt("keep going")
@@ -223,11 +225,11 @@ async def test_no_limit_is_the_default(mount: Any) -> None:
 # --------------------------------------------------------------- tool calls --
 
 
-async def test_continue_denies_the_call_and_keeps_the_turn(mount: Any) -> None:
+async def test_continue_denies_the_call_and_keeps_the_turn(mount: MountProfile) -> None:
     """`exit: continue`, the default. The model is told, in upstream's own
     words, not to call that tool again — and the turn goes on."""
     ctx = await mount(row("limits", toolCalls={"turnLimit": 1}), profile=PROFILE)
-    session = ctx.sessions.create("tool-capped")
+    session = ctx.require(SESSIONS).create("tool-capped")
 
     await run_tool_calls(ctx, session, bash_call("c1"))
     await run_tool_calls(ctx, session, bash_call("c2"), step=2)
@@ -237,12 +239,12 @@ async def test_continue_denies_the_call_and_keeps_the_turn(mount: Any) -> None:
     assert not events_of(session, "limits/exceeded"), "continue is not a turn-ending breach"
 
 
-async def test_a_per_tool_budget_is_checked_beside_the_aggregate(mount: Any) -> None:
+async def test_a_per_tool_budget_is_checked_beside_the_aggregate(mount: MountProfile) -> None:
     """One table where upstream mounts one middleware per tool."""
     ctx = await mount(
         row("limits", toolCalls={"perTool": {"bash": {"turnLimit": 1}}}), profile=PROFILE
     )
-    session = ctx.sessions.create("per-tool")
+    session = ctx.require(SESSIONS).create("per-tool")
 
     await run_tool_calls(ctx, session, bash_call("c1"))
     await run_tool_calls(ctx, session, bash_call("c2"), step=2)
@@ -250,7 +252,7 @@ async def test_a_per_tool_budget_is_checked_beside_the_aggregate(mount: Any) -> 
     assert _denied(session, "c2", TOOL_DENIAL.format(tool="bash"))
 
 
-async def test_end_denies_the_siblings_in_upstreams_words(mount: Any) -> None:
+async def test_end_denies_the_siblings_in_upstreams_words(mount: MountProfile) -> None:
     """`exit: end`, and the one place pH's mechanics show through.
 
     Upstream jumps to the graph's end and synthesizes results for the calls it
@@ -260,7 +262,7 @@ async def test_end_denies_the_siblings_in_upstreams_words(mount: Any) -> None:
     about them.
     """
     ctx = await mount(row("limits", toolCalls={"turnLimit": 1, "exit": "end"}), profile=PROFILE)
-    session = ctx.sessions.create("ending")
+    session = ctx.require(SESSIONS).create("ending")
 
     await run_tool_calls(ctx, session, bash_call("c1"), bash_call("c2"), bash_call("c3"))
 
@@ -270,7 +272,7 @@ async def test_end_denies_the_siblings_in_upstreams_words(mount: Any) -> None:
     assert breach.data["limit"] == "tool-calls"
 
 
-async def test_an_end_breach_concludes_the_batch(mount: Any) -> None:
+async def test_an_end_breach_concludes_the_batch(mount: MountProfile) -> None:
     """The other half of `end`: the turn stops — through the loop's own flag.
 
     `Deny.concludes_turn` is the same mechanism a *successful* result uses to end
@@ -281,24 +283,24 @@ async def test_an_end_breach_concludes_the_batch(mount: Any) -> None:
     skipped it, as the vocabulary says one may, would not have ended the turn.
     """
     ctx = await mount(row("limits", toolCalls={"turnLimit": 1, "exit": "end"}), profile=PROFILE)
-    session = ctx.sessions.create("closing")
+    session = ctx.require(SESSIONS).create("closing")
 
     outcome = await run_tool_calls(ctx, session, bash_call("c1"), bash_call("c2"))
 
     assert outcome.concluded, "the batch did not tell the loop the turn is over"
 
 
-async def test_continue_leaves_the_turn_running(mount: Any) -> None:
+async def test_continue_leaves_the_turn_running(mount: MountProfile) -> None:
     """The pair to the test above, and the whole difference between the modes."""
     ctx = await mount(row("limits", toolCalls={"turnLimit": 1}), profile=PROFILE)
-    session = ctx.sessions.create("continuing")
+    session = ctx.require(SESSIONS).create("continuing")
 
     outcome = await run_tool_calls(ctx, session, bash_call("c1"), bash_call("c2"))
 
     assert not outcome.concluded
 
 
-async def test_a_later_turn_is_not_ended_by_an_earlier_breach(mount: Any) -> None:
+async def test_a_later_turn_is_not_ended_by_an_earlier_breach(mount: MountProfile) -> None:
     """Nothing carries the breach forward, which is the point.
 
     The first shape re-read a logged breach at every step and had to scope it to
@@ -308,8 +310,8 @@ async def test_a_later_turn_is_not_ended_by_an_earlier_breach(mount: Any) -> Non
     counts are reset by `turn/start` and there is no latch to expire.
     """
     ctx = await mount(row("limits", toolCalls={"turnLimit": 1, "exit": "end"}), profile=PROFILE)
-    session = ctx.sessions.create("later")
-    agent = ctx.agents.create(session, FAKE_OPTIONS)
+    session = ctx.require(SESSIONS).create("later")
+    agent = ctx.require(AGENTS).create(session, FAKE_OPTIONS)
     session.append("turn/start", {"turn": 1})
     await run_tool_calls(ctx, session, bash_call("c1"), bash_call("c2"))
     session.append("turn/start", {"turn": 2})
@@ -320,10 +322,10 @@ async def test_a_later_turn_is_not_ended_by_an_earlier_breach(mount: Any) -> Non
 # ------------------------------------------------------------- the breaker --
 
 
-async def test_the_breaker_trips_after_repeated_failure(mount: Any) -> None:
+async def test_the_breaker_trips_after_repeated_failure(mount: MountProfile) -> None:
     """The row's second gate. Five identical failures is not a long task."""
     ctx = await mount(row("limits", breaker={"consecutiveFailures": 3}), profile=PROFILE)
-    session = ctx.sessions.create("stuck")
+    session = ctx.require(SESSIONS).create("stuck")
 
     for step in range(1, 5):
         await run_tool_calls(ctx, session, _failing_read(f"c{step}"), step=step)
@@ -334,11 +336,11 @@ async def test_the_breaker_trips_after_repeated_failure(mount: Any) -> None:
     assert tripped.ignorable
 
 
-async def test_a_success_resets_the_breaker(mount: Any) -> None:
+async def test_a_success_resets_the_breaker(mount: MountProfile) -> None:
     """Consecutive, not cumulative — a tool that works intermittently is not
     the failure this catches."""
     ctx = await mount(row("limits", breaker={"consecutiveFailures": 2}), profile=PROFILE)
-    session = ctx.sessions.create("recovering")
+    session = ctx.require(SESSIONS).create("recovering")
 
     await run_tool_calls(ctx, session, _failing_read("c1"), step=1)
     await run_tool_calls(ctx, session, bash_call("c2"), step=2)
@@ -365,7 +367,7 @@ def test_the_denial_text_is_upstreams() -> None:
 # --------------------------------------------------------------- the footer --
 
 
-async def test_the_footer_shows_the_tightest_budget(mount: Any) -> None:
+async def test_the_footer_shows_the_tightest_budget(mount: MountProfile) -> None:
     """A live reading, not just the notice that lands when the budget is spent.
 
     Upstream announces a limit on the step it stops you — the one moment the
@@ -375,38 +377,38 @@ async def test_the_footer_shows_the_tightest_budget(mount: Any) -> None:
     ctx = await mount(
         row("limits", modelCalls={"turnLimit": 10}, toolCalls={"turnLimit": 4}), profile=PROFILE
     )
-    session = ctx.sessions.create("gauged")
+    session = ctx.require(SESSIONS).create("gauged")
     session.append("turn/start", {"turn": 1})
     session.append("step/start", {"turn": 1, "step": 1})
     for index in range(3):
         session.append("tool/call", {"turn": 1, "step": 1, "callId": f"c{index}", "name": "bash"})
 
-    (reading,) = ctx.tui_status.readings(session)
+    (reading,) = ctx.require(TUI_STATUS).readings(session)
 
     # 3/4 tools is tighter than 1/10 steps, and that is the one worth the line.
     assert reading.text == "tools 3/4"
     assert reading.level == "normal", "0.75 is short of the gauge's own 0.85"
 
     session.append("tool/call", {"turn": 1, "step": 1, "callId": "c3", "name": "bash"})
-    (reading,) = ctx.tui_status.readings(session)
+    (reading,) = ctx.require(TUI_STATUS).readings(session)
 
     assert reading.text == "tools 4/4"
     assert reading.level == "warning"
 
 
-async def test_the_footer_says_nothing_when_no_budget_is_set(mount: Any) -> None:
+async def test_the_footer_says_nothing_when_no_budget_is_set(mount: MountProfile) -> None:
     """The shipped default. A row that always occupies the line teaches a person
     to stop reading it."""
     ctx = await mount(profile=PROFILE)
-    session = ctx.sessions.create("ungauged")
+    session = ctx.require(SESSIONS).create("ungauged")
 
-    assert ctx.tui_status.readings(session) == []
+    assert ctx.require(TUI_STATUS).readings(session) == []
 
 
 # ------------------------------------------------------------ code dispatches --
 
 
-async def test_a_code_mode_dispatch_counts_as_a_tool_call(mount: Any) -> None:
+async def test_a_code_mode_dispatch_counts_as_a_tool_call(mount: MountProfile) -> None:
     """C1 made every dispatch a governed evaluation; the fold now counts it.
 
     A `tools.glob(...)` from inside a cell logs `tool/code-dispatch-start`, not
@@ -417,7 +419,7 @@ async def test_a_code_mode_dispatch_counts_as_a_tool_call(mount: Any) -> None:
     from ph_stabilize.limits import counts_of
 
     ctx = await mount(row("limits"), profile=PROFILE)
-    session = ctx.sessions.create("cell")
+    session = ctx.require(SESSIONS).create("cell")
     ref = {"root_call_id": "r1", "parent_call_id": "p1", "name": "glob"}
     for sub, failed in (("d1", False), ("d2", True)):
         start = CodeDispatchLog(**ref, sub_call_id=sub, is_error=failed).to_wire()
@@ -438,14 +440,16 @@ async def test_a_code_mode_dispatch_counts_as_a_tool_call(mount: Any) -> None:
 async def _parent(ctx: Any, session_id: str = "parent") -> tuple[Any, Any, Any]:
     """A parent agent and a stub provider. The stub does not log admission —
     the real provider does, as obligation 1 — so tests say what it would have."""
-    session = ctx.sessions.create(session_id)
-    agent = ctx.agents.create(session, FAKE_OPTIONS)
+    session = ctx.require(SESSIONS).create(session_id)
+    agent = ctx.require(AGENTS).create(session, FAKE_OPTIONS)
     provider = StubSubagentProvider(root=ctx)
-    ctx.subagents.register_provider("stub", provider)
+    ctx.require(SUBAGENTS).register_provider("stub", provider)
     return session, agent, provider
 
 
-async def test_the_children_budget_refuses_the_spawn_that_would_cross_it(mount: Any) -> None:
+async def test_the_children_budget_refuses_the_spawn_that_would_cross_it(
+    mount: MountProfile,
+) -> None:
     """P4-04's last piece: a cap on children, as a guard on `ctx.subagents`.
 
     Refused *before* the provider is asked, so nothing is created — the contract
@@ -455,19 +459,19 @@ async def test_the_children_budget_refuses_the_spawn_that_would_cross_it(mount: 
     ctx = await mount(row("limits", children={"turnLimit": 1}), profile=PROFILE)
     session, parent, provider = await _parent(ctx)
 
-    first = await ctx.subagents.start("stub", SubagentRequest(prompt="go", parent=parent))
+    first = await ctx.require(SUBAGENTS).start("stub", SubagentRequest(prompt="go", parent=parent))
     session.append(ADMITTED, {**first.to_wire(), "prompt": "go"})
 
     with pytest.raises(SubagentSpawnError, match=r"turn limit exceeded \(2/1 children\)"):
-        await ctx.subagents.start("stub", SubagentRequest(prompt="again", parent=parent))
+        await ctx.require(SUBAGENTS).start("stub", SubagentRequest(prompt="again", parent=parent))
 
     assert len(provider.requests) == 1, "refused before the provider was asked"
     breach = events_of(session, "limits/exceeded")[-1].data
     assert breach["limit"] == "children" and breach["turn"] == 1
 
 
-async def test_no_children_budget_registers_no_guard(mount: Any) -> None:
+async def test_no_children_budget_registers_no_guard(mount: MountProfile) -> None:
     """Unset by default, like every other ceiling here — and the guard is not
     even registered, so a spawn pays nothing for a cap nobody chose."""
     ctx = await mount(row("limits"), profile=PROFILE)
-    assert ctx.subagents._guards == []
+    assert ctx.require(SUBAGENTS)._guards == []

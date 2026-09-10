@@ -18,7 +18,7 @@ from ph.session.request_header import (
     fold_request_header,
     header_equals,
 )
-from ph.testing import assistant_payload, user_payload
+from ph.testing import assistant_payload, block_text, user_payload
 
 
 def test_derivation_follows_the_surface() -> None:
@@ -31,7 +31,7 @@ def test_derivation_follows_the_surface() -> None:
     )
     messages = session.derive_messages()
     # Boundaries and raw chunks are trace data, so they are correctly absent.
-    assert [(m.role, m.content[0].text) for m in messages] == [
+    assert [(m.role, block_text(m.content[0])) for m in messages] == [
         ("user", "hi"),
         ("assistant", "hey"),
     ]
@@ -71,7 +71,7 @@ def test_cache_rebuilds_only_on_a_surface_rewrite() -> None:
         SurfaceIntent(SurfaceReplace(replaces=(0, 1)), (0, 1)),
     )
     rebuilt = session.derive_messages()
-    assert [m.content[0].text for m in rebuilt] == ["summary"]
+    assert [block_text(m.content[0]) for m in rebuilt] == ["summary"]
     assert session.surface.replace_generation == 1
 
 
@@ -85,8 +85,8 @@ def test_transcript_keeps_what_the_surface_shadows() -> None:
         SurfaceIntent(SurfaceReplace(replaces=(0, 1)), (0, 1)),
     )
     # The model sees the summary; the human still sees the conversation.
-    assert [m.content[0].text for m in session.derive_messages()] == ["summary"]
-    assert [m.content[0].text for m in session.transcript()] == ["a", "b"]
+    assert [block_text(m.content[0]) for m in session.derive_messages()] == ["summary"]
+    assert [block_text(m.content[0]) for m in session.transcript()] == ["a", "b"]
 
 
 def test_request_header_folds_incrementally_and_matches_the_pure_fold() -> None:

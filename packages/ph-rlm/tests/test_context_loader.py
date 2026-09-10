@@ -24,11 +24,15 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from rlm_fixtures import MountedRuntime
 from runtime_helpers import dispatch_names, run_ipython_cell, settled_dispatches
 
+from ph.keys import SYSTEM_PROMPT, TOOLS
+from ph.session.json import as_seq
 from ph.system_prompt import render_prompt
 from ph.tools import Accept
 from ph_rlm.context_loader import LOADED, Corpus, Document, render_manifest
+from ph_rlm.keys import CONTEXT_CORPUS
 
 pytestmark = pytest.mark.anyio
 
@@ -44,7 +48,7 @@ def row(sources: list[dict[str, Any]], **config: Any) -> dict[str, Any]:
 
 
 @pytest.fixture
-def loaded(mounted_runtime: Any, tmp_path: Path) -> Loaded:
+def loaded(mounted_runtime: MountedRuntime, tmp_path: Path) -> Loaded:
     """`await loaded(sources=…)` → `(ctx, session, agent)` on the real runtime.
 
     The real kernel, because the load-bearing claim is about what a *cell* sees
@@ -214,7 +218,7 @@ async def test_one_oversized_query_is_offloaded_without_its_siblings(loaded: Loa
 
 
 async def test_the_corpus_rehydrates_and_says_when_it_changed(
-    mounted_runtime: Any, tmp_path: Path
+    mounted_runtime: MountedRuntime, tmp_path: Path
 ) -> None:
     """The plan's other gate. A recipe, not a snapshot (D17/Q4): what is durable
     is `{loader, sources, digest}`, and a later session re-resolves it."""
@@ -227,31 +231,31 @@ async def test_the_corpus_rehydrates_and_says_when_it_changed(
     (record,) = [event for event in session.events if event.type == LOADED]
     first_digest = str(record.data["digest"])
     assert record.data["loader"] == "rlm-context-loader"
-    assert list(record.data["sources"]) == [str(source)]
+    assert list(as_seq(record.data["sources"])) == [str(source)]
     assert record.data["note"] == "", "a first load has nothing to report"
 
     # Re-resolving unchanged sources gives the same digest, so nothing new is
     # recorded and nothing is said — the silent case, and the common one.
     ctx2, _session2, _agent2 = await mounted_runtime(session_id="c2", extra_rows=[row(sources)])
-    assert ctx2.context_corpus.corpus.digest == first_digest
-    assert ctx2.context_corpus.announce(session) == ""
+    assert ctx2.require(CONTEXT_CORPUS).corpus.digest == first_digest
+    assert ctx2.require(CONTEXT_CORPUS).announce(session) == ""
     assert len([event for event in session.events if event.type == LOADED]) == 1
 
     # Now the source moves under a session that was already told about it. A
     # snapshot would have restored the old bytes; a recipe re-resolves and says so.
     source.write_text("rewritten content, quite different\n")
     ctx3, _s3, _a3 = await mounted_runtime(session_id="c3", extra_rows=[row(sources)])
-    assert ctx3.context_corpus.corpus.digest != first_digest
-    note = ctx3.context_corpus.announce(session)
+    assert ctx3.require(CONTEXT_CORPUS).corpus.digest != first_digest
+    note = ctx3.require(CONTEXT_CORPUS).announce(session)
     assert "was rebuilt from changed sources" in note
     assert session.events[-1].data["note"] == note
     # And announcing again is a memo hit: same note, no third record.
-    assert ctx3.context_corpus.announce(session) == note
+    assert ctx3.require(CONTEXT_CORPUS).announce(session) == note
     assert len([event for event in session.events if event.type == LOADED]) == 2
 
 
 async def test_an_unreadable_source_is_reported_not_hidden(
-    mounted_runtime: Any, tmp_path: Path
+    mounted_runtime: MountedRuntime, tmp_path: Path
 ) -> None:
     ctx, session, agent = await mounted_runtime(
         session_id="missing",
@@ -264,18 +268,18 @@ async def test_an_unreadable_source_is_reported_not_hidden(
             )
         ],
     )
-    assert ctx.context_corpus.corpus.missing == (str(tmp_path / "gone.md"),)
+    assert ctx.require(CONTEXT_CORPUS).corpus.missing == (str(tmp_path / "gone.md"),)
 
     prompt = await _assemble(ctx, agent)
     assert "could not be read" in prompt
-    assert "unavailable" in ctx.context_corpus.announce(session)
+    assert "unavailable" in ctx.require(CONTEXT_CORPUS).announce(session)
 
 
 # ------------------------------------------------------------- the prompt --
 
 
 async def _assemble(ctx: Any, agent: Any) -> str:
-    assembly = await ctx.system_prompt.assemble(agent.ctx, agent=agent)
+    assembly = await ctx.require(SYSTEM_PROMPT).assemble(agent.ctx, agent=agent)
     return render_prompt(assembly)
 
 
@@ -295,7 +299,7 @@ async def test_the_corpus_is_in_the_cached_prefix(loaded: Loaded) -> None:
     """A `section`, not a `context()`: resolved once at mount, so the text is
     fixed for the session and belongs in the stable prefix (A12)."""
     ctx, _session, agent = await loaded()
-    assembly = await ctx.system_prompt.assemble(agent.ctx, agent=agent)
+    assembly = await ctx.require(SYSTEM_PROMPT).assemble(agent.ctx, agent=agent)
 
     assert "# Loaded context" in render_prompt(assembly)
 
@@ -309,18 +313,18 @@ def test_a_manifest_names_every_document() -> None:
 # ------------------------------------------------------- standing down --
 
 
-async def test_no_sources_means_no_row(mounted_runtime: Any) -> None:
+async def test_no_sources_means_no_row(mounted_runtime: MountedRuntime) -> None:
     """Off by default is the shipped state; a row with nothing to load must not
     advertise three tools that would answer nothing."""
     ctx, _session, agent = await mounted_runtime(session_id="empty", extra_rows=[row([])])
 
     assert ctx.get("context_corpus") is None
-    assert "context_search" not in ctx.tools.names(scope=agent.ctx)
+    assert "context_search" not in ctx.require(TOOLS).names(scope=agent.ctx)
     assert "# Loaded context" not in await _assemble(ctx, agent)
 
 
 async def test_a_corpus_under_the_threshold_stands_down(
-    mounted_runtime: Any, tmp_path: Path
+    mounted_runtime: MountedRuntime, tmp_path: Path
 ) -> None:
     """Q4's threshold: a corpus small enough to read with `tools.read` should be
     read with `tools.read` — governed, logged and offloadable already."""
@@ -332,4 +336,4 @@ async def test_a_corpus_under_the_threshold_stands_down(
     )
 
     assert ctx.get("context_corpus") is None
-    assert "context_search" not in ctx.tools.names(scope=agent.ctx)
+    assert "context_search" not in ctx.require(TOOLS).names(scope=agent.ctx)

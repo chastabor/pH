@@ -22,9 +22,13 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from conftest import BINDINGS_ROW, DOCTRINE_ROW, PROVIDER_ROW
+from rlm_fixtures import BINDINGS_ROW, DOCTRINE_ROW, PROVIDER_ROW
 
+from ph.agent.types import AgentHandle
+from ph.cordis import Context
+from ph.keys import AGENTS, SUBAGENTS, SYSTEM_PROMPT, WORKSPACE
 from ph.seams.subagents import SubagentRequest
+from ph.session import Session
 from ph.system_prompt import join_context_sections, render_context_sections, render_prompt
 from ph_rlm.presentation import IPYTHON
 from ph_rlm.prompt import CHILD_DOCTRINE, DELEGATION, DOCTRINE, WORKSPACE_LINE
@@ -48,21 +52,22 @@ def prompted(mounted_runtime: Mounted) -> Callable[..., Any]:
         delegation: bool = True,
         extra_rows: list[dict[str, Any]] | None = None,
         **kwargs: Any,
-    ) -> tuple[Any, Any, Any]:
+    ) -> tuple[Context, Session, AgentHandle]:
         rows = [
             *([PROVIDER_ROW, BINDINGS_ROW] if delegation else []),
             DOCTRINE_ROW,
             *(extra_rows or []),
         ]
-        return await mounted_runtime(
+        built: tuple[Context, Session, AgentHandle] = await mounted_runtime(
             session_id="parent", presentation=True, extra_rows=rows, **kwargs
         )
+        return built
 
     return build
 
 
 async def _assemble(ctx: Any, agent: Any) -> Any:
-    return await ctx.system_prompt.assemble(agent.ctx, agent=agent)
+    return await ctx.require(SYSTEM_PROMPT).assemble(agent.ctx, agent=agent)
 
 
 async def _prompt(ctx: Any, agent: Any) -> str:
@@ -154,10 +159,10 @@ async def test_a_child_is_told_it_is_a_child(prompted: Mounted) -> None:
     ctx, _session, parent = await prompted()
     assert CHILD_DOCTRINE.strip() not in await _prompt(ctx, parent)
 
-    run = await ctx.subagents.start(
+    run = await ctx.require(SUBAGENTS).start(
         PROVIDER_NAME, SubagentRequest(prompt="look into it", parent=parent, name="scout")
     )
-    child = ctx.agents.get(run.session_id)
+    child = ctx.require(AGENTS).get(run.session_id)
     assert child is not None
     text = await _prompt(ctx, child)
     assert CHILD_DOCTRINE.strip() in text
@@ -203,7 +208,7 @@ async def test_an_acquired_workspace_replaces_the_none_acquired_line(prompted: M
     would have started describing the seam object the day it was mounted.
     """
     ctx, _session, agent = await prompted()
-    await ctx.workspace.acquire(
+    await ctx.require(WORKSPACE).acquire(
         session_id="s1", agent_id=agent.id, base=Path("/repo"), session=agent.session
     )
     snapshot = await _snapshot(ctx, agent)
@@ -217,7 +222,7 @@ async def test_an_acquired_workspace_replaces_the_none_acquired_line(prompted: M
 
 async def test_the_snapshot_lists_the_family_and_the_children(prompted: Mounted) -> None:
     ctx, _session, parent = await prompted()
-    run = await ctx.subagents.start(
+    run = await ctx.require(SUBAGENTS).start(
         PROVIDER_NAME, SubagentRequest(prompt="find it", parent=parent, name="scout")
     )
     snapshot = await _snapshot(ctx, parent)
@@ -225,7 +230,7 @@ async def test_the_snapshot_lists_the_family_and_the_children(prompted: Mounted)
     assert "child scout" in snapshot
     assert "Your children: scout" in snapshot
 
-    child = ctx.agents.get(run.session_id)
+    child = ctx.require(AGENTS).get(run.session_id)
     assert child is not None
     child_snapshot = await _snapshot(ctx, child)
     assert "Reachable agents: parent " in child_snapshot
@@ -237,9 +242,9 @@ async def test_a_child_at_the_depth_limit_is_told_so(prompted: Mounted) -> None:
     ctx, _session, parent = await prompted(
         extra_rows=[{"id": "rlm-subagent-provider", "config": {"maxDepth": 1}}]
     )
-    run = await ctx.subagents.start(
+    run = await ctx.require(SUBAGENTS).start(
         PROVIDER_NAME, SubagentRequest(prompt="one level", parent=parent, name="scout")
     )
-    child = ctx.agents.get(run.session_id)
+    child = ctx.require(AGENTS).get(run.session_id)
     assert child is not None
     assert "you may not delegate further" in await _snapshot(ctx, child)

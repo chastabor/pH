@@ -26,6 +26,7 @@ import pytest
 from tui_helpers import root_of, running, until
 
 import ph_app.tui.app
+from ph.keys import TUI_STATUS
 from ph.seams.tui_status import StatusField, StatusReading
 from ph_app.tui.app import PHTuiApp
 
@@ -168,7 +169,7 @@ async def test_the_footer_is_folded_on_change_and_not_per_frame(
         # Counted in a registered field rather than by replacing the accessor:
         # The front end is frozen, and this is where the cost actually is —
         # every field runs over the whole session on every fold.
-        root_of(tui_daemon).ctx.tui_status.register(StatusField(id="probe", read=counted))
+        root_of(tui_daemon).ctx.require(TUI_STATUS).register(StatusField(id="probe", read=counted))
         front.state.status = "running"
         app.state_changed()
         await until(pilot, lambda: app._spinner is not None)

@@ -58,6 +58,7 @@ from typing import Any
 
 import pytest
 
+from ph.keys import SANDBOX, SUBPROCESS
 from ph.seams.sandbox import Egress, SandboxError, SandboxPolicy, writable_paths
 from ph.seams.sandbox_egress import PROBE_HOST
 from ph.seams.sandbox_local import (
@@ -74,6 +75,7 @@ from ph.seams.sandbox_local import (
     seatbelt_profile,
 )
 from ph.seams.subprocess import SubprocessSpawnSpec, scrub_env
+from ph.testing import MountProfile
 from ph.testing.diagnostics import report_section
 
 pytestmark = pytest.mark.anyio
@@ -209,7 +211,7 @@ def test_every_mode_goes_through_one_profile_builder() -> None:
     for a policy, so a policy whose profile was built elsewhere made that false —
     and made the argv assertion below true only for the modes it did own."""
     for mode in ("read-only", "workspace-write", "danger-full-access"):
-        policy = SandboxPolicy(mode=mode, workspace_root="/w")  # type: ignore[arg-type]
+        policy = SandboxPolicy(mode=mode, workspace_root="/w")
         confined = Seatbelt().confine(("cmd", "arg"), policy)
         assert confined.argv[:2] == ("sandbox-exec", "-p")
         assert confined.argv[2] == seatbelt_profile(policy)
@@ -251,7 +253,7 @@ def test_the_backend_is_chosen_by_platform_then_by_binary(
 
 
 async def test_the_row_declines_rather_than_claiming_confinement_it_cannot_prove(
-    mount: Any,
+    mount: MountProfile,
 ) -> None:
     """**The whole safety argument of this row.**
 
@@ -267,15 +269,15 @@ async def test_the_row_declines_rather_than_claiming_confinement_it_cannot_prove
     """
     ctx = await mount(ROW)
 
-    if ctx.sandbox.provider is None:
-        assert ctx.sandbox.enforcement is None, "no backend is not partial confinement"
+    if ctx.require(SANDBOX).provider is None:
+        assert ctx.require(SANDBOX).enforcement is None, "no backend is not partial confinement"
         with pytest.raises(SandboxError):
-            ctx.sandbox.confine(("cmd",), _policy())
+            ctx.require(SANDBOX).confine(("cmd",), _policy())
     else:
-        assert ctx.sandbox.enforcement == "full"
+        assert ctx.require(SANDBOX).enforcement == "full"
 
 
-async def test_the_verdict_reaches_ph_doctor_either_way(mount: Any) -> None:
+async def test_the_verdict_reaches_ph_doctor_either_way(mount: MountProfile) -> None:
     """ "Why is strict refusing to start" is asked of the tool, not of the source.
 
     A decline that says only *"the sandbox refused a write"* is true and useless;
@@ -296,21 +298,23 @@ async def test_the_verdict_reaches_ph_doctor_either_way(mount: Any) -> None:
 
 async def _run(ctx: Any, argv: tuple[str, ...], cwd: Path) -> tuple[int, str]:
     """One confined argv, run. Code plus output, so a failure says why."""
-    outcome = await ctx.subprocess.run(SubprocessSpawnSpec(argv=argv, cwd=cwd, env=scrub_env()))
+    outcome = await ctx.require(SUBPROCESS).run(
+        SubprocessSpawnSpec(argv=argv, cwd=cwd, env=scrub_env())
+    )
     return outcome.exit_code, outcome.stdout + outcome.stderr
 
 
-async def _enforcing(mount: Any, tmp_path: Path) -> tuple[Any, Path]:
+async def _enforcing(mount: MountProfile, tmp_path: Path) -> tuple[Any, Path]:
     """A mounted row over a host whose kernel enforces, and a workspace, or a skip."""
     ctx = await mount(ROW)
-    if ctx.sandbox.provider is None:
+    if ctx.require(SANDBOX).provider is None:
         pytest.skip("no enforcing sandbox backend on this host")
     workspace = tmp_path / "work"
     workspace.mkdir()
     return ctx, workspace
 
 
-async def test_an_absolute_path_write_is_refused(mount: Any, tmp_path: Path) -> None:
+async def test_an_absolute_path_write_is_refused(mount: MountProfile, tmp_path: Path) -> None:
     """**P6-04's gate, and the half of E13 no tier below this one can close.**
 
     `test_containment_ladder.py` asserts the escape at the `worktree` rung and
@@ -333,22 +337,26 @@ async def test_an_absolute_path_write_is_refused(mount: Any, tmp_path: Path) -> 
         return (sys.executable, "-c", f"open({str(target)!r}, 'w').write('written')")
 
     landed, output = await _run(
-        ctx, ctx.sandbox.confine(raw(workspace / "in.txt"), policy).argv, workspace
+        ctx, ctx.require(SANDBOX).confine(raw(workspace / "in.txt"), policy).argv, workspace
     )
     assert landed == 0, output
     assert (workspace / "in.txt").read_text(encoding="utf-8") == "written"
 
-    escaped, output = await _run(ctx, ctx.sandbox.confine(raw(outside), policy).argv, workspace)
+    escaped, output = await _run(
+        ctx, ctx.require(SANDBOX).confine(raw(outside), policy).argv, workspace
+    )
     assert escaped != 0, "the kernel must refuse this"
     assert outside.read_text(encoding="utf-8") == "host", "and the host file must be untouched"
 
 
-async def test_read_only_mode_refuses_the_workspace_too(mount: Any, tmp_path: Path) -> None:
+async def test_read_only_mode_refuses_the_workspace_too(
+    mount: MountProfile, tmp_path: Path
+) -> None:
     """The mode `readonly-scratch` will be built on (P6-05): nothing is writable,
     including the directory the agent is standing in."""
     ctx, workspace = await _enforcing(mount, tmp_path)
 
-    confined = ctx.sandbox.confine(
+    confined = ctx.require(SANDBOX).confine(
         (sys.executable, "-c", "open('here.txt', 'w').write('x')"),
         SandboxPolicy(mode="read-only"),
     )
@@ -378,7 +386,7 @@ async def _said(ctx: Any, workspace: Path, script: str, **extra: Any) -> str:
     the three lines that produce it.
     """
     policy = SandboxPolicy(mode="workspace-write", workspace_root=str(workspace), **extra)
-    argv = ctx.sandbox.confine((sys.executable, "-c", script), policy).argv
+    argv = ctx.require(SANDBOX).confine((sys.executable, "-c", script), policy).argv
     _, out = await _run(ctx, argv, workspace)
     return out
 
@@ -411,7 +419,7 @@ async def _isolated(ctx: Any, workspace: Path, **extra: Any) -> bool:
         listener.close()
 
 
-async def test_the_namespaces_are_real(mount: Any, tmp_path: Path) -> None:
+async def test_the_namespaces_are_real(mount: MountProfile, tmp_path: Path) -> None:
     """`--unshare-net` and `--unshare-pid` are namespaces, not filters — nothing
     inside can talk past them, which is why they are the mechanism. Seatbelt has
     no namespaces and *is* a filter, at the kernel; the loopback question below is
@@ -433,11 +441,13 @@ async def test_the_namespaces_are_real(mount: Any, tmp_path: Path) -> None:
         assert await _count(ctx, workspace, PIDS) < 10, "its own processes, not the host's table"
 
 
-async def test_the_deployment_can_hand_out_the_hosts_network(mount: Any, tmp_path: Path) -> None:
+async def test_the_deployment_can_hand_out_the_hosts_network(
+    mount: MountProfile, tmp_path: Path
+) -> None:
     """`network.mode: full` is the one way to the host's interfaces, and it is the
     deployment's to say — a row, not a per-call flag."""
     ctx = await mount(ROW, FULL_NETWORK)
-    if ctx.sandbox.provider is None:
+    if ctx.require(SANDBOX).provider is None:
         pytest.skip("no enforcing sandbox backend on this host")
     workspace = tmp_path / "work"
     workspace.mkdir()
@@ -601,7 +611,7 @@ def test_the_proxy_url_carries_no_user_when_there_is_no_agent() -> None:
 def test_a_command_with_the_hosts_network_gets_no_shim() -> None:
     """`full` is the host's network; the door is for `allowlist` only, and a seam
     that hands both to a backend has made a mistake this backend does not repeat."""
-    argv = Bubblewrap().confine(("curl",), _policy(network=True, egress=_egress())).argv  # type: ignore[arg-type]
+    argv = Bubblewrap().confine(("curl",), _policy(network=True, egress=_egress())).argv
     assert "--unshare-net" not in argv
     assert "--setenv" not in argv
     assert argv[argv.index("--") + 1 :] == ("curl",)
@@ -620,7 +630,7 @@ def test_the_seatbelt_profile_opens_only_the_door() -> None:
         "nothing to bind and nothing to reach by path"
     )
     assert "network" not in seatbelt_profile(_policy()), "no door, no lines"
-    assert "remote ip" not in seatbelt_profile(_policy(network=True, egress=_egress()))  # type: ignore[arg-type]
+    assert "remote ip" not in seatbelt_profile(_policy(network=True, egress=_egress()))
 
     confined = Seatbelt().confine(("curl",), _policy(egress=_egress()))
     assert confined.argv[3] == "/usr/bin/env", "sandbox-exec sets no environment; env does"

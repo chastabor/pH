@@ -36,6 +36,7 @@ from unittest.mock import patch
 import pytest
 
 from ph.cordis import DEPLOYMENT
+from ph.keys import AGENTS, SESSIONS, SYSTEM_PROMPT, WORKSPACE
 from ph.paths import write_text_under
 from ph.system_prompt.assembly import AssembleContext
 from ph.system_prompt.memory import (
@@ -47,7 +48,7 @@ from ph.system_prompt.memory import (
     render,
 )
 from ph.testing import FAKE_OPTIONS as FAKE
-from ph.testing import StubWorkspaceProvider
+from ph.testing import MountProfile, StubWorkspaceProvider
 
 pytestmark = pytest.mark.anyio
 
@@ -63,7 +64,7 @@ async def _assembled(ctx: Any, agent: Any = None) -> str:
     Filtered by name rather than using `join_context_sections`, because what is
     under test is *this* row's contribution and a profile contributes others.
     """
-    assembly = await ctx.system_prompt.assemble(ctx, agent=agent)
+    assembly = await ctx.require(SYSTEM_PROMPT).assemble(ctx, agent=agent)
     return "\n\n".join(section.text for section in assembly.contexts if section.name == "memory")
 
 
@@ -112,20 +113,22 @@ def test_nothing_found_renders_nothing(tmp_path: Path) -> None:
 # ------------------------------------------------------------------- the row --
 
 
-async def test_the_row_contributes_a_context_not_a_section(mount: Any, tmp_path: Path) -> None:
+async def test_the_row_contributes_a_context_not_a_section(
+    mount: MountProfile, tmp_path: Path
+) -> None:
     """G8 in one assertion. A `section` is the cached prefix; putting a file
     whose purpose is to be edited there bills every earlier token for the edit.
     """
     _write(tmp_path / "AGENTS.md", "Prefer explicit code.")
     ctx = await mount()
 
-    assembly = await ctx.system_prompt.assemble(DEPLOYMENT)
+    assembly = await ctx.require(SYSTEM_PROMPT).assemble(DEPLOYMENT)
 
     assert "Prefer explicit code." in await _assembled(ctx)
     assert not any("Prefer explicit code." in text for _, text in assembly.sections)
 
 
-async def test_an_edit_is_visible_without_a_restart(mount: Any, tmp_path: Path) -> None:
+async def test_an_edit_is_visible_without_a_restart(mount: MountProfile, tmp_path: Path) -> None:
     """The Phase-1 row read at mount, so editing memory did nothing until the
     process restarted. Being a provider is what fixes that; the cache below is
     what keeps it from costing a read per turn."""
@@ -138,7 +141,7 @@ async def test_an_edit_is_visible_without_a_restart(mount: Any, tmp_path: Path) 
     assert "Prefer spaces, and say why." in await _assembled(ctx)
 
 
-async def test_an_unchanged_file_is_not_re_read(mount: Any, tmp_path: Path) -> None:
+async def test_an_unchanged_file_is_not_re_read(mount: MountProfile, tmp_path: Path) -> None:
     """`assemble` runs once per model *step*, so "memory is live" must not mean
     "every step reads 64 KiB from disk".
 
@@ -171,7 +174,7 @@ async def test_an_unchanged_file_is_not_re_read(mount: Any, tmp_path: Path) -> N
     assert opens == 0, "the file was read to answer a question the signature had"
 
 
-async def test_an_edit_is_read_again(mount: Any, tmp_path: Path) -> None:
+async def test_an_edit_is_read_again(mount: MountProfile, tmp_path: Path) -> None:
     """The other half: the signature is mtime and size, so a changed file is
     re-read exactly when it changed."""
     memory_file = _write(tmp_path / "AGENTS.md", "before")
@@ -185,7 +188,7 @@ async def test_an_edit_is_read_again(mount: Any, tmp_path: Path) -> None:
     assert "after, and longer than before" in memory.text(request)
 
 
-async def test_the_cache_does_not_grow_without_bound(mount: Any, tmp_path: Path) -> None:
+async def test_the_cache_does_not_grow_without_bound(mount: MountProfile, tmp_path: Path) -> None:
     """The key is a workspace root, and a daemon fans out one per child — so
     without a bound the process retains a rendered snapshot for every worktree
     it ever saw. Driven through `text()`, because a test that re-implemented the
@@ -198,21 +201,23 @@ async def test_the_cache_does_not_grow_without_bound(mount: Any, tmp_path: Path)
 
     with patch.object(MemoryFiles, "root", lambda _self, agent: agent):
         for root in roots:
-            memory.text(AssembleContext(scope=ctx, agent=root))
+            memory.text(AssembleContext(scope=ctx, agent=root))  # type: ignore[arg-type]
 
     assert len(memory._cache) <= CACHE_MAX
 
 
-async def test_an_agent_reads_the_memory_of_the_tree_it_is_in(mount: Any, tmp_path: Path) -> None:
+async def test_an_agent_reads_the_memory_of_the_tree_it_is_in(
+    mount: MountProfile, tmp_path: Path
+) -> None:
     """Per agent, not per process (D21). A child working in a worktree that has
     its own `AGENTS.md` is being told the rules of the tree it is in — a root
     read once at mount would hand every agent the process's own directory."""
     _write(tmp_path / "AGENTS.md", "the parent tree")
     ctx = await mount()
-    ctx.workspace.register_provider(StubWorkspaceProvider(root=tmp_path / "trees"))
-    session = ctx.sessions.create("s")
-    agent = ctx.agents.create(session, FAKE)
-    workspace = await ctx.workspace.acquire(
+    ctx.require(WORKSPACE).register_provider(StubWorkspaceProvider(root=tmp_path / "trees"))
+    session = ctx.require(SESSIONS).create("s")
+    agent = ctx.require(AGENTS).create(session, FAKE)
+    workspace = await ctx.require(WORKSPACE).acquire(
         session_id=session.id, agent_id=agent.id, base=tmp_path, session=session
     )
     _write(workspace.root / "AGENTS.md", "the tree this agent got")

@@ -66,7 +66,7 @@ from typing import Any
 import pytest
 
 from ph.cordis import DEPLOYMENT, Context, Profile
-from ph.keys import FS
+from ph.keys import AGENTS, FS, SESSIONS
 from ph.seams.fs import (
     Config as FsConfig,
 )
@@ -81,7 +81,7 @@ from ph.seams.fs import (
     read_before_edit,
 )
 from ph.session import Session
-from ph.testing import FAKE_OPTIONS, StubAgent, run_tool
+from ph.testing import FAKE_OPTIONS, MountProfile, StubAgent, run_tool
 
 pytestmark = pytest.mark.anyio
 
@@ -110,7 +110,7 @@ async def _mounted(tmp_path: Path, **config: Any) -> FsService:
     """
     root = Context()
     await apply(root, FsConfig(root=str(tmp_path), **config))
-    service: FsService = root.fs
+    service: FsService = root.require(FS)
     return service
 
 
@@ -559,21 +559,23 @@ async def test_an_fs_reader_cannot_be_called_without_a_boundary(tmp_path: Path) 
     class NoCtx:
         """An agent-shaped object that never assigned `self.ctx`."""
 
-    # Through `root.fs`, which `Context.__getattr__` types as `Any` — the exact
-    # path the row's runtime layer exists for, and the one mypy cannot see. The
-    # typed handle would need a `# type: ignore` to say the same thing less well.
+    # The runtime layer's own refusal: `scope=` is keyword-only and required, so
+    # a caller who omits it gets a `TypeError` naming the argument rather than a
+    # silent deployment-wide walk. The pragma is the point of the test — this
+    # call is *meant* to be the one mypy rejects, and until issue 32 removed
+    # `Context.__getattr__` the sugar hid it behind an `Any`.
     with pytest.raises(TypeError, match="missing 1 required keyword-only argument"):
-        await root.fs.glob("**/*.txt")
+        await root.require(FS).glob("**/*.txt")  # type: ignore[call-arg]
 
     assert len(await fs.glob("**/*.txt", scope=DEPLOYMENT)) == 1, "the deployment, asked for"
     assert len(await fs.glob("**/*.txt", scope=agent)) == 1, "an agent's own boundary"
-    assert len(await fs.glob("**/*.txt", agent=NoCtx(), scope=agent)) == 1, (
+    assert len(await fs.glob("**/*.txt", agent=NoCtx(), scope=agent)) == 1, (  # type: ignore[arg-type]
         "a stated boundary answers the question, whatever the agent handle looks like"
     )
 
 
 async def test_a_tool_call_is_judged_in_the_scope_the_caller_states(
-    mount: Any,
+    mount: MountProfile,
 ) -> None:
     """The same divergence one layer up, driven through the real pipeline.
 
@@ -601,13 +603,15 @@ async def test_a_tool_call_is_judged_in_the_scope_the_caller_states(
     (root / "secret.txt").write_text("s")
     (root / "plain.txt").write_text("p")
 
-    parent = ctx.agents.create(ctx.sessions.create("p624-parent"), FAKE_OPTIONS)
-    child = ctx.agents.create(ctx.sessions.create("p624-child"), FAKE_OPTIONS, parent=parent)
+    parent = ctx.require(AGENTS).create(ctx.require(SESSIONS).create("p624-parent"), FAKE_OPTIONS)
+    child = ctx.require(AGENTS).create(
+        ctx.require(SESSIONS).create("p624-child"), FAKE_OPTIONS, parent=parent
+    )
 
     def screen(_path: str, name: str, _agent: Any, is_dir: bool) -> WalkDecision:
         return "yield" if is_dir or name != "secret.txt" else "skip"
 
-    ctx.fs.screen(screen, scope=child.ctx)
+    ctx.require(FS).screen(screen, scope=child.ctx)
 
     async def shown(scope: Context, agent: Any) -> list[str]:
         found = await run_tool(ctx, "glob", {"pattern": "*.txt"}, agent=agent, scope=scope)
@@ -625,7 +629,9 @@ async def test_a_tool_call_is_judged_in_the_scope_the_caller_states(
 # ------------------------------------------- the workspace is the whole world --
 
 
-async def test_no_path_the_model_reads_names_the_machine(mount: Any, tmp_path: Path) -> None:
+async def test_no_path_the_model_reads_names_the_machine(
+    mount: MountProfile, tmp_path: Path
+) -> None:
     """Every path that reaches the model is relative to the workspace (A11/A12).
 
     An absolute path inside the workspace names the same file as its relative
@@ -646,23 +652,27 @@ async def test_no_path_the_model_reads_names_the_machine(mount: Any, tmp_path: P
     project.mkdir()
     (project / "notes.md").write_text("hello\n", encoding="utf-8")
     ctx = await mount({"id": "fs", "config": {"root": str(project)}})
-    agent = ctx.agents.create(ctx.sessions.create("named"), FAKE_OPTIONS)
+    agent = ctx.require(AGENTS).create(ctx.require(SESSIONS).create("named"), FAKE_OPTIONS)
 
-    window = await ctx.fs.read("notes.md", scope=agent.ctx, agent=agent)
-    written = await ctx.fs.write("sub/new.txt", "x", scope=agent.ctx, agent=agent)
-    edited = await ctx.fs.edit("notes.md", "hello", "goodbye", scope=agent.ctx, agent=agent)
+    window = await ctx.require(FS).read("notes.md", scope=agent.ctx, agent=agent)
+    written = await ctx.require(FS).write("sub/new.txt", "x", scope=agent.ctx, agent=agent)
+    edited = await ctx.require(FS).edit(
+        "notes.md", "hello", "goodbye", scope=agent.ctx, agent=agent
+    )
 
     assert window.path == "notes.md", "a read named the machine"
-    assert ctx.fs.named(project / "sub" / "new.txt", agent=agent) == "sub/new.txt"
+    assert ctx.require(FS).named(project / "sub" / "new.txt", agent=agent) == "sub/new.txt"
     assert written is not None or written is None  # the write happened; its shape is the tool's
     assert edited == 1
     # And the one case a relative path would mislead: outside the workspace it
     # keeps its absolute form, because that is not a name the workspace has.
     outside = tmp_path / "elsewhere.txt"
-    assert ctx.fs.named(outside, agent=agent) == str(outside)
+    assert ctx.require(FS).named(outside, agent=agent) == str(outside)
 
 
-async def test_a_read_records_the_workspace_relative_name(mount: Any, tmp_path: Path) -> None:
+async def test_a_read_records_the_workspace_relative_name(
+    mount: MountProfile, tmp_path: Path
+) -> None:
     """`fs/observed` too: it is a record about a file, kept across runs.
 
     A record whose path is `/tmp/ph-w-7/src/x.py` describes a directory that
@@ -674,10 +684,10 @@ async def test_a_read_records_the_workspace_relative_name(mount: Any, tmp_path: 
     project.mkdir()
     (project / "notes.md").write_text("hello\n", encoding="utf-8")
     ctx = await mount({"id": "fs", "config": {"root": str(project)}})
-    session = ctx.sessions.create("observed")
-    agent = ctx.agents.create(session, FAKE_OPTIONS)
+    session = ctx.require(SESSIONS).create("observed")
+    agent = ctx.require(AGENTS).create(session, FAKE_OPTIONS)
 
-    await ctx.fs.read("notes.md", scope=agent.ctx, agent=agent, session=session)
+    await ctx.require(FS).read("notes.md", scope=agent.ctx, agent=agent, session=session)
 
     observed = [one for one in session.events if one.type == "fs/observed"]
     assert [one.data["path"] for one in observed] == ["notes.md"]

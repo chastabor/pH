@@ -32,8 +32,10 @@ import pytest
 
 from ph.agent.types import AgentOptions
 from ph.bundles import BASE, HEADLESS
+from ph.keys import AGENTS, COMMANDS, SESSIONS
 from ph.session import Session
-from ph.testing import anthropic_reply
+from ph.session.json import as_int, as_obj
+from ph.testing import MountProfile, anthropic_reply
 from ph_app.adapters._http import HttpClient
 from ph_app.adapters.anthropic import MIN_CACHEABLE_TOKENS
 from ph_stabilize import BUNDLE
@@ -175,13 +177,15 @@ def wire(monkeypatch: pytest.MonkeyPatch) -> _PromptCache:
 
 def _usage(session: Session, event_type: str) -> list[dict[str, Any]]:
     return [
-        dict(event.data["usage"])
+        dict(as_obj(event.data["usage"]))
         for event in session.events
         if event.type == event_type and event.data.get("usage")
     ]
 
 
-async def test_the_second_request_of_a_session_reads_cache(mount: Any, wire: _PromptCache) -> None:
+async def test_the_second_request_of_a_session_reads_cache(
+    mount: MountProfile, wire: _PromptCache
+) -> None:
     """The gate, and the defect it is here for.
 
     Anthropic's caching is opt-in: before P6-13 this adapter sent no markers, so
@@ -191,8 +195,8 @@ async def test_the_second_request_of_a_session_reads_cache(mount: Any, wire: _Pr
     *read*, and the log is where that is answerable.
     """
     ctx = await mount(ROUTE, profile=PROFILE)
-    session = ctx.sessions.create("cache")
-    agent = ctx.agents.create(session, OPTIONS)
+    session = ctx.require(SESSIONS).create("cache")
+    agent = ctx.require(AGENTS).create(session, OPTIONS)
 
     await agent.prompt(_prompt(0))
     await agent.prompt(_prompt(1))
@@ -205,7 +209,7 @@ async def test_the_second_request_of_a_session_reads_cache(mount: Any, wire: _Pr
     assert second["cacheReadTokens"] > 0, "the second request re-read no prefix"
 
 
-async def test_every_later_request_keeps_reading(mount: Any, wire: _PromptCache) -> None:
+async def test_every_later_request_keeps_reading(mount: MountProfile, wire: _PromptCache) -> None:
     """The property a marker on "the newest message" would fail.
 
     A conversation grows past several checkpoint boundaries here, so this covers
@@ -215,7 +219,7 @@ async def test_every_later_request_keeps_reading(mount: Any, wire: _PromptCache)
     spot check lands between the periods.
     """
     ctx = await mount(ROUTE, profile=PROFILE)
-    agent = ctx.agents.create(ctx.sessions.create("deep"), OPTIONS)
+    agent = ctx.require(AGENTS).create(ctx.require(SESSIONS).create("deep"), OPTIONS)
 
     for turn in range(8):
         await agent.prompt(_prompt(turn))
@@ -228,7 +232,7 @@ async def test_every_later_request_keeps_reading(mount: Any, wire: _PromptCache)
 
 
 async def test_the_compaction_call_reads_the_conversations_own_prefix(
-    mount: Any, wire: _PromptCache
+    mount: MountProfile, wire: _PromptCache
 ) -> None:
     """P4-03's replayed envelope, priced — the second half of the gate.
 
@@ -238,14 +242,14 @@ async def test_the_compaction_call_reads_the_conversations_own_prefix(
     beside the shape it used; this asserts the two agree.
     """
     ctx = await mount(ROUTE, profile=PROFILE)
-    session = ctx.sessions.create("compact")
-    agent = ctx.agents.create(session, OPTIONS)
+    session = ctx.require(SESSIONS).create("compact")
+    agent = ctx.require(AGENTS).create(session, OPTIONS)
     for turn in range(6):
         await agent.prompt(_prompt(turn))
 
     wire.reply = "## SESSION INTENT\n\nthe scripted summary"
-    await ctx.commands.dispatch("/compact", session=session, agent=agent)
+    await ctx.require(COMMANDS).dispatch("/compact", session=session, agent=agent)
 
     (record,) = [event for event in session.events if event.type == "compaction/summarized"]
     assert record.data["shape"] == "replay", "a direct shape cannot hit the conversation's cache"
-    assert record.data["usage"]["cacheReadTokens"] > 0
+    assert as_int(as_obj(record.data["usage"])["cacheReadTokens"]) > 0

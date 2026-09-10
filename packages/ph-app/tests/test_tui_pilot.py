@@ -21,13 +21,15 @@ from typing import Any
 
 import pytest
 from daemon_helpers import until as settled
+from textual.binding import Binding
 from textual.widgets import Input
 from tui_helpers import root_of, running, turn_done, until
 
+from ph.keys import APPROVAL, COMMANDS, CREDENTIALS, TOOLS
 from ph.seams.approval import ApprovalRequest, Edited, Responded
 from ph.seams.commands import CommandDefinition
 from ph.seams.user_questions import UserQuestion
-from ph.testing import StubAgent, simple_tool
+from ph.testing import StubAgent, not_none, simple_tool
 from ph_app.trust import TrustStore
 from ph_app.tui.app import PHTuiApp
 from ph_app.tui.modals.approval import ApprovalModal
@@ -52,7 +54,7 @@ async def test_typing_and_submitting_runs_a_turn(make_tui_app: MakeApp, tui_daem
     async with running(make_tui_app()) as (app, pilot):
         root = root_of(tui_daemon)
         assert app.front is not None
-        root.ctx.tools.register(simple_tool("ping"))
+        root.ctx.require(TOOLS).register(simple_tool("ping"))
         await pilot.press(*"hello")
         await pilot.press(app.keys.submit)
         await until(pilot, turn_done(app))
@@ -139,7 +141,7 @@ async def _decide(app: Any, pilot: Any, root: Any, *, arguments: Any = None) -> 
 
     async def ask() -> None:
         answers.append(
-            await root.ctx.approval.request(
+            await root.ctx.require(APPROVAL).request(
                 agent=StubAgent(ctx=root.ctx, session=root.session),
                 tool_name="write",
                 call_id="c1",
@@ -349,7 +351,7 @@ async def test_the_command_palette_inserts_a_command(
         root = root_of(tui_daemon)
         front = app.front
         assert front is not None
-        root.ctx.commands.register(_command())
+        root.ctx.require(COMMANDS).register(_command())
         # A command registered on the daemon reaches this palette as a
         # `session.commands` notification, so it is there a frame later rather
         # than at once — the honest cost of the list living one socket away.
@@ -554,7 +556,7 @@ async def test_typing_a_slash_offers_registered_commands(
     async with running(make_tui_app()) as (app, pilot):
         root = root_of(tui_daemon)
         assert app.front is not None
-        root.ctx.commands.register(_command())
+        root.ctx.require(COMMANDS).register(_command())
         prompt = app.query_one(PromptInput)
         await pilot.press(*"/comp")
         await pilot.pause()
@@ -571,7 +573,7 @@ async def test_a_disposed_command_leaves_the_completion_list(
     async with running(make_tui_app()) as (app, pilot):
         root = root_of(tui_daemon)
         assert app.front is not None
-        dispose = root.ctx.commands.register(_command())
+        dispose = root.ctx.require(COMMANDS).register(_command())
         prompt = app.query_one(PromptInput)
         await pilot.press(*"/comp")
         await pilot.pause()
@@ -590,7 +592,7 @@ async def test_escape_closes_the_completion_list_before_interrupting(
     async with running(make_tui_app()) as (app, pilot):
         root = root_of(tui_daemon)
         assert app.front is not None
-        root.ctx.commands.register(_command())
+        root.ctx.require(COMMANDS).register(_command())
         prompt = app.query_one(PromptInput)
         await pilot.press(*"/comp")
         await pilot.pause()
@@ -620,7 +622,7 @@ async def test_a_slash_line_dispatches_instead_of_prompting(
         root = root_of(tui_daemon)
         front = app.front
         assert front is not None
-        root.ctx.commands.register(_command())
+        root.ctx.require(COMMANDS).register(_command())
         await until(pilot, lambda: any(one.name == "compact" for one in front.commands()))
         await pilot.press(*"/compact")
         await pilot.pause()
@@ -662,7 +664,7 @@ async def test_every_verb_is_a_command_an_action_and_maybe_a_key(
         # registered anywhere, so the list a person sees is the merge of both
         # ends — which is the thing "reachable as a command" has to mean now.
         registered = {definition.name for definition in front.commands()}
-        bound = {binding.id for binding in app.BINDINGS if hasattr(binding, "id")}
+        bound = {binding.id for binding in app.BINDINGS if isinstance(binding, Binding)}
         for verb in TUI_VERBS:
             assert verb.name in registered
             assert hasattr(app, f"action_{verb.action}"), verb.action
@@ -690,7 +692,7 @@ async def test_login_stores_a_secret_without_logging_it(
         await pilot.press("enter")
         await pilot.pause()
 
-        credentials = root.ctx.credentials
+        credentials = root.ctx.require(CREDENTIALS)
         resolved = credentials.resolve(credentials.reference("PH_TEST_KEY"))
         assert resolved is not None
         assert resolved.reveal() == "s3cret"
@@ -873,7 +875,10 @@ async def test_two_terminals_on_one_session_share_the_log_and_not_the_composer(
         await until(first_pilot, turn_done(first))
         await until(
             second_pilot,
-            lambda: any(item.text == "shared" for item in second.front.state.visible_items()),
+            lambda: any(
+                item.text == "shared"
+                for item in not_none(not_none(second.front).state).visible_items()
+            ),
         )
 
         assert second.query_one(PromptInput).area.text == "a draft", "the draft is still theirs"

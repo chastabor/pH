@@ -14,17 +14,24 @@ report — so "nothing mounted" is asserted rather than assumed.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
 import pytest
 from textual.coordinate import Coordinate
-from textual.widgets import DataTable
+from textual.widgets import DataTable, Input
 from tui_helpers import until
 
 from ph.cordis import Context
+from ph.keys import SESSIONS
 from ph.persistence import LineageError, read_session
 from ph.session import Session, SurfaceIntent
-from ph.testing import assistant_payload, stored_log, user_payload, write_reference_fork
+from ph.testing import (
+    MountProfile,
+    assistant_payload,
+    store_root,
+    stored_log,
+    user_payload,
+    write_reference_fork,
+)
 from ph_app.tui.trajectory import build_trajectory
 from ph_app.tui.trajectory_app import TrajectoryApp, load_records
 from ph_app.tui.widgets.trajectory import FORK_MARK, Query, search_index
@@ -48,15 +55,15 @@ def _log(session: Session) -> Session:
 
 async def _stored(ctx: Context, session_id: str = "audit") -> Path:
     """Write a real log to disk through the persistence row."""
-    session = _log(ctx.sessions.create(session_id))
-    await ctx.sessions.flush(session)
-    return stored_log(ctx.session_persistence.root, session.id)
+    session = _log(ctx.require(SESSIONS).create(session_id))
+    await ctx.require(SESSIONS).flush(session)
+    return stored_log(store_root(ctx), session.id)
 
 
 # ----------------------------------------------------- nothing mounted --
 
 
-async def test_it_opens_a_stored_log_with_nothing_mounted(mount: Any) -> None:
+async def test_it_opens_a_stored_log_with_nothing_mounted(mount: MountProfile) -> None:
     """The gate the shape exists for.
 
     The records are read from a *file* — no context, no agent, no provider, no
@@ -96,14 +103,14 @@ def test_a_missing_log_is_named_as_the_person_typed_it(tmp_path: Path) -> None:
         load_records("absent", home=tmp_path)
 
 
-async def test_a_log_is_readable_by_id_or_by_path(mount: Any, tmp_path: Path) -> None:
+async def test_a_log_is_readable_by_id_or_by_path(mount: MountProfile, tmp_path: Path) -> None:
     """By path, so a fixture or a copy someone sent is readable without being
     installed into `$PH_HOME` first."""
     ctx: Context = await mount()
     path = await _stored(ctx)
 
     by_path, _ = load_records(str(path))
-    by_id, _ = load_records("audit", home=Path(ctx.session_persistence.root).parent)
+    by_id, _ = load_records("audit", home=Path(store_root(ctx)).parent)
     assert by_path == by_id == "audit"
 
 
@@ -135,7 +142,7 @@ def test_search_covers_the_source_not_only_the_text() -> None:
 # ---------------------------------------------- lineage (feasibility §5.3) --
 
 
-async def test_a_log_under_any_filename_is_readable(mount: Any, tmp_path: Path) -> None:
+async def test_a_log_under_any_filename_is_readable(mount: MountProfile, tmp_path: Path) -> None:
     """ "A fixture, a copy someone sent" — the capability this module's docstring
     promises and nothing exercised.
 
@@ -157,14 +164,14 @@ async def test_a_log_under_any_filename_is_readable(mount: Any, tmp_path: Path) 
 
 
 async def test_a_reference_forked_child_renders_its_inherited_history(
-    mount: Any, tmp_path: Path
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """The child holds two events and the view shows the whole conversation."""
     ctx = await mount({"id": "session-persistence", "config": {"root": str(tmp_path / "s")}})
     parent_path = await _stored(ctx, "base")
     # The **sessions root**, not the log's own directory: a log now sits one
     # level down, inside its family.
-    root = Path(ctx.session_persistence.root)
+    root = Path(store_root(ctx))
     _, parent_events = read_session(parent_path)
     boundary = next(event.seq for event in reversed(parent_events) if event.type == "turn/end")
 
@@ -179,7 +186,7 @@ async def test_a_reference_forked_child_renders_its_inherited_history(
 
 
 async def test_a_child_whose_ancestor_is_gone_refuses_rather_than_showing_half(
-    mount: Any, tmp_path: Path
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """A partial history rendered as a whole one is the failure to avoid.
 
@@ -187,7 +194,7 @@ async def test_a_child_whose_ancestor_is_gone_refuses_rather_than_showing_half(
     the refusal names the ancestor it could not find.
     """
     ctx = await mount({"id": "session-persistence", "config": {"root": str(tmp_path / "s")}})
-    root = Path(ctx.session_persistence.root)
+    root = Path(store_root(ctx))
     root.mkdir(parents=True, exist_ok=True)
     orphan = write_reference_fork(root, "orphan", "deleted-parent", boundary=4)
 
@@ -207,41 +214,44 @@ def test_a_fork_is_marked_only_at_a_closed_turn() -> None:
     assert [record.title for record in marked] == ["turn end"]
 
 
-async def test_the_fork_key_refuses_off_a_boundary_and_says_why(mount: Any) -> None:
+async def test_the_fork_key_refuses_off_a_boundary_and_says_why(mount: MountProfile) -> None:
     """A key that silently does nothing is worse than one that is not offered."""
     ctx: Context = await mount()
-    session = _log(ctx.sessions.create("forking"))
+    session = _log(ctx.require(SESSIONS).create("forking"))
     records = build_trajectory(session)
-    app = TrajectoryApp(records, session_id=session.id, sessions=ctx.sessions)
+    app = TrajectoryApp(records, session_id=session.id, sessions=ctx.require(SESSIONS))
 
     async with app.run_test() as pilot:
         await pilot.pause()
         panel = app.trajectory.panel
         # The cursor starts on record #1 — a `turn start`, not a boundary.
-        assert panel.selected() is not None
-        assert not panel.selected().fork_point
+        started = panel.selected()
+        assert started is not None
+        assert not started.fork_point
         await pilot.press("f")
         # The store's own words, with its own code — this view no longer states
         # A6 in parallel with the layer that enforces it.
         assert "open turn" in app.trajectory.notice
-        assert f"#{app.trajectory.panel.selected().index}" in app.trajectory.notice
+        selected = app.trajectory.panel.selected()
+        assert selected is not None
+        assert f"#{selected.index}" in app.trajectory.notice
 
 
-async def test_a_fork_at_a_boundary_produces_a_byte_identical_prefix(mount: Any) -> None:
+async def test_a_fork_at_a_boundary_produces_a_byte_identical_prefix(mount: MountProfile) -> None:
     """The row's gate, and the reason forking is the view's headline action.
 
     Driven through the key, so what is tested is the action a person performs.
     """
     ctx: Context = await mount()
-    session = _log(ctx.sessions.create("source"))
+    session = _log(ctx.require(SESSIONS).create("source"))
     records = build_trajectory(session)
     boundary = next(record for record in records if record.fork_point)
-    app = TrajectoryApp(records, session_id=session.id, sessions=ctx.sessions)
+    app = TrajectoryApp(records, session_id=session.id, sessions=ctx.require(SESSIONS))
 
     child = None
     async with app.run_test() as pilot:
         await pilot.pause()
-        table = app.trajectory.panel.query_one("#trajectory-table")
+        table = app.trajectory.panel.query_one("#trajectory-table", DataTable)
         table.move_cursor(row=app.trajectory.panel.visible_records.index(boundary))
         await pilot.pause()
         assert app.trajectory.panel.selected() is boundary
@@ -270,7 +280,7 @@ async def test_forking_without_a_harness_says_so() -> None:
     async with app.run_test() as pilot:
         await pilot.pause()
         boundary = next(record for record in records if record.fork_point)
-        app.trajectory.panel.query_one("#trajectory-table").move_cursor(
+        app.trajectory.panel.query_one("#trajectory-table", DataTable).move_cursor(
             row=app.trajectory.panel.visible_records.index(boundary)
         )
         await pilot.pause()
@@ -290,13 +300,15 @@ async def test_the_table_and_the_details_panel_follow_the_cursor() -> None:
     async with app.run_test() as pilot:
         await pilot.pause()
         panel = app.trajectory.panel
-        assert panel.query_one("#trajectory-table").row_count == len(records)
+        assert panel.query_one("#trajectory-table", DataTable).row_count == len(records)
         # The header states what the log holds, including where forks may aim.
         header = app.query_one("#trajectory-header").render()
         assert "1 fork point(s)" in str(header)
 
         tool = next(record for record in records if record.kind == "tool")
-        panel.query_one("#trajectory-table").move_cursor(row=panel.visible_records.index(tool))
+        panel.query_one("#trajectory-table", DataTable).move_cursor(
+            row=panel.visible_records.index(tool)
+        )
         await pilot.pause()
         body = str(panel.query_one(".details-body").render())
         assert "src/a.py" in body, "the panel did not follow the cursor"
@@ -309,18 +321,18 @@ async def test_filtering_narrows_the_table_and_keeps_a_selection() -> None:
     async with app.run_test() as pilot:
         await pilot.pause()
         panel = app.trajectory.panel
-        panel.query_one("#trajectory-filter").value = "read"
+        panel.query_one("#trajectory-filter", Input).value = "read"
         await until(pilot, lambda: len(panel.visible_records) < len(records))
 
         assert all("read" in search_index(record) for record in panel.visible_records)
         assert panel.selected() is not None, "a narrowed table still has a selection"
 
-        panel.query_one("#trajectory-filter").value = "nothing-matches-this"
+        panel.query_one("#trajectory-filter", Input).value = "nothing-matches-this"
         await until(pilot, lambda: not panel.visible_records)
         assert panel.selected() is None
 
 
-async def test_the_fork_mark_reaches_the_table(mount: Any) -> None:
+async def test_the_fork_mark_reaches_the_table(mount: MountProfile) -> None:
     """The mark is the affordance; without it the key is a guess.
 
     Asserted on the rendered cell rather than on the record, because the first

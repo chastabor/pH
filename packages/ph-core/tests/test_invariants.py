@@ -22,11 +22,13 @@ fire, which is the failure mode an invariant suite has.
 
 from __future__ import annotations
 
+from collections.abc import Callable, Mapping
 from typing import Any
 
 import pytest
 
 from ph.cordis import DEPLOYMENT, Context
+from ph.keys import GOALS, INVARIANTS, SESSIONS
 from ph.seams.goals import Goal
 from ph.seams.invariants import Invariant, InvariantRegistry, Violation
 from ph.seams.scope_invariant import violations as scope_violations
@@ -35,6 +37,7 @@ from ph.seams.skills_invariant import violations as skill_violations
 from ph.session import SurfaceIntent
 from ph.session.invariant import violations as session_violations
 from ph.testing import (
+    MountProfile,
     report_section,
     simple_tool,
     skill,
@@ -130,7 +133,7 @@ async def test_verify_reports_every_violation_not_the_first() -> None:
 # ------------------------------------------------------------------- session --
 
 
-async def test_a_log_written_behind_append_trips_the_events_snapshot(mount: Any) -> None:
+async def test_a_log_written_behind_append_trips_the_events_snapshot(mount: MountProfile) -> None:
     """The first of `Session.stale`'s three projections, broken the only way it can be.
 
     `events` is a snapshot invalidated on append, so it agrees with the log for as
@@ -145,7 +148,7 @@ async def test_a_log_written_behind_append_trips_the_events_snapshot(mount: Any)
     message now says that rather than asserting a cause it cannot see.
     """
     ctx = await mount()
-    session = ctx.sessions.create("s1")
+    session = ctx.require(SESSIONS).create("s1")
     session.append("user/message", user_payload("hello", "m1"), SurfaceIntent("append"))
 
     assert session_violations(ctx) == [], "a session built by appending disagreed with itself"
@@ -156,7 +159,9 @@ async def test_a_log_written_behind_append_trips_the_events_snapshot(mount: Any)
     assert any("events snapshot holds 1" in one for one in found), found
 
 
-async def test_a_surface_that_outran_its_log_trips_the_session_invariant(mount: Any) -> None:
+async def test_a_surface_that_outran_its_log_trips_the_session_invariant(
+    mount: MountProfile,
+) -> None:
     """I6's surface half, isolated from the snapshot.
 
     `SurfaceManager` folds incrementally and `fold_surface` replays the whole log
@@ -170,7 +175,7 @@ async def test_a_surface_that_outran_its_log_trips_the_session_invariant(mount: 
     disagree about the conversation, and only one of the three is the log.
     """
     ctx = await mount()
-    session = ctx.sessions.create("s1")
+    session = ctx.require(SESSIONS).create("s1")
     session.append("user/message", user_payload("hello", "m1"), SurfaceIntent("append"))
     assert session.surface.nodes, "the manager had not folded, so there is nothing to outrun"
 
@@ -181,7 +186,7 @@ async def test_a_surface_that_outran_its_log_trips_the_session_invariant(mount: 
     assert any("surface projects 1 node(s)" in one for one in found), found
 
 
-async def test_a_stale_derivation_trips_the_session_invariant(mount: Any) -> None:
+async def test_a_stale_derivation_trips_the_session_invariant(mount: MountProfile) -> None:
     """The third projection, and the one I3 stands on.
 
     `derive_messages` is memoized per surface node, and it is what
@@ -192,7 +197,7 @@ async def test_a_stale_derivation_trips_the_session_invariant(mount: Any) -> Non
     invalidation looks like from the inside.
     """
     ctx = await mount()
-    session = ctx.sessions.create("s1")
+    session = ctx.require(SESSIONS).create("s1")
     session.append("user/message", user_payload("hello", "m1"), SurfaceIntent("append"))
     assert session.derive_messages(), "nothing was derived, so there is nothing to go stale"
 
@@ -297,7 +302,7 @@ async def test_a_narrowing_clears_the_cache_rather_than_ageing_it() -> None:
     skills.reach(DEPLOYMENT)
     assert skills._reach, "nothing was cached to invalidate"
 
-    skills.restrict(SkillRestriction(deny=("write-code",)))
+    skills.restrict(SkillRestriction(deny=frozenset({"write-code"})))
 
     assert skills._reach == {}, "a narrowing aged the cache instead of emptying it"
     assert skills.reach(DEPLOYMENT) == {"read-code"}, "the narrowing did not take"
@@ -335,7 +340,7 @@ async def test_a_child_reaching_past_its_ancestor_trips_the_skill_invariant(
     skills.register(skill("write-code"))
     parent = root.scope("parent", module="test")
     child = parent.scope("child", module="test")
-    skills.restrict(SkillRestriction(deny=("write-code",)), scope=parent)
+    skills.restrict(SkillRestriction(deny=frozenset({"write-code"})), scope=parent)
 
     assert skills.reach(child) == {"read-code"}, "the parent's narrowing did not reach the child"
     assert skill_violations(root) == []
@@ -385,14 +390,17 @@ async def test_a_disposed_scope_is_not_retained_as_a_cache_key(registry: str) ->
     the *key*, which is the only thing they share — their values, folds and
     invalidation side effects all differ.
     """
+    root: Context
+    fill: Callable[[Context], object]
+    table: Mapping[Any, Any]
     if registry == "tools":
-        root, service = tool_runtime()
-        service.register(simple_tool("read"))
-        fill, table = service.view, service._views
+        root, tools = tool_runtime()
+        tools.register(simple_tool("read"))
+        fill, table = tools.view, tools._views
     else:
-        root, service = skill_service()
-        service.register(skill("read-code"))
-        fill, table = service.reach, service._reach
+        root, skills = skill_service()
+        skills.register(skill("read-code"))
+        fill, table = skills.reach, skills._reach
 
     kept = root.scope("kept", module="test")
     fill(kept)
@@ -456,7 +464,7 @@ async def test_the_scope_walk_terminates_on_a_cycle() -> None:
 # ------------------------------------------------------------------ mounting --
 
 
-async def test_the_rows_reach_the_report_through_the_real_mount(mount: Any) -> None:
+async def test_the_rows_reach_the_report_through_the_real_mount(mount: MountProfile) -> None:
     """The half no unit test can reach: `contribute` waiting on the key.
 
     Every one of these rows calls `contribute`, which registers through
@@ -490,7 +498,9 @@ async def test_the_rows_reach_the_report_through_the_real_mount(mount: Any) -> N
     assert all(rows[name].startswith("holds ·") for name in pollable), rows
 
 
-async def test_a_drifted_fold_cache_is_reported_by_the_row_that_owns_it(mount: Any) -> None:
+async def test_a_drifted_fold_cache_is_reported_by_the_row_that_owns_it(
+    mount: MountProfile,
+) -> None:
     """The poll, end to end, through the mount a deployment actually runs.
 
     A goal is set, the service caches the fold, and a reader mutates the table it
@@ -499,12 +509,12 @@ async def test_a_drifted_fold_cache_is_reported_by_the_row_that_owns_it(mount: A
     cache drifted is the part a person can act on, and is why these are a row each.
     """
     ctx = await mount()
-    session = ctx.sessions.create("drifted")
-    ctx.goals.set(session, Goal(id="g1", objective="make the tests pass"))
+    session = ctx.require(SESSIONS).create("drifted")
+    ctx.require(GOALS).set(session, Goal(id="g1", objective="make the tests pass"))
 
-    ctx.goals.states(session)["g1"].spent.turns = 99
+    ctx.require(GOALS).states(session)["g1"].spent.turns = 99
 
-    violations = ctx.invariants.verify()
+    violations = ctx.require(INVARIANTS).verify()
     assert [one.invariant for one in violations] == ["goal-fold-cache"]
     assert "drifted" in violations[0].detail
     assert report_section(ctx, "Invariants")["goal-fold-cache"].startswith("VIOLATED ·")
@@ -518,7 +528,7 @@ async def test_a_drifted_fold_cache_is_reported_by_the_row_that_owns_it(mount: A
     ],
 )
 async def test_a_row_whose_service_is_gone_reports_nothing_rather_than_holds(
-    mount: Any, row: str, service: str, invariant: str
+    mount: MountProfile, row: str, service: str, invariant: str
 ) -> None:
     """`inject` is what makes "absent rather than assumed" true of a *service*.
 
@@ -540,7 +550,7 @@ async def test_a_row_whose_service_is_gone_reports_nothing_rather_than_holds(
     assert invariant not in report_section(ctx, "Invariants")
 
 
-async def test_an_unmounted_invariant_is_absent_rather_than_assumed(mount: Any) -> None:
+async def test_an_unmounted_invariant_is_absent_rather_than_assumed(mount: MountProfile) -> None:
     """The whole reason the registry exists, stated as a test.
 
     Dropping `agent-loop-invariant` means I3 is *not* enforced in this profile,

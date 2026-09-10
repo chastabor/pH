@@ -63,7 +63,7 @@ from ph.session import (
 )
 from ph.session.events import SessionEvent
 from ph.session.store import SessionStore
-from ph.testing import user_payload
+from ph.testing import block_text, user_payload
 
 
 def _store() -> SessionStore:
@@ -144,9 +144,9 @@ def test_fork_at_an_earlier_boundary_takes_only_that_prefix() -> None:
     _closed_turn(parent, 2, "second")
 
     child = store.fork(parent, first_turn_end, "child")
-    assert [m.content[0].text for m in child.derive_messages()] == ["first"]
+    assert [block_text(m.content[0]) for m in child.derive_messages()] == ["first"]
     # The parent is untouched by the fork.
-    assert [m.content[0].text for m in parent.derive_messages()] == ["first", "second"]
+    assert [block_text(m.content[0]) for m in parent.derive_messages()] == ["first", "second"]
 
 
 def test_fork_inside_an_open_turn_is_refused() -> None:

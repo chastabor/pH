@@ -19,8 +19,8 @@ import anyio
 
 from ..agent.types import AgentHandle, AgentOptions
 from ..cordis import DEPLOYMENT, Boundary, Context
-from ..keys import SKILLS, TOOLS
-from ..llm.types import ContextForm, PluginSource
+from ..keys import SESSION_PERSISTENCE, SKILLS, TOOLS
+from ..llm.types import ContextForm, PluginSource, ReasoningBlock, TextBlock
 from ..persistence.jsonl import HEADER_LINE_TYPE, locate_session, session_path
 from ..seams.skills import SkillService
 from ..seams.workspace import (
@@ -473,3 +473,124 @@ def stored_log(root: Path, session_id: str, *, family: str | None = None) -> Pat
     inherits its parent's and should say so.
     """
     return locate_session(root, session_id) or session_path(root, session_id, family or session_id)
+
+
+def as_kind[B](block: object, kind: type[B]) -> B:
+    """This value, narrowed to `kind` — the assertion a test was already making.
+
+    A `ContentBlock` is a five-way union, so `blocks[0].name` is an error on four
+    of them: a test that indexes a message's content and reads a field is
+    *claiming* which kind it got, and until the test trees came under mypy
+    (issue 32) nothing checked the claim. 103 such reads existed, and the check
+    they wanted is one `isinstance`.
+
+    Named for the `as_int`/`as_obj`/`as_seq` family, which does the same job for
+    a payload field: state the shape you are reading and fail on the spot if it
+    is not that. `assert` rather than a raise because the caller is a test and
+    the failure is a wrong expectation, not a refusal to handle.
+
+    Not block-specific despite where it started: `Message.source` is a four-way
+    union read the same way, and one helper is better than a second copy under
+    another name.
+    """
+    assert isinstance(block, kind), f"expected a {kind.__name__}, got {type(block).__name__}"
+    return block
+
+
+def block_text(block: object) -> str:
+    """The text of a block that carries text — `TextBlock` or `ReasoningBlock`.
+
+    Both spell it `text`, and 75 of the reads `as_kind` exists for wanted only
+    the string. Naming both kinds here keeps the call site from having to decide
+    which of the two it is holding when it does not care.
+
+    Not `text_of`: that one joins a *sequence* and silently skips anything that
+    is not a `TextBlock`, so a test asserting on reasoning text would get `""`
+    and pass for the wrong reason.
+    """
+    assert isinstance(block, TextBlock | ReasoningBlock), (
+        f"expected a block carrying text, got {type(block).__name__}"
+    )
+    return block.text
+
+
+def session_of(agent: AgentHandle) -> Session:
+    """The agent's session, which a test that has an agent always has.
+
+    `AgentHandle.session` is `Session | None` because a handle exists before the
+    session is attached, and every read of it in production narrows first. A
+    test that has just created an agent through `ctx.require(AGENTS).create(...)`
+    knows better, and said so by reading `agent.session.events` — a claim
+    nothing checked until the test trees came under mypy (issue 32).
+    """
+    session = agent.session
+    assert session is not None, "this agent has no session"
+    return session
+
+
+def noted[I, T](bucket: list[I], item: I, answer: T) -> T:
+    """Record that a listener ran, then answer with a value already in hand.
+
+    Twelve listeners in the test trees were written `bucket.append(x) or answer`
+    — a statement smuggled into a lambda, relying on `append` returning `None`.
+    That reads the value of a call that has none, which mypy refuses once the
+    trees are checked (issue 32), and `(append(x), answer)[1]` does not help:
+    the value is still *used*, just as a tuple element. A function is the only
+    place a statement can go.
+    """
+    bucket.append(item)
+    return answer
+
+
+def noting[I, T](bucket: list[I], item: I, answer: Callable[[], T]) -> T:
+    """Record that a listener ran, **then** produce the answer.
+
+    `noted`'s sibling for the case where the answer is a call — `next_()` in a
+    middleware chain. The callable matters: passing `next_()` as a value would
+    run the rest of the chain *before* this listener recorded itself, and these
+    tests assert the order (`["pre", "body", "post"]`).
+    """
+    bucket.append(item)
+    return answer()
+
+
+def store_root(ctx: Context) -> Path:
+    """Where the mounted session store keeps its logs, for a test that needs it.
+
+    **Narrowed rather than promised.** `SessionPersistence` says nothing about
+    where a backend writes — its module is titled "what a backend owes, without
+    saying where it writes" — so `root` is a field of the two path-backed
+    implementations and not of the Protocol. Seven tests read
+    `ctx.require(SESSION_PERSISTENCE).root` anyway, which compiled only because
+    the test trees were outside mypy (issue 32).
+
+    Widening the Protocol to suit them would contradict a stated decision, so
+    the narrowing happens here and the assertion names what the test is
+    assuming: a store that has a path on disk at all.
+    """
+    from ..persistence.jsonl import JsonlSessionStore
+    from ..persistence.turso import TursoSessionStore
+
+    store = ctx.require(SESSION_PERSISTENCE)
+    assert isinstance(store, JsonlSessionStore | TursoSessionStore), (
+        f"{type(store).__name__} keeps no logs on disk, so it has no root"
+    )
+    return store.root
+
+
+def not_none[T](value: T | None, what: str = "") -> T:
+    """This value, which a test that reached this line knows is there.
+
+    A seam's `get(...)` answers `X | None` because absence is normal in
+    production, and every caller there narrows. A test that has just registered
+    the thing it is asking for knows better — and said so by reading the
+    attribute, which compiled only while the test trees were outside mypy
+    (issue 32).
+
+    Prefer a plain `assert x is not None` where the value is used more than
+    once: the local it binds narrows for the rest of the function, and reads
+    better than repeating this call. This is for the single-use case, where
+    binding a name costs a line and buys nothing.
+    """
+    assert value is not None, what or "expected a value, got None"
+    return value

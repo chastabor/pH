@@ -29,12 +29,13 @@ still let a human's `/refine` through.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Literal, TypeAlias
+from typing import Literal, Protocol, TypeAlias
 
 from ph.agent.types import AgentHandle
 from ph.cordis import Context, events
-from ph.session import Session
+from ph.session import Session, SessionEvent
 
 from .state import REFINED, HarnessScope
 
@@ -88,7 +89,22 @@ async def veto_reason(ctx: Context, request: RefineRequest) -> str | None:
     return None if reason is None else str(reason)
 
 
-def _since_last_consideration(session: Session) -> tuple[int, int | None, bool]:
+class EventLog(Protocol):
+    """A log's events, which is all `due` and its fold actually read.
+
+    Narrower than `Session` on purpose. Both functions below are pure folds over
+    the event list — the docstring of `_since_last_consideration` says "one
+    backwards pass" — and taking the whole `Session` overstated what they touch:
+    the harness planner's own test double is three lines holding a list, and it
+    satisfied this contract all along while failing the declared one. That went
+    unnoticed because the test trees were outside mypy (issue 32).
+    """
+
+    @property
+    def events(self) -> Sequence[SessionEvent]: ...
+
+
+def _since_last_consideration(session: EventLog) -> tuple[int, int | None, bool]:
     """`(turns, milliseconds, compacted)` since the last consideration.
 
     One backwards pass, because all three answers stop at the same event: the
@@ -119,7 +135,7 @@ def _since_last_consideration(session: Session) -> tuple[int, int | None, bool]:
 
 
 def due(
-    session: Session,
+    session: EventLog,
     *,
     turns_between: int = TURNS_BETWEEN_REFINEMENTS,
     cooldown_minutes: int = COOLDOWN_MINUTES,

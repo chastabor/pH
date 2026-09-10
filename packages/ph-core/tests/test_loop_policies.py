@@ -19,6 +19,7 @@ from typing import Any
 import pytest
 
 from ph.agent.types import AgentOptions
+from ph.keys import AGENTS, LLM, SESSIONS
 from ph.llm.retry import is_transient
 from ph.llm.types import (
     CONTEXT_WINDOW_EXCEEDED,
@@ -35,7 +36,8 @@ from ph.llm.types import (
 )
 from ph.seams.token_meter import TokenMeter
 from ph.session import Session, SurfaceIntent
-from ph.testing import assistant_payload, user_payload
+from ph.session.json import as_obj
+from ph.testing import MountProfile, assistant_payload, user_payload
 
 pytestmark = pytest.mark.anyio
 
@@ -66,7 +68,7 @@ def test_a_context_overflow_is_never_retried() -> None:
 FAST_RETRY = {"id": "llm-retry", "config": {"maxAttempts": 3, "baseDelayMs": 1}}
 
 
-async def test_retry_recovers_a_transient_failure_and_records_it(mount: Any) -> None:
+async def test_retry_recovers_a_transient_failure_and_records_it(mount: MountProfile) -> None:
     ctx = await mount(FAST_RETRY)
     attempts = {"count": 0}
 
@@ -86,18 +88,20 @@ async def test_retry_recovers_a_transient_failure_and_records_it(mount: Any) -> 
             yield BlockEnd(index=0, block=TextBlock(text="recovered"))
             yield Finish(reason=FinishReason(kind="stop"))
 
-    ctx.llm.register_adapter(["flaky"], Flaky())
-    session = ctx.sessions.create("s")
-    await ctx.agents.create(session, AgentOptions(provider="flaky", model="m")).prompt("hi")
+    ctx.require(LLM).register_adapter(["flaky"], Flaky())
+    session = ctx.require(SESSIONS).create("s")
+    await (
+        ctx.require(AGENTS).create(session, AgentOptions(provider="flaky", model="m")).prompt("hi")
+    )
 
     assert attempts["count"] == 3
     retries = [event for event in session.events if event.type == "llm/retry"]
     assert [event.data["attempt"] for event in retries] == [1, 2]
     assert retries[0].data["code"] == "RATE_LIMIT"
-    assert session.events[-1].data["reason"]["kind"] == "completed"
+    assert as_obj(session.events[-1].data["reason"])["kind"] == "completed"
 
 
-async def test_retry_is_bounded(mount: Any) -> None:
+async def test_retry_is_bounded(mount: MountProfile) -> None:
     ctx = await mount(FAST_RETRY)
     attempts = {"count": 0}
 
@@ -110,16 +114,16 @@ async def test_retry_is_bounded(mount: Any) -> None:
                 )
             )
 
-    ctx.llm.register_adapter(["down"], AlwaysFailing())
-    session = ctx.sessions.create("s")
-    await ctx.agents.create(session, AgentOptions(provider="down", model="m")).prompt("hi")
+    ctx.require(LLM).register_adapter(["down"], AlwaysFailing())
+    session = ctx.require(SESSIONS).create("s")
+    await ctx.require(AGENTS).create(session, AgentOptions(provider="down", model="m")).prompt("hi")
 
     # max_attempts=3: two retries, then the failure stands.
     assert attempts["count"] == 3
-    assert session.events[-1].data["reason"]["kind"] == "error"
+    assert as_obj(session.events[-1].data["reason"])["kind"] == "error"
 
 
-async def test_an_overflow_reaches_the_turn_instead_of_being_retried(mount: Any) -> None:
+async def test_an_overflow_reaches_the_turn_instead_of_being_retried(mount: MountProfile) -> None:
     ctx = await mount(FAST_RETRY)
     attempts = {"count": 0}
 
@@ -133,12 +137,15 @@ async def test_an_overflow_reaches_the_turn_instead_of_being_retried(mount: Any)
                 )
             )
 
-    ctx.llm.register_adapter(["big"], Overflowing())
-    session = ctx.sessions.create("s")
-    await ctx.agents.create(session, AgentOptions(provider="big", model="m")).prompt("hi")
+    ctx.require(LLM).register_adapter(["big"], Overflowing())
+    session = ctx.require(SESSIONS).create("s")
+    await ctx.require(AGENTS).create(session, AgentOptions(provider="big", model="m")).prompt("hi")
 
     assert attempts["count"] == 1
-    assert session.events[-1].data["reason"]["error"]["code"] == CONTEXT_WINDOW_EXCEEDED
+    assert (
+        as_obj(as_obj(session.events[-1].data["reason"])["error"])["code"]
+        == CONTEXT_WINDOW_EXCEEDED
+    )
 
 
 def test_the_baseline_switches_from_estimate_to_usage() -> None:

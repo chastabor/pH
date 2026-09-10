@@ -142,6 +142,9 @@ import anyio
 import pytest
 from daemon_helpers import PROFILE, running
 
+from ph.agent.inbox import InboxTarget
+from ph.agent_loop.driver import ReactLoopAgent
+from ph.keys import SCHEDULE, SESSIONS, WORKSPACE
 from ph.seams.schedule import Schedule
 from ph.testing import stored_log
 from ph_app.daemon import recovery, server
@@ -194,7 +197,7 @@ async def _settled(client: DaemonClient, root_id: str, *, events: int) -> dict[s
             row = next((one for one in listed["sessions"] if one["sessionId"] == root_id), None)
             assert row is not None, f'session "{root_id}" left the listing while settling'
             if row["status"] == "idle" and row["cursor"]["sequence"] >= events:
-                return row
+                return dict(row)
             await anyio.sleep(0.01)
 
 
@@ -236,24 +239,25 @@ async def test_a_person_reaches_a_busy_root_at_its_next_step(
     spawned. Asserted through the inbox target rather than through timing, which
     is the fact and not a race.
     """
-    from ph.agent_loop.driver import ReactLoopAgent
 
     targets: list[str] = []
     original = ReactLoopAgent.send
 
-    def spy(self: Any, message: Any, target: str, wakeup: bool) -> None:
+    def spy(self: Any, message: Any, target: InboxTarget, wakeup: bool) -> None:
         targets.append(target)
         original(self, message, target, wakeup)
 
     monkeypatch.setattr(ReactLoopAgent, "send", spy)
     async with running(tmp_path) as daemon:
-        supervisor = daemon.server.supervisor
+        supervisor = daemon.running.supervisor
         root = await supervisor.start("busy")
 
         await supervisor.prompt("busy", "the first thing")
         assert targets[-1] == "next-turn", "an idle root has no turn to join"
 
-        root.agent._phase.kind = "running"
+        driver = root.agent
+        assert isinstance(driver, ReactLoopAgent)
+        driver._phase.kind = "running"
         await supervisor.prompt("busy", "also this")
         assert targets[-1] == "next-step", "a person waited for the whole turn to end"
 
@@ -291,7 +295,7 @@ async def test_a_failed_turn_is_named_beside_an_idle_status(
 
         assert row["status"] == "idle"
         assert row["lastTurn"] == "error"
-        assert daemon.server.supervisor.roots["sour"].recovery.attempts == 0, (
+        assert daemon.running.supervisor.roots["sour"].recovery.attempts == 0, (
             "a failed turn is not a crashed task; the ladder must not have moved"
         )
 
@@ -705,7 +709,7 @@ async def test_two_clients_naming_one_new_root_share_it(
     second root, and there is no ordering left for luck to supply.
     """
     async with running(tmp_path) as daemon:
-        supervisor = daemon.server.supervisor
+        supervisor = daemon.running.supervisor
         original = Supervisor._session_for
         parked, release = anyio.Event(), anyio.Event()
 
@@ -850,7 +854,7 @@ async def test_an_injected_crash_is_retried_and_the_root_recovers(
     async with running(tmp_path) as daemon:
         client = await daemon.client()
         await client.call("session/new", sessionId="recovers")
-        root = daemon.server.supervisor.roots["recovers"]
+        root = daemon.running.supervisor.roots["recovers"]
         _crash(monkeypatch, root, 1)
 
         await client.prompt("recovers", "hello")
@@ -890,7 +894,7 @@ async def test_the_ladder_gives_up_after_its_last_attempt_and_reports(
         client = await daemon.client(on_notify=lambda method, params: seen.append(params))
         await client.call("session/new", sessionId="doomed")
         await client.call("session/attach", sessionId="doomed")
-        root = daemon.server.supervisor.roots["doomed"]
+        root = daemon.running.supervisor.roots["doomed"]
         _crash(monkeypatch, root, 99)
 
         await client.prompt("doomed", "hello")
@@ -903,7 +907,7 @@ async def test_the_ladder_gives_up_after_its_last_attempt_and_reports(
         # its own trace whether or not a client was ever attached.
         given_up = next(e for e in root.session.events_from(0) if e.type == recovery.FAILED)
         assert given_up.data["attempts"] == len(recovery.RETRY_DELAYS)
-        assert "injected crash" in given_up.data["reason"]
+        assert "injected crash" in str(given_up.data["reason"])
         # Waited for, not sampled: `status` flips when `give_up` appends, while
         # the notification is still crossing the outbox and the pump. Reading
         # `seen` at that instant caught the client mid-delivery — `retrying` had
@@ -944,7 +948,7 @@ async def test_a_root_resumed_mid_ladder_does_not_start_the_count_over(
         async with running(tmp_path, name="first") as daemon:
             client = await daemon.client()
             await client.call("session/new", sessionId="stubborn")
-            root = daemon.server.supervisor.roots["stubborn"]
+            root = daemon.running.supervisor.roots["stubborn"]
             _crash(crash, root, 99)
             await client.prompt("stubborn", "hello")
             # Waited on *disk*, not on status: `status` flips when `give_up`
@@ -961,7 +965,7 @@ async def test_a_root_resumed_mid_ladder_does_not_start_the_count_over(
     async with running(tmp_path, name="second") as daemon:
         client = await daemon.client()
         await client.call("session/new", sessionId="stubborn")
-        root = daemon.server.supervisor.roots["stubborn"]
+        root = daemon.running.supervisor.roots["stubborn"]
         # Read straight off the resumed log, nothing carried in memory between
         # the two daemons.
         assert root.status == "failed"
@@ -985,7 +989,7 @@ async def test_one_root_crashing_does_not_take_the_daemon_down(
         await _settled(client, "bystander", events=1)
 
         await client.call("session/new", sessionId="casualty")
-        casualty = daemon.server.supervisor.roots["casualty"]
+        casualty = daemon.running.supervisor.roots["casualty"]
         _crash(monkeypatch, casualty, 99)
         await client.prompt("casualty", "hello")
         await _until(lambda: casualty.status == "failed", what="the doomed root to give up")
@@ -1014,7 +1018,7 @@ async def test_the_tree_is_restored_from_the_latest_checkpoint_before_a_retry(
     worktree would test P4-09's capture again instead.
     """
     async with running(tmp_path) as daemon:
-        supervisor = daemon.server.supervisor
+        supervisor = daemon.running.supervisor
         root = await supervisor.start("restores")
         root.session.append("workspace/checkpoint", {"agentId": root.agent.id, "tree": "older"})
         root.session.append("workspace/checkpoint", {"agentId": root.agent.id, "tree": "newest"})
@@ -1028,8 +1032,10 @@ async def test_the_tree_is_restored_from_the_latest_checkpoint_before_a_retry(
         # The **seam's** method, not a module import: the ladder asks the mounted
         # tier now, so patching a name in this module would have kept passing while
         # the call it stands for went somewhere else.
-        monkeypatch.setattr(type(root.ctx.workspace), "of", lambda self, agent_id: object())
-        monkeypatch.setattr(type(root.ctx.workspace), "restore", fake_restore)
+        monkeypatch.setattr(
+            type(root.ctx.require(WORKSPACE)), "of", lambda self, agent_id: object()
+        )
+        monkeypatch.setattr(type(root.ctx.require(WORKSPACE)), "restore", fake_restore)
 
         assert await supervisor._restore(root) is True
         assert asked == ["newest"], "the retry went back to a stale restore point"
@@ -1039,7 +1045,7 @@ async def test_the_tree_is_restored_from_the_latest_checkpoint_before_a_retry(
         async def angry_restore(_seam: Any, workspace: Any, token: str) -> tuple[str, ...]:
             raise RuntimeError("the tier said no")
 
-        monkeypatch.setattr(type(root.ctx.workspace), "restore", angry_restore)
+        monkeypatch.setattr(type(root.ctx.require(WORKSPACE)), "restore", angry_restore)
         assert await supervisor._restore(root) is False
 
 
@@ -1052,7 +1058,7 @@ async def test_a_root_with_no_workspace_restores_nothing_and_says_so(
     implied a rollback nobody performed would misread the attempt that follows.
     """
     async with running(tmp_path) as daemon:
-        supervisor = daemon.server.supervisor
+        supervisor = daemon.running.supervisor
         root = await supervisor.start("advisory")
         assert await supervisor._restore(root) is False
 
@@ -1078,12 +1084,12 @@ async def test_a_failing_flush_climbs_the_ladder_instead_of_retrying_forever(
     async with running(tmp_path) as daemon:
         client = await daemon.client()
         await client.call("session/new", sessionId="unflushable")
-        root = daemon.server.supervisor.roots["unflushable"]
+        root = daemon.running.supervisor.roots["unflushable"]
 
         async def broken(self: Any, session: Any) -> None:
             raise RuntimeError("flush is broken")
 
-        monkeypatch.setattr(type(root.ctx.sessions), "flush", broken)
+        monkeypatch.setattr(type(root.ctx.require(SESSIONS)), "flush", broken)
         await client.prompt("unflushable", "hello")
         await _until(lambda: root.status == "failed", what="the ladder to give up")
 
@@ -1114,7 +1120,7 @@ async def test_an_idle_root_is_released_and_comes_back_with_its_history(
     whole time.
     """
     async with running(tmp_path) as daemon:
-        supervisor = daemon.server.supervisor
+        supervisor = daemon.running.supervisor
         client = await daemon.client()
         await client.prompt("napper", "first")
         settled = await _settled(client, "napper", events=1)
@@ -1145,7 +1151,7 @@ async def test_the_release_is_recorded_before_it_happens(tmp_path: Path) -> None
         client = await daemon.client()
         await client.prompt("recorded", "hello")
         await _settled(client, "recorded", events=1)
-        await daemon.server.supervisor.sweep(after=0)
+        await daemon.running.supervisor.sweep(after=0)
 
         assert _on_disk(stored_log(tmp_path / "sessions", "recorded"), recovery.PASSIVATED), (
             "the record did not reach disk with the release"
@@ -1163,10 +1169,10 @@ async def test_a_root_somebody_is_watching_is_not_released(tmp_path: Path) -> No
         client = await daemon.client()
         await client.call("session/new", sessionId="watched")
         await client.call("session/attach", sessionId="watched")
-        assert await daemon.server.supervisor.sweep(after=0) == []
+        assert await daemon.running.supervisor.sweep(after=0) == []
 
         await client.call("session/detach", sessionId="watched")
-        assert await daemon.server.supervisor.sweep(after=0) == ["watched"]
+        assert await daemon.running.supervisor.sweep(after=0) == ["watched"]
 
 
 async def test_a_root_that_has_not_been_quiet_long_enough_is_not_released(
@@ -1179,7 +1185,7 @@ async def test_a_root_that_has_not_been_quiet_long_enough_is_not_released(
     log immediately eligible, correctly.
     """
     async with running(tmp_path) as daemon:
-        supervisor = daemon.server.supervisor
+        supervisor = daemon.running.supervisor
         client = await daemon.client()
         await client.prompt("busy", "hello")
         await _settled(client, "busy", events=1)
@@ -1203,7 +1209,7 @@ async def test_a_root_mid_ladder_is_not_released(
     said `idle`.
     """
     async with running(tmp_path) as daemon:
-        supervisor = daemon.server.supervisor
+        supervisor = daemon.running.supervisor
         client = await daemon.client()
         await client.call("session/new", sessionId="climbing")
         root = supervisor.roots["climbing"]
@@ -1236,7 +1242,7 @@ async def test_a_passivated_session_may_be_opened_by_another_process(
             await other.call("session/new", sessionId="handed-over")
         assert refusal.value.reason == "session_already_active"
 
-        await first.server.supervisor.sweep(after=0)
+        await first.running.supervisor.sweep(after=0)
         # Now it is nobody's, so the second daemon may have it.
         assert (await other.call("session/new", sessionId="handed-over"))["sessionId"] == (
             "handed-over"
@@ -1255,12 +1261,12 @@ async def test_attaching_wakes_a_passivated_root(tmp_path: Path) -> None:
         client = await daemon.client()
         await client.prompt("awaited", "hello")
         await _settled(client, "awaited", events=1)
-        await daemon.server.supervisor.sweep(after=0)
-        assert "awaited" not in daemon.server.supervisor.roots
+        await daemon.running.supervisor.sweep(after=0)
+        assert "awaited" not in daemon.running.supervisor.roots
 
         attached = await client.call("session/attach", sessionId="awaited")
         assert attached["sessionId"] == "awaited"
-        assert "awaited" in daemon.server.supervisor.roots
+        assert "awaited" in daemon.running.supervisor.roots
 
 
 async def test_the_sweeper_actually_runs(tmp_path: Path) -> None:
@@ -1282,7 +1288,7 @@ async def test_the_sweeper_actually_runs(tmp_path: Path) -> None:
         await _settled(client, "swept", events=1)
         await client.call("session/detach", sessionId="swept")
         await _until(
-            lambda: "swept" not in daemon.server.supervisor.roots,
+            lambda: "swept" not in daemon.running.supervisor.roots,
             what="the sweeper to release an idle root on its own",
         )
 
@@ -1305,7 +1311,7 @@ async def test_a_root_with_a_live_child_is_not_released(tmp_path: Path) -> None:
     invented status the predicate was checking for.
     """
     async with running(tmp_path) as daemon:
-        supervisor = daemon.server.supervisor
+        supervisor = daemon.running.supervisor
 
         for label, settle in (
             ("finished", ("subagent/status", {"runId": "c", "status": "done"})),
@@ -1370,18 +1376,18 @@ async def test_a_due_schedule_starts_a_turn(tmp_path: Path) -> None:
     own bugs and its own transcript shape.
     """
     async with running(tmp_path) as daemon:
-        supervisor = daemon.server.supervisor
+        supervisor = daemon.running.supervisor
         client = await daemon.client()
         await client.call("session/new", sessionId="cron")
         root = supervisor.roots["cron"]
 
-        root.ctx.schedule.create(
+        root.ctx.require(SCHEDULE).create(
             root.session,
             Schedule(id="nightly", kind="interval", spec="60000", prompt="do the thing"),
         )
         # Relative to creation: a schedule is anchored where it was made, so a
         # clock starting at zero is decades before its own schedule exists.
-        made = root.ctx.schedule.states(root.session)["nightly"].created_at
+        made = root.ctx.require(SCHEDULE).states(root.session)["nightly"].created_at
         assert await supervisor.tick(now=made + 1_000) == [], "fired before it was due"
 
         assert await supervisor.tick(now=made + 90_000) == ["nightly"]
@@ -1402,26 +1408,27 @@ async def test_a_due_schedule_starts_its_own_turn_even_mid_turn(
     share that turn's per-turn ceilings with it, and two schedules due in one
     pass would become one turn rather than two.
     """
-    from ph.agent_loop.driver import ReactLoopAgent
 
     targets: list[str] = []
     original = ReactLoopAgent.send
 
-    def spy(self: Any, message: Any, target: str, wakeup: bool) -> None:
+    def spy(self: Any, message: Any, target: InboxTarget, wakeup: bool) -> None:
         targets.append(target)
         original(self, message, target, wakeup)
 
     monkeypatch.setattr(ReactLoopAgent, "send", spy)
     async with running(tmp_path) as daemon:
-        supervisor = daemon.server.supervisor
+        supervisor = daemon.running.supervisor
         root = await supervisor.start("cron-busy")
-        root.ctx.schedule.create(
+        root.ctx.require(SCHEDULE).create(
             root.session,
             Schedule(id="nightly", kind="interval", spec="60000", prompt="do the thing"),
         )
-        made = root.ctx.schedule.states(root.session)["nightly"].created_at
+        made = root.ctx.require(SCHEDULE).states(root.session)["nightly"].created_at
 
-        root.agent._phase.kind = "running"
+        driver = root.agent
+        assert isinstance(driver, ReactLoopAgent)
+        driver._phase.kind = "running"
         assert await supervisor.tick(now=made + 90_000) == ["nightly"]
 
     assert targets[-1] == "next-turn", "a scheduled turn joined a turn already running"
@@ -1436,17 +1443,17 @@ async def test_a_root_with_work_scheduled_is_not_released(tmp_path: Path) -> Non
     watched while still sitting in the log claiming it fires at nine.
     """
     async with running(tmp_path) as daemon:
-        supervisor = daemon.server.supervisor
+        supervisor = daemon.running.supervisor
         root = await supervisor.start("appointed")
         assert await supervisor.sweep(after=0) == ["appointed"], "an empty root should release"
 
         root = await supervisor.start("appointed")
-        root.ctx.schedule.create(
+        root.ctx.require(SCHEDULE).create(
             root.session, Schedule(id="s", kind="cron", spec="0 9 * * *", prompt="morning")
         )
         assert await supervisor.sweep(after=0) == [], "released a root with work scheduled"
 
-        root.ctx.schedule.cancel(root.session, "s")
+        root.ctx.require(SCHEDULE).cancel(root.session, "s")
         assert await supervisor.sweep(after=0) == ["appointed"]
 
 
@@ -1458,13 +1465,13 @@ async def test_a_heartbeat_records_that_something_is_still_watching(tmp_path: Pa
     what keeps the root mounted is the schedule itself.
     """
     async with running(tmp_path) as daemon:
-        supervisor = daemon.server.supervisor
+        supervisor = daemon.running.supervisor
         root = await supervisor.start("monthly")
 
         await supervisor.heartbeat(now=1_000)
         assert not [e for e in root.session.events_from(0) if e.type == "schedule/heartbeat"]
 
-        root.ctx.schedule.create(
+        root.ctx.require(SCHEDULE).create(
             root.session, Schedule(id="m", kind="cron", spec="0 0 1 * *", prompt="monthly")
         )
         await supervisor.heartbeat(now=2_000)
@@ -1477,22 +1484,22 @@ async def test_one_root_with_a_broken_schedule_does_not_stop_the_others(
 ) -> None:
     """Every root's schedules fire from one loop, so one of them must not end it."""
     async with running(tmp_path) as daemon:
-        supervisor = daemon.server.supervisor
+        supervisor = daemon.running.supervisor
         broken = await supervisor.start("broken")
         working = await supervisor.start("working")
-        working.ctx.schedule.create(
+        working.ctx.require(SCHEDULE).create(
             working.session, Schedule(id="ok", kind="interval", spec="1000", prompt="hi")
         )
 
-        original = type(broken.ctx.schedule).claim
+        original = type(broken.ctx.require(SCHEDULE)).claim
 
         def claim(self: Any, session: Any, *, now: int) -> Any:
             if session.id == "broken":
                 raise RuntimeError("this schedule is unreadable")
             return original(self, session, now=now)
 
-        monkeypatch.setattr(type(broken.ctx.schedule), "claim", claim)
-        made = working.ctx.schedule.states(working.session)["ok"].created_at
+        monkeypatch.setattr(type(broken.ctx.require(SCHEDULE)), "claim", claim)
+        made = working.ctx.require(SCHEDULE).states(working.session)["ok"].created_at
         assert await supervisor.tick(now=made + 10_000) == ["ok"]
 
 
@@ -1525,7 +1532,7 @@ async def test_a_reaped_runtime_dir_reaches_every_root_as_a_record(
     """
     socket = reaped_host() / "daemon.sock"
     async with running(tmp_path, path=socket, watch_every=0.05) as daemon:
-        supervisor = daemon.server.supervisor
+        supervisor = daemon.running.supervisor
         first = await supervisor.start("alpha")
         second = await supervisor.start("beta")
 
@@ -1562,10 +1569,10 @@ async def test_the_roots_keep_working_when_the_socket_goes(
     """
     socket = reaped_host() / "daemon.sock"
     async with running(tmp_path, path=socket) as daemon:
-        supervisor = daemon.server.supervisor
+        supervisor = daemon.running.supervisor
         root = await supervisor.start("working")
         shutil.rmtree(tmp_path / "xdg")
-        assert await daemon.server.check_reachable() == "removed"
+        assert await daemon.running.check_reachable() == "removed"
 
         await supervisor.prompt("working", "still there?")
 
@@ -1592,13 +1599,13 @@ async def test_a_second_daemons_socket_is_not_mistaken_for_a_recovery(
     """
     socket = reaped_host() / "daemon.sock"
     async with running(tmp_path, path=socket) as daemon:
-        await daemon.server.supervisor.start("held")
-        assert await daemon.server.check_reachable() == "", "its own socket, unchanged"
+        await daemon.running.supervisor.start("held")
+        assert await daemon.running.check_reachable() == "", "its own socket, unchanged"
 
         socket.unlink()
         socket.touch()  # logind remade the directory; somebody remade the socket
-        assert await daemon.server.check_reachable() == "replaced"
-        assert _notices(daemon.server.supervisor.roots["held"])[0].data["reason"] == "replaced"
+        assert await daemon.running.check_reachable() == "replaced"
+        assert _notices(daemon.running.supervisor.roots["held"])[0].data["reason"] == "replaced"
 
 
 async def test_the_record_is_on_disk_before_anyone_could_read_it(
@@ -1613,9 +1620,9 @@ async def test_the_record_is_on_disk_before_anyone_could_read_it(
     """
     socket = reaped_host() / "daemon.sock"
     async with running(tmp_path, path=socket) as daemon:
-        await daemon.server.supervisor.start("durable")
+        await daemon.running.supervisor.start("durable")
         shutil.rmtree(tmp_path / "xdg")
-        await daemon.server.check_reachable()
+        await daemon.running.check_reachable()
 
         stored = stored_log(tmp_path / "sessions", "durable").read_text(encoding="utf-8")
         assert recovery.UNREACHABLE in stored
@@ -1633,7 +1640,7 @@ async def test_daemon_status_says_it_cannot_be_reached_and_what_would_fix_it(
     """
     socket = reaped_host() / "daemon.sock"
     async with running(tmp_path, path=socket) as daemon:
-        healthy = daemon.server.status()
+        healthy = daemon.running.status()
         assert healthy.unreachable_since is None
         # One encoding, not three. The reply used to carry `survivesLogout` and
         # `linger` beside the rendered rows; nothing but this assertion read
@@ -1650,8 +1657,8 @@ async def test_daemon_status_says_it_cannot_be_reached_and_what_would_fix_it(
         assert rows["enable it"] == "loginctl enable-linger someone"
 
         shutil.rmtree(tmp_path / "xdg")
-        await daemon.server.check_reachable()
-        assert isinstance(daemon.server.status().unreachable_since, int)
+        await daemon.running.check_reachable()
+        assert isinstance(daemon.running.status().unreachable_since, int)
 
 
 async def test_a_hand_built_server_with_no_bound_socket_watches_nothing(
@@ -1699,15 +1706,15 @@ async def test_a_daemon_wakes_a_root_whose_schedule_came_due_while_it_was_down(
     """
     socket = tmp_path / "first.sock"
     async with running(tmp_path, path=socket) as first:
-        root = await first.server.supervisor.start("appointed")
-        root.ctx.schedule.create(
+        root = await first.running.supervisor.start("appointed")
+        root.ctx.require(SCHEDULE).create(
             root.session, Schedule(id="s", kind="interval", spec="1000", prompt="tick")
         )
-        made = root.ctx.schedule.states(root.session)["s"].created_at
-        await first.server.supervisor._flush(root)
+        made = root.ctx.require(SCHEDULE).states(root.session)["s"].created_at
+        await first.running.supervisor._flush(root)
 
     async with running(tmp_path, name="second") as second:
-        supervisor = second.server.supervisor
+        supervisor = second.running.supervisor
         assert list(supervisor.roots) == [], "nothing is mounted until something is due"
 
         fired = await supervisor.wake_and_tick(now=made + 600_000)
@@ -1731,17 +1738,17 @@ async def test_a_session_with_no_appointment_is_left_alone(tmp_path: Path) -> No
     """
     socket = tmp_path / "first.sock"
     async with running(tmp_path, path=socket) as first:
-        plain = await first.server.supervisor.start("no-appointment")
-        await first.server.supervisor._flush(plain)
-        root = await first.server.supervisor.start("appointed")
-        root.ctx.schedule.create(
+        plain = await first.running.supervisor.start("no-appointment")
+        await first.running.supervisor._flush(plain)
+        root = await first.running.supervisor.start("appointed")
+        root.ctx.require(SCHEDULE).create(
             root.session, Schedule(id="s", kind="interval", spec="1000", prompt="tick")
         )
-        made = root.ctx.schedule.states(root.session)["s"].created_at
-        await first.server.supervisor._flush(root)
+        made = root.ctx.require(SCHEDULE).states(root.session)["s"].created_at
+        await first.running.supervisor._flush(root)
 
     async with running(tmp_path, name="second") as second:
-        supervisor = second.server.supervisor
+        supervisor = second.running.supervisor
 
         await supervisor.wake_and_tick(now=made + 600_000)
 
@@ -1767,15 +1774,15 @@ async def test_catch_up_is_unbounded_by_default(tmp_path: Path) -> None:
     """
     socket = tmp_path / "first.sock"
     async with running(tmp_path, path=socket) as first:
-        root = await first.server.supervisor.start("long-gone")
-        root.ctx.schedule.create(
+        root = await first.running.supervisor.start("long-gone")
+        root.ctx.require(SCHEDULE).create(
             root.session, Schedule(id="s", kind="interval", spec="1000", prompt="tick")
         )
-        made = root.ctx.schedule.states(root.session)["s"].created_at
-        await first.server.supervisor._flush(root)
+        made = root.ctx.require(SCHEDULE).states(root.session)["s"].created_at
+        await first.running.supervisor._flush(root)
 
     async with running(tmp_path, name="second") as second:
-        supervisor = second.server.supervisor
+        supervisor = second.running.supervisor
         assert supervisor.wake_within is None, "the shipped default is to catch up"
 
         a_year_later = made + 365 * 24 * 60 * 60 * 1000
@@ -1796,15 +1803,15 @@ async def test_a_deployment_can_bound_how_stale_an_appointment_may_be(
     """
     socket = tmp_path / "first.sock"
     async with running(tmp_path, path=socket) as first:
-        root = await first.server.supervisor.start("abandoned")
-        root.ctx.schedule.create(
+        root = await first.running.supervisor.start("abandoned")
+        root.ctx.require(SCHEDULE).create(
             root.session, Schedule(id="s", kind="interval", spec="1000", prompt="tick")
         )
-        made = root.ctx.schedule.states(root.session)["s"].created_at
-        await first.server.supervisor._flush(root)
+        made = root.ctx.require(SCHEDULE).states(root.session)["s"].created_at
+        await first.running.supervisor._flush(root)
 
     async with running(tmp_path, name="second", wake_within=60.0) as second:
-        supervisor = second.server.supervisor
+        supervisor = second.running.supervisor
         long_after = made + 600_000 + 60_000 + 1
 
         assert await supervisor.wake_and_tick(now=long_after) == []

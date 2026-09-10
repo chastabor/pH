@@ -171,7 +171,7 @@ async def test_a_shell_child_never_inherits_a_credential(tmp_path: Any) -> None:
 
         await _run(client, root, "env")
 
-        output = root.session.latest("shell/result").data["stdout"]  # type: ignore[union-attr]
+        output = root.session.latest("shell/result").data["stdout"]
         assert "ANTHROPIC_API_KEY" not in output
         assert "SECRET" not in output and "PASSWORD" not in output
 

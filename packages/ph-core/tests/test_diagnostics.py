@@ -21,15 +21,15 @@ nothing else checks.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
 import pytest
 import yaml
 
 from ph.cordis import Context, Mount
+from ph.keys import CONTAINMENT, DIAGNOSTICS, WORKSPACE
 from ph.seams.containment import TIERS
 from ph.seams.diagnostics import Diagnostic, DiagnosticsRegistry
-from ph.testing import StubWorkspaceProvider, acquire_for_role, report_section
+from ph.testing import MountProfile, StubWorkspaceProvider, acquire_for_role, report_section
 
 pytestmark = pytest.mark.anyio
 
@@ -85,7 +85,9 @@ async def test_a_section_unwinds_with_the_row_that_registered_it() -> None:
     assert registry.report() == []
 
 
-async def test_a_section_is_contributed_whatever_the_row_order(mount: Any, tmp_path: Path) -> None:
+async def test_a_section_is_contributed_whatever_the_row_order(
+    mount: MountProfile, tmp_path: Path
+) -> None:
     """The reason `contribute` waits on the key instead of reading it at `apply`.
 
     `base.yaml` opens by promising that row order carries no load semantics, and
@@ -109,13 +111,13 @@ async def test_a_section_is_contributed_whatever_the_row_order(mount: Any, tmp_p
 
     ctx = await mount(profile=[profile])
 
-    assert "Containment" in dict(ctx.diagnostics.report())
+    assert "Containment" in dict(ctx.require(DIAGNOSTICS).report())
 
 
 # ----------------------------------------------------------------- the table --
 
 
-async def test_the_report_prints_the_tier_table_verbatim(mount: Any) -> None:
+async def test_the_report_prints_the_tier_table_verbatim(mount: MountProfile) -> None:
     """E1's gate, asserted against the one home the sentences have.
 
     Verbatim, because the defect is a description that claims more than the rung
@@ -134,7 +136,7 @@ async def test_the_report_prints_the_tier_table_verbatim(mount: Any) -> None:
 
 
 async def test_both_rungs_are_described_when_a_deployment_runs_two(
-    mount: Any, tmp_path: Path
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """The shipped `rlm` posture. A report that printed only the root agent's
     rung would say "bounds: nothing" about a process where the children — the
@@ -142,7 +144,7 @@ async def test_both_rungs_are_described_when_a_deployment_runs_two(
     ctx = await mount(
         {"id": "containment", "config": {"tier": "advisory", "childTier": "worktree"}}
     )
-    ctx.workspace.register_provider(StubWorkspaceProvider(root=tmp_path / "trees"))
+    ctx.require(WORKSPACE).register_provider(StubWorkspaceProvider(root=tmp_path / "trees"))
 
     rows = report_section(ctx, "Containment")
 
@@ -152,7 +154,7 @@ async def test_both_rungs_are_described_when_a_deployment_runs_two(
     assert rows["worktree does NOT bound"] == TIERS["worktree"].does_not_bound
 
 
-async def test_the_effective_tier_is_reported_not_the_configured_one(mount: Any) -> None:
+async def test_the_effective_tier_is_reported_not_the_configured_one(mount: MountProfile) -> None:
     """E10. An operator who set `worktree` and got nothing is owed that fact;
     reading their own setting back to them is how a person comes to believe in
     containment they do not have."""
@@ -164,12 +166,12 @@ async def test_the_effective_tier_is_reported_not_the_configured_one(mount: Any)
     assert rows["tier (configured)"] == "worktree — not in force here"
 
 
-async def test_strict_reports_whether_it_is_satisfied(mount: Any) -> None:
+async def test_strict_reports_whether_it_is_satisfied(mount: MountProfile) -> None:
     """`strict` that cannot be honoured refuses to start (E8), so a *running*
     process reporting `strict: yes` is one where it is satisfied — and saying so
     is what distinguishes "confined" from "asked to be"."""
     ctx = await mount({"id": "containment", "config": {"tier": "sandbox"}})
-    ctx.containment.strict = True
+    ctx.require(CONTAINMENT).strict = True
 
     assert report_section(ctx, "Containment")["strict is satisfied"] == "no"
 
@@ -177,13 +179,13 @@ async def test_strict_reports_whether_it_is_satisfied(mount: Any) -> None:
 # ------------------------------------------------------------------ per agent --
 
 
-async def test_workspaces_are_reported_per_agent(mount: Any, tmp_path: Path) -> None:
+async def test_workspaces_are_reported_per_agent(mount: MountProfile, tmp_path: Path) -> None:
     """Since P4-11 there is no single answer, so the report has one row per
     agent that actually holds something."""
     ctx = await mount(
         {"id": "containment", "config": {"tier": "advisory", "childTier": "worktree"}}
     )
-    ctx.workspace.register_provider(StubWorkspaceProvider(root=tmp_path / "trees"))
+    ctx.require(WORKSPACE).register_provider(StubWorkspaceProvider(root=tmp_path / "trees"))
     root = await acquire_for_role(ctx, tmp_path)
     child = await acquire_for_role(ctx, tmp_path, child=True)
 
@@ -197,7 +199,7 @@ async def test_workspaces_are_reported_per_agent(mount: Any, tmp_path: Path) -> 
     assert "writable" in rows["agent child"]
 
 
-async def test_an_agent_that_holds_nothing_is_not_described(mount: Any) -> None:
+async def test_an_agent_that_holds_nothing_is_not_described(mount: MountProfile) -> None:
     """`doctor` on an idle process has only the profile-level rows to show, and
     inventing one per configured agent would describe workspaces nobody holds."""
     ctx = await mount()
@@ -208,7 +210,7 @@ async def test_an_agent_that_holds_nothing_is_not_described(mount: Any) -> None:
 # ------------------------------------------------------------------ topology --
 
 
-async def test_the_topology_section_is_a_row_like_every_other_section(mount: Any) -> None:
+async def test_the_topology_section_is_a_row_like_every_other_section(mount: MountProfile) -> None:
     """It reaches the report through the registry, which is the whole change.
 
     `ph doctor` built this section by hand and appended it after
@@ -224,13 +226,13 @@ async def test_the_topology_section_is_a_row_like_every_other_section(mount: Any
     """
     ctx = await mount()
 
-    titles = [title for title, _ in ctx.diagnostics.report()]
+    titles = [title for title, _ in ctx.require(DIAGNOSTICS).report()]
 
     assert titles.index("Topology") > titles.index("Containment")
     assert titles[-1] == "Invariants"
 
 
-async def test_the_topology_names_what_activated_and_the_realms(mount: Any) -> None:
+async def test_the_topology_names_what_activated_and_the_realms(mount: MountProfile) -> None:
     """The half `--dump-config` cannot show, and the reason the row exists.
 
     A dump is the composition before anything runs, so a row that mounted and
@@ -247,7 +249,7 @@ async def test_the_topology_names_what_activated_and_the_realms(mount: Any) -> N
 
 
 async def test_a_topology_that_cannot_be_read_leaves_the_rest_of_the_report(
-    mount: Any, monkeypatch: pytest.MonkeyPatch
+    mount: MountProfile, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The advantage that is not about tidiness — and it was a misdiagnosis.
 
@@ -269,7 +271,7 @@ async def test_a_topology_that_cannot_be_read_leaves_the_rest_of_the_report(
 
     monkeypatch.setattr(Mount, "topology", boom)
     ctx = await mount()
-    report = dict(ctx.diagnostics.report())
+    report = dict(ctx.require(DIAGNOSTICS).report())
 
     assert report["Containment"] and report["Invariants"]
     assert report["Topology"] == [("(this section failed)", "see the log for the traceback")]

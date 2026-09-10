@@ -131,14 +131,66 @@ python_version = "3.12"
 strict = true
 # Every shipped package, not just `ph`: `ph_rlm` and `ph_runtime` are where the
 # subprocess protocol lives, and a config that checked only `ph` would have let
-# the guest drift untyped. `packages` rather than `.` because the test trees hold
-# several modules named `conftest`, which mypy refuses as duplicates.
-mypy_path = "packages/ph-core/src:packages/ph-app/src:packages/ph-rlm/src:packages/ph-runtime-guest/src:packages/ph-stabilize/src:packages/ph-text-index/src:packages/ph-code-graph/src"
-packages = ["ph", "ph_app", "ph_rlm", "ph_runtime", "ph_stabilize", "ph_text_index", "ph_code_graph"]
+# the guest drift untyped.
+#
+# **The test trees are here too, and that took removing a duplicate rather than
+# a flag** (issue 32). They were excluded because two of them held a module
+# named `conftest` and mypy refuses duplicates — its own suggestion, an
+# `__init__.py` in each tree, does not help: with `explicit_package_bases` the
+# module name would have to be `packages.ph-app.tests.conftest`, and `ph-app`
+# is not an identifier, so both collapse to `tests.conftest` again (checked).
+# The fix was to stop having two: the per-package fixture modules are now
+# `app_fixtures` and `rlm_fixtures`, registered from the one root `conftest.py`
+# through `pytest_plugins`. That also retired a latent bug the trees had
+# documented in five places — `from conftest import ROW` resolved to whichever
+# conftest won the name under full collection.
+#
+# `mypy_path` carries the test directories for the same reason `pythonpath`
+# does below: `daemon_helpers`, `tui_helpers`, `rlm_fixtures` and friends are
+# top-level modules that tests import by name, and both tools have to find them
+# in the same place.
+mypy_path = "packages/ph-core/src:packages/ph-app/src:packages/ph-rlm/src:packages/ph-runtime-guest/src:packages/ph-stabilize/src:packages/ph-text-index/src:packages/ph-code-graph/src:packages/ph-app/tests:packages/ph-rlm/tests:packages/ph-stabilize/tests:packages/ph-core/tests:tests"
+# One list, because mypy takes `packages` or `files` and not both. The `src`
+# entries are the seven shipped packages, reached by path so `mypy_path` above
+# supplies the base that makes their module names come out as `ph`, `ph_app`
+# and so on rather than as the directories they sit in.
+files = [
+    "packages/ph-core/src/ph",
+    "packages/ph-app/src/ph_app",
+    "packages/ph-rlm/src/ph_rlm",
+    "packages/ph-runtime-guest/src/ph_runtime",
+    "packages/ph-stabilize/src/ph_stabilize",
+    "packages/ph-text-index/src/ph_text_index",
+    "packages/ph-code-graph/src/ph_code_graph",
+    "conftest.py",
+    "packages/ph-core/tests",
+    "packages/ph-app/tests",
+    "packages/ph-rlm/tests",
+    "packages/ph-stabilize/tests",
+    "packages/ph-text-index/tests",
+    "packages/ph-code-graph/tests",
+    "tests",
+]
 namespace_packages = true
 explicit_package_bases = true
 
 [tool.pytest.ini_options]
+# Where the shared test-support modules live. `daemon_helpers`, `tui_helpers`,
+# `app_fixtures`, `rlm_fixtures`, `runtime_helpers`, `stabilize_helpers` and
+# `fixture_replay` are top-level modules a test imports by name. Under pytest's
+# default `prepend` mode they were found only because collecting a directory
+# inserts it into `sys.path` — which made the import order-dependent, and is why
+# `from conftest import ROW` once resolved to a *different* package's conftest.
+# Declared here they are on the path from startup, which is also what lets the
+# one root `conftest.py` register two of them as plugins.
+pythonpath = [
+    "tests",
+    "packages/ph-app/tests",
+    "packages/ph-rlm/tests",
+    "packages/ph-stabilize/tests",
+    "packages/ph-core/tests",
+]
+
 testpaths = [
     "packages/ph-core/tests",
     "packages/ph-app/tests",

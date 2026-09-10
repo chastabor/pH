@@ -29,9 +29,10 @@ import anyio
 import pytest
 
 from ph.agent.types import AgentOptions
+from ph.keys import AGENTS, SANDBOX, SESSIONS, SHELL, WORKSPACE
 from ph.seams.sandbox import DENIED, Allowances, NetworkAllowance
 from ph.seams.sandbox_egress import PROBE_HOST, EgressProxy, origin_form, parse_head
-from ph.testing import report_section
+from ph.testing import MountProfile, report_section
 
 pytestmark = pytest.mark.anyio
 
@@ -294,12 +295,12 @@ async def test_the_allowlist_is_asked_live() -> None:
 # ------------------------------------------------------------- end to end --
 
 
-async def _bridged(mount: Any, *rows: dict[str, Any]) -> Any:
+async def _bridged(mount: MountProfile, *rows: dict[str, Any]) -> Any:
     """A mount with the backend and a live bridge, or a skip that says why not."""
     ctx = await mount(ROW, *rows)
-    if ctx.sandbox.provider is None:
+    if ctx.require(SANDBOX).provider is None:
         pytest.skip("no enforcing sandbox backend on this host")
-    if ctx.sandbox.egress is None:
+    if ctx.require(SANDBOX).egress is None:
         pytest.skip(f"no egress bridge: {report_section(ctx, 'Local confinement').get('egress')}")
     return ctx
 
@@ -315,7 +316,7 @@ def _fetch(url: str) -> str:
 
 
 async def test_a_confined_command_reaches_an_allowed_host_and_only_that(
-    mount: Any, tmp_path: Path
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """**The row's gate.** Through `ctx.shell`, as an agent's command runs: the
     shim comes up, the socket is reached through the read-only bind, the proxy
@@ -333,18 +334,22 @@ async def test_a_confined_command_reaches_an_allowed_host_and_only_that(
             "config": {"network": {"mode": "allowlist", "hosts": ["127.0.0.1"]}},
         }
         ctx = await _bridged(mount, allow)
-        session = ctx.sessions.create("egress")
-        agent = ctx.agents.create(session, AgentOptions(provider="fake", model="f"))
+        session = ctx.require(SESSIONS).create("egress")
+        agent = ctx.require(AGENTS).create(session, AgentOptions(provider="fake", model="f"))
         # The lifecycle row acquires at the agent's first step; a command run outside
         # a turn needs its workspace acquired by hand, as the ladder tests do.
-        await ctx.workspace.acquire(session_id=session.id, agent_id=agent.id, base=tmp_path)
+        await ctx.require(WORKSPACE).acquire(
+            session_id=session.id, agent_id=agent.id, base=tmp_path
+        )
 
-        reached = await ctx.shell.run(_fetch(f"http://127.0.0.1:{host.port}/"), agent=agent)
+        reached = await ctx.require(SHELL).run(
+            _fetch(f"http://127.0.0.1:{host.port}/"), agent=agent
+        )
         assert reached.exit_code == 0, reached.stderr
         assert reached.stdout.strip() == "hello from host"
-        assert reached.confined_by == ctx.sandbox.provider.backend
+        assert reached.confined_by == ctx.require(SANDBOX).provider.backend
 
-        refused = await ctx.shell.run(_fetch("http://example.invalid/"), agent=agent)
+        refused = await ctx.require(SHELL).run(_fetch("http://example.invalid/"), agent=agent)
         assert refused.exit_code != 0
         assert "403" in refused.stderr
 
@@ -356,19 +361,19 @@ async def test_a_confined_command_reaches_an_allowed_host_and_only_that(
 
 
 async def test_a_command_that_ignores_the_proxy_reaches_nothing_and_says_so(
-    mount: Any, tmp_path: Path
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """The closed direction, and the record read from the command's own words:
     a raw `connect()` finds no route, and the kernel's silence becomes a
     `sandbox/denied` because the output said so — `Network is unreachable` from a
     namespace with no route, `Operation not permitted` from Seatbelt's deny."""
     ctx = await _bridged(mount)
-    session = ctx.sessions.create("raw")
-    agent = ctx.agents.create(session, AgentOptions(provider="fake", model="f"))
-    await ctx.workspace.acquire(session_id=session.id, agent_id=agent.id, base=tmp_path)
+    session = ctx.require(SESSIONS).create("raw")
+    agent = ctx.require(AGENTS).create(session, AgentOptions(provider="fake", model="f"))
+    await ctx.require(WORKSPACE).acquire(session_id=session.id, agent_id=agent.id, base=tmp_path)
     raw = f"{sys.executable} -c 'import socket; socket.create_connection((\"192.0.2.1\", 80), 2)'"
 
-    result = await ctx.shell.run(raw, agent=agent)
+    result = await ctx.require(SHELL).run(raw, agent=agent)
 
     assert result.exit_code != 0
     words = "Operation not permitted" if sys.platform == "darwin" else "Network is unreachable"
@@ -378,7 +383,7 @@ async def test_a_command_that_ignores_the_proxy_reaches_nothing_and_says_so(
     assert denials[0].data["kind"] == "network" and denials[0].data["via"] == "output"
 
 
-async def test_the_bridge_is_claimed_only_after_its_probe(mount: Any) -> None:
+async def test_the_bridge_is_claimed_only_after_its_probe(mount: MountProfile) -> None:
     """`ph doctor` says the bridge is up because a confined command reached it
     through the door, not because a proxy was started."""
     ctx = await _bridged(mount)
@@ -387,5 +392,5 @@ async def test_the_bridge_is_claimed_only_after_its_probe(mount: Any) -> None:
     assert PROBE_HOST in section["egress"]
     assert section["egress refused"] == "0"
     # And what the seam says follows from it.
-    assert ctx.sandbox.allowances == Allowances(network=NetworkAllowance())
-    assert "reachable through the egress proxy" in ctx.sandbox.network_posture()
+    assert ctx.require(SANDBOX).allowances == Allowances(network=NetworkAllowance())
+    assert "reachable through the egress proxy" in ctx.require(SANDBOX).network_posture()

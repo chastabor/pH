@@ -368,7 +368,7 @@ def test_leaving_re_raises_the_signal_under_the_default_handler(
     cannot survive.
     """
     killed: list[tuple[int, int]] = []
-    monkeypatch.setattr(resources.os, "kill", lambda pid, number: killed.append((pid, number)))
+    monkeypatch.setattr(os, "kill", lambda pid, number: killed.append((pid, number)))
     monkeypatch.setattr(signal, "signal", lambda number, handler: dispositions.append(handler))
     dispositions: list[Any] = []
 

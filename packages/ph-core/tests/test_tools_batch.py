@@ -19,7 +19,8 @@ import pytest
 from ph.cancel import CancelToken
 from ph.llm.types import ToolCallBlock, create_user_message
 from ph.session import Session
-from ph.testing import StubAgent, parked_gate, raising, simple_tool, tool_runtime
+from ph.session.json import as_obj, as_seq
+from ph.testing import StubAgent, parked_gate, raising, session_of, simple_tool, tool_runtime
 from ph.tools import TOOL_ABORTED_BEFORE_DISPATCH, Deny, ToolRuntime
 from ph.tools.batch import execute_tool_calls, parse_arguments
 
@@ -69,8 +70,10 @@ async def test_results_commit_in_model_order_not_completion_order() -> None:
     tools.register(_slow("fast", trace, 0.01, safe=True))
     await _run(root, agent, "slow", "fast")
     results = [
-        event.data["message"]["content"][0]["content"][0]["text"]
-        for event in agent.session.events
+        as_obj(as_seq(as_obj(as_seq(as_obj(event.data["message"])["content"])[0])["content"])[0])[
+            "text"
+        ]
+        for event in session_of(agent).events
         if event.type == "tool/result"
     ]
     assert results == ["slow", "fast"]
@@ -109,9 +112,9 @@ async def test_every_call_is_logged_before_it_executes() -> None:
     root, tools, agent, trace = _setup()
     tools.register(_slow("a", trace, 0.0, safe=True))
     await _run(root, agent, "a")
-    assert [event.type for event in agent.session.events] == ["tool/call", "tool/result"]
+    assert [event.type for event in session_of(agent).events] == ["tool/call", "tool/result"]
     # The result cites its call, so a reader can pair them without guessing.
-    assert agent.session.events[1].source_event_seqs == (0,)
+    assert session_of(agent).events[1].source_event_seqs == (0,)
 
 
 async def test_a_parked_call_has_no_record_until_the_gate_decides() -> None:
@@ -135,11 +138,11 @@ async def test_a_parked_call_has_no_record_until_the_gate_decides() -> None:
     async with anyio.create_task_group() as tasks:
         tasks.start_soon(_run, root, agent, "a")
         await reached.wait()
-        assert [e.type for e in agent.session.events] == [], "parked: nothing has happened"
+        assert [e.type for e in session_of(agent).events] == [], "parked: nothing has happened"
         release.set()
 
-    assert [e.type for e in agent.session.events] == ["tool/call", "tool/result"]
-    assert agent.session.events[1].source_event_seqs == (0,), "and the pair still pairs"
+    assert [e.type for e in session_of(agent).events] == ["tool/call", "tool/result"]
+    assert session_of(agent).events[1].source_event_seqs == (0,), "and the pair still pairs"
 
 
 async def test_a_denied_call_still_logs_its_pair() -> None:
@@ -157,9 +160,9 @@ async def test_a_denied_call_still_logs_its_pair() -> None:
 
     await _run(root, agent, "a")
 
-    assert [e.type for e in agent.session.events] == ["tool/call", "tool/result"]
-    assert agent.session.events[1].data["failureKind"] == "denied"
-    assert agent.session.events[1].source_event_seqs == (0,)
+    assert [e.type for e in session_of(agent).events] == ["tool/call", "tool/result"]
+    assert session_of(agent).events[1].data["failureKind"] == "denied"
+    assert session_of(agent).events[1].source_event_seqs == (0,)
     assert "a:start" not in trace
 
 
@@ -186,25 +189,28 @@ async def test_results_keep_model_order_when_the_gate_settles_out_of_order() -> 
 
     await _run(root, agent, "slow", "fast")
 
-    events = agent.session.events
+    events = session_of(agent).events
     calls = [e for e in events if e.type == "tool/call"]
     results = [e for e in events if e.type == "tool/result"]
     assert [c.data["name"] for c in calls] == ["fast", "slow"], "recorded as they became runnable"
-    assert [r.data["message"]["source"]["callId"] for r in results] == ["call-0", "call-1"], (
-        "committed as the model asked"
-    )
+    assert [as_obj(as_obj(r.data["message"])["source"])["callId"] for r in results] == [
+        "call-0",
+        "call-1",
+    ], "committed as the model asked"
     by_id = {c.data["callId"]: c.seq for c in calls}
     for result in results:
-        assert result.source_event_seqs == (by_id[result.data["message"]["source"]["callId"]],)
+        assert result.source_event_seqs == (
+            by_id[as_obj(as_obj(result.data["message"])["source"])["callId"]],
+        )
 
 
 async def test_a_crashing_body_still_leaves_its_call_and_a_result() -> None:
     root, tools, agent, _trace = _setup()
     tools.register(simple_tool("boom", raising(RuntimeError("nope"))))
     await _run(root, agent, "boom")
-    result = agent.session.events[1]
-    assert [event.type for event in agent.session.events] == ["tool/call", "tool/result"]
-    assert result.data["message"]["content"][0]["isError"] is True
+    result = session_of(agent).events[1]
+    assert [event.type for event in session_of(agent).events] == ["tool/call", "tool/result"]
+    assert as_obj(as_seq(as_obj(result.data["message"])["content"])[0])["isError"] is True
     # The kind travels into the log, so a card can colour a failure differently
     # from a refusal without re-deriving it.
     assert result.data["failureKind"] == "failed"
@@ -225,10 +231,10 @@ async def test_cancellation_records_a_result_for_every_skipped_call() -> None:
     assert outcome.aborted
     # Replay must see a result for every call, or the pairing a provider
     # requires is broken.
-    calls = [e for e in agent.session.events if e.type == "tool/call"]
-    results = [e for e in agent.session.events if e.type == "tool/result"]
+    calls = [e for e in session_of(agent).events if e.type == "tool/call"]
+    results = [e for e in session_of(agent).events if e.type == "tool/result"]
     assert len(calls) == len(results) == 2
-    assert results[1].data["error"]["code"] == TOOL_ABORTED_BEFORE_DISPATCH
+    assert as_obj(results[1].data["error"])["code"] == TOOL_ABORTED_BEFORE_DISPATCH
     assert results[1].data["failureKind"] == "aborted"
     assert "second:start" not in trace
 
@@ -247,11 +253,13 @@ async def test_deferred_context_reaches_the_acceptor_after_the_result() -> None:
 
     tools.register(simple_tool("defer", body))
     seen_at: list[int] = []
-    await _run(root, agent, "defer", accept=lambda _c: seen_at.append(len(agent.session.events)))
+    await _run(
+        root, agent, "defer", accept=lambda _c: seen_at.append(len(session_of(agent).events))
+    )
     assert len(seen_at) == 1
     # Handed over only after the result is durable, so call/result adjacency
     # survives — a context spliced between them breaks the pairing.
-    assert agent.session.events[seen_at[0] - 1].type == "tool/result"
+    assert session_of(agent).events[seen_at[0] - 1].type == "tool/result"
 
 
 async def test_conclude_turn_propagates_to_the_batch_outcome() -> None:

@@ -11,7 +11,7 @@ So the check runs at runtime, on the request the adapter is about to receive.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
 
 import pytest
@@ -26,6 +26,7 @@ from ph.agent.types import (
     RequestProposal,
 )
 from ph.agent_loop.invariant import ModelVisibleNotLoggedError
+from ph.keys import AGENTS, LLM, LLM_FAKE, SESSIONS, SYSTEM_PROMPT
 from ph.llm.types import (
     BlockEnd,
     BlockStart,
@@ -39,9 +40,10 @@ from ph.llm.types import (
     create_user_message,
 )
 from ph.session import SurfaceIntent
+from ph.session.json import as_obj
 from ph.system_prompt.assembly import PromptContext, PromptSection
 from ph.testing import FAKE_OPTIONS as FAKE
-from ph.testing import user_payload
+from ph.testing import MountProfile, block_text, user_payload
 
 pytestmark = pytest.mark.anyio
 
@@ -54,10 +56,10 @@ def _plugin_snapshots(session: Any) -> list[Any]:
     ]
 
 
-async def test_lifecycle_events_appear_in_order(mount: Any) -> None:
+async def test_lifecycle_events_appear_in_order(mount: MountProfile) -> None:
     ctx = await mount()
-    session = ctx.sessions.create("s")
-    await ctx.agents.create(session, FAKE).prompt("hello")
+    session = ctx.require(SESSIONS).create("s")
+    await ctx.require(AGENTS).create(session, FAKE).prompt("hello")
 
     types = [event.type for event in session.events]
     assert types[:7] == [
@@ -74,23 +76,23 @@ async def test_lifecycle_events_appear_in_order(mount: Any) -> None:
     ]
     assert types[-3:] == ["assistant/message", "step/end", "turn/end"]
     assert "assistant/chunk" in types
-    assert session.events[-1].data["reason"]["kind"] == "completed"
+    assert as_obj(session.events[-1].data["reason"])["kind"] == "completed"
 
 
-async def test_every_request_is_exactly_derive_messages(mount: Any) -> None:
+async def test_every_request_is_exactly_derive_messages(mount: MountProfile) -> None:
     ctx = await mount()
-    session = ctx.sessions.create("s")
-    await ctx.agents.create(session, FAKE).prompt("hello")
-    assert ctx.llm_fake.requests
+    session = ctx.require(SESSIONS).create("s")
+    await ctx.require(AGENTS).create(session, FAKE).prompt("hello")
+    assert ctx.require(LLM_FAKE).requests
     derived = session.derive_messages()
-    for request in ctx.llm_fake.requests:
+    for request in ctx.require(LLM_FAKE).requests:
         assert request.is_loop_request
         assert [m.id for m in request.messages] == [m.id for m in derived[: len(request.messages)]]
 
 
-async def test_the_invariant_fires_on_a_bypassed_request(mount: Any) -> None:
+async def test_the_invariant_fires_on_a_bypassed_request(mount: MountProfile) -> None:
     ctx = await mount()
-    session = ctx.sessions.create("s")
+    session = ctx.require(SESSIONS).create("s")
     caught: list[BaseException] = []
 
     # A plugin that smuggles content past the log — the failure I3 exists to
@@ -117,36 +119,36 @@ async def test_the_invariant_fires_on_a_bypassed_request(mount: Any) -> None:
     # reach it.
     ctx.on("llm/stream", bypass, prepend=True)
 
-    await ctx.agents.create(session, FAKE).prompt("hello")
+    await ctx.require(AGENTS).create(session, FAKE).prompt("hello")
     assert caught, "the invariant did not fire on a bypassed request"
     # The turn ends in error rather than quietly succeeding on smuggled input.
-    assert session.events[-1].data["reason"]["kind"] == "error"
+    assert as_obj(session.events[-1].data["reason"])["kind"] == "error"
 
 
-async def test_pre_step_reject_blocks_the_turn(mount: Any) -> None:
+async def test_pre_step_reject_blocks_the_turn(mount: MountProfile) -> None:
     ctx = await mount()
-    session = ctx.sessions.create("s")
+    session = ctx.require(SESSIONS).create("s")
 
     async def deny(request: PreStepRequest, next_: Any) -> PreStepDecision:
         return PreStepDecision(kind="reject", reason="over budget")
 
     ctx.on("agent/pre-step", deny)
-    await ctx.agents.create(session, FAKE).prompt("hello")
+    await ctx.require(AGENTS).create(session, FAKE).prompt("hello")
 
     assert "step/start" not in [event.type for event in session.events]
-    assert session.events[-1].data["reason"]["kind"] == "blocked"
+    assert as_obj(session.events[-1].data["reason"])["kind"] == "blocked"
 
 
-async def test_agent_request_waterfall_can_reroute(mount: Any) -> None:
+async def test_agent_request_waterfall_can_reroute(mount: MountProfile) -> None:
     ctx = await mount()
-    session = ctx.sessions.create("s")
+    session = ctx.require(SESSIONS).create("s")
 
     async def reroute(proposal: RequestProposal, next_: Any) -> LlmCallConfig:
         config = await next_()
         return LlmCallConfig(provider=config.provider, model="rerouted", temperature=0.1)
 
     ctx.on("agent/request", reroute)
-    await ctx.agents.create(session, FAKE).prompt("hello")
+    await ctx.require(AGENTS).create(session, FAKE).prompt("hello")
 
     header = session.request_header()
     assert header is not None
@@ -154,7 +156,7 @@ async def test_agent_request_waterfall_can_reroute(mount: Any) -> None:
     assert header.config.temperature == 0.1
 
 
-async def test_the_request_derives_its_messages_after_the_waterfall(mount: Any) -> None:
+async def test_the_request_derives_its_messages_after_the_waterfall(mount: MountProfile) -> None:
     """A listener may append, and the request it is proposing will carry it.
 
     Pinned because `ph-stabilize`'s `input-offload` leans on exactly this
@@ -165,9 +167,11 @@ async def test_the_request_derives_its_messages_after_the_waterfall(mount: Any) 
     depended on an ordering no test held. It does now.
     """
     ctx = await mount()
-    session = ctx.sessions.create("s")
+    session = ctx.require(SESSIONS).create("s")
 
-    async def inject(proposal: RequestProposal, next_: Any) -> LlmCallConfig:
+    async def inject(
+        proposal: RequestProposal, next_: Callable[..., Awaitable[LlmCallConfig]]
+    ) -> LlmCallConfig:
         if not any(event.type == "assistant/message" for event in session.events):
             session.append(
                 "user/message",
@@ -177,13 +181,13 @@ async def test_the_request_derives_its_messages_after_the_waterfall(mount: Any) 
         return await next_()
 
     ctx.on("agent/request", inject)
-    await ctx.agents.create(session, FAKE).prompt("hello")
+    await ctx.require(AGENTS).create(session, FAKE).prompt("hello")
 
     # Read off the adapter, which is the only place the *sent* messages exist.
-    sent = ctx.llm_fake.requests
+    sent = ctx.require(LLM_FAKE).requests
     assert sent, "no request reached the adapter"
     text = [
-        block.text
+        block_text(block)
         for message in sent[0].messages
         for block in message.content
         if getattr(block, "type", None) == "text"
@@ -193,10 +197,10 @@ async def test_the_request_derives_its_messages_after_the_waterfall(mount: Any) 
     )
 
 
-async def test_request_header_is_logged_only_when_it_changes(mount: Any) -> None:
+async def test_request_header_is_logged_only_when_it_changes(mount: MountProfile) -> None:
     ctx = await mount()
-    session = ctx.sessions.create("s")
-    agent = ctx.agents.create(session, FAKE)
+    session = ctx.require(SESSIONS).create("s")
+    agent = ctx.require(AGENTS).create(session, FAKE)
     await agent.prompt("first")
     await agent.prompt("second")
     headers = [e for e in session.events if e.type == "request/header"]
@@ -206,14 +210,16 @@ async def test_request_header_is_logged_only_when_it_changes(mount: Any) -> None
     assert headers[0].data["reason"] == "initial"
 
 
-async def test_prompt_sections_are_static_and_context_is_snapshotted(mount: Any) -> None:
+async def test_prompt_sections_are_static_and_context_is_snapshotted(mount: MountProfile) -> None:
     ctx = await mount()
     clock = {"value": "09:00"}
-    ctx.system_prompt.section(PromptSection(name="identity", text="You are pH.", order=-100))
-    ctx.system_prompt.context(PromptContext(name="time", text=lambda _c: clock["value"]))
+    ctx.require(SYSTEM_PROMPT).section(
+        PromptSection(name="identity", text="You are pH.", order=-100)
+    )
+    ctx.require(SYSTEM_PROMPT).context(PromptContext(name="time", text=lambda _c: clock["value"]))
 
-    session = ctx.sessions.create("s")
-    agent = ctx.agents.create(session, FAKE)
+    session = ctx.require(SESSIONS).create("s")
+    agent = ctx.require(AGENTS).create(session, FAKE)
     await agent.prompt("first")
 
     header = session.request_header()
@@ -230,7 +236,9 @@ async def test_prompt_sections_are_static_and_context_is_snapshotted(mount: Any)
     assert len(_plugin_snapshots(session)) == 2
 
 
-async def test_adapter_failures_become_a_terminal_finish_and_end_the_turn(mount: Any) -> None:
+async def test_adapter_failures_become_a_terminal_finish_and_end_the_turn(
+    mount: MountProfile,
+) -> None:
     ctx = await mount()
 
     class Exploding:
@@ -238,16 +246,20 @@ async def test_adapter_failures_become_a_terminal_finish_and_end_the_turn(mount:
             raise RuntimeError("provider is down")
             yield  # pragma: no cover
 
-    ctx.llm.register_adapter(["boom"], Exploding())
-    session = ctx.sessions.create("s")
-    await ctx.agents.create(session, AgentOptions(provider="boom", model="m")).prompt("hello")
+    ctx.require(LLM).register_adapter(["boom"], Exploding())
+    session = ctx.require(SESSIONS).create("s")
+    await (
+        ctx.require(AGENTS)
+        .create(session, AgentOptions(provider="boom", model="m"))
+        .prompt("hello")
+    )
 
     reason = session.events[-1].data["reason"]
-    assert reason["kind"] == "error"
-    assert reason["error"]["message"] == "provider is down"
+    assert as_obj(reason)["kind"] == "error"
+    assert as_obj(as_obj(reason)["error"])["message"] == "provider is down"
 
 
-async def test_request_error_waterfall_can_retry(mount: Any) -> None:
+async def test_request_error_waterfall_can_retry(mount: MountProfile) -> None:
     ctx = await mount()
     attempts = {"count": 0}
 
@@ -266,7 +278,7 @@ async def test_request_error_waterfall_can_retry(mount: Any) -> None:
             yield BlockEnd(index=0, block=TextBlock(text="recovered"))
             yield Finish(reason=FinishReason(kind="stop"))
 
-    ctx.llm.register_adapter(["flaky"], Flaky())
+    ctx.require(LLM).register_adapter(["flaky"], Flaky())
 
     async def retry_once(failure: RequestFailure, next_: Any) -> Any:
         if failure.failure.code == "TRANSIENT":
@@ -274,18 +286,22 @@ async def test_request_error_waterfall_can_retry(mount: Any) -> None:
         return await next_()
 
     ctx.on("agent/request-error", retry_once)
-    session = ctx.sessions.create("s")
-    await ctx.agents.create(session, AgentOptions(provider="flaky", model="m")).prompt("hello")
+    session = ctx.require(SESSIONS).create("s")
+    await (
+        ctx.require(AGENTS)
+        .create(session, AgentOptions(provider="flaky", model="m"))
+        .prompt("hello")
+    )
 
     assert attempts["count"] == 2
-    assert session.events[-1].data["reason"]["kind"] == "completed"
-    assert session.derive_messages()[-1].content[0].text == "recovered"
+    assert as_obj(session.events[-1].data["reason"])["kind"] == "completed"
+    assert block_text(session.derive_messages()[-1].content[0]) == "recovered"
 
 
-async def test_turn_stopping_listener_can_keep_the_turn_alive(mount: Any) -> None:
+async def test_turn_stopping_listener_can_keep_the_turn_alive(mount: MountProfile) -> None:
     ctx = await mount()
-    session = ctx.sessions.create("s")
-    agent = ctx.agents.create(session, FAKE)
+    session = ctx.require(SESSIONS).create("s")
+    agent = ctx.require(AGENTS).create(session, FAKE)
     seen = {"count": 0}
 
     def object_once(agent_handle: Any, turn: int) -> None:
@@ -307,10 +323,10 @@ async def test_turn_stopping_listener_can_keep_the_turn_alive(mount: Any) -> Non
     assert types.count("step/start") == 2
 
 
-async def test_cancelling_ends_the_turn_as_aborted(mount: Any) -> None:
+async def test_cancelling_ends_the_turn_as_aborted(mount: MountProfile) -> None:
     ctx = await mount()
-    session = ctx.sessions.create("s")
-    agent = ctx.agents.create(session, FAKE)
+    session = ctx.require(SESSIONS).create("s")
+    agent = ctx.require(AGENTS).create(session, FAKE)
 
     async def cancel_at_pre_step(request: PreStepRequest, next_: Any) -> Any:
         agent.cancel(AgentCancelCause(kind="user"), keep_inbox=True)
@@ -319,14 +335,14 @@ async def test_cancelling_ends_the_turn_as_aborted(mount: Any) -> None:
     ctx.on("agent/pre-step", cancel_at_pre_step)
     await agent.prompt("hello")
     reason = session.events[-1].data["reason"]
-    assert reason["kind"] == "aborted"
-    assert reason["reason"]["kind"] == "user"
+    assert as_obj(reason)["kind"] == "aborted"
+    assert as_obj(as_obj(reason)["reason"])["kind"] == "user"
 
 
-async def test_agent_scoped_listeners_hear_only_their_agent(mount: Any) -> None:
+async def test_agent_scoped_listeners_hear_only_their_agent(mount: MountProfile) -> None:
     ctx = await mount()
-    a = ctx.agents.create(ctx.sessions.create("a"), FAKE)
-    b = ctx.agents.create(ctx.sessions.create("b"), FAKE)
+    a = ctx.require(AGENTS).create(ctx.require(SESSIONS).create("a"), FAKE)
+    b = ctx.require(AGENTS).create(ctx.require(SESSIONS).create("b"), FAKE)
     heard: list[str] = []
     a.ctx.on("agent/status", lambda agent, status: heard.append(f"{agent.id}:{status}"))
     await b.prompt("hello")

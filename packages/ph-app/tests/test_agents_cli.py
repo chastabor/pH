@@ -43,6 +43,7 @@ from daemon_helpers import Daemon, private_runtime, serving
 from typer.testing import CliRunner
 
 from ph_app.cli import app
+from ph_app.payloads import DaemonStatusReply
 from ph_app.protocol import Cursor
 from ph_app.wire import as_obj
 
@@ -605,7 +606,10 @@ def test_every_agents_command_is_registered() -> None:
     from ph_app.agents import agents_app
 
     registered = agents_app.registered_commands
-    names = {command.name or command.callback.__name__ for command in registered}
+    names = {
+        command.name or (command.callback.__name__ if command.callback else "<no callback>")
+        for command in registered
+    }
     assert names == {"send", "attach", "schedule", "status", "doctor", "shutdown"}
     groups = {group.name for group in app.registered_groups}
     assert "agents" in groups
@@ -625,7 +629,8 @@ def test_the_daemon_status_reply_is_json_and_says_what_it_is(
     from ph_app.daemon.server import DaemonServer
     from ph_app.daemon.supervisor import Supervisor
 
-    async def read() -> dict[str, Any]:
+    async def read() -> DaemonStatusReply:
+        facts: DaemonStatusReply
         async with anyio.create_task_group() as tasks:
             server = DaemonServer(
                 supervisor=Supervisor(profile=PROFILE, tasks=tasks),
@@ -634,7 +639,11 @@ def test_the_daemon_status_reply_is_json_and_says_what_it_is(
             )
             facts = server.status()
             tasks.cancel_scope.cancel()
-            return facts
+        # Assigned inside the group and returned outside it: a task group's
+        # `__aexit__` is typed as one that may suppress, so a `return` in the
+        # block leaves a path that falls off the end. `connected()` in
+        # `daemon/client.py` carries the same note for the same reason.
+        return facts
 
     facts = anyio.run(read)
     # Round-trips as JSON, because it does: every reply goes through `dumps`.

@@ -30,6 +30,7 @@ import anyio
 import pytest
 from daemon_helpers import running, until
 
+from ph.keys import APPROVAL
 from ph.paths import resolve_roots
 from ph.seams.schedule_index import ScheduleIndex
 from ph.session import now_ms
@@ -78,15 +79,15 @@ async def test_the_exit_does_not_wait_on_the_passivation_window(tmp_path: Path) 
     nothing will ever release.
     """
     async with running(tmp_path, ephemeral=True, passivate_after=None) as daemon:
-        root = await daemon.server.supervisor.start("kept")
-        assert root.id in daemon.server.supervisor.roots
+        root = await daemon.running.supervisor.start("kept")
+        assert root.id in daemon.running.supervisor.roots
 
         # An hour on, rather than a sleep: quiet is measured from the log — or,
         # for a session with no events yet, from when the root was mounted — so
         # `now` is the honest way to ask "and once this root has been idle a
         # while?". The root is still mounted, because nothing swept it.
-        assert daemon.server.spent(now=now_ms() + 3_600_000), "nothing else wants it"
-        assert root.id in daemon.server.supervisor.roots, "and it was not released to get there"
+        assert daemon.running.spent(now=now_ms() + 3_600_000), "nothing else wants it"
+        assert root.id in daemon.running.supervisor.roots, "and it was not released to get there"
 
 
 # ------------------------------------------------------------ the predicate --
@@ -102,8 +103,8 @@ async def test_an_explicitly_started_daemon_is_never_spent(tmp_path: Path) -> No
     reaction to.
     """
     async with running(tmp_path) as daemon:
-        assert not daemon.server.supervisor.roots
-        assert not daemon.server.spent(), "somebody chose to run this"
+        assert not daemon.running.supervisor.roots
+        assert not daemon.running.spent(), "somebody chose to run this"
 
 
 async def test_a_connected_client_keeps_an_ephemeral_daemon_up(tmp_path: Path) -> None:
@@ -117,12 +118,12 @@ async def test_a_connected_client_keeps_an_ephemeral_daemon_up(tmp_path: Path) -
     Sabotage: count attached roots instead of open connections.
     """
     async with running(tmp_path, ephemeral=True) as daemon:
-        assert daemon.server.spent(), "nothing has connected yet"
+        assert daemon.running.spent(), "nothing has connected yet"
 
         await daemon.client()
-        await until(lambda: bool(daemon.server.open_connections), what="the connection to count")
+        await until(lambda: bool(daemon.running.open_connections), what="the connection to count")
 
-        assert not daemon.server.spent(), "a client is on the socket"
+        assert not daemon.running.spent(), "a client is on the socket"
 
 
 async def test_a_root_somebody_is_watching_keeps_an_ephemeral_daemon_up(
@@ -137,12 +138,12 @@ async def test_a_root_somebody_is_watching_keeps_an_ephemeral_daemon_up(
     you, so the daemon behind it stays too.
     """
     async with running(tmp_path, ephemeral=True) as daemon:
-        root = await daemon.server.supervisor.start("watched")
+        root = await daemon.running.supervisor.start("watched")
         client = await daemon.client()
         await client.call("session/attach", sessionId=root.id)
         await until(lambda: bool(root.subscribers), what="the attach to land")
 
-        assert not daemon.server.spent()
+        assert not daemon.running.spent()
 
 
 async def test_an_appointment_keeps_an_ephemeral_daemon_up(tmp_path: Path) -> None:
@@ -156,11 +157,11 @@ async def test_an_appointment_keeps_an_ephemeral_daemon_up(tmp_path: Path) -> No
     Sabotage: drop condition 4, and this passes as spent.
     """
     async with running(tmp_path, ephemeral=True) as daemon:
-        assert daemon.server.spent(), "nothing on the books yet"
+        assert daemon.running.spent(), "nothing on the books yet"
 
         _appointment()
 
-        assert not daemon.server.spent(), "somebody has an appointment with this daemon"
+        assert not daemon.running.spent(), "somebody has an appointment with this daemon"
 
 
 # ----------------------------------------------------------------- the exit --
@@ -179,26 +180,26 @@ async def test_the_sweep_that_finds_nothing_left_ends_the_daemon(tmp_path: Path)
     until somebody kills it.
     """
     async with running(tmp_path, ephemeral=True, passivate_after=0.0) as daemon:
-        root = await daemon.server.supervisor.start("done")
+        root = await daemon.running.supervisor.start("done")
         # Nobody watching: a subscriber is its own claim on a root's life, and
         # `start` leaves none.
         assert not root.subscribers
 
-        released = await daemon.server.sweep()
+        released = await daemon.running.sweep()
 
         assert released == ["done"]
-        assert daemon.server.stop.is_set(), "the pass that released the last root also ended it"
+        assert daemon.running.stop.is_set(), "the pass that released the last root also ended it"
 
 
 async def test_a_service_daemon_sweeps_and_stays(tmp_path: Path) -> None:
     """The same pass, the same empty supervisor, the opposite outcome."""
     async with running(tmp_path, passivate_after=0.0) as daemon:
-        await daemon.server.supervisor.start("done")
+        await daemon.running.supervisor.start("done")
 
-        released = await daemon.server.sweep()
+        released = await daemon.running.sweep()
 
         assert released == ["done"]
-        assert not daemon.server.stop.is_set()
+        assert not daemon.running.stop.is_set()
 
 
 async def test_a_root_parked_on_a_person_does_not_keep_an_ephemeral_daemon_alive(
@@ -216,14 +217,14 @@ async def test_a_root_parked_on_a_person_does_not_keep_an_ephemeral_daemon_alive
     stopping loses it. The log keeps the question.
     """
     async with running(tmp_path, ephemeral=True, passivate_after=0.0) as daemon:
-        root = await daemon.server.supervisor.start("parked")
+        root = await daemon.running.supervisor.start("parked")
         outcome: list[Any] = []
 
         async with anyio.create_task_group() as tasks:
 
             async def ask() -> None:
                 outcome.append(
-                    await root.ctx.approval.request(
+                    await root.ctx.require(APPROVAL).request(
                         agent=StubAgent(ctx=root.ctx, session=root.session),
                         tool_name="write",
                         call_id="c1",
@@ -234,9 +235,9 @@ async def test_a_root_parked_on_a_person_does_not_keep_an_ephemeral_daemon_alive
             await anyio.sleep(0.05)
             assert root.status == "waiting", "parked on a human, by the desk's own reckoning"
 
-            await daemon.server.sweep()
+            await daemon.running.sweep()
 
-            assert daemon.server.stop.is_set()
+            assert daemon.running.stop.is_set()
             tasks.cancel_scope.cancel()
 
 
@@ -251,9 +252,9 @@ async def test_the_socket_is_gone_once_an_ephemeral_daemon_has_left(tmp_path: Pa
     """
     async with running(tmp_path, ephemeral=True, passivate_after=0.0) as daemon:
         path = daemon.path
-        await daemon.server.supervisor.start("done")
+        await daemon.running.supervisor.start("done")
 
-        await daemon.server.sweep()
+        await daemon.running.sweep()
         await until(lambda: not path.exists(), what="the socket to be unlinked")
 
     assert not path.exists()
@@ -275,8 +276,8 @@ async def test_a_session_created_and_never_used_does_not_pin_the_daemon(
     ever release.
     """
     async with running(tmp_path, ephemeral=True) as daemon:
-        root = await daemon.server.supervisor.start("never-used")
+        root = await daemon.running.supervisor.start("never-used")
         assert root.session.last_event is None, "the case under test: nothing has happened"
 
         assert root.idle_for(now_ms() + 3_600_000) >= 3_600_000
-        assert daemon.server.spent(now=now_ms() + 3_600_000)
+        assert daemon.running.spent(now=now_ms() + 3_600_000)

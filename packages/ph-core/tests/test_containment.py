@@ -23,8 +23,9 @@ from typing import Any
 import pytest
 
 from ph.cordis import MountRefusal
+from ph.keys import CONTAINMENT, SANDBOX
 from ph.seams.containment import ContainmentUnavailableError
-from ph.testing import StubSandboxProvider, acquire_for_role
+from ph.testing import MountProfile, StubSandboxProvider, acquire_for_role
 
 pytestmark = pytest.mark.anyio
 
@@ -36,7 +37,7 @@ def _row(**config: Any) -> dict[str, Any]:
 # ------------------------------------------------------------------ choosing --
 
 
-async def test_mounting_the_row_chooses_nothing(mount: Any, tmp_path: Path) -> None:
+async def test_mounting_the_row_chooses_nothing(mount: MountProfile, tmp_path: Path) -> None:
     """`None` is no opinion, and that is not the same as `advisory`.
 
     The row is in `ph-base`, so it is mounted in every profile — and mounting it
@@ -47,11 +48,13 @@ async def test_mounting_the_row_chooses_nothing(mount: Any, tmp_path: Path) -> N
 
     workspace = await acquire_for_role(ctx, tmp_path)
 
-    assert ctx.containment.for_role(child=False) is None
+    assert ctx.require(CONTAINMENT).for_role(child=False) is None
     assert workspace.kind == "worktree", "mounting the selector disabled the tier"
 
 
-async def test_advisory_is_a_choice_and_declines_the_provider(mount: Any, tmp_path: Path) -> None:
+async def test_advisory_is_a_choice_and_declines_the_provider(
+    mount: MountProfile, tmp_path: Path
+) -> None:
     """The person's own checkout, said out loud.
 
     A registered provider is *not* consulted — which is the whole difference
@@ -65,7 +68,9 @@ async def test_advisory_is_a_choice_and_declines_the_provider(mount: Any, tmp_pa
     assert workspace.root == tmp_path
 
 
-async def test_a_parent_and_its_children_sit_on_different_rungs(mount: Any, tmp_path: Path) -> None:
+async def test_a_parent_and_its_children_sit_on_different_rungs(
+    mount: MountProfile, tmp_path: Path
+) -> None:
     """The shipped `rlm` posture, and the reason there are two knobs.
 
     The root agent stays in the directory the person opened; the children that
@@ -82,20 +87,20 @@ async def test_a_parent_and_its_children_sit_on_different_rungs(mount: Any, tmp_
     assert child.root != root.root
 
 
-async def test_child_tier_follows_the_tier_when_unset(mount: Any, tmp_path: Path) -> None:
+async def test_child_tier_follows_the_tier_when_unset(mount: MountProfile, tmp_path: Path) -> None:
     """A profile that names one rung means it for everyone; the second knob is
     for the deployment that wants them to differ, not a thing every profile has
     to restate."""
     ctx = await mount(_row(tier="worktree"))
 
-    assert ctx.containment.for_role(child=False) == "worktree"
-    assert ctx.containment.for_role(child=True) == "worktree"
+    assert ctx.require(CONTAINMENT).for_role(child=False) == "worktree"
+    assert ctx.require(CONTAINMENT).for_role(child=True) == "worktree"
 
 
 # -------------------------------------------------------------------- strict --
 
 
-async def test_strict_refuses_when_no_backend_is_mounted(mount: Any) -> None:
+async def test_strict_refuses_when_no_backend_is_mounted(mount: MountProfile) -> None:
     """E8's gate, and it fires at mount because that is what "refuse to start"
     means. The refusal names the backend *and* the other way out.
 
@@ -111,7 +116,7 @@ async def test_strict_refuses_when_no_backend_is_mounted(mount: Any) -> None:
     assert "containment.strict" in str(refused.value)
 
 
-async def test_strict_refuses_a_tier_that_enforces_nothing(mount: Any) -> None:
+async def test_strict_refuses_a_tier_that_enforces_nothing(mount: MountProfile) -> None:
     """`worktree` bounds relative writes and nothing else (§4.8), so asking for
     strictness while configuring it is asking for a guarantee no rung below
     `sandbox` can give."""
@@ -130,12 +135,12 @@ async def _strict_with(ctx: Any, backend: StubSandboxProvider | None) -> None:
     wrong for one of them.
     """
     if backend is not None:
-        ctx.sandbox.register_provider(backend)
-    ctx.containment.strict = True
-    ctx.containment.verify()
+        ctx.require(SANDBOX).register_provider(backend)
+    ctx.require(CONTAINMENT).strict = True
+    ctx.require(CONTAINMENT).verify()
 
 
-async def test_strict_refuses_a_partial_backend(mount: Any) -> None:
+async def test_strict_refuses_a_partial_backend(mount: MountProfile) -> None:
     """The one E8 states explicitly: **`partial` is a refusal, not a
     downgrade.** A boundary that holds for some of it is the shape an operator
     would trust and should not."""
@@ -148,29 +153,29 @@ async def test_strict_refuses_a_partial_backend(mount: Any) -> None:
     assert "rather than a downgrade" in str(refused.value)
 
 
-async def test_strict_is_satisfied_by_a_full_backend(mount: Any) -> None:
+async def test_strict_is_satisfied_by_a_full_backend(mount: MountProfile) -> None:
     ctx = await mount(_row(tier="sandbox"))
 
     await _strict_with(ctx, StubSandboxProvider(enforcement="full"))
 
-    assert ctx.sandbox.enforcement == "full"
+    assert ctx.require(SANDBOX).enforcement == "full"
 
 
-async def test_without_strict_a_missing_backend_is_not_a_refusal(mount: Any) -> None:
+async def test_without_strict_a_missing_backend_is_not_a_refusal(mount: MountProfile) -> None:
     """Configuring `sandbox` on a host that cannot provide it runs — and reports
     honestly that nothing is enforced. `strict` is the flag for a deployment
     that would rather not start than find that out later."""
     ctx = await mount(_row(tier="sandbox"))
 
-    ctx.containment.verify()
+    ctx.require(CONTAINMENT).verify()
 
-    assert ctx.sandbox.enforcement is None
+    assert ctx.require(SANDBOX).enforcement is None
 
 
 # ------------------------------------------------------------------- startup --
 
 
-async def test_a_profile_that_cannot_honour_strict_does_not_start(mount: Any) -> None:
+async def test_a_profile_that_cannot_honour_strict_does_not_start(mount: MountProfile) -> None:
     """ "Refuse to start" has to mean the process, not the first unconfined call.
 
     Through the loader's own `profile/mounted` hook, so the refusal covers every

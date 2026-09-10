@@ -24,8 +24,12 @@ from typing import Any
 
 import pytest
 
+from ph.keys import SESSIONS, WORKSPACE
 from ph.seams.workspace import workspace_leaks
 from ph.session import Session
+from ph.testing import (
+    MountProfile,
+)
 from ph.testing import (
     workspace_acquired as _acquired,
 )
@@ -40,7 +44,7 @@ from ph.testing.git import WORKTREE_ROWS, git, worktree_agent
 pytestmark = pytest.mark.anyio
 
 
-async def _reopen(mount: Any, base: Path, session: Session) -> tuple[Any, Session]:
+async def _reopen(mount: MountProfile, base: Path, session: Session) -> tuple[Any, Session]:
     """The next open: a second process, the same log, and the drain that makes
     the detached listener observable.
 
@@ -49,7 +53,7 @@ async def _reopen(mount: Any, base: Path, session: Session) -> tuple[Any, Sessio
     header, the drain — are the ones a reconciliation test must get right.
     """
     ctx = await mount(*WORKTREE_ROWS, {"id": "fs", "config": {"root": str(base)}})
-    revived = ctx.sessions.adopt(
+    revived = ctx.require(SESSIONS).adopt(
         Session(session.id, seed=list(session.events), header=session.header)
     )
     await ctx.drain()
@@ -119,7 +123,7 @@ def test_each_agent_is_folded_separately() -> None:
 
 @pytest.mark.needs_git
 async def test_a_crash_between_acquire_and_dispose_is_reconciled_on_the_next_open(
-    mount: Any, tmp_path: Path
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """P4-14's gate, against a real repository.
 
@@ -145,7 +149,7 @@ async def test_a_crash_between_acquire_and_dispose_is_reconciled_on_the_next_ope
 
 @pytest.mark.needs_git
 async def test_a_leak_whose_tree_is_already_gone_still_closes_its_pair(
-    mount: Any, tmp_path: Path
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """Nothing to reclaim is not nothing to record.
 
@@ -165,7 +169,7 @@ async def test_a_leak_whose_tree_is_already_gone_still_closes_its_pair(
 
 @pytest.mark.needs_git
 async def test_a_dirty_leak_reaches_the_branch_rather_than_being_discarded(
-    mount: Any, tmp_path: Path
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """A crash is not a reason to throw away work. Reconciliation runs the same
     disposal policy an orderly release runs, so what the agent had written when the
@@ -193,7 +197,7 @@ async def test_a_dirty_leak_reaches_the_branch_rather_than_being_discarded(
 
 @pytest.mark.needs_git
 async def test_forking_does_not_reclaim_the_parents_live_worktree(
-    mount: Any, tmp_path: Path
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """The defect this row shipped for one commit, and the reason the fold starts
     at `seed_length`.
@@ -207,7 +211,7 @@ async def test_forking_does_not_reclaim_the_parents_live_worktree(
     """
     ctx, session, _agent, workspace = await worktree_agent(mount, tmp_path)
 
-    child = ctx.sessions.fork(session)
+    child = ctx.require(SESSIONS).fork(session)
     await ctx.drain()
 
     assert workspace_leaks(child) == [], "the fork folded its parent's live worktree as a leak"
@@ -215,7 +219,7 @@ async def test_forking_does_not_reclaim_the_parents_live_worktree(
 
 
 @pytest.mark.needs_git
-async def test_a_held_workspace_is_never_reconciled(mount: Any, tmp_path: Path) -> None:
+async def test_a_held_workspace_is_never_reconciled(mount: MountProfile, tmp_path: Path) -> None:
     """Belt and braces, on the seam's own knowledge. `live()` exists so
     `/workspaces` can ask "is this tree anybody's" before offering to delete a
     directory; a reconciler with a second, weaker answer to that question is how
@@ -223,13 +227,13 @@ async def test_a_held_workspace_is_never_reconciled(mount: Any, tmp_path: Path) 
     ctx, session, _agent, workspace = await worktree_agent(mount, tmp_path)
     assert workspace_leaks(session) != []
 
-    await ctx.workspace.reconcile(session)
+    await ctx.require(WORKSPACE).reconcile(session)
 
     assert workspace.root.is_dir(), "the seam reclaimed a workspace it still holds"
 
 
 async def test_a_leak_no_mounted_tier_can_reclaim_is_left_alone(
-    mount: Any, tmp_path: Path, caplog: Any
+    mount: MountProfile, tmp_path: Path, caplog: Any
 ) -> None:
     """Reported, not removed. The tree belongs to a tier this profile does not
     have, and deleting a directory on the strength of a record written by a
@@ -245,7 +249,7 @@ async def test_a_leak_no_mounted_tier_can_reclaim_is_left_alone(
     )
 
     with caplog.at_level("WARNING"):
-        ctx.sessions.adopt(session)
+        ctx.require(SESSIONS).adopt(session)
         await ctx.drain()
 
     assert tree.exists(), "a tree no mounted tier owns was removed anyway"

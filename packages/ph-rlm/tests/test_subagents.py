@@ -38,7 +38,9 @@ from typing import Any
 
 import anyio
 import pytest
+from rlm_fixtures import PROVIDER_ROW
 
+from ph.keys import AGENTS, SESSIONS, SKILLS, SUBAGENTS, TOOLS, WORKSPACE
 from ph.llm.types import text_of
 from ph.persistence import resume_session
 from ph.seams.subagents import (
@@ -55,19 +57,18 @@ from ph.seams.subagents import (
 )
 from ph.seams.workspace import workspace_survivors
 from ph.session import derive_event_message
-from ph.testing import FAKE_OPTIONS, StubWorkspaceProvider, skill
+from ph.testing import FAKE_OPTIONS, MountProfile, StubWorkspaceProvider, not_none, skill
 from ph.testing.git import WORKTREE_ROWS, git_repo
+from ph_rlm.keys import RLM_CHILDREN
 from ph_rlm.subagents import PROVIDER_NAME, TASK_PREFIX, delegation_depth
 
 pytestmark = pytest.mark.anyio
 
 Mounted = Callable[..., Any]
 
-from conftest import PROVIDER_ROW  # noqa: E402 - a fixture row, not a symbol
-
 
 @pytest.fixture
-def delegating(mount: Any) -> Callable[..., Any]:
+def delegating(mount: MountProfile) -> Callable[..., Any]:
     """`await delegating()` → `(ctx, parent_session, parent)` with the provider on."""
 
     async def build(**config: Any) -> tuple[Any, Any, Any]:
@@ -75,14 +76,14 @@ def delegating(mount: Any) -> Callable[..., Any]:
         if config:
             rows[0]["config"] = config
         ctx = await mount(*rows)
-        session = ctx.sessions.create("parent")
-        return ctx, session, ctx.agents.create(session, FAKE_OPTIONS)
+        session = ctx.require(SESSIONS).create("parent")
+        return ctx, session, ctx.require(AGENTS).create(session, FAKE_OPTIONS)
 
     return build
 
 
 async def _spawn(ctx: Any, parent: Any, prompt: str = "research the thing", **kwargs: Any) -> Any:
-    return await ctx.subagents.start(
+    return await ctx.require(SUBAGENTS).start(
         PROVIDER_NAME, SubagentRequest(prompt=prompt, parent=parent, **kwargs)
     )
 
@@ -108,7 +109,7 @@ async def test_admission_returns_before_the_child_answers(delegating: Mounted) -
     assert admitted[0].data["prompt"] == "research the thing"
 
     # The child's own session exists and carries the parent link and depth.
-    child_session = ctx.sessions.get(run.session_id)
+    child_session = ctx.require(SESSIONS).get(run.session_id)
     assert child_session is not None
     assert child_session.header.parent_session == session.id
     assert delegation_depth(child_session) == 1
@@ -133,7 +134,7 @@ async def test_eight_children_are_all_admitted_without_waiting(delegating: Mount
     assert len({run.id for run in runs}) == 8
     assert len({run.name for run in runs}) == 8, "names address children, so they are unique"
     assert len([e for e in session.events if e.type == "subagent/admitted"]) == 8
-    assert len(ctx.subagents.list(parent_id=parent.id)) == 8
+    assert len(ctx.require(SUBAGENTS).list(parent_id=parent.id)) == 8
 
 
 async def test_the_child_gets_the_task_labelled_as_the_parents(delegating: Mounted) -> None:
@@ -142,7 +143,7 @@ async def test_the_child_gets_the_task_labelled_as_the_parents(delegating: Mount
     run = await _spawn(ctx, parent, "count the files")
     await ctx.drain()
 
-    child_session = ctx.sessions.get(run.session_id)
+    child_session = ctx.require(SESSIONS).get(run.session_id)
     assert child_session is not None
     relayed = [
         event
@@ -170,8 +171,8 @@ async def test_the_depth_gate_names_both_numbers(delegating: Mounted) -> None:
 async def test_a_child_cannot_delegate_past_the_depth_limit(delegating: Mounted) -> None:
     ctx, _session, parent = await delegating(maxDepth=1)
     run = await _spawn(ctx, parent)
-    child_session = ctx.sessions.get(run.session_id)
-    child = ctx.agents.get(child_session.id) if child_session else None
+    child_session = ctx.require(SESSIONS).get(run.session_id)
+    child = ctx.require(AGENTS).get(child_session.id) if child_session else None
     assert child is not None
 
     with pytest.raises(SubagentSpawnError, match=r"RLM_DEPTH=1, RLM_MAX_DEPTH=1"):
@@ -254,9 +255,9 @@ async def test_a_read_child_gets_an_isolated_checkout_where_a_tier_can_give_one(
     ctx, _session, parent = await delegating()
     parent_root = tmp_path / "parent-tree"
     parent_root.mkdir()
-    await ctx.workspace.acquire(session_id="parent", agent_id=parent.id, base=parent_root)
+    await ctx.require(WORKSPACE).acquire(session_id="parent", agent_id=parent.id, base=parent_root)
     tier = StubWorkspaceProvider()
-    ctx.workspace.register_provider(tier)
+    ctx.require(WORKSPACE).register_provider(tier)
 
     child = await _spawn(ctx, parent, "read some code")
 
@@ -265,7 +266,7 @@ async def test_a_read_child_gets_an_isolated_checkout_where_a_tier_can_give_one(
     assert tier.bases == [parent_root]
 
 
-async def test_a_profile_with_no_workspace_row_refuses_to_promise_one(mount: Any) -> None:
+async def test_a_profile_with_no_workspace_row_refuses_to_promise_one(mount: MountProfile) -> None:
     """The conservative claim, and the only case that still downgrades.
 
     With no seam at all nothing can enforce a writable repo, so nothing promises
@@ -277,8 +278,8 @@ async def test_a_profile_with_no_workspace_row_refuses_to_promise_one(mount: Any
         {"id": "workspace-lifecycle", "remove": True},
         {"id": "workspace", "remove": True},
     )
-    session = ctx.sessions.create("parent")
-    parent = ctx.agents.create(session, FAKE_OPTIONS)
+    session = ctx.require(SESSIONS).create("parent")
+    parent = ctx.require(AGENTS).create(session, FAKE_OPTIONS)
 
     child = await _spawn(ctx, parent, "implement the thing", access="write")
 
@@ -368,7 +369,7 @@ async def test_a_child_that_replied_is_not_announced_as_silent(delegating: Mount
     """
     ctx, session, parent = await delegating()
     run = await _spawn(ctx, parent, "say something")
-    ctx.rlm_children.mark_replied(run.session_id)
+    ctx.require(RLM_CHILDREN).mark_replied(run.session_id)
     await ctx.drain()
 
     assert _notices(session) == [], "a child that replied was announced as silent"
@@ -435,10 +436,10 @@ async def test_deleting_a_child_leaves_a_tombstone(delegating: Mounted) -> None:
     """The transcript stays on disk, so the revocation must be findable."""
     ctx, session, parent = await delegating()
     run = await _spawn(ctx, parent, "doomed")
-    provider = ctx.rlm_children
+    provider = ctx.require(RLM_CHILDREN)
 
     assert await provider.delete(session, run.id, reason="user") is True
-    assert ctx.subagents.get(run.id) is None
+    assert ctx.require(SUBAGENTS).get(run.id) is None
     # Deleting twice is not an error, and does not double-tombstone.
     assert await provider.delete(session, run.id) is False
 
@@ -453,7 +454,7 @@ async def test_deleting_a_child_leaves_a_tombstone(delegating: Mounted) -> None:
     # knew only `deleted` could not say whether it had ever run.
     assert roster[run.id]["status"] == "cancelled"
     # The child's log is still there — a tombstone is not a deletion.
-    assert ctx.sessions.get(run.session_id) is not None
+    assert ctx.require(SESSIONS).get(run.session_id) is not None
 
 
 async def test_a_settled_child_releases_its_agent_scope(delegating: Mounted) -> None:
@@ -463,7 +464,7 @@ async def test_a_settled_child_releases_its_agent_scope(delegating: Mounted) -> 
     run = await _spawn(ctx, parent, "finish and go")
     await ctx.drain()
 
-    assert ctx.agents.get(run.session_id) is None, "the child agent was never disposed"
+    assert ctx.require(AGENTS).get(run.session_id) is None, "the child agent was never disposed"
     # And a caller that awaits after the release still gets the outcome.
     assert run.result is not None
     assert (await run.result()).status == "done"
@@ -475,8 +476,8 @@ async def test_disposing_the_parent_unwinds_its_children(delegating: Mounted) ->
     ctx, session, parent = await delegating()
     run = await _spawn(ctx, parent, "outlive me")
 
-    await ctx.agents.dispose(parent.id)
-    assert ctx.subagents.get(run.id) is None
+    await ctx.require(AGENTS).dispose(parent.id)
+    assert ctx.require(SUBAGENTS).get(run.id) is None
     tombstones = [event for event in session.events if event.type == "subagent/deleted"]
     assert [event.data["reason"] for event in tombstones] == ["parent-teardown"]
 
@@ -542,16 +543,18 @@ async def test_a_real_child_is_narrowed_by_its_spawn(delegating: Mounted) -> Non
     """
     ctx, _session, parent = await delegating()
     for name in ("review", "deploy"):
-        ctx.skills.register(skill(name))
+        ctx.require(SKILLS).register(skill(name))
 
     run = await _spawn(ctx, parent, skills=("review",), tools=("read",))
-    child_scope = next(one.ctx for one in ctx.agents.list() if one.session.id == run.session_id)
+    child_scope = next(
+        one.ctx for one in ctx.require(AGENTS).list() if one.session.id == run.session_id
+    )
 
-    assert [one.name for one in ctx.skills.list(child_scope)] == ["review"]
-    assert "read" in ctx.tools.view(child_scope).visible
-    assert "write" not in ctx.tools.view(child_scope).visible
+    assert [one.name for one in ctx.require(SKILLS).list(child_scope)] == ["review"]
+    assert "read" in ctx.require(TOOLS).view(child_scope).visible
+    assert "write" not in ctx.require(TOOLS).view(child_scope).visible
     # The parent kept everything, which is what makes this narrowing.
-    assert "write" in ctx.tools.view(parent.ctx).visible
+    assert "write" in ctx.require(TOOLS).view(parent.ctx).visible
 
 
 async def test_a_real_spawn_cannot_widen(delegating: Mounted) -> None:
@@ -575,16 +578,16 @@ async def test_a_rehydrated_child_is_narrowed_again(delegating: Mounted) -> None
     """
     ctx, _session, parent = await delegating()
     for name in ("review", "deploy"):
-        ctx.skills.register(skill(name))
+        ctx.require(SKILLS).register(skill(name))
     run = await _spawn(ctx, parent, skills=("review",))
-    assert [one.name for one in ctx.skills.list(run.scope)] == ["review"]
+    assert [one.name for one in ctx.require(SKILLS).list(run.scope)] == ["review"]
 
     await ctx.drain()
-    assert ctx.agents.get(run.session_id) is None, "the child should have settled"
+    assert ctx.require(AGENTS).get(run.session_id) is None, "the child should have settled"
 
-    assert await ctx.subagents.rehydrate(run.id)
+    assert await ctx.require(SUBAGENTS).rehydrate(run.id)
 
-    assert [one.name for one in ctx.skills.list(run.scope)] == ["review"], (
+    assert [one.name for one in ctx.require(SKILLS).list(run.scope)] == ["review"], (
         "a rehydrated child came back holding more than its parent granted"
     )
 
@@ -604,13 +607,13 @@ async def _tiered_child(
     """
     parent_root = tmp_path / "parent-tree"
     parent_root.mkdir(exist_ok=True)
-    await ctx.workspace.acquire(session_id="parent", agent_id=parent.id, base=parent_root)
-    ctx.workspace.register_provider(StubWorkspaceProvider(root=tmp_path / "trees"))
+    await ctx.require(WORKSPACE).acquire(session_id="parent", agent_id=parent.id, base=parent_root)
+    ctx.require(WORKSPACE).register_provider(StubWorkspaceProvider(root=tmp_path / "trees"))
     return await _spawn(ctx, parent, prompt, access=access)
 
 
 def _marks(ctx: Any, run: Any) -> list[str]:
-    session = ctx.sessions.get(run.session_id)
+    session = ctx.require(SESSIONS).get(run.session_id)
     return [
         str(event.data.get("retained", ""))
         for event in session.events
@@ -634,7 +637,7 @@ async def test_a_child_is_retained_from_the_moment_its_tree_exists(
     run = await _tiered_child(ctx, parent, tmp_path, "get cancelled")
 
     assert _marks(ctx, run) == ["the child has not settled cleanly"]
-    (record,) = workspace_survivors(ctx.sessions.get(run.session_id))
+    (record,) = workspace_survivors(ctx.require(SESSIONS).get(run.session_id))
     assert record.outcome == "retained"
 
 
@@ -656,7 +659,7 @@ async def test_a_clean_child_leaves_nothing_behind(delegating: Mounted, tmp_path
     # with no `release` and so keeps every tree — under the real `worktree`
     # provider this checkout is discarded and there is no survivor at all, which
     # is precisely the promise the withdrawal restores.
-    (record,) = workspace_survivors(ctx.sessions.get(run.session_id))
+    (record,) = workspace_survivors(ctx.require(SESSIONS).get(run.session_id))
     assert record.outcome != "retained", "a successful child's checkout is not evidence"
     assert record.reason == ""
 
@@ -670,9 +673,9 @@ async def test_a_cancelled_child_keeps_its_evidence(delegating: Mounted, tmp_pat
     """
     ctx, _session, parent = await delegating()
     run = await _tiered_child(ctx, parent, tmp_path, "outlive me")
-    child_session = ctx.sessions.get(run.session_id)
+    child_session = ctx.require(SESSIONS).get(run.session_id)
 
-    await ctx.agents.dispose(parent.id)
+    await ctx.require(AGENTS).dispose(parent.id)
 
     (record,) = workspace_survivors(child_session)
     assert record.outcome == "retained"
@@ -707,8 +710,8 @@ async def test_a_failed_child_tells_its_parent_where_the_tree_is(
     """
     ctx, session, parent = await delegating()
     run = await _tiered_child(ctx, parent, tmp_path, "fail please")
-    child = ctx.agents.get(run.session_id)
-    root = ctx.workspace.of(child.id).root
+    child = ctx.require(AGENTS).get(run.session_id)
+    root = ctx.require(WORKSPACE).of(child.id).root
     _breaks(child)
     await ctx.drain()
 
@@ -737,7 +740,7 @@ async def test_a_child_with_no_tree_is_announced_without_naming_one(
     """
     ctx, session, parent = await delegating()
     run = await _spawn(ctx, parent, "fail with no workspace")
-    _breaks(ctx.agents.get(run.session_id))
+    _breaks(ctx.require(AGENTS).get(run.session_id))
     await ctx.drain()
 
     (told,) = _notices(session)
@@ -823,14 +826,14 @@ async def test_a_full_parent_queues_the_next_child_until_a_slot_frees(
     second = await _spawn(ctx, parent, "second")
     await _until(lambda: gate.arrived == 1, "the first child to reach the model")
 
-    roster = ctx.subagents.roster(session)
+    roster = ctx.require(SUBAGENTS).roster(session)
     assert roster[first.id]["status"] == "running"
     assert roster[second.id]["status"] == "queued", "admitted, not refused — and waiting"
     assert _statuses(session, second.id) == ["queued"], "the wait is in the log"
 
     gate.release_one()
     await _until(lambda: gate.arrived == 2, "the second child to take the freed slot")
-    assert ctx.subagents.roster(session)[first.id]["status"] == "done"
+    assert ctx.require(SUBAGENTS).roster(session)[first.id]["status"] == "done"
     assert _statuses(session, second.id) == ["queued", "running"]
 
     gate.release_one()
@@ -881,7 +884,7 @@ async def test_deleting_a_queued_child_stops_its_wait_and_takes_no_slot(
     """A child revoked before it ran is cancelled where it waits, and the slot it
     never held is not leaked — the next child still gets it."""
     ctx, session, parent = await delegating(maxConcurrent=1)
-    provider = ctx.subagents.require(PROVIDER_NAME).provider
+    provider = ctx.require(SUBAGENTS).require(PROVIDER_NAME).provider
     first = await _spawn(ctx, parent, "first")
     second = await _spawn(ctx, parent, "second")
     await _until(lambda: gate.arrived == 1, "the first child to reach the model")
@@ -910,7 +913,7 @@ async def _persisted(ctx: Any, session: Any) -> None:
     without the two writers P5-03 refuses. Draining here instead would wait on
     the very child that is meant to be caught mid-flight.
     """
-    await ctx.sessions.flush(session)
+    await ctx.require(SESSIONS).flush(session)
 
 
 RETRIES = 3
@@ -924,7 +927,7 @@ number would be asserting against a value it does not control — and coupling
 
 
 async def _restart(
-    mount: Any, session_id: str, *, skills: tuple[str, ...] = (), concurrent: int = 1
+    mount: MountProfile, session_id: str, *, skills: tuple[str, ...] = (), concurrent: int = 1
 ) -> Any:
     """A second harness over the same `$PH_HOME`, resuming one root from its log.
 
@@ -939,15 +942,15 @@ async def _restart(
     """
     ctx = await mount(dict(PROVIDER_ROW, config={"maxConcurrent": concurrent}))
     for name in skills:
-        ctx.skills.register(skill(name))
+        ctx.require(SKILLS).register(skill(name))
     session = await resume_session(ctx, session_id)
-    parent = ctx.agents.create(session, FAKE_OPTIONS)
-    await ctx.subagents.resume_children(parent, retry_limit=RETRIES)
+    parent = ctx.require(AGENTS).create(session, FAKE_OPTIONS)
+    await ctx.require(SUBAGENTS).resume_children(parent, retry_limit=RETRIES)
     return ctx, session, parent
 
 
 async def test_a_queued_child_is_re_driven_after_a_restart(
-    delegating: Mounted, gate: _Gate, mount: Any
+    delegating: Mounted, gate: _Gate, mount: MountProfile
 ) -> None:
     """The work was described in the parent's log and running nowhere (P5-04).
 
@@ -969,7 +972,7 @@ async def test_a_queued_child_is_re_driven_after_a_restart(
     # interrupted sibling is on the ladder and comes back too.
     revived_ctx, revived, _parent = await _restart(mount, session.id, concurrent=2)
 
-    assert second.id in {run.id for run in revived_ctx.subagents.list()}, (
+    assert second.id in {run.id for run in revived_ctx.require(SUBAGENTS).list()}, (
         "the queued child came back under its own id"
     )
     await _until(
@@ -983,7 +986,7 @@ async def test_a_queued_child_is_re_driven_after_a_restart(
 
 
 async def test_a_child_caught_mid_turn_climbs_the_ladder_with_its_task_re_presented(
-    delegating: Mounted, gate: _Gate, mount: Any
+    delegating: Mounted, gate: _Gate, mount: MountProfile
 ) -> None:
     """The ladder, and the thing that makes it a real attempt rather than a lie.
 
@@ -1002,7 +1005,7 @@ async def test_a_child_caught_mid_turn_climbs_the_ladder_with_its_task_re_presen
 
     revived_ctx, revived, _parent = await _restart(mount, session.id)
 
-    assert interrupted.id in {run.id for run in revived_ctx.subagents.list()}
+    assert interrupted.id in {run.id for run in revived_ctx.require(SUBAGENTS).list()}
     assert child_is_live(subagent_roster(revived)[interrupted.id]), "a child owed a turn is live"
     # The count follows the restart's own `running` record, which a detached
     # drive job writes a moment later — so this waits for the fact rather than
@@ -1014,10 +1017,10 @@ async def test_a_child_caught_mid_turn_climbs_the_ladder_with_its_task_re_presen
     assert subagent_roster(revived)[interrupted.id]["starts"] == 2, "one first run, one restart"
     await _until(gate.twice, "the resumed child to reach the model again")
 
-    child = revived_ctx.sessions.get(interrupted.session_id)
+    child = revived_ctx.require(SESSIONS).get(interrupted.session_id)
     assert child is not None
     tasks = [
-        text_of(derive_event_message(event).content)
+        text_of(not_none(derive_event_message(event)).content)
         for event in child.events
         if event.type == "user/message" and TASK_PREFIX in repr(event.data)
     ]
@@ -1046,7 +1049,7 @@ async def _stalled(ctx: Any, session: Any, parent: Any, gate: _Gate, *, restarts
 
 
 async def test_the_ladder_gives_up_and_says_so(
-    delegating: Mounted, gate: _Gate, mount: Any
+    delegating: Mounted, gate: _Gate, mount: MountProfile
 ) -> None:
     """Three restarts with nothing achieved between them is not bad luck.
 
@@ -1060,7 +1063,7 @@ async def test_the_ladder_gives_up_and_says_so(
 
     revived_ctx, revived, _parent = await _restart(mount, session.id)
 
-    assert revived_ctx.subagents.list() == [], "a spent ladder put a child back to work"
+    assert revived_ctx.require(SUBAGENTS).list() == [], "a spent ladder put a child back to work"
     row = subagent_roster(revived)[spent.id]
     assert row["status"] == "error"
     assert row["detail"] == exhausted_detail(RETRIES)
@@ -1069,7 +1072,7 @@ async def test_the_ladder_gives_up_and_says_so(
 
 
 async def test_progress_since_the_last_restart_clears_the_ladder(
-    delegating: Mounted, gate: _Gate, mount: Any
+    delegating: Mounted, gate: _Gate, mount: MountProfile
 ) -> None:
     """A child stopped, working an hour, then stopped again met two incidents.
 
@@ -1088,7 +1091,7 @@ async def test_progress_since_the_last_restart_clears_the_ladder(
 
     row = subagent_roster(revived)[moved.id]
     assert child_is_live(row), "a child that got somewhere is owed another attempt"
-    assert moved.id in {run.id for run in revived_ctx.subagents.list()}
+    assert moved.id in {run.id for run in revived_ctx.require(SUBAGENTS).list()}
     # **The restart is still recorded as one**, counting up from the cleared
     # ladder. Derived from `attempts` instead, this readmit would look like a
     # first run, write no `resumed`, and the ladder would never count it again.
@@ -1099,7 +1102,7 @@ async def test_progress_since_the_last_restart_clears_the_ladder(
 
 
 async def test_a_readmitted_child_does_not_come_back_wider_than_it_was_admitted(
-    delegating: Mounted, gate: _Gate, mount: Any
+    delegating: Mounted, gate: _Gate, mount: MountProfile
 ) -> None:
     """§6.5 across a power cut, which is why the narrowing is in the record.
 
@@ -1108,8 +1111,8 @@ async def test_a_readmitted_child_does_not_come_back_wider_than_it_was_admitted(
     run alone it would, and nothing would have said so.
     """
     ctx, session, parent = await delegating(maxConcurrent=1)
-    ctx.skills.register(skill("review"))
-    ctx.skills.register(skill("audit"))
+    ctx.require(SKILLS).register(skill("review"))
+    ctx.require(SKILLS).register(skill("audit"))
     await _spawn(ctx, parent, "first")
     narrowed = await _spawn(ctx, parent, "second", skills=("review",), tools=("read",))
     await _until(lambda: gate.arrived == 1, "the first child to reach the model")
@@ -1126,14 +1129,14 @@ async def test_a_readmitted_child_does_not_come_back_wider_than_it_was_admitted(
     assert list(admitted["skills"]) == ["review"], "the narrowing has to survive the round trip"
     assert list(admitted["tools"]) == ["read"]
 
-    back = next(run for run in revived_ctx.subagents.list() if run.id == narrowed.id)
+    back = next(run for run in revived_ctx.require(SUBAGENTS).list() if run.id == narrowed.id)
     assert back.grant is not None
     assert back.grant.skills == ("review",)
     assert back.grant.tools == ("read",)
 
 
 async def test_a_child_no_provider_can_resume_is_settled_not_left_queued(
-    delegating: Mounted, gate: _Gate, mount: Any
+    delegating: Mounted, gate: _Gate, mount: MountProfile
 ) -> None:
     """A `queued` row nothing will pick up is worse than an honest failure.
 
@@ -1149,8 +1152,8 @@ async def test_a_child_no_provider_can_resume_is_settled_not_left_queued(
 
     bare = await mount()
     revived = await resume_session(bare, session.id)
-    await bare.subagents.resume_children(
-        bare.agents.create(revived, FAKE_OPTIONS), retry_limit=RETRIES
+    await bare.require(SUBAGENTS).resume_children(
+        bare.require(AGENTS).create(revived, FAKE_OPTIONS), retry_limit=RETRIES
     )
 
     row = subagent_roster(revived)[orphan.id]
@@ -1163,7 +1166,9 @@ async def test_a_child_no_provider_can_resume_is_settled_not_left_queued(
 
 
 @pytest.mark.needs_git
-async def test_a_re_addressed_child_comes_back_to_its_own_work(mount: Any, tmp_path: Path) -> None:
+async def test_a_re_addressed_child_comes_back_to_its_own_work(
+    mount: MountProfile, tmp_path: Path
+) -> None:
     """A second question reaches the child that answered the first, tree and all.
 
     Disposal commits the checkout to the child's branch before removing it, and
@@ -1173,24 +1178,24 @@ async def test_a_re_addressed_child_comes_back_to_its_own_work(mount: Any, tmp_p
     """
     ctx = await mount(*WORKTREE_ROWS, PROVIDER_ROW)
     base = await git_repo(ctx, tmp_path / "repo")
-    session = ctx.sessions.create("parent")
-    parent = ctx.agents.create(session, FAKE_OPTIONS)
-    await ctx.workspace.acquire(
+    session = ctx.require(SESSIONS).create("parent")
+    parent = ctx.require(AGENTS).create(session, FAKE_OPTIONS)
+    await ctx.require(WORKSPACE).acquire(
         session_id=session.id, agent_id=parent.id, base=base, access="write", session=session
     )
 
-    run = await ctx.subagents.start(
+    run = await ctx.require(SUBAGENTS).start(
         PROVIDER_NAME, SubagentRequest(prompt="first question", parent=parent, access="write")
     )
-    first = ctx.workspace.of(run.session_id)
+    first = ctx.require(WORKSPACE).of(run.session_id)
     assert first is not None and first.kind == "worktree"
     (first.root / "child-work.txt").write_text("what the first answer produced\n", encoding="utf-8")
     await ctx.drain()
     assert not first.root.exists(), "the checkout goes; the branch is what survives"
 
-    assert await ctx.subagents.ensure_addressable(run.session_id) is True
+    assert await ctx.require(SUBAGENTS).ensure_addressable(run.session_id) is True
 
-    again = ctx.workspace.of(run.session_id)
+    again = ctx.require(WORKSPACE).of(run.session_id)
     assert again is not None, "a child given a runtime back and no tree writes into its parent's"
     assert again.root == first.root, "the same child, so the same checkout"
     assert again.ref == first.ref
@@ -1199,7 +1204,7 @@ async def test_a_re_addressed_child_comes_back_to_its_own_work(mount: Any, tmp_p
 
 @pytest.mark.needs_git
 async def test_a_re_addressed_child_is_no_wider_than_it_was_admitted(
-    mount: Any, tmp_path: Path
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """The containment half. A child admitted `read` comes back ephemeral.
 
@@ -1209,20 +1214,20 @@ async def test_a_re_addressed_child_is_no_wider_than_it_was_admitted(
     """
     ctx = await mount(*WORKTREE_ROWS, PROVIDER_ROW)
     base = await git_repo(ctx, tmp_path / "repo")
-    session = ctx.sessions.create("parent")
-    parent = ctx.agents.create(session, FAKE_OPTIONS)
-    await ctx.workspace.acquire(
+    session = ctx.require(SESSIONS).create("parent")
+    parent = ctx.require(AGENTS).create(session, FAKE_OPTIONS)
+    await ctx.require(WORKSPACE).acquire(
         session_id=session.id, agent_id=parent.id, base=base, access="write", session=session
     )
 
-    run = await ctx.subagents.start(
+    run = await ctx.require(SUBAGENTS).start(
         PROVIDER_NAME, SubagentRequest(prompt="look only", parent=parent, access="read")
     )
-    assert ctx.workspace.of(run.session_id).kind == "worktree-ephemeral"
+    assert not_none(ctx.require(WORKSPACE).of(run.session_id)).kind == "worktree-ephemeral"
     await ctx.drain()
 
-    assert await ctx.subagents.ensure_addressable(run.session_id) is True
+    assert await ctx.require(SUBAGENTS).ensure_addressable(run.session_id) is True
 
-    again = ctx.workspace.of(run.session_id)
+    again = ctx.require(WORKSPACE).of(run.session_id)
     assert again is not None
     assert again.kind == "worktree-ephemeral", "a second question must not widen the first's grant"

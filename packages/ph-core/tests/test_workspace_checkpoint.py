@@ -51,9 +51,10 @@ from typing import Any
 
 import pytest
 
+from ph.keys import CODE_RUNTIME_STUB, COMMANDS, SESSIONS, WORKSPACE
 from ph.seams.workspace import CHECKPOINT, checkpoints
 from ph.seams.workspace_git import pre_run_ref
-from ph.testing import run_tool
+from ph.testing import MountProfile, run_tool
 from ph.testing.git import git, git_repo, worktree_agent
 from ph.tools.registry import RUN_CODE
 
@@ -62,13 +63,17 @@ pytestmark = [pytest.mark.anyio, pytest.mark.needs_git]
 
 async def _checkpointed(ctx: Any, session: Any, agent: Any, call_id: str = "c1") -> int:
     """Take a restore point and hand back the seq a person would type."""
-    workspace = ctx.workspace.of(agent.id)
-    await ctx.workspace.checkpoint(workspace, session=session, agent_id=agent.id, call_id=call_id)
+    workspace = ctx.require(WORKSPACE).of(agent.id)
+    await ctx.require(WORKSPACE).checkpoint(
+        workspace, session=session, agent_id=agent.id, call_id=call_id
+    )
     return int(next(item.seq for item in reversed(session.events) if item.type == CHECKPOINT))
 
 
 async def _run(ctx: Any, session: Any, agent: Any, argument: str = "") -> str:
-    shown = await ctx.commands.dispatch(f"/revert {argument}".strip(), session=session, agent=agent)
+    shown = await ctx.require(COMMANDS).dispatch(
+        f"/revert {argument}".strip(), session=session, agent=agent
+    )
     assert shown is not None
     return str(shown)
 
@@ -77,7 +82,7 @@ async def _run(ctx: Any, session: Any, agent: Any, argument: str = "") -> str:
 
 
 async def test_a_checkpoint_captures_the_tree_without_disturbing_the_agent(
-    mount: Any, tmp_path: Path
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """The property that lets this run before *every* cell: it is invisible.
 
@@ -91,7 +96,7 @@ async def test_a_checkpoint_captures_the_tree_without_disturbing_the_agent(
     await git(ctx, workspace.root, "add", "staged.txt")
     _, before, _ = await git(ctx, workspace.root, "status", "--porcelain")
 
-    token = await ctx.workspace.checkpoint(
+    token = await ctx.require(WORKSPACE).checkpoint(
         workspace, session=session, agent_id=agent.id, call_id="call-1"
     )
 
@@ -107,7 +112,7 @@ async def test_a_checkpoint_captures_the_tree_without_disturbing_the_agent(
     assert "pre-run" not in branches
 
 
-async def test_the_pin_and_the_event_name_each_other(mount: Any, tmp_path: Path) -> None:
+async def test_the_pin_and_the_event_name_each_other(mount: MountProfile, tmp_path: Path) -> None:
     """`/revert <seq>` names one thing, and the ref is derivable from the event.
 
     The payload carries neither `seq` nor `ref`, because both are derivable from
@@ -124,7 +129,7 @@ async def test_the_pin_and_the_event_name_each_other(mount: Any, tmp_path: Path)
     """
     ctx, session, agent, workspace = await worktree_agent(mount, tmp_path)
 
-    token = await ctx.workspace.checkpoint(
+    token = await ctx.require(WORKSPACE).checkpoint(
         workspace, session=session, agent_id=agent.id, call_id="call-1"
     )
 
@@ -136,7 +141,9 @@ async def test_the_pin_and_the_event_name_each_other(mount: Any, tmp_path: Path)
     assert resolved.strip() == event.data["tree"]
 
 
-async def test_a_shared_workspace_is_never_checkpointed(mount: Any, tmp_path: Path) -> None:
+async def test_a_shared_workspace_is_never_checkpointed(
+    mount: MountProfile, tmp_path: Path
+) -> None:
     """A `shared` workspace is the *person's* own checkout.
 
     A restore point there would offer to overwrite their uncommitted work with
@@ -145,13 +152,15 @@ async def test_a_shared_workspace_is_never_checkpointed(mount: Any, tmp_path: Pa
     """
     ctx = await mount()
     base = await git_repo(ctx, tmp_path / "repo")
-    session = ctx.sessions.create("s1")
-    workspace = await ctx.workspace.acquire(
+    session = ctx.require(SESSIONS).create("s1")
+    workspace = await ctx.require(WORKSPACE).acquire(
         session_id="s1", agent_id="a1", base=base, session=session
     )
     assert workspace.kind == "shared"
 
-    ref = await ctx.workspace.checkpoint(workspace, session=session, agent_id="a1", call_id="c1")
+    ref = await ctx.require(WORKSPACE).checkpoint(
+        workspace, session=session, agent_id="a1", call_id="c1"
+    )
 
     assert ref is None
     assert not [item for item in session.events if item.type == CHECKPOINT]
@@ -160,7 +169,7 @@ async def test_a_shared_workspace_is_never_checkpointed(mount: Any, tmp_path: Pa
 # ------------------------------------------------------------------ restore --
 
 
-async def test_a_denied_run_reverts_exactly(mount: Any, tmp_path: Path) -> None:
+async def test_a_denied_run_reverts_exactly(mount: MountProfile, tmp_path: Path) -> None:
     """E7's gate, end to end.
 
     Everything the run touched goes back: a tracked file it modified, a tracked
@@ -170,7 +179,9 @@ async def test_a_denied_run_reverts_exactly(mount: Any, tmp_path: Path) -> None:
     ctx, session, agent, workspace = await worktree_agent(mount, tmp_path)
     root = workspace.root
     (root / "untracked.txt").write_text("before\n", encoding="utf-8")
-    await ctx.workspace.checkpoint(workspace, session=session, agent_id=agent.id, call_id="c1")
+    await ctx.require(WORKSPACE).checkpoint(
+        workspace, session=session, agent_id=agent.id, call_id="c1"
+    )
     tree = next(item.data["tree"] for item in session.events if item.type == CHECKPOINT)
 
     # ... the run, before it was denied.
@@ -179,7 +190,7 @@ async def test_a_denied_run_reverts_exactly(mount: Any, tmp_path: Path) -> None:
     (root / "new").mkdir()
     (root / "new" / "spilled.txt").write_text("partial\n", encoding="utf-8")
 
-    removed = await ctx.workspace.restore(workspace, tree)
+    removed = await ctx.require(WORKSPACE).restore(workspace, tree)
 
     assert (root / "tracked.txt").read_text(encoding="utf-8") == "original\n"
     assert (root / "untracked.txt").read_text(encoding="utf-8") == "before\n"
@@ -188,7 +199,7 @@ async def test_a_denied_run_reverts_exactly(mount: Any, tmp_path: Path) -> None:
     assert "new/spilled.txt" in removed
 
 
-async def test_ignored_paths_are_never_touched(mount: Any, tmp_path: Path) -> None:
+async def test_ignored_paths_are_never_touched(mount: MountProfile, tmp_path: Path) -> None:
     """`.gitignore`d paths are outside the promise, in both directions.
 
     `git add -A` never put them in the tree, so a restore has nothing to put
@@ -198,18 +209,20 @@ async def test_ignored_paths_are_never_touched(mount: Any, tmp_path: Path) -> No
     ctx, session, agent, workspace = await worktree_agent(mount, tmp_path)
     root = workspace.root
     (root / "build.log").write_text("cached\n", encoding="utf-8")
-    await ctx.workspace.checkpoint(workspace, session=session, agent_id=agent.id, call_id="c1")
+    await ctx.require(WORKSPACE).checkpoint(
+        workspace, session=session, agent_id=agent.id, call_id="c1"
+    )
     tree = next(item.data["tree"] for item in session.events if item.type == CHECKPOINT)
     (root / "build.log").write_text("cached, then some\n", encoding="utf-8")
     (root / "after.log").write_text("also ignored\n", encoding="utf-8")
 
-    await ctx.workspace.restore(workspace, tree)
+    await ctx.require(WORKSPACE).restore(workspace, tree)
 
     assert (root / "build.log").read_text(encoding="utf-8") == "cached, then some\n"
     assert (root / "after.log").exists()
 
 
-async def test_an_untracked_file_comes_back_untracked(mount: Any, tmp_path: Path) -> None:
+async def test_an_untracked_file_comes_back_untracked(mount: MountProfile, tmp_path: Path) -> None:
     """The reason the restore uses a scratch index rather than the agent's.
 
     `git add -A` puts untracked-not-ignored files in the checkpoint tree, so
@@ -219,17 +232,19 @@ async def test_an_untracked_file_comes_back_untracked(mount: Any, tmp_path: Path
     ctx, session, agent, workspace = await worktree_agent(mount, tmp_path)
     root = workspace.root
     (root / "untracked.txt").write_text("before\n", encoding="utf-8")
-    await ctx.workspace.checkpoint(workspace, session=session, agent_id=agent.id, call_id="c1")
+    await ctx.require(WORKSPACE).checkpoint(
+        workspace, session=session, agent_id=agent.id, call_id="c1"
+    )
     tree = next(item.data["tree"] for item in session.events if item.type == CHECKPOINT)
     (root / "untracked.txt").write_text("changed\n", encoding="utf-8")
 
-    await ctx.workspace.restore(workspace, tree)
+    await ctx.require(WORKSPACE).restore(workspace, tree)
 
     _, status, _ = await git(ctx, root, "status", "--porcelain")
     assert status.strip() == "?? untracked.txt", f"restore changed the index: {status!r}"
 
 
-async def test_scratch_survives_a_revert(mount: Any, tmp_path: Path) -> None:
+async def test_scratch_survives_a_revert(mount: MountProfile, tmp_path: Path) -> None:
     """Scratch lives outside the worktree, so it is safe *by construction*.
 
     That is what makes it the right place for a child to put anything it wants
@@ -238,15 +253,19 @@ async def test_scratch_survives_a_revert(mount: Any, tmp_path: Path) -> None:
     """
     ctx, session, agent, workspace = await worktree_agent(mount, tmp_path)
     (workspace.scratch / "notes.md").write_text("what I learned\n", encoding="utf-8")
-    await ctx.workspace.checkpoint(workspace, session=session, agent_id=agent.id, call_id="c1")
+    await ctx.require(WORKSPACE).checkpoint(
+        workspace, session=session, agent_id=agent.id, call_id="c1"
+    )
     tree = next(item.data["tree"] for item in session.events if item.type == CHECKPOINT)
 
-    await ctx.workspace.restore(workspace, tree)
+    await ctx.require(WORKSPACE).restore(workspace, tree)
 
     assert (workspace.scratch / "notes.md").read_text(encoding="utf-8") == "what I learned\n"
 
 
-async def test_a_collected_tree_reports_rather_than_raises(mount: Any, tmp_path: Path) -> None:
+async def test_a_collected_tree_reports_rather_than_raises(
+    mount: MountProfile, tmp_path: Path
+) -> None:
     """The write-ahead window (A10) has a visible failure mode, not a silent one.
 
     The event is appended before the ref that keeps the tree alive, so a crash
@@ -257,19 +276,23 @@ async def test_a_collected_tree_reports_rather_than_raises(mount: Any, tmp_path:
     ctx, _session, _agent, workspace = await worktree_agent(mount, tmp_path)
 
     with pytest.raises(FileNotFoundError):
-        await ctx.workspace.restore(workspace, "0" * 40)
+        await ctx.require(WORKSPACE).restore(workspace, "0" * 40)
 
 
 # --------------------------------------------------------------------- fold --
 
 
-async def test_restore_points_are_a_fold_over_the_log(mount: Any, tmp_path: Path) -> None:
+async def test_restore_points_are_a_fold_over_the_log(mount: MountProfile, tmp_path: Path) -> None:
     """A checkpoint is a *fact in the log*, so a resumed or forked session finds
     the same restore points a live one has — nothing had to remember them."""
     ctx, session, agent, workspace = await worktree_agent(mount, tmp_path)
-    await ctx.workspace.checkpoint(workspace, session=session, agent_id=agent.id, call_id="c1")
+    await ctx.require(WORKSPACE).checkpoint(
+        workspace, session=session, agent_id=agent.id, call_id="c1"
+    )
     (workspace.root / "tracked.txt").write_text("second\n", encoding="utf-8")
-    await ctx.workspace.checkpoint(workspace, session=session, agent_id=agent.id, call_id="c2")
+    await ctx.require(WORKSPACE).checkpoint(
+        workspace, session=session, agent_id=agent.id, call_id="c2"
+    )
 
     found = checkpoints(session)
 
@@ -280,7 +303,9 @@ async def test_restore_points_are_a_fold_over_the_log(mount: Any, tmp_path: Path
 # ------------------------------------------------------------------ /revert --
 
 
-async def test_revert_restores_and_says_what_it_restored(mount: Any, tmp_path: Path) -> None:
+async def test_revert_restores_and_says_what_it_restored(
+    mount: MountProfile, tmp_path: Path
+) -> None:
     """The happy path, through the command a person actually types."""
     ctx, session, agent, workspace = await worktree_agent(mount, tmp_path)
     seq = await _checkpointed(ctx, session, agent)
@@ -293,7 +318,7 @@ async def test_revert_restores_and_says_what_it_restored(mount: Any, tmp_path: P
 
 
 async def test_revert_lists_what_restoring_the_tree_did_not_undo(
-    mount: Any, tmp_path: Path
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """N3, and the reason the command exists in this shape.
 
@@ -330,7 +355,9 @@ async def test_revert_lists_what_restoring_the_tree_did_not_undo(
     assert "npm publish" in shown
 
 
-async def test_an_unknown_tool_is_reported_as_not_undone(mount: Any, tmp_path: Path) -> None:
+async def test_an_unknown_tool_is_reported_as_not_undone(
+    mount: MountProfile, tmp_path: Path
+) -> None:
     """The default is the safe direction.
 
     A tool that declares nothing — an MCP server's, a row added next month — is
@@ -354,7 +381,9 @@ async def test_an_unknown_tool_is_reported_as_not_undone(mount: Any, tmp_path: P
     assert "acme_deploy" in shown
 
 
-async def test_revert_with_no_argument_lists_the_restore_points(mount: Any, tmp_path: Path) -> None:
+async def test_revert_with_no_argument_lists_the_restore_points(
+    mount: MountProfile, tmp_path: Path
+) -> None:
     """A person who does not know the seq should not have to read the log."""
     ctx, session, agent, _workspace = await worktree_agent(mount, tmp_path)
     await _checkpointed(ctx, session, agent)
@@ -365,7 +394,9 @@ async def test_revert_with_no_argument_lists_the_restore_points(mount: Any, tmp_
     assert agent.id in shown
 
 
-async def test_an_unknown_seq_names_the_ones_that_exist(mount: Any, tmp_path: Path) -> None:
+async def test_an_unknown_seq_names_the_ones_that_exist(
+    mount: MountProfile, tmp_path: Path
+) -> None:
     ctx, session, agent, _workspace = await worktree_agent(mount, tmp_path)
     seq = await _checkpointed(ctx, session, agent)
 
@@ -378,7 +409,9 @@ async def test_an_unknown_seq_names_the_ones_that_exist(mount: Any, tmp_path: Pa
 # ------------------------------------------------------------------- the row --
 
 
-async def test_the_row_checkpoints_a_code_run_and_nothing_else(mount: Any, tmp_path: Path) -> None:
+async def test_the_row_checkpoints_a_code_run_and_nothing_else(
+    mount: MountProfile, tmp_path: Path
+) -> None:
     """The policy row, mounted — every other test here calls `checkpoint()` directly.
 
     Two halves. A run through the *transport* takes a restore point, which is the
@@ -396,7 +429,7 @@ async def test_the_row_checkpoints_a_code_run_and_nothing_else(mount: Any, tmp_p
             ]
         },
     )
-    ctx.code_runtime_stub.register_program("noop", lambda: None)
+    ctx.require(CODE_RUNTIME_STUB).register_program("noop", lambda: None)
 
     await run_tool(ctx, "read", {"path": "tracked.txt"}, agent=agent, session=session)
     assert not [item for item in session.events if item.type == CHECKPOINT]
@@ -408,7 +441,9 @@ async def test_the_row_checkpoints_a_code_run_and_nothing_else(mount: Any, tmp_p
     assert event.data["tree"]
 
 
-async def test_provisioned_materials_are_not_the_agents_work(mount: Any, tmp_path: Path) -> None:
+async def test_provisioned_materials_are_not_the_agents_work(
+    mount: MountProfile, tmp_path: Path
+) -> None:
     """E14 meets E7, and the seam already settled which set is which.
 
     A copied `.env` or a hardlinked `node_modules` is untracked-and-not-ignored
@@ -421,9 +456,9 @@ async def test_provisioned_materials_are_not_the_agents_work(mount: Any, tmp_pat
     (workspace.root / "node_modules").mkdir()
     (workspace.root / "node_modules" / "dep.js").write_text("x\n", encoding="utf-8")
     held = replace(workspace, provisioned=("node_modules",))
-    ctx.workspace._held[agent.id].workspace = held
+    ctx.require(WORKSPACE)._held[agent.id].workspace = held
 
-    await ctx.workspace.checkpoint(held, session=session, agent_id=agent.id, call_id="c1")
+    await ctx.require(WORKSPACE).checkpoint(held, session=session, agent_id=agent.id, call_id="c1")
     tree = next(item.data["tree"] for item in session.events if item.type == CHECKPOINT)
     _, listing, _ = await git(ctx, workspace.root, "ls-tree", "-r", "--name-only", tree)
 

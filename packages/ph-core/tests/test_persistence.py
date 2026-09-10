@@ -33,10 +33,11 @@ from typing import Any
 
 import pytest
 
-from ph.persistence.jsonl import read_session
+from ph.keys import AGENTS, SESSION_PERSISTENCE, SESSIONS, TOOLS
+from ph.persistence.jsonl import JsonlSessionStore, read_session
 from ph.session import Session, SessionEvent, SurfaceIntent
 from ph.testing import FAKE_OPTIONS as FAKE
-from ph.testing import stored_log, user_payload, write_reference_fork
+from ph.testing import MountProfile, stored_log, user_payload, write_reference_fork
 
 pytestmark = pytest.mark.anyio
 
@@ -52,27 +53,27 @@ def test_append_is_synchronous_and_io_free() -> None:
 
 
 async def test_flush_writes_a_header_line_and_one_line_per_event(
-    mount: Any, tmp_path: Path
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     ctx = await mount(_root(tmp_path))
-    session = ctx.sessions.create("s")
+    session = ctx.require(SESSIONS).create("s")
     session.append("turn/start", {"turn": 1})
     session.append("turn/end", {"turn": 1, "reason": {"kind": "completed"}})
 
     path = stored_log(tmp_path / "sessions", "s")
     assert not path.exists(), "append must not touch the disk"
 
-    await ctx.sessions.flush(session)
+    await ctx.require(SESSIONS).flush(session)
     lines = path.read_text(encoding="utf-8").splitlines()
     assert len(lines) == 3
     assert lines[0].startswith('{"type":"session/header"')
 
 
-async def test_a_stored_session_reads_back_identically(mount: Any, tmp_path: Path) -> None:
+async def test_a_stored_session_reads_back_identically(mount: MountProfile, tmp_path: Path) -> None:
     ctx = await mount(_root(tmp_path))
-    session = ctx.sessions.create("s")
-    await ctx.agents.create(session, FAKE).prompt("hello")
-    await ctx.sessions.flush(session)
+    session = ctx.require(SESSIONS).create("s")
+    await ctx.require(AGENTS).create(session, FAKE).prompt("hello")
+    await ctx.require(SESSIONS).flush(session)
 
     header, events = read_session(stored_log(tmp_path / "sessions", "s"))
     assert header.id == "s"
@@ -81,19 +82,23 @@ async def test_a_stored_session_reads_back_identically(mount: Any, tmp_path: Pat
     assert Session("s2", seed=events).derive_messages() == session.derive_messages()
 
 
-async def test_flush_is_idempotent_and_appends_only_new_events(mount: Any, tmp_path: Path) -> None:
+async def test_flush_is_idempotent_and_appends_only_new_events(
+    mount: MountProfile, tmp_path: Path
+) -> None:
     ctx = await mount(_root(tmp_path))
-    session = ctx.sessions.create("s")
+    session = ctx.require(SESSIONS).create("s")
     session.append("turn/start", {"turn": 1})
-    await ctx.sessions.flush(session)
-    await ctx.sessions.flush(session)
+    await ctx.require(SESSIONS).flush(session)
+    await ctx.require(SESSIONS).flush(session)
     session.append("turn/end", {"turn": 1, "reason": {"kind": "completed"}})
-    await ctx.sessions.flush(session)
+    await ctx.require(SESSIONS).flush(session)
 
     assert len(stored_log(tmp_path / "sessions", "s").read_text().splitlines()) == 3
 
 
-async def test_a_forked_session_stores_a_reference_not_a_copy(mount: Any, tmp_path: Path) -> None:
+async def test_a_forked_session_stores_a_reference_not_a_copy(
+    mount: MountProfile, tmp_path: Path
+) -> None:
     """**Step 4.** The prefix stays in the parent's file; the child stores a pointer.
 
     On disk the child begins at `session/end-seed`, stamped at seq
@@ -107,13 +112,13 @@ async def test_a_forked_session_stores_a_reference_not_a_copy(mount: Any, tmp_pa
     repurposing it as a storage offset would have quietly changed all five.
     """
     ctx = await mount(_root(tmp_path))
-    parent = ctx.sessions.create("parent")
+    parent = ctx.require(SESSIONS).create("parent")
     parent.append("turn/start", {"turn": 1})
     parent.append("turn/end", {"turn": 1, "reason": {"kind": "completed"}})
-    await ctx.sessions.flush(parent)
+    await ctx.require(SESSIONS).flush(parent)
 
-    child = ctx.sessions.fork(parent, None, "child")
-    await ctx.sessions.flush(child)
+    child = ctx.require(SESSIONS).fork(parent, None, "child")
+    await ctx.require(SESSIONS).flush(child)
 
     header, own = read_session(stored_log(tmp_path / "sessions", "child", family="parent"))
     assert header.parent_session == "parent"
@@ -127,13 +132,13 @@ async def test_a_forked_session_stores_a_reference_not_a_copy(mount: Any, tmp_pa
         "session/end-seed",
     ], "in memory the child is a whole session, sharing the parent's immutable events"
 
-    _, whole = ctx.session_persistence.read("child")
+    _, whole = ctx.require(SESSION_PERSISTENCE).read("child")
     assert [event.type for event in whole] == [event.type for event in child.events]
     assert [event.seq for event in whole] == [0, 1, 2]
 
 
 async def test_a_child_is_never_durable_before_the_prefix_it_references(
-    mount: Any, tmp_path: Path
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """**Write ordering is the one thing copying used to give for free.**
 
@@ -148,16 +153,16 @@ async def test_a_child_is_never_durable_before_the_prefix_it_references(
     the plain one — a log is flushed after everything it references.
     """
     ctx = await mount(_root(tmp_path))
-    parent = ctx.sessions.create("parent")
+    parent = ctx.require(SESSIONS).create("parent")
     parent.append("turn/start", {"turn": 1})
     parent.append("turn/end", {"turn": 1, "reason": {"kind": "completed"}})
 
     # The parent has never been flushed. Its file does not exist.
-    child = ctx.sessions.fork(parent, None, "child")
-    await ctx.sessions.flush(child)
+    child = ctx.require(SESSIONS).fork(parent, None, "child")
+    await ctx.require(SESSIONS).flush(child)
 
     assert stored_log(tmp_path / "sessions", "parent").exists(), "the ancestor went first"
-    _, whole = ctx.session_persistence.read("child")
+    _, whole = ctx.require(SESSION_PERSISTENCE).read("child")
     assert [event.seq for event in whole] == [0, 1, 2]
 
 
@@ -191,19 +196,19 @@ def test_a_wrong_format_version_is_refused(tmp_path: Path) -> None:
 
 
 async def test_the_checkpoint_policy_flushes_once_before_each_request(
-    mount: Any, tmp_path: Path
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """Barrier 1 (A4). One fsync per step, not two: the "step end" barrier on
     the request path *is* this one, since the next request's flush covers
     everything the previous step committed."""
     ctx = await mount(_root(tmp_path))
-    session = ctx.sessions.create("s")
+    session = ctx.require(SESSIONS).create("s")
     written: list[int] = []
     # `session/flush` is a parallel dispatch, so an extra listener observes the
     # barriers without displacing the backend that actually writes.
     ctx.on("session/flush", lambda target: written.append(len(target.events)))
 
-    await ctx.agents.create(session, FAKE).prompt("hello")
+    await ctx.require(AGENTS).create(session, FAKE).prompt("hello")
     assert len(written) == 1, f"expected exactly one barrier on a tool-less step, saw {written}"
     # By the time the model request goes out, the message that motivated it and
     # the header it was built under are both durable.
@@ -212,21 +217,23 @@ async def test_the_checkpoint_policy_flushes_once_before_each_request(
     assert "request/header" in durable
 
 
-async def test_a_rejected_step_still_reaches_disk(mount: Any, tmp_path: Path) -> None:
+async def test_a_rejected_step_still_reaches_disk(mount: MountProfile, tmp_path: Path) -> None:
     """The one step end barrier 1 never reaches: no request follows a reject."""
     from ph.agent.types import PreStepDecision
 
     ctx = await mount(_root(tmp_path))
-    session = ctx.sessions.create("s")
+    session = ctx.require(SESSIONS).create("s")
     written: list[int] = []
     ctx.on("session/flush", lambda target: written.append(len(target.events)))
     ctx.on("agent/pre-step", lambda request, next_: PreStepDecision(kind="reject"))
 
-    await ctx.agents.create(session, FAKE).prompt("hello")
+    await ctx.require(AGENTS).create(session, FAKE).prompt("hello")
     assert written, "a rejected step was never flushed"
 
 
-async def test_a_top_level_tool_body_is_preceded_by_a_barrier(mount: Any, tmp_path: Path) -> None:
+async def test_a_top_level_tool_body_is_preceded_by_a_barrier(
+    mount: MountProfile, tmp_path: Path
+) -> None:
     """Barrier 2: the `tool/call` is durable before the side effect happens."""
     from ph.testing import simple_tool
 
@@ -234,19 +241,24 @@ async def test_a_top_level_tool_body_is_preceded_by_a_barrier(mount: Any, tmp_pa
     flushed_before_body: list[bool] = []
 
     def body(_args: Any, run: Any) -> str:
-        durable = ctx.session_persistence._buffers[run.session.id].pending
+        # The buffer table is the jsonl store's own, not part of the
+        # `SessionPersistence` Protocol — this test mounts that backend and now
+        # says so instead of reading through an `Any`.
+        store = ctx.require(SESSION_PERSISTENCE)
+        assert isinstance(store, JsonlSessionStore)
+        durable = store._buffers[run.session.id].pending
         flushed_before_body.append(not durable)
         return "ok"
 
-    ctx.tools.register(simple_tool("touch", body))
-    session = ctx.sessions.create("s")
-    run = ctx.tools.create_execution(
+    ctx.require(TOOLS).register(simple_tool("touch", body))
+    session = ctx.require(SESSIONS).create("s")
+    run = ctx.require(TOOLS).create_execution(
         __import__("ph.tools", fromlist=["ToolExecutionInput"]).ToolExecutionInput(
             call_id="c", name="touch", arguments={}, scope=ctx, session=session
         )
     )
     session.append("turn/start", {"turn": 1})
-    await ctx.tools.dispatch(run)
+    await ctx.require(TOOLS).dispatch(run)
     # Nothing pending when the body ran: the barrier drained the buffer first.
     assert flushed_before_body == [True]
 
@@ -258,7 +270,9 @@ def test_events_survive_a_wire_round_trip() -> None:
         assert SessionEvent.from_wire(event.to_wire()).to_wire() == event.to_wire()
 
 
-async def test_a_broken_lineage_is_reported_by_ph_doctor(mount: Any, tmp_path: Path) -> None:
+async def test_a_broken_lineage_is_reported_by_ph_doctor(
+    mount: MountProfile, tmp_path: Path
+) -> None:
     """**Step 5, where it can actually be acted on.**
 
     The plan's guard was "refuse to remove a session that has descendants", but
@@ -287,7 +301,7 @@ async def test_a_broken_lineage_is_reported_by_ph_doctor(mount: Any, tmp_path: P
     ]
 
 
-async def test_segments_each_hold_only_their_own_run(mount: Any, tmp_path: Path) -> None:
+async def test_segments_each_hold_only_their_own_run(mount: MountProfile, tmp_path: Path) -> None:
     """**Segmentation on disk: three files, one contiguous log (§7 step 6).**
 
     Each file's events are disjoint from its neighbours' and they tile exactly,
@@ -296,20 +310,20 @@ async def test_segments_each_hold_only_their_own_run(mount: Any, tmp_path: Path)
     walks the chain and hands back the whole run.
     """
     ctx = await mount(_root(tmp_path))
-    first = ctx.sessions.create("s0")
+    first = ctx.require(SESSIONS).create("s0")
     for turn in (1, 2):
         first.append("turn/start", {"turn": turn})
         first.append("turn/end", {"turn": turn, "reason": {"kind": "completed"}})
 
-    second = ctx.sessions.roll(first, "s1")
+    second = ctx.require(SESSIONS).roll(first, "s1")
     for turn in (3, 4):
         second.append("turn/start", {"turn": turn})
         second.append("turn/end", {"turn": turn, "reason": {"kind": "completed"}})
 
-    third = ctx.sessions.roll(second, "s2")
+    third = ctx.require(SESSIONS).roll(second, "s2")
     third.append("turn/start", {"turn": 5})
     third.append("turn/end", {"turn": 5, "reason": {"kind": "completed"}})
-    await ctx.sessions.flush(third)
+    await ctx.require(SESSIONS).flush(third)
 
     root = tmp_path / "sessions"
     held = {
@@ -321,7 +335,7 @@ async def test_segments_each_hold_only_their_own_run(mount: Any, tmp_path: Path)
         "different events in different lineages, never both in one materialised log"
     )
 
-    _, whole = ctx.session_persistence.read("s2")
+    _, whole = ctx.require(SESSION_PERSISTENCE).read("s2")
     assert [event.seq for event in whole] == list(range(12))
     assert [event.type for event in whole].count("session/segmented") == 0, (
         "a marker belongs to the log that stopped, not to the one that carried on"

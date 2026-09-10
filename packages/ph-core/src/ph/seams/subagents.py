@@ -223,6 +223,17 @@ class SubagentRequest:
 
     prompt: str
     parent: AgentDriver
+    """Who is delegating. **Required for a spawn, and tolerated as `None` by
+    `held_by` alone.**
+
+    `_boundary_for` has an explicit `if request.parent is None` branch — a
+    grant computed with no parent inherits the mount's own ceiling — but every
+    provider that goes on to *spawn* reads the parent's session, inbox and
+    model, so declaring it optional here made eight reads in
+    `ph_rlm.subagents` type errors for a case they never receive. The
+    declaration is the spawn contract; the one caller that asks only for a
+    grant passes `None` past it deliberately.
+    """
     scope: Context | None = None
     """The boundary this delegation is made **from** (P6-31).
 
@@ -1266,7 +1277,31 @@ FamilyRole: TypeAlias = Literal["self", "parent", "sibling", "child"]
 """How one agent stands relative to another, within reach."""
 
 
-def reachable_family(sessions: Iterable[Session], agent_id: str) -> dict[str, FamilyRole]:
+class _Parented(Protocol):
+    """A session's id and its parent link, and nothing else.
+
+    All `reachable_family` reads — its docstring already says sessions are
+    "passed in rather than read from a store, so this answers on a resumed log
+    with no live agents as readily as in a running process", which is a
+    structural contract described in prose. Written as one, a caller can hand it
+    a family tree it built for the purpose: the messaging test does exactly
+    that, and its two-field double satisfied this all along while failing the
+    declared `Session` (issue 32).
+    """
+
+    @property
+    def id(self) -> str: ...
+
+    @property
+    def header(self) -> _HasParent: ...
+
+
+class _HasParent(Protocol):
+    @property
+    def parent_session(self) -> str | None: ...
+
+
+def reachable_family(sessions: Iterable[_Parented], agent_id: str) -> dict[str, FamilyRole]:
     """Every agent `agent_id` may address, mapped to how it is related (C7).
 
     The enumeration half of `family_reach`, and derived *from* it rather than

@@ -15,15 +15,17 @@ from typing import Any
 
 import pytest
 import yaml
-from conftest import HOST_INTERPRETER
+from rlm_fixtures import HOST_INTERPRETER
 from runtime_helpers import dispatch_names, run_ipython_cell
 
 from ph.bundles import BASE, HEADLESS
 from ph.cordis import Context, Profile, load_profile_documents
+from ph.keys import CODE_RUNTIME, SYSTEM_PROMPT, TOOLS
 from ph.system_prompt.assembly import render_prompt
 from ph.testing import report_section
 from ph.tools.registry import RUN_CODE
 from ph_rlm import BUNDLE
+from ph_rlm.keys import PYTHON_RUNTIME
 from ph_rlm.presentation import IPYTHON
 
 pytestmark = pytest.mark.anyio
@@ -77,12 +79,12 @@ async def test_every_row_in_the_profile_activates(
 
 async def test_the_bundle_mounts_over_base(shipped_profile: Any) -> None:
     ctx, _session, _agent = await shipped_profile()
-    provider = ctx.code_runtime.require()
+    provider = ctx.require(CODE_RUNTIME).require()
     assert provider.language == "python"
     assert provider.persistence == "namespace"
     # The two rows that have to arrive together: the provider promises to
     # snapshot at registration, and this is the row that keeps the promise.
-    assert ctx.python_runtime.snapshots is not None
+    assert ctx.require(PYTHON_RUNTIME).snapshots is not None
 
 
 async def test_a_cell_runs_and_its_state_reaches_the_log(shipped_profile: Any) -> None:
@@ -104,14 +106,14 @@ async def test_a_cell_runs_and_its_state_reaches_the_log(shipped_profile: Any) -
 async def test_the_shipped_profile_offers_exactly_one_callable(shipped_profile: Any) -> None:
     """Prime Agent's surface, kept: one entry, and the reserved name is not it."""
     ctx, _session, agent = await shipped_profile()
-    view = ctx.tools.view(agent.ctx)
+    view = ctx.require(TOOLS).view(agent.ctx)
 
     assert view.mode == "code"
     assert view.transport_name == IPYTHON
     # Under Code Mode the model is handed no schema list at all; everything other
     # than the transport is reached as a binding (P1-04, C6).
-    assert ctx.tools.schemas(scope=agent.ctx) == []
-    assert ctx.tools.get(RUN_CODE, scope=agent.ctx) is None
+    assert ctx.require(TOOLS).schemas(scope=agent.ctx) == []
+    assert ctx.require(TOOLS).get(RUN_CODE, scope=agent.ctx) is None
     # And the base tool rows are still mounted — not directly callable, but
     # present, which is what makes them bindings rather than absences.
     assert len(view.visible) > 1
@@ -125,7 +127,7 @@ async def test_the_shipped_sdk_block_lists_the_four_namespaces(shipped_profile: 
     the run asks, so this is also the assertion that a cell can reach every one.
     """
     ctx, _session, agent = await shipped_profile()
-    assembly = await ctx.system_prompt.assemble(agent.ctx, agent=agent)
+    assembly = await ctx.require(SYSTEM_PROMPT).assemble(agent.ctx, agent=agent)
     text = render_prompt(assembly)
 
     assert "tools.read" in text or "tools.write" in text
@@ -173,7 +175,7 @@ async def test_the_shipped_runtime_gets_the_configured_graces(shipped_profile: A
     ctx, _session, _agent = await shipped_profile(
         {"code-runtime-python": {"cancelGraceSeconds": 0.25, "shutdownGraceSeconds": 1.5}}
     )
-    runtime = ctx.python_runtime
+    runtime = ctx.require(PYTHON_RUNTIME)
     assert runtime.cancel_grace == 0.25
     assert runtime.shutdown_grace == 1.5
     assert runtime.boot_timeout == 30.0, "an untouched knob keeps its default"

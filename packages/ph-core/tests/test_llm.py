@@ -20,6 +20,7 @@ from ph.llm.types import (
     FinishReason,
     LlmFailure,
     ReasoningDelta,
+    StreamChunk,
     TextBlock,
     TextDelta,
     TokenUsage,
@@ -29,9 +30,10 @@ from ph.llm.types import (
     chunk_from_wire,
     is_token_delta,
 )
+from ph.testing import as_kind, block_text
 
 
-def _recorded() -> list[object]:
+def _recorded() -> list[StreamChunk]:
     return [
         BlockStart(index=0, block_type="reasoning"),
         ReasoningDelta(index=0, text="let me "),
@@ -54,11 +56,11 @@ def test_assembler_rebuilds_blocks_in_stream_order() -> None:
         assembler.push(chunk)
     blocks = assembler.blocks()
     assert [block.type for block in blocks] == ["reasoning", "text", "tool-call"]
-    assert blocks[0].text == "let me think"
-    assert blocks[1].text == "Hello, world"
-    assert blocks[2].name == "read"
+    assert block_text(blocks[0]) == "let me think"
+    assert block_text(blocks[1]) == "Hello, world"
+    assert as_kind(blocks[2], ToolCallBlock).name == "read"
     # Tool arguments stay the raw JSON string the model produced, unparsed.
-    assert blocks[2].arguments == '{"path": "a"}'
+    assert as_kind(blocks[2], ToolCallBlock).arguments == '{"path": "a"}'
     assert assembler.usage == TokenUsage(input_tokens=10, output_tokens=4)
     assert assembler.finish.kind == "tool-calls"
 
@@ -88,14 +90,14 @@ def test_block_end_closes_a_block_and_later_deltas_are_ignored() -> None:
     # completed block after it closed.
     assembler.push(TextDelta(index=0, text=" ignored"))
     assembler.push(BlockEnd(index=0, block=TextBlock(text="rewritten")))
-    assert [block.text for block in assembler.blocks()] == ["kept"]
+    assert [block_text(block) for block in assembler.blocks()] == ["kept"]
 
 
 def test_delta_only_protocols_need_no_block_start() -> None:
     assembler = BlockAssembler()
     assembler.push(TextDelta(index=0, text="a"))
     assembler.push(TextDelta(index=0, text="b"))
-    assert [block.text for block in assembler.blocks()] == ["ab"]
+    assert [block_text(block) for block in assembler.blocks()] == ["ab"]
 
 
 def test_max_tokens_drops_tool_calls() -> None:
@@ -120,7 +122,7 @@ def test_interrupted_blocks_keep_only_visible_prefixes() -> None:
     kept = assembler.interrupted_blocks()
     # Interruption precedes dispatch, so a retained tool call would need a
     # fabricated result. Whitespace-only blocks are noise.
-    assert [block.text for block in kept] == ["said this"]
+    assert [block_text(block) for block in kept] == ["said this"]
 
 
 def test_missing_finish_defaults_to_stop() -> None:
@@ -131,6 +133,10 @@ def test_finish_carries_structured_failures() -> None:
     failure = LlmFailure(message="rate limited", code="RATE_LIMIT", status=429)
     finish = Finish(reason=FinishReason(kind="error", failure=failure))
     restored = chunk_from_wire(finish.to_wire())
+    # `chunk_from_wire` answers with the whole `StreamChunk` union, and only
+    # `Finish` carries a reason — the narrowing this test was asserting by
+    # reading the field.
+    assert isinstance(restored, Finish)
     assert restored.reason.failure == failure
 
 
@@ -144,6 +150,8 @@ def test_is_token_delta_ignores_empty_frames() -> None:
 
 def test_unknown_chunk_types_are_refused() -> None:
     with pytest.raises(TypeError):
-        BlockAssembler().push(object())
+        # `object()` is the point: `push` must refuse a chunk that is not one,
+        # so the argument is deliberately outside the union it declares.
+        BlockAssembler().push(object())  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="unknown stream chunk"):
         chunk_from_wire({"type": "nonsense"})

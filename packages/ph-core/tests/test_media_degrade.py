@@ -20,6 +20,7 @@ from test_dimensions import png
 
 from ph.agent.types import AgentOptions
 from ph.cordis import Context
+from ph.keys import AGENTS, ATTACHMENTS, LLM_FAKE, SESSIONS
 from ph.llm.adapter import ResolvedModel
 from ph.llm.media import (
     degrade_media,
@@ -29,6 +30,8 @@ from ph.llm.media import (
 )
 from ph.llm.types import AttachmentRef, MediaBlock, TextBlock, create_user_message
 from ph.seams.attachments import AttachmentStore
+from ph.session.json import as_obj, as_seq
+from ph.testing import MountProfile, as_kind
 
 pytestmark = pytest.mark.anyio
 
@@ -117,7 +120,7 @@ def test_an_acceptable_attachment_is_left_alone(tmp_path: Any) -> None:
 # ------------------------------------------------------------- the notice --
 
 
-async def test_the_row_degrades_and_records_once(mount: Any, tmp_path: Any) -> None:
+async def test_the_row_degrades_and_records_once(mount: MountProfile, tmp_path: Any) -> None:
     """End to end through the waterfall, on the fake route — which declares no
     media, and so is every text-only provider's path too.
 
@@ -125,10 +128,10 @@ async def test_the_row_degrades_and_records_once(mount: Any, tmp_path: Any) -> N
     history, so the refusal repeats for the life of the session.
     """
     ctx: Context = await mount()
-    store: AttachmentStore = ctx.attachments
+    store: AttachmentStore = ctx.require(ATTACHMENTS)
     ref = await store.save_bytes(content=PNG, mime="image/png", name="shot.png")
-    session = ctx.sessions.create("degraded")
-    agent = ctx.agents.create(session, AgentOptions(provider="fake", model="fake-1"))
+    session = ctx.require(SESSIONS).create("degraded")
+    agent = ctx.require(AGENTS).create(session, AgentOptions(provider="fake", model="fake-1"))
 
     agent.followup(_message({"type": "text", "text": "what is this?"}, MediaBlock(attachment=ref)))
     await agent.run()
@@ -137,7 +140,7 @@ async def test_the_row_degrades_and_records_once(mount: Any, tmp_path: Any) -> N
     notices = [event for event in session.events if event.type == "attachment/degraded"]
     assert len(notices) == 1
     assert notices[0].ignorable
-    (request,) = [one for one in ctx.llm_fake.requests if one.is_loop_request][:1]
+    (request,) = [one for one in ctx.require(LLM_FAKE).requests if one.is_loop_request][:1]
     assert "was not sent" in str(request.messages[0].content)
 
 
@@ -205,14 +208,16 @@ def test_an_image_larger_than_the_route_uses_is_sent_and_flagged() -> None:
     notices = oversized_notices(messages, route)
 
     assert degraded == [], "an image the route accepts must still be sent"
-    assert messages[0].content[0].attachment.width == 4000, "and sent unchanged"
+    assert as_kind(messages[0].content[0], MediaBlock).attachment.width == 4000, (
+        "and sent unchanged"
+    )
     (notice,) = notices
     assert (notice["width"], notice["height"], notice["usableEdge"]) == (4000, 3000, 1568)
     assert notice["name"] == "shot.png", "and names the file a person would recognise"
 
 
 async def test_the_oversized_notice_lands_once_and_names_the_picture(
-    mount: Any, tmp_path: Any
+    mount: MountProfile, tmp_path: Any
 ) -> None:
     """End to end, and `record_degraded`'s rule applied to its sibling.
 
@@ -222,15 +227,15 @@ async def test_the_oversized_notice_lands_once_and_names_the_picture(
     that runs in a test; the shipped numbers live on the Anthropic row.
     """
     ctx: Context = await mount()
-    ctx.llm_fake.route = ResolvedModel(
+    ctx.require(LLM_FAKE).route = ResolvedModel(
         accepts=frozenset({"image/png"}), max_image_edge=8000, usable_image_edge=1568
     )
-    store: AttachmentStore = ctx.attachments
+    store: AttachmentStore = ctx.require(ATTACHMENTS)
     ref = await store.save_bytes(
         content=PNG, mime="image/png", name="shot.png", width=4000, height=3000
     )
-    session = ctx.sessions.create("oversized")
-    agent = ctx.agents.create(session, AgentOptions(provider="fake", model="fake-1"))
+    session = ctx.require(SESSIONS).create("oversized")
+    agent = ctx.require(AGENTS).create(session, AgentOptions(provider="fake", model="fake-1"))
 
     agent.followup(_message({"type": "text", "text": "look"}, MediaBlock(attachment=ref)))
     await agent.run()
@@ -239,11 +244,11 @@ async def test_the_oversized_notice_lands_once_and_names_the_picture(
     notices = [event for event in session.events if event.type == "attachment/oversized"]
     assert len(notices) == 1
     assert notices[0].ignorable
-    assert notices[0].data["attachments"][0]["name"] == "shot.png"
+    assert as_obj(as_seq(notices[0].data["attachments"])[0])["name"] == "shot.png"
     assert not [one for one in session.events if one.type == "attachment/degraded"]
 
 
-async def test_the_store_measures_an_image_it_is_given(mount: Any) -> None:
+async def test_the_store_measures_an_image_it_is_given(mount: MountProfile) -> None:
     """P7-03's enabling change: `width` is no longer a fact someone had to know.
 
     The header carries it, so the store reads it — which is what makes every
@@ -252,7 +257,7 @@ async def test_the_store_measures_an_image_it_is_given(mount: Any) -> None:
     as much as its header does.
     """
     ctx: Context = await mount()
-    store: AttachmentStore = ctx.attachments
+    store: AttachmentStore = ctx.require(ATTACHMENTS)
     # `test_dimensions.png` rather than a second hand-rolled header: that module
     # is where the byte layout is stated and asserted, and a private copy here
     # would drift from it silently — this test would keep passing against a PNG

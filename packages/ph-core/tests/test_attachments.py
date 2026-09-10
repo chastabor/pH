@@ -31,6 +31,7 @@ from typing import Any
 import pytest
 
 from ph.cordis import Context
+from ph.keys import ATTACHMENTS, SPILL_STORE
 from ph.llm.types import AttachmentRef, MediaBlock, Message, create_user_message
 from ph.seams.attachments import OCTET_STREAM, AttachmentStore, digest_of, mime_for
 from ph.seams.token_meter import (
@@ -40,6 +41,7 @@ from ph.seams.token_meter import (
     TokenMeter,
     estimate_media_tokens,
 )
+from ph.testing import MountProfile
 
 pytestmark = pytest.mark.anyio
 
@@ -230,12 +232,12 @@ def test_a_message_carrying_media_measures_more_than_its_text() -> None:
 # --------------------------------------------------------------- the mount --
 
 
-async def test_the_row_provides_the_store(mount: Any, tmp_path: Path) -> None:
+async def test_the_row_provides_the_store(mount: MountProfile, tmp_path: Path) -> None:
     """`attachments-local` ships in `ph-base`, beside the spill store and
     deliberately not inside it: clearing a cache must never delete conversation."""
     ctx = await mount()
 
-    store = ctx.attachments
+    store = ctx.require(ATTACHMENTS)
 
     assert store.root == tmp_path / "attachments"
-    assert store.root != ctx.spill_store.root
+    assert store.root != ctx.require(SPILL_STORE).root

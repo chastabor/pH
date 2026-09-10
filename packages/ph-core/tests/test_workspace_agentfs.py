@@ -63,6 +63,7 @@ from typing import Any
 
 import pytest
 
+from ph.keys import AGENTS, COMMANDS, CONTAINMENT, SESSIONS, WORKSPACE
 from ph.seams.containment import TIERS
 from ph.seams.workspace import (
     CheckpointingProvider,
@@ -84,7 +85,7 @@ from ph.seams.workspace_agentfs import (
 )
 from ph.seams.workspace_git import GitWorktreeProvider, tree_hash
 from ph.seams.workspace_jj import JjWorkspaceProvider
-from ph.testing import FAKE_OPTIONS, StubCheckpointingProvider, StubWorkspaceProvider
+from ph.testing import FAKE_OPTIONS, MountProfile, StubCheckpointingProvider, StubWorkspaceProvider
 from ph.testing.git import git, git_repo
 
 pytestmark = pytest.mark.anyio
@@ -144,7 +145,7 @@ def test_the_overlay_tier_declares_no_restore_mechanism() -> None:
 
 
 async def test_revert_refuses_an_overlay_and_still_lists_for_a_worktree(
-    mount: Any, tmp_path: Path
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """**The other half of P6-20's gate: the sentence a person actually reads.**
 
@@ -177,14 +178,16 @@ async def test_revert_refuses_an_overlay_and_still_lists_for_a_worktree(
             if name == "ov"
             else StubCheckpointingProvider(root=tmp_path / name, kinds=pair)
         )
-        ctx.workspace.register_provider(stub)
-        session = ctx.sessions.create(f"s-{name}")
-        agent = ctx.agents.create(session, FAKE_OPTIONS)
-        workspace = await ctx.workspace.acquire(
+        ctx.require(WORKSPACE).register_provider(stub)
+        session = ctx.require(SESSIONS).create(f"s-{name}")
+        agent = ctx.require(AGENTS).create(session, FAKE_OPTIONS)
+        workspace = await ctx.require(WORKSPACE).acquire(
             session_id=session.id, agent_id=agent.id, base=tmp_path, access="write", session=session
         )
         assert workspace.kind == pair[0]
-        shown[name] = str(await ctx.commands.dispatch("/revert", session=session, agent=agent))
+        shown[name] = str(
+            await ctx.require(COMMANDS).dispatch("/revert", session=session, agent=agent)
+        )
 
     assert shown["ov"].startswith(
         "refusing: the mounted tier has no restore mechanism for an overlay workspace"
@@ -195,7 +198,7 @@ async def test_revert_refuses_an_overlay_and_still_lists_for_a_worktree(
 
 
 async def test_doctor_states_what_an_overlay_bounds_not_what_its_rung_sells(
-    mount: Any, tmp_path: Path
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """**E1, in the one place a person looks to check it.**
 
@@ -207,10 +210,10 @@ async def test_doctor_states_what_an_overlay_bounds_not_what_its_rung_sells(
     occupies the rung, not to its name.
     """
     ctx = await mount(ROW)  # `containment` is in the base profile already
-    if ctx.workspace.provider is None:
+    if ctx.require(WORKSPACE).provider is None:
         pytest.skip("no working overlay on this host")
 
-    rows = dict(ctx.containment.describe())
+    rows = dict(ctx.require(CONTAINMENT).describe())
 
     assert "/revert" in TIERS["worktree"].buys, "the stock row is what this must not print"
     assert "no /revert" in rows["buys"], rows["buys"]
@@ -218,7 +221,7 @@ async def test_doctor_states_what_an_overlay_bounds_not_what_its_rung_sells(
     assert rows["bounds"] == TIERS["worktree"].bounds, "what it bounds really is the same"
 
 
-async def test_git_checkpointing_declines_an_overlay(mount: Any, tmp_path: Path) -> None:
+async def test_git_checkpointing_declines_an_overlay(mount: MountProfile, tmp_path: Path) -> None:
     """**The gate, asserted by behaviour rather than by reading the source.**
 
     `workspace_git` captures with `write-tree` against a `GIT_INDEX_FILE`, which
@@ -247,7 +250,7 @@ def test_an_agentfs_id_stays_inside_the_alphabet_agentfs_accepts() -> None:
 
 
 async def test_the_seam_handles_an_overlay_without_agentfs_installed(
-    mount: Any, tmp_path: Path
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """**The seam-contract half, which the row asked for and only half landed.**
 
@@ -259,14 +262,16 @@ async def test_the_seam_handles_an_overlay_without_agentfs_installed(
     CI shape this row's own gate names.
     """
     ctx = await mount()
-    ctx.workspace.register_provider(
+    ctx.require(WORKSPACE).register_provider(
         StubWorkspaceProvider(root=tmp_path / "ov", kinds=("overlay", "overlay-ephemeral"))
     )
 
-    writer = await ctx.workspace.acquire(
+    writer = await ctx.require(WORKSPACE).acquire(
         session_id="s", agent_id="w", base=tmp_path, access="write"
     )
-    reader = await ctx.workspace.acquire(session_id="s", agent_id="r", base=tmp_path, access="read")
+    reader = await ctx.require(WORKSPACE).acquire(
+        session_id="s", agent_id="r", base=tmp_path, access="read"
+    )
 
     assert writer is not None and reader is not None
     assert (writer.kind, reader.kind) == ("overlay", "overlay-ephemeral")
@@ -277,22 +282,28 @@ async def test_the_seam_handles_an_overlay_without_agentfs_installed(
 # -------------------------------------------------------- provider contract --
 
 
-async def test_a_writer_keeps_its_delta_and_a_reader_does_not(mount: Any, tmp_path: Path) -> None:
+async def test_a_writer_keeps_its_delta_and_a_reader_does_not(
+    mount: MountProfile, tmp_path: Path
+) -> None:
     """The two kinds, from the one call that decides between them."""
     ctx = await _overlaid(mount, tmp_path)
     base = tmp_path / "tree"
     base.mkdir()
     (base / "f.txt").write_text("host", encoding="utf-8")
 
-    writer = await ctx.workspace.acquire(session_id="s3", agent_id="w", base=base, access="write")
-    reader = await ctx.workspace.acquire(session_id="s3", agent_id="r", base=base, access="read")
+    writer = await ctx.require(WORKSPACE).acquire(
+        session_id="s3", agent_id="w", base=base, access="write"
+    )
+    reader = await ctx.require(WORKSPACE).acquire(
+        session_id="s3", agent_id="r", base=base, access="read"
+    )
     assert writer is not None and reader is not None
     assert writer.kind == "overlay"
     assert reader.kind == "overlay-ephemeral"
 
 
 async def test_the_row_declines_rather_than_claiming_a_tier_it_cannot_deliver(
-    mount: Any, tmp_path: Path
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """**The structural half of this row, and it is easy to get backwards.**
 
@@ -306,14 +317,14 @@ async def test_the_row_declines_rather_than_claiming_a_tier_it_cannot_deliver(
     ctx = await mount(ROW)
     isolates = (await probe_overlay(ctx, tmp_path / "probe")).isolates
 
-    assert (ctx.workspace.provider is not None) is isolates, (
+    assert (ctx.require(WORKSPACE).provider is not None) is isolates, (
         "the slot is claimed exactly when the overlay was proved to isolate"
     )
     if not isolates:
-        assert ctx.workspace.effective_tier(child=True) == "advisory"
+        assert ctx.require(WORKSPACE).effective_tier(child=True) == "advisory"
 
 
-async def test_the_probe_says_why_when_it_declines(mount: Any, tmp_path: Path) -> None:
+async def test_the_probe_says_why_when_it_declines(mount: MountProfile, tmp_path: Path) -> None:
     """ "Why am I on worktrees" is asked of the tool, not of the source."""
     ctx = await mount(ROW)
     result = await probe_overlay(ctx, tmp_path / "probe")
@@ -327,17 +338,19 @@ async def test_the_probe_says_why_when_it_declines(mount: Any, tmp_path: Path) -
 # ------------------------------------------------- the real thing, or skipped --
 
 
-async def _overlaid(mount: Any, tmp_path: Path) -> Any:
+async def _overlaid(mount: MountProfile, tmp_path: Path) -> Any:
     """A mounted row over a host where the overlay actually isolates, or a skip."""
     ctx = await mount(ROW)
-    if ctx.workspace.provider is None:
+    if ctx.require(WORKSPACE).provider is None:
         # `apply` already probed and kept the answer; re-running it here paid a
         # second init+mount per skipped test purely to write the message.
         pytest.skip("no working overlay on this host")
     return ctx
 
 
-async def test_two_agents_get_isolated_views_of_one_tree(mount: Any, tmp_path: Path) -> None:
+async def test_two_agents_get_isolated_views_of_one_tree(
+    mount: MountProfile, tmp_path: Path
+) -> None:
     """**The row's own acceptance criterion**: two agents writing the same path
     do not collide, and the host tree keeps its own copy.
 
@@ -350,8 +363,12 @@ async def test_two_agents_get_isolated_views_of_one_tree(mount: Any, tmp_path: P
     base.mkdir()
     (base / "shared.txt").write_text("host-original", encoding="utf-8")
 
-    first = await ctx.workspace.acquire(session_id="s1", agent_id="a1", base=base, access="read")
-    second = await ctx.workspace.acquire(session_id="s1", agent_id="a2", base=base, access="read")
+    first = await ctx.require(WORKSPACE).acquire(
+        session_id="s1", agent_id="a1", base=base, access="read"
+    )
+    second = await ctx.require(WORKSPACE).acquire(
+        session_id="s1", agent_id="a2", base=base, access="read"
+    )
     assert first is not None and second is not None
     assert first.kind == "overlay-ephemeral" and second.kind == "overlay-ephemeral"
 
@@ -365,7 +382,9 @@ async def test_two_agents_get_isolated_views_of_one_tree(mount: Any, tmp_path: P
     )
 
 
-async def test_an_overlay_shows_files_a_checkout_would_not(mount: Any, tmp_path: Path) -> None:
+async def test_an_overlay_shows_files_a_checkout_would_not(
+    mount: MountProfile, tmp_path: Path
+) -> None:
     """**The functional case for this row, as against the performance one.**
 
     `git worktree add` hands an agent tracked files at a commit: no build output,
@@ -377,7 +396,7 @@ async def test_an_overlay_shows_files_a_checkout_would_not(mount: Any, tmp_path:
     base.mkdir()
     (base / "ignored-artifact").write_text("built", encoding="utf-8")
 
-    workspace = await ctx.workspace.acquire(
+    workspace = await ctx.require(WORKSPACE).acquire(
         session_id="s2", agent_id="a1", base=base, access="read"
     )
     assert workspace is not None
@@ -389,7 +408,7 @@ async def test_an_overlay_shows_files_a_checkout_would_not(mount: Any, tmp_path:
 
 async def _worked(ctx: Any, base: Path, agent_id: str, edit: str) -> None:
     """One writer's overlay, edited and released — the state an export starts from."""
-    workspace = await ctx.workspace.acquire(
+    workspace = await ctx.require(WORKSPACE).acquire(
         session_id=SESSION, agent_id=agent_id, base=base, access="write"
     )
     assert workspace is not None and workspace.kind == "overlay"
@@ -410,7 +429,7 @@ async def _export(ctx: Any, agent_id: str) -> str:
     """
     return await export_overlay(
         ctx,
-        store=store_for(ctx.workspace.provider.root, SESSION, agent_id),
+        store=store_for(ctx.require(WORKSPACE).provider.root, SESSION, agent_id),
         identifier=fs_id(SESSION, agent_id),
         ref=f"ph/{SESSION}/{agent_id}",
     )
@@ -418,7 +437,7 @@ async def _export(ctx: Any, agent_id: str) -> str:
 
 @pytest.mark.needs_git
 async def test_an_export_lands_on_a_branch_rooted_at_what_the_agent_saw(
-    mount: Any, tmp_path: Path
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """**The reason this is a branch and not a copy.**
 
@@ -452,7 +471,7 @@ async def test_an_export_lands_on_a_branch_rooted_at_what_the_agent_saw(
 
 @pytest.mark.needs_git
 async def test_git_finds_the_conflict_so_the_export_does_not_have_to(
-    mount: Any, tmp_path: Path
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """**Why the branch, rather than a hand-rolled refusal.**
 
@@ -483,7 +502,7 @@ async def test_git_finds_the_conflict_so_the_export_does_not_have_to(
 
 @pytest.mark.needs_git
 async def test_an_export_carries_symlinks_rather_than_flattening_them(
-    mount: Any, tmp_path: Path
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """**Two defects met here, and the silent one was worse.**
 
@@ -500,7 +519,7 @@ async def test_an_export_carries_symlinks_rather_than_flattening_them(
     ctx = await _overlaid(mount, tmp_path)
     base = await git_repo(ctx, tmp_path / "repo")
 
-    workspace = await ctx.workspace.acquire(
+    workspace = await ctx.require(WORKSPACE).acquire(
         session_id=SESSION, agent_id="a5", base=base, access="write"
     )
     assert workspace is not None
@@ -519,7 +538,9 @@ async def test_an_export_carries_symlinks_rather_than_flattening_them(
 
 
 @pytest.mark.needs_git
-async def test_an_export_refuses_rather_than_reusing_a_branch(mount: Any, tmp_path: Path) -> None:
+async def test_an_export_refuses_rather_than_reusing_a_branch(
+    mount: MountProfile, tmp_path: Path
+) -> None:
     """A second export onto a taken name would discard whatever is on it."""
     ctx = await _overlaid(mount, tmp_path)
     base = await git_repo(ctx, tmp_path / "repo")
@@ -532,7 +553,7 @@ async def test_an_export_refuses_rather_than_reusing_a_branch(mount: Any, tmp_pa
 
 
 async def test_an_export_refuses_when_there_was_no_commit_to_root_at(
-    mount: Any, tmp_path: Path
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """An overlay over a plain directory has no base commit, so it has no branch.
 
@@ -549,13 +570,13 @@ async def test_an_export_refuses_when_there_was_no_commit_to_root_at(
     assert caught.value.reason == "no-base-commit"
 
 
-def _record(ctx: Any, agent_id: str, kind: str = "overlay-ephemeral") -> WorkspaceRecord:
+def _record(ctx: Any, agent_id: str, kind: WorkspaceKind = "overlay-ephemeral") -> WorkspaceRecord:
     """The durable pair as reconciliation would find it, with no live object."""
-    store = store_for(ctx.workspace.provider.root, SESSION, agent_id)
+    store = store_for(ctx.require(WORKSPACE).provider.root, SESSION, agent_id)
     return WorkspaceRecord(session_id=SESSION, agent_id=agent_id, kind=kind, root=store / "mnt")
 
 
-async def test_a_crashed_agents_overlay_is_reclaimed(mount: Any, tmp_path: Path) -> None:
+async def test_a_crashed_agents_overlay_is_reclaimed(mount: MountProfile, tmp_path: Path) -> None:
     """**F6, and the leak here is worse than a leftover directory.**
 
     A crash skips `release` entirely, and a live FUSE mount outlives the process
@@ -568,13 +589,13 @@ async def test_a_crashed_agents_overlay_is_reclaimed(mount: Any, tmp_path: Path)
     ctx = await _overlaid(mount, tmp_path)
     base = tmp_path / "tree"
     base.mkdir()
-    workspace = await ctx.workspace.acquire(
+    workspace = await ctx.require(WORKSPACE).acquire(
         session_id=SESSION, agent_id="c1", base=base, access="read"
     )
     assert workspace is not None and await is_mount(workspace.root)
 
     # No release runs: this is the state a killed process leaves behind.
-    kept = await ctx.workspace.provider.reclaim(_record(ctx, "c1"))
+    kept = await ctx.require(WORKSPACE).provider.reclaim(_record(ctx, "c1"))
 
     assert kept is False, "an ephemeral overlay is discarded exactly as its release would"
     assert not await is_mount(workspace.root), "and the mount is gone, not merely forgotten"
@@ -582,7 +603,7 @@ async def test_a_crashed_agents_overlay_is_reclaimed(mount: Any, tmp_path: Path)
 
 @pytest.mark.needs_git
 async def test_the_seam_exports_an_overlay_without_knowing_which_tier_it_is(
-    mount: Any, tmp_path: Path
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """**One verb, both tiers**, which is the point of the Protocol.
 
@@ -595,7 +616,7 @@ async def test_the_seam_exports_an_overlay_without_knowing_which_tier_it_is(
     base = await git_repo(ctx, tmp_path / "repo")
     await _worked(ctx, base, "a6", "one\n")
 
-    ref = await ctx.workspace.export(_record(ctx, "a6", kind="overlay"))
+    ref = await ctx.require(WORKSPACE).export(_record(ctx, "a6", kind="overlay"))
 
     assert ref == f"ph/{SESSION}/a6"
     code, _, _ = await git(ctx, base, "rev-parse", "--verify", f"refs/heads/{ref}")

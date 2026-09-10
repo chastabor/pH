@@ -40,6 +40,7 @@ from ph.session import (
     fold_surface,
     is_in_place_rewrite,
 )
+from ph.session.json import as_obj, as_seq
 from ph.session.surface import (
     SurfaceError,
     is_append_surface_event,
@@ -73,7 +74,7 @@ def test_replace_shadows_nodes_and_leaves_the_log_intact() -> None:
     assert session.surface.nodes == (4, 3)
     assert len(session.events) == before + 1
     # The shadowed events are still there, byte-for-byte.
-    assert session.events[1].data["content"][0]["text"] == "one"
+    assert as_obj(as_seq(session.events[1].data["content"])[0])["text"] == "one"
     assert session.surface.replace_generation == 1
 
 

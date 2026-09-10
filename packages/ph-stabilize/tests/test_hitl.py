@@ -40,9 +40,11 @@ from stabilize_helpers import (
     run_tool_calls,
 )
 
+from ph.keys import SESSIONS, TOOLS
 from ph.llm.types import ToolCallBlock
 from ph.seams.approval import Edited, Responded
-from ph.testing import simple_tool
+from ph.session.json import as_obj, as_seq
+from ph.testing import MountProfile, simple_tool
 from ph_stabilize.destructive import findings
 from ph_stabilize.hitl import set_mode
 
@@ -109,7 +111,7 @@ def test_a_payload_on_a_second_line_is_still_seen() -> None:
         assert "rm -rf build" in str(found[0]), found
 
 
-async def test_a_multi_line_cell_is_gated_through_the_real_pipeline(mount: Any) -> None:
+async def test_a_multi_line_cell_is_gated_through_the_real_pipeline(mount: MountProfile) -> None:
     """**The motivating case, end to end rather than at the classifier.**
 
     Every cell a model writes is multi-line, and every one of them was ungated:
@@ -120,7 +122,7 @@ async def test_a_multi_line_cell_is_gated_through_the_real_pipeline(mount: Any) 
     """
     ctx = await mount(_gated(bash={"preset": "destructive"}), profile=PROFILE)
     answer_approvals(ctx, "rejected")
-    session = ctx.sessions.create("multiline")
+    session = ctx.require(SESSIONS).create("multiline")
 
     await run_tool_calls(ctx, session, bash_call("c1", "cd /tmp\nrm -rf build"))
 
@@ -164,12 +166,12 @@ def test_the_parser_sees_structure_a_pattern_cannot() -> None:
 # ---------------------------------------------------------------- the modes --
 
 
-async def test_a_destructive_call_is_asked_about(mount: Any) -> None:
+async def test_a_destructive_call_is_asked_about(mount: MountProfile) -> None:
     """The row's gate. The verdict rides the ask, so the person is told what the
     harness is worried about and an auditor can tune against it."""
     ctx = await mount(_gated(bash={"preset": "destructive"}), profile=PROFILE)
     answer_approvals(ctx, "rejected")
-    session = ctx.sessions.create("destructive")
+    session = ctx.require(SESSIONS).create("destructive")
 
     await run_tool_calls(ctx, session, bash_call("c1", "rm -rf /tmp/x"))
 
@@ -178,47 +180,47 @@ async def test_a_destructive_call_is_asked_about(mount: Any) -> None:
     assert events_of(session, "approval/decided")[0].data["outcome"] == "rejected"
 
 
-async def test_auto_lets_the_routine_case_through(mount: Any) -> None:
+async def test_auto_lets_the_routine_case_through(mount: MountProfile) -> None:
     """`auto` trusts the condition — which is the whole reason a condition
     exists. Nothing matched, so nothing is asked."""
     ctx = await mount(_gated(bash={"preset": "destructive"}), profile=PROFILE)
     answer_approvals(ctx, "rejected")
-    session = ctx.sessions.create("routine")
+    session = ctx.require(SESSIONS).create("routine")
 
     await run_tool_calls(ctx, session, bash_call("c1", "ls -R src"))
 
     assert not events_of(session, "approval/asked")
 
 
-async def test_manual_asks_even_when_nothing_matched(mount: Any) -> None:
+async def test_manual_asks_even_when_nothing_matched(mount: MountProfile) -> None:
     """Which is what `manual` means: the condition selects, the posture decides
     whether selection is enough."""
     ctx = await mount(_gated("manual", bash={"preset": "destructive"}), profile=PROFILE)
     answer_approvals(ctx, "rejected")
-    session = ctx.sessions.create("manual")
+    session = ctx.require(SESSIONS).create("manual")
 
     await run_tool_calls(ctx, session, bash_call("c1", "ls -R src"))
 
     assert events_of(session, "approval/asked")
 
 
-async def test_yolo_asks_about_nothing(mount: Any) -> None:
+async def test_yolo_asks_about_nothing(mount: MountProfile) -> None:
     """A thing a person turns on deliberately, for a session they are watching."""
     ctx = await mount(_gated("yolo", bash={"preset": "destructive"}), profile=PROFILE)
     answer_approvals(ctx, "rejected")
-    session = ctx.sessions.create("yolo")
+    session = ctx.require(SESSIONS).create("yolo")
 
     await run_tool_calls(ctx, session, bash_call("c1", "rm -rf /tmp/x"))
 
     assert not events_of(session, "approval/asked")
 
 
-async def test_the_mode_is_read_from_the_log_so_a_resume_keeps_it(mount: Any) -> None:
+async def test_the_mode_is_read_from_the_log_so_a_resume_keeps_it(mount: MountProfile) -> None:
     """A toggle that lived in a field would be one a restart silently undid, and
     the posture is the last thing a person wants quietly reset."""
     ctx = await mount(_gated("manual", bash={}), profile=PROFILE)
     answer_approvals(ctx, "rejected")
-    session = ctx.sessions.create("toggled")
+    session = ctx.require(SESSIONS).create("toggled")
     set_mode(session, "yolo")
 
     await run_tool_calls(ctx, session, bash_call("c1", "ls"))
@@ -226,25 +228,25 @@ async def test_the_mode_is_read_from_the_log_so_a_resume_keeps_it(mount: Any) ->
     assert not events_of(session, "approval/asked"), "the recorded mode was ignored"
 
 
-async def test_an_ordinary_call_is_not_gated_by_default(mount: Any) -> None:
+async def test_an_ordinary_call_is_not_gated_by_default(mount: MountProfile) -> None:
     """`bash` declares, so under `manual` this would ask; under the shipped `auto`
     the destructive patterns are what separate `rm -rf` from `echo`."""
     ctx = await mount(profile=PROFILE)
     answer_approvals(ctx, "rejected")
-    session = ctx.sessions.create("ungated")
+    session = ctx.require(SESSIONS).create("ungated")
 
     await run_tool_calls(ctx, session, bash_call("c1", "echo hello"))
 
     assert not events_of(session, "approval/asked")
 
 
-async def test_a_declared_tool_is_gated_with_no_config_naming_it(mount: Any) -> None:
+async def test_a_declared_tool_is_gated_with_no_config_naming_it(mount: MountProfile) -> None:
     """**P6-16's gate.** The previous version of this test asserted the opposite —
     that `rm -rf /tmp/x` was *not* asked about with no config — which was true and
     was the defect."""
     ctx = await mount(profile=PROFILE)
     answer_approvals(ctx, "rejected")
-    session = ctx.sessions.create("declared")
+    session = ctx.require(SESSIONS).create("declared")
 
     await run_tool_calls(ctx, session, bash_call("c1", "rm -rf /tmp/x"))
 
@@ -253,14 +255,14 @@ async def test_a_declared_tool_is_gated_with_no_config_naming_it(mount: Any) -> 
     assert "rm -rf" in str(asked[0].data.get("reason", "")), asked[0].data
 
 
-async def test_a_renamed_tool_is_still_gated(mount: Any) -> None:
+async def test_a_renamed_tool_is_still_gated(mount: MountProfile) -> None:
     """The failure the row is named after: a rule keyed on the old name stops
     matching, nothing raises, and an approval gate is off. The declaration travels
     with the tool."""
     ctx = await mount(profile=PROFILE)
     answer_approvals(ctx, "rejected")
-    session = ctx.sessions.create("renamed")
-    ctx.tools.register(
+    session = ctx.require(SESSIONS).create("renamed")
+    ctx.require(TOOLS).register(
         simple_tool(
             "shell_v2",
             description="the same capability under a name no rule mentions",
@@ -279,7 +281,7 @@ async def test_a_renamed_tool_is_still_gated(mount: Any) -> None:
 
 
 async def test_a_deployments_patterns_for_declared_tools_survive_a_rename(
-    mount: Any,
+    mount: MountProfile,
 ) -> None:
     """**Why the declared rule is config and not a constant.**
 
@@ -294,8 +296,8 @@ async def test_a_deployments_patterns_for_declared_tools_survive_a_rename(
         profile=PROFILE,
     )
     answer_approvals(ctx, "rejected")
-    session = ctx.sessions.create("survives")
-    ctx.tools.register(simple_tool("shell_v2", is_irreversible=True))
+    session = ctx.require(SESSIONS).create("survives")
+    ctx.require(TOOLS).register(simple_tool("shell_v2", is_irreversible=True))
 
     call = ToolCallBlock(id="c1", name="shell_v2", arguments=json.dumps({"command": "sudo ls"}))
     await run_tool_calls(ctx, session, call)
@@ -308,20 +310,20 @@ async def test_a_deployments_patterns_for_declared_tools_survive_a_rename(
 # ------------------------------------------------------------ the decisions --
 
 
-async def test_approve_runs_the_call_as_asked(mount: Any) -> None:
+async def test_approve_runs_the_call_as_asked(mount: MountProfile) -> None:
     ctx = await mount(_gated(bash={}), profile=PROFILE)
     answer_approvals(ctx, "allowed-once")
-    session = ctx.sessions.create("approved")
+    session = ctx.require(SESSIONS).create("approved")
 
     await run_tool_calls(ctx, session, bash_call("c1", "echo hello"))
 
     assert "hello" in result_text(session, "c1")
 
 
-async def test_reject_stops_it_and_says_who(mount: Any) -> None:
+async def test_reject_stops_it_and_says_who(mount: MountProfile) -> None:
     ctx = await mount(_gated(bash={}), profile=PROFILE)
     answer_approvals(ctx, "rejected")
-    session = ctx.sessions.create("rejected")
+    session = ctx.require(SESSIONS).create("rejected")
 
     await run_tool_calls(ctx, session, bash_call("c1", "echo hello"))
 
@@ -329,14 +331,14 @@ async def test_reject_stops_it_and_says_who(mount: Any) -> None:
     assert "hello" not in result_text(session, "c1")
 
 
-async def test_a_call_parked_on_a_human_leaves_no_record_of_an_act(mount: Any) -> None:
+async def test_a_call_parked_on_a_human_leaves_no_record_of_an_act(mount: MountProfile) -> None:
     """The real gate, through the real seam: the ask is in the log, the act is not.
 
     While a person looks at the modal, the log holds `approval/asked` — which
     *is* the pending state — and nothing else.
     """
     ctx = await mount(_gated(bash={}), profile=PROFILE)
-    session = ctx.sessions.create("parked")
+    session = ctx.require(SESSIONS).create("parked")
     reached, release = anyio.Event(), anyio.Event()
 
     async def eventually() -> str:
@@ -362,7 +364,7 @@ async def test_a_call_parked_on_a_human_leaves_no_record_of_an_act(mount: Any) -
     assert "later" in result_text(session, "c1")
 
 
-async def test_edit_runs_the_humans_arguments_and_logs_all_three(mount: Any) -> None:
+async def test_edit_runs_the_humans_arguments_and_logs_all_three(mount: MountProfile) -> None:
     """The correction path: three records, each attributed to whoever made it.
 
     The *assistant message* holds what the model asked for; `approval/decided`
@@ -373,7 +375,7 @@ async def test_edit_runs_the_humans_arguments_and_logs_all_three(mount: Any) -> 
     """
     ctx = await mount(_gated(bash={}), profile=PROFILE)
     answer_approvals(ctx, Edited(arguments={"command": "echo corrected"}))
-    session = ctx.sessions.create("edited")
+    session = ctx.require(SESSIONS).create("edited")
 
     await run_tool_calls(ctx, session, bash_call("c1", "echo original"))
 
@@ -388,7 +390,7 @@ async def test_edit_runs_the_humans_arguments_and_logs_all_three(mount: Any) -> 
     assert decided.data["arguments"]["command"] == "echo corrected", "who changed it"
 
 
-async def test_respond_skips_the_body_and_answers_in_its_place(mount: Any) -> None:
+async def test_respond_skips_the_body_and_answers_in_its_place(mount: MountProfile) -> None:
     """A *successful* result, because the model asked a question and got one.
 
     A denial it would have to interpret is the wrong shape for "you don't need
@@ -396,26 +398,26 @@ async def test_respond_skips_the_body_and_answers_in_its_place(mount: Any) -> No
     """
     ctx = await mount(_gated(bash={}), profile=PROFILE)
     answer_approvals(ctx, Responded(message="the port is 8080, no need to look"))
-    session = ctx.sessions.create("responded")
+    session = ctx.require(SESSIONS).create("responded")
 
     await run_tool_calls(ctx, session, bash_call("c1", "cat config.toml"))
 
     assert result_text(session, "c1") == "the port is 8080, no need to look"
     block = next(
-        event.data["message"]["content"][0]
+        as_seq(as_obj(event.data["message"])["content"])[0]
         for event in session.events
         if event.type == "tool/result"
     )
-    assert block["isError"] is False, "an answer is not a failure"
+    assert as_obj(block)["isError"] is False, "an answer is not a failure"
     (decided,) = events_of(session, "approval/decided")
     assert decided.data["outcome"] == "responded"
 
 
-async def test_no_answerer_still_denies(mount: Any) -> None:
+async def test_no_answerer_still_denies(mount: MountProfile) -> None:
     """B3, unchanged by the two new answers: absence is not consent, and a
     missing channel reads differently from a human saying no."""
     ctx = await mount(_gated(bash={}), profile=PROFILE)
-    session = ctx.sessions.create("unanswered")
+    session = ctx.require(SESSIONS).create("unanswered")
 
     await run_tool_calls(ctx, session, bash_call("c1", "echo hello"))
 

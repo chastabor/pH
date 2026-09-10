@@ -32,6 +32,7 @@ from fixture_replay import (
     to_wire,
 )
 
+from ph.keys import TOOLS
 from ph_app.profiles import resolve_profile
 from ph_rlm.presentation import IPYTHON
 
@@ -144,7 +145,7 @@ async def test_every_tool_the_fixtures_called_exists_under_the_rlm_profile(
     native call, which is the translation the report describes.
     """
     ctx, _session, agent = await shipped_profile(profile=resolve_profile("rlm"))
-    visible = set(ctx.tools.view(agent.ctx).visible)
+    visible = set(ctx.require(TOOLS).view(agent.ctx).visible)
 
     called = {name for shape in shapes.values() for name in shape.tool_calls}
     assert called, "the fixtures recorded no tool calls"

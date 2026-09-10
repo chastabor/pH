@@ -16,6 +16,7 @@ rather than in front of a person.
 from __future__ import annotations
 
 import pytest
+from pydantic import BaseModel
 
 from ph.seams.commands import CommandDefinition, CommandSchema
 from ph.seams.tui_screens import ScreenDefinition, ScreenSchema
@@ -29,7 +30,7 @@ from ph.wire import declarable_fields, wire_alias
     ids=["command", "screen"],
 )
 def test_a_schema_carries_every_field_of_its_definition_but_the_body(
-    definition: type, schema: type
+    definition: type, schema: type[BaseModel]
 ) -> None:
     """Coverage by construction: the sets are compared, not a sample of them.
 

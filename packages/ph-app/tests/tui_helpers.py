@@ -15,7 +15,7 @@ from typing import Any
 
 from textual.pilot import Pilot
 
-from ph.seams.approval import ApprovalRequest
+from ph.seams.approval import ApprovalAnswer, ApprovalRequest
 from ph.seams.user_questions import UserQuestion
 from ph_app.tui.app import PHTuiApp
 
@@ -70,7 +70,13 @@ def root_of(daemon: Any, session_id: str = "pilot") -> Any:
     return daemon.held(session_id)
 
 
-async def until(pilot: Pilot[object], predicate: Callable[[], bool], *, tries: int = 400) -> None:
+async def until[T](pilot: Pilot[T], predicate: Callable[[], bool], *, tries: int = 400) -> None:
+    """Pause until the predicate holds, or give up naming the wait.
+
+    Generic in the pilot's own type parameter rather than taking
+    `Pilot[object]`: `Pilot` is invariant, so a `Pilot[None]` — what
+    `run_test()` hands an app returning nothing — is not a `Pilot[object]`
+    and every caller of that shape was refused."""
     for _ in range(tries):
         if predicate():
             return
@@ -81,7 +87,7 @@ async def until(pilot: Pilot[object], predicate: Callable[[], bool], *, tries: i
 @asynccontextmanager
 async def running(
     app: PHTuiApp, *, size: tuple[int, int] = (80, 24)
-) -> AsyncIterator[tuple[PHTuiApp, Pilot[object]]]:
+) -> AsyncIterator[tuple[PHTuiApp, Pilot[str | None]]]:
     """`size` for a test that needs the transcript to actually scroll: the
     default is Textual's own, tall enough to hold a short conversation whole.
 
@@ -121,7 +127,10 @@ class StubHost:
         self.questions: list[UserQuestion] = []
         self.redraws = 0
 
-    async def ask_approval(self, request: ApprovalRequest) -> tuple[str, str]:
+    async def ask_approval(self, request: ApprovalRequest) -> tuple[ApprovalAnswer, str]:
+        # `ApprovalAnswer`, not `tuple[str, str]`: `ModalHost` promises the
+        # narrowed answer, and the whole reason it is a Protocol is that a
+        # double whose member drifted fails here rather than at the first modal.
         self.approvals.append(request)
         return "allowed-once", ""
 

@@ -111,13 +111,16 @@ def test_a_large_integer_inside_a_payload_does_not_veto_the_frame() -> None:
     with a path in its message."""
     huge = 2**63 - 1
     ack = decode(f'{{"type": "boot-ack", "protocol": 2, "python": "3", "limits": {{"a": {huge}}}}}')
-    assert ack is not None and ack["limits"] == {"a": huge}
+    assert ack is not None and ack["type"] == "boot-ack"
+    assert ack["limits"] == {"a": huge}
     done = decode(f'{{"type": "done", "id": 1, "value": {2**60}}}')
-    assert done is not None and done["value"] == 2**60
+    assert done is not None and done["type"] == "done"
+    assert done["value"] == 2**60
     call = decode(
         f'{{"type": "call", "id": 1, "global": "g", "name": "n", "args": {{"n": {huge}}}}}'
     )
-    assert call is not None and call["args"] == {"n": huge}
+    assert call is not None and call["type"] == "call"
+    assert call["args"] == {"n": huge}
 
 
 def test_fuzzed_frames_neither_raise_nor_forge() -> None:
@@ -137,7 +140,13 @@ def test_fuzzed_frames_neither_raise_nor_forge() -> None:
             "done",
             "fault",
         }
-        if "id" in frame:
+        # Narrowed on the tag rather than on `"id" in frame`: a membership test
+        # tells mypy nothing about a `TypedDict` union, which is the same lesson
+        # `_WORKSPACE_KINDS` records for `Literal`s (issue 49c). Naming the
+        # three that carry one also made the set *checkable* — `fault` was in
+        # the first draft of this line and `FaultFrame` has no `id`, which the
+        # `in frame` form could never have said.
+        if frame["type"] in {"call", "done", "snapshot"}:
             assert type(frame["id"]) is int
 
 

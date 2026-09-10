@@ -20,8 +20,9 @@ from typing import Any
 
 import anyio
 import pytest
-from conftest import Harnessed, note_edit
+from rlm_fixtures import Harnessed, note_edit
 
+from ph.keys import APPROVAL, COMMANDS, SESSIONS, SYSTEM_PROMPT
 from ph.system_prompt import (
     join_context_sections,
     render_context_sections,
@@ -44,6 +45,7 @@ from ph_rlm.harness import (
     render_state,
 )
 from ph_rlm.harness.state import extend_session
+from ph_rlm.keys import HARNESS
 
 pytestmark = pytest.mark.anyio
 
@@ -56,7 +58,7 @@ def _allow(ctx: Any) -> list[str]:
         asked.append(request.tool_name)
         return "allowed-once"
 
-    ctx.approval.register_answerer(answerer)
+    ctx.require(APPROVAL).register_answerer(answerer)
     return asked
 
 
@@ -67,10 +69,10 @@ async def _refined(harnessed: Harnessed) -> tuple[Any, Any, Any]:
     is one that keeps passing against a log the service has stopped writing.
     """
     ctx, session, agent = await harnessed()
-    await ctx.harness.apply(
+    await ctx.require(HARNESS).apply(
         RefinementProposal(summary="one", edits=[note_edit("first")]), session=session, agent=agent
     )
-    await ctx.harness.apply(
+    await ctx.require(HARNESS).apply(
         RefinementProposal(
             summary="two",
             edits=[
@@ -91,7 +93,7 @@ async def _refined(harnessed: Harnessed) -> tuple[Any, Any, Any]:
 
 async def test_an_applied_refinement_is_the_state(harnessed: Harnessed) -> None:
     ctx, session, agent = await harnessed()
-    record = await ctx.harness.apply(
+    record = await ctx.require(HARNESS).apply(
         RefinementProposal(summary="learned something", edits=[note_edit("prefer-uv")]),
         session=session,
         agent=agent,
@@ -100,10 +102,12 @@ async def test_an_applied_refinement_is_the_state(harnessed: Harnessed) -> None:
     assert [event.type for event in session.events if event.type.startswith("harness/")] == [
         REFINED
     ]
-    entry = ctx.harness.state(session).entry("note", "prefer-uv")
+    entry = ctx.require(HARNESS).state(session).entry("note", "prefer-uv")
     assert entry is not None
     assert (entry.title, entry.version, entry.scope) == ("a thing learned", 1, "local")
-    assert [one.refine_id for one in ctx.harness.state(session).refinements] == [record.refine_id]
+    assert [one.refine_id for one in ctx.require(HARNESS).state(session).refinements] == [
+        record.refine_id
+    ]
 
 
 async def test_deleting_the_state_and_re_deriving_is_byte_identical(harnessed: Harnessed) -> None:
@@ -114,7 +118,7 @@ async def test_deleting_the_state_and_re_deriving_is_byte_identical(harnessed: H
     """
     ctx, session, _ = await _refined(harnessed)
 
-    assert fold_session(session).to_wire() == ctx.harness.local(session).to_wire()
+    assert fold_session(session).to_wire() == ctx.require(HARNESS).local(session).to_wire()
     # And an update bumped the version rather than replacing history.
     revised = fold_session(session).entry("note", "first")
     assert revised is not None
@@ -138,21 +142,21 @@ async def test_a_fork_inherits_the_harness_as_of_its_boundary(harnessed: Harness
     before the boundary hands it the harness that existed then.
     """
     ctx, session, agent = await harnessed()
-    await ctx.harness.apply(
+    await ctx.require(HARNESS).apply(
         RefinementProposal(summary="before", edits=[note_edit("early")]),
         session=session,
         agent=agent,
     )
     boundary = session.events[-1].seq
-    await ctx.harness.apply(
+    await ctx.require(HARNESS).apply(
         RefinementProposal(summary="after", edits=[note_edit("late")]), session=session, agent=agent
     )
 
     assert set(fold_session(session).entries["note"]) == {"early", "late"}
-    forked = ctx.sessions.fork(session, boundary, child_session_id="forked")
+    forked = ctx.require(SESSIONS).fork(session, boundary, child_session_id="forked")
     assert set(fold_session(forked).entries["note"]) == {"early"}
     # Nothing was copied and no state was handed over: the seeded prefix folds.
-    assert ctx.harness.local(forked).entry("note", "late") is None
+    assert ctx.require(HARNESS).local(forked).entry("note", "late") is None
 
 
 def test_a_record_from_a_newer_build_does_not_break_the_fold() -> None:
@@ -185,7 +189,7 @@ def test_a_record_from_a_newer_build_does_not_break_the_fold() -> None:
 async def test_h5_the_doctrine_is_not_editable(harnessed: Harnessed) -> None:
     ctx, session, agent = await harnessed()
     with pytest.raises(RefinementRefused, match="not editable"):
-        await ctx.harness.apply(
+        await ctx.require(HARNESS).apply(
             RefinementProposal(
                 summary="rewrite everything",
                 edits=[note_edit("base_system_prompt", "a new doctrine")],
@@ -204,7 +208,7 @@ async def test_h1_an_unresolvable_reference_is_rejected_on_the_event(harnessed: 
     did apply rather than dropped.
     """
     ctx, session, agent = await harnessed()
-    record = await ctx.harness.apply(
+    record = await ctx.require(HARNESS).apply(
         RefinementProposal(
             summary="mixed",
             edits=[
@@ -228,13 +232,13 @@ async def test_h1_an_unresolvable_reference_is_rejected_on_the_event(harnessed: 
     # On the event, so a reader of the log can see what was refused and why.
     logged = next(event for event in session.events if event.type == REFINED)
     assert list(logged.data["rejected"]) == record.rejected
-    assert ctx.harness.state(session).entry("skill", "imaginary") is None
+    assert ctx.require(HARNESS).state(session).entry("skill", "imaginary") is None
 
 
 async def test_h1_a_skill_without_a_reference_teaches_nothing(harnessed: Harnessed) -> None:
     ctx, session, agent = await harnessed()
     with pytest.raises(RefinementRefused, match="no reference"):
-        await ctx.harness.apply(
+        await ctx.require(HARNESS).apply(
             RefinementProposal(
                 summary="vague",
                 edits=[
@@ -255,7 +259,7 @@ async def test_h2_a_skill_for_a_bound_tool_renders_the_binding_form(harnessed: H
     prompt text steering the model onto the ungoverned raw-namespace path.
     """
     ctx, session, agent = await harnessed()
-    await ctx.harness.apply(
+    await ctx.require(HARNESS).apply(
         RefinementProposal(
             summary="how to search",
             edits=[
@@ -272,14 +276,14 @@ async def test_h2_a_skill_for_a_bound_tool_renders_the_binding_form(harnessed: H
         session=session,
         agent=agent,
     )
-    entry = ctx.harness.state(session).entry("skill", "finding-files")
+    entry = ctx.require(HARNESS).state(session).entry("skill", "finding-files")
     assert entry is not None
     assert entry.call_pattern == "await tools.glob(...)"
 
 
 async def test_h2_an_unbound_reference_does_not_claim_to_be_a_binding(harnessed: Harnessed) -> None:
     ctx, session, agent = await harnessed()
-    await ctx.harness.apply(
+    await ctx.require(HARNESS).apply(
         RefinementProposal(
             summary="plain python",
             edits=[
@@ -296,7 +300,7 @@ async def test_h2_an_unbound_reference_does_not_claim_to_be_a_binding(harnessed:
         session=session,
         agent=agent,
     )
-    entry = ctx.harness.state(session).entry("skill", "dumping")
+    entry = ctx.require(HARNESS).state(session).entry("skill", "dumping")
     assert entry is not None
     assert entry.call_pattern == "json.dumps(...)"
     assert "tools." not in entry.call_pattern
@@ -305,7 +309,7 @@ async def test_h2_an_unbound_reference_does_not_claim_to_be_a_binding(harnessed:
 async def test_deleting_an_entry_that_is_not_there_is_refused(harnessed: Harnessed) -> None:
     ctx, session, agent = await harnessed()
     with pytest.raises(RefinementRefused, match="no such note"):
-        await ctx.harness.apply(
+        await ctx.require(HARNESS).apply(
             RefinementProposal(
                 summary="tidying", edits=[HarnessEdit(action="delete", kind="note", id="ghost")]
             ),
@@ -323,12 +327,12 @@ async def test_h3_a_global_edit_prompts_and_a_local_one_does_not(harnessed: Harn
     ctx, session, agent = await harnessed()
     asked = _allow(ctx)
 
-    await ctx.harness.apply(
+    await ctx.require(HARNESS).apply(
         RefinementProposal(summary="local", edits=[note_edit("mine")]), session=session, agent=agent
     )
     assert asked == [], "a local refinement asked for approval"
 
-    await ctx.harness.apply(
+    await ctx.require(HARNESS).apply(
         RefinementProposal(summary="everyone", edits=[note_edit("shared")]),
         scope="global",
         session=session,
@@ -348,29 +352,29 @@ async def test_h3_a_declined_global_edit_writes_nothing(harnessed: Harnessed) ->
     async def refuse(_request: Any, _next: Any) -> str:
         return "rejected"
 
-    ctx.approval.register_answerer(refuse)
+    ctx.require(APPROVAL).register_answerer(refuse)
 
     with pytest.raises(RefinementRefused, match="not approved"):
-        await ctx.harness.apply(
+        await ctx.require(HARNESS).apply(
             RefinementProposal(summary="everyone", edits=[note_edit("shared")]),
             scope="global",
             session=session,
             agent=agent,
         )
-    assert read_global_events(ctx.harness.directory) == []
+    assert read_global_events(ctx.require(HARNESS).directory) == []
 
 
 async def test_h3_fails_closed_with_nowhere_to_ask(harnessed: Harnessed) -> None:
     """B3: no answerer is not consent."""
     ctx, session, agent = await harnessed()
     with pytest.raises(RefinementRefused, match="not approved"):
-        await ctx.harness.apply(
+        await ctx.require(HARNESS).apply(
             RefinementProposal(summary="everyone", edits=[note_edit("shared")]),
             scope="global",
             session=session,
             agent=agent,
         )
-    assert read_global_events(ctx.harness.directory) == []
+    assert read_global_events(ctx.require(HARNESS).directory) == []
 
 
 # --------------------------------------------------------------- global --
@@ -380,21 +384,21 @@ async def test_a_global_refinement_folds_from_its_own_log(harnessed: Harnessed) 
     """The global scope is a log too, so "state is a fold" holds at both."""
     ctx, session, agent = await harnessed()
     _allow(ctx)
-    await ctx.harness.apply(
+    await ctx.require(HARNESS).apply(
         RefinementProposal(summary="deployment-wide", edits=[note_edit("house-style")]),
         scope="global",
         session=session,
         agent=agent,
     )
 
-    assert (ctx.harness.directory / GLOBAL_LOG_NAME).exists()
-    assert len(read_global_events(ctx.harness.directory)) == 1
+    assert (ctx.require(HARNESS).directory / GLOBAL_LOG_NAME).exists()
+    assert len(read_global_events(ctx.require(HARNESS).directory)) == 1
     # Not in the session's log — that is what makes it outlive this session.
     assert [event for event in session.events if event.type == REFINED] == []
-    world = ctx.harness.globals().entry("note", "house-style")
+    world = ctx.require(HARNESS).globals().entry("note", "house-style")
     assert world is not None and world.scope == "global"
     # And the model is shown local layered over global.
-    assert ctx.harness.state(session).entry("note", "house-style") is not None
+    assert ctx.require(HARNESS).state(session).entry("note", "house-style") is not None
 
 
 async def test_a_local_entry_shadows_a_global_one(harnessed: Harnessed) -> None:
@@ -402,18 +406,18 @@ async def test_a_local_entry_shadows_a_global_one(harnessed: Harnessed) -> None:
     get to overrule it."""
     ctx, session, agent = await harnessed()
     _allow(ctx)
-    await ctx.harness.apply(
+    await ctx.require(HARNESS).apply(
         RefinementProposal(summary="everywhere", edits=[note_edit("style", "the house rule")]),
         scope="global",
         session=session,
         agent=agent,
     )
-    await ctx.harness.apply(
+    await ctx.require(HARNESS).apply(
         RefinementProposal(summary="here", edits=[note_edit("style", "what this repo does")]),
         session=session,
         agent=agent,
     )
-    entry = ctx.harness.state(session).entry("note", "style")
+    entry = ctx.require(HARNESS).state(session).entry("note", "style")
     assert entry is not None
     assert entry.title == "what this repo does"
 
@@ -425,7 +429,7 @@ async def test_concurrent_global_writes_are_both_recorded(harnessed: Harnessed) 
     _allow(ctx)
 
     async def write(index: int) -> None:
-        await ctx.harness.apply(
+        await ctx.require(HARNESS).apply(
             RefinementProposal(summary=f"n{index}", edits=[note_edit(f"entry-{index}")]),
             scope="global",
             session=session,
@@ -436,8 +440,12 @@ async def test_concurrent_global_writes_are_both_recorded(harnessed: Harnessed) 
         for index in range(8):
             tasks.start_soon(write, index)
 
-    assert len(read_global_events(ctx.harness.directory)) == 8, "an append was lost or torn"
-    assert set(ctx.harness.globals().entries["note"]) == {f"entry-{index}" for index in range(8)}
+    assert len(read_global_events(ctx.require(HARNESS).directory)) == 8, (
+        "an append was lost or torn"
+    )
+    assert set(ctx.require(HARNESS).globals().entries["note"]) == {
+        f"entry-{index}" for index in range(8)
+    }
 
 
 # ------------------------------------------------------------- rollback --
@@ -446,14 +454,14 @@ async def test_concurrent_global_writes_are_both_recorded(harnessed: Harnessed) 
 async def test_h6_rollback_restores_the_fold(harnessed: Harnessed) -> None:
     """The plan's gate. Derivable because each apply recorded what it replaced."""
     ctx, session, agent = await harnessed()
-    await ctx.harness.apply(
+    await ctx.require(HARNESS).apply(
         RefinementProposal(summary="original", edits=[note_edit("kept", "the first title")]),
         session=session,
         agent=agent,
     )
-    before = ctx.harness.state(session).to_wire()
+    before = ctx.require(HARNESS).state(session).to_wire()
 
-    bad = await ctx.harness.apply(
+    bad = await ctx.require(HARNESS).apply(
         RefinementProposal(
             summary="a regrettable change",
             edits=[
@@ -464,11 +472,11 @@ async def test_h6_rollback_restores_the_fold(harnessed: Harnessed) -> None:
         session=session,
         agent=agent,
     )
-    changed = ctx.harness.state(session).entry("note", "kept")
+    changed = ctx.require(HARNESS).state(session).entry("note", "kept")
     assert changed is not None and changed.title == "worse"
 
-    await ctx.harness.rollback(bad.refine_id, session=session, agent=agent)
-    after = ctx.harness.state(session)
+    await ctx.require(HARNESS).rollback(bad.refine_id, session=session, agent=agent)
+    after = ctx.require(HARNESS).state(session)
     restored = after.entry("note", "kept")
     assert restored is not None and restored.title == "the first title"
     assert after.entry("note", "also-added") is None
@@ -483,12 +491,12 @@ async def test_h6_rollback_restores_the_fold(harnessed: Harnessed) -> None:
 
 async def test_h6_a_refinement_is_not_rolled_back_twice(harnessed: Harnessed) -> None:
     ctx, session, agent = await harnessed()
-    record = await ctx.harness.apply(
+    record = await ctx.require(HARNESS).apply(
         RefinementProposal(summary="one", edits=[note_edit("thing")]), session=session, agent=agent
     )
-    await ctx.harness.rollback(record.refine_id, session=session, agent=agent)
+    await ctx.require(HARNESS).rollback(record.refine_id, session=session, agent=agent)
     with pytest.raises(RefinementRefused, match="already been rolled back"):
-        await ctx.harness.rollback(record.refine_id, session=session, agent=agent)
+        await ctx.require(HARNESS).rollback(record.refine_id, session=session, agent=agent)
 
 
 async def test_h6_rolling_back_a_global_refinement_asks_too(harnessed: Harnessed) -> None:
@@ -496,37 +504,37 @@ async def test_h6_rolling_back_a_global_refinement_asks_too(harnessed: Harnessed
     writing one does, so it goes through the same gate."""
     ctx, session, agent = await harnessed()
     asked = _allow(ctx)
-    record = await ctx.harness.apply(
+    record = await ctx.require(HARNESS).apply(
         RefinementProposal(summary="everyone", edits=[note_edit("shared")]),
         scope="global",
         session=session,
         agent=agent,
     )
 
-    await ctx.harness.rollback(record.refine_id, session=session, agent=agent)
+    await ctx.require(HARNESS).rollback(record.refine_id, session=session, agent=agent)
     assert asked == ["refine", "refine"]
-    assert ctx.harness.globals().entry("note", "shared") is None
+    assert ctx.require(HARNESS).globals().entry("note", "shared") is None
     # In the global log, not this session's — a rollback belongs to the scope it
     # undoes, or reopening the session would resurrect the entry.
-    assert len(read_global_events(ctx.harness.directory)) == 2
+    assert len(read_global_events(ctx.require(HARNESS).directory)) == 2
     assert [event for event in session.events if event.type == REFINED] == []
 
 
 async def test_the_command_reports_and_rolls_back(harnessed: Harnessed) -> None:
     ctx, session, agent = await harnessed()
-    record = await ctx.harness.apply(
+    record = await ctx.require(HARNESS).apply(
         RefinementProposal(summary="one", edits=[note_edit("thing")]), session=session, agent=agent
     )
 
-    shown = await ctx.commands.dispatch("/refine --show", session=session, agent=agent)
+    shown = await ctx.require(COMMANDS).dispatch("/refine --show", session=session, agent=agent)
     assert shown is not None and "[local:thing] a thing learned" in shown
     assert record.summary in shown
 
-    rolled = await ctx.commands.dispatch(
+    rolled = await ctx.require(COMMANDS).dispatch(
         f"/refine --rollback {record.refine_id}", session=session, agent=agent
     )
     assert rolled is not None and record.refine_id in rolled
-    assert ctx.harness.state(session).entry("note", "thing") is None
+    assert ctx.require(HARNESS).state(session).entry("note", "thing") is None
     # Recorded as something the *user* did, not as a model turn.
     assert [event.type for event in session.events if event.type.startswith("command/")] == [
         "command/run",
@@ -539,7 +547,9 @@ async def test_the_command_reports_and_rolls_back(harnessed: Harnessed) -> None:
 
 async def test_the_command_refuses_an_unknown_id(harnessed: Harnessed) -> None:
     ctx, session, agent = await harnessed()
-    shown = await ctx.commands.dispatch("/refine --rollback nope", session=session, agent=agent)
+    shown = await ctx.require(COMMANDS).dispatch(
+        "/refine --rollback nope", session=session, agent=agent
+    )
     assert shown is not None and "refusing" in shown and "nope" in shown
 
 
@@ -550,7 +560,7 @@ async def test_the_harness_reaches_the_model_as_a_snapshot(harnessed: Harnessed)
     """A12: a refinement changes this text mid-session, so it must not sit in the
     cached prefix — every apply would re-bill the whole prompt."""
     ctx, session, agent = await harnessed()
-    await ctx.harness.apply(
+    await ctx.require(HARNESS).apply(
         RefinementProposal(
             summary="learned how to run them",
             edits=[
@@ -567,7 +577,7 @@ async def test_the_harness_reaches_the_model_as_a_snapshot(harnessed: Harnessed)
         session=session,
         agent=agent,
     )
-    assembly = await ctx.system_prompt.assemble(agent.ctx, agent=agent)
+    assembly = await ctx.require(SYSTEM_PROMPT).assemble(agent.ctx, agent=agent)
     snapshot = join_context_sections(render_context_sections(assembly))
 
     assert "# Continual Harness State" in snapshot
@@ -603,28 +613,28 @@ async def test_the_projection_is_written_and_equals_the_fold(harnessed: Harnesse
     back — and if it can drift, something has started treating it as state.
     """
     ctx, session, agent = await harnessed()
-    await ctx.harness.apply(
+    await ctx.require(HARNESS).apply(
         RefinementProposal(summary="one", edits=[note_edit("thing")]), session=session, agent=agent
     )
 
-    path = ctx.harness.projection_path(session)
+    path = ctx.require(HARNESS).projection_path(session)
     assert path.exists()
     # Per session, because the projection is of local layered over global: one
     # shared path would have two sessions overwriting each other's.
-    assert path == ctx.harness.directory / session.id / PROJECTION_NAME
-    assert ctx.harness.verify_projection(session) is True
+    assert path == ctx.require(HARNESS).directory / session.id / PROJECTION_NAME
+    assert ctx.require(HARNESS).verify_projection(session) is True
 
     # Deleting it loses nothing: the state is the log.
     path.unlink()
-    assert ctx.harness.state(session).entry("note", "thing") is not None
-    assert ctx.harness.verify_projection(session) is False
-    await ctx.harness.write_projection(session)
-    assert ctx.harness.verify_projection(session) is True
+    assert ctx.require(HARNESS).state(session).entry("note", "thing") is not None
+    assert ctx.require(HARNESS).verify_projection(session) is False
+    await ctx.require(HARNESS).write_projection(session)
+    assert ctx.require(HARNESS).verify_projection(session) is True
 
 
 async def test_the_row_mounts_without_the_delegation_rows(harnessed: Harnessed) -> None:
     """The harness is not a delegation feature: `harnessed` mounts neither
     `rlm-subagent-provider` nor `rlm-prompt`, and `/refine` still works."""
     ctx, session, _agent = await harnessed()
-    assert ctx.harness.state(session).entries == {}
-    assert ctx.commands.get("refine") is not None
+    assert ctx.require(HARNESS).state(session).entries == {}
+    assert ctx.require(COMMANDS).get("refine") is not None

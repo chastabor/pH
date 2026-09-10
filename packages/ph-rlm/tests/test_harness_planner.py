@@ -23,11 +23,14 @@ from collections.abc import Callable
 from typing import Any
 
 import pytest
-from conftest import HARNESS_ROW
+from rlm_fixtures import HARNESS_ROW
 
+from ph.cordis import Context
+from ph.keys import AGENTS, COMMANDS, JOBS, LLM_FAKE, SESSIONS
+from ph.llm.types import GenerateOptions
 from ph.session import SurfaceIntent
 from ph.session.events import SessionEvent, SurfaceReplace
-from ph.testing import FAKE_OPTIONS, user_payload
+from ph.testing import FAKE_OPTIONS, MountProfile, block_text, user_payload
 from ph_rlm.harness import (
     CONSIDERED,
     REFINED,
@@ -36,6 +39,7 @@ from ph_rlm.harness import (
     due,
 )
 from ph_rlm.harness.planner import REFINEMENT_SYSTEM_PROMPT, REVIEW_SYSTEM_PROMPT
+from ph_rlm.keys import HARNESS
 
 pytestmark = pytest.mark.anyio
 
@@ -61,26 +65,26 @@ NO = json.dumps({"shouldRefine": False, "rationale": "routine work"})
 
 
 @pytest.fixture
-def refining(mount: Any) -> Refining:
+def refining(mount: MountProfile) -> Refining:
     """`await refining(**config)` → `(ctx, session, agent)` with a scripted model."""
 
     async def build(**config: Any) -> tuple[Any, Any, Any]:
         row = {**HARNESS_ROW, "config": config} if config else HARNESS_ROW
         ctx = await mount(row)
-        session = ctx.sessions.create("planning")
-        return ctx, session, ctx.agents.create(session, FAKE_OPTIONS)
+        session = ctx.require(SESSIONS).create("planning")
+        return ctx, session, ctx.require(AGENTS).create(session, FAKE_OPTIONS)
 
     return build
 
 
-def script(ctx: Any, *, review: str = NO, planner: str = "{}") -> list[Any]:
+def script(ctx: Context, *, review: str = NO, planner: str = "{}") -> list[GenerateOptions]:
     """Answer the review gate and the planner differently, and keep the requests."""
 
     def respond(request: Any) -> str:
         return review if request.system == REVIEW_SYSTEM_PROMPT else planner
 
-    ctx.llm_fake.respond = respond
-    return ctx.llm_fake.requests
+    ctx.require(LLM_FAKE).respond = respond
+    return ctx.require(LLM_FAKE).requests
 
 
 def turn(session: Any, index: int = 1) -> None:
@@ -105,7 +109,7 @@ async def test_the_planner_call_is_not_a_turn(refining: Refining) -> None:
     say(session, "hello")
     before = len(session.events)
 
-    await ctx.commands.dispatch("/refine", session=session, agent=agent)
+    await ctx.require(COMMANDS).dispatch("/refine", session=session, agent=agent)
     await ctx.drain()
 
     planner_request = next(one for one in requests if one.system == REFINEMENT_SYSTEM_PROMPT)
@@ -126,7 +130,7 @@ async def test_the_planner_prompt_carries_the_state_the_history_and_the_tail(
 ) -> None:
     ctx, session, agent = await refining()
     requests = script(ctx, planner=json.dumps(PROPOSAL))
-    await ctx.harness.apply(
+    await ctx.require(HARNESS).apply(
         RefinementProposal(
             summary="an earlier lesson",
             edits=[
@@ -144,14 +148,15 @@ async def test_the_planner_prompt_carries_the_state_the_history_and_the_tail(
     )
     say(session, "run the tests")
 
-    await ctx.commands.dispatch("/refine focus on the test commands", session=session, agent=agent)
+    await ctx.require(COMMANDS).dispatch(
+        "/refine focus on the test commands", session=session, agent=agent
+    )
     await ctx.drain()
 
-    prompt = (
+    prompt = block_text(
         next(one for one in requests if one.system == REFINEMENT_SYSTEM_PROMPT)
         .messages[0]
         .content[0]
-        .text
     )
     # What it already knows, so the model updates rather than duplicates.
     assert "[local:prefer-uv] prefer uv" in prompt
@@ -171,14 +176,13 @@ async def test_only_the_tail_of_a_long_conversation_is_sent(refining: Refining) 
     say(session, "x" * 5_000, "m1")
     say(session, "the last thing said", "m2")
 
-    await ctx.commands.dispatch("/refine", session=session, agent=agent)
+    await ctx.require(COMMANDS).dispatch("/refine", session=session, agent=agent)
     await ctx.drain()
 
-    prompt = (
+    prompt = block_text(
         next(one for one in requests if one.system == REFINEMENT_SYSTEM_PROMPT)
         .messages[0]
         .content[0]
-        .text
     )
     assert "the last thing said" in prompt
     assert "x" * 500 not in prompt
@@ -197,14 +201,13 @@ async def test_the_conversation_is_what_the_model_saw(refining: Refining) -> Non
         SurfaceIntent(SurfaceReplace(replaces=(first.seq,)), (first.seq,)),
     )
 
-    await ctx.commands.dispatch("/refine", session=session, agent=agent)
+    await ctx.require(COMMANDS).dispatch("/refine", session=session, agent=agent)
     await ctx.drain()
 
-    prompt = (
+    prompt = block_text(
         next(one for one in requests if one.system == REFINEMENT_SYSTEM_PROMPT)
         .messages[0]
         .content[0]
-        .text
     )
     assert "(summary of earlier conversation)" in prompt
     assert "the forgotten original" not in prompt
@@ -220,13 +223,13 @@ async def test_the_command_schedules_a_job_and_the_refinement_lands(refining: Re
     ctx, session, agent = await refining()
     script(ctx, planner=json.dumps(PROPOSAL))
 
-    shown = await ctx.commands.dispatch("/refine", session=session, agent=agent)
+    shown = await ctx.require(COMMANDS).dispatch("/refine", session=session, agent=agent)
     assert shown is not None and "background" in shown and "refine-" in shown
     # Nothing has been applied yet: the command returned before the model did.
-    assert ctx.harness.state(session).entry("procedure", "run-the-tests") is None
+    assert ctx.require(HARNESS).state(session).entry("procedure", "run-the-tests") is None
 
     await ctx.drain()
-    entry = ctx.harness.state(session).entry("procedure", "run-the-tests")
+    entry = ctx.require(HARNESS).state(session).entry("procedure", "run-the-tests")
     assert entry is not None and entry.content == "uv run pytest"
 
 
@@ -234,7 +237,7 @@ async def test_show_prints_what_the_bound_hides(refining: Refining) -> None:
     """`--show` is unbounded on purpose: the entries the prompt section elides are
     exactly the ones a human cannot see any other way."""
     ctx, session, agent = await refining(maxPerKind=1)
-    await ctx.harness.apply(
+    await ctx.require(HARNESS).apply(
         RefinementProposal(
             summary="two notes",
             edits=[
@@ -246,16 +249,16 @@ async def test_show_prints_what_the_bound_hides(refining: Refining) -> None:
         agent=agent,
     )
 
-    shown = await ctx.commands.dispatch("/refine --show", session=session, agent=agent)
+    shown = await ctx.require(COMMANDS).dispatch("/refine --show", session=session, agent=agent)
     assert shown is not None
     assert "[local:aaa] first" in shown and "[local:zzz] second" in shown
     assert "more" not in shown
-    assert ctx.llm_fake.requests == [], "--show asked a model anything"
+    assert ctx.require(LLM_FAKE).requests == [], "--show asked a model anything"
 
 
 async def test_show_on_an_empty_harness_says_so(refining: Refining) -> None:
     ctx, session, agent = await refining()
-    assert await ctx.commands.dispatch("/refine --show", session=session, agent=agent) == (
+    assert await ctx.require(COMMANDS).dispatch("/refine --show", session=session, agent=agent) == (
         "the harness is empty"
     )
 
@@ -266,11 +269,11 @@ async def test_a_user_pass_skips_the_review_gate(refining: Refining) -> None:
     ctx, session, agent = await refining()
     requests = script(ctx, review=NO, planner=json.dumps(PROPOSAL))
 
-    await ctx.commands.dispatch("/refine", session=session, agent=agent)
+    await ctx.require(COMMANDS).dispatch("/refine", session=session, agent=agent)
     await ctx.drain()
 
     assert [one.system for one in requests] == [REFINEMENT_SYSTEM_PROMPT]
-    assert ctx.harness.state(session).entry("procedure", "run-the-tests") is not None
+    assert ctx.require(HARNESS).state(session).entry("procedure", "run-the-tests") is not None
 
 
 async def test_a_pass_that_proposes_nothing_is_recorded_and_visible(refining: Refining) -> None:
@@ -279,7 +282,7 @@ async def test_a_pass_that_proposes_nothing_is_recorded_and_visible(refining: Re
     ctx, session, agent = await refining()
     script(ctx, planner=json.dumps({"summary": "nothing durable here", "edits": []}))
 
-    await ctx.commands.dispatch("/refine", session=session, agent=agent)
+    await ctx.require(COMMANDS).dispatch("/refine", session=session, agent=agent)
     await ctx.drain()
 
     considered = [event for event in session.events if event.type == CONSIDERED]
@@ -303,7 +306,7 @@ async def test_a_planner_that_returns_junk_records_it_instead_of_raising(
     ctx, session, agent = await refining()
     requests = script(ctx, planner="I'm afraid I can't do that.")
 
-    await ctx.commands.dispatch("/refine", session=session, agent=agent)
+    await ctx.require(COMMANDS).dispatch("/refine", session=session, agent=agent)
     await ctx.drain()
 
     (considered,) = [event for event in session.events if event.type == CONSIDERED]
@@ -329,9 +332,9 @@ async def test_a_reply_wrapped_in_prose_is_corrected_rather_than_declined(
     def respond(request: Any) -> str:
         return NO if request.system == REVIEW_SYSTEM_PROMPT else next(replies)
 
-    ctx.llm_fake.respond = respond
+    ctx.require(LLM_FAKE).respond = respond
 
-    await ctx.commands.dispatch("/refine", session=session, agent=agent)
+    await ctx.require(COMMANDS).dispatch("/refine", session=session, agent=agent)
     await ctx.drain()
 
     assert [event for event in session.events if event.type == REFINED], "the refinement applied"
@@ -341,8 +344,8 @@ async def test_a_second_pass_is_refused_while_one_is_running(refining: Refining)
     ctx, session, agent = await refining()
     script(ctx, planner=json.dumps(PROPOSAL))
 
-    await ctx.commands.dispatch("/refine", session=session, agent=agent)
-    second = await ctx.commands.dispatch("/refine", session=session, agent=agent)
+    await ctx.require(COMMANDS).dispatch("/refine", session=session, agent=agent)
+    second = await ctx.require(COMMANDS).dispatch("/refine", session=session, agent=agent)
     assert second is not None and "already running" in second
     await ctx.drain()
     assert len([event for event in session.events if event.type == REFINED]) == 1
@@ -354,11 +357,11 @@ async def test_a_finished_pass_leaves_no_job_behind(refining: Refining) -> None:
     ctx, session, agent = await refining()
     script(ctx, planner=json.dumps(PROPOSAL))
 
-    await ctx.commands.dispatch("/refine", session=session, agent=agent)
-    assert [job.kind for job in ctx.jobs.list()] == ["refine"]
+    await ctx.require(COMMANDS).dispatch("/refine", session=session, agent=agent)
+    assert [job.kind for job in ctx.require(JOBS).list()] == ["refine"]
 
     await ctx.drain()
-    assert ctx.jobs.list() == []
+    assert ctx.require(JOBS).list() == []
     # Forgotten because it finished, not cancelled: the refinement still landed.
     assert [event for event in session.events if event.type == REFINED] != []
 
@@ -404,7 +407,7 @@ async def test_a_refinement_itself_starts_the_cooldown(refining: Refining) -> No
     script(ctx, planner=json.dumps(PROPOSAL))
     for index in range(30):
         turn(session, index)
-    await ctx.commands.dispatch("/refine", session=session, agent=agent)
+    await ctx.require(COMMANDS).dispatch("/refine", session=session, agent=agent)
     await ctx.drain()
 
     assert [event for event in session.events if event.type == REFINED] != []
@@ -436,10 +439,10 @@ async def test_auto_refine_fires_at_the_threshold_and_stays_local(refining: Refi
         turn(session, index)
         await ctx.drain()
 
-    entry = ctx.harness.state(session).entry("procedure", "run-the-tests")
+    entry = ctx.require(HARNESS).state(session).entry("procedure", "run-the-tests")
     assert entry is not None and entry.scope == "local"
     # The gate ran first, and only then the planner.
-    assert [one.system for one in ctx.llm_fake.requests] == [
+    assert [one.system for one in ctx.require(LLM_FAKE).requests] == [
         REVIEW_SYSTEM_PROMPT,
         REFINEMENT_SYSTEM_PROMPT,
     ]
@@ -453,7 +456,9 @@ async def test_a_declined_review_costs_one_cheap_call(refining: Refining) -> Non
         turn(session, index)
         await ctx.drain()
 
-    assert [one.system for one in ctx.llm_fake.requests].count(REFINEMENT_SYSTEM_PROMPT) == 0
+    assert [one.system for one in ctx.require(LLM_FAKE).requests].count(
+        REFINEMENT_SYSTEM_PROMPT
+    ) == 0
     considered = [event for event in session.events if event.type == CONSIDERED]
     assert [one.data["trigger"] for one in considered] == ["turns", "turns"]
     assert considered[0].data["reason"] == "routine work"
@@ -473,15 +478,15 @@ async def test_a_veto_stops_it_before_any_model_call(refining: Refining) -> None
 
     turn(session)
     await ctx.drain()
-    assert ctx.llm_fake.requests == []
+    assert ctx.require(LLM_FAKE).requests == []
     (auto,) = [event for event in session.events if event.type == CONSIDERED]
     assert auto.data["reason"] == "vetoed: this deployment does not refine (trigger: turns)"
 
     # And the trigger is on the payload, so a listener can tell the automatic
     # passes from a human's `/refine`.
-    await ctx.commands.dispatch("/refine", session=session, agent=agent)
+    await ctx.require(COMMANDS).dispatch("/refine", session=session, agent=agent)
     await ctx.drain()
-    assert ctx.llm_fake.requests == []
+    assert ctx.require(LLM_FAKE).requests == []
     asked = [event for event in session.events if event.type == CONSIDERED][-1]
     assert asked.data["reason"] == "vetoed: this deployment does not refine (trigger: user)"
 
@@ -494,9 +499,9 @@ async def test_auto_refine_can_be_turned_off(refining: Refining) -> None:
         turn(session, index)
         await ctx.drain()
 
-    assert ctx.llm_fake.requests == []
+    assert ctx.require(LLM_FAKE).requests == []
     # The command still works: turning the automatic pass off is not turning the
     # harness off.
-    await ctx.commands.dispatch("/refine", session=session, agent=agent)
+    await ctx.require(COMMANDS).dispatch("/refine", session=session, agent=agent)
     await ctx.drain()
-    assert ctx.harness.state(session).entry("procedure", "run-the-tests") is not None
+    assert ctx.require(HARNESS).state(session).entry("procedure", "run-the-tests") is not None

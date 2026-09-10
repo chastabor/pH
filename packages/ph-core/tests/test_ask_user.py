@@ -24,9 +24,10 @@ import anyio
 import pytest
 
 from ph.cordis import DEPLOYMENT
+from ph.keys import AGENTS, SESSIONS, TOOLS, USER_QUESTIONS
 from ph.llm.types import text_of
 from ph.seams.user_questions import UserQuestion, pending_questions
-from ph.testing import FAKE_OPTIONS, run_tool
+from ph.testing import FAKE_OPTIONS, MountProfile, run_tool
 from ph.tools.builtin.ask_user import UNATTENDED
 
 pytestmark = pytest.mark.anyio
@@ -37,7 +38,7 @@ rather than inserting one keeps this the same row `tui.yaml` arms."""
 
 
 def _agent(ctx: Any, session: Any) -> Any:
-    return ctx.agents.create(session, FAKE_OPTIONS)
+    return ctx.require(AGENTS).create(session, FAKE_OPTIONS)
 
 
 def _answering(answer: str | None, seen: list[UserQuestion]) -> Any:
@@ -66,7 +67,7 @@ async def _ask(
 # ------------------------------------------------------------------ the row --
 
 
-async def test_the_row_is_disarmed_in_the_base_bundle(mount: Any) -> None:
+async def test_the_row_is_disarmed_in_the_base_bundle(mount: MountProfile) -> None:
     """Nothing is offered to a model that has nobody to ask.
 
     Composed without the patch, so this is `ph-base` + `headless` exactly as an
@@ -77,26 +78,26 @@ async def test_the_row_is_disarmed_in_the_base_bundle(mount: Any) -> None:
     """
     ctx = await mount()
 
-    assert ctx.tools.get("ask_user", scope=DEPLOYMENT) is None
+    assert ctx.require(TOOLS).get("ask_user", scope=DEPLOYMENT) is None
 
 
-async def test_arming_the_row_registers_the_tool(mount: Any) -> None:
+async def test_arming_the_row_registers_the_tool(mount: MountProfile) -> None:
     ctx = await mount(ROW)
 
-    assert ctx.tools.get("ask_user", scope=DEPLOYMENT) is not None
+    assert ctx.require(TOOLS).get("ask_user", scope=DEPLOYMENT) is not None
 
 
 # ------------------------------------------------------------ the exchange --
 
 
 async def test_the_model_can_ask_the_person_a_question_and_read_the_answer(
-    mount: Any,
+    mount: MountProfile,
 ) -> None:
     """The whole path, end to end: tool → seam → answerer → result → log."""
     ctx = await mount(ROW)
     seen: list[UserQuestion] = []
-    ctx.user_questions.register_answerer(_answering("8080", seen))
-    session = ctx.sessions.create("asked")
+    ctx.require(USER_QUESTIONS).register_answerer(_answering("8080", seen))
+    session = ctx.require(SESSIONS).create("asked")
 
     result = await _ask(ctx, session, "Port", ["8080", "9000"])
 
@@ -110,7 +111,7 @@ async def test_the_model_can_ask_the_person_a_question_and_read_the_answer(
     assert answered is not None and answered.data.get("answer") == "8080"
 
 
-async def test_the_question_is_logged_before_the_person_answers(mount: Any) -> None:
+async def test_the_question_is_logged_before_the_person_answers(mount: MountProfile) -> None:
     """§5 rule 2, and the reason the two events are two.
 
     The answerer reads the log from inside its own call — which is the only
@@ -121,14 +122,14 @@ async def test_the_question_is_logged_before_the_person_answers(mount: Any) -> N
     Sabotage: append both after the waterfall, and `during` is empty.
     """
     ctx = await mount(ROW)
-    session = ctx.sessions.create("ordered")
+    session = ctx.require(SESSIONS).create("ordered")
     during: list[str] = []
 
     async def answerer(question: UserQuestion, _next: Any = None) -> str:
         during.extend(event.type for event in session.events if event.type.startswith("question/"))
         return "yes"
 
-    ctx.user_questions.register_answerer(answerer)
+    ctx.require(USER_QUESTIONS).register_answerer(answerer)
 
     await _ask(ctx, session)
 
@@ -136,7 +137,7 @@ async def test_the_question_is_logged_before_the_person_answers(mount: Any) -> N
 
 
 async def test_a_question_nobody_is_there_to_answer_writes_nothing_to_the_log(
-    mount: Any,
+    mount: MountProfile,
 ) -> None:
     """Never asked is not the same as asked and declined.
 
@@ -148,7 +149,7 @@ async def test_a_question_nobody_is_there_to_answer_writes_nothing_to_the_log(
     never happened — a log that says a person was asked and said no.
     """
     ctx = await mount(ROW)
-    session = ctx.sessions.create("alone")
+    session = ctx.require(SESSIONS).create("alone")
 
     result = await _ask(ctx, session)
 
@@ -157,7 +158,7 @@ async def test_a_question_nobody_is_there_to_answer_writes_nothing_to_the_log(
 
 
 async def test_an_answerer_that_cannot_reach_anyone_is_the_same_as_none(
-    mount: Any,
+    mount: MountProfile,
 ) -> None:
     """Registered but unreachable — the daemon with every front end closed.
 
@@ -169,9 +170,11 @@ async def test_an_answerer_that_cannot_reach_anyone_is_the_same_as_none(
     attached once keeps this session logging questions into an empty room.
     """
     ctx = await mount(ROW)
-    session = ctx.sessions.create("unreachable")
+    session = ctx.require(SESSIONS).create("unreachable")
     attached: list[str] = []
-    ctx.user_questions.register_answerer(_answering("42", []), reachable=lambda: bool(attached))
+    ctx.require(USER_QUESTIONS).register_answerer(
+        _answering("42", []), reachable=lambda: bool(attached)
+    )
 
     away = await _ask(ctx, session)
     attached.append("a front end")
@@ -183,7 +186,7 @@ async def test_an_answerer_that_cannot_reach_anyone_is_the_same_as_none(
 
 
 async def test_a_declined_question_is_recorded_and_stops_being_pending(
-    mount: Any,
+    mount: MountProfile,
 ) -> None:
     """Somebody was there and said nothing — which is an answer to record.
 
@@ -193,8 +196,8 @@ async def test_a_declined_question_is_recorded_and_stops_being_pending(
     interrupted, and a resume would put it back forever.
     """
     ctx = await mount(ROW)
-    session = ctx.sessions.create("declined")
-    ctx.user_questions.register_answerer(_answering(None, []))
+    session = ctx.require(SESSIONS).create("declined")
+    ctx.require(USER_QUESTIONS).register_answerer(_answering(None, []))
 
     result = await _ask(ctx, session)
 
@@ -207,7 +210,7 @@ async def test_a_declined_question_is_recorded_and_stops_being_pending(
 # ------------------------------------------------------------- the pending --
 
 
-async def test_a_question_cancelled_mid_answer_stays_pending(mount: Any) -> None:
+async def test_a_question_cancelled_mid_answer_stays_pending(mount: MountProfile) -> None:
     """The pending state is the log, not a table somebody remembered to keep.
 
     A real interruption, not a doctored log: the turn is cancelled while a person
@@ -221,7 +224,7 @@ async def test_a_question_cancelled_mid_answer_stays_pending(mount: Any) -> None
     then say a released root had been answered.
     """
     ctx = await mount(ROW)
-    session = ctx.sessions.create("interrupted")
+    session = ctx.require(SESSIONS).create("interrupted")
     posed = anyio.Event()
 
     async def never(question: UserQuestion, _next: Any = None) -> str:
@@ -229,7 +232,7 @@ async def test_a_question_cancelled_mid_answer_stays_pending(mount: Any) -> None
         await anyio.sleep(30)
         return "too late"
 
-    ctx.user_questions.register_answerer(never)
+    ctx.require(USER_QUESTIONS).register_answerer(never)
 
     async with anyio.create_task_group() as tasks:
         tasks.start_soon(_ask, ctx, session, "Port", ["8080"])
@@ -245,7 +248,7 @@ async def test_a_question_cancelled_mid_answer_stays_pending(mount: Any) -> None
 
 
 async def test_the_ask_id_is_the_call_id_the_rest_of_the_log_already_uses(
-    mount: Any,
+    mount: MountProfile,
 ) -> None:
     """One string joins the four records of one exchange.
 
@@ -255,8 +258,8 @@ async def test_the_ask_id_is_the_call_id_the_rest_of_the_log_already_uses(
     question the log is still holding open.
     """
     ctx = await mount(ROW)
-    ctx.user_questions.register_answerer(_answering("8080", []))
-    session = ctx.sessions.create("keyed")
+    ctx.require(USER_QUESTIONS).register_answerer(_answering("8080", []))
+    session = ctx.require(SESSIONS).create("keyed")
 
     await run_tool(
         ctx,

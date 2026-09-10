@@ -27,7 +27,9 @@ from typing import Any
 
 import pytest
 
+from ph.keys import SESSION_TELEMETRY
 from ph.seams.telemetry import SessionTelemetryRecord
+from ph.testing import MountProfile
 
 pytestmark = pytest.mark.anyio
 
@@ -38,7 +40,7 @@ def _record(body: str, **attributes: Any) -> SessionTelemetryRecord:
     )
 
 
-async def test_a_sink_sees_only_what_redaction_left(mount: Any) -> None:
+async def test_a_sink_sees_only_what_redaction_left(mount: MountProfile) -> None:
     """The gate.
 
     A redactor registered on the waterfall rewrites the record; the sink is
@@ -57,14 +59,14 @@ async def test_a_sink_sees_only_what_redaction_left(mount: Any) -> None:
         )
 
     ctx.on("session-telemetry/record", redact)
-    ctx.session_telemetry.add_sink(seen.append)
+    ctx.require(SESSION_TELEMETRY).add_sink(seen.append)
 
-    await ctx.session_telemetry.record(_record("the password is hunter2"))
+    await ctx.require(SESSION_TELEMETRY).record(_record("the password is hunter2"))
 
     assert [record.body for record in seen] == ["the password is «redacted»"]
 
 
-async def test_a_record_a_redactor_drops_reaches_no_sink(mount: Any) -> None:
+async def test_a_record_a_redactor_drops_reaches_no_sink(mount: MountProfile) -> None:
     """Dropping is stronger than rewriting, and must be just as absolute.
 
     A redactor returning `None` removes the record; a sink that still saw it
@@ -77,13 +79,13 @@ async def test_a_record_a_redactor_drops_reaches_no_sink(mount: Any) -> None:
         return None
 
     ctx.on("session-telemetry/record", drop)
-    ctx.session_telemetry.add_sink(seen.append)
+    ctx.require(SESSION_TELEMETRY).add_sink(seen.append)
 
-    await ctx.session_telemetry.record(_record("secret"))
+    await ctx.require(SESSION_TELEMETRY).record(_record("secret"))
     assert seen == []
 
 
-async def test_a_failing_sink_does_not_take_the_others_with_it(mount: Any) -> None:
+async def test_a_failing_sink_does_not_take_the_others_with_it(mount: MountProfile) -> None:
     """Sink containment belongs to the seam, so this is where it is asserted.
 
     Every sink talks to something that can be down — a collector, a disk — and
@@ -97,8 +99,8 @@ async def test_a_failing_sink_does_not_take_the_others_with_it(mount: Any) -> No
     def explode(record: SessionTelemetryRecord) -> None:
         raise RuntimeError("the collector is down")
 
-    ctx.session_telemetry.add_sink(explode)
-    ctx.session_telemetry.add_sink(lambda record: seen.append(record.body))
+    ctx.require(SESSION_TELEMETRY).add_sink(explode)
+    ctx.require(SESSION_TELEMETRY).add_sink(lambda record: seen.append(record.body))
 
-    await ctx.session_telemetry.record(_record("still recorded"))
+    await ctx.require(SESSION_TELEMETRY).record(_record("still recorded"))
     assert seen == ["still recorded"]

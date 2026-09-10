@@ -25,16 +25,25 @@ from typing import Any
 import pytest
 
 from ph.agent.types import AgentOptions
-from ph.llm.types import GenerateOptions
+from ph.keys import AGENTS, LLM_FAKE, LLM_REPLAY, SESSIONS, SYSTEM_PROMPT, TOOLS
+from ph.llm.types import GenerateOptions, Message, ModelSource
+from ph.session.json import as_obj
 from ph.system_prompt.assembly import PromptContext, PromptSection
 from ph.testing import FAKE_OPTIONS as FAKE
-from ph.testing import REPLAY_ROW, ReplayAdapter, recorded_steps, shared_prefix
+from ph.testing import (
+    REPLAY_ROW,
+    MountProfile,
+    ReplayAdapter,
+    as_kind,
+    recorded_steps,
+    shared_prefix,
+)
 from ph.tools import ToolOutput, define_tool, text_content
 
 pytestmark = pytest.mark.anyio
 
 
-def _shape(message: Any) -> dict[str, Any]:
+def _shape(message: Message) -> dict[str, Any]:
     """What the model would read, with per-run facts removed.
 
     Two things legitimately differ between a recording and its replay, and
@@ -74,30 +83,34 @@ def _assert_prefix_stable(requests: list[GenerateOptions]) -> None:
 
 
 async def _record(ctx: Any, prompts: list[str]) -> Any:
-    session = ctx.sessions.create("recorded")
-    agent = ctx.agents.create(session, FAKE)
+    session = ctx.require(SESSIONS).create("recorded")
+    agent = ctx.require(AGENTS).create(session, FAKE)
     for prompt in prompts:
         await agent.prompt(prompt)
     return session
 
 
-async def test_consecutive_requests_share_their_prefix(mount: Any) -> None:
+async def test_consecutive_requests_share_their_prefix(mount: MountProfile) -> None:
     ctx = await mount()
-    ctx.system_prompt.section(PromptSection(name="identity", text="You are pH.", order=-100))
+    ctx.require(SYSTEM_PROMPT).section(
+        PromptSection(name="identity", text="You are pH.", order=-100)
+    )
     await _record(ctx, ["first", "second", "third"])
-    requests = ctx.llm_fake.requests
+    requests = ctx.require(LLM_FAKE).requests
     assert len(requests) == 3
     _assert_prefix_stable(requests)
 
 
-async def test_a_changing_context_snapshot_keeps_the_prefix_stable(mount: Any) -> None:
+async def test_a_changing_context_snapshot_keeps_the_prefix_stable(mount: MountProfile) -> None:
     ctx = await mount()
     clock = {"value": "09:00"}
-    ctx.system_prompt.section(PromptSection(name="identity", text="You are pH.", order=-100))
-    ctx.system_prompt.context(PromptContext(name="time", text=lambda _c: clock["value"]))
+    ctx.require(SYSTEM_PROMPT).section(
+        PromptSection(name="identity", text="You are pH.", order=-100)
+    )
+    ctx.require(SYSTEM_PROMPT).context(PromptContext(name="time", text=lambda _c: clock["value"]))
 
-    session = ctx.sessions.create("s")
-    agent = ctx.agents.create(session, FAKE)
+    session = ctx.require(SESSIONS).create("s")
+    agent = ctx.require(AGENTS).create(session, FAKE)
     await agent.prompt("first")
     clock["value"] = "10:00"
     await agent.prompt("second")
@@ -106,11 +119,11 @@ async def test_a_changing_context_snapshot_keeps_the_prefix_stable(mount: Any) -
 
     # The changing text is appended as new history, never folded into the
     # cached prefix — which is the entire reason `context()` is not a `section`.
-    _assert_prefix_stable(ctx.llm_fake.requests)
-    assert all(request.system == "You are pH." for request in ctx.llm_fake.requests)
+    _assert_prefix_stable(ctx.require(LLM_FAKE).requests)
+    assert all(request.system == "You are pH." for request in ctx.require(LLM_FAKE).requests)
 
 
-async def test_a_memory_edit_does_not_move_the_prefix(mount: Any, tmp_path: Path) -> None:
+async def test_a_memory_edit_does_not_move_the_prefix(mount: MountProfile, tmp_path: Path) -> None:
     """G8's gate, and the reason `memory-agents-md` is a `context()` (P4-13).
 
     `AGENTS.md` exists to be edited. Registered as a static section — which is
@@ -121,17 +134,19 @@ async def test_a_memory_edit_does_not_move_the_prefix(mount: Any, tmp_path: Path
     reached the model anyway.
     """
     ctx = await mount()
-    ctx.system_prompt.section(PromptSection(name="identity", text="You are pH.", order=-100))
+    ctx.require(SYSTEM_PROMPT).section(
+        PromptSection(name="identity", text="You are pH.", order=-100)
+    )
     memory = tmp_path / "AGENTS.md"
     memory.write_text("Prefer tabs.", encoding="utf-8")
 
-    session = ctx.sessions.create("s")
-    agent = ctx.agents.create(session, FAKE)
+    session = ctx.require(SESSIONS).create("s")
+    agent = ctx.require(AGENTS).create(session, FAKE)
     await agent.prompt("first")
     memory.write_text("Prefer spaces, and say why.", encoding="utf-8")
     await agent.prompt("second")
 
-    requests = ctx.llm_fake.requests
+    requests = ctx.require(LLM_FAKE).requests
     _assert_prefix_stable(requests)
     assert all(request.system == "You are pH." for request in requests)
     delivered = json.dumps([_shape(message) for message in requests[-1].messages])
@@ -139,7 +154,7 @@ async def test_a_memory_edit_does_not_move_the_prefix(mount: Any, tmp_path: Path
 
 
 async def test_a_tool_registration_is_the_kind_of_change_that_does_move_the_prefix(
-    mount: Any,
+    mount: MountProfile,
 ) -> None:
     """Stated explicitly: the test asserts stability, not that nothing ever changes.
 
@@ -148,10 +163,10 @@ async def test_a_tool_registration_is_the_kind_of_change_that_does_move_the_pref
     *accidental* churn, not against real changes.
     """
     ctx = await mount()
-    session = ctx.sessions.create("s")
-    agent = ctx.agents.create(session, FAKE)
+    session = ctx.require(SESSIONS).create("s")
+    agent = ctx.require(AGENTS).create(session, FAKE)
     await agent.prompt("first")
-    ctx.tools.register(
+    ctx.require(TOOLS).register(
         define_tool(
             "ping",
             "returns pong",
@@ -165,30 +180,36 @@ async def test_a_tool_registration_is_the_kind_of_change_that_does_move_the_pref
     headers = [event for event in session.events if event.type == "request/header"]
     assert [event.data["reason"] for event in headers] == ["initial", "change"]
     # History still extends rather than being rewritten.
-    _assert_prefix_stable(ctx.llm_fake.requests)
+    _assert_prefix_stable(ctx.require(LLM_FAKE).requests)
 
 
-async def test_replay_reproduces_the_recorded_derivation(mount: Any) -> None:
+async def test_replay_reproduces_the_recorded_derivation(mount: MountProfile) -> None:
     ctx = await mount()
-    ctx.system_prompt.section(PromptSection(name="identity", text="You are pH.", order=-100))
+    ctx.require(SYSTEM_PROMPT).section(
+        PromptSection(name="identity", text="You are pH.", order=-100)
+    )
     recorded = await _record(ctx, ["first", "second"])
     expected = [_shape(message) for message in recorded.derive_messages()]
 
     # A second process replays the recording with no provider at all.
     replay_ctx = await mount(REPLAY_ROW)
-    replay_ctx.system_prompt.section(PromptSection(name="identity", text="You are pH.", order=-100))
-    adapter: ReplayAdapter = replay_ctx.llm_replay
+    replay_ctx.require(SYSTEM_PROMPT).section(
+        PromptSection(name="identity", text="You are pH.", order=-100)
+    )
+    adapter: ReplayAdapter = replay_ctx.require(LLM_REPLAY)
     adapter.steps = recorded_steps(recorded.events)
 
-    session = replay_ctx.sessions.create("replayed")
-    agent = replay_ctx.agents.create(session, AgentOptions(provider="replay", model="fake-1"))
+    session = replay_ctx.require(SESSIONS).create("replayed")
+    agent = replay_ctx.require(AGENTS).create(
+        session, AgentOptions(provider="replay", model="fake-1")
+    )
     await agent.prompt("first")
     await agent.prompt("second")
 
     assert [_shape(message) for message in session.derive_messages()] == expected
     # And the provenance is honest about who actually answered.
     replayed_sources = [
-        message.source.provider
+        as_kind(message.source, ModelSource).provider
         for message in session.derive_messages()
         if message.role == "assistant"
     ]
@@ -216,13 +237,13 @@ def test_recorded_steps_group_by_turn_and_step() -> None:
     assert all(len(step.chunks) == 2 for step in steps)
 
 
-async def test_replay_refuses_to_invent_a_step(mount: Any) -> None:
+async def test_replay_refuses_to_invent_a_step(mount: MountProfile) -> None:
     ctx = await mount(REPLAY_ROW)
-    ctx.llm_replay.steps = []
-    session = ctx.sessions.create("s")
-    agent = ctx.agents.create(session, AgentOptions(provider="replay", model="m"))
+    ctx.require(LLM_REPLAY).steps = []
+    session = ctx.require(SESSIONS).create("s")
+    agent = ctx.require(AGENTS).create(session, AgentOptions(provider="replay", model="m"))
     await agent.prompt("hello")
     # The turn fails rather than the replay fabricating output.
     reason = session.events[-1].data["reason"]
-    assert reason["kind"] == "error"
-    assert reason["error"]["code"] == "REPLAY_EXHAUSTED"
+    assert as_obj(reason)["kind"] == "error"
+    assert as_obj(as_obj(reason)["error"])["code"] == "REPLAY_EXHAUSTED"

@@ -29,12 +29,13 @@ from typing import Any
 import pytest
 
 from ph.cordis import Context
+from ph.keys import SESSIONS
 from ph.llm.types import PluginSource
 from ph.persistence import read_session
 from ph.session import Session, SurfaceIntent, SurfaceReplace, is_fork_boundary
 from ph.session.json import thaw_json
 from ph.session.known_event_types import KNOWN_SESSION_EVENT_TYPES
-from ph.testing import assistant_payload, stored_log, user_payload
+from ph.testing import MountProfile, assistant_payload, store_root, stored_log, user_payload
 from ph_app.tui.adapter import RECORDLESS as TRANSCRIPT_RECORDLESS
 from ph_app.tui.trajectory import HANDLERS, RECORDLESS, TrajectoryRecord, build_trajectory
 
@@ -338,7 +339,9 @@ def test_a_record_inside_an_open_turn_is_not_a_fork_point() -> None:
 # --------------------------------------------------------------- the fold --
 
 
-async def test_a_stored_log_and_a_live_one_project_identically(mount: Any, tmp_path: Any) -> None:
+async def test_a_stored_log_and_a_live_one_project_identically(
+    mount: MountProfile, tmp_path: Any
+) -> None:
     """The P2-01 gate, for the auditor's view.
 
     The point of the whole projection: it is derived from the log and nothing
@@ -347,7 +350,7 @@ async def test_a_stored_log_and_a_live_one_project_identically(mount: Any, tmp_p
     what P3-25's harness-free entry point stands on.
     """
     ctx: Context = await mount()
-    live = ctx.sessions.create("round-trip")
+    live = ctx.require(SESSIONS).create("round-trip")
     for event in _conversation().events:
         # `thaw_json`, because a logged payload is frozen — its lists are tuples,
         # which the lossless-JSON guard refuses on the way back in.
@@ -356,9 +359,9 @@ async def test_a_stored_log_and_a_live_one_project_identically(mount: Any, tmp_p
             thaw_json(event.data),
             SurfaceIntent("append") if event.surface_op else None,
         )
-    await ctx.sessions.flush(live)
+    await ctx.require(SESSIONS).flush(live)
 
-    header, events = read_session(stored_log(ctx.session_persistence.root, live.id))
+    header, events = read_session(stored_log(store_root(ctx), live.id))
     stored = Session(live.id, seed=events, header=header)
 
     replayed = build_trajectory(stored)

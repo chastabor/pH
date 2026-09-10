@@ -32,7 +32,9 @@ from typing import Any, get_args
 import pytest
 
 from ph.cordis import MountRefusal
+from ph.keys import SESSION_TELEMETRY
 from ph.seams.telemetry import SessionTelemetryRecord
+from ph.testing import MountProfile, not_none
 
 pytestmark = pytest.mark.anyio
 
@@ -46,7 +48,7 @@ def _record(body: str, **attributes: Any) -> SessionTelemetryRecord:
 
 
 async def test_the_shipped_sink_exports_post_redaction_records(
-    mount: Any, monkeypatch: pytest.MonkeyPatch
+    mount: MountProfile, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """End to end through the row itself: what a collector would receive.
 
@@ -65,7 +67,8 @@ async def test_the_shipped_sink_exports_post_redaction_records(
 
     import ph.seams.telemetry_otel as row
 
-    exported = InMemoryLogRecordExporter()
+    # opentelemetry's in-memory exporter ships untyped.
+    exported = InMemoryLogRecordExporter()  # type: ignore[no-untyped-call]
     monkeypatch.setattr(row, "_pipeline", lambda config: SimpleLogRecordProcessor(exported))
 
     ctx = await mount(OTEL_ROW)
@@ -76,19 +79,19 @@ async def test_the_shipped_sink_exports_post_redaction_records(
         )
 
     ctx.on("session-telemetry/record", redact)
-    await ctx.session_telemetry.record(_record("token hunter2", tool="bash"))
+    await ctx.require(SESSION_TELEMETRY).record(_record("token hunter2", tool="bash"))
 
     emitted = exported.get_finished_logs()
     assert emitted, "the row's sink exported nothing"
     body = emitted[-1].log_record
     assert body.body == "token «x»", "an unredacted record reached the exporter"
-    assert body.attributes["ph.channel"] == "ledger"
-    assert body.attributes["ph.tool"] == "bash"
+    assert not_none(body.attributes)["ph.channel"] == "ledger"
+    assert not_none(body.attributes)["ph.tool"] == "bash"
     assert body.severity_text == "info"
 
 
 async def test_the_row_refuses_rather_than_shipping_nowhere(
-    mount: Any, monkeypatch: pytest.MonkeyPatch
+    mount: MountProfile, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Half the extra is not a working exporter, and must not mount as one.
 

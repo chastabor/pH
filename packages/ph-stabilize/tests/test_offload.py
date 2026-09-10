@@ -26,13 +26,14 @@ from stabilize_helpers import PROFILE, blob, break_spill, events_of
 
 from ph.cancel import CancelToken
 from ph.cordis import DEPLOYMENT
-from ph.llm.types import ToolCallBlock, text_of
+from ph.keys import SESSIONS, SPILL_STORE, TOOLS
+from ph.llm.types import ToolCallBlock, ToolResultBlock, ToolSource, text_of
 from ph.session import Session, derive_event_message
 from ph.session.known_event_types import (
     IGNORABLE_SESSION_EVENT_TYPES,
     KNOWN_SESSION_EVENT_TYPES,
 )
-from ph.testing import StubAgent, simple_tool
+from ph.testing import MountProfile, StubAgent, as_kind, not_none, simple_tool
 from ph.tools.batch import execute_tool_calls
 from ph.tools.definition import Accept, text_content
 from ph_stabilize.offload import (
@@ -68,7 +69,7 @@ async def _run(
     and collide.
     """
     agent = StubAgent(ctx.scope("agent"), session)
-    ctx.tools.register(
+    ctx.require(TOOLS).register(
         simple_tool(name, lambda _args, _run: text, self_limits=self_limits), scope=agent.ctx
     )
     block = ToolCallBlock(id=f"call-{name}", name=name, arguments="{}")
@@ -79,7 +80,7 @@ async def _run(
 def _call_id(event: Any) -> str:
     message = derive_event_message(event)
     assert message is not None
-    return str(message.source.call_id)
+    return str(as_kind(message.source, ToolSource).call_id)
 
 
 def model_text(event: Any) -> str:
@@ -92,16 +93,16 @@ def model_text(event: Any) -> str:
     """
     message = derive_event_message(event)
     assert message is not None
-    return "\n".join(text_of(block.content) for block in message.content)
+    return "\n".join(text_of(as_kind(block, ToolResultBlock).content) for block in message.content)
 
 
 # ------------------------------------------------------------- the boundary --
 
 
-async def test_a_result_at_the_threshold_stays_inline(mount: Any) -> None:
+async def test_a_result_at_the_threshold_stays_inline(mount: MountProfile) -> None:
     """80 000 characters is admitted — the limit is what the policy still allows."""
     ctx = await mount(profile=PROFILE)
-    session = ctx.sessions.create("at-limit")
+    session = ctx.require(SESSIONS).create("at-limit")
 
     event = await _run(ctx, session, "big", blob(THRESHOLD))
 
@@ -109,21 +110,21 @@ async def test_a_result_at_the_threshold_stays_inline(mount: Any) -> None:
     assert not [e for e in session.events if e.type == "offload/spilled"]
 
 
-async def test_one_character_over_the_threshold_is_offloaded(mount: Any) -> None:
+async def test_one_character_over_the_threshold_is_offloaded(mount: MountProfile) -> None:
     """80 001 is not. The row's gate, and the reason the comparison is `>`."""
     ctx = await mount(profile=PROFILE)
-    session = ctx.sessions.create("over-limit")
+    session = ctx.require(SESSIONS).create("over-limit")
 
     event = await _run(ctx, session, "big", blob(THRESHOLD + 1))
 
     assert TOO_LARGE in model_text(event)
     (spilled,) = [e for e in session.events if e.type == "offload/spilled"]
     assert spilled.data["callId"] == "call-big"
-    assert Path(spilled.data["locator"]).is_file()
+    assert Path(str(spilled.data["locator"])).is_file()
 
 
 async def test_the_original_is_recoverable_from_the_path_the_model_was_given(
-    mount: Any,
+    mount: MountProfile,
 ) -> None:
     """A relocation, not a deletion — the property the spill seam exists for.
 
@@ -131,20 +132,20 @@ async def test_the_original_is_recoverable_from_the_path_the_model_was_given(
     harness has told the model something is retrievable when it is not.
     """
     ctx = await mount(profile=PROFILE)
-    session = ctx.sessions.create("recoverable")
+    session = ctx.require(SESSIONS).create("recoverable")
     original = blob(THRESHOLD + 1)
 
     event = await _run(ctx, session, "big", original)
     (spilled,) = [e for e in session.events if e.type == "offload/spilled"]
 
-    assert spilled.data["locator"] in model_text(event), "the model was not told where it went"
-    assert Path(spilled.data["locator"]).read_text(encoding="utf-8") == original
+    assert str(spilled.data["locator"]) in model_text(event), "the model was not told where it went"
+    assert Path(str(spilled.data["locator"])).read_text(encoding="utf-8") == original
 
 
 # ------------------------------------------------------------------ excluded --
 
 
-async def test_a_self_limiting_tool_is_untouched(mount: Any) -> None:
+async def test_a_self_limiting_tool_is_untouched(mount: MountProfile) -> None:
     """The row's other gate, asked of the *tool* rather than of a name list.
 
     A tool that takes an offset and a limit has already told the model how to
@@ -154,7 +155,7 @@ async def test_a_self_limiting_tool_is_untouched(mount: Any) -> None:
     which upstream can do because its tool set is closed and pH's is not.
     """
     ctx = await mount(profile=PROFILE)
-    session = ctx.sessions.create("declared")
+    session = ctx.require(SESSIONS).create("declared")
 
     event = await _run(ctx, session, "pager", blob(THRESHOLD * 2), self_limits=True)
 
@@ -162,7 +163,7 @@ async def test_a_self_limiting_tool_is_untouched(mount: Any) -> None:
     assert not [e for e in session.events if e.type == "offload/spilled"]
 
 
-async def test_a_tool_that_does_not_declare_is_offloaded(mount: Any) -> None:
+async def test_a_tool_that_does_not_declare_is_offloaded(mount: MountProfile) -> None:
     """The other half of the pair: without the declaration the guard rail runs.
 
     Named after the first version of the test above, which registered a stub
@@ -170,14 +171,14 @@ async def test_a_tool_that_does_not_declare_is_offloaded(mount: Any) -> None:
     whether or not the list matched any tool this harness registers.
     """
     ctx = await mount(profile=PROFILE)
-    session = ctx.sessions.create("undeclared")
+    session = ctx.require(SESSIONS).create("undeclared")
 
     event = await _run(ctx, session, "pager", blob(THRESHOLD * 2))
 
     assert TOO_LARGE in model_text(event)
 
 
-async def test_exactly_the_paging_tools_declare_that_they_self_limit(mount: Any) -> None:
+async def test_exactly_the_paging_tools_declare_that_they_self_limit(mount: MountProfile) -> None:
     """And the declaration is on the tools it is supposed to be on.
 
     Enumerated from the *registry* — every tool the profile actually mounts —
@@ -188,8 +189,12 @@ async def test_exactly_the_paging_tools_declare_that_they_self_limit(mount: Any)
     this file would notice.
     """
     ctx = await mount(profile=PROFILE)
-    registered = {schema.name for schema in ctx.tools.schemas(scope=DEPLOYMENT)}
-    declared = {name for name in registered if ctx.tools.get(name, scope=DEPLOYMENT).self_limits}
+    registered = {schema.name for schema in ctx.require(TOOLS).schemas(scope=DEPLOYMENT)}
+    declared = {
+        name
+        for name in registered
+        if not_none(ctx.require(TOOLS).get(name, scope=DEPLOYMENT)).self_limits
+    }
 
     assert declared == {"read", "write", "edit", "glob", "grep"}
     assert "bash" in registered and "bash" not in declared, (
@@ -229,7 +234,7 @@ def test_a_very_long_line_is_clipped_before_it_reaches_the_preview() -> None:
 
 
 async def test_a_spill_that_fails_keeps_the_original_result(
-    mount: Any, monkeypatch: pytest.MonkeyPatch
+    mount: MountProfile, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Upstream's rule, and the one this file did not have a gate for.
 
@@ -238,7 +243,7 @@ async def test_a_spill_that_fails_keeps_the_original_result(
     passed every other test here.
     """
     ctx = await mount(profile=PROFILE)
-    session = ctx.sessions.create("no-disk")
+    session = ctx.require(SESSIONS).create("no-disk")
     break_spill(monkeypatch)
     original = blob(THRESHOLD + 1)
 
@@ -252,7 +257,7 @@ async def test_a_spill_that_fails_keeps_the_original_result(
 # ----------------------------------------------------------- one at a time --
 
 
-async def test_only_the_oversized_sibling_is_replaced(mount: Any) -> None:
+async def test_only_the_oversized_sibling_is_replaced(mount: MountProfile) -> None:
     """C5. Forty dispatches get forty answers, not one melted together.
 
     Every dispatch crosses this same waterfall, so the per-result decision is
@@ -260,12 +265,14 @@ async def test_only_the_oversized_sibling_is_replaced(mount: Any) -> None:
     a claim about the seam, and a claim is what a test is for.
     """
     ctx = await mount(profile=PROFILE)
-    session = ctx.sessions.create("siblings")
+    session = ctx.require(SESSIONS).create("siblings")
     agent = StubAgent(ctx.scope("agent"), session)
-    ctx.tools.register(
+    ctx.require(TOOLS).register(
         simple_tool("huge", lambda _a, _r: blob(THRESHOLD + 1), safe=True), scope=agent.ctx
     )
-    ctx.tools.register(simple_tool("tiny", lambda _a, _r: "small", safe=True), scope=agent.ctx)
+    ctx.require(TOOLS).register(
+        simple_tool("tiny", lambda _a, _r: "small", safe=True), scope=agent.ctx
+    )
 
     blocks = [
         ToolCallBlock(id="call-huge", name="huge", arguments="{}"),
@@ -301,7 +308,7 @@ def test_the_byte_threshold_is_a_second_way_to_trip() -> None:
     assert not oversized("é" * 3, Config(token_limit=None, max_inline_bytes=None))
 
 
-async def test_it_measures_the_projection_another_listener_produced(mount: Any) -> None:
+async def test_it_measures_the_projection_another_listener_produced(mount: MountProfile) -> None:
     """Composition: the guard rail measures what will be *sent*.
 
     A `tools/post-execute` row ahead of this one may rewrite the content — a
@@ -311,7 +318,7 @@ async def test_it_measures_the_projection_another_listener_produced(mount: Any) 
     grows a small result past the threshold; the offload must notice.
     """
     ctx = await mount(profile=PROFILE)
-    session = ctx.sessions.create("composed")
+    session = ctx.require(SESSIONS).create("composed")
 
     async def inflate(execution: Any, result: Any, next_: Any) -> Any:
         decision = await next_(execution, result)
@@ -325,38 +332,38 @@ async def test_it_measures_the_projection_another_listener_produced(mount: Any) 
 
     assert TOO_LARGE in model_text(event), "the inflated projection went unmeasured"
     (spilled,) = [e for e in session.events if e.type == "offload/spilled"]
-    assert Path(spilled.data["locator"]).read_text(encoding="utf-8") == blob(THRESHOLD + 1)
+    assert Path(str(spilled.data["locator"])).read_text(encoding="utf-8") == blob(THRESHOLD + 1)
 
 
 # ---------------------------------------------------------------- the sweep --
 
 
 async def test_a_blob_whose_event_never_landed_is_swept_at_the_next_open(
-    mount: Any,
+    mount: MountProfile,
 ) -> None:
     """**P6-15's gate, through the producers that were never swept.** Both
     directions in one test, because a sweep that deleted *everything* would pass
     the orphan half while destroying the offload the model was told it could read
     back — which is what a per-producer sweep produces on a shared owner."""
     ctx = await mount(profile=PROFILE)
-    session = ctx.sessions.create("swept")
+    session = ctx.require(SESSIONS).create("swept")
     await _run(ctx, session, "big", blob(THRESHOLD + 1))
     (spilled,) = events_of(session, "offload/spilled")
     live = Path(spilled.data["locator"])
 
-    orphan = await ctx.spill_store.save_text(
+    orphan = await ctx.require(SPILL_STORE).save_text(
         owner=session.id, source="a crash", suggested_name="never-recorded.md", content="lost"
     )
     assert Path(orphan.locator).is_file(), "the crash-shaped file exists before the sweep"
 
-    removed = await ctx.spill_store.sweep_session(session)
+    removed = await ctx.require(SPILL_STORE).sweep_session(session)
 
     assert removed == [orphan.locator], removed
     assert not Path(orphan.locator).exists()
     assert live.is_file(), "the offload the model was told to read back must survive"
 
 
-async def test_the_sweep_is_wired_to_session_open(mount: Any) -> None:
+async def test_the_sweep_is_wired_to_session_open(mount: MountProfile) -> None:
     """The seam mounts the listener, so it exists wherever the store does.
 
     Asserted separately from the fold because they fail differently: a fold that
@@ -365,8 +372,8 @@ async def test_the_sweep_is_wired_to_session_open(mount: Any) -> None:
     was correct and its listener belonged to one producer.
     """
     ctx = await mount(profile=PROFILE)
-    session = ctx.sessions.create("wired")
-    orphan = await ctx.spill_store.save_text(
+    session = ctx.require(SESSIONS).create("wired")
+    orphan = await ctx.require(SPILL_STORE).save_text(
         owner=session.id, source="a crash", suggested_name="orphan.md", content="lost"
     )
 

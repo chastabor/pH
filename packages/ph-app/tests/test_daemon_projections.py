@@ -21,6 +21,7 @@ from daemon_helpers import running, until
 
 from ph.bundles import BASE, HEADLESS
 from ph.cordis import DEPLOYMENT, Profile, load_profile_documents
+from ph.keys import COMMANDS, FS, LLM, TOOLS, TUI_STATUS
 from ph.seams.commands import CommandDefinition
 from ph.seams.tui_status import StatusField, StatusReading
 from ph.session import SessionEvent
@@ -44,10 +45,10 @@ async def _furnished(daemon: Any, session_id: str = "projected") -> Any:
     list, and proves nothing about either.
     """
     root = await daemon.root(session_id)
-    root.ctx.tui_status.register(
+    root.ctx.require(TUI_STATUS).register(
         StatusField(id="probe", read=lambda session: StatusReading(text="probe", level="warning"))
     )
-    root.ctx.commands.register(
+    root.ctx.require(COMMANDS).register(
         CommandDefinition(
             name="probe",
             summary="a command registered by the test",
@@ -106,7 +107,7 @@ async def test_readings_ride_the_status_notification(tmp_path: Any) -> None:
         root = await _furnished(daemon, "pushed")
         await client.call("session/attach", sessionId=root.id)
 
-        await daemon.server.supervisor.prompt(root.id, "hello")
+        await daemon.running.supervisor.prompt(root.id, "hello")
         # The turn runs in the root's own task, so the notification arrives on
         # its schedule rather than this one's. Waiting on the fact beats sleeping
         # for a guess.
@@ -189,7 +190,7 @@ async def test_the_tool_list_matches_what_the_deployment_offers(tmp_path: Any) -
 
         reply = await client.call("tools/list", sessionId=root.id)
 
-        schemas = root.ctx.tools.schemas(scope=DEPLOYMENT)
+        schemas = root.ctx.require(TOOLS).schemas(scope=DEPLOYMENT)
         assert [one["name"] for one in reply["tools"]] == [one.name for one in schemas]
 
 
@@ -200,7 +201,7 @@ async def test_the_config_rows_are_the_composed_profile(tmp_path: Any) -> None:
 
         reply = await client.call("daemon/config")
 
-        assert reply["rows"] == list(daemon.server.supervisor.profile.dump())
+        assert reply["rows"] == list(daemon.running.supervisor.profile.dump())
         assert reply["rows"], "an empty profile would make this vacuous"
 
 
@@ -286,7 +287,7 @@ async def test_a_new_session_records_the_clients_cwd_in_its_header(tmp_path: Any
         # (P5-14), and this test's subject is the header rather than the gate.
         await client.call("session/new", sessionId="homed", cwd=str(tmp_path), trust="once")
 
-        root = daemon.server.supervisor.roots["homed"]
+        root = daemon.running.supervisor.roots["homed"]
         assert root.session.header.cwd == str(tmp_path)
 
 
@@ -319,7 +320,7 @@ async def _with_a_card(daemon: Any, session_id: str) -> Any:
     # protocol has one statement in `ph.testing`, and a third copy of it is a
     # third thing to fix when it moves. Registered under `fake`, which is the
     # provider the daemon gives every root, so it shadows it for this one.
-    root.ctx.llm.register_adapter(
+    root.ctx.require(LLM).register_adapter(
         ("fake",),
         ReplayAdapter(
             steps=[
@@ -328,7 +329,7 @@ async def _with_a_card(daemon: Any, session_id: str) -> Any:
             ]
         ),
     )
-    root.ctx.tools.register(
+    root.ctx.require(TOOLS).register(
         simple_tool(
             "ping",
             lambda _args, _run: "pong",
@@ -536,12 +537,12 @@ async def test_the_daemon_refuses_to_mount_an_untrusted_project(tmp_path: Any) -
             await client.call("session/new", sessionId="untrusted", cwd=str(project))
 
         assert raised.value.reason == "untrusted_project"
-        assert "untrusted" not in daemon.server.supervisor.roots
+        assert "untrusted" not in daemon.running.supervisor.roots
 
         # Answered, and it mounts — and `always` is the answer that is recorded,
         # so the next client is not asked again.
         await client.call("session/new", sessionId="untrusted", cwd=str(project), trust="always")
-        assert "untrusted" in daemon.server.supervisor.roots
+        assert "untrusted" in daemon.running.supervisor.roots
         assert TrustStore(path=trust_path()).trusted(project)
 
 
@@ -572,11 +573,11 @@ async def test_a_root_works_in_the_directory_its_session_names(tmp_path: Any) ->
         await client.call("session/new", sessionId="b", cwd=str(two), trust="once")
 
         first, second = daemon.held("a"), daemon.held("b")
-        assert first.ctx.fs.root_for(first.agent) == one
-        assert second.ctx.fs.root_for(second.agent) == two
+        assert first.ctx.require(FS).root_for(first.agent) == one
+        assert second.ctx.require(FS).root_for(second.agent) == two
         # And a relative path — the only kind a tool should be asked for —
         # resolves inside the right one.
-        assert first.ctx.fs.resolve("x.py", agent=first.agent) == one / "x.py"
+        assert first.ctx.require(FS).resolve("x.py", agent=first.agent) == one / "x.py"
 
 
 async def test_a_resumed_root_returns_to_its_own_repo(tmp_path: Any) -> None:
@@ -598,7 +599,7 @@ async def test_a_resumed_root_returns_to_its_own_repo(tmp_path: Any) -> None:
     async with running(tmp_path) as daemon:
         client = await daemon.client()
         await client.call("session/new", sessionId="c", cwd=str(repo), trust="once")
-        await daemon.server.supervisor._flush(daemon.held("c"))
+        await daemon.running.supervisor._flush(daemon.held("c"))
         await daemon.sweep()
         assert not daemon.holds("c")
 
@@ -607,4 +608,4 @@ async def test_a_resumed_root_returns_to_its_own_repo(tmp_path: Any) -> None:
 
         root = daemon.held("c")
         assert root.session.header.cwd == str(repo)
-        assert root.ctx.fs.root_for(root.agent) == repo
+        assert root.ctx.require(FS).root_for(root.agent) == repo

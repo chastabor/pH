@@ -36,6 +36,7 @@ from typing import Any
 
 from ph.agent.types import AgentOptions
 from ph.cordis import DEPLOYMENT, Profile, ProfileDocument
+from ph.keys import AGENTS, LLM_REPLAY, SESSIONS, TOKEN_METER, TOOLS
 from ph.llm.types import GenerateOptions
 from ph.seams.token_meter import TokenMeter
 from ph.testing import REPLAY_ROW, RecordedStep, shared_prefix, text_chunks, tool_call_chunks
@@ -257,14 +258,16 @@ async def run_profile(
         # The window a provider would report. Left at the adapter's 8 192
         # default, every request in this workload is over budget and the
         # measurement is of nothing but compaction.
-        ctx.llm_replay.context_window = context_window
-        transport = ctx.tools.view(DEPLOYMENT).transport_name
-        ctx.llm_replay.steps = authored_steps(files, transport)
-        session = ctx.sessions.create(f"bench-{profile}")
-        agent = ctx.agents.create(session, OPTIONS)
+        ctx.require(LLM_REPLAY).context_window = context_window
+        transport = ctx.require(TOOLS).view(DEPLOYMENT).transport_name
+        ctx.require(LLM_REPLAY).steps = authored_steps(files, transport)
+        session = ctx.require(SESSIONS).create(f"bench-{profile}")
+        agent = ctx.require(AGENTS).create(session, OPTIONS)
         for path in files:
             await agent.prompt(f"Summarise {path.name}.")
-        return measure(profile, context_window, ctx.llm_replay.requests, ctx.token_meter)
+        return measure(
+            profile, context_window, ctx.require(LLM_REPLAY).requests, ctx.require(TOKEN_METER)
+        )
 
 
 async def run_all(home: Path) -> list[Measurement]:

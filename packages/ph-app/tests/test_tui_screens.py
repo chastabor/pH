@@ -24,6 +24,7 @@ import pytest
 from tui_helpers import root_of, running, turn_done, until
 
 import ph_app.tui
+from ph.keys import TUI_SCREENS
 from ph.seams.tui_screens import ScreenDefinition
 from ph_app.tui.app import PHTuiApp
 from ph_app.tui.frontend import FrontSession
@@ -178,7 +179,7 @@ async def test_a_screen_this_build_cannot_draw_is_not_offered(
             key="f9",
             build=lambda session: TrajectoryScreen([], session_id=session.id),
         )
-        root.ctx.tui_screens.register(pretend, scope=root.ctx.scope("a-row"))
+        root.ctx.require(TUI_SCREENS).register(pretend, scope=root.ctx.scope("a-row"))
         await pilot.pause()
 
         assert _routes(app, "pretend") == set(), "a screen with no local builder was offered"
@@ -214,7 +215,11 @@ async def test_the_trajectory_opens_over_the_chat_and_escape_returns_to_it(
 
         await pilot.press(TRAJECTORY_KEY)
         await until(pilot, lambda: isinstance(app.screen, TrajectoryScreen))
-        assert app.screen.records, "the screen was built from the live session's log"
+        # Bound after the wait: the `isinstance` inside the lambda narrows
+        # nothing out here, and `App.screen` is a `Screen[object]`.
+        screen = app.screen
+        assert isinstance(screen, TrajectoryScreen)
+        assert screen.records, "the screen was built from the live session's log"
 
         await pilot.press("escape")
         await until(pilot, lambda: not isinstance(app.screen, TrajectoryScreen))
@@ -229,7 +234,9 @@ async def test_the_screen_is_a_fold_of_the_log_as_it_stands(make_tui_app: MakeAp
     async with running(make_tui_app()) as (app, pilot):
         await pilot.press(TRAJECTORY_KEY)
         await until(pilot, lambda: isinstance(app.screen, TrajectoryScreen))
-        empty = len(app.screen.records)
+        opened = app.screen
+        assert isinstance(opened, TrajectoryScreen)
+        empty = len(opened.records)
         await pilot.press("escape")
         await until(pilot, lambda: not isinstance(app.screen, TrajectoryScreen))
 
@@ -239,7 +246,9 @@ async def test_the_screen_is_a_fold_of_the_log_as_it_stands(make_tui_app: MakeAp
 
         await pilot.press(TRAJECTORY_KEY)
         await until(pilot, lambda: isinstance(app.screen, TrajectoryScreen))
-        assert len(app.screen.records) > empty
+        reopened = app.screen
+        assert isinstance(reopened, TrajectoryScreen)
+        assert len(reopened.records) > empty
 
 
 # ------------------------------------------------------- cross-navigation --

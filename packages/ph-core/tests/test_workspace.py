@@ -34,11 +34,12 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, get_args
 
 import pytest
 
 from ph.cordis import Context
+from ph.keys import WORKSPACE
 from ph.seams.workspace import (
     ContainmentTier,
     Workspace,
@@ -51,7 +52,7 @@ from ph.seams.workspace import (
     writable_roots,
 )
 from ph.session import Session
-from ph.testing import StubCheckpointingProvider, workspace_seam
+from ph.testing import MountProfile, StubCheckpointingProvider, workspace_seam
 
 pytestmark = pytest.mark.anyio
 
@@ -409,14 +410,14 @@ async def test_acquiring_without_a_session_records_nothing_and_still_works(
     assert seam.of("a1") is None
 
 
-async def test_mounting_the_seam_changes_nothing(mount: Any) -> None:
+async def test_mounting_the_seam_changes_nothing(mount: MountProfile) -> None:
     """P4-07's gate. `ph-base` layers this row, so the claim has to hold for
     every profile: the seam is present, no tier is in force, and nothing has
     been acquired until the agent lifecycle does it (P4-08)."""
     ctx = await mount()
 
-    assert ctx.workspace.effective_tier(child=False) == "advisory"
-    assert ctx.workspace.of("any-agent") is None
+    assert ctx.require(WORKSPACE).effective_tier(child=False) == "advisory"
+    assert ctx.require(WORKSPACE).of("any-agent") is None
 
 
 # ------------------------------------------------------- the kind vocabulary --
@@ -456,7 +457,7 @@ def test_every_kind_is_classified_the_same_way_by_all_three_predicates() -> None
         "overlay-ephemeral": ("read", True, True),
     }
 
-    assert set(table) == set(WorkspaceKind.__args__), "a kind was added without a row here"
+    assert set(table) == set(get_args(WorkspaceKind)), "a kind was added without a row here"
     for kind, (access, fresh, discards) in table.items():
         assert (project_access(kind), fresh_root(kind), discards_writes(kind)) == (
             access,
@@ -466,7 +467,7 @@ def test_every_kind_is_classified_the_same_way_by_all_three_predicates() -> None
 
 
 async def test_a_shared_workspace_is_never_offered_a_restore_point(
-    mount: Any, tmp_path: Path
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """The *kind* half of `can_checkpoint`, which a capable tier must not override.
 
@@ -481,15 +482,15 @@ async def test_a_shared_workspace_is_never_offered_a_restore_point(
     """
     ctx = await mount()
     provider = StubCheckpointingProvider(root=tmp_path / "trees")
-    ctx.workspace.register_provider(provider)
-    isolated = await ctx.workspace.acquire(
+    ctx.require(WORKSPACE).register_provider(provider)
+    isolated = await ctx.require(WORKSPACE).acquire(
         session_id="s1", agent_id="a1", base=tmp_path, access="write"
     )
     theirs = replace(isolated, kind="shared", root=tmp_path)
 
-    assert ctx.workspace.can_checkpoint(isolated), "a capable tier was refused"
-    assert not ctx.workspace.can_checkpoint(theirs)
-    assert await ctx.workspace.capture(theirs) is None
+    assert ctx.require(WORKSPACE).can_checkpoint(isolated), "a capable tier was refused"
+    assert not ctx.require(WORKSPACE).can_checkpoint(theirs)
+    assert await ctx.require(WORKSPACE).capture(theirs) is None
 
 
 def test_only_the_ephemeral_kinds_lose_evidence_so_only_they_are_retained() -> None:
@@ -501,7 +502,7 @@ def test_only_the_ephemeral_kinds_lose_evidence_so_only_they_are_retained() -> N
     without being asked one tree at a time. Every other kind either commits its
     work to a branch first or never had writes of its own.
     """
-    kinds: tuple[WorkspaceKind, ...] = WorkspaceKind.__args__
+    kinds: tuple[WorkspaceKind, ...] = get_args(WorkspaceKind)
 
     discarding = {kind for kind in kinds if discards_writes(kind)}
     assert discarding == {"worktree-ephemeral", "overlay-ephemeral"}
@@ -543,7 +544,7 @@ def test_the_prompted_boundary_and_the_enforced_one_are_one_definition(
     workspace = _worktree(tmp_path)
     policy = workspace_policy(workspace)
 
-    named = {policy.workspace_root, *policy.writable_extra}
+    named = {policy.workspace_root, *(policy.writable_extra or [])}
     assert named == {str(path) for path in writable_roots(workspace)}
 
 
@@ -613,7 +614,12 @@ async def test_the_workspace_question_is_fail_soft_for_a_seam_nobody_mounted(
 
     ctx.provide("workspace", seam)
     assert workspace_of(ctx, "never-acquired") is None
-    assert workspace_of(ctx, object()) is None, "an agent with no id is not a lookup key"
+    # `object()` deliberately: the claim is that something which is not an
+    # agent and not an id is not a lookup key, so the argument is outside the
+    # union `workspace_of` declares.
+    assert workspace_of(ctx, object()) is None, (  # type: ignore[arg-type]
+        "an agent with no id is not a lookup key"
+    )
 
     acquired = await seam.acquire(session_id="s", agent_id="a", base=tmp_path)
     assert workspace_of(ctx, "a") is acquired

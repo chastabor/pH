@@ -30,9 +30,10 @@ from typing import Any
 
 import pytest
 
+from ph.keys import AGENTS, COMMANDS, SESSIONS, WORKSPACE
 from ph.seams.workspace import CHECKPOINT, WorkspaceRecord
 from ph.seams.workspace_jj import _needs_the_tree
-from ph.testing import FAKE_OPTIONS
+from ph.testing import FAKE_OPTIONS, MountProfile
 from ph.testing.git import git
 from ph.testing.jj import jj, jj_agent, jj_repo
 
@@ -46,7 +47,7 @@ scratch roots come from `$PH_HOME`, which the `mount` fixture already points at
 `tmp_path`."""
 
 
-async def _tiered(mount: Any, tmp_path: Path, *extra: dict[str, Any]) -> tuple[Any, Path]:
+async def _tiered(mount: MountProfile, tmp_path: Path, *extra: dict[str, Any]) -> tuple[Any, Path]:
     """A mounted profile with the tier on, and a colocated repository to point it at.
 
     The repository goes under `tmp_path`, never `ctx.fs.root` — that is the
@@ -66,7 +67,7 @@ async def _bookmarks(ctx: Any, base: Path) -> str:
 
 
 async def test_a_write_agent_gets_its_own_workspace_on_its_own_bookmark(
-    mount: Any, tmp_path: Path
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """E2, one half. The name is `ph/<session>/<agent>` — the git tier's shape, and
     deliberately so: `/workspaces` enumerates one prefix to find what disposal
@@ -74,7 +75,7 @@ async def test_a_write_agent_gets_its_own_workspace_on_its_own_bookmark(
     half of them."""
     ctx, base = await _tiered(mount, tmp_path)
 
-    workspace = await ctx.workspace.acquire(
+    workspace = await ctx.require(WORKSPACE).acquire(
         session_id="s1", agent_id="a1", base=base, access="write"
     )
 
@@ -85,7 +86,9 @@ async def test_a_write_agent_gets_its_own_workspace_on_its_own_bookmark(
     assert workspace.repo_writable is True
 
 
-async def test_a_child_starts_from_the_parents_work_in_progress(mount: Any, tmp_path: Path) -> None:
+async def test_a_child_starts_from_the_parents_work_in_progress(
+    mount: MountProfile, tmp_path: Path
+) -> None:
     """**The reason this tier exists**, and the one thing the git tier cannot do.
 
     The parent has edited a tracked file and added a new one, and has committed
@@ -97,7 +100,7 @@ async def test_a_child_starts_from_the_parents_work_in_progress(mount: Any, tmp_
     (base / "README.md").write_text("parent edited this\n", encoding="utf-8")
     (base / "wip.txt").write_text("parent's work in progress\n", encoding="utf-8")
 
-    workspace = await ctx.workspace.acquire(
+    workspace = await ctx.require(WORKSPACE).acquire(
         session_id="s1", agent_id="a1", base=base, access="write"
     )
 
@@ -106,7 +109,7 @@ async def test_a_child_starts_from_the_parents_work_in_progress(mount: Any, tmp_
 
 
 async def test_the_parent_may_keep_working_without_staling_its_children(
-    mount: Any, tmp_path: Path
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """The trap `_fork_point` exists to avoid, pinned as behaviour rather than as a
     comment.
@@ -123,7 +126,7 @@ async def test_the_parent_may_keep_working_without_staling_its_children(
     """
     ctx, base = await _tiered(mount, tmp_path)
     (base / "wip.txt").write_text("first\n", encoding="utf-8")
-    workspace = await ctx.workspace.acquire(
+    workspace = await ctx.require(WORKSPACE).acquire(
         session_id="s1", agent_id="a1", base=base, access="write"
     )
 
@@ -142,7 +145,7 @@ async def test_the_parent_may_keep_working_without_staling_its_children(
 
 
 async def test_two_children_fork_from_one_point_and_do_not_collide(
-    mount: Any, tmp_path: Path
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """E2, and the fan-out this tier is bought for.
 
@@ -154,8 +157,12 @@ async def test_two_children_fork_from_one_point_and_do_not_collide(
     ctx, base = await _tiered(mount, tmp_path)
     (base / "shared.txt").write_text("from the parent\n", encoding="utf-8")
 
-    one = await ctx.workspace.acquire(session_id="s1", agent_id="a1", base=base, access="write")
-    two = await ctx.workspace.acquire(session_id="s1", agent_id="a2", base=base, access="write")
+    one = await ctx.require(WORKSPACE).acquire(
+        session_id="s1", agent_id="a1", base=base, access="write"
+    )
+    two = await ctx.require(WORKSPACE).acquire(
+        session_id="s1", agent_id="a2", base=base, access="write"
+    )
 
     for workspace in (one, two):
         assert (workspace.root / "shared.txt").read_text(encoding="utf-8") == "from the parent\n"
@@ -172,7 +179,7 @@ async def test_two_children_fork_from_one_point_and_do_not_collide(
 
 
 async def test_a_read_agent_gets_an_ephemeral_workspace_it_may_still_write(
-    mount: Any, tmp_path: Path
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """E3. This tier cannot enforce read-only any more than the git tier can, so
     `access="read"` buys a different *kind* rather than a permission: the writes
@@ -184,7 +191,7 @@ async def test_a_read_agent_gets_an_ephemeral_workspace_it_may_still_write(
     """
     ctx, base = await _tiered(mount, tmp_path)
 
-    workspace = await ctx.workspace.acquire(
+    workspace = await ctx.require(WORKSPACE).acquire(
         session_id="s1", agent_id="a1", base=base, access="read"
     )
 
@@ -194,7 +201,7 @@ async def test_a_read_agent_gets_an_ephemeral_workspace_it_may_still_write(
 
 
 async def test_a_directory_jj_does_not_manage_declines_and_the_seam_falls_back(
-    mount: Any, tmp_path: Path
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """The decline that keeps this row safe to layer anywhere.
 
@@ -209,7 +216,7 @@ async def test_a_directory_jj_does_not_manage_declines_and_the_seam_falls_back(
     ctx = await mount(TIER_ROW)
     base = await git_repo(ctx, tmp_path / "plain")
 
-    workspace = await ctx.workspace.acquire(
+    workspace = await ctx.require(WORKSPACE).acquire(
         session_id="s1", agent_id="a1", base=base, access="write"
     )
 
@@ -222,7 +229,7 @@ async def test_a_directory_jj_does_not_manage_declines_and_the_seam_falls_back(
 
 
 async def test_release_puts_the_childs_work_on_a_git_branch_and_removes_the_tree(
-    mount: Any, tmp_path: Path
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """The merge-back story, end to end, and it ends in **git**.
 
@@ -232,13 +239,13 @@ async def test_release_puts_the_childs_work_on_a_git_branch_and_removes_the_tree
     this be a provider swap rather than a migration.
     """
     ctx, base = await _tiered(mount, tmp_path)
-    session = ctx.sessions.create("s1")
-    workspace = await ctx.workspace.acquire(
+    session = ctx.require(SESSIONS).create("s1")
+    workspace = await ctx.require(WORKSPACE).acquire(
         session_id="s1", agent_id="a1", base=base, access="write", session=session
     )
     (workspace.root / "child.txt").write_text("work from a1\n", encoding="utf-8")
 
-    await ctx.workspace.dispose("a1")
+    await ctx.require(WORKSPACE).dispose("a1")
 
     assert not workspace.root.exists(), "the checkout is a resource, not an artifact"
     (disposed,) = [one for one in session.events if one.type == "workspace/disposed"]
@@ -252,7 +259,7 @@ async def test_release_puts_the_childs_work_on_a_git_branch_and_removes_the_tree
 
 
 async def test_a_parent_that_spawned_a_child_still_keeps_its_own_work(
-    mount: Any, tmp_path: Path
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """Data loss, found by building the tier on top of itself.
 
@@ -266,18 +273,18 @@ async def test_a_parent_that_spawned_a_child_still_keeps_its_own_work(
     of leaving it as `@-`.
     """
     ctx, base = await _tiered(mount, tmp_path)
-    session = ctx.sessions.create("s1")
-    parent = await ctx.workspace.acquire(
+    session = ctx.require(SESSIONS).create("s1")
+    parent = await ctx.require(WORKSPACE).acquire(
         session_id="s1", agent_id="parent", base=base, access="write", session=session
     )
     (parent.root / "parent-work.txt").write_text("hours of it\n", encoding="utf-8")
 
     # Spawning is what empties the parent's tip.
-    await ctx.workspace.acquire(
+    await ctx.require(WORKSPACE).acquire(
         session_id="s1", agent_id="child", base=parent.root, access="write", session=session
     )
-    await ctx.workspace.dispose("child")
-    await ctx.workspace.dispose("parent")
+    await ctx.require(WORKSPACE).dispose("child")
+    await ctx.require(WORKSPACE).dispose("parent")
 
     (disposed,) = [
         one
@@ -290,16 +297,18 @@ async def test_a_parent_that_spawned_a_child_still_keeps_its_own_work(
     assert out == "hours of it\n"
 
 
-async def test_a_child_that_did_nothing_leaves_nothing_behind(mount: Any, tmp_path: Path) -> None:
+async def test_a_child_that_did_nothing_leaves_nothing_behind(
+    mount: MountProfile, tmp_path: Path
+) -> None:
     """The other half of the disposal policy: a bookmark on an empty commit is
     noise a person then has to work out how to clean up."""
     ctx, base = await _tiered(mount, tmp_path)
-    session = ctx.sessions.create("s1")
-    await ctx.workspace.acquire(
+    session = ctx.require(SESSIONS).create("s1")
+    await ctx.require(WORKSPACE).acquire(
         session_id="s1", agent_id="a1", base=base, access="write", session=session
     )
 
-    await ctx.workspace.dispose("a1")
+    await ctx.require(WORKSPACE).dispose("a1")
 
     (disposed,) = [one for one in session.events if one.type == "workspace/disposed"]
     assert disposed.data["kept"] is False
@@ -307,18 +316,18 @@ async def test_a_child_that_did_nothing_leaves_nothing_behind(mount: Any, tmp_pa
 
 
 async def test_an_ephemeral_release_discards_the_work_and_the_ref(
-    mount: Any, tmp_path: Path
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """`worktree-ephemeral`'s whole promise: the writes happened and reach nobody,
     **even though the tree was dirty**."""
     ctx, base = await _tiered(mount, tmp_path)
-    session = ctx.sessions.create("s1")
-    workspace = await ctx.workspace.acquire(
+    session = ctx.require(SESSIONS).create("s1")
+    workspace = await ctx.require(WORKSPACE).acquire(
         session_id="s1", agent_id="a1", base=base, access="read", session=session
     )
     (workspace.root / "throwaway.txt").write_text("nobody sees this\n", encoding="utf-8")
 
-    await ctx.workspace.dispose("a1")
+    await ctx.require(WORKSPACE).dispose("a1")
 
     (disposed,) = [one for one in session.events if one.type == "workspace/disposed"]
     assert disposed.data["kept"] is False
@@ -327,19 +336,21 @@ async def test_an_ephemeral_release_discards_the_work_and_the_ref(
     assert code != 0
 
 
-async def test_a_retained_ephemeral_workspace_keeps_its_work(mount: Any, tmp_path: Path) -> None:
+async def test_a_retained_ephemeral_workspace_keeps_its_work(
+    mount: MountProfile, tmp_path: Path
+) -> None:
     """P6-28. Retention is an exception to `discard`, so a child whose run went
     wrong leaves its work on a bookmark to read rather than a directory to trip
     over."""
     ctx, base = await _tiered(mount, tmp_path)
-    session = ctx.sessions.create("s1")
-    workspace = await ctx.workspace.acquire(
+    session = ctx.require(SESSIONS).create("s1")
+    workspace = await ctx.require(WORKSPACE).acquire(
         session_id="s1", agent_id="a1", base=base, access="read", session=session
     )
     (workspace.root / "evidence.txt").write_text("what went wrong\n", encoding="utf-8")
-    ctx.workspace.retain("a1", "the run failed and this is why")
+    ctx.require(WORKSPACE).retain("a1", "the run failed and this is why")
 
-    await ctx.workspace.dispose("a1")
+    await ctx.require(WORKSPACE).dispose("a1")
 
     assert not workspace.root.exists()
     code, out, err = await git(ctx, base, "show", "--stat", "ph/s1/a1")
@@ -348,7 +359,7 @@ async def test_a_retained_ephemeral_workspace_keeps_its_work(mount: Any, tmp_pat
 
 
 async def test_disposal_leaves_the_repository_able_to_re_acquire(
-    mount: Any, tmp_path: Path
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """The state a resume finds has to be usable.
 
@@ -359,22 +370,32 @@ async def test_disposal_leaves_the_repository_able_to_re_acquire(
     """
     ctx, base = await _tiered(mount, tmp_path)
 
-    first = await ctx.workspace.acquire(session_id="s1", agent_id="a1", base=base, access="read")
-    await ctx.workspace.dispose("a1")
-    second = await ctx.workspace.acquire(session_id="s1", agent_id="a1", base=base, access="read")
+    first = await ctx.require(WORKSPACE).acquire(
+        session_id="s1", agent_id="a1", base=base, access="read"
+    )
+    await ctx.require(WORKSPACE).dispose("a1")
+    second = await ctx.require(WORKSPACE).acquire(
+        session_id="s1", agent_id="a1", base=base, access="read"
+    )
 
     assert second.kind == "worktree-ephemeral"
     assert second.root == first.root
 
 
-async def test_a_workspace_already_at_the_path_is_reused(mount: Any, tmp_path: Path) -> None:
+async def test_a_workspace_already_at_the_path_is_reused(
+    mount: MountProfile, tmp_path: Path
+) -> None:
     """The rehydrate path: an agent given its workspace back must find its own work
     in it, not a fresh fork over the top of it."""
     ctx, base = await _tiered(mount, tmp_path)
-    first = await ctx.workspace.acquire(session_id="s1", agent_id="a1", base=base, access="write")
+    first = await ctx.require(WORKSPACE).acquire(
+        session_id="s1", agent_id="a1", base=base, access="write"
+    )
     (first.root / "half-done.txt").write_text("mid-turn\n", encoding="utf-8")
 
-    second = await ctx.workspace.acquire(session_id="s1", agent_id="a1", base=base, access="write")
+    second = await ctx.require(WORKSPACE).acquire(
+        session_id="s1", agent_id="a1", base=base, access="write"
+    )
 
     assert second.root == first.root
     assert (second.root / "half-done.txt").read_text(encoding="utf-8") == "mid-turn\n"
@@ -384,7 +405,7 @@ async def test_a_workspace_already_at_the_path_is_reused(mount: Any, tmp_path: P
 
 
 async def test_reclaim_recovers_a_crashed_childs_work_from_the_record_alone(
-    mount: Any, tmp_path: Path
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """F6. A crash must cost a directory, not a day.
 
@@ -394,7 +415,7 @@ async def test_reclaim_recovers_a_crashed_childs_work_from_the_record_alone(
     the record names, which is why no repository path is needed or guessed at.
     """
     ctx, base = await _tiered(mount, tmp_path)
-    workspace = await ctx.workspace.acquire(
+    workspace = await ctx.require(WORKSPACE).acquire(
         session_id="s1", agent_id="a1", base=base, access="write"
     )
     (workspace.root / "unsaved.txt").write_text("the process died here\n", encoding="utf-8")
@@ -402,7 +423,7 @@ async def test_reclaim_recovers_a_crashed_childs_work_from_the_record_alone(
         agent_id="a1", kind="worktree", root=workspace.root, ref="ph/s1/a1", session_id="s1"
     )
 
-    kept = await ctx.workspace.provider.reclaim(record)
+    kept = await ctx.require(WORKSPACE).provider.reclaim(record)
 
     assert kept is True
     assert not workspace.root.exists()
@@ -411,25 +432,27 @@ async def test_reclaim_recovers_a_crashed_childs_work_from_the_record_alone(
     assert "unsaved.txt" in out
 
 
-async def test_reclaiming_a_tree_that_is_already_gone_says_so(mount: Any, tmp_path: Path) -> None:
+async def test_reclaiming_a_tree_that_is_already_gone_says_so(
+    mount: MountProfile, tmp_path: Path
+) -> None:
     """Both an orderly release and a reconciliation reach disposal, and now that the
     ordinary path removes the tree, the second arrival is the common case. It
     decides nothing — it reports what the first left, which is the bookmark."""
     ctx, base = await _tiered(mount, tmp_path)
-    workspace = await ctx.workspace.acquire(
+    workspace = await ctx.require(WORKSPACE).acquire(
         session_id="s1", agent_id="a1", base=base, access="write"
     )
     (workspace.root / "work.txt").write_text("done\n", encoding="utf-8")
     record = WorkspaceRecord(
         agent_id="a1", kind="worktree", root=workspace.root, ref="ph/s1/a1", session_id="s1"
     )
-    assert await ctx.workspace.provider.reclaim(record) is True
+    assert await ctx.require(WORKSPACE).provider.reclaim(record) is True
 
-    assert await ctx.workspace.provider.reclaim(record) is False
+    assert await ctx.require(WORKSPACE).provider.reclaim(record) is False
 
 
 async def test_work_that_cannot_be_named_keeps_its_tree_instead_of_losing_it(
-    mount: Any, tmp_path: Path
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """**A failure to name cancels the removal, not the work** — the git tier's rule
     at the same point in disposal, and the reason release names the work itself
@@ -447,7 +470,7 @@ async def test_work_that_cannot_be_named_keeps_its_tree_instead_of_losing_it(
     directory or a day.
     """
     ctx, base = await _tiered(mount, tmp_path)
-    workspace = await ctx.workspace.acquire(
+    workspace = await ctx.require(WORKSPACE).acquire(
         session_id="s1", agent_id="a1", base=base, access="write"
     )
     (workspace.root / "irreplaceable.txt").write_text("hours of work\n", encoding="utf-8")
@@ -455,17 +478,19 @@ async def test_work_that_cannot_be_named_keeps_its_tree_instead_of_losing_it(
         agent_id="a1", kind="worktree", root=workspace.root, ref="ph/no bookmark", session_id="s1"
     )
 
-    kept = await ctx.workspace.provider.reclaim(record)
+    kept = await ctx.require(WORKSPACE).provider.reclaim(record)
 
     assert kept is True
     assert (workspace.root / "irreplaceable.txt").exists(), "work that reached no ref was deleted"
 
 
-async def test_export_names_the_bookmark_the_work_is_on(mount: Any, tmp_path: Path) -> None:
+async def test_export_names_the_bookmark_the_work_is_on(
+    mount: MountProfile, tmp_path: Path
+) -> None:
     """`/workspaces` asks the seam one question rather than asking which tier
     answered."""
     ctx, base = await _tiered(mount, tmp_path)
-    workspace = await ctx.workspace.acquire(
+    workspace = await ctx.require(WORKSPACE).acquire(
         session_id="s1", agent_id="a1", base=base, access="write"
     )
     record = WorkspaceRecord(
@@ -476,13 +501,13 @@ async def test_export_names_the_bookmark_the_work_is_on(mount: Any, tmp_path: Pa
         session_id="s1",
     )
 
-    assert await ctx.workspace.export(record) == "ph/s1/a1"
+    assert await ctx.require(WORKSPACE).export(record) == "ph/s1/a1"
 
 
 # --------------------------------------------------------------------- tier --
 
 
-async def test_the_tier_advertises_exactly_what_it_has(mount: Any, tmp_path: Path) -> None:
+async def test_the_tier_advertises_exactly_what_it_has(mount: MountProfile, tmp_path: Path) -> None:
     """E1, in the one place a person looks to check — and in **both** directions.
 
     While this tier had no restore points, `buys` said so, and printing the rung's
@@ -495,23 +520,27 @@ async def test_the_tier_advertises_exactly_what_it_has(mount: Any, tmp_path: Pat
     `can_checkpoint` agreeing with the sentence, rather than the sentence alone.
     """
     ctx, base = await _tiered(mount, tmp_path)
-    workspace = await ctx.workspace.acquire(
+    workspace = await ctx.require(WORKSPACE).acquire(
         session_id="s1", agent_id="a1", base=base, access="write"
     )
 
-    described = ctx.workspace.provider.describe_tier()
+    described = ctx.require(WORKSPACE).provider.describe_tier()
 
     assert "per-run checkpoints" in described.buys
     assert "no per-run checkpoints" not in described.buys
     assert "work in progress" in described.buys
     assert "absolute-path raw write" in described.does_not_bound
-    assert ctx.workspace.can_checkpoint(workspace), "the sentence promises what is not there"
+    assert ctx.require(WORKSPACE).can_checkpoint(workspace), (
+        "the sentence promises what is not there"
+    )
 
 
 # ------------------------------------------------------------- restore points --
 
 
-async def test_a_run_can_be_reverted_to_the_state_before_it(mount: Any, tmp_path: Path) -> None:
+async def test_a_run_can_be_reverted_to_the_state_before_it(
+    mount: MountProfile, tmp_path: Path
+) -> None:
     """P4-09 at this tier: capture, damage, put it back.
 
     A denial settles the whole run (Q9a), which bounds partial state to about one
@@ -520,18 +549,18 @@ async def test_a_run_can_be_reverted_to_the_state_before_it(mount: Any, tmp_path
     in a demo: an edit, a deletion, and a file the run created.
     """
     ctx, base = await _tiered(mount, tmp_path)
-    workspace = await ctx.workspace.acquire(
+    workspace = await ctx.require(WORKSPACE).acquire(
         session_id="s1", agent_id="a1", base=base, access="write"
     )
     (workspace.root / "tracked.txt").write_text("before the run\n", encoding="utf-8")
 
-    token = await ctx.workspace.capture(workspace)
+    token = await ctx.require(WORKSPACE).capture(workspace)
     assert token is not None
     (workspace.root / "tracked.txt").write_text("the run clobbered this\n", encoding="utf-8")
     (workspace.root / "added.txt").write_text("the run made this\n", encoding="utf-8")
     (workspace.root / "README.md").unlink()
 
-    added = await ctx.workspace.restore(workspace, token)
+    added = await ctx.require(WORKSPACE).restore(workspace, token)
 
     assert (workspace.root / "tracked.txt").read_text(encoding="utf-8") == "before the run\n"
     assert (workspace.root / "README.md").exists(), "a file the run deleted did not come back"
@@ -540,7 +569,7 @@ async def test_a_run_can_be_reverted_to_the_state_before_it(mount: Any, tmp_path
 
 
 async def test_the_operation_log_keeps_a_restore_point_reachable(
-    mount: Any, tmp_path: Path
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """**What replaces the git tier's hidden ref**, and the reason this tier writes none.
 
@@ -556,18 +585,18 @@ async def test_the_operation_log_keeps_a_restore_point_reachable(
     alone would have taken the first out.
     """
     ctx, base = await _tiered(mount, tmp_path)
-    workspace = await ctx.workspace.acquire(
+    workspace = await ctx.require(WORKSPACE).acquire(
         session_id="s1", agent_id="a1", base=base, access="write"
     )
     (workspace.root / "keep.txt").write_text("the state to come back to\n", encoding="utf-8")
-    token = await ctx.workspace.capture(workspace)
+    token = await ctx.require(WORKSPACE).capture(workspace)
     assert token is not None
 
     for step in range(5):
         (workspace.root / f"cell-{step}.txt").write_text(f"{step}\n", encoding="utf-8")
-        await ctx.workspace.capture(workspace)
+        await ctx.require(WORKSPACE).capture(workspace)
 
-    added = await ctx.workspace.restore(workspace, token)
+    added = await ctx.require(WORKSPACE).restore(workspace, token)
 
     assert (workspace.root / "keep.txt").read_text(
         encoding="utf-8"
@@ -575,7 +604,7 @@ async def test_the_operation_log_keeps_a_restore_point_reachable(
     assert added == tuple(f"cell-{step}.txt" for step in range(5))
 
 
-async def test_a_restore_leaves_ignored_files_alone(mount: Any, tmp_path: Path) -> None:
+async def test_a_restore_leaves_ignored_files_alone(mount: MountProfile, tmp_path: Path) -> None:
     """A `/revert` that wiped a build cache would turn a recovery into a rebuild.
 
     Free here rather than arranged: an ignored path was never in the commit, so it
@@ -584,21 +613,23 @@ async def test_a_restore_leaves_ignored_files_alone(mount: Any, tmp_path: Path) 
     """
     ctx, base = await _tiered(mount, tmp_path)
     (base / ".gitignore").write_text("build/\n", encoding="utf-8")
-    workspace = await ctx.workspace.acquire(
+    workspace = await ctx.require(WORKSPACE).acquire(
         session_id="s1", agent_id="a1", base=base, access="write"
     )
     (workspace.root / "build").mkdir()
     (workspace.root / "build" / "cache").write_text("expensive\n", encoding="utf-8")
-    token = await ctx.workspace.capture(workspace)
+    token = await ctx.require(WORKSPACE).capture(workspace)
     assert token is not None
     (workspace.root / "build" / "cache").write_text("still expensive\n", encoding="utf-8")
 
-    await ctx.workspace.restore(workspace, token)
+    await ctx.require(WORKSPACE).restore(workspace, token)
 
     assert (workspace.root / "build" / "cache").read_text(encoding="utf-8") == "still expensive\n"
 
 
-async def test_a_restore_touches_only_its_own_workspace(mount: Any, tmp_path: Path) -> None:
+async def test_a_restore_touches_only_its_own_workspace(
+    mount: MountProfile, tmp_path: Path
+) -> None:
     """Why this is `jj restore --from` and not `jj op restore`.
 
     The operation log is what keeps a restore point *reachable*, which makes
@@ -607,20 +638,24 @@ async def test_a_restore_touches_only_its_own_workspace(mount: Any, tmp_path: Pa
     back with it — in the tier bought precisely so a fan-out does not collide.
     """
     ctx, base = await _tiered(mount, tmp_path)
-    one = await ctx.workspace.acquire(session_id="s1", agent_id="a1", base=base, access="write")
-    two = await ctx.workspace.acquire(session_id="s1", agent_id="a2", base=base, access="write")
-    token = await ctx.workspace.capture(one)
+    one = await ctx.require(WORKSPACE).acquire(
+        session_id="s1", agent_id="a1", base=base, access="write"
+    )
+    two = await ctx.require(WORKSPACE).acquire(
+        session_id="s1", agent_id="a2", base=base, access="write"
+    )
+    token = await ctx.require(WORKSPACE).capture(one)
     assert token is not None
     (one.root / "mine.txt").write_text("a1's cell\n", encoding="utf-8")
     (two.root / "theirs.txt").write_text("a2 is still working\n", encoding="utf-8")
 
-    await ctx.workspace.restore(one, token)
+    await ctx.require(WORKSPACE).restore(one, token)
 
     assert not (one.root / "mine.txt").exists()
     assert (two.root / "theirs.txt").read_text(encoding="utf-8") == "a2 is still working\n"
 
 
-async def test_a_token_names_one_state(mount: Any, tmp_path: Path) -> None:
+async def test_a_token_names_one_state(mount: MountProfile, tmp_path: Path) -> None:
     """The whole of what a token must promise: **equal tokens mean equal content**.
 
     That is the direction `unchanged_failure` depends on — a gate that failed
@@ -630,22 +665,22 @@ async def test_a_token_names_one_state(mount: Any, tmp_path: Path) -> None:
     *new* id, and the cost is a gate re-run rather than a wrong answer.
     """
     ctx, base = await _tiered(mount, tmp_path)
-    workspace = await ctx.workspace.acquire(
+    workspace = await ctx.require(WORKSPACE).acquire(
         session_id="s1", agent_id="a1", base=base, access="write"
     )
     (workspace.root / "work.txt").write_text("one\n", encoding="utf-8")
 
-    first = await ctx.workspace.capture(workspace)
-    unchanged = await ctx.workspace.capture(workspace)
+    first = await ctx.require(WORKSPACE).capture(workspace)
+    unchanged = await ctx.require(WORKSPACE).capture(workspace)
     (workspace.root / "work.txt").write_text("two\n", encoding="utf-8")
-    changed = await ctx.workspace.capture(workspace)
+    changed = await ctx.require(WORKSPACE).capture(workspace)
 
     assert first is not None and first == unchanged, "the token moved with nothing changed"
     assert changed != first, "an edit did not change the token"
 
 
 async def test_a_restore_point_that_is_gone_is_reported_rather_than_crashing(
-    mount: Any, tmp_path: Path
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """`FileNotFoundError`, matching the git tier, because it is what `/revert`
     catches to say "no longer available" instead of showing a person a traceback for
@@ -658,15 +693,17 @@ async def test_a_restore_point_that_is_gone_is_reported_rather_than_crashing(
     above the tier that made it.
     """
     ctx, base = await _tiered(mount, tmp_path)
-    workspace = await ctx.workspace.acquire(
+    workspace = await ctx.require(WORKSPACE).acquire(
         session_id="s1", agent_id="a1", base=base, access="write"
     )
 
     with pytest.raises(FileNotFoundError):
-        await ctx.workspace.restore(workspace, "deadbeef" * 5)
+        await ctx.require(WORKSPACE).restore(workspace, "deadbeef" * 5)
 
 
-async def test_revert_offers_restore_points_for_a_jj_workspace(mount: Any, tmp_path: Path) -> None:
+async def test_revert_offers_restore_points_for_a_jj_workspace(
+    mount: MountProfile, tmp_path: Path
+) -> None:
     """The sentence a person reads, end to end.
 
     P6-20's refusal is now about the *tier*, so this is the half that would regress
@@ -676,24 +713,28 @@ async def test_revert_offers_restore_points_for_a_jj_workspace(mount: Any, tmp_p
     ctx, base = await _tiered(
         mount, tmp_path, {"insert": [{"id": "workspace-revert", "name": "workspace-revert"}]}
     )
-    session = ctx.sessions.create("s1")
-    agent = ctx.agents.create(session, FAKE_OPTIONS)
-    workspace = await ctx.workspace.acquire(
+    session = ctx.require(SESSIONS).create("s1")
+    agent = ctx.require(AGENTS).create(session, FAKE_OPTIONS)
+    workspace = await ctx.require(WORKSPACE).acquire(
         session_id=session.id, agent_id=agent.id, base=base, access="write", session=session
     )
     (workspace.root / "work.txt").write_text("before\n", encoding="utf-8")
-    await ctx.workspace.checkpoint(workspace, session=session, agent_id=agent.id, call_id="call-1")
+    await ctx.require(WORKSPACE).checkpoint(
+        workspace, session=session, agent_id=agent.id, call_id="call-1"
+    )
     (workspace.root / "work.txt").write_text("after\n", encoding="utf-8")
 
     (point,) = [one for one in session.events if one.type == CHECKPOINT]
-    shown = str(await ctx.commands.dispatch(f"/revert {point.seq}", session=session, agent=agent))
+    shown = str(
+        await ctx.require(COMMANDS).dispatch(f"/revert {point.seq}", session=session, agent=agent)
+    )
 
     assert "restored the workspace" in shown, shown
     assert (workspace.root / "work.txt").read_text(encoding="utf-8") == "before\n"
 
 
 async def test_a_live_jj_workspace_is_refused_by_workspaces_remove(
-    mount: Any, tmp_path: Path
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """The refusal that protects an agent still working, which did not fire here.
 
@@ -707,13 +748,13 @@ async def test_a_live_jj_workspace_is_refused_by_workspaces_remove(
     tiers put on a `Workspace` and carry rather than derive.
     """
     ctx, base, session, agent = await jj_agent(mount)
-    held = await ctx.workspace.acquire(
+    held = await ctx.require(WORKSPACE).acquire(
         session_id="s1", agent_id="a1", base=base, access="write", session=session
     )
     (held.root / "mid-turn.txt").write_text("still working\n", encoding="utf-8")
 
     shown = str(
-        await ctx.commands.dispatch(
+        await ctx.require(COMMANDS).dispatch(
             "/workspaces remove a1 --with-branch --force-branch", session=session, agent=agent
         )
     )
@@ -725,7 +766,7 @@ async def test_a_live_jj_workspace_is_refused_by_workspaces_remove(
 
 
 async def test_a_stray_jj_workspace_is_listed_with_its_path_and_can_be_removed(
-    mount: Any, tmp_path: Path
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """The gap `ArtifactProvider` closes, from a person's side.
 
@@ -739,18 +780,20 @@ async def test_a_stray_jj_workspace_is_listed_with_its_path_and_can_be_removed(
     never held and so will never dispose.
     """
     ctx, base, session, agent = await jj_agent(mount)
-    stray = await ctx.workspace.provider.acquire(
+    stray = await ctx.require(WORKSPACE).provider.acquire(
         session_id="s1", agent_id="a1", base=base, scratch=tmp_path / "scratch"
     )
     assert stray is not None
     (stray.root / "abandoned.txt").write_text("nobody came back\n", encoding="utf-8")
 
-    shown = str(await ctx.commands.dispatch("/workspaces list", session=session, agent=agent))
+    shown = str(
+        await ctx.require(COMMANDS).dispatch("/workspaces list", session=session, agent=agent)
+    )
     assert str(stray.root) in shown, shown
     assert "stray" in shown, shown
 
     removed = str(
-        await ctx.commands.dispatch("/workspaces remove a1", session=session, agent=agent)
+        await ctx.require(COMMANDS).dispatch("/workspaces remove a1", session=session, agent=agent)
     )
 
     assert removed == f"removed {stray.root}", removed
@@ -761,7 +804,9 @@ async def test_a_stray_jj_workspace_is_listed_with_its_path_and_can_be_removed(
     assert code == 0, "remove took the branch as well as the directory"
 
 
-async def test_the_persons_own_repository_is_never_a_stray(mount: Any, tmp_path: Path) -> None:
+async def test_the_persons_own_repository_is_never_a_stray(
+    mount: MountProfile, tmp_path: Path
+) -> None:
     """The root filter, and it is the whole safety of this enumeration.
 
     `jj workspace list` reports **every** workspace of the repository, and the first
@@ -774,23 +819,27 @@ async def test_the_persons_own_repository_is_never_a_stray(mount: Any, tmp_path:
     The tier answers only for what it put where it puts things.
     """
     ctx, base = await _tiered(mount, tmp_path)
-    ours = await ctx.workspace.acquire(session_id="s1", agent_id="a1", base=base, access="write")
+    ours = await ctx.require(WORKSPACE).acquire(
+        session_id="s1", agent_id="a1", base=base, access="write"
+    )
     mine = tmp_path / "my-own-workspace"
     mine.parent.mkdir(parents=True, exist_ok=True)
     code, _, err = await jj(ctx, base, "workspace", "add", "--name", "mine", str(mine))
     assert code == 0, err
 
-    found = await ctx.workspace.strays(base)
+    found = await ctx.require(WORKSPACE).strays(base)
 
     assert {one.path for one in found.values()} == {ours.root}
     assert base not in {one.path for one in found.values()}, "the repository itself was listed"
     assert mine not in {one.path for one in found.values()}
     # And the verb refuses a path it did not enumerate, rather than trusting a caller.
-    assert await ctx.workspace.discard(base) != ""
+    assert await ctx.require(WORKSPACE).discard(base) != ""
     assert base.exists() and (base / ".jj").exists()
 
 
-async def test_a_live_jj_workspace_shows_where_the_disk_went(mount: Any, tmp_path: Path) -> None:
+async def test_a_live_jj_workspace_shows_where_the_disk_went(
+    mount: MountProfile, tmp_path: Path
+) -> None:
     """`held` rows carry a path now, which is the other half of the same fix.
 
     An operator wondering where the disk went should see every checkout, and under
@@ -798,11 +847,13 @@ async def test_a_live_jj_workspace_shows_where_the_disk_went(mount: Any, tmp_pat
     whether an agent was working in it or not.
     """
     ctx, base, session, agent = await jj_agent(mount)
-    held = await ctx.workspace.acquire(
+    held = await ctx.require(WORKSPACE).acquire(
         session_id="s1", agent_id="a1", base=base, access="write", session=session
     )
 
-    shown = str(await ctx.commands.dispatch("/workspaces list", session=session, agent=agent))
+    shown = str(
+        await ctx.require(COMMANDS).dispatch("/workspaces list", session=session, agent=agent)
+    )
 
     assert "held" in shown, shown
     assert str(held.root) in shown, shown
@@ -813,7 +864,7 @@ async def test_a_live_jj_workspace_shows_where_the_disk_went(mount: Any, tmp_pat
 
 
 async def test_workspaces_needs_no_git_binary_on_a_jj_host(
-    mount: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    mount: MountProfile, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """**jj embeds its own git, so a jj deployment need not have the binary.**
 
@@ -828,11 +879,11 @@ async def test_workspaces_needs_no_git_binary_on_a_jj_host(
     nothing about which of them was being exercised.
     """
     ctx, base, session, agent = await jj_agent(mount)
-    workspace = await ctx.workspace.acquire(
+    workspace = await ctx.require(WORKSPACE).acquire(
         session_id="s1", agent_id="a1", base=base, access="write", session=session
     )
     (workspace.root / "work.txt").write_text("the agent did this\n", encoding="utf-8")
-    await ctx.workspace.dispose("a1")
+    await ctx.require(WORKSPACE).dispose("a1")
 
     shim = tmp_path / "no-git"
     shim.mkdir()
@@ -842,7 +893,9 @@ async def test_workspaces_needs_no_git_binary_on_a_jj_host(
     broken, _, _ = await git(ctx, base, "--version")
     assert broken != 0, "the shim is not in force, so this test proves nothing"
 
-    shown = str(await ctx.commands.dispatch("/workspaces list", session=session, agent=agent))
+    shown = str(
+        await ctx.require(COMMANDS).dispatch("/workspaces list", session=session, agent=agent)
+    )
 
     assert "ph/s1/a1" in shown, shown
     assert "no agent workspaces are left behind" not in shown
@@ -851,13 +904,15 @@ async def test_workspaces_needs_no_git_binary_on_a_jj_host(
     # agent — the same work, listed as if it were two.
     assert shown.count("ph/s1/a1") == 1, shown
     # And the verbs work, not just the listing.
-    merged = str(await ctx.commands.dispatch("/workspaces merge a1", session=session, agent=agent))
+    merged = str(
+        await ctx.require(COMMANDS).dispatch("/workspaces merge a1", session=session, agent=agent)
+    )
     assert merged == "merged ph/s1/a1", merged
     assert (base / "work.txt").read_text(encoding="utf-8") == "the agent did this\n"
 
 
 async def test_merging_reports_the_conflicts_jj_records_instead_of_claiming_success(
-    mount: Any, tmp_path: Path
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """The trap that makes `merge` a tier verb rather than one exit code.
 
@@ -869,15 +924,17 @@ async def test_merging_reports_the_conflicts_jj_records_instead_of_claiming_succ
     """
     ctx, base, session, agent = await jj_agent(mount)
     (base / "shared.txt").write_text("original\n", encoding="utf-8")
-    child = await ctx.workspace.acquire(
+    child = await ctx.require(WORKSPACE).acquire(
         session_id="s1", agent_id="a1", base=base, access="write", session=session
     )
     (child.root / "shared.txt").write_text("the child's version\n", encoding="utf-8")
-    await ctx.workspace.dispose("a1")
+    await ctx.require(WORKSPACE).dispose("a1")
     # The person moved the same line while the child was working.
     (base / "shared.txt").write_text("the person's version\n", encoding="utf-8")
 
-    shown = str(await ctx.commands.dispatch("/workspaces merge a1", session=session, agent=agent))
+    shown = str(
+        await ctx.require(COMMANDS).dispatch("/workspaces merge a1", session=session, agent=agent)
+    )
 
     assert "conflict" in shown, shown
     assert "shared.txt" in shown, shown
@@ -885,7 +942,7 @@ async def test_merging_reports_the_conflicts_jj_records_instead_of_claiming_succ
 
 
 async def test_removing_a_bookmark_refuses_work_nothing_else_has(
-    mount: Any, tmp_path: Path
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """`git branch -d`'s refusal, which jj has no equivalent of and so gets one.
 
@@ -896,30 +953,30 @@ async def test_removing_a_bookmark_refuses_work_nothing_else_has(
     everything the agent did is on that bookmark.
     """
     ctx, base, session, agent = await jj_agent(mount)
-    workspace = await ctx.workspace.acquire(
+    workspace = await ctx.require(WORKSPACE).acquire(
         session_id="s1", agent_id="a1", base=base, access="write", session=session
     )
     (workspace.root / "unmerged.txt").write_text("nobody has this\n", encoding="utf-8")
-    await ctx.workspace.dispose("a1")
+    await ctx.require(WORKSPACE).dispose("a1")
 
     refused = str(
-        await ctx.commands.dispatch(
+        await ctx.require(COMMANDS).dispatch(
             "/workspaces remove a1 --with-branch", session=session, agent=agent
         )
     )
 
     assert "kept branch ph/s1/a1" in refused, refused
     assert "--force-branch" in refused
-    assert "ph/s1/a1" in await ctx.workspace.refs(base)
+    assert "ph/s1/a1" in await ctx.require(WORKSPACE).refs(base)
 
     forced = str(
-        await ctx.commands.dispatch(
+        await ctx.require(COMMANDS).dispatch(
             "/workspaces remove a1 --with-branch --force-branch", session=session, agent=agent
         )
     )
 
     assert forced.endswith("and branch ph/s1/a1"), forced
-    assert "ph/s1/a1" not in await ctx.workspace.refs(base)
+    assert "ph/s1/a1" not in await ctx.require(WORKSPACE).refs(base)
 
 
 async def _at(ctx: Any, cwd: Path, template: str = "commit_id") -> str:
@@ -936,7 +993,7 @@ async def _at(ctx: Any, cwd: Path, template: str = "commit_id") -> str:
 
 
 async def test_reading_does_not_snapshot_the_persons_own_checkout(
-    mount: Any, tmp_path: Path
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """**The hole `auto_track` could not close, and the reason `snapshot` has no default.**
 
@@ -957,7 +1014,7 @@ async def test_reading_does_not_snapshot_the_persons_own_checkout(
     (base / "my-own-note.txt").write_text("mid-thought\n", encoding="utf-8")
     before = await _at(ctx, base)
 
-    await ctx.commands.dispatch("/workspaces list", session=session, agent=agent)
+    await ctx.require(COMMANDS).dispatch("/workspaces list", session=session, agent=agent)
 
     assert await _at(ctx, base) == before, "a read committed the person's working copy"
     # And their file never entered a commit. Asked of `@`'s own diff rather than of
@@ -995,7 +1052,9 @@ def test_a_read_of_a_verb_that_needs_the_tree_is_refused() -> None:
     assert not _needs_the_tree(("workspace", "forget", "x"))
 
 
-async def test_the_calls_that_must_see_the_tree_still_do(mount: Any, tmp_path: Path) -> None:
+async def test_the_calls_that_must_see_the_tree_still_do(
+    mount: MountProfile, tmp_path: Path
+) -> None:
     """The other side of the same parameter, so the fix cannot be "read everything".
 
     Three verbs' answers *are* the tree, and each would be silently wrong if it
@@ -1007,20 +1066,20 @@ async def test_the_calls_that_must_see_the_tree_still_do(mount: Any, tmp_path: P
     (base / "wip.txt").write_text("the parent's work\n", encoding="utf-8")
 
     # A fork point must see it — this is the whole tier.
-    child = await ctx.workspace.acquire(
+    child = await ctx.require(WORKSPACE).acquire(
         session_id="s1", agent_id="a1", base=base, access="write", session=session
     )
     assert (child.root / "wip.txt").read_text(encoding="utf-8") == "the parent's work\n"
 
     # A capture must see the child's newest edit.
     (child.root / "cell.txt").write_text("first\n", encoding="utf-8")
-    first = await ctx.workspace.capture(child)
+    first = await ctx.require(WORKSPACE).capture(child)
     (child.root / "cell.txt").write_text("second\n", encoding="utf-8")
-    second = await ctx.workspace.capture(child)
+    second = await ctx.require(WORKSPACE).capture(child)
     assert first is not None and second is not None and first != second
 
     # And a release must not conclude the child did nothing.
-    await ctx.workspace.dispose("a1")
+    await ctx.require(WORKSPACE).dispose("a1")
     (disposed,) = [one for one in session.events if one.type == "workspace/disposed"]
     assert disposed.data["kept"] is True
 
@@ -1029,7 +1088,7 @@ async def test_the_calls_that_must_see_the_tree_still_do(mount: Any, tmp_path: P
 
 
 async def test_a_provisioned_material_stays_out_of_what_an_agent_contributes(
-    mount: Any, tmp_path: Path
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """P6-35's security property, arriving at this tier — and it needed work here.
 
@@ -1059,21 +1118,21 @@ async def test_a_provisioned_material_stays_out_of_what_an_agent_contributes(
     base = await jj_repo(ctx, tmp_path / "repo")
     (base / "secret.env").write_text("TOKEN=shhh\n", encoding="utf-8")
     (base / ".gitignore").write_text("secret.env\n", encoding="utf-8")
-    session = ctx.sessions.create("s1")
-    parent = await ctx.workspace.acquire(
+    session = ctx.require(SESSIONS).create("s1")
+    parent = await ctx.require(WORKSPACE).acquire(
         session_id="s1", agent_id="parent", base=base, access="write", session=session
     )
     assert (parent.root / "config.env").exists(), "the agent never got the material"
     (parent.root / "real-work.txt").write_text("the agent did this\n", encoding="utf-8")
     # A child forked from that tree — the fork point is the parent's work frozen,
     # and the material is sitting in it.
-    child = await ctx.workspace.acquire(
+    child = await ctx.require(WORKSPACE).acquire(
         session_id="s1", agent_id="child", base=parent.root, access="write", session=session
     )
     (child.root / "child-work.txt").write_text("the child did this\n", encoding="utf-8")
 
-    await ctx.workspace.dispose("child")
-    await ctx.workspace.dispose("parent")
+    await ctx.require(WORKSPACE).dispose("child")
+    await ctx.require(WORKSPACE).dispose("parent")
 
     code, out, _ = await git(ctx, base, "show", "ph/s1/parent:real-work.txt")
     assert code == 0 and out == "the agent did this\n", "the work did not reach the bookmark"
@@ -1084,7 +1143,7 @@ async def test_a_provisioned_material_stays_out_of_what_an_agent_contributes(
 
 
 async def test_a_file_the_base_already_tracks_reaches_children_and_that_is_the_tier(
-    mount: Any, tmp_path: Path
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """**The non-guarantee, stated as behaviour so nobody discovers it by merging.**
 
@@ -1107,7 +1166,9 @@ async def test_a_file_the_base_already_tracks_reaches_children_and_that_is_the_t
     ctx, base = await _tiered(mount, tmp_path)
     (base / "in-progress.txt").write_text("the parent is mid-thought\n", encoding="utf-8")
 
-    child = await ctx.workspace.acquire(session_id="s1", agent_id="a1", base=base, access="write")
+    child = await ctx.require(WORKSPACE).acquire(
+        session_id="s1", agent_id="a1", base=base, access="write"
+    )
 
     assert (child.root / "in-progress.txt").exists(), "this tier exists to do exactly this"
     code, out, _ = await git(ctx, base, "show", "ph/s1/a1:in-progress.txt")

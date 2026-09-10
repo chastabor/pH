@@ -55,18 +55,22 @@ from stabilize_helpers import (
 )
 
 from ph.cordis import DEPLOYMENT
+from ph.keys import AGENTS, FS, SANDBOX, SESSIONS, WORKSPACE
 from ph.llm.types import ToolCallBlock
 from ph.seams.fs import FsDenied
 from ph.testing import (
     FAKE_OPTIONS,
+    MountProfile,
     StubAgent,
     StubSandboxProvider,
     StubWorkspaceProvider,
+    noted,
     report_section,
     run_tool,
 )
 from ph_stabilize.permissions_fs import (
     BOUNDED_REACH,
+    FS_PERMISSIONS,
     UNBOUNDED_REACH,
     FsPermissions,
     Rule,
@@ -77,9 +81,11 @@ pytestmark = pytest.mark.anyio
 
 def _policy(*rules: Rule, root: str = "/w") -> FsPermissions:
     """The decision half on its own, for the questions no tool can ask yet."""
-    return FsPermissions(
-        rules=rules, roots=lambda agent=None: getattr(agent, "root", None) or Path(root)
-    )
+
+    def roots(agent: Any = None) -> Path:
+        return getattr(agent, "root", None) or Path(root)
+
+    return FsPermissions(rules=rules, roots=roots)
 
 
 DEFAULT_WRITE_SCOPE: dict[str, Any] = {
@@ -97,7 +103,7 @@ about visible in the test.
 """
 
 
-async def _scoped(mount: Any, tmp_path: Path, *rules: dict[str, Any]) -> Any:
+async def _scoped(mount: MountProfile, tmp_path: Path, *rules: dict[str, Any]) -> Any:
     """The bundle's default write scope, with any explicit rules *above* it.
 
     Above, because first-match-wins is the whole precedence mechanism: an
@@ -108,7 +114,7 @@ async def _scoped(mount: Any, tmp_path: Path, *rules: dict[str, Any]) -> Any:
     return await _mounted(mount, tmp_path, *rules, DEFAULT_WRITE_SCOPE)
 
 
-async def _mounted(mount: Any, tmp_path: Path, *rules: dict[str, Any]) -> Any:
+async def _mounted(mount: MountProfile, tmp_path: Path, *rules: dict[str, Any]) -> Any:
     """The row with its ACL spelled the way a profile spells it, over a temp root."""
     return await mount(
         row("permissions-fs", rules=list(rules)), row("fs", root=str(tmp_path)), profile=PROFILE
@@ -221,7 +227,7 @@ def test_an_allow_rule_never_causes_a_recursive_refusal() -> None:
 # ------------------------------------------------------------ through the fs --
 
 
-async def test_a_denied_read_never_opens_the_file(mount: Any, tmp_path: Path) -> None:
+async def test_a_denied_read_never_opens_the_file(mount: MountProfile, tmp_path: Path) -> None:
     """Gated on `fs/read-intent`, so the refusal happens before the open — a
     check that ran after would be a report, which is the failure this seam
     exists to avoid."""
@@ -229,11 +235,13 @@ async def test_a_denied_read_never_opens_the_file(mount: Any, tmp_path: Path) ->
     ctx = await _mounted(mount, tmp_path, {"paths": ["*.env"], "mode": "deny"})
 
     with pytest.raises(FsDenied) as refused:
-        await ctx.fs.read("secret.env", scope=DEPLOYMENT)
+        await ctx.require(FS).read("secret.env", scope=DEPLOYMENT)
     assert "denied by permissions-fs" in str(refused.value)
 
 
-async def test_a_denied_write_and_edit_are_both_refused(mount: Any, tmp_path: Path) -> None:
+async def test_a_denied_write_and_edit_are_both_refused(
+    mount: MountProfile, tmp_path: Path
+) -> None:
     """One `write` rule covers create, overwrite and in-place edit.
 
     Splitting them would mean "you may not write here" left `edit` open, which
@@ -246,17 +254,19 @@ async def test_a_denied_write_and_edit_are_both_refused(mount: Any, tmp_path: Pa
     )
 
     with pytest.raises(FsDenied):
-        await ctx.fs.write("vendor/lib.py", "x = 2\n", scope=DEPLOYMENT)
+        await ctx.require(FS).write("vendor/lib.py", "x = 2\n", scope=DEPLOYMENT)
     with pytest.raises(FsDenied):
-        await ctx.fs.edit("vendor/lib.py", "x = 1", "x = 2", scope=DEPLOYMENT)
+        await ctx.require(FS).edit("vendor/lib.py", "x = 1", "x = 2", scope=DEPLOYMENT)
     # And nothing changed on disk, which is the only assertion that proves the
     # gate ran before the write rather than after it.
     assert (tmp_path / "vendor" / "lib.py").read_text(encoding="utf-8") == "x = 1\n"
     # The read the rule did not mention is still allowed.
-    assert "x = 1" in (await ctx.fs.read("vendor/lib.py", scope=DEPLOYMENT)).text
+    assert "x = 1" in (await ctx.require(FS).read("vendor/lib.py", scope=DEPLOYMENT)).text
 
 
-async def test_a_concealed_path_is_absent_from_glob_and_grep(mount: Any, tmp_path: Path) -> None:
+async def test_a_concealed_path_is_absent_from_glob_and_grep(
+    mount: MountProfile, tmp_path: Path
+) -> None:
     """Enumeration is filtered, not asked about — and filtered during the walk.
 
     `grep` reads every file it visits, so post-filtering its matches would
@@ -267,16 +277,16 @@ async def test_a_concealed_path_is_absent_from_glob_and_grep(mount: Any, tmp_pat
     (tmp_path / "secret.env").write_text("TOKEN=hunter2\n", encoding="utf-8")
     ctx = await _mounted(mount, tmp_path, {"paths": ["*.env"], "mode": "deny"})
 
-    paths = await ctx.fs.glob("**/*", scope=DEPLOYMENT)
+    paths = await ctx.require(FS).glob("**/*", scope=DEPLOYMENT)
     assert any(path.endswith("app.py") for path in paths)
     assert not any(path.endswith("secret.env") for path in paths)
 
-    matches = await ctx.fs.grep("TOKEN", scope=DEPLOYMENT)
+    matches = await ctx.require(FS).grep("TOKEN", scope=DEPLOYMENT)
     assert [match.path for match in matches] == [str(tmp_path / "app.py")]
     assert not any("hunter2" in match.text for match in matches)
 
 
-async def test_a_denied_tree_is_never_entered(mount: Any, tmp_path: Path) -> None:
+async def test_a_denied_tree_is_never_entered(mount: MountProfile, tmp_path: Path) -> None:
     """P6-19. `deny secrets/**` refuses the directory, not each file in it.
 
     The glob is the reason this needed a second question rather than reusing
@@ -293,16 +303,18 @@ async def test_a_denied_tree_is_never_entered(mount: Any, tmp_path: Path) -> Non
     (tmp_path / "app.py").write_text("TOKEN = 1\n")
     ctx = await _mounted(mount, tmp_path, {"paths": ["secrets/**"], "mode": "deny"})
 
-    paths = await ctx.fs.glob("**/*", scope=DEPLOYMENT)
+    paths = await ctx.require(FS).glob("**/*", scope=DEPLOYMENT)
     assert any(path.endswith("app.py") for path in paths)
     assert not any("secrets" in path for path in paths), "neither the tree nor its contents"
 
-    matches = await ctx.fs.grep("TOKEN", scope=DEPLOYMENT)
+    matches = await ctx.require(FS).grep("TOKEN", scope=DEPLOYMENT)
     assert [match.path for match in matches] == [str(tmp_path / "app.py")]
     assert not any("hunter" in match.text for match in matches)
 
 
-async def test_a_tree_an_allow_rule_names_is_still_entered(mount: Any, tmp_path: Path) -> None:
+async def test_a_tree_an_allow_rule_names_is_still_entered(
+    mount: MountProfile, tmp_path: Path
+) -> None:
     """Pruning rounds towards refusal, but only for rules that refuse.
 
     `_could_match_under` reasons from a pattern's literal head and cannot see
@@ -315,11 +327,12 @@ async def test_a_tree_an_allow_rule_names_is_still_entered(mount: Any, tmp_path:
     (tmp_path / "docs" / "readme.md").write_text("hello\n")
     ctx = await _mounted(mount, tmp_path, {"paths": ["docs/**"], "mode": "allow"})
 
-    assert any(path.endswith("readme.md") for path in await ctx.fs.glob("**/*", scope=DEPLOYMENT))
+    walked = await ctx.require(FS).glob("**/*", scope=DEPLOYMENT)
+    assert any(path.endswith("readme.md") for path in walked)
 
 
 async def test_a_workspace_scoped_read_rule_does_not_prune_the_workspace(
-    mount: Any, tmp_path: Path
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """The over-refusal pruning could have introduced, and the guard against it.
 
@@ -342,10 +355,11 @@ async def test_a_workspace_scoped_read_rule_does_not_prune_the_workspace(
         },
     )
 
-    assert any(path.endswith("app.py") for path in await ctx.fs.glob("**/*", scope=DEPLOYMENT))
+    walked = await ctx.require(FS).glob("**/*", scope=DEPLOYMENT)
+    assert any(path.endswith("app.py") for path in walked)
 
 
-async def test_interrupt_asks_and_the_answer_decides(mount: Any, tmp_path: Path) -> None:
+async def test_interrupt_asks_and_the_answer_decides(mount: MountProfile, tmp_path: Path) -> None:
     """`interrupt` is an approval, through the same seam `hitl` uses.
 
     One approval channel, so a deployment configures its answerer once — and a
@@ -353,34 +367,34 @@ async def test_interrupt_asks_and_the_answer_decides(mount: Any, tmp_path: Path)
     """
     (tmp_path / "notes.md").write_text("hello\n", encoding="utf-8")
     ctx = await _mounted(mount, tmp_path, {"paths": ["notes.md"], "mode": "interrupt"})
-    agent = StubAgent(ctx, ctx.sessions.create("asked"))
+    agent = StubAgent(ctx, ctx.require(SESSIONS).create("asked"))
     answers: list[str] = ["allowed-once"]
     answer_approvals(ctx, lambda: answers[0])
 
-    assert "hello" in (await ctx.fs.read("notes.md", agent=agent, scope=DEPLOYMENT)).text
+    assert "hello" in (await ctx.require(FS).read("notes.md", agent=agent, scope=DEPLOYMENT)).text
     answers[0] = "rejected"
     with pytest.raises(FsDenied) as refused:
-        await ctx.fs.read("notes.md", agent=agent, scope=DEPLOYMENT)
+        await ctx.require(FS).read("notes.md", agent=agent, scope=DEPLOYMENT)
     # The seam's own sentence, so a model can tell a human's "no" from a missing
     # channel — only one of the two is worth re-planning around.
     assert "the user rejected" in str(refused.value)
     assert events_of(agent.session, "approval/decided")
 
 
-async def test_interrupt_without_an_answerer_denies(mount: Any, tmp_path: Path) -> None:
+async def test_interrupt_without_an_answerer_denies(mount: MountProfile, tmp_path: Path) -> None:
     """Fail closed, the same way every other path through `ctx.approval` does:
     a missing channel is a misconfigured deployment, not consent."""
     (tmp_path / "notes.md").write_text("hello\n", encoding="utf-8")
     ctx = await _mounted(mount, tmp_path, {"paths": ["notes.md"], "mode": "interrupt"})
-    agent = StubAgent(ctx, ctx.sessions.create("unanswered"))
+    agent = StubAgent(ctx, ctx.require(SESSIONS).create("unanswered"))
 
     with pytest.raises(FsDenied) as refused:
-        await ctx.fs.read("notes.md", agent=agent, scope=DEPLOYMENT)
+        await ctx.require(FS).read("notes.md", agent=agent, scope=DEPLOYMENT)
     assert "no approval channel" in str(refused.value)
 
 
 async def test_an_agentless_interrupt_denies_rather_than_prompting(
-    mount: Any, tmp_path: Path
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """No agent means no session, and a prompt raised outside a session is worse
     than useless.
@@ -394,14 +408,16 @@ async def test_an_agentless_interrupt_denies_rather_than_prompting(
     (tmp_path / "notes.md").write_text("hello\n", encoding="utf-8")
     ctx = await _mounted(mount, tmp_path, {"paths": ["notes.md"], "mode": "interrupt"})
     asked: list[Any] = []
-    answer_approvals(ctx, lambda: asked.append("prompted") or "allowed-once")
+    answer_approvals(ctx, lambda: noted(asked, "prompted", "allowed-once"))
 
     with pytest.raises(FsDenied):
-        await ctx.fs.read("notes.md", scope=DEPLOYMENT)
+        await ctx.require(FS).read("notes.md", scope=DEPLOYMENT)
     assert asked == [], "a human was prompted with nowhere to record the answer"
 
 
-async def test_a_rule_may_carry_its_own_words_for_the_prompt(mount: Any, tmp_path: Path) -> None:
+async def test_a_rule_may_carry_its_own_words_for_the_prompt(
+    mount: MountProfile, tmp_path: Path
+) -> None:
     """`description`: the path is not always enough to decide by, and an operator
     who wrote the rule knows why it is there."""
     (tmp_path / "notes.md").write_text("hello\n", encoding="utf-8")
@@ -410,28 +426,28 @@ async def test_a_rule_may_carry_its_own_words_for_the_prompt(mount: Any, tmp_pat
         tmp_path,
         {"paths": ["notes.md"], "mode": "interrupt", "description": "shared team notes"},
     )
-    agent = StubAgent(ctx, ctx.sessions.create("described"))
+    agent = StubAgent(ctx, ctx.require(SESSIONS).create("described"))
     answer_approvals(ctx, lambda: "rejected")
 
     with pytest.raises(FsDenied):
-        await ctx.fs.read("notes.md", agent=agent, scope=DEPLOYMENT)
+        await ctx.require(FS).read("notes.md", agent=agent, scope=DEPLOYMENT)
     (asked,) = events_of(agent.session, "approval/asked")
     assert asked.data["reason"] == "shared team notes"
 
 
-async def test_nothing_is_restricted_by_default(mount: Any, tmp_path: Path) -> None:
+async def test_nothing_is_restricted_by_default(mount: MountProfile, tmp_path: Path) -> None:
     """Layering the bundle must not start refusing file access — `hitl`'s rule,
     for the same reason: a harness that refuses on first run is one whose rules
     nobody chose."""
     (tmp_path / "secret.env").write_text("TOKEN=1\n", encoding="utf-8")
     ctx = await mount(row("fs", root=str(tmp_path)), profile=PROFILE)
 
-    assert "TOKEN" in (await ctx.fs.read("secret.env", scope=DEPLOYMENT)).text
-    assert await ctx.fs.glob("**/*.env", scope=DEPLOYMENT)
+    assert "TOKEN" in (await ctx.require(FS).read("secret.env", scope=DEPLOYMENT)).text
+    assert await ctx.require(FS).glob("**/*.env", scope=DEPLOYMENT)
 
 
 async def test_a_tool_call_is_covered_without_the_row_naming_the_tool(
-    mount: Any, tmp_path: Path
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """The reason the rules hang off the seam rather than off `tools/pre-execute`.
 
@@ -447,7 +463,7 @@ async def test_a_tool_call_is_covered_without_the_row_naming_the_tool(
     """
     (tmp_path / "secret.env").write_text("TOKEN=hunter2\n", encoding="utf-8")
     ctx = await _mounted(mount, tmp_path, {"paths": ["*.env"], "mode": "deny"})
-    session = ctx.sessions.create("gated")
+    session = ctx.require(SESSIONS).create("gated")
 
     await run_tool_calls(
         ctx,
@@ -461,7 +477,7 @@ async def test_a_tool_call_is_covered_without_the_row_naming_the_tool(
     assert block is not None and block.is_error is True
 
 
-async def test_an_empty_rule_set_attaches_nothing(mount: Any, tmp_path: Path) -> None:
+async def test_an_empty_rule_set_attaches_nothing(mount: MountProfile, tmp_path: Path) -> None:
     """The row mounted with no rules is the row doing nothing at all.
 
     Not "allowing everything through a predicate that says yes": `hide` is
@@ -473,15 +489,17 @@ async def test_an_empty_rule_set_attaches_nothing(mount: Any, tmp_path: Path) ->
     (tmp_path / "secret.env").write_text("TOKEN=1\n", encoding="utf-8")
     ctx = await _mounted(mount, tmp_path)
 
-    assert ctx.fs_permissions.rules == ()
-    assert "TOKEN" in (await ctx.fs.read("secret.env", scope=DEPLOYMENT)).text
-    assert await ctx.fs.glob("**/*.env", scope=DEPLOYMENT)
+    assert ctx.require(FS_PERMISSIONS).rules == ()
+    assert "TOKEN" in (await ctx.require(FS).read("secret.env", scope=DEPLOYMENT)).text
+    assert await ctx.require(FS).glob("**/*.env", scope=DEPLOYMENT)
 
 
 # ------------------------------------------------------------------- reach --
 
 
-async def test_the_reach_message_toggles_with_a_sandbox(mount: Any, tmp_path: Path) -> None:
+async def test_the_reach_message_toggles_with_a_sandbox(
+    mount: MountProfile, tmp_path: Path
+) -> None:
     """E9, and the reason `reach` reads the seam rather than a mount-time bool.
 
     These rules bound access *through* `ctx.fs`; a code cell calling `open()`
@@ -491,18 +509,20 @@ async def test_the_reach_message_toggles_with_a_sandbox(mount: Any, tmp_path: Pa
     sentence for a profile that layers its backend afterwards.
     """
     ctx = await _mounted(mount, tmp_path, {"paths": ["*.env"], "mode": "deny"})
-    assert ctx.fs_permissions.reach == UNBOUNDED_REACH
-    assert "not covered" in ctx.fs_permissions.reach
+    assert ctx.require(FS_PERMISSIONS).reach == UNBOUNDED_REACH
+    assert "not covered" in ctx.require(FS_PERMISSIONS).reach
 
     # P6-04's backend does not exist yet, so the stand-in is what the seam
     # actually reads: a provider in the slot. The claim under test is the
     # toggle, not what any particular backend enforces.
-    ctx.sandbox.register_provider(StubSandboxProvider())
-    assert ctx.fs_permissions.reach == BOUNDED_REACH
-    assert "not covered" not in ctx.fs_permissions.reach
+    ctx.require(SANDBOX).register_provider(StubSandboxProvider())
+    assert ctx.require(FS_PERMISSIONS).reach == BOUNDED_REACH
+    assert "not covered" not in ctx.require(FS_PERMISSIONS).reach
 
 
-async def test_the_reading_reaches_doctor_even_with_no_rules(mount: Any, tmp_path: Path) -> None:
+async def test_the_reading_reaches_doctor_even_with_no_rules(
+    mount: MountProfile, tmp_path: Path
+) -> None:
     """P4-12. The empty case is the one worth printing: a deployment that wrote
     no rules has a *wider* reach than one that wrote a deny list, and a report
     that only appeared once someone configured something would tell people what
@@ -516,7 +536,7 @@ async def test_the_reading_reaches_doctor_even_with_no_rules(mount: Any, tmp_pat
     assert rows["reach"] == UNBOUNDED_REACH
 
 
-async def test_the_reading_names_each_rule(mount: Any, tmp_path: Path) -> None:
+async def test_the_reading_names_each_rule(mount: MountProfile, tmp_path: Path) -> None:
     """A person reading `ph doctor` is asking "what is refused here", and a
     count answers a different question than the one they asked."""
     ctx = await _mounted(mount, tmp_path, {"paths": ["*.env"], "mode": "deny"})
@@ -534,7 +554,9 @@ def test_a_policy_with_no_sandbox_seam_reports_unconfined() -> None:
     assert not _policy().confined
 
 
-async def test_an_anchored_rule_still_applies_inside_a_worktree(mount: Any, tmp_path: Path) -> None:
+async def test_an_anchored_rule_still_applies_inside_a_worktree(
+    mount: MountProfile, tmp_path: Path
+) -> None:
     """The hole D21 opened, and the reason the root is asked per agent.
 
     A rule written `secrets/**` is anchored to *the workspace*. With the root
@@ -544,13 +566,13 @@ async def test_an_anchored_rule_still_applies_inside_a_worktree(mount: Any, tmp_
     with nothing failing to say so.
     """
     ctx = await _mounted(mount, tmp_path, {"operations": ["write"], "paths": ["secrets/**"]})
-    session = ctx.sessions.create("s1")
-    agent = ctx.agents.create(session, FAKE_OPTIONS)
-    ctx.workspace.register_provider(StubWorkspaceProvider(root=tmp_path / "trees"))
-    workspace = await ctx.workspace.acquire(
+    session = ctx.require(SESSIONS).create("s1")
+    agent = ctx.require(AGENTS).create(session, FAKE_OPTIONS)
+    ctx.require(WORKSPACE).register_provider(StubWorkspaceProvider(root=tmp_path / "trees"))
+    workspace = await ctx.require(WORKSPACE).acquire(
         session_id="s1", agent_id=agent.id, base=tmp_path, session=session
     )
-    assert workspace.root != ctx.fs.root, "this test is only meaningful for a fresh root"
+    assert workspace.root != ctx.require(FS).root, "this test is only meaningful for a fresh root"
 
     result = await run_tool(
         ctx,
@@ -570,8 +592,16 @@ def test_two_agents_are_judged_against_their_own_roots(tmp_path: Path) -> None:
     that resolved one root for everybody would answer for the wrong one.
     """
 
-    class _Agent:
+    class _Agent(StubAgent):
+        """A real `AgentHandle` carrying a workspace root.
+
+        `roots` is the only thing that looks at the agent here and it reads
+        `.root`; `objection` still declares `AgentHandle | None`, which a bare
+        three-field class never satisfied.
+        """
+
         def __init__(self, root: Path) -> None:
+            super().__init__()
             self.root = root
 
     policy = _policy(Rule(operations=("write",), paths=("secrets/**",)), root="/w")
@@ -585,7 +615,7 @@ def test_two_agents_are_judged_against_their_own_roots(tmp_path: Path) -> None:
 # ----------------------------------------------- the default write scope --
 
 
-async def test_writing_inside_the_workspace_never_asks(mount: Any, tmp_path: Path) -> None:
+async def test_writing_inside_the_workspace_never_asks(mount: MountProfile, tmp_path: Path) -> None:
     """E6's first half, and the whole reason the row exists.
 
     Not one prompt, for any number of writes: the agent owns this checkout, so
@@ -605,7 +635,7 @@ async def test_writing_inside_the_workspace_never_asks(mount: Any, tmp_path: Pat
 
 
 async def test_a_write_named_through_a_symlink_into_the_workspace_never_asks(
-    mount: Any, tmp_path: Path
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """**Both sides of the boundary are one spelling, and only one of them is
     canonical by construction.**
@@ -634,7 +664,7 @@ async def test_a_write_named_through_a_symlink_into_the_workspace_never_asks(
     assert (workspace.root / "inside.txt").read_text(encoding="utf-8") == "x"
 
 
-async def test_writing_to_scratch_never_asks(mount: Any, tmp_path: Path) -> None:
+async def test_writing_to_scratch_never_asks(mount: MountProfile, tmp_path: Path) -> None:
     """Scratch is outside the worktree *by design* (E5) and is the one place a
     read-only or ephemeral agent is told it may write — so a scope covering only
     `root` would prompt on exactly the writes the design invites."""
@@ -650,7 +680,7 @@ async def test_writing_to_scratch_never_asks(mount: Any, tmp_path: Path) -> None
     assert (workspace.scratch / "notes.md").read_text(encoding="utf-8") == "kept"
 
 
-async def test_one_write_outside_asks_once(mount: Any, tmp_path: Path) -> None:
+async def test_one_write_outside_asks_once(mount: MountProfile, tmp_path: Path) -> None:
     """E6's second half. The rare prompt is the meaningful one, and it carries
     the boundary being left rather than only the path."""
     outside = tmp_path / "elsewhere"
@@ -667,7 +697,7 @@ async def test_one_write_outside_asks_once(mount: Any, tmp_path: Path) -> None:
     assert (outside / "escape.txt").exists()
 
 
-async def test_a_refused_write_outside_does_not_happen(mount: Any, tmp_path: Path) -> None:
+async def test_a_refused_write_outside_does_not_happen(mount: MountProfile, tmp_path: Path) -> None:
     outside = tmp_path / "elsewhere"
     outside.mkdir()
     ctx = await _scoped(mount, tmp_path)
@@ -682,7 +712,7 @@ async def test_a_refused_write_outside_does_not_happen(mount: Any, tmp_path: Pat
     assert not (outside / "escape.txt").exists()
 
 
-async def test_no_answerer_denies_rather_than_allowing(mount: Any, tmp_path: Path) -> None:
+async def test_no_answerer_denies_rather_than_allowing(mount: MountProfile, tmp_path: Path) -> None:
     """Fail-closed, the reading every asking row in this package shares: an
     approval nobody can answer is not an approval."""
     outside = tmp_path / "elsewhere"
@@ -698,15 +728,17 @@ async def test_no_answerer_denies_rather_than_allowing(mount: Any, tmp_path: Pat
     assert not (outside / "escape.txt").exists()
 
 
-async def test_an_agent_with_no_workspace_is_unaffected(mount: Any, tmp_path: Path) -> None:
+async def test_an_agent_with_no_workspace_is_unaffected(
+    mount: MountProfile, tmp_path: Path
+) -> None:
     """No workspace, no scope to be outside of.
 
     A profile that layers this row without the lifecycle gets today's behaviour
     rather than a boundary drawn around a directory nobody chose.
     """
     ctx = await _scoped(mount, tmp_path)
-    session = ctx.sessions.create("s1")
-    agent = ctx.agents.create(session, FAKE_OPTIONS)
+    session = ctx.require(SESSIONS).create("s1")
+    agent = ctx.require(AGENTS).create(session, FAKE_OPTIONS)
     answer_approvals(ctx, "rejected")
     target = tmp_path / "anywhere.txt"
 
@@ -715,7 +747,7 @@ async def test_an_agent_with_no_workspace_is_unaffected(mount: Any, tmp_path: Pa
     assert target.read_text(encoding="utf-8") == "x"
 
 
-async def test_an_explicit_deny_beats_the_default(mount: Any, tmp_path: Path) -> None:
+async def test_an_explicit_deny_beats_the_default(mount: MountProfile, tmp_path: Path) -> None:
     """The layering *is* the precedence.
 
     Waterfall listeners run outermost-first in registration order, so
@@ -739,7 +771,7 @@ async def test_an_explicit_deny_beats_the_default(mount: Any, tmp_path: Path) ->
 
 
 async def test_a_leading_wildcard_hides_the_file_without_refusing_the_tree(
-    mount: Any, tmp_path: Path
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """The idiomatic deny, and the walk it must not shut down.
 
@@ -760,18 +792,19 @@ async def test_a_leading_wildcard_hides_the_file_without_refusing_the_tree(
     # Files only — `_walk` never yields a directory — so this is every file in
     # the tree except the one the rule names.
     found = sorted(
-        path[len(str(tmp_path)) + 1 :] for path in await ctx.fs.glob("**/*", scope=DEPLOYMENT)
+        path[len(str(tmp_path)) + 1 :]
+        for path in await ctx.require(FS).glob("**/*", scope=DEPLOYMENT)
     )
     assert found == ["docs/b.md", "src/a.py", "top.txt"]
 
     # And the delete side keeps the harder rounding, which is the reason the two
     # callers of `_refuses_under` differ rather than an oversight.
-    policy = _policy(Rule(paths=["**/.env"], mode="deny"), root=str(tmp_path))
+    policy = _policy(Rule(paths=("**/.env",), mode="deny"), root=str(tmp_path))
     assert policy.deletion_reason(tmp_path / "src", recursive=True) is not None
 
 
 async def test_a_directory_the_sandbox_allows_is_not_outside_the_workspace(
-    mount: Any, tmp_path: Path
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """P6-38, E6: the prompt boundary is the enforced one. A write into a directory
     `sandbox-allow` binds writable must not be asked about as if it left the
@@ -802,7 +835,7 @@ async def test_a_directory_the_sandbox_allows_is_not_outside_the_workspace(
     )
     (tmp_path / "project").mkdir()
     agent, _ = await scoped_agent(ctx, tmp_path)
-    permissions = ctx.fs_permissions
+    permissions = ctx.require(FS_PERMISSIONS)
 
     assert permissions.objection("write", cache / "wheel.whl", agent=agent) is None
     assert (

@@ -32,16 +32,20 @@ from typing import Any
 import pytest
 
 from ph.cordis import Context
+from ph.keys import AGENTS, ATTACHMENTS, SESSIONS
 from ph.llm.adapter import LlmError, MediaRoute
 from ph.llm.assembler import BlockAssembler
 from ph.llm.types import (
     GenerateOptions,
     MediaBlock,
+    ToolCallBlock,
     ToolSchema,
     create_tool_result_message,
     create_user_message,
 )
 from ph.seams.credentials import CredentialService
+from ph.session.json import as_obj
+from ph.testing import as_kind, block_text
 from ph_app.adapters._http import failure_from_status
 from ph_app.adapters.anthropic import (
     CACHE_BREAKPOINTS,
@@ -103,8 +107,8 @@ def test_openai_thinking_maps_to_a_reasoning_block() -> None:
     blocks = assembler.blocks()
     # Two distinct blocks, in the order they streamed.
     assert [block.type for block in blocks] == ["reasoning", "text"]
-    assert blocks[0].text == "let me think"
-    assert blocks[1].text == "the answer"
+    assert block_text(blocks[0]) == "let me think"
+    assert block_text(blocks[1]) == "the answer"
 
 
 def test_openai_tool_arguments_stream_as_deltas() -> None:
@@ -149,8 +153,8 @@ def test_openai_tool_arguments_stream_as_deltas() -> None:
     for chunk in chunks:
         assembler.push(chunk)
     (call,) = assembler.blocks()
-    assert call.name == "read"
-    assert json.loads(call.arguments) == {"path": "a"}
+    assert as_kind(call, ToolCallBlock).name == "read"
+    assert json.loads(as_kind(call, ToolCallBlock).arguments) == {"path": "a"}
     assert assembler.finish.kind == "tool-calls"
 
 
@@ -414,8 +418,8 @@ def test_anthropic_thinking_and_tool_blocks_map_across() -> None:
         assembler.push(chunk)
     blocks = assembler.blocks()
     assert [block.type for block in blocks] == ["reasoning", "tool-call"]
-    assert blocks[0].text == "hmm"
-    assert blocks[1].name == "read"
+    assert block_text(blocks[0]) == "hmm"
+    assert as_kind(blocks[1], ToolCallBlock).name == "read"
     assert assembler.finish.kind == "tool-calls"
     assert assembler.usage is not None and assembler.usage.output_tokens == 12
 
@@ -431,12 +435,12 @@ async def test_real_api_smoke(tmp_path: Any, monkeypatch: Any) -> None:  # pragm
 
     monkeypatch.setenv("PH_HOME", str(tmp_path))
     async with mounted(compose_profile("deepseek")) as ctx:
-        session = ctx.sessions.create("smoke")
-        agent = ctx.agents.create(
+        session = ctx.require(SESSIONS).create("smoke")
+        agent = ctx.require(AGENTS).create(
             session, AgentOptions(provider="deepseek", model="deepseek-chat", max_tokens=64)
         )
         await agent.prompt("Reply with the single word: ok")
-        assert session.events[-1].data["reason"]["kind"] == "completed"
+        assert as_obj(session.events[-1].data["reason"])["kind"] == "completed"
         assert any(event.type == "assistant/chunk" for event in session.events)
 
 
@@ -516,9 +520,9 @@ def test_every_route_capability_reaches_resolve_model() -> None:
     """
     carried = {name for name in vars(MediaRoute) if not name.startswith("_")}
     routes: list[tuple[Any, Any]] = [
-        (AnthropicConfig(accepts=("image/png",), maxAttachmentBytes=99), AnthropicAdapter),
-        (ProviderProfile(provider="p", accepts=("image/png",), maxAttachmentBytes=99), None),
-        (GoogleConfig(accepts=("image/png",), maxAttachmentBytes=99), GoogleAdapter),
+        (AnthropicConfig(accepts=("image/png",), max_attachment_bytes=99), AnthropicAdapter),
+        (ProviderProfile(provider="p", accepts=("image/png",), max_attachment_bytes=99), None),
+        (GoogleConfig(accepts=("image/png",), max_attachment_bytes=99), GoogleAdapter),
     ]
     for route, adapter_type in routes:
         adapter = (
@@ -593,7 +597,7 @@ async def test_a_blob_that_is_gone_degrades_rather_than_failing(tmp_path: Path) 
     """A session copied without its attachments still opens and still runs."""
     root = Context()
     ref = await _with_attachment(root, tmp_path, "image/png")
-    root.attachments.path_for(ref).unlink()
+    root.require(ATTACHMENTS).path_for(ref).unlink()
     adapter = AnthropicAdapter(ctx=root, config=AnthropicConfig())
 
     body, _handles = await adapter._body(

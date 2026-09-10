@@ -94,6 +94,7 @@ import anyio
 import pytest
 
 from ph.cordis import Context
+from ph.keys import SESSION_PERSISTENCE, SESSIONS
 from ph.persistence import (
     MAX_DEPTH,
     ClaimingStore,
@@ -105,7 +106,8 @@ from ph.persistence import (
 from ph.persistence.jsonl import JsonlSessionStore
 from ph.persistence.protocol import SessionPersistence, StoredSession
 from ph.session import Session, SessionEvent, SessionHeader, SurfaceIntent
-from ph.testing import reference_fork, user_payload
+from ph.session.json import as_obj
+from ph.testing import MountProfile, reference_fork, user_payload
 
 pytestmark = pytest.mark.anyio
 
@@ -174,7 +176,7 @@ async def test_a_tracked_session_round_trips_through_the_backend(
     header, events = store.read("s1")
     assert header.id == "s1"
     assert [(event.seq, event.type) for event in events] == [(0, "turn/start"), (1, "tool/call")]
-    assert events[1].data["arguments"]["path"] == "x", "a nested payload did not survive"
+    assert as_obj(events[1].data["arguments"])["path"] == "x", "a nested payload did not survive"
 
 
 async def test_what_comes_back_can_seed_a_session_again(store: SessionPersistence) -> None:
@@ -419,7 +421,7 @@ def test_both_backends_satisfy_the_protocol(store: SessionPersistence) -> None:
 
 @pytest.mark.parametrize("backend", BACKENDS)
 async def test_a_profile_resumes_through_whichever_backend_it_mounted(
-    mount: Any, backend: str
+    mount: MountProfile, backend: str
 ) -> None:
     """The row's point, end to end: a session survives a remount, either way.
 
@@ -443,11 +445,11 @@ async def test_a_profile_resumes_through_whichever_backend_it_mounted(
     )
 
     ctx = await mount(*overlays)
-    session = ctx.sessions.create("carried")
+    session = ctx.require(SESSIONS).create("carried")
     session.append("turn/start", {"turn": 1})
-    await ctx.sessions.flush(session)
+    await ctx.require(SESSIONS).flush(session)
 
-    store = ctx.session_persistence
+    store = ctx.require(SESSION_PERSISTENCE)
     assert store.exists("carried"), f"{backend} did not store the session"
     header, events = store.read("carried")
     assert header.id == "carried"

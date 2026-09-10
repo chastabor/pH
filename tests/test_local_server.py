@@ -50,8 +50,11 @@ import httpx
 import pytest
 
 from ph.agent.types import AgentOptions
+from ph.keys import AGENTS, LLM, SESSIONS
 from ph.llm.types import text_of
 from ph.session import Session
+from ph.session.json import as_obj
+from ph.testing import MountProfile
 from ph_app.attach import ingest, prompt_message
 from ph_app.profiles import resolve_profile
 
@@ -160,13 +163,13 @@ def _options(model: str, *, max_tokens: int = 32) -> AgentOptions:
 
 def _usage(session: Session) -> list[dict[str, Any]]:
     return [
-        dict(event.data["usage"])
+        dict(as_obj(event.data["usage"]))
         for event in session.events
         if event.type == "assistant/message" and event.data.get("usage")
     ]
 
 
-async def test_the_local_route_completes_a_turn(mount: Any, route: str) -> None:
+async def test_the_local_route_completes_a_turn(mount: MountProfile, route: str) -> None:
     """One real round trip through the shipped `llama` profile.
 
     `resolve_profile` rather than a hand-written overlay: what is under test
@@ -174,16 +177,16 @@ async def test_the_local_route_completes_a_turn(mount: Any, route: str) -> None:
     `llama.yaml` has to fail here.
     """
     ctx = await mount(profile=resolve_profile("llama"))
-    session = ctx.sessions.create("local-smoke")
-    agent = ctx.agents.create(session, _options(route))
+    session = ctx.require(SESSIONS).create("local-smoke")
+    agent = ctx.require(AGENTS).create(session, _options(route))
 
     await agent.prompt("Reply with the single word: ok")
 
-    assert session.events[-1].data["reason"]["kind"] == "completed"
+    assert as_obj(session.events[-1].data["reason"])["kind"] == "completed"
     assert any(event.type == "assistant/chunk" for event in session.events)
 
 
-async def test_the_second_turn_reads_the_prefix_cache(mount: Any, route: str) -> None:
+async def test_the_second_turn_reads_the_prefix_cache(mount: MountProfile, route: str) -> None:
     """A12, priced by the server: turn two re-reads turn one's prefix.
 
     **The first turn is not asserted to be a miss**, which is where this parts
@@ -195,8 +198,8 @@ async def test_the_second_turn_reads_the_prefix_cache(mount: Any, route: str) ->
     the day for the best possible reason.
     """
     ctx = await mount(profile=resolve_profile("llama"))
-    session = ctx.sessions.create("local-cache")
-    agent = ctx.agents.create(session, _options(route))
+    session = ctx.require(SESSIONS).create("local-cache")
+    agent = ctx.require(AGENTS).create(session, _options(route))
 
     await agent.prompt("Say ok.")
     await agent.prompt("Say ok again.")
@@ -210,7 +213,7 @@ async def test_the_second_turn_reads_the_prefix_cache(mount: Any, route: str) ->
     )
 
 
-async def test_the_configured_window_fits_one_slot(mount: Any, route: str) -> None:
+async def test_the_configured_window_fits_one_slot(mount: MountProfile, route: str) -> None:
     """`contextWindow` is one slot's, and llama.cpp is the one that knows.
 
     The mistake this exists for: `--ctx-size` is divided by `--parallel`, so
@@ -232,7 +235,7 @@ async def test_the_configured_window_fits_one_slot(mount: Any, route: str) -> No
         pytest.skip(f"{_server_root()} publishes no per-slot n_ctx; not a llama.cpp server")
 
     ctx = await mount(profile=resolve_profile("llama"))
-    model = ctx.llm.resolve_model("llama", route)
+    model = ctx.require(LLM).resolve_model("llama", route)
 
     # `resolve_model` answers with an empty `ResolvedModel` when no adapter owns
     # the provider, so an absent window means either the profile set none or the
@@ -262,7 +265,7 @@ def _answer(session: Session) -> str:
     )
 
 
-async def test_the_model_sees_the_cat(mount: Any, route: str) -> None:
+async def test_the_model_sees_the_cat(mount: MountProfile, route: str) -> None:
     """The media path, end to end, with the model as the instrument.
 
     **This is the one test here that reads what the model said**, and the reason
@@ -295,12 +298,12 @@ async def test_the_model_sees_the_cat(mount: Any, route: str) -> None:
         pytest.skip(f"{_server_root()} reports vision={vision!r}; start it with --mmproj")
 
     ctx = await mount(profile=resolve_profile("llama"))
-    session = ctx.sessions.create("local-vision")
+    session = ctx.require(SESSIONS).create("local-vision")
     # The human door (I-9), which is what `ph -p --attach` uses: `ingest` reads
     # the path with the harness's own permissions, and `prompt_message` is the
     # message `prompted` builds — text first, then the media.
     refs = await ingest(ctx, [CAT])
-    agent = ctx.agents.create(session, _options(route, max_tokens=256))
+    agent = ctx.require(AGENTS).create(session, _options(route, max_tokens=256))
     agent.followup(prompt_message("What animal is in this photograph?", refs))
     await agent.run()
 

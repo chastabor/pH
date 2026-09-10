@@ -38,6 +38,7 @@ from typing import Any
 import pytest
 from runtime_helpers import dispatch_names, run_ipython_cell, settled_dispatches
 
+from ph.keys import AGENTS, SESSIONS, SUBAGENTS
 from ph.seams.subagents import SubagentRequest
 from ph.testing import run_tool
 from ph.tools import Accept, Allow, Deny
@@ -250,15 +251,15 @@ async def test_d_a_non_family_send_cannot_be_re_permitted(shipped_profile: Any) 
     reason, so neither would exercise the boundary.
     """
     ctx, session, parent = await shipped_profile()
-    child_run = await ctx.subagents.start(
+    child_run = await ctx.require(SUBAGENTS).start(
         PROVIDER_NAME, SubagentRequest(prompt="delegate on", parent=parent, name="scout")
     )
-    child = ctx.agents.get(child_run.session_id)
+    child = ctx.require(AGENTS).get(child_run.session_id)
     assert child is not None
-    grandchild = await ctx.subagents.start(
+    grandchild = await ctx.require(SUBAGENTS).start(
         PROVIDER_NAME, SubagentRequest(prompt="one level down", parent=child, name="recon")
     )
-    assert ctx.sessions.get(grandchild.session_id) is not None
+    assert ctx.require(SESSIONS).get(grandchild.session_id) is not None
 
     ctx.on("tools/pre-execute", lambda _execution, _next: Allow())
 

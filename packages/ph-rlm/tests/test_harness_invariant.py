@@ -19,11 +19,12 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-from conftest import INVARIANT_ROW, Harnessed, note_edit
+from rlm_fixtures import INVARIANT_ROW, Harnessed, note_edit
 
 from ph.testing import report_section
 from ph_rlm.harness import RefinementProposal
 from ph_rlm.harness.invariant import violations
+from ph_rlm.keys import HARNESS
 
 pytestmark = pytest.mark.anyio
 
@@ -31,10 +32,10 @@ pytestmark = pytest.mark.anyio
 async def _refined(harnessed: Harnessed) -> tuple[Any, Any, Any]:
     """A session whose harness has one entry and a written projection, and where it is."""
     ctx, session, agent = await harnessed(INVARIANT_ROW)
-    await ctx.harness.apply(
+    await ctx.require(HARNESS).apply(
         RefinementProposal(summary="one", edits=[note_edit("thing")]), session=session, agent=agent
     )
-    path = ctx.harness.projection_path(session)
+    path = ctx.require(HARNESS).projection_path(session)
     assert path.exists(), "nothing was projected to check"
     return ctx, session, path
 
@@ -79,11 +80,13 @@ async def test_a_second_refinement_leaves_the_projection_equal_to_the_fold(
     """
     ctx, session, _path = await _refined(harnessed)
 
-    await ctx.harness.apply(
+    await ctx.require(HARNESS).apply(
         RefinementProposal(summary="two", edits=[note_edit("second")]), session=session, agent=None
     )
 
-    assert ctx.harness.state(session).entry("note", "second") is not None, "the fold did not move"
+    assert ctx.require(HARNESS).state(session).entry("note", "second") is not None, (
+        "the fold did not move"
+    )
     assert violations(ctx) == [], "the fold moved and the projection was left behind"
 
 
@@ -100,6 +103,6 @@ async def test_a_missing_projection_is_not_a_violation(harnessed: Harnessed) -> 
     path.unlink()
 
     assert violations(ctx) == []
-    assert ctx.harness.state(session).entry("note", "thing") is not None, (
+    assert ctx.require(HARNESS).state(session).entry("note", "thing") is not None, (
         "deleting the projection lost state, so it was never only a projection"
     )

@@ -21,6 +21,7 @@ from typing import Any
 import pytest
 from daemon_helpers import running, until
 
+from ph.keys import COMMANDS
 from ph.llm.types import AttachmentRef
 from ph.seams.commands import CommandDefinition
 from ph.session import now_ms
@@ -46,7 +47,7 @@ async def _prompt(client: Any, root: Any) -> dict[str, Any]:
 
 
 async def _command(client: Any, root: Any) -> dict[str, Any]:
-    root.ctx.commands.register(
+    root.ctx.require(COMMANDS).register(
         CommandDefinition(name="probe", summary="a probe", run=lambda argument, ctx: "ran")
     )
     return {"line": "/probe"}
@@ -169,7 +170,7 @@ async def test_a_mutation_on_a_passivated_root_brings_it_back(tmp_path: Any) -> 
     """
     async with running(tmp_path) as daemon:
         root = await daemon.root("sleepy")
-        supervisor = daemon.server.supervisor
+        supervisor = daemon.running.supervisor
         await supervisor.passivate(root, now=now_ms())
         assert "sleepy" not in supervisor.roots
         client = await daemon.client()

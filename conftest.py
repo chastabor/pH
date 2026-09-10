@@ -24,6 +24,24 @@ from ph.bundles import BASE, HEADLESS
 from ph.cordis import Context, Profile, load_profile_documents
 from ph.cordis.loader import compose_rows
 
+pytest_plugins = ["app_fixtures", "rlm_fixtures"]
+"""The two per-package fixture sets, registered from the **one** conftest.
+
+They were `packages/ph-app/tests/conftest.py` and
+`packages/ph-rlm/tests/conftest.py`, which is what kept the test trees out
+of mypy: two modules named `conftest` are a duplicate mypy refuses, and no
+flag fixes it because the unique name it would need —
+`packages.ph-app.tests.conftest` — is not an identifier (issue 32).
+
+Registering them here rather than merging their bodies into this file keeps
+each set beside the tests it serves, and `pythonpath` in `pyproject.toml` is
+what makes them importable by name at startup. It also fixed a latent bug
+the trees had documented in five separate comments: `from conftest import
+ROW` resolved to whichever conftest won the name under full collection, so
+ph-rlm's row constants were reachable from ph-app's tree and vice versa.
+`pytest_plugins` is only honoured in a *root* conftest, which is the other
+reason the registration lives here."""
+
 MountProfile = Callable[..., Awaitable[Context]]
 
 NEEDS_BINARY = {
@@ -50,12 +68,15 @@ callback, which the traceback cannot: it arrives with no application frames at
 all, because by then nothing of ours is on the stack.
 
 **If `context:` names `Future.set_result(None)`, this is issue 58** and the
-cause is known: anyio's `_wait_until_readable` registers that as an
-`add_reader` callback and removes the reader in a *done-callback* one loop
-iteration later, so a cancelled readiness wait can still be fired. pH reaches
-it through `ph_rlm.kernel.manager._recv_line`, whose `wait_readable` is
-cancelled ~20x a second by `move_on_after(_CANCEL_POLL_SECONDS)`. See issue 58
-in `plans/Implementation_Plan.md` — no re-investigation needed.
+mechanism is known: anyio's `_RawSocketMixin._wait_until_readable` registers
+that as an `add_reader` callback and removes the reader in a *done-callback*
+one loop iteration later, so a cancelled readiness wait can still be fired.
+That mixin is `UNIXSocketStream`, so the exposure is the **daemon** socket —
+`connect_unix`, `UNIXSocketListener.accept`, every `Peer` read. It is *not*
+`ph_rlm.kernel.manager._recv_line`, which this note used to name: that calls
+the free `anyio.wait_readable`, a different implementation that catches
+`InvalidStateError` and removes the reader synchronously. See issue 58 in
+`plans/Implementation_Plan.md` — no re-investigation needed.
 
 Any *other* callback is a new one, and the name above is the lead."""
 
@@ -106,7 +127,9 @@ def pytest_configure(config: pytest.Config) -> None:
             error.add_note(STRAY_CALLBACK_NOTE)
         return original(runner, loop, context)
 
-    TestRunner._exception_handler = attributing
+    # `setattr`, because a method assignment is what this is: anyio's handler
+    # is being wrapped for the process, and mypy refuses a direct rebind.
+    setattr(TestRunner, "_exception_handler", attributing)  # noqa: B010
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:

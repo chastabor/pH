@@ -27,6 +27,8 @@ from ph.cordis.loader import (
     interpolate,
     safe_yaml_load,
 )
+from ph.keys import MOUNT, SANDBOX
+from ph.testing import MountProfile, not_none
 from ph.wire import WireModel
 
 pytestmark = pytest.mark.anyio
@@ -148,9 +150,10 @@ async def test_mounting_activates_only_rows_whose_injections_resolve() -> None:
     import types
 
     module = types.ModuleType("ph_test_rows")
-    module.provider = provider
-    module.consumer = consumer
-    module.orphan = orphan
+    # `setattr`, because that is what these assignments are: a `ModuleType`
+    # built at runtime has no declared members for mypy to check against.
+    for name, row in (("provider", provider), ("consumer", consumer), ("orphan", orphan)):
+        setattr(module, name, row)
     sys.modules["ph_test_rows"] = module
 
     # Deliberately mounted consumer-first: file order must not decide.
@@ -333,7 +336,7 @@ def _realm_module(name: str) -> None:
 
     @plugin("t-reader", inject=["t_fs"])
     async def reader(ctx: Context, config: None) -> None:
-        ctx.provide("t_seen", ctx.t_fs)
+        ctx.provide("t_seen", ctx.require("t_fs"))
 
     _fake_module(name, fs_provider=fs_provider, reader=reader)
 
@@ -369,12 +372,16 @@ async def test_isolate_gives_a_row_a_private_copy_of_a_service() -> None:
     shared = mount.forks["shared-reader"].ctx
     private = mount.forks["private-reader"].ctx
     assert shared is not None and private is not None
-    assert shared.t_seen is ctx.t_fs, "the sibling should see the shared service"
-    assert private.t_seen is not ctx.t_fs, "the isolating row saw the shared service"
-    assert private.t_seen["owner"].startswith("root/realm:private-reader/")
+    assert shared.require("t_seen") is ctx.require("t_fs"), (
+        "the sibling should see the shared service"
+    )
+    assert private.require("t_seen") is not ctx.require("t_fs"), (
+        "the isolating row saw the shared service"
+    )
+    assert private.require("t_seen")["owner"].startswith("root/realm:private-reader/")
     # The shared instance is untouched: a realm adds a provision, it does not
     # replace one, so root and every other row keep what they had.
-    assert ctx.t_fs["root"] == "shared"
+    assert ctx.require("t_fs")["root"] == "shared"
     assert "private-reader/fs" in mount.forks
     await ctx.dispose()
 
@@ -403,8 +410,8 @@ async def test_isolate_with_a_mapping_overrides_the_private_copy_s_config() -> N
 
     sealed = mount.forks["sealed"].ctx
     assert sealed is not None
-    assert sealed.t_seen["root"] == "/sealed"
-    assert ctx.t_fs["root"] == "shared"
+    assert sealed.require("t_seen")["root"] == "/sealed"
+    assert ctx.require("t_fs")["root"] == "shared"
     # The dump reads back as written, in whichever of the two forms was used.
     dumped = {row["id"]: row for row in profile.dump()}
     assert dumped["sealed"]["isolate"] == {"fs": {"root": "/sealed"}}
@@ -507,7 +514,7 @@ async def test_a_private_copy_that_cannot_activate_is_refused_not_fallen_through
 
     @plugin("t-reader", inject=["t_fs"])
     async def reader(ctx: Context, config: object) -> None:
-        ctx.provide("t_seen", ctx.t_fs)
+        ctx.provide("t_seen", ctx.require("t_fs"))
 
     _fake_module("ph_test_realm_needy", needy=needy, late=late, reader=reader)
 
@@ -532,38 +539,44 @@ async def test_a_private_copy_that_cannot_activate_is_refused_not_fallen_through
 # -------------------------------------------------------------- reconfigure --
 
 
-async def test_reconfigure_reapplies_one_row_and_touches_nothing_else(mount: Any) -> None:
+async def test_reconfigure_reapplies_one_row_and_touches_nothing_else(mount: MountProfile) -> None:
     """P6-38: a row re-applied live releases and refills its own registrations,
     and every other fork in the mount is the same object it was."""
     ctx = await mount()
-    before = {row_id: fork for row_id, fork in ctx.mount.forks.items() if row_id != "sandbox-allow"}
-    old = ctx.mount.forks["sandbox-allow"]
+    before = {
+        row_id: fork
+        for row_id, fork in ctx.require(MOUNT).forks.items()
+        if row_id != "sandbox-allow"
+    }
+    old = ctx.require(MOUNT).forks["sandbox-allow"]
 
-    fork = await ctx.mount.reconfigure(
+    fork = await ctx.require(MOUNT).reconfigure(
         "sandbox-allow", {"network": {"mode": "allowlist", "hosts": ["only.example"]}}
     )
 
     assert fork is not old and old.unmounted and fork.active
-    assert ctx.mount.forks["sandbox-allow"] is fork
-    assert ctx.sandbox.allowances is not None
-    assert ctx.sandbox.allowances.network.hosts == ["only.example"]
+    assert ctx.require(MOUNT).forks["sandbox-allow"] is fork
+    assert ctx.require(SANDBOX).allowances is not None
+    assert not_none(not_none(ctx.require(SANDBOX).allowances).network).hosts == ["only.example"]
     assert {
-        row_id: fork for row_id, fork in ctx.mount.forks.items() if row_id != "sandbox-allow"
+        row_id: fork
+        for row_id, fork in ctx.require(MOUNT).forks.items()
+        if row_id != "sandbox-allow"
     } == before
-    assert dict(ctx.mount.topology())["sandbox-allow"].endswith(
+    assert dict(ctx.require(MOUNT).topology())["sandbox-allow"].endswith(
         "from bundles/base.yaml, reconfigured live"
     )
-    assert ctx.mount.reconfigured == {"sandbox-allow"}
+    assert ctx.require(MOUNT).reconfigured == {"sandbox-allow"}
     # The config each row runs is the fork's, not a parallel dict's.
     assert fork.config == {"network": {"mode": "allowlist", "hosts": ["only.example"]}}
 
 
-async def test_reconfigure_refuses_what_it_cannot_do_honestly(mount: Any) -> None:
+async def test_reconfigure_refuses_what_it_cannot_do_honestly(mount: MountProfile) -> None:
     ctx = await mount({"id": "sandbox-allow", "disabled": True})
     with pytest.raises(LoaderError, match="no row with id"):
-        await ctx.mount.reconfigure("nonesuch", {})
+        await ctx.require(MOUNT).reconfigure("nonesuch", {})
     with pytest.raises(LoaderError, match="is disabled by"):
-        await ctx.mount.reconfigure("sandbox-allow", {})
+        await ctx.require(MOUNT).reconfigure("sandbox-allow", {})
 
 
 # ------------------------------------------------ where a mount works (P5-14) --

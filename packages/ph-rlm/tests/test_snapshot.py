@@ -42,10 +42,12 @@ import pytest
 from runtime_helpers import run_cell
 
 from ph.cordis import DEPLOYMENT
+from ph.keys import AGENTS, COMPACTION, SESSIONS, SPILL_STORE
 from ph.llm.types import text_of
 from ph.session import IGNORABLE_SESSION_EVENT_TYPES, SurfaceIntent
 from ph.session.events import SurfaceReplace
 from ph.testing import FAKE_OPTIONS, plugin_payload, prefix_of, user_payload
+from ph_rlm.keys import KERNEL_SNAPSHOTS, PYTHON_RUNTIME
 from ph_rlm.snapshot import (
     KernelSnapshotPolicy,
     fold_namespace,
@@ -133,7 +135,7 @@ async def test_a_new_kernel_gets_the_namespace_back(mounted_runtime: Mounted) ->
 
     # Close the child the way disposal would, then run again: a new kernel for
     # the same namespace has to be handed the state the log remembers.
-    runtime = ctx.python_runtime
+    runtime = ctx.require(PYTHON_RUNTIME)
     await runtime.close_namespace(agent.id)
 
     result = await run_cell(ctx, "carried['over']", agent=agent, session=session, call_id="c2")
@@ -170,7 +172,7 @@ async def test_a_tag_from_another_session_is_refused(
     file read as sound.
     """
     ctx, session, agent = await mounted_runtime(session_id="kernel-state")
-    policy: KernelSnapshotPolicy = ctx.kernel_snapshots
+    policy: KernelSnapshotPolicy = ctx.require(KERNEL_SNAPSHOTS)
     await run_cell(ctx, "value = 'mine'", agent=agent, session=session, call_id="c1")
 
     # The record as it stands verifies against its own session.
@@ -179,7 +181,7 @@ async def test_a_tag_from_another_session_is_refused(
 
     # Under a different session id the same bytes do not, so nothing is handed
     # back to be unpickled.
-    forged = ctx.sessions.create("someone-else")
+    forged = ctx.require(SESSIONS).create("someone-else")
     assert await policy._payload(forged, record) is None
 
 
@@ -207,7 +209,7 @@ async def test_a_spilled_variable_still_restores(mounted_runtime: Mounted) -> No
         session_id="kernel-state", snapshot_config={"inlineBlobMax": 256}
     )
     await run_cell(ctx, "big = 'y' * 20_000", agent=agent, session=session, call_id="c1")
-    await ctx.python_runtime.close_namespace(agent.id)
+    await ctx.require(PYTHON_RUNTIME).close_namespace(agent.id)
     result = await run_cell(ctx, "len(big)", agent=agent, session=session, call_id="c2")
     assert result.value["value"] == 20_000
 
@@ -233,12 +235,12 @@ async def test_unreferenced_blobs_are_swept(mounted_runtime: Mounted) -> None:
         session_id="kernel-state", snapshot_config={"inlineBlobMax": 256}
     )
     await run_cell(ctx, "big = 'z' * 20_000", agent=agent, session=session)
-    directory = Path(ctx.spill_store.root) / f"kernel/{agent.id}"
+    directory = Path(ctx.require(SPILL_STORE).root) / f"kernel/{agent.id}"
     orphan = directory / "deadbeefdeadbeef-nothing.dill"
     orphan.write_bytes(b"nobody points at this")
     kept = _kernel_locators(session)
 
-    removed = await ctx.spill_store.sweep_session(session)
+    removed = await ctx.require(SPILL_STORE).sweep_session(session)
     assert str(orphan) in removed
     assert not orphan.exists()
     assert all(Path(locator).exists() for locator in kept)
@@ -259,14 +261,14 @@ async def test_a_sweep_leaves_another_sessions_blobs_alone(mounted_runtime: Moun
     assert ours
 
     # A second session in the same process, with its own agent and its own blob.
-    other_session = ctx.sessions.create("another-session")
-    other_agent = ctx.agents.create(other_session, FAKE_OPTIONS)
+    other_session = ctx.require(SESSIONS).create("another-session")
+    other_agent = ctx.require(AGENTS).create(other_session, FAKE_OPTIONS)
     await run_cell(ctx, "theirs = 'b' * 20_000", agent=other_agent, session=other_session)
     theirs = _kernel_locators(other_session)
     assert theirs and theirs != ours
 
     # Opening either session must not collect the other's blobs.
-    assert await ctx.spill_store.sweep_session(other_session) == []
+    assert await ctx.require(SPILL_STORE).sweep_session(other_session) == []
     assert all(Path(locator).exists() for locator in ours | theirs)
 
 
@@ -362,7 +364,9 @@ async def test_the_note_is_registered_on_the_compaction_seam(
     ctx, session, agent = await mounted_runtime(session_id="wired")
     await run_cell(ctx, "answer = 42", agent=agent, session=session)
 
-    assert any("`answer`" in note for note in ctx.compaction.notes(session, scope=DEPLOYMENT))
+    assert any(
+        "`answer`" in note for note in ctx.require(COMPACTION).notes(session, scope=DEPLOYMENT)
+    )
 
 
 async def test_the_namespace_outlives_a_compaction_of_the_conversation(

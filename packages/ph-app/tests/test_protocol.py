@@ -9,7 +9,7 @@ reaches `error.data.reason`, and an id-less request still runs its body.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -18,6 +18,7 @@ from ph.wire import WireModel
 from ph_app.protocol import (
     Cursor,
     DaemonError,
+    ErrorFrame,
     InvalidParams,
     Refusal,
     cursor_of,
@@ -75,7 +76,8 @@ async def test_respond_shapes_a_result_an_error_and_nothing_for_an_id_less_frame
     }
     crashed = await respond({"id": 3, "method": "crash"}, dispatch)
     assert crashed is not None and "error" in crashed
-    assert "data" not in crashed["error"], "an unnamed failure carries no reason to branch on"
+    failed = cast("ErrorFrame", crashed)
+    assert "data" not in failed["error"], "an unnamed failure carries no reason to branch on"
     # A notification's body runs; nothing comes back.
     assert await respond({"method": "fine", "params": {}}, dispatch) is None
     assert ran == ["fine", "refuse", "crash", "fine"]

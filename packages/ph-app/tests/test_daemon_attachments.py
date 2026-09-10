@@ -25,6 +25,7 @@ from typing import Any
 import pytest
 from daemon_helpers import running, until
 
+from ph.keys import ATTACHMENTS
 from ph.llm.types import AttachmentRef
 from ph_app.daemon.framing import MAX_ATTACHMENT_BYTES, MAX_LINE
 from ph_app.protocol import DaemonError
@@ -73,7 +74,7 @@ async def test_the_client_sends_content_and_gets_back_a_reference(tmp_path: Any)
         assert ref.name == "diagram.png"
         # Measured from the header by the store, with no image library involved.
         assert (ref.width, ref.height) == (16, 15)
-        assert root.ctx.attachments.exists(ref)
+        assert root.ctx.require(ATTACHMENTS).exists(ref)
 
 
 async def test_the_same_file_twice_is_one_blob(tmp_path: Any) -> None:
@@ -90,7 +91,7 @@ async def test_the_same_file_twice_is_one_blob(tmp_path: Any) -> None:
         second = await _put(client, root.id, name="same-picture.png")
 
         assert first["attachmentId"] == second["attachmentId"]
-        stored = list(root.ctx.attachments.root.iterdir())
+        stored = list(root.ctx.require(ATTACHMENTS).root.iterdir())
         assert len(stored) == 1, f"one blob expected, found {stored}"
 
 

@@ -19,7 +19,7 @@ from typing import Any, cast
 import pytest
 
 from ph.session import KNOWN_SESSION_EVENT_TYPES, Session, SessionFoldCache, SurfaceIntent
-from ph.session.json import InvalidJsonValueError
+from ph.session.json import InvalidJsonValueError, JsonValue, as_obj, as_seq
 from ph.testing import prefix_of, user_payload
 
 
@@ -35,14 +35,21 @@ def test_seq_always_equals_log_length() -> None:
 
 def test_appended_data_is_detached_from_the_caller() -> None:
     session = Session("s")
-    payload = {"turn": 1, "nested": {"list": [1, 2]}}
+    # Built through named locals rather than one literal, because the mutations
+    # below are the point and they have to be typed: a bare
+    # `{"nested": {"list": [1, 2]}}` infers `dict[str, object]`, which `append`
+    # refuses — and reaching the inner list back through `payload` yields a
+    # `JsonValue`, which has no `.append`. Holding it directly says what the
+    # test is doing: mutate the caller's own buffer, after the append.
+    inner: list[JsonValue] = [1, 2]
+    payload: dict[str, JsonValue] = {"turn": 1, "nested": {"list": inner}}
     event = session.append("turn/start", payload)
     payload["turn"] = 99
-    payload["nested"]["list"].append(3)
+    inner.append(3)
     # The log holds the value at append time, not a live view of the caller's
     # buffer — a stateful producer cannot rewrite history after the fact.
     assert event.data["turn"] == 1
-    assert list(event.data["nested"]["list"]) == [1, 2]
+    assert list(as_seq(as_obj(event.data["nested"])["list"])) == [1, 2]
 
 
 def test_logged_data_is_not_writable() -> None:
@@ -65,8 +72,11 @@ def test_logged_data_is_not_writable() -> None:
         {"value": object()},
     ],
 )
-def test_non_lossless_payloads_are_refused(payload: dict[str, object]) -> None:
+def test_non_lossless_payloads_are_refused(payload: dict[str, Any]) -> None:
     session = Session("s")
+    # `Any`, and deliberately: every row here is a value `append` must
+    # **refuse**, so annotating it as what `append` accepts would be a
+    # claim the test exists to disprove.
     with pytest.raises(InvalidJsonValueError):
         session.append("turn/start", payload)
     assert session.seq == 0
@@ -89,7 +99,9 @@ def test_a_non_object_payload_is_refused_at_the_write_door() -> None:
 
 def test_cyclic_payloads_are_refused() -> None:
     session = Session("s")
-    cycle: dict[str, object] = {}
+    # `Any` for the same reason as the refusal table above: a dict that holds
+    # itself is not a `JsonValue`, which is what this asserts.
+    cycle: dict[str, Any] = {}
     cycle["self"] = cycle
     with pytest.raises(InvalidJsonValueError, match="circular"):
         session.append("turn/start", cycle)

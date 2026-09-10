@@ -70,6 +70,7 @@ from ph.seams.schedule import (
     CANCELLED,
     TICK,
     Schedule,
+    ScheduleKind,
     ScheduleService,
     due_at,
     next_at,
@@ -77,6 +78,7 @@ from ph.seams.schedule import (
 )
 from ph.seams.schedule_index import INDEX_NAME, ScheduleIndex
 from ph.session import Session, now_ms
+from ph.session.json import as_int
 
 MINUTE = 60_000
 HOUR = 60 * MINUTE
@@ -103,7 +105,7 @@ def _in_timezone(name: str) -> Iterator[None]:
         time.tzset()
 
 
-def _sched(kind: str, spec: str) -> tuple[Session, ScheduleService, int]:
+def _sched(kind: ScheduleKind, spec: str) -> tuple[Session, ScheduleService, int]:
     """A session holding one schedule, the service, and when it was created.
 
     Through `create` rather than appending the event by hand: a helper that
@@ -320,7 +322,7 @@ def test_a_log_with_no_schedules_is_not_walked() -> None:
 def _last_due(session: Session) -> int:
     """The `dueAt` of the most recent tick — the log's copy, the only copy."""
     ticks = [event for event in session.events_from(0) if event.type == TICK]
-    return int(ticks[-1].data["dueAt"])
+    return as_int(ticks[-1].data["dueAt"])
 
 
 # ------------------------------------------------ P6-23: the what-is-due index --

@@ -77,6 +77,8 @@ __all__ = [
     "list_branches",
     "merge_branch",
     "pre_run_ref",
+    "sanitize_ref",
+    "tree_hash",
 ]
 
 log = logging.getLogger("ph.seams.workspace_git")

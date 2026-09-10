@@ -188,7 +188,7 @@ def test_the_measurable_set_gates_what_is_probed() -> None:
         (webp_lossy, "image/webp"),
     ):
         assert mime in IMAGE_MIMES
-        assert image_dimensions(build(10, 20)) == (10, 20)  # type: ignore[operator]
+        assert image_dimensions(build(10, 20)) == (10, 20)
     assert "application/pdf" not in IMAGE_MIMES, "a PDF must never reach the JPEG walk"
 
 

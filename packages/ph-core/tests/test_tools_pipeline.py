@@ -25,8 +25,19 @@ from typing import Any
 
 import pytest
 
+from ph.keys import TOOLS
 from ph.llm.types import create_user_message
-from ph.testing import StubAgent, boundary_for, raising, simple_tool, tool_runtime
+from ph.testing import (
+    MountProfile,
+    StubAgent,
+    block_text,
+    boundary_for,
+    noted,
+    noting,
+    raising,
+    simple_tool,
+    tool_runtime,
+)
 from ph.tools import (
     Accept,
     Allow,
@@ -67,7 +78,7 @@ async def test_the_happy_path_renders_the_declared_value() -> None:
     result = await tools.execute(_call(text="hello"))
     assert not result.is_error
     assert result.value == "hello"
-    assert result.content[0].text == "hello"
+    assert block_text(result.content[0]) == "hello"
 
 
 async def test_stages_run_in_the_documented_order() -> None:
@@ -115,7 +126,7 @@ async def test_a_guard_denial_cannot_be_re_permitted() -> None:
         return Allow()
 
     root.on("tools/pre-execute", permissive)
-    root.on("tools/execute", lambda execution, next_: ran.append("body") or next_())
+    root.on("tools/execute", lambda execution, next_: noting(ran, "body", next_))
 
     result = await tools.execute(_call(text="x"))
     assert result.is_error
@@ -154,7 +165,7 @@ async def test_guards_run_after_approval_so_they_have_the_last_word() -> None:
             return "allowed-once"
 
     root.provide("approval", Approver())
-    tools.guard(lambda execution: seen.append("guard") or "still no")
+    tools.guard(lambda execution: noted(seen, "guard", "still no"))
     root.on("tools/pre-execute", lambda execution, next_: Ask(reason="dangerous"))
 
     result = await tools.execute(_call(text="x", agent=StubAgent(root)))
@@ -169,7 +180,7 @@ async def test_a_pre_execute_denial_skips_the_guards() -> None:
     root, tools = tool_runtime()
     tools.register(_echo())
     guarded: list[str] = []
-    tools.guard(lambda execution: guarded.append("guard") or None)
+    tools.guard(lambda execution: noted(guarded, "guard", None))
     root.on("tools/pre-execute", lambda execution, next_: Deny(reason="no"))
     result = await tools.execute(_call(text="x"))
     assert result.is_error
@@ -190,12 +201,12 @@ async def test_a_pre_execute_row_can_answer_in_the_tools_own_voice() -> None:
     """
     root, tools = tool_runtime()
     ran: list[str] = []
-    tools.register(simple_tool("echo", lambda _args, _run: ran.append("body") or "ran"))
+    tools.register(simple_tool("echo", lambda _args, _run: noted(ran, "body", "ran")))
     root.on("tools/pre-execute", lambda execution, next_: Respond(message="8080"))
 
     result = await tools.execute(_call("echo", text="x"))
     assert not result.is_error, "an answer is not a failure"
-    assert result.content[0].text == "8080"
+    assert block_text(result.content[0]) == "8080"
     assert ran == [], "the body ran anyway"
 
 
@@ -211,7 +222,7 @@ async def test_a_pre_execute_row_can_substitute_the_arguments() -> None:
     """
     root, tools = tool_runtime()
     seen: list[Any] = []
-    tools.register(simple_tool("echo", lambda args, _run: seen.append(dict(args)) or "ran"))
+    tools.register(simple_tool("echo", lambda args, _run: noted(seen, dict(args), "ran")))
     root.on(
         "tools/pre-execute",
         lambda execution, next_: Allow(arguments={"text": "corrected"}, has_arguments=True),
@@ -282,13 +293,13 @@ async def test_a_raising_body_becomes_a_structured_error() -> None:
     assert result.error is not None and result.error.message == "the tool broke"
     # Content carries the Native envelope the model expects, so a failure reads
     # the same as every other result.
-    assert result.content[0].text == "Error: the tool broke"
+    assert block_text(result.content[0]) == "Error: the tool broke"
 
 
 async def test_an_unknown_tool_is_refused_before_any_listener() -> None:
     root, tools = tool_runtime()
     seen: list[str] = []
-    root.on("tools/pre-execute", lambda execution, next_: seen.append("pre") or next_())
+    root.on("tools/pre-execute", lambda execution, next_: noting(seen, "pre", next_))
     result = await tools.execute(_call("nonexistent"))
     assert result.is_error
     assert result.error is not None and "unknown tool" in result.error.message
@@ -334,7 +345,7 @@ async def test_post_execute_can_replace_content_or_block() -> None:
 
     disposer = root.on("tools/post-execute", replace)
     result = await tools.execute(_call(text="original"))
-    assert result.content[0].text == "rewritten"
+    assert block_text(result.content[0]) == "rewritten"
     assert not result.is_error
     disposer()
 
@@ -344,7 +355,7 @@ async def test_post_execute_can_replace_content_or_block() -> None:
     )
     blocked = await tools.execute(_call(text="original"))
     assert blocked.is_error
-    assert blocked.content[0].text == "try again"
+    assert block_text(blocked.content[0]) == "try again"
 
 
 async def test_post_execute_runs_on_a_denied_call() -> None:
@@ -352,7 +363,7 @@ async def test_post_execute_runs_on_a_denied_call() -> None:
     tools.register(_echo())
     seen: list[str] = []
     root.on("tools/pre-execute", lambda execution, next_: Deny(reason="nope"))
-    root.on("tools/post-execute", lambda execution, result, next_: seen.append("post") or next_())
+    root.on("tools/post-execute", lambda execution, result, next_: noting(seen, "post", next_))
     await tools.execute(_call(text="x"))
     # A denial is still a result, and policy may still shape what the model reads.
     assert seen == ["post"]
@@ -371,7 +382,7 @@ async def test_finalize_content_runs_even_for_a_failure() -> None:
     # Invoked exactly once, for the failure that bypassed post-execute: a tool
     # whose content needs a last-mile transform must not have to trust policy.
     assert seen == [True]
-    assert result.content[0].text == "finalized"
+    assert block_text(result.content[0]) == "finalized"
 
 
 def _notice() -> Any:
@@ -414,13 +425,13 @@ async def test_a_block_discards_context_the_body_deferred() -> None:
 async def test_arguments_reaching_the_body_are_frozen() -> None:
     _root, tools = tool_runtime()
     captured: list[Any] = []
-    tools.register(simple_tool("capture", lambda args, _run: captured.append(args) or "ok"))
+    tools.register(simple_tool("capture", lambda args, _run: noted(captured, args, "ok")))
     await tools.execute(_call("capture", nested={"a": 1}))
     with pytest.raises(TypeError):
         captured[0]["nested"] = 2
 
 
-async def test_a_timeout_budget_is_enforced_by_its_row(mount: Any) -> None:
+async def test_a_timeout_budget_is_enforced_by_its_row(mount: MountProfile) -> None:
     """`timeout_ms` is a promise the `tools-timeout` row keeps; a declared
     budget with nothing behind it would be the type telling a lie."""
     import anyio
@@ -431,8 +442,8 @@ async def test_a_timeout_budget_is_enforced_by_its_row(mount: Any) -> None:
         await anyio.sleep(1.0)
         return "late"
 
-    ctx.tools.register(simple_tool("slow", slow, timeout_ms=50))
-    result = await ctx.tools.execute(_call("slow"))
+    ctx.require(TOOLS).register(simple_tool("slow", slow, timeout_ms=50))
+    result = await ctx.require(TOOLS).execute(_call("slow"))
     assert result.is_error
     assert result.error is not None
     assert result.error.info == {"name": "Timeout", "code": "TIMEOUT"}

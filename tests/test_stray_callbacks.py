@@ -38,6 +38,7 @@ def _fire(context: dict[str, Any]) -> BaseException:
             self._exceptions = collected
 
     _Runner_._exception_handler(_Runner(), None, context)  # type: ignore[arg-type]
+    assert isinstance(error, BaseException)
     return error
 
 

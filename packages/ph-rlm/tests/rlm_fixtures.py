@@ -15,20 +15,34 @@ different things while appearing to test one.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from ph.testing import FAKE_OPTIONS
+from ph.agent.types import AgentHandle
+from ph.cordis import Context
+from ph.keys import AGENTS, SESSIONS
+from ph.session import Session
+from ph.testing import FAKE_OPTIONS, MountProfile
 from ph_rlm import BUNDLE
 from ph_rlm.harness import HarnessEdit
 from ph_rlm.kernel.journal import OrphanJournal
 from ph_rlm.kernel.manager import Kernel, KernelLimits, _declare
 from ph_rlm.kernel.venv import resolve_interpreter
 
-MakeKernel = Callable[..., "Kernel"]
+type MakeKernel = Callable[..., Awaitable["Kernel"]]
+"""`await make_kernel(...)` → a live kernel. Awaitable, because `make` is
+`async` — the alias said otherwise and nothing checked while the trees were
+outside mypy (issue 32)."""
+
+type MountedRuntime = Callable[..., Awaitable[tuple[Context, Session, AgentHandle]]]
+"""`await mounted_runtime(...)` → `(ctx, session, agent)` on the real profile.
+
+Named because seventeen tests took it as `Any` and then read services off
+the `ctx` it hands back, which is how 1,581 untyped reads hid behind one
+fixture (issue 32)."""
 
 HOST_RUNTIME_ROW: dict[str, Any] = {
     "id": "code-runtime-python",
@@ -68,7 +82,7 @@ Harnessed = Callable[..., Any]
 
 
 @pytest.fixture
-def harnessed(mounted_runtime: Any) -> Harnessed:
+def harnessed(mounted_runtime: MountedRuntime) -> Harnessed:
     """`await harnessed(*rows)` -> `(ctx, session, agent)` with the harness mounted.
 
     On the real runtime, so H1 probes a live kernel, and with `$PH_HOME` under
@@ -133,7 +147,7 @@ async def make_kernel(tmp_path: Path) -> AsyncIterator[MakeKernel]:
 
 
 @pytest.fixture
-def shipped_profile(mount: Any) -> Callable[..., Any]:
+def shipped_profile(mount: MountProfile) -> Callable[..., Any]:
     """`await shipped_profile()` → `(ctx, session, agent)` on the real `rlm` bundle.
 
     `ph-base` + `headless` + `rlm/bundle.yaml` through the loader, so a row
@@ -166,14 +180,14 @@ def shipped_profile(mount: Any) -> Callable[..., Any]:
             *({"id": row_id, "config": values} for row_id, values in merged.items()),
             profile=profile,
         )
-        session = ctx.sessions.create(session_id)
-        return ctx, session, ctx.agents.create(session, FAKE_OPTIONS)
+        session = ctx.require(SESSIONS).create(session_id)
+        return ctx, session, ctx.require(AGENTS).create(session, FAKE_OPTIONS)
 
     return build
 
 
 @pytest.fixture
-def mounted_runtime(mount: Any) -> Callable[..., Any]:
+def mounted_runtime(mount: MountProfile) -> MountedRuntime:
     """`await mounted_runtime(...)` → `(ctx, session, agent)` on the real profile.
 
     `snapshots=False` mounts the runtime *without* the snapshot policy, which is
@@ -191,7 +205,7 @@ def mounted_runtime(mount: Any) -> Callable[..., Any]:
         presentation: bool = False,
         snapshot_config: dict[str, Any] | None = None,
         extra_rows: list[dict[str, Any]] | None = None,
-    ) -> tuple[Any, Any, Any]:
+    ) -> tuple[Context, Session, AgentHandle]:
         rows = [*CODE_MODE_ROWS, HOST_RUNTIME_ROW]
         if snapshots:
             rows.append(
@@ -201,7 +215,7 @@ def mounted_runtime(mount: Any) -> Callable[..., Any]:
             rows.append(PRESENTATION_ROW)
         rows.extend(extra_rows or [])
         ctx = await mount(*rows)
-        session = ctx.sessions.create(session_id)
-        return ctx, session, ctx.agents.create(session, FAKE_OPTIONS)
+        session = ctx.require(SESSIONS).create(session_id)
+        return ctx, session, ctx.require(AGENTS).create(session, FAKE_OPTIONS)
 
     return build

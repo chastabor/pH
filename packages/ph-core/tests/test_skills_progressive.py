@@ -32,6 +32,7 @@ from typing import Any
 import pytest
 
 from ph.cordis import DEPLOYMENT
+from ph.keys import AGENTS, SESSIONS, SKILLS, SYSTEM_PROMPT, TOOLS
 from ph.llm.types import text_of
 from ph.seams.skills import (
     ARGUMENT_HINT_MAX,
@@ -47,7 +48,7 @@ from ph.seams.skills import (
     rendered_skill,
 )
 from ph.system_prompt import render_prompt
-from ph.testing import FAKE_OPTIONS, run_tool, skill, write_skill
+from ph.testing import FAKE_OPTIONS, MountProfile, run_tool, skill, write_skill
 
 pytestmark = pytest.mark.anyio
 
@@ -191,30 +192,32 @@ def test_a_catalog_of_nothing_renders_nothing() -> None:
 
 
 async def test_the_catalog_reaches_the_prompt_without_the_bodies(
-    mount: Any, tmp_path: Path
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """The gate. Names and descriptions are cheap and always useful; a body is
     neither, so it waits to be asked for."""
     write_skill(tmp_path, "note-taking", body="Step one: open a file. Step two: write in it.")
     ctx = await mount(row(tmp_path))
 
-    prompt = render_prompt(await ctx.system_prompt.assemble(DEPLOYMENT))
+    prompt = render_prompt(await ctx.require(SYSTEM_PROMPT).assemble(DEPLOYMENT))
 
     assert "**note-taking** — search the web for a query" in prompt
     assert "Step one" not in prompt, "a skill body reached the prompt"
 
 
-async def test_the_tool_hands_over_the_body_when_asked(mount: Any, tmp_path: Path) -> None:
+async def test_the_tool_hands_over_the_body_when_asked(mount: MountProfile, tmp_path: Path) -> None:
     write_skill(tmp_path, "note-taking", body="Step one: open a file.")
     ctx = await mount(row(tmp_path))
-    agent = ctx.agents.create(ctx.sessions.create("s"), FAKE_OPTIONS)
+    agent = ctx.require(AGENTS).create(ctx.require(SESSIONS).create("s"), FAKE_OPTIONS)
 
     result = await run_tool(ctx, "skill", {"name": "note-taking"}, agent=agent)
 
     assert "Step one: open a file." in text_of(result.content)
 
 
-async def test_reading_a_skill_resolves_the_tools_it_declared(mount: Any, tmp_path: Path) -> None:
+async def test_reading_a_skill_resolves_the_tools_it_declared(
+    mount: MountProfile, tmp_path: Path
+) -> None:
     """`allowed-tools` is answered, not echoed (P7-17).
 
     An echoed list leaves the model to diff it against its own catalog. Resolved
@@ -232,7 +235,7 @@ async def test_reading_a_skill_resolves_the_tools_it_declared(mount: Any, tmp_pa
         extra="allowed-tools:\n  - read\n  - deploy",
     )
     ctx = await mount(row(tmp_path))
-    agent = ctx.agents.create(ctx.sessions.create("s"), FAKE_OPTIONS)
+    agent = ctx.require(AGENTS).create(ctx.require(SESSIONS).create("s"), FAKE_OPTIONS)
 
     result = await run_tool(ctx, "skill", {"name": "release"}, agent=agent)
 
@@ -253,13 +256,17 @@ RELEASE = """parameters:
     default: v"""
 
 
-async def _release(mount: Any, root: Path, body: str = "Bump {{parameters.version-type}}.") -> Any:
+async def _release(
+    mount: MountProfile, root: Path, body: str = "Bump {{parameters.version-type}}."
+) -> Any:
     write_skill(root, "release", description="cut a release", extra=RELEASE, body=body)
     ctx = await mount(row(root))
-    return ctx, ctx.agents.create(ctx.sessions.create("s"), FAKE_OPTIONS)
+    return ctx, ctx.require(AGENTS).create(ctx.require(SESSIONS).create("s"), FAKE_OPTIONS)
 
 
-async def test_a_declared_input_is_filled_into_the_instructions(mount: Any, tmp_path: Path) -> None:
+async def test_a_declared_input_is_filled_into_the_instructions(
+    mount: MountProfile, tmp_path: Path
+) -> None:
     """**P7-18's first half.** A skill takes inputs, and the body says so.
 
     Instructions with the value already in them are what makes a parameter worth
@@ -291,7 +298,7 @@ async def test_a_declared_input_is_filled_into_the_instructions(mount: Any, tmp_
     ids=["missing-required", "outside-the-enum", "unknown-name", "wrong-type"],
 )
 async def test_arguments_that_do_not_satisfy_the_declaration_are_refused(
-    mount: Any, tmp_path: Path, arguments: dict[str, Any], expected: str
+    mount: MountProfile, tmp_path: Path, arguments: dict[str, Any], expected: str
 ) -> None:
     """Refused before the model starts following the instructions.
 
@@ -312,7 +319,9 @@ async def test_arguments_that_do_not_satisfy_the_declaration_are_refused(
     assert expected in text_of(result.content)
 
 
-async def test_a_body_naming_an_undeclared_input_is_refused(mount: Any, tmp_path: Path) -> None:
+async def test_a_body_naming_an_undeclared_input_is_refused(
+    mount: MountProfile, tmp_path: Path
+) -> None:
     """The author's typo, surfaced where both halves are finally in hand.
 
     G9 keeps the body on disk until something asks for it, so there is no earlier
@@ -332,7 +341,9 @@ async def test_a_body_naming_an_undeclared_input_is_refused(mount: Any, tmp_path
     assert "undeclared parameter(s) verison" in text_of(result.content)
 
 
-async def test_a_step_is_rendered_like_the_prose_around_it(mount: Any, tmp_path: Path) -> None:
+async def test_a_step_is_rendered_like_the_prose_around_it(
+    mount: MountProfile, tmp_path: Path
+) -> None:
     """A step is part of the document, so it gets the same substitution.
 
     An author writing `Tag {{parameters.tag-prefix}}1.0` in a step means what they
@@ -354,7 +365,7 @@ async def test_a_step_is_rendered_like_the_prose_around_it(mount: Any, tmp_path:
         body="See the steps.",
     )
     ctx = await mount(row(tmp_path))
-    agent = ctx.agents.create(ctx.sessions.create("s"), FAKE_OPTIONS)
+    agent = ctx.require(AGENTS).create(ctx.require(SESSIONS).create("s"), FAKE_OPTIONS)
     seen: list[Any] = []
     ctx.on("skills/read", lambda payload: seen.append(payload))
 
@@ -371,7 +382,9 @@ async def test_a_step_is_rendered_like_the_prose_around_it(mount: Any, tmp_path:
         )
 
 
-async def test_a_skill_that_declares_no_inputs_is_still_scanned(mount: Any, tmp_path: Any) -> None:
+async def test_a_skill_that_declares_no_inputs_is_still_scanned(
+    mount: MountProfile, tmp_path: Any
+) -> None:
     """There is no shortcut for a skill with no `parameters:` block, and there was.
 
     An early return handed such a body straight back, which made the scan
@@ -393,7 +406,7 @@ async def test_a_skill_that_declares_no_inputs_is_still_scanned(mount: Any, tmp_
         body="Follow the steps.",
     )
     ctx = await mount(row(tmp_path))
-    agent = ctx.agents.create(ctx.sessions.create("s"), FAKE_OPTIONS)
+    agent = ctx.require(AGENTS).create(ctx.require(SESSIONS).create("s"), FAKE_OPTIONS)
 
     result = await run_tool(ctx, "skill", {"name": "port"}, agent=agent)
 
@@ -437,7 +450,9 @@ def test_the_readmes_example_is_a_skill_this_build_can_load() -> None:
     assert steps[-1].startswith("Run uv run pytest -q"), "and a declared default fills itself in"
 
 
-async def test_a_listener_that_fails_does_not_fail_the_read(mount: Any, tmp_path: Any) -> None:
+async def test_a_listener_that_fails_does_not_fail_the_read(
+    mount: MountProfile, tmp_path: Any
+) -> None:
     """A skill read cannot be un-read, which is what `contained=` is for.
 
     The body is rendered and about to be returned by the time the event fires, so
@@ -462,7 +477,9 @@ async def test_a_listener_that_fails_does_not_fail_the_read(mount: Any, tmp_path
     assert "Bump minor." in text_of(result.content)
 
 
-async def test_a_skill_that_declares_nothing_is_untouched(mount: Any, tmp_path: Path) -> None:
+async def test_a_skill_that_declares_nothing_is_untouched(
+    mount: MountProfile, tmp_path: Path
+) -> None:
     """Optional, and the body of a plain skill is returned byte for byte.
 
     A `SKILL.md` is prose *and* code samples, and code is full of braces — a
@@ -470,7 +487,7 @@ async def test_a_skill_that_declares_nothing_is_untouched(mount: Any, tmp_path: 
     itself."""
     write_skill(tmp_path, "notes", body="Use `{{mustache}}` and {braces} freely.")
     ctx = await mount(row(tmp_path))
-    agent = ctx.agents.create(ctx.sessions.create("s"), FAKE_OPTIONS)
+    agent = ctx.require(AGENTS).create(ctx.require(SESSIONS).create("s"), FAKE_OPTIONS)
 
     result = await run_tool(ctx, "skill", {"name": "notes"}, agent=agent)
 
@@ -503,12 +520,14 @@ async def test_a_malformed_declaration_refuses_the_skill(
     assert read_skill(tmp_path / "risky" / "SKILL.md") is None, why
 
 
-async def test_an_unknown_skill_names_what_is_installed(mount: Any, tmp_path: Path) -> None:
+async def test_an_unknown_skill_names_what_is_installed(
+    mount: MountProfile, tmp_path: Path
+) -> None:
     """A typo is the likely cause and the model can fix it from the list — but
     only if the refusal carries the list rather than just saying no."""
     write_skill(tmp_path, "note-taking")
     ctx = await mount(row(tmp_path))
-    agent = ctx.agents.create(ctx.sessions.create("s"), FAKE_OPTIONS)
+    agent = ctx.require(AGENTS).create(ctx.require(SESSIONS).create("s"), FAKE_OPTIONS)
 
     result = await run_tool(ctx, "skill", {"name": "note-takin"}, agent=agent)
 
@@ -516,42 +535,44 @@ async def test_an_unknown_skill_names_what_is_installed(mount: Any, tmp_path: Pa
     assert "note-taking" in text_of(result.content)
 
 
-async def test_the_catalog_covers_skills_another_row_registered(mount: Any, tmp_path: Path) -> None:
+async def test_the_catalog_covers_skills_another_row_registered(
+    mount: MountProfile, tmp_path: Path
+) -> None:
     """The reason the catalog is a provider rather than a fixed string: a second
     row that installs skills — `rlm-skills-python` is the one that exists —
     appears in *this* catalog instead of adding a second one, and neither row
     has to be mounted before the other."""
     ctx = await mount(row())
 
-    ctx.skills.register(
+    ctx.require(SKILLS).register(
         Skill(name="deploy", description="ship the thing", hint="Callable as `await deploy(...)`.")
     )
 
-    prompt = render_prompt(await ctx.system_prompt.assemble(DEPLOYMENT))
+    prompt = render_prompt(await ctx.require(SYSTEM_PROMPT).assemble(DEPLOYMENT))
 
     assert "**deploy** — ship the thing Callable as `await deploy(...)`." in prompt
 
 
-async def test_no_skills_means_no_tool(mount: Any) -> None:
+async def test_no_skills_means_no_tool(mount: MountProfile) -> None:
     """The same rule `subagent-task` follows: a tool in every prompt that can
     only fail teaches the model a capability the deployment does not have. The
     check is at `profile/mounted`, so a skill installed by *any* row counts."""
     ctx = await mount(row())
 
-    assert ctx.tools.get("skill", scope=DEPLOYMENT) is None
+    assert ctx.require(TOOLS).get("skill", scope=DEPLOYMENT) is None
 
 
-async def test_no_paths_scans_nothing(mount: Any) -> None:
+async def test_no_paths_scans_nothing(mount: MountProfile) -> None:
     """`$PH_HOME/skills` is deliberately not a default: scanning a well-known
     directory at every start would make "install a skill" mean "drop a file
     there", and a skill is something a distribution or a user installs on
     purpose (I7)."""
     ctx = await mount()
 
-    assert ctx.skills.list(DEPLOYMENT) == []
+    assert ctx.require(SKILLS).list(DEPLOYMENT) == []
 
 
-async def test_the_deployment_wide_answer_has_to_be_asked_for(mount: Any) -> None:
+async def test_the_deployment_wide_answer_has_to_be_asked_for(mount: MountProfile) -> None:
     """P6-32's behavioural half, on the seam P6-31 named and left.
 
     `reach` resolved `scope or self.ctx`, and `self.ctx` is the mount — the
@@ -564,14 +585,19 @@ async def test_the_deployment_wide_answer_has_to_be_asked_for(mount: Any) -> Non
     one that widens is the one you have to type.
     """
     ctx = await mount()
-    ctx.skills.register(skill("wide"))
-    ctx.skills.register(skill("narrow"))
-    agent = ctx.agents.create(ctx.sessions.create("p632"), FAKE_OPTIONS)
-    ctx.skills.restrict(SkillRestriction(deny=("wide",)), scope=agent.ctx)
+    ctx.require(SKILLS).register(skill("wide"))
+    ctx.require(SKILLS).register(skill("narrow"))
+    agent = ctx.require(AGENTS).create(ctx.require(SESSIONS).create("p632"), FAKE_OPTIONS)
+    ctx.require(SKILLS).restrict(SkillRestriction(deny=frozenset({"wide"})), scope=agent.ctx)
 
-    assert [one.name for one in ctx.skills.list(DEPLOYMENT)] == ["narrow", "wide"]
-    assert [one.name for one in ctx.skills.list(agent.ctx)] == ["narrow"], "the narrowing was lost"
+    assert [one.name for one in ctx.require(SKILLS).list(DEPLOYMENT)] == ["narrow", "wide"]
+    assert [one.name for one in ctx.require(SKILLS).list(agent.ctx)] == ["narrow"], (
+        "the narrowing was lost"
+    )
 
     # And saying nothing is no longer a way to get the wide answer by accident.
+    # The pragma is the point of the assertion: this call is *meant* to be the
+    # one the checker rejects, and until issue 32 removed `Context.__getattr__`
+    # the sugar hid it behind an `Any`.
     with pytest.raises(TypeError, match="missing 1 required positional argument"):
-        ctx.skills.list()
+        ctx.require(SKILLS).list()  # type: ignore[call-arg]

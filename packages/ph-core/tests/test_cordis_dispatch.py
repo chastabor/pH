@@ -8,6 +8,7 @@ behaviour without the built-in knowing it was replaced.
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 import pytest
@@ -53,13 +54,13 @@ async def test_waterfall_listeners_wrap_the_built_in() -> None:
     root = Context()
     trace: list[str] = []
 
-    async def outer(payload: dict[str, Any], next_: Any) -> str:
+    async def outer(payload: dict[str, Any], next_: Callable[..., Awaitable[str]]) -> str:
         trace.append("outer-in")
         result = await next_()
         trace.append("outer-out")
         return f"[{result}]"
 
-    async def inner_listener(payload: dict[str, Any], next_: Any) -> str:
+    async def inner_listener(payload: dict[str, Any], next_: Callable[..., Awaitable[str]]) -> str:
         trace.append("inner-in")
         return await next_()
 
@@ -80,10 +81,10 @@ async def test_waterfall_veto_stops_the_built_in() -> None:
     root = Context()
     ran: list[str] = []
 
-    async def veto(payload: dict[str, Any], next_: Any) -> str:
+    async def veto(payload: dict[str, Any], next_: Callable[..., Awaitable[str]]) -> str:
         return "denied"
 
-    async def downstream(payload: dict[str, Any], next_: Any) -> str:
+    async def downstream(payload: dict[str, Any], next_: Callable[..., Awaitable[str]]) -> str:
         ran.append("downstream")
         return await next_()
 
@@ -101,10 +102,10 @@ async def test_waterfall_veto_stops_the_built_in() -> None:
 async def test_waterfall_next_can_hand_down_replaced_arguments() -> None:
     root = Context()
 
-    async def rewrite(value: str, next_: Any) -> str:
+    async def rewrite(value: str, next_: Callable[..., Awaitable[str]]) -> str:
         return await next_("rewritten")
 
-    async def observe(value: str, next_: Any) -> str:
+    async def observe(value: str, next_: Callable[..., Awaitable[str]]) -> str:
         return await next_()
 
     async def built_in(value: str) -> str:

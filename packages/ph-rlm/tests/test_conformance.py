@@ -29,6 +29,7 @@ import anyio
 import pytest
 from runtime_helpers import run_ipython_cell
 
+from ph.keys import TOOLS
 from ph.seams.subprocess import scrub_env
 from ph_app.profiles import resolve_profile
 from ph_rlm.kernel.codec import decode, encode
@@ -168,7 +169,7 @@ async def test_every_shipped_namespace_is_callable_from_a_cell(shipped_profile: 
     once got dropped and a `uv` venv started building over the network.
     """
     ctx, session, agent = await shipped_profile(profile=resolve_profile("rlm"))
-    declared = {"tools", *ctx.tools.view(agent.ctx).code_namespaces}
+    declared = {"tools", *ctx.require(TOOLS).view(agent.ctx).code_namespaces}
 
     # The names, not the calls: what is under test is that every namespace the
     # host declares is *bound in the guest*. Which names the profile ought to

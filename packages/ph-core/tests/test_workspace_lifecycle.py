@@ -22,8 +22,10 @@ from typing import Any
 
 import pytest
 
+from ph.keys import AGENTS, FS, SESSIONS, WORKSPACE
 from ph.seams.workspace import PROJECT_PROVISION_FILE, discover_provisioning
-from ph.testing import FAKE_OPTIONS, StubWorkspaceProvider, run_tool
+from ph.session.json import as_obj
+from ph.testing import FAKE_OPTIONS, MountProfile, StubWorkspaceProvider, not_none, run_tool
 
 pytestmark = pytest.mark.anyio
 
@@ -38,8 +40,8 @@ def _tier(tmp_path: Path) -> StubWorkspaceProvider:
 
 async def _run(ctx: Any, session_id: str = "s") -> Any:
     """One agent, one prompt — the least that reaches `agent/pre-step`."""
-    session = ctx.sessions.create(session_id)
-    agent = ctx.agents.create(session, FAKE_OPTIONS)
+    session = ctx.require(SESSIONS).create(session_id)
+    agent = ctx.require(AGENTS).create(session, FAKE_OPTIONS)
     await agent.prompt("hello")
     return agent
 
@@ -47,22 +49,24 @@ async def _run(ctx: Any, session_id: str = "s") -> Any:
 # ------------------------------------------------------------- acquisition --
 
 
-async def test_an_agent_holds_a_workspace_by_the_time_it_steps(mount: Any) -> None:
+async def test_an_agent_holds_a_workspace_by_the_time_it_steps(mount: MountProfile) -> None:
     """The row's whole job, at the default tier: nothing changes except that the
     question "where does this agent write" now has an answer."""
     ctx = await mount()
 
     agent = await _run(ctx)
 
-    workspace = ctx.workspace.of(agent.id)
+    workspace = ctx.require(WORKSPACE).of(agent.id)
     assert workspace is not None
     assert workspace.kind == "shared"
     # The process's own directory, which is what `shared` means — so a profile
     # that names no tier behaves exactly as it did before this row existed.
-    assert workspace.root == ctx.fs.root
+    assert workspace.root == ctx.require(FS).root
 
 
-async def test_a_child_with_no_workspace_refuses_instead_of_inventing_one(mount: Any) -> None:
+async def test_a_child_with_no_workspace_refuses_instead_of_inventing_one(
+    mount: MountProfile,
+) -> None:
     """§6.5, at the one place it was reachable by omission.
 
     A child's base and `access` are its parent's decision and arrive with the spawn.
@@ -79,8 +83,10 @@ async def test_a_child_with_no_workspace_refuses_instead_of_inventing_one(mount:
     detect — `workspace/acquired` says what it got, not what it should have got.
     """
     ctx = await mount()
-    orphan = ctx.sessions.create("child", meta={"origin": "subagent", "parentSession": "root"})
-    agent = ctx.agents.create(orphan, FAKE_OPTIONS)
+    orphan = ctx.require(SESSIONS).create(
+        "child", meta={"origin": "subagent", "parentSession": "root"}
+    )
+    agent = ctx.require(AGENTS).create(orphan, FAKE_OPTIONS)
 
     await agent.prompt("hello")
 
@@ -88,14 +94,18 @@ async def test_a_child_with_no_workspace_refuses_instead_of_inventing_one(mount:
     # what a raise from `agent/pre-step` becomes. A bare exception would reach this
     # record as `UNKNOWN`, so the code is the half worth pinning.
     (ended,) = [one for one in orphan.events if one.type == "turn/end"]
-    error = ended.data["reason"]["error"]
-    assert ended.data["reason"]["kind"] == "error"
-    assert error["code"] == "CHILD_WORKSPACE_MISSING"
-    assert agent.id in str(error["message"])
-    assert ctx.workspace.of(agent.id) is None, "the refusal must not leave a workspace behind"
+    error = as_obj(ended.data["reason"])["error"]
+    assert as_obj(ended.data["reason"])["kind"] == "error"
+    assert as_obj(error)["code"] == "CHILD_WORKSPACE_MISSING"
+    assert agent.id in str(as_obj(error)["message"])
+    assert ctx.require(WORKSPACE).of(agent.id) is None, (
+        "the refusal must not leave a workspace behind"
+    )
 
 
-async def test_a_child_whose_parent_did_acquire_steps_normally(mount: Any, tmp_path: Path) -> None:
+async def test_a_child_whose_parent_did_acquire_steps_normally(
+    mount: MountProfile, tmp_path: Path
+) -> None:
     """The other half, and the one that must not regress: the refusal is about an
     *absent* workspace, never about being a child.
 
@@ -104,24 +114,26 @@ async def test_a_child_whose_parent_did_acquire_steps_normally(mount: Any, tmp_p
     overwrite it.
     """
     ctx = await mount()
-    child = ctx.sessions.create("child", meta={"origin": "subagent", "parentSession": "root"})
-    agent = ctx.agents.create(child, FAKE_OPTIONS)
+    child = ctx.require(SESSIONS).create(
+        "child", meta={"origin": "subagent", "parentSession": "root"}
+    )
+    agent = ctx.require(AGENTS).create(child, FAKE_OPTIONS)
     # What a spawn does: the parent decides, and it decided `read`.
-    granted = await ctx.workspace.acquire(
+    granted = await ctx.require(WORKSPACE).acquire(
         session_id=child.id, agent_id=agent.id, base=tmp_path, access="read", session=child
     )
 
     await agent.prompt("hello")
 
-    assert ctx.workspace.of(agent.id) is granted
+    assert ctx.require(WORKSPACE).of(agent.id) is granted
 
 
-async def test_the_workspace_is_taken_once_not_once_per_turn(mount: Any) -> None:
+async def test_the_workspace_is_taken_once_not_once_per_turn(mount: MountProfile) -> None:
     """`git worktree add` per turn would be both slow and wrong — the second
     call would find the first's tree and the branch already taken."""
     ctx = await mount()
-    session = ctx.sessions.create("s")
-    agent = ctx.agents.create(session, FAKE_OPTIONS)
+    session = ctx.require(SESSIONS).create("s")
+    agent = ctx.require(AGENTS).create(session, FAKE_OPTIONS)
 
     await agent.prompt("first")
     await agent.prompt("second")
@@ -130,7 +142,7 @@ async def test_the_workspace_is_taken_once_not_once_per_turn(mount: Any) -> None
     assert len(acquired) == 1
 
 
-async def test_an_acquire_that_names_a_live_agent_unwinds_with_it(mount: Any) -> None:
+async def test_an_acquire_that_names_a_live_agent_unwinds_with_it(mount: MountProfile) -> None:
     """P4-16's note, closed: `agent_id` already says whose workspace this is.
 
     A hand-rolled `acquire` with no `scope=` handed the seam a checkout that
@@ -139,28 +151,30 @@ async def test_an_acquire_that_names_a_live_agent_unwinds_with_it(mount: Any) ->
     own scope is the owner whether or not the caller said so.
     """
     ctx = await mount()
-    session = ctx.sessions.create("s")
-    agent = ctx.agents.create(session, FAKE_OPTIONS)
+    session = ctx.require(SESSIONS).create("s")
+    agent = ctx.require(AGENTS).create(session, FAKE_OPTIONS)
 
-    await ctx.workspace.acquire(session_id=session.id, agent_id=agent.id, base=ctx.fs.root)
-    assert ctx.workspace.of(agent.id) is not None
+    await ctx.require(WORKSPACE).acquire(
+        session_id=session.id, agent_id=agent.id, base=ctx.require(FS).root
+    )
+    assert ctx.require(WORKSPACE).of(agent.id) is not None
 
-    await ctx.agents.dispose(agent.id)
+    await ctx.require(AGENTS).dispose(agent.id)
 
-    assert ctx.workspace.of(agent.id) is None
+    assert ctx.require(WORKSPACE).of(agent.id) is None
 
 
-async def test_disposing_the_agent_releases_its_workspace(mount: Any) -> None:
+async def test_disposing_the_agent_releases_its_workspace(mount: MountProfile) -> None:
     """I2, end to end: the agent's scope owns the checkout, so an agent that
     goes away does not leave one behind for a reconciler to find."""
     ctx = await mount()
-    session = ctx.sessions.create("s")
-    agent = ctx.agents.create(session, FAKE_OPTIONS)
+    session = ctx.require(SESSIONS).create("s")
+    agent = ctx.require(AGENTS).create(session, FAKE_OPTIONS)
     await agent.prompt("hello")
 
-    await ctx.agents.dispose(agent.id)
+    await ctx.require(AGENTS).dispose(agent.id)
 
-    assert ctx.workspace.of(agent.id) is None
+    assert ctx.require(WORKSPACE).of(agent.id) is None
     assert [event.type for event in session.events if event.type.startswith("workspace/")] == [
         "workspace/acquired",
         "workspace/disposed",
@@ -171,7 +185,7 @@ async def test_disposing_the_agent_releases_its_workspace(mount: Any) -> None:
 
 
 async def test_relative_paths_resolve_against_the_agents_own_root(
-    mount: Any, tmp_path: Path
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """The tier biting: a relative write lands in this agent's tree.
 
@@ -181,17 +195,19 @@ async def test_relative_paths_resolve_against_the_agents_own_root(
     §12 Q10 exists to prevent.
     """
     ctx = await mount()
-    ctx.workspace.register_provider(_tier(tmp_path))
+    ctx.require(WORKSPACE).register_provider(_tier(tmp_path))
     agent = await _run(ctx)
-    root = ctx.workspace.of(agent.id).root
+    root = not_none(ctx.require(WORKSPACE).of(agent.id)).root
 
-    assert ctx.fs.resolve("notes.txt", agent=agent) == root / "notes.txt"
-    assert ctx.fs.root_for(agent) == root
+    assert ctx.require(FS).resolve("notes.txt", agent=agent) == root / "notes.txt"
+    assert ctx.require(FS).root_for(agent) == root
     # Absolute paths are the tier's stated limit, not an oversight.
-    assert ctx.fs.resolve("/etc/hosts", agent=agent) == Path("/etc/hosts")
+    assert ctx.require(FS).resolve("/etc/hosts", agent=agent) == Path("/etc/hosts")
 
 
-async def test_two_agents_resolve_to_two_different_trees(mount: Any, tmp_path: Path) -> None:
+async def test_two_agents_resolve_to_two_different_trees(
+    mount: MountProfile, tmp_path: Path
+) -> None:
     """E2 at the layer that makes it true.
 
     A fan-out is only isolated if `edit("x.py")` means a different file for each
@@ -199,27 +215,27 @@ async def test_two_agents_resolve_to_two_different_trees(mount: Any, tmp_path: P
     would be a rename of the hazard rather than a fix for it.
     """
     ctx = await mount()
-    ctx.workspace.register_provider(_tier(tmp_path))
+    ctx.require(WORKSPACE).register_provider(_tier(tmp_path))
 
     one = await _run(ctx, "s1")
     two = await _run(ctx, "s2")
 
-    assert ctx.fs.resolve("x.py", agent=one) != ctx.fs.resolve("x.py", agent=two)
+    assert ctx.require(FS).resolve("x.py", agent=one) != ctx.require(FS).resolve("x.py", agent=two)
 
 
 async def test_an_agent_with_no_workspace_still_reads_the_process_root(
-    mount: Any,
+    mount: MountProfile,
 ) -> None:
     """`ph doctor`, a CLI probe, a test — callers with no agent at all are real
     and must not be the ones that raise."""
     ctx = await mount()
 
-    assert ctx.fs.root_for(None) == ctx.fs.root
-    assert ctx.fs.resolve("x.py") == ctx.fs.root / "x.py"
+    assert ctx.require(FS).root_for(None) == ctx.require(FS).root
+    assert ctx.require(FS).resolve("x.py") == ctx.require(FS).root / "x.py"
 
 
 async def test_a_resolver_that_breaks_falls_back_rather_than_failing_the_read(
-    mount: Any,
+    mount: MountProfile,
 ) -> None:
     """An agent whose workspace lookup broke still has to be able to read a
     file: the wrong-but-working directory is a better failure than a traceback
@@ -229,9 +245,9 @@ async def test_a_resolver_that_breaks_falls_back_rather_than_failing_the_read(
     class _Exploding:
         id = "boom"
 
-    ctx.fs._rebase = _raise  # type: ignore[assignment]
+    ctx.require(FS)._rebase = _raise
 
-    assert ctx.fs.root_for(_Exploding()) == ctx.fs.root
+    assert ctx.require(FS).root_for(_Exploding()) == ctx.require(FS).root  # type: ignore[arg-type]
 
 
 def _raise(_agent: Any) -> Path:
@@ -241,7 +257,7 @@ def _raise(_agent: Any) -> Path:
 # ------------------------------------------------------------------ command --
 
 
-async def test_bash_runs_in_the_agents_workspace(mount: Any, tmp_path: Path) -> None:
+async def test_bash_runs_in_the_agents_workspace(mount: MountProfile, tmp_path: Path) -> None:
     """The other half of "cwd resolves to `workspace.root`" (§4.8).
 
     A shell command is the shortest path from a model to a relative-path write,
@@ -249,9 +265,9 @@ async def test_bash_runs_in_the_agents_workspace(mount: Any, tmp_path: Path) -> 
     the tools and nothing else.
     """
     ctx = await mount()
-    ctx.workspace.register_provider(_tier(tmp_path))
+    ctx.require(WORKSPACE).register_provider(_tier(tmp_path))
     agent = await _run(ctx)
-    root = ctx.workspace.of(agent.id).root
+    root = not_none(ctx.require(WORKSPACE).of(agent.id)).root
 
     result = await run_tool(ctx, "bash", {"command": "pwd && echo $PH_TEST_REDIRECT"}, agent=agent)
 
@@ -263,7 +279,7 @@ async def test_bash_runs_in_the_agents_workspace(mount: Any, tmp_path: Path) -> 
 
 
 async def test_the_model_is_told_when_its_command_said_more_than_was_kept(
-    mount: Any, tmp_path: Path
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """P7-13's model-facing half: a truncated result must not read as a whole one.
 
@@ -281,7 +297,7 @@ async def test_the_model_is_told_when_its_command_said_more_than_was_kept(
     with nothing saying there was more.
     """
     ctx = await mount({"id": "subprocess", "config": {"maxOutputBytes": 4096}})
-    ctx.workspace.register_provider(_tier(tmp_path))
+    ctx.require(WORKSPACE).register_provider(_tier(tmp_path))
     agent = await _run(ctx)
 
     result = await run_tool(
@@ -355,7 +371,9 @@ def test_a_project_file_that_does_not_parse_is_ignored(tmp_path: Path, text: str
     assert discover_provisioning(tmp_path) == []
 
 
-async def test_the_project_list_is_guarded_like_any_other(mount: Any, tmp_path: Path) -> None:
+async def test_the_project_list_is_guarded_like_any_other(
+    mount: MountProfile, tmp_path: Path
+) -> None:
     """The end of the claim the row is built on.
 
     A repository may state what its worktrees need and may **not** name anything
@@ -369,10 +387,10 @@ async def test_the_project_list_is_guarded_like_any_other(mount: Any, tmp_path: 
     (base / PROJECT_PROVISION_FILE).write_text(
         "provision: [{source: ../../etc/passwd, dest: stolen}]", encoding="utf-8"
     )
-    ctx.workspace.provision(discover_provisioning(base))
-    ctx.workspace.register_provider(_tier(tmp_path))
+    ctx.require(WORKSPACE).provision(discover_provisioning(base))
+    ctx.require(WORKSPACE).register_provider(_tier(tmp_path))
 
-    workspace = await ctx.workspace.acquire(session_id="s", agent_id="a1", base=base)
+    workspace = await ctx.require(WORKSPACE).acquire(session_id="s", agent_id="a1", base=base)
 
     assert not (workspace.root / "stolen").exists()
     assert len(workspace.provision_failures) == 1

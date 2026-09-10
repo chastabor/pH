@@ -29,11 +29,12 @@ from typing import Any
 
 import pytest
 
-from ph.seams.sandbox import writable_paths
+from ph.keys import SANDBOX, SUBPROCESS, WORKSPACE
+from ph.seams.sandbox import Enforcement, writable_paths
 from ph.seams.subprocess import SubprocessSpawnSpec, scrub_env
-from ph.seams.workspace import project_access, workspace_policy
+from ph.seams.workspace import WorkspaceAccess, project_access, workspace_policy
 from ph.seams.workspace_scratch import ReadonlyScratchProvider
-from ph.testing import StubSandboxProvider, report_section
+from ph.testing import MountProfile, StubSandboxProvider, report_section
 
 pytestmark = pytest.mark.anyio
 
@@ -42,13 +43,13 @@ SANDBOX_ROW = {"id": "sandbox-local", "disabled": False}
 SECTION = "Read-only scratch workspaces"
 
 
-async def _with_backend(ctx: Any, enforcement: str) -> None:
+async def _with_backend(ctx: Any, enforcement: Enforcement) -> None:
     """Register a backend the way a profile that layers one *after* this row does."""
-    ctx.sandbox.register_provider(StubSandboxProvider(enforcement=enforcement))
+    ctx.require(SANDBOX).register_provider(StubSandboxProvider(enforcement=enforcement))
     await ctx.serial("profile/mounted")
 
 
-async def _acquire(tmp_path: Path, access: str = "write") -> Any:
+async def _acquire(tmp_path: Path, access: WorkspaceAccess = "write") -> Any:
     """One workspace straight from the provider, for the vocabulary half."""
     scratch = tmp_path / "scratch"
     scratch.mkdir(parents=True, exist_ok=True)
@@ -57,7 +58,7 @@ async def _acquire(tmp_path: Path, access: str = "write") -> Any:
     )
 
 
-async def _enforcing(mount: Any, tmp_path: Path) -> tuple[Any, Any]:
+async def _enforcing(mount: MountProfile, tmp_path: Path) -> tuple[Any, Any]:
     """A mounted rung over a host whose kernel enforces, and a workspace — or a skip.
 
     Through `ctx.workspace.acquire` rather than the provider directly, so what the
@@ -66,12 +67,14 @@ async def _enforcing(mount: Any, tmp_path: Path) -> tuple[Any, Any]:
     never hands out.
     """
     ctx = await mount(SANDBOX_ROW, ROW)
-    if ctx.workspace.provider is None:
+    if ctx.require(WORKSPACE).provider is None:
         # The reason is already in `sandbox-local`'s own section; re-probing to
         # build a skip message costs a second bwrap spawn for a string the row
         # computed at mount.
         pytest.skip(f"no enforcing sandbox backend: {report_section(ctx, 'Local confinement')}")
-    workspace = await ctx.workspace.acquire(session_id="s", agent_id="a", base=tmp_path / "repo")
+    workspace = await ctx.require(WORKSPACE).acquire(
+        session_id="s", agent_id="a", base=tmp_path / "repo"
+    )
     return ctx, workspace
 
 
@@ -82,11 +85,15 @@ async def _confined_write(ctx: Any, workspace: Any, target: Path) -> tuple[int, 
     workspace carries `redirection_env`, and a spawn that dropped it would confine
     a process the harness never runs.
     """
-    argv = ctx.sandbox.confine(
-        (sys.executable, "-c", f"open({str(target)!r}, 'w').write('agent')"),
-        workspace_policy(workspace),
-    ).argv
-    outcome = await ctx.subprocess.run(
+    argv = (
+        ctx.require(SANDBOX)
+        .confine(
+            (sys.executable, "-c", f"open({str(target)!r}, 'w').write('agent')"),
+            workspace_policy(workspace),
+        )
+        .argv
+    )
+    outcome = await ctx.require(SUBPROCESS).run(
         SubprocessSpawnSpec(argv=argv, cwd=workspace.root, env=scrub_env(extra=workspace.env))
     )
     return outcome.exit_code, outcome.stdout + outcome.stderr
@@ -139,7 +146,7 @@ async def test_the_root_is_inside_scratch_and_exists(tmp_path: Path) -> None:
 # -------------------------------------------------------------- registration --
 
 
-async def test_the_rung_is_not_claimed_without_a_backend(mount: Any) -> None:
+async def test_the_rung_is_not_claimed_without_a_backend(mount: MountProfile) -> None:
     """**Gated on enforcement, not on acquisition**, and the direction matters.
 
     `register_provider` is `claim_slot`: exclusive. A row that claimed the slot
@@ -150,24 +157,26 @@ async def test_the_rung_is_not_claimed_without_a_backend(mount: Any) -> None:
     """
     ctx = await mount(ROW)
 
-    assert ctx.workspace.provider is None, "no backend, no rung"
+    assert ctx.require(WORKSPACE).provider is None, "no backend, no rung"
     assert "no sandbox backend" in report_section(ctx, SECTION)["declined"]
 
 
-async def test_a_partial_backend_is_declined_by_default(mount: Any) -> None:
+async def test_a_partial_backend_is_declined_by_default(mount: MountProfile) -> None:
     """A backend enforcing part of a policy cannot be known to make a repository
     unwritable, so the default is to decline and say which backend and why."""
     ctx = await mount(ROW)
     await _with_backend(ctx, "partial")
 
-    assert ctx.workspace.provider is None
+    assert ctx.require(WORKSPACE).provider is None
     assert "partial" in report_section(ctx, SECTION)["declined"]
 
 
 # --------------------------------------------------------------- enforcement --
 
 
-async def test_a_read_child_really_cannot_write_the_repo(mount: Any, tmp_path: Path) -> None:
+async def test_a_read_child_really_cannot_write_the_repo(
+    mount: MountProfile, tmp_path: Path
+) -> None:
     """**The gate against a kernel that will refuse**, or a skip.
 
     A bare `ctx.subprocess` spawn rather than `ctx.shell`, for
@@ -188,7 +197,9 @@ async def test_a_read_child_really_cannot_write_the_repo(mount: Any, tmp_path: P
     assert target.read_text(encoding="utf-8") == "host", "the repository was written"
 
 
-async def test_the_agents_own_scratch_still_takes_writes(mount: Any, tmp_path: Path) -> None:
+async def test_the_agents_own_scratch_still_takes_writes(
+    mount: MountProfile, tmp_path: Path
+) -> None:
     """The half that stops "refuses everything" reading as success.
 
     A rung that refused the agent's own root would be unusable, and the first
@@ -203,7 +214,7 @@ async def test_the_agents_own_scratch_still_takes_writes(mount: Any, tmp_path: P
     assert (workspace.root / "produced.txt").read_text(encoding="utf-8") == "agent"
 
 
-async def test_the_sandbox_rung_is_now_reachable_end_to_end(mount: Any) -> None:
+async def test_the_sandbox_rung_is_now_reachable_end_to_end(mount: MountProfile) -> None:
     """**What P6-05 actually closes**, asserted through the seam a person reads.
 
     `effective_tier` could never return `sandbox`: no `WorkspaceProvider` declared
@@ -216,9 +227,11 @@ async def test_the_sandbox_rung_is_now_reachable_end_to_end(mount: Any) -> None:
     ctx = await mount(ROW)
     await _with_backend(ctx, "full")
 
-    assert ctx.workspace.effective_tier(child=False) == "sandbox"
-    assert ctx.workspace.effective_tier(child=True) == "sandbox"
+    assert ctx.require(WORKSPACE).effective_tier(child=False) == "sandbox"
+    assert ctx.require(WORKSPACE).effective_tier(child=True) == "sandbox"
 
-    acquired = await ctx.workspace.acquire(session_id="s", agent_id="a", base=Path("/repo"))
+    acquired = await ctx.require(WORKSPACE).acquire(
+        session_id="s", agent_id="a", base=Path("/repo")
+    )
     assert acquired.kind == "readonly-scratch"
     assert acquired.repo_writable is False

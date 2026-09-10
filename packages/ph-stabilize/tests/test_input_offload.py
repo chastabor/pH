@@ -17,14 +17,16 @@ from typing import Any
 import pytest
 from stabilize_helpers import PROFILE, blob, break_spill
 
+from ph.keys import AGENTS, SESSIONS
 from ph.llm.types import text_of
 from ph.session import Session, SurfaceIntent
 from ph.session.events import SurfaceReplace
+from ph.session.json import as_obj
 from ph.session.known_event_types import (
     IGNORABLE_SESSION_EVENT_TYPES,
     KNOWN_SESSION_EVENT_TYPES,
 )
-from ph.testing import FAKE_OPTIONS, user_payload
+from ph.testing import FAKE_OPTIONS, MountProfile, user_payload
 from ph_stabilize.input_offload import (
     HUMAN_TOKEN_LIMIT_BEFORE_EVICT,
     TOO_LARGE_HUMAN_MSG,
@@ -43,7 +45,7 @@ TOO_LARGE = TOO_LARGE_HUMAN_MSG.partition(" and")[0]
 
 async def _prompt(ctx: Any, session: Session, text: str) -> Any:
     """Run one real turn on the fake adapter with `text` as the human message."""
-    agent = ctx.agents.create(session, FAKE_OPTIONS)
+    agent = ctx.require(AGENTS).create(session, FAKE_OPTIONS)
     await agent.prompt(text)
     return agent
 
@@ -61,10 +63,10 @@ def _human_text(session: Session) -> str:
 # ------------------------------------------------------------- the threshold --
 
 
-async def test_a_paste_at_the_threshold_is_left_alone(mount: Any) -> None:
+async def test_a_paste_at_the_threshold_is_left_alone(mount: MountProfile) -> None:
     """200 000 characters is admitted — the limit is what is still allowed."""
     ctx = await mount(profile=PROFILE)
-    session = ctx.sessions.create("at-limit")
+    session = ctx.require(SESSIONS).create("at-limit")
     original = blob(THRESHOLD)
 
     await _prompt(ctx, session, original)
@@ -73,22 +75,22 @@ async def test_a_paste_at_the_threshold_is_left_alone(mount: Any) -> None:
     assert original in _model_text(session)
 
 
-async def test_one_character_over_is_offloaded(mount: Any) -> None:
+async def test_one_character_over_is_offloaded(mount: MountProfile) -> None:
     """200 001 is not. The row's gate, and the reason the comparison is `>`."""
     ctx = await mount(profile=PROFILE)
-    session = ctx.sessions.create("over-limit")
+    session = ctx.require(SESSIONS).create("over-limit")
 
     await _prompt(ctx, session, blob(THRESHOLD + 1))
 
     (spilled,) = [e for e in session.events if e.type == "offload/input-spilled"]
-    assert Path(spilled.data["locator"]).is_file()
+    assert Path(str(spilled.data["locator"])).is_file()
 
 
 # ---------------------------------------------------- the split, which is (c) --
 
 
 async def test_the_model_reads_a_preview_and_the_log_keeps_what_was_typed(
-    mount: Any,
+    mount: MountProfile,
 ) -> None:
     """The whole design, in one assertion pair.
 
@@ -97,7 +99,7 @@ async def test_the_model_reads_a_preview_and_the_log_keeps_what_was_typed(
     still scroll back to what they pasted.
     """
     ctx = await mount(profile=PROFILE)
-    session = ctx.sessions.create("split")
+    session = ctx.require(SESSIONS).create("split")
     original = blob(THRESHOLD + 1)
 
     await _prompt(ctx, session, original)
@@ -111,22 +113,22 @@ async def test_the_model_reads_a_preview_and_the_log_keeps_what_was_typed(
 
 
 async def test_the_original_is_recoverable_from_the_path_the_model_was_given(
-    mount: Any,
+    mount: MountProfile,
 ) -> None:
     """A relocation, not a deletion: the path must hold the text."""
     ctx = await mount(profile=PROFILE)
-    session = ctx.sessions.create("recoverable")
+    session = ctx.require(SESSIONS).create("recoverable")
     original = blob(THRESHOLD + 1)
 
     await _prompt(ctx, session, original)
     (spilled,) = [e for e in session.events if e.type == "offload/input-spilled"]
 
-    assert spilled.data["locator"] in _model_text(session)
-    assert Path(spilled.data["locator"]).read_text(encoding="utf-8") == original
+    assert str(spilled.data["locator"]) in _model_text(session)
+    assert Path(str(spilled.data["locator"])).read_text(encoding="utf-8") == original
 
 
 async def test_the_preview_is_a_plugins_notice_not_the_persons_words(
-    mount: Any,
+    mount: MountProfile,
 ) -> None:
     """Attribution. The replacement is the harness speaking, and says so.
 
@@ -135,7 +137,7 @@ async def test_the_preview_is_a_plugins_notice_not_the_persons_words(
     who produced a row.
     """
     ctx = await mount(profile=PROFILE)
-    session = ctx.sessions.create("attribution")
+    session = ctx.require(SESSIONS).create("attribution")
 
     await _prompt(ctx, session, blob(THRESHOLD + 1))
 
@@ -143,9 +145,9 @@ async def test_the_preview_is_a_plugins_notice_not_the_persons_words(
         e for e in session.events if e.type == "user/message" and e.surface_op != "append"
     )
     source = replacement.data["source"]
-    assert source["kind"] == "plugin"
-    assert source["plugin"] == "input-offload"
-    assert source["form"] == "notice"
+    assert as_obj(source)["kind"] == "plugin"
+    assert as_obj(source)["plugin"] == "input-offload"
+    assert as_obj(source)["form"] == "notice"
 
 
 # ------------------------------------------------------------------ idempotent --
@@ -190,11 +192,11 @@ def test_a_replacement_is_never_offloaded_again() -> None:
 
 
 async def test_a_spill_that_fails_keeps_the_message(
-    mount: Any, monkeypatch: pytest.MonkeyPatch
+    mount: MountProfile, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """An offload that cannot store the content must not be why it is lost."""
     ctx = await mount(profile=PROFILE)
-    session = ctx.sessions.create("no-disk")
+    session = ctx.require(SESSIONS).create("no-disk")
     break_spill(monkeypatch)
     original = blob(THRESHOLD + 1)
 

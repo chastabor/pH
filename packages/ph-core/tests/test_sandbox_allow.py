@@ -18,6 +18,7 @@ import pytest
 
 from ph.agent.types import AgentOptions
 from ph.cordis import Context
+from ph.keys import AGENTS, MOUNT, SANDBOX, SESSIONS, SHELL, WORKSPACE
 from ph.paths import canonical
 from ph.seams.sandbox import (
     DEFAULT_HOSTS,
@@ -33,7 +34,7 @@ from ph.seams.sandbox import (
     host_allowed,
 )
 from ph.seams.sandbox_local import Bubblewrap, LocalBackend, Seatbelt, local_backend
-from ph.testing import StubSandboxProvider, report_section
+from ph.testing import MountProfile, StubSandboxProvider, not_none, report_section
 
 pytestmark = pytest.mark.anyio
 
@@ -251,12 +252,14 @@ def test_a_denial_carries_the_sentence_with_the_way_out() -> None:
     assert "agent" not in written
 
 
-async def test_a_denial_lands_in_the_agents_session(mount: Any) -> None:
+async def test_a_denial_lands_in_the_agents_session(mount: MountProfile) -> None:
     ctx = await mount()
-    session = ctx.sessions.create("s")
-    agent = ctx.agents.create(session, AgentOptions(provider="fake", model="f"))
+    session = ctx.require(SESSIONS).create("s")
+    agent = ctx.require(AGENTS).create(session, AgentOptions(provider="fake", model="f"))
 
-    ctx.sandbox.record_denial(Denial(kind="network", via="proxy", host="h", port=1), agent=agent.id)
+    ctx.require(SANDBOX).record_denial(
+        Denial(kind="network", via="proxy", host="h", port=1), agent=agent.id
+    )
 
     (event,) = [one for one in session.events if one.type == DENIED]
     assert event.data["host"] == "h" and event.data["agent"] == agent.id
@@ -264,12 +267,14 @@ async def test_a_denial_lands_in_the_agents_session(mount: Any) -> None:
 
 
 async def test_a_denial_with_no_agent_to_charge_is_logged_not_lost(
-    mount: Any, caplog: pytest.LogCaptureFixture
+    mount: MountProfile, caplog: pytest.LogCaptureFixture
 ) -> None:
     ctx = await mount()
     with caplog.at_level("WARNING", logger="ph.seams.sandbox"):
-        ctx.sandbox.record_denial(Denial(kind="network", via="proxy", host="h", port=1), agent=None)
-        ctx.sandbox.record_denial(
+        ctx.require(SANDBOX).record_denial(
+            Denial(kind="network", via="proxy", host="h", port=1), agent=None
+        )
+        ctx.require(SANDBOX).record_denial(
             Denial(kind="network", via="proxy", host="h", port=1), agent="nobody"
         )
     assert sum("no session to record it in" in record.message for record in caplog.records) == 2
@@ -278,16 +283,18 @@ async def test_a_denial_with_no_agent_to_charge_is_logged_not_lost(
 # ---------------------------------------------------------------- the row --
 
 
-async def test_the_row_registers_the_shipped_defaults_and_describes_them(mount: Any) -> None:
+async def test_the_row_registers_the_shipped_defaults_and_describes_them(
+    mount: MountProfile,
+) -> None:
     ctx = await mount()
-    assert ctx.sandbox.allowances == Allowances(paths=[], network=NetworkAllowance())
+    assert ctx.require(SANDBOX).allowances == Allowances(paths=[], network=NetworkAllowance())
     rows = report_section(ctx, "Sandbox allowances")
     assert rows["network"].startswith("allowlist")
     assert "github.com" in rows["hosts"]
     assert rows["writable beyond the workspace"] == "none"
 
 
-async def test_a_profile_replaces_the_whole_statement(mount: Any, tmp_path: Path) -> None:
+async def test_a_profile_replaces_the_whole_statement(mount: MountProfile, tmp_path: Path) -> None:
     """The loader's patch rule: `config:` is one layer's, wholly.
 
     The paths come back **expanded and canonical**, because `register_allowances`
@@ -299,7 +306,7 @@ async def test_a_profile_replaces_the_whole_statement(mount: Any, tmp_path: Path
     ctx = await mount(
         _allow(paths=[str(tmp_path), "~/definitely-not-here-ph"], network={"mode": "off"})
     )
-    assert ctx.sandbox.allowances == Allowances(
+    assert ctx.require(SANDBOX).allowances == Allowances(
         paths=[
             str(canonical(tmp_path)),
             str(canonical(Path("~/definitely-not-here-ph").expanduser())),
@@ -313,7 +320,7 @@ async def test_a_profile_replaces_the_whole_statement(mount: Any, tmp_path: Path
 
 
 async def test_the_allowed_paths_are_settled_once_where_they_are_registered(
-    mount: Any, tmp_path: Path
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """**The spelling is the mint's, not the reader's.** `allowed_paths()` runs
     inside `effective`, so on every confined command *and* every gated write; a
@@ -328,19 +335,23 @@ async def test_the_allowed_paths_are_settled_once_where_they_are_registered(
     link.symlink_to(real)
     ctx = await mount(_allow(paths=[str(link)]))
 
-    assert ctx.sandbox.allowances is not None
-    assert ctx.sandbox.allowances.paths == [str(real)], "resolved once, at the mint"
-    assert ctx.sandbox.allowed_paths() == (real,)
-    effective = ctx.sandbox.effective(SandboxPolicy(mode="workspace-write", workspace_root="/w"))
+    assert ctx.require(SANDBOX).allowances is not None
+    assert not_none(ctx.require(SANDBOX).allowances).paths == [str(real)], (
+        "resolved once, at the mint"
+    )
+    assert ctx.require(SANDBOX).allowed_paths() == (real,)
+    effective = ctx.require(SANDBOX).effective(
+        SandboxPolicy(mode="workspace-write", workspace_root="/w")
+    )
     assert effective.writable_extra == [str(real)]
 
 
-async def test_unmounting_the_row_closes_the_seam_again(mount: Any) -> None:
+async def test_unmounting_the_row_closes_the_seam_again(mount: MountProfile) -> None:
     ctx = await mount()
-    assert ctx.sandbox.allowances is not None
-    await ctx.mount.forks["sandbox-allow"].dispose()
-    assert ctx.sandbox.allowances is None
-    assert not ctx.sandbox.permits("github.com", 443)
+    assert ctx.require(SANDBOX).allowances is not None
+    await ctx.require(MOUNT).forks["sandbox-allow"].dispose()
+    assert ctx.require(SANDBOX).allowances is None
+    assert not ctx.require(SANDBOX).permits("github.com", 443)
 
 
 # ------------------------------------------------------------------ shell --
@@ -374,21 +385,23 @@ OUTAGE = {
 
 
 async def test_the_shell_records_what_the_kernel_refused_from_the_commands_words(
-    mount: Any, tmp_path: Path
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """`ctx.shell` runs confined, reads the output, and appends the record for the
     agent it ran for. What is pinned is the reading: the command is confined, but
     it is not refused anything — it prints the kernel's own sentence itself."""
     ctx = await mount()
     backend = _platform_backend()
-    ctx.sandbox.register_provider(backend)
-    session = ctx.sessions.create("s")
-    agent = ctx.agents.create(session, AgentOptions(provider="fake", model="f"))
+    ctx.require(SANDBOX).register_provider(backend)
+    session = ctx.require(SESSIONS).create("s")
+    agent = ctx.require(AGENTS).create(session, AgentOptions(provider="fake", model="f"))
     # The lifecycle row acquires at the agent's first step; the shell confines only
     # an agent that has a workspace, so acquire it by hand as the ladder tests do.
-    await ctx.workspace.acquire(session_id=session.id, agent_id=agent.id, base=tmp_path)
+    await ctx.require(WORKSPACE).acquire(session_id=session.id, agent_id=agent.id, base=tmp_path)
 
-    result = await ctx.shell.run(f"echo '{FILE_REFUSAL[backend.backend]}' >&2; exit 1", agent=agent)
+    result = await ctx.require(SHELL).run(
+        f"echo '{FILE_REFUSAL[backend.backend]}' >&2; exit 1", agent=agent
+    )
 
     assert result.confined_by == backend.backend
     (event,) = [one for one in session.events if one.type == DENIED]
@@ -397,15 +410,15 @@ async def test_the_shell_records_what_the_kernel_refused_from_the_commands_words
 
 
 async def test_the_shell_does_not_blame_the_sandbox_for_an_outage_under_full_network(
-    mount: Any, tmp_path: Path
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     ctx = await mount(_allow(network={"mode": "full"}))
     backend = _platform_backend()
-    ctx.sandbox.register_provider(backend)
-    session = ctx.sessions.create("s")
-    agent = ctx.agents.create(session, AgentOptions(provider="fake", model="f"))
-    await ctx.workspace.acquire(session_id=session.id, agent_id=agent.id, base=tmp_path)
+    ctx.require(SANDBOX).register_provider(backend)
+    session = ctx.require(SESSIONS).create("s")
+    agent = ctx.require(AGENTS).create(session, AgentOptions(provider="fake", model="f"))
+    await ctx.require(WORKSPACE).acquire(session_id=session.id, agent_id=agent.id, base=tmp_path)
 
-    await ctx.shell.run(f"echo '{OUTAGE[backend.backend]}' >&2; exit 1", agent=agent)
+    await ctx.require(SHELL).run(f"echo '{OUTAGE[backend.backend]}' >&2; exit 1", agent=agent)
 
     assert not [one for one in session.events if one.type == DENIED]

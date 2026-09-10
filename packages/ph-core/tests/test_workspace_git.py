@@ -27,9 +27,11 @@ from typing import Any
 
 import pytest
 
+from ph.keys import SESSIONS, SUBPROCESS, WORKSPACE
 from ph.seams.subprocess import SubprocessSpawnSpec, scrub_env
 from ph.seams.workspace import redirection_env, workspace_survivors
 from ph.seams.workspace_git import sanitize_ref, tree_hash
+from ph.testing import MountProfile
 from ph.testing.git import git, git_repo
 
 pytestmark = [pytest.mark.anyio, pytest.mark.needs_git]
@@ -42,7 +44,7 @@ scratch roots come from `$PH_HOME`, which the `mount` fixture already points at
 `tmp_path`, instead of being spelled a second time."""
 
 
-async def _tiered(mount: Any, tmp_path: Path) -> tuple[Any, Path]:
+async def _tiered(mount: MountProfile, tmp_path: Path) -> tuple[Any, Path]:
     """A mounted profile with the tier on, and a repository to point it at.
 
     The repository goes under `tmp_path`, never `ctx.fs.root` — that is the
@@ -58,13 +60,13 @@ async def _tiered(mount: Any, tmp_path: Path) -> tuple[Any, Path]:
 
 
 async def test_a_write_agent_gets_its_own_checkout_on_its_own_branch(
-    mount: Any, tmp_path: Path
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """E2, one half. The branch name is `ph/<session>/<agent>` because a person
     reading `git branch` after the fact has to be able to tell whose work it is."""
     ctx, base = await _tiered(mount, tmp_path)
 
-    workspace = await ctx.workspace.acquire(
+    workspace = await ctx.require(WORKSPACE).acquire(
         session_id="s1", agent_id="a1", base=base, access="write"
     )
 
@@ -77,7 +79,7 @@ async def test_a_write_agent_gets_its_own_checkout_on_its_own_branch(
 
 
 async def test_two_children_work_without_collision_and_merge_back(
-    mount: Any, tmp_path: Path
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """E2, and the reason the tier exists.
 
@@ -88,8 +90,12 @@ async def test_two_children_work_without_collision_and_merge_back(
     """
     ctx, base = await _tiered(mount, tmp_path)
 
-    one = await ctx.workspace.acquire(session_id="s1", agent_id="a1", base=base, access="write")
-    two = await ctx.workspace.acquire(session_id="s1", agent_id="a2", base=base, access="write")
+    one = await ctx.require(WORKSPACE).acquire(
+        session_id="s1", agent_id="a1", base=base, access="write"
+    )
+    two = await ctx.require(WORKSPACE).acquire(
+        session_id="s1", agent_id="a2", base=base, access="write"
+    )
 
     # Concurrent, in the only sense that matters here: both trees are live at
     # once, and neither write is visible to the other.
@@ -110,7 +116,7 @@ async def test_two_children_work_without_collision_and_merge_back(
 
 
 async def test_a_read_agent_gets_an_ephemeral_checkout_it_may_still_write(
-    mount: Any, tmp_path: Path
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """E3. `worktree` cannot enforce read-only, so `access="read"` buys a
     different *kind* rather than a permission: writes happen and reach nobody.
@@ -121,7 +127,7 @@ async def test_a_read_agent_gets_an_ephemeral_checkout_it_may_still_write(
     """
     ctx, base = await _tiered(mount, tmp_path)
 
-    workspace = await ctx.workspace.acquire(
+    workspace = await ctx.require(WORKSPACE).acquire(
         session_id="s1", agent_id="a1", base=base, access="read"
     )
 
@@ -131,7 +137,7 @@ async def test_a_read_agent_gets_an_ephemeral_checkout_it_may_still_write(
 
 
 async def test_a_non_repository_declines_and_the_seam_falls_back(
-    mount: Any, tmp_path: Path
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """E10. Half the directories a person runs pH in are not repositories, so
     declining must be a notice rather than a refusal to start — and the seam
@@ -141,7 +147,7 @@ async def test_a_non_repository_declines_and_the_seam_falls_back(
     base = tmp_path / "plain"
     base.mkdir()
 
-    workspace = await ctx.workspace.acquire(session_id="s1", agent_id="a1", base=base)
+    workspace = await ctx.require(WORKSPACE).acquire(session_id="s1", agent_id="a1", base=base)
 
     assert workspace.kind == "shared"
     assert workspace.root == base
@@ -151,7 +157,7 @@ async def test_a_non_repository_declines_and_the_seam_falls_back(
 
 
 async def test_a_dirty_worktree_is_committed_to_its_branch_and_then_removed(
-    mount: Any, tmp_path: Path
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """The policy, and both halves of it: an agent that changed nothing leaves
     nothing behind, and an agent that did work leaves a **branch** to inspect and
@@ -173,19 +179,19 @@ async def test_a_dirty_worktree_is_committed_to_its_branch_and_then_removed(
     unmerged branch, and *that refusal is the fact*.
     """
     ctx, base = await _tiered(mount, tmp_path)
-    session = ctx.sessions.create("s1")
+    session = ctx.require(SESSIONS).create("s1")
 
-    clean = await ctx.workspace.acquire(
+    clean = await ctx.require(WORKSPACE).acquire(
         session_id="s1", agent_id="clean", base=base, access="write", session=session
     )
-    await ctx.workspace.dispose("clean")
+    await ctx.require(WORKSPACE).dispose("clean")
     assert not clean.root.exists()
 
-    dirty = await ctx.workspace.acquire(
+    dirty = await ctx.require(WORKSPACE).acquire(
         session_id="s1", agent_id="dirty", base=base, access="write", session=session
     )
     (dirty.root / "work.txt").write_text("real work\n", encoding="utf-8")
-    await ctx.workspace.dispose("dirty")
+    await ctx.require(WORKSPACE).dispose("dirty")
     assert not dirty.root.exists(), "the checkout outlived the agent that borrowed it"
 
     # The work is not gone — it moved to where a crash cannot reach it.
@@ -201,7 +207,7 @@ async def test_a_dirty_worktree_is_committed_to_its_branch_and_then_removed(
 
 
 async def test_an_ephemeral_worktree_is_discarded_even_when_dirty(
-    mount: Any, tmp_path: Path
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """E3's second half, and the promise the kind is named for.
 
@@ -210,12 +216,12 @@ async def test_an_ephemeral_worktree_is_discarded_even_when_dirty(
     """
     ctx, base = await _tiered(mount, tmp_path)
 
-    workspace = await ctx.workspace.acquire(
+    workspace = await ctx.require(WORKSPACE).acquire(
         session_id="s1", agent_id="a1", base=base, access="read"
     )
     (workspace.root / "discarded.txt").write_text("nobody reads this\n", encoding="utf-8")
 
-    await ctx.workspace.dispose("a1")
+    await ctx.require(WORKSPACE).dispose("a1")
 
     assert not workspace.root.exists()
     assert not (base / "discarded.txt").exists()
@@ -224,7 +230,7 @@ async def test_an_ephemeral_worktree_is_discarded_even_when_dirty(
 
 
 async def test_committed_work_survives_disposal_of_a_clean_worktree(
-    mount: Any, tmp_path: Path
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """Disposal reads `git status` to decide whether to commit, and a commit empties it.
 
@@ -235,15 +241,15 @@ async def test_committed_work_survives_disposal_of_a_clean_worktree(
     stays, because git refuses to drop an unmerged one, and `kept` says so.
     """
     ctx, base = await _tiered(mount, tmp_path)
-    session = ctx.sessions.create("s1")
-    workspace = await ctx.workspace.acquire(
+    session = ctx.require(SESSIONS).create("s1")
+    workspace = await ctx.require(WORKSPACE).acquire(
         session_id="s1", agent_id="a1", base=base, access="write", session=session
     )
     (workspace.root / "work.txt").write_text("finished\n", encoding="utf-8")
     await git(ctx, workspace.root, "add", "-A")
     await git(ctx, workspace.root, "commit", "-m", "the child's work")
 
-    await ctx.workspace.dispose("a1")
+    await ctx.require(WORKSPACE).dispose("a1")
 
     _, branches, _ = await git(ctx, base, "branch", "--list", "ph/s1/a1")
     assert branches.strip().endswith("ph/s1/a1"), "the branch holding the work was deleted"
@@ -252,7 +258,7 @@ async def test_committed_work_survives_disposal_of_a_clean_worktree(
 
 
 async def test_disposal_leaves_the_repository_able_to_re_acquire(
-    mount: Any, tmp_path: Path
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """The state a resume finds has to be usable.
 
@@ -263,16 +269,20 @@ async def test_disposal_leaves_the_repository_able_to_re_acquire(
     """
     ctx, base = await _tiered(mount, tmp_path)
 
-    first = await ctx.workspace.acquire(session_id="s1", agent_id="a1", base=base, access="read")
-    await ctx.workspace.dispose("a1")
-    second = await ctx.workspace.acquire(session_id="s1", agent_id="a1", base=base, access="read")
+    first = await ctx.require(WORKSPACE).acquire(
+        session_id="s1", agent_id="a1", base=base, access="read"
+    )
+    await ctx.require(WORKSPACE).dispose("a1")
+    second = await ctx.require(WORKSPACE).acquire(
+        session_id="s1", agent_id="a1", base=base, access="read"
+    )
 
     assert second.kind == "worktree-ephemeral"
     assert second.root == first.root
 
 
 async def test_a_worktree_is_rebuilt_from_its_branch_with_the_work_on_it(
-    mount: Any, tmp_path: Path
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """The round trip the whole policy is for, and the reason a crash is survivable.
 
@@ -288,13 +298,17 @@ async def test_a_worktree_is_rebuilt_from_its_branch_with_the_work_on_it(
     directory.
     """
     ctx, base = await _tiered(mount, tmp_path)
-    first = await ctx.workspace.acquire(session_id="s1", agent_id="a1", base=base, access="write")
+    first = await ctx.require(WORKSPACE).acquire(
+        session_id="s1", agent_id="a1", base=base, access="write"
+    )
     (first.root / "half-done.txt").write_text("interrupted here\n", encoding="utf-8")
 
-    await ctx.workspace.dispose("a1")
+    await ctx.require(WORKSPACE).dispose("a1")
     assert not first.root.exists()
 
-    second = await ctx.workspace.acquire(session_id="s1", agent_id="a1", base=base, access="write")
+    second = await ctx.require(WORKSPACE).acquire(
+        session_id="s1", agent_id="a1", base=base, access="write"
+    )
 
     assert second.root == first.root
     assert (second.root / "half-done.txt").read_text(encoding="utf-8") == "interrupted here\n", (
@@ -303,16 +317,20 @@ async def test_a_worktree_is_rebuilt_from_its_branch_with_the_work_on_it(
 
 
 async def test_an_existing_worktree_is_reused_rather_than_recreated(
-    mount: Any, tmp_path: Path
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """A resume finds this agent's own tree, and recreating it would discard the
     uncommitted work disposal exists to put on the branch."""
     ctx, base = await _tiered(mount, tmp_path)
 
-    first = await ctx.workspace.acquire(session_id="s1", agent_id="a1", base=base, access="write")
+    first = await ctx.require(WORKSPACE).acquire(
+        session_id="s1", agent_id="a1", base=base, access="write"
+    )
     (first.root / "in-progress.txt").write_text("half done\n", encoding="utf-8")
 
-    second = await ctx.workspace.acquire(session_id="s1", agent_id="a1", base=base, access="write")
+    second = await ctx.require(WORKSPACE).acquire(
+        session_id="s1", agent_id="a1", base=base, access="write"
+    )
 
     assert second.root == first.root
     assert (second.root / "in-progress.txt").read_text(encoding="utf-8") == "half done\n"
@@ -322,7 +340,7 @@ async def test_an_existing_worktree_is_reused_rather_than_recreated(
 
 
 async def test_the_redirection_env_keeps_a_test_run_out_of_the_tree(
-    mount: Any, tmp_path: Path
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """E12, at this tier: `pytest` writes `.pytest_cache/` and `__pycache__/`
     into the tree it runs against.
@@ -334,7 +352,7 @@ async def test_the_redirection_env_keeps_a_test_run_out_of_the_tree(
     sandbox tier (E11).
     """
     ctx, base = await _tiered(mount, tmp_path)
-    workspace = await ctx.workspace.acquire(
+    workspace = await ctx.require(WORKSPACE).acquire(
         session_id="s1", agent_id="a1", base=base, access="write"
     )
 
@@ -347,7 +365,7 @@ async def test_the_redirection_env_keeps_a_test_run_out_of_the_tree(
     await git(ctx, workspace.root, "add", "-A")
     await git(ctx, workspace.root, "commit", "-m", "add a test")
 
-    outcome = await ctx.subprocess.run(
+    outcome = await ctx.require(SUBPROCESS).run(
         SubprocessSpawnSpec(
             argv=("python", "-m", "pytest", "-q", "test_sample.py"),
             cwd=workspace.root,
@@ -392,13 +410,13 @@ def test_ref_components_are_an_allow_list(raw: str, expected: str) -> None:
     assert sanitize_ref(raw) == expected
 
 
-async def test_mounting_the_row_claims_the_tier(mount: Any) -> None:
+async def test_mounting_the_row_claims_the_tier(mount: MountProfile) -> None:
     """P4-08's mounted form: the row is the tier, so `ph doctor` reports
     `worktree` from the moment a profile layers it — and `advisory` when one
     does not, which is P4-07's gate and still holds."""
     ctx = await mount(TIER_ROW)
 
-    assert ctx.workspace.effective_tier(child=False) == "worktree"
+    assert ctx.require(WORKSPACE).effective_tier(child=False) == "worktree"
 
 
 # -------------------------------------------------------------- provisioning --
@@ -429,7 +447,7 @@ async def _repo_with_materials(ctx: Any, path: Path) -> Path:
 
 
 async def test_a_worktree_arrives_with_the_materials_a_checkout_lacks(
-    mount: Any, tmp_path: Path
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """E14 against real git, which is the only way to show the problem exists:
     `git worktree add` genuinely does not carry a gitignored file, so the child
@@ -437,7 +455,7 @@ async def test_a_worktree_arrives_with_the_materials_a_checkout_lacks(
     ctx = await mount(TIER_ROW, PROVISION_ROW)
     base = await _repo_with_materials(ctx, tmp_path / "repo")
 
-    workspace = await ctx.workspace.acquire(
+    workspace = await ctx.require(WORKSPACE).acquire(
         session_id="s1", agent_id="a1", base=base, access="write"
     )
 
@@ -448,7 +466,7 @@ async def test_a_worktree_arrives_with_the_materials_a_checkout_lacks(
 
 
 async def test_a_worktree_holding_only_its_materials_is_still_clean(
-    mount: Any, tmp_path: Path
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """The property that keeps this row from defeating the tier it serves.
 
@@ -469,9 +487,9 @@ async def test_a_worktree_holding_only_its_materials_is_still_clean(
     base = await _repo_with_materials(ctx, tmp_path / "repo")
     (base / ".gitignore").write_text("", encoding="utf-8")
     await git(ctx, base, "commit", "-am", "stop ignoring them")
-    session = ctx.sessions.create("s1")
+    session = ctx.require(SESSIONS).create("s1")
 
-    workspace = await ctx.workspace.acquire(
+    workspace = await ctx.require(WORKSPACE).acquire(
         session_id="s1", agent_id="a1", base=base, access="write", session=session
     )
     assert (workspace.root / ".env").exists()
@@ -479,7 +497,7 @@ async def test_a_worktree_holding_only_its_materials_is_still_clean(
     _, status, _ = await git(ctx, workspace.root, "status", "--porcelain", "-uall")
     assert ".env" in status
 
-    await ctx.workspace.dispose("a1")
+    await ctx.require(WORKSPACE).dispose("a1")
 
     (disposed,) = [e for e in session.events if e.type == "workspace/disposed"]
     assert disposed.data["kept"] is False, "materials were mistaken for the agent's work"
@@ -487,19 +505,19 @@ async def test_a_worktree_holding_only_its_materials_is_still_clean(
 
 
 async def test_work_beside_the_materials_still_keeps_the_worktree(
-    mount: Any, tmp_path: Path
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """The other direction, and the one that matters more: subtracting the
     materials must not subtract the work sitting next to them."""
     ctx = await mount(TIER_ROW, PROVISION_ROW)
     base = await _repo_with_materials(ctx, tmp_path / "repo")
-    session = ctx.sessions.create("s1")
-    workspace = await ctx.workspace.acquire(
+    session = ctx.require(SESSIONS).create("s1")
+    workspace = await ctx.require(WORKSPACE).acquire(
         session_id="s1", agent_id="a1", base=base, access="write", session=session
     )
     (workspace.root / "real-work.txt").write_text("the agent did this\n", encoding="utf-8")
 
-    await ctx.workspace.dispose("a1")
+    await ctx.require(WORKSPACE).dispose("a1")
 
     (disposed,) = [e for e in session.events if e.type == "workspace/disposed"]
     assert disposed.data["kept"] is True
@@ -508,7 +526,9 @@ async def test_work_beside_the_materials_still_keeps_the_worktree(
     assert code == 0 and out == "the agent did this\n", "the work beside the materials was lost"
 
 
-async def test_nothing_is_provisioned_into_a_shared_workspace(mount: Any, tmp_path: Path) -> None:
+async def test_nothing_is_provisioned_into_a_shared_workspace(
+    mount: MountProfile, tmp_path: Path
+) -> None:
     """The root *is* the base, so every material is already in it — and copying
     `.env` onto itself is the one way this could destroy the file it exists to
     provide."""
@@ -517,7 +537,7 @@ async def test_nothing_is_provisioned_into_a_shared_workspace(mount: Any, tmp_pa
     base.mkdir()
     (base / ".env").write_text("TOKEN=shhh\n", encoding="utf-8")
 
-    workspace = await ctx.workspace.acquire(session_id="s1", agent_id="a1", base=base)
+    workspace = await ctx.require(WORKSPACE).acquire(session_id="s1", agent_id="a1", base=base)
 
     assert workspace.kind == "shared"
     assert (base / ".env").read_text(encoding="utf-8") == "TOKEN=shhh\n"
@@ -525,7 +545,7 @@ async def test_nothing_is_provisioned_into_a_shared_workspace(mount: Any, tmp_pa
 
 
 async def test_a_material_that_does_not_arrive_reaches_the_agent(
-    mount: Any, tmp_path: Path
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """A failure in a log line reaches an operator tomorrow; this reaches the
     model on the step it matters, because the agent is the one about to wonder
@@ -535,9 +555,9 @@ async def test_a_material_that_does_not_arrive_reaches_the_agent(
         {"id": "workspace-lifecycle", "config": {"provision": [{"source": "../outside"}]}},
     )
     base = await git_repo(ctx, tmp_path / "repo")
-    session = ctx.sessions.create("s1")
+    session = ctx.require(SESSIONS).create("s1")
 
-    workspace = await ctx.workspace.acquire(
+    workspace = await ctx.require(WORKSPACE).acquire(
         session_id="s1", agent_id="a1", base=base, session=session
     )
 
@@ -549,16 +569,16 @@ async def test_a_material_that_does_not_arrive_reaches_the_agent(
 # ------------------------------------------------------------------ declines --
 
 
-async def test_a_decline_says_which_one_it_was(mount: Any, tmp_path: Path) -> None:
+async def test_a_decline_says_which_one_it_was(mount: MountProfile, tmp_path: Path) -> None:
     """E15. A fallback that cannot say *why* is indistinguishable from "no tier
     configured", which is the confusion `ph doctor` exists to remove: an operator
     who set `worktree` and got `shared` is owed the reason."""
     ctx = await mount(TIER_ROW)
     base = tmp_path / "plain"
     base.mkdir()
-    session = ctx.sessions.create("s1")
+    session = ctx.require(SESSIONS).create("s1")
 
-    workspace = await ctx.workspace.acquire(
+    workspace = await ctx.require(WORKSPACE).acquire(
         session_id="s1", agent_id="a1", base=base, session=session
     )
 
@@ -567,20 +587,24 @@ async def test_a_decline_says_which_one_it_was(mount: Any, tmp_path: Path) -> No
     assert event.data["declined"] == "not-a-repository"
 
 
-async def test_no_tier_configured_is_not_a_decline(mount: Any, tmp_path: Path) -> None:
+async def test_no_tier_configured_is_not_a_decline(mount: MountProfile, tmp_path: Path) -> None:
     """The distinction the field exists for: `advisory` because nobody asked for
     containment is a different fact from `advisory` because the tier could not
     serve, and a doctor that ran them together would be useless."""
     ctx = await mount()
-    session = ctx.sessions.create("s1")
+    session = ctx.require(SESSIONS).create("s1")
 
-    await ctx.workspace.acquire(session_id="s1", agent_id="a1", base=tmp_path, session=session)
+    await ctx.require(WORKSPACE).acquire(
+        session_id="s1", agent_id="a1", base=tmp_path, session=session
+    )
 
     (event,) = [e for e in session.events if e.type == "workspace/acquired"]
     assert "declined" not in event.data
 
 
-async def test_the_tree_hash_changes_only_when_the_work_does(mount: Any, tmp_path: Path) -> None:
+async def test_the_tree_hash_changes_only_when_the_work_does(
+    mount: MountProfile, tmp_path: Path
+) -> None:
     """P5-07's fingerprint, and P4-09's restore point, are one derivation.
 
     A content address: two identical trees hash identically and any edit changes
@@ -590,7 +614,7 @@ async def test_the_tree_hash_changes_only_when_the_work_does(mount: Any, tmp_pat
     that consumes it.
     """
     ctx, base = await _tiered(mount, tmp_path)
-    workspace = await ctx.workspace.acquire(
+    workspace = await ctx.require(WORKSPACE).acquire(
         session_id="s1", agent_id="a1", base=base, access="write"
     )
 
@@ -606,7 +630,9 @@ async def test_the_tree_hash_changes_only_when_the_work_does(mount: Any, tmp_pat
     assert await tree_hash(ctx, workspace) == first, "undoing the edit did not restore the hash"
 
 
-async def test_a_workspace_with_no_checkout_has_no_fingerprint(mount: Any, tmp_path: Path) -> None:
+async def test_a_workspace_with_no_checkout_has_no_fingerprint(
+    mount: MountProfile, tmp_path: Path
+) -> None:
     """`shared` is the process's own directory, so there is nothing to hash.
 
     `None` rather than a made-up value: an empty fingerprint that compared equal
@@ -614,7 +640,7 @@ async def test_a_workspace_with_no_checkout_has_no_fingerprint(mount: Any, tmp_p
     else's tree.
     """
     ctx = await mount()
-    workspace = await ctx.workspace.acquire(
+    workspace = await ctx.require(WORKSPACE).acquire(
         session_id="s1", agent_id="a1", base=tmp_path, access="write"
     )
     assert workspace.kind == "shared"
@@ -622,7 +648,7 @@ async def test_a_workspace_with_no_checkout_has_no_fingerprint(mount: Any, tmp_p
 
 
 async def test_a_workspace_inside_someone_elses_repository_is_not_hashed_into_it(
-    mount: Any, tmp_path: Path
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """`rev-parse` walks **up**, and that is the bug this pins shut.
 
@@ -645,7 +671,9 @@ async def test_a_workspace_inside_someone_elses_repository_is_not_hashed_into_it
     inside.mkdir(parents=True)
     (inside / "work.txt").write_text("belongs to another tier\n", encoding="utf-8")
     workspace = replace(
-        await ctx.workspace.acquire(session_id="s1", agent_id="a1", base=tmp_path, access="write"),
+        await ctx.require(WORKSPACE).acquire(
+            session_id="s1", agent_id="a1", base=tmp_path, access="write"
+        ),
         root=inside,
         kind="worktree",
     )
@@ -660,7 +688,7 @@ async def test_a_workspace_inside_someone_elses_repository_is_not_hashed_into_it
 
 
 async def test_a_retained_ephemeral_tree_survives_the_kind_that_discards_it(
-    mount: Any, tmp_path: Path
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """P6-28's mechanism, against the promise it makes an exception to.
 
@@ -687,15 +715,15 @@ async def test_a_retained_ephemeral_tree_survives_the_kind_that_discards_it(
     and a leak has no closing event at all.
     """
     ctx, base = await _tiered(mount, tmp_path)
-    session = ctx.sessions.create("s1")
+    session = ctx.require(SESSIONS).create("s1")
 
-    workspace = await ctx.workspace.acquire(
+    workspace = await ctx.require(WORKSPACE).acquire(
         session_id="s1", agent_id="a1", base=base, access="read", session=session
     )
     (workspace.root / "evidence.txt").write_text("what the child was doing\n", encoding="utf-8")
 
-    assert ctx.workspace.retain("a1", "error") is True
-    await ctx.workspace.dispose("a1")
+    assert ctx.require(WORKSPACE).retain("a1", "error") is True
+    await ctx.require(WORKSPACE).dispose("a1")
 
     assert not workspace.root.exists(), "retention kept the directory instead of the work"
     code, out, _ = await git(ctx, base, "show", "ph/s1/a1:evidence.txt")
@@ -707,7 +735,9 @@ async def test_a_retained_ephemeral_tree_survives_the_kind_that_discards_it(
     assert [one.data.get("kept") for one in closed] == [True]
 
 
-async def test_retention_is_refused_once_the_scope_is_gone(mount: Any, tmp_path: Path) -> None:
+async def test_retention_is_refused_once_the_scope_is_gone(
+    mount: MountProfile, tmp_path: Path
+) -> None:
     """The window, stated because the teardown path is outside it (§5 rule 6).
 
     `retain` marks a *held* workspace, and a workspace is held only while the
@@ -722,15 +752,19 @@ async def test_retention_is_refused_once_the_scope_is_gone(mount: Any, tmp_path:
     whether this tier hands out trees at all.
     """
     ctx, base = await _tiered(mount, tmp_path)
-    await ctx.workspace.acquire(session_id="s1", agent_id="a1", base=base, access="read")
+    await ctx.require(WORKSPACE).acquire(session_id="s1", agent_id="a1", base=base, access="read")
 
-    assert ctx.workspace.retain("a1", "error") is True, "a live agent can be marked"
-    await ctx.workspace.dispose("a1")
-    assert ctx.workspace.retain("a1", "too late") is False, "the window closes with the scope"
-    assert ctx.workspace.retain("never-existed", "probe") is False
+    assert ctx.require(WORKSPACE).retain("a1", "error") is True, "a live agent can be marked"
+    await ctx.require(WORKSPACE).dispose("a1")
+    assert ctx.require(WORKSPACE).retain("a1", "too late") is False, (
+        "the window closes with the scope"
+    )
+    assert ctx.require(WORKSPACE).retain("never-existed", "probe") is False
 
 
-async def test_the_mark_is_written_the_moment_it_is_made(mount: Any, tmp_path: Path) -> None:
+async def test_the_mark_is_written_the_moment_it_is_made(
+    mount: MountProfile, tmp_path: Path
+) -> None:
     """Why retention is its own event rather than only a field on the closing half.
 
     The decision is made *because* a run went wrong, and the most complete way
@@ -744,12 +778,12 @@ async def test_the_mark_is_written_the_moment_it_is_made(mount: Any, tmp_path: P
     a caller saying "never mind" and that has to be as durable as the mark.
     """
     ctx, base = await _tiered(mount, tmp_path)
-    session = ctx.sessions.create("s1")
-    await ctx.workspace.acquire(
+    session = ctx.require(SESSIONS).create("s1")
+    await ctx.require(WORKSPACE).acquire(
         session_id="s1", agent_id="a1", base=base, access="read", session=session
     )
 
-    ctx.workspace.retain("a1", "the child was cancelled")
+    ctx.require(WORKSPACE).retain("a1", "the child was cancelled")
     marks = [one.data.get("retained") for one in session.events if one.type == "workspace/retained"]
     assert marks == ["the child was cancelled"]
     (open_record,) = workspace_survivors(session)
@@ -757,12 +791,12 @@ async def test_the_mark_is_written_the_moment_it_is_made(mount: Any, tmp_path: P
         "a crash here leaves a record that is both retained and unclosed"
     )
 
-    ctx.workspace.retain("a1", "")
+    ctx.require(WORKSPACE).retain("a1", "")
     assert workspace_survivors(session)[0].outcome == "leaked", "the withdrawal is durable too"
 
 
 async def test_reconciliation_honours_a_retention_the_way_release_does(
-    mount: Any, tmp_path: Path
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """One rule for one word, across both paths that can end a tree.
 
@@ -779,15 +813,15 @@ async def test_reconciliation_honours_a_retention_the_way_release_does(
     `-d` declines to delete.
     """
     ctx, base = await _tiered(mount, tmp_path)
-    session = ctx.sessions.create("s1")
-    workspace = await ctx.workspace.acquire(
+    session = ctx.require(SESSIONS).create("s1")
+    workspace = await ctx.require(WORKSPACE).acquire(
         session_id="s1", agent_id="a1", base=base, access="read", session=session
     )
     (workspace.root / "evidence.txt").write_text("what the child was doing\n", encoding="utf-8")
-    ctx.workspace.retain("a1", "the child was cancelled")
+    ctx.require(WORKSPACE).retain("a1", "the child was cancelled")
     (record,) = workspace_survivors(session)
 
-    assert await ctx.workspace.provider.reclaim(record) is True
+    assert await ctx.require(WORKSPACE).provider.reclaim(record) is True
     assert not workspace.root.exists(), "reconciliation left the checkout behind"
     code, out, _ = await git(ctx, base, "show", "ph/s1/a1:evidence.txt")
     assert code == 0 and out == "what the child was doing\n", (
@@ -795,7 +829,9 @@ async def test_reconciliation_honours_a_retention_the_way_release_does(
     )
 
 
-async def test_disposal_leaves_the_collector_nothing_to_collect(mount: Any, tmp_path: Path) -> None:
+async def test_disposal_leaves_the_collector_nothing_to_collect(
+    mount: MountProfile, tmp_path: Path
+) -> None:
     """What the age-bounded stay of execution is *for*, once nothing is retained on disk.
 
     P6-28's collector was written when a retained tree was a directory, and its job
@@ -817,22 +853,22 @@ async def test_disposal_leaves_the_collector_nothing_to_collect(mount: Any, tmp_
     find the ref's repo. `/workspaces remove` is the deliberate verb meanwhile.
     """
     ctx, base = await _tiered(mount, tmp_path)
-    session = ctx.sessions.create("s1")
-    ephemeral = await ctx.workspace.acquire(
+    session = ctx.require(SESSIONS).create("s1")
+    ephemeral = await ctx.require(WORKSPACE).acquire(
         session_id="s1", agent_id="gone", base=base, access="read", session=session
     )
-    ordinary = await ctx.workspace.acquire(
+    ordinary = await ctx.require(WORKSPACE).acquire(
         session_id="s1", agent_id="dirty", base=base, access="write", session=session
     )
     for agent_id, workspace in (("gone", ephemeral), ("dirty", ordinary)):
         (workspace.root / "work.txt").write_text("uncommitted\n", encoding="utf-8")
-        ctx.workspace.retain(agent_id, "the child was cancelled")
-        await ctx.workspace.dispose(agent_id)
+        ctx.require(WORKSPACE).retain(agent_id, "the child was cancelled")
+        await ctx.require(WORKSPACE).dispose(agent_id)
 
     records = workspace_survivors(session)
-    rows = ctx.workspace.collectable(records, older_than=1.0, now=1e9, touched={"s1": 0.0})
+    rows = ctx.require(WORKSPACE).collectable(records, older_than=1.0, now=1e9, touched={"s1": 0.0})
     assert sorted(one.verdict for one in rows) == ["gone", "gone"]
-    assert await ctx.workspace.collect(rows) == []
+    assert await ctx.require(WORKSPACE).collect(rows) == []
 
     # Nothing was destroyed: both agents' work is on their branches, the ephemeral
     # one included — its retention is what bought it a branch rather than a `-D`.
@@ -846,12 +882,14 @@ async def test_disposal_leaves_the_collector_nothing_to_collect(mount: Any, tmp_
     stranded.mkdir(parents=True, exist_ok=True)
     (stranded / "left.txt").write_text("disposal could not remove this\n", encoding="utf-8")
     stuck = replace(records[0], agent_id="stuck", root=stranded, ref=None)
-    (row,) = ctx.workspace.collectable([stuck], older_than=1.0, now=1e9, touched={"s1": 0.0})
+    (row,) = ctx.require(WORKSPACE).collectable(
+        [stuck], older_than=1.0, now=1e9, touched={"s1": 0.0}
+    )
     assert row.verdict == "collect"
 
 
 async def test_a_provisioned_secret_is_not_committed_to_the_branch(
-    mount: Any, tmp_path: Path
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """The risk disposal took on the day it started committing, pinned at its edge.
 
@@ -874,14 +912,14 @@ async def test_a_provisioned_secret_is_not_committed_to_the_branch(
     )
     base = await git_repo(ctx, tmp_path / "repo")
     (base / "secret.env").write_text("TOKEN=shhh\n", encoding="utf-8")
-    session = ctx.sessions.create("s1")
-    workspace = await ctx.workspace.acquire(
+    session = ctx.require(SESSIONS).create("s1")
+    workspace = await ctx.require(WORKSPACE).acquire(
         session_id="s1", agent_id="a1", base=base, access="write", session=session
     )
     assert (workspace.root / "secret.env").exists(), "the agent never got the material"
     (workspace.root / "real-work.txt").write_text("the agent did this\n", encoding="utf-8")
 
-    await ctx.workspace.dispose("a1")
+    await ctx.require(WORKSPACE).dispose("a1")
 
     code, out, _ = await git(ctx, base, "show", "ph/s1/a1:real-work.txt")
     assert code == 0 and out == "the agent did this\n", "the work was not committed"

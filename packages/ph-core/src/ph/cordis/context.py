@@ -917,16 +917,6 @@ class Context:
             raise ServiceNotFoundError(f'no service "{name}" is provided at or above {self.path}')
         return value
 
-    def __getattr__(self, key: str) -> Any:
-        # Never intercept private/dunder lookups: doing so turns a missing
-        # attribute during __init__ into unbounded recursion.
-        if key.startswith("_"):
-            raise AttributeError(key)
-        # The untyped sugar. It stays for scripts and for the reads a seam makes
-        # of a service it cannot name without a cycle; `require` is the same
-        # lookup with a type on it.
-        return self.require(key)
-
     # -------------------------------------------------------------- effects --
 
     def add_disposer(self, dispose: Disposer, *, label: str = "") -> Disposer:

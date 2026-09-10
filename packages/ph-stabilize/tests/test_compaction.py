@@ -29,6 +29,7 @@ from stabilize_helpers import PROFILE, break_spill
 from ph.agent.types import AgentOptions
 from ph.cancel import Cancelled
 from ph.cordis import DEPLOYMENT, Context
+from ph.keys import AGENTS, COMMANDS, COMPACTION, LLM_FAKE, SESSIONS, TOKEN_METER, TOOLS
 from ph.llm.types import (
     CONTEXT_WINDOW_EXCEEDED,
     BlockEnd,
@@ -47,7 +48,14 @@ from ph.session.known_event_types import (
     IGNORABLE_SESSION_EVENT_TYPES,
     KNOWN_SESSION_EVENT_TYPES,
 )
-from ph.testing import FAKE_OPTIONS, assistant_payload, tool_result_payload, user_payload
+from ph.testing import (
+    FAKE_OPTIONS,
+    MountProfile,
+    assistant_payload,
+    not_none,
+    tool_result_payload,
+    user_payload,
+)
 from ph_stabilize.compaction import (
     KEEP_FRACTION,
     MAX_ARG_LENGTH,
@@ -79,16 +87,16 @@ def _route(ctx: Context) -> None:
     conversation rather than part of it — so the test distinguishes the two the
     same way the harness does.
     """
-    adapter = ctx.llm_fake
+    adapter = ctx.require(LLM_FAKE)
     adapter.respond = lambda request: SUMMARY if request.purpose == "compaction" else "answer"
 
 
 def _summary_requests(ctx: Context) -> list[GenerateOptions]:
-    return [one for one in ctx.llm_fake.requests if one.purpose == "compaction"]
+    return [one for one in ctx.require(LLM_FAKE).requests if one.purpose == "compaction"]
 
 
 def _loop_requests(ctx: Context) -> list[GenerateOptions]:
-    return [one for one in ctx.llm_fake.requests if one.is_loop_request]
+    return [one for one in ctx.require(LLM_FAKE).requests if one.is_loop_request]
 
 
 def _instruction(request: GenerateOptions) -> str:
@@ -140,8 +148,8 @@ pressure trigger, which is what keeps these tests about the *manual* path.
 
 async def _conversation(ctx: Context, session_id: str, turns: int = 8) -> Any:
     """A session with `turns` question/answer pairs, long enough to compact."""
-    session = ctx.sessions.create(session_id)
-    agent = ctx.agents.create(session, FAKE_OPTIONS)
+    session = ctx.require(SESSIONS).create(session_id)
+    agent = ctx.require(AGENTS).create(session, FAKE_OPTIONS)
     for index in range(turns):
         await agent.prompt(f"question {index} " + "detail " * (QUESTION_CHARS // 7))
     return agent
@@ -197,8 +205,8 @@ def test_the_fraction_trigger_fires_at_0_85_of_a_known_window() -> None:
 
     under, under_session = engine_for(at_the_line - 1)
     over, over_session = engine_for(at_the_line)
-    assert under._under_pressure(under.ctx.token_meter.baseline(under_session)) is False
-    assert over._under_pressure(over.ctx.token_meter.baseline(over_session)) is True
+    assert under._under_pressure(under.ctx.require(TOKEN_METER).baseline(under_session)) is False
+    assert over._under_pressure(over.ctx.require(TOKEN_METER).baseline(over_session)) is True
 
 
 def test_without_a_window_the_trigger_is_the_fixed_token_count() -> None:
@@ -221,8 +229,8 @@ def test_without_a_window_the_trigger_is_the_fixed_token_count() -> None:
 
     under, under_session = engine_for(TRIGGER_TOKENS - 1)
     over, over_session = engine_for(TRIGGER_TOKENS)
-    assert under._under_pressure(under.ctx.token_meter.baseline(under_session)) is False
-    assert over._under_pressure(over.ctx.token_meter.baseline(over_session)) is True
+    assert under._under_pressure(under.ctx.require(TOKEN_METER).baseline(under_session)) is False
+    assert over._under_pressure(over.ctx.require(TOKEN_METER).baseline(over_session)) is True
 
 
 def _bare_context() -> Context:
@@ -306,7 +314,7 @@ def test_a_conversation_with_no_balanced_cut_is_not_compacted() -> None:
 
 
 async def test_the_model_reads_the_summary_and_the_log_keeps_the_conversation(
-    mount: Any,
+    mount: MountProfile,
 ) -> None:
     """A3 in one assertion pair, and the whole reason compaction is a surface op.
 
@@ -318,7 +326,7 @@ async def test_the_model_reads_the_summary_and_the_log_keeps_the_conversation(
     session = agent.session
     before = len(session.events)
 
-    result = await ctx.commands.dispatch("/compact", session=session, agent=agent)
+    result = await ctx.require(COMMANDS).dispatch("/compact", session=session, agent=agent)
 
     assert SUMMARY in _model_text(session)
     assert "question 0" not in _model_text(session), "the model was sent the history anyway"
@@ -328,7 +336,7 @@ async def test_the_model_reads_the_summary_and_the_log_keeps_the_conversation(
 
 
 async def test_the_replaced_conversation_is_written_to_conversation_history(
-    mount: Any,
+    mount: MountProfile,
 ) -> None:
     """A3's other half: the originals are on disk, at the path the model was given.
 
@@ -340,7 +348,7 @@ async def test_the_replaced_conversation_is_written_to_conversation_history(
     agent = await _conversation(ctx, "history")
     session = agent.session
 
-    await ctx.commands.dispatch("/compact", session=session, agent=agent)
+    await ctx.require(COMMANDS).dispatch("/compact", session=session, agent=agent)
 
     (record,) = _events(session, "compaction/summarized")
     locator = record.data["locator"]
@@ -350,7 +358,7 @@ async def test_the_replaced_conversation_is_written_to_conversation_history(
 
 
 async def test_the_summary_is_the_plugins_text_and_says_it_is_a_compaction(
-    mount: Any,
+    mount: MountProfile,
 ) -> None:
     """Attribution, and the discriminator every reader keys on.
 
@@ -364,7 +372,7 @@ async def test_the_summary_is_the_plugins_text_and_says_it_is_a_compaction(
     agent = await _conversation(ctx, "attribution")
     session = agent.session
 
-    await ctx.commands.dispatch("/compact", session=session, agent=agent)
+    await ctx.require(COMMANDS).dispatch("/compact", session=session, agent=agent)
 
     replacement = next(
         event
@@ -377,7 +385,7 @@ async def test_the_summary_is_the_plugins_text_and_says_it_is_a_compaction(
     assert source["form"] == "compaction"
 
 
-async def test_the_replacement_cites_every_node_it_shadows(mount: Any) -> None:
+async def test_the_replacement_cites_every_node_it_shadows(mount: MountProfile) -> None:
     """What makes the substitution reversible reading rather than deletion.
 
     `Session.append` refuses a replace that shadows a node it does not cite, so
@@ -389,7 +397,7 @@ async def test_the_replacement_cites_every_node_it_shadows(mount: Any) -> None:
     agent = await _conversation(ctx, "provenance")
     session = agent.session
 
-    await ctx.commands.dispatch("/compact", session=session, agent=agent)
+    await ctx.require(COMMANDS).dispatch("/compact", session=session, agent=agent)
 
     (record,) = _events(session, "compaction/summarized")
     replacement = session.events[record.seq + 1]
@@ -459,7 +467,10 @@ def _long_write_session(session_id: str, body: str) -> Session:
 
 
 def _engine(ctx: Context) -> SummarizeEngine:
-    engine: SummarizeEngine = ctx.compaction.engine
+    # `CompactionSeam.engine` is `CompactionEngine | None` — absent until a row
+    # registers one. Every caller here mounts the row that does, and says so.
+    engine = ctx.require(COMPACTION).engine
+    assert isinstance(engine, SummarizeEngine), "the summarize row is not mounted"
     return engine
 
 
@@ -471,7 +482,7 @@ def _truncate(ctx: Context, session: Session, agent: Any = None) -> tuple[int, .
     registry whether a tool declares its arguments disposable.
     """
     return _engine(ctx).truncate_arguments(
-        agent, session, "pressure", ctx.token_meter.baseline(session)
+        agent, session, "pressure", ctx.require(TOKEN_METER).baseline(session)
     )
 
 
@@ -491,20 +502,20 @@ def _arguments_of(session: Session, name: str = "write") -> list[str]:
     ]
 
 
-async def test_only_a_tool_that_declares_it_has_arguments_elided(mount: Any) -> None:
+async def test_only_a_tool_that_declares_it_has_arguments_elided(mount: MountProfile) -> None:
     """`write` declares `arguments_disposable`; the registry is what says so.
 
     A deployment that renames the fs tools, or an MCP server that adds its own,
     keeps working — which a hardcoded name list in this package could not.
     """
     ctx = await mount(profile=PROFILE)
-    assert ctx.tools.get("write", scope=DEPLOYMENT).arguments_disposable
-    assert not ctx.tools.get("read", scope=DEPLOYMENT).arguments_disposable, (
+    assert not_none(ctx.require(TOOLS).get("write", scope=DEPLOYMENT)).arguments_disposable
+    assert not not_none(ctx.require(TOOLS).get("read", scope=DEPLOYMENT)).arguments_disposable, (
         "reading is not a payload"
     )
 
 
-async def test_a_long_call_argument_is_elided_from_what_the_model_sees(mount: Any) -> None:
+async def test_a_long_call_argument_is_elided_from_what_the_model_sees(mount: MountProfile) -> None:
     """The pass, and the split it preserves.
 
     The model stops being shown a file body it wrote and the log keeps the bytes
@@ -524,7 +535,7 @@ async def test_a_long_call_argument_is_elided_from_what_the_model_sees(mount: An
     assert body in json.dumps(thaw_json(session.events[rewritten[0]].data)), "the log lost it"
 
 
-async def test_an_argument_at_the_limit_is_left_alone(mount: Any) -> None:
+async def test_an_argument_at_the_limit_is_left_alone(mount: MountProfile) -> None:
     """The boundary as a pair, for the reason every threshold here is: one
     tested only from the far side passes for any limit at or below it."""
     ctx = await mount(profile=PROFILE)
@@ -537,7 +548,7 @@ async def test_an_argument_at_the_limit_is_left_alone(mount: Any) -> None:
 
 
 async def test_the_elision_keeps_the_call_id_so_the_pair_still_balances(
-    mount: Any,
+    mount: MountProfile,
 ) -> None:
     """The rewrite must not change what the call/result pairing sees.
 
@@ -555,7 +566,7 @@ async def test_the_elision_keeps_the_call_id_so_the_pair_still_balances(
     assert json.loads(_arguments_of(session)[0])["path"] == "notes.md", "a short arg was touched"
 
 
-async def test_the_replacement_carries_no_usage(mount: Any) -> None:
+async def test_the_replacement_carries_no_usage(mount: MountProfile) -> None:
     """The hazard that makes this rewrite different from the others.
 
     `TokenMeter.last_usage` scans *backward* for the newest `assistant/message`
@@ -567,17 +578,17 @@ async def test_the_replacement_carries_no_usage(mount: Any) -> None:
     ctx = await mount(profile=PROFILE)
     session = _long_write_session("usage", "x" * (MAX_ARG_LENGTH + 1))
     _pressured(session, used=950)
-    baseline_before = ctx.token_meter.baseline(session).tokens
+    baseline_before = ctx.require(TOKEN_METER).baseline(session).tokens
 
     _truncate(ctx, session)
 
     replacement = session.events[-2]
     assert replacement.type == "assistant/message"
     assert "usage" not in replacement.data
-    assert ctx.token_meter.baseline(session).tokens == baseline_before
+    assert ctx.require(TOKEN_METER).baseline(session).tokens == baseline_before
 
 
-async def test_a_recent_message_is_not_truncated(mount: Any) -> None:
+async def test_a_recent_message_is_not_truncated(mount: MountProfile) -> None:
     """Retention, which is the whole reason this is not just "shorten everything":
     the model is still working with the tail, and an argument it is about to act
     on is exactly the one it must be able to read."""
@@ -593,7 +604,7 @@ async def test_a_recent_message_is_not_truncated(mount: Any) -> None:
     assert _truncate(ctx, session) == ()
 
 
-async def test_truncating_twice_changes_nothing_the_second_time(mount: Any) -> None:
+async def test_truncating_twice_changes_nothing_the_second_time(mount: MountProfile) -> None:
     """Idempotence falls out of the length check — an elided argument is 40-odd
     characters — but it is asserted, because a pass that ran every step and
     appended a replacement every step would grow the log without bound."""
@@ -606,7 +617,7 @@ async def test_truncating_twice_changes_nothing_the_second_time(mount: Any) -> N
     assert len(session.events) == length
 
 
-async def test_a_tool_that_does_not_declare_it_keeps_its_arguments(mount: Any) -> None:
+async def test_a_tool_that_does_not_declare_it_keeps_its_arguments(mount: MountProfile) -> None:
     """The restriction is real, and it is asked of the *tool*.
 
     Upstream matches `{"write_file", "edit_file"}` — names pH does not register —
@@ -641,7 +652,7 @@ def test_arguments_that_are_not_a_json_object_are_left_alone() -> None:
     assert truncated_arguments(json.dumps({"short": "ok"}), 10) is None
 
 
-async def test_truncation_runs_inside_the_automatic_path(mount: Any) -> None:
+async def test_truncation_runs_inside_the_automatic_path(mount: MountProfile) -> None:
     """The wiring: the free remedy is tried before the expensive one.
 
     Asked through `compact_if_needed`, which is what `agent/pre-step` calls — so
@@ -650,7 +661,7 @@ async def test_truncation_runs_inside_the_automatic_path(mount: Any) -> None:
     ctx = await mount(profile=PROFILE)
     _route(ctx)
     session = _long_write_session("automatic", "x" * (MAX_ARG_LENGTH + 1))
-    agent = ctx.agents.create(session, FAKE_OPTIONS)
+    agent = ctx.require(AGENTS).create(session, FAKE_OPTIONS)
 
     await _engine(ctx).compact_if_needed(agent, "pressure")
 
@@ -689,12 +700,12 @@ def _tool_batch_session(session_id: str, *sizes: int, opening: bool = True) -> S
     return session
 
 
-async def test_an_oversized_trailing_batch_is_clipped_and_recoverable(mount: Any) -> None:
+async def test_an_oversized_trailing_batch_is_clipped_and_recoverable(mount: MountProfile) -> None:
     """Each result is relocated, not dropped — the promise `ctx.spill_store`
     makes everywhere in this bundle."""
     ctx = await mount(profile=PROFILE)
     session = _tool_batch_session("clip", 30_000, 30_000)
-    agent = ctx.agents.create(session, FAKE_OPTIONS)
+    agent = ctx.require(AGENTS).create(session, FAKE_OPTIONS)
 
     clipped = await _engine(ctx).clip_overflow_tail(agent)
 
@@ -713,7 +724,7 @@ async def test_an_oversized_trailing_batch_is_clipped_and_recoverable(mount: Any
         assert body not in _derived_text(session)
 
 
-async def test_the_clip_changes_only_the_result_content(mount: Any) -> None:
+async def test_the_clip_changes_only_the_result_content(mount: MountProfile) -> None:
     """`Session.append` refuses a `tool/result` replacement that touches anything
     but content, so this is really a test that the payload is rebuilt from the
     original rather than synthesized — a fresh message id would be rejected, and
@@ -721,7 +732,7 @@ async def test_the_clip_changes_only_the_result_content(mount: Any) -> None:
     """
     ctx = await mount(profile=PROFILE)
     session = _tool_batch_session("content-only", 30_000)
-    agent = ctx.agents.create(session, FAKE_OPTIONS)
+    agent = ctx.require(AGENTS).create(session, FAKE_OPTIONS)
 
     await _engine(ctx).clip_overflow_tail(agent)
 
@@ -732,14 +743,14 @@ async def test_the_clip_changes_only_the_result_content(mount: Any) -> None:
     assert block.tool_call_id == "c0"
 
 
-async def test_a_small_result_is_not_replaced_by_a_larger_pointer(mount: Any) -> None:
+async def test_a_small_result_is_not_replaced_by_a_larger_pointer(mount: MountProfile) -> None:
     """The batch is what must shrink, and a member that would grow is not part
     of shrinking it. Upstream clips every message in an over-budget batch; a
     hundred-character result swapped for a nine-hundred-character pointer is a
     clip that made the request bigger."""
     ctx = await mount(profile=PROFILE)
     session = _tool_batch_session("mixed", 30_000, 40)
-    agent = ctx.agents.create(session, FAKE_OPTIONS)
+    agent = ctx.require(AGENTS).create(session, FAKE_OPTIONS)
 
     clipped = await _engine(ctx).clip_overflow_tail(agent)
 
@@ -748,17 +759,17 @@ async def test_a_small_result_is_not_replaced_by_a_larger_pointer(mount: Any) ->
 
 
 async def test_a_conversation_that_does_not_end_in_tool_results_is_untouched(
-    mount: Any,
+    mount: MountProfile,
 ) -> None:
     """The cheap check that keeps this pass free in the ordinary case."""
     ctx = await mount(profile=PROFILE)
     session = _long_write_session("no-tail", "x" * 100)
-    agent = ctx.agents.create(session, FAKE_OPTIONS)
+    agent = ctx.require(AGENTS).create(session, FAKE_OPTIONS)
 
     assert await _engine(ctx).clip_overflow_tail(agent) == ()
 
 
-async def test_the_clip_alone_is_enough_to_retry_the_request(mount: Any) -> None:
+async def test_the_clip_alone_is_enough_to_retry_the_request(mount: MountProfile) -> None:
     """Why the clip is worth having beside summarization rather than inside it.
 
     This session has one enormous outstanding call/result pair and nothing else,
@@ -770,7 +781,7 @@ async def test_the_clip_alone_is_enough_to_retry_the_request(mount: Any) -> None
     ctx = await mount(profile=PROFILE)
     _route(ctx)
     session = _tool_batch_session("only-remedy", 30_000, opening=False)
-    agent = ctx.agents.create(session, FAKE_OPTIONS)
+    agent = ctx.require(AGENTS).create(session, FAKE_OPTIONS)
     engine = _engine(ctx)
 
     assert engine._plan(session) is None, "the fixture is not the no-safe-cut shape"
@@ -780,7 +791,7 @@ async def test_the_clip_alone_is_enough_to_retry_the_request(mount: Any) -> None
 # --------------------------------------------------------------- pressure --
 
 
-async def test_pressure_compacts_without_anyone_asking(mount: Any) -> None:
+async def test_pressure_compacts_without_anyone_asking(mount: MountProfile) -> None:
     """The automatic half of G4, end to end and at the shipped threshold.
 
     Nothing here calls the engine: a long enough conversation crosses 0.85 of
@@ -790,8 +801,8 @@ async def test_pressure_compacts_without_anyone_asking(mount: Any) -> None:
     """
     ctx = await mount(profile=PROFILE)
     _route(ctx)
-    session = ctx.sessions.create("pressure")
-    agent = ctx.agents.create(session, FAKE_OPTIONS)
+    session = ctx.require(SESSIONS).create("pressure")
+    agent = ctx.require(AGENTS).create(session, FAKE_OPTIONS)
 
     for index in range(10):
         await agent.prompt(f"question {index} " + "detail " * 600)
@@ -801,11 +812,12 @@ async def test_pressure_compacts_without_anyone_asking(mount: Any) -> None:
     assert SUMMARY in _model_text(session)
     # And the compaction relieved what triggered it, rather than firing on every
     # step from here on: one record, and the baseline is back under the line.
-    assert ctx.token_meter.baseline(session).pressure < TRIGGER_FRACTION
+    pressure = ctx.require(TOKEN_METER).baseline(session).pressure
+    assert pressure is not None and pressure < TRIGGER_FRACTION
 
 
 async def test_the_automatic_triggers_can_be_turned_off_without_losing_the_command(
-    mount: Any,
+    mount: MountProfile,
 ) -> None:
     """dsh's `auto` knob, and why it is separate from the row itself.
 
@@ -815,14 +827,14 @@ async def test_the_automatic_triggers_can_be_turned_off_without_losing_the_comma
     """
     ctx = await mount({"id": "compaction-summarize", "config": {"auto": False}}, profile=PROFILE)
     _route(ctx)
-    session = ctx.sessions.create("manual-only")
-    agent = ctx.agents.create(session, FAKE_OPTIONS)
+    session = ctx.require(SESSIONS).create("manual-only")
+    agent = ctx.require(AGENTS).create(session, FAKE_OPTIONS)
 
     for index in range(10):
         await agent.prompt(f"question {index} " + "detail " * 600)
     assert not _events(session, "compaction/summarized"), "the automatic trigger stayed armed"
 
-    await ctx.commands.dispatch("/compact", session=session, agent=agent)
+    await ctx.require(COMMANDS).dispatch("/compact", session=session, agent=agent)
     assert _events(session, "compaction/summarized"), "the command was disarmed too"
 
 
@@ -834,7 +846,7 @@ async def test_the_automatic_triggers_can_be_turned_off_without_losing_the_comma
 
 
 async def test_the_summarize_request_is_a_prefix_of_the_conversations(
-    mount: Any,
+    mount: MountProfile,
 ) -> None:
     """The cache property, asserted structurally rather than hoped for.
 
@@ -847,7 +859,7 @@ async def test_the_summarize_request_is_a_prefix_of_the_conversations(
     _route(ctx)
     agent = await _conversation(ctx, "prefix")
 
-    await ctx.commands.dispatch("/compact", session=agent.session, agent=agent)
+    await ctx.require(COMMANDS).dispatch("/compact", session=agent.session, agent=agent)
 
     conversation = _loop_requests(ctx)[-1]
     (summary,) = _summary_requests(ctx)
@@ -858,7 +870,7 @@ async def test_the_summarize_request_is_a_prefix_of_the_conversations(
     assert summary.messages[:shared] == conversation.messages[:shared]
 
 
-async def test_the_summarizer_is_shown_the_whole_range(mount: Any) -> None:
+async def test_the_summarizer_is_shown_the_whole_range(mount: MountProfile) -> None:
     """No tail, no rendering: the shadowed messages are sent as themselves.
 
     Two things follow. The model reads real `tool-call`/`tool-result` blocks
@@ -870,7 +882,7 @@ async def test_the_summarizer_is_shown_the_whole_range(mount: Any) -> None:
     _route(ctx)
     agent = await _conversation(ctx, "whole-range")
 
-    await ctx.commands.dispatch("/compact", session=agent.session, agent=agent)
+    await ctx.require(COMMANDS).dispatch("/compact", session=agent.session, agent=agent)
 
     (record,) = _events(agent.session, "compaction/summarized")
     (summary,) = _summary_requests(ctx)
@@ -880,7 +892,7 @@ async def test_the_summarizer_is_shown_the_whole_range(mount: Any) -> None:
     assert "question 0" in text_of(summary.messages[0].content)
 
 
-async def test_the_replay_does_not_inherit_a_reasoning_budget(mount: Any) -> None:
+async def test_the_replay_does_not_inherit_a_reasoning_budget(mount: MountProfile) -> None:
     """One of two deliberate departures from byte-identical.
 
     A reasoning model would otherwise spend a thinking budget on an extraction.
@@ -890,13 +902,13 @@ async def test_the_replay_does_not_inherit_a_reasoning_budget(mount: Any) -> Non
     """
     ctx = await mount(profile=PROFILE)
     _route(ctx)
-    session = ctx.sessions.create("thinking")
+    session = ctx.require(SESSIONS).create("thinking")
     options = AgentOptions(provider="fake", model="fake-1", reasoning_effort="high")
-    agent = ctx.agents.create(session, options)
+    agent = ctx.require(AGENTS).create(session, options)
     for index in range(8):
         await agent.prompt(f"question {index} " + "detail " * (QUESTION_CHARS // 7))
 
-    await ctx.commands.dispatch("/compact", session=session, agent=agent)
+    await ctx.require(COMMANDS).dispatch("/compact", session=session, agent=agent)
 
     (summary,) = _summary_requests(ctx)
     assert _loop_requests(ctx)[-1].reasoning_effort == "high", "the fixture proves nothing"
@@ -904,7 +916,7 @@ async def test_the_replay_does_not_inherit_a_reasoning_budget(mount: Any) -> Non
     assert summary.max_tokens == SUMMARY_MAX_TOKENS
 
 
-async def test_a_reply_of_only_tool_calls_falls_back_without_them(mount: Any) -> None:
+async def test_a_reply_of_only_tool_calls_falls_back_without_them(mount: MountProfile) -> None:
     """The cost of carrying the conversation's tools, and the answer to it.
 
     The replay hands the model the session's tool schemas under the session's own
@@ -922,12 +934,12 @@ async def test_a_reply_of_only_tool_calls_falls_back_without_them(mount: Any) ->
     async def call_a_tool_first(options: GenerateOptions, next_: Any) -> Any:
         if options.purpose == "compaction" and not answered["once"]:
             answered["once"] = True
-            ctx.llm_fake.requests.append(options)
+            ctx.require(LLM_FAKE).requests.append(options)
             return _reaching_for_a_tool()
         return await next_(options)
 
     ctx.on("llm/stream", call_a_tool_first)
-    await ctx.commands.dispatch("/compact", session=agent.session, agent=agent)
+    await ctx.require(COMMANDS).dispatch("/compact", session=agent.session, agent=agent)
 
     first, second = _summary_requests(ctx)
     assert first.tools, "the first attempt did not carry the conversation's tools"
@@ -938,14 +950,14 @@ async def test_a_reply_of_only_tool_calls_falls_back_without_them(mount: Any) ->
     assert SUMMARY in _model_text(agent.session), "the fallback did not produce a summary"
 
 
-async def test_a_session_with_no_logged_request_still_compacts(mount: Any) -> None:
+async def test_a_session_with_no_logged_request_still_compacts(mount: MountProfile) -> None:
     """There is no envelope to replay before the first request is built, and a
     hand-built session may never have one — so the self-contained shape is the
     floor rather than a failure path."""
     ctx = await mount(profile=PROFILE)
     _route(ctx)
     session = _tool_batch_session("headerless", 200, 200)
-    agent = ctx.agents.create(session, FAKE_OPTIONS)
+    agent = ctx.require(AGENTS).create(session, FAKE_OPTIONS)
 
     assert session.request_header() is None
     result = await _engine(ctx).compact_now(agent)
@@ -958,7 +970,7 @@ async def test_a_session_with_no_logged_request_still_compacts(mount: Any) -> No
 # -------------------------------------------------------------- the overflow --
 
 
-async def test_a_context_overflow_compacts_and_retries_the_request(mount: Any) -> None:
+async def test_a_context_overflow_compacts_and_retries_the_request(mount: MountProfile) -> None:
     """The trigger `llm-retry` deliberately leaves alone (G4).
 
     A provider that says `CONTEXT_WINDOW_EXCEEDED` has already answered the
@@ -998,7 +1010,7 @@ async def test_a_context_overflow_compacts_and_retries_the_request(mount: Any) -
 
 
 async def test_a_summarizer_that_fails_leaves_the_conversation_untouched(
-    mount: Any,
+    mount: MountProfile,
 ) -> None:
     """A compaction that cannot summarize must change nothing.
 
@@ -1011,9 +1023,11 @@ async def test_a_summarizer_that_fails_leaves_the_conversation_untouched(
     agent = await _conversation(ctx, "broken-summarizer")
     session = agent.session
     before = _model_text(session)
-    ctx.llm_fake.respond = lambda request: "" if request.purpose == "compaction" else "answer"
+    ctx.require(LLM_FAKE).respond = lambda request: (
+        "" if request.purpose == "compaction" else "answer"
+    )
 
-    reply = await ctx.commands.dispatch("/compact", session=session, agent=agent)
+    reply = await ctx.require(COMMANDS).dispatch("/compact", session=session, agent=agent)
 
     assert not _events(session, "compaction/summarized")
     assert _model_text(session) == before
@@ -1021,7 +1035,7 @@ async def test_a_summarizer_that_fails_leaves_the_conversation_untouched(
 
 
 async def test_an_automatic_decline_is_recorded_and_not_retried_at_once(
-    mount: Any,
+    mount: MountProfile,
 ) -> None:
     """Automatic compaction never raises — it records why and stands aside.
 
@@ -1033,8 +1047,11 @@ async def test_an_automatic_decline_is_recorded_and_not_retried_at_once(
     _route(ctx)
     agent = await _conversation(ctx, "declined")
     session = agent.session
-    engine: SummarizeEngine = ctx.compaction.engine
-    ctx.llm_fake.respond = lambda request: "" if request.purpose == "compaction" else "answer"
+    engine = ctx.require(COMPACTION).engine
+    assert isinstance(engine, SummarizeEngine)
+    ctx.require(LLM_FAKE).respond = lambda request: (
+        "" if request.purpose == "compaction" else "answer"
+    )
 
     assert await engine.compact_if_needed(agent, "overflow") is None
     (declined,) = _events(session, "compaction/declined")
@@ -1045,7 +1062,7 @@ async def test_an_automatic_decline_is_recorded_and_not_retried_at_once(
     assert len(_summary_requests(ctx)) == calls, "the decline was retried with nothing changed"
 
 
-async def test_a_manual_failure_is_recorded_in_the_log(mount: Any) -> None:
+async def test_a_manual_failure_is_recorded_in_the_log(mount: MountProfile) -> None:
     """The command tells the person "the attempt is recorded in the session log",
     and until this test that sentence was false.
 
@@ -1058,9 +1075,11 @@ async def test_a_manual_failure_is_recorded_in_the_log(mount: Any) -> None:
     ctx = await mount(profile=PROFILE)
     _route(ctx)
     agent = await _conversation(ctx, "manual-failure")
-    ctx.llm_fake.respond = lambda request: "" if request.purpose == "compaction" else "answer"
+    ctx.require(LLM_FAKE).respond = lambda request: (
+        "" if request.purpose == "compaction" else "answer"
+    )
 
-    reply = await ctx.commands.dispatch("/compact", session=agent.session, agent=agent)
+    reply = await ctx.require(COMMANDS).dispatch("/compact", session=agent.session, agent=agent)
 
     assert "recorded in the session log" in (reply or ""), "the claim under test moved"
     (declined,) = _events(agent.session, "compaction/declined")
@@ -1068,7 +1087,7 @@ async def test_a_manual_failure_is_recorded_in_the_log(mount: Any) -> None:
     assert declined.data["code"] == "summary"
 
 
-async def test_a_refusal_before_any_attempt_is_not_recorded(mount: Any) -> None:
+async def test_a_refusal_before_any_attempt_is_not_recorded(mount: MountProfile) -> None:
     """`busy` is not a failed compaction — nothing was attempted, so there is no
     attempt to account for. Recording one would put an event in the log for
     every mistyped command."""
@@ -1077,13 +1096,13 @@ async def test_a_refusal_before_any_attempt_is_not_recorded(mount: Any) -> None:
     agent = await _conversation(ctx, "busy-unrecorded")
     agent._set_phase("running")
 
-    await ctx.commands.dispatch("/compact", session=agent.session, agent=agent)
+    await ctx.require(COMMANDS).dispatch("/compact", session=agent.session, agent=agent)
 
     assert not _events(agent.session, "compaction/declined")
 
 
 async def test_an_unexpected_failure_neither_escapes_nor_goes_unrecorded(
-    mount: Any, monkeypatch: pytest.MonkeyPatch
+    mount: MountProfile, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A bug in this row must not end the person's turn.
 
@@ -1108,7 +1127,9 @@ async def test_an_unexpected_failure_neither_escapes_nor_goes_unrecorded(
     assert "the disk went away" in declined.data["reason"]
 
 
-async def test_cancellation_is_not_swallowed(mount: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_cancellation_is_not_swallowed(
+    mount: MountProfile, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The one thing the guard must let through.
 
     `Cancelled` derives from `Exception`, so a guard written to contain bugs
@@ -1129,15 +1150,15 @@ async def test_cancellation_is_not_swallowed(mount: Any, monkeypatch: pytest.Mon
         await engine.compact_if_needed(agent, "overflow")
 
 
-async def test_a_short_conversation_reports_nothing_to_compact(mount: Any) -> None:
+async def test_a_short_conversation_reports_nothing_to_compact(mount: MountProfile) -> None:
     """`None`, not an error: "your conversation is short" and "your summarizer
     is broken" are different outcomes and the seam keeps them apart."""
     ctx = await mount(profile=PROFILE)
     _route(ctx)
-    session = ctx.sessions.create("short")
-    agent = ctx.agents.create(session, FAKE_OPTIONS)
+    session = ctx.require(SESSIONS).create("short")
+    agent = ctx.require(AGENTS).create(session, FAKE_OPTIONS)
 
-    reply = await ctx.commands.dispatch("/compact", session=session, agent=agent)
+    reply = await ctx.require(COMMANDS).dispatch("/compact", session=session, agent=agent)
 
     assert reply == "no compactable history yet"
     assert not _summary_requests(ctx), "a summarize call was spent on an empty session"
@@ -1147,7 +1168,7 @@ async def test_a_short_conversation_reports_nothing_to_compact(mount: Any) -> No
 
 
 async def test_a_history_that_cannot_be_written_still_compacts_and_claims_no_path(
-    mount: Any, monkeypatch: pytest.MonkeyPatch
+    mount: MountProfile, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A spill that failed must not leave the model reading a path that holds nothing.
 
@@ -1161,7 +1182,7 @@ async def test_a_history_that_cannot_be_written_still_compacts_and_claims_no_pat
     session = agent.session
     break_spill(monkeypatch)
 
-    await ctx.commands.dispatch("/compact", session=session, agent=agent)
+    await ctx.require(COMMANDS).dispatch("/compact", session=session, agent=agent)
 
     (record,) = _events(session, "compaction/summarized")
     assert record.data["locator"] is None
@@ -1172,7 +1193,7 @@ async def test_a_history_that_cannot_be_written_still_compacts_and_claims_no_pat
 # ------------------------------------------------------------- the command --
 
 
-async def test_compact_refuses_while_the_agent_is_working(mount: Any) -> None:
+async def test_compact_refuses_while_the_agent_is_working(mount: MountProfile) -> None:
     """A compaction landing mid-turn would move the surface underneath a request
     the loop had already derived."""
     ctx = await mount(profile=PROFILE)
@@ -1180,13 +1201,13 @@ async def test_compact_refuses_while_the_agent_is_working(mount: Any) -> None:
     agent = await _conversation(ctx, "busy")
 
     agent._set_phase("running")
-    reply = await ctx.commands.dispatch("/compact", session=agent.session, agent=agent)
+    reply = await ctx.require(COMMANDS).dispatch("/compact", session=agent.session, agent=agent)
 
     assert "idle session" in (reply or "")
     assert not _events(agent.session, "compaction/summarized")
 
 
-async def test_compact_carries_what_the_user_is_about_to_work_on(mount: Any) -> None:
+async def test_compact_carries_what_the_user_is_about_to_work_on(mount: MountProfile) -> None:
     """`/compact [instructions]`, and the reason it takes any.
 
     dsh refuses arguments here and deepagents' compact tool takes none. But the
@@ -1201,7 +1222,7 @@ async def test_compact_carries_what_the_user_is_about_to_work_on(mount: Any) -> 
     _route(ctx)
     agent = await _conversation(ctx, "focus")
 
-    await ctx.commands.dispatch(
+    await ctx.require(COMMANDS).dispatch(
         "/compact next I am rewriting the retry policy", session=agent.session, agent=agent
     )
 
@@ -1211,14 +1232,14 @@ async def test_compact_carries_what_the_user_is_about_to_work_on(mount: Any) -> 
     assert record.data["instructions"] == "next I am rewriting the retry policy"
 
 
-async def test_a_bare_compact_asks_the_summarizer_to_focus_on_nothing(mount: Any) -> None:
+async def test_a_bare_compact_asks_the_summarizer_to_focus_on_nothing(mount: MountProfile) -> None:
     """No argument means no focus block — an empty section would be a heading
     the model has to decide what to do with."""
     ctx = await mount(profile=PROFILE)
     _route(ctx)
     agent = await _conversation(ctx, "no-focus")
 
-    await ctx.commands.dispatch("/compact", session=agent.session, agent=agent)
+    await ctx.require(COMMANDS).dispatch("/compact", session=agent.session, agent=agent)
 
     (request,) = _summary_requests(ctx)
     assert "what_the_user_asked_you_to_focus_on" not in _instruction(request)
@@ -1226,17 +1247,17 @@ async def test_a_bare_compact_asks_the_summarizer_to_focus_on_nothing(mount: Any
     assert record.data["instructions"] is None
 
 
-async def test_compact_without_an_engine_says_so(mount: Any) -> None:
+async def test_compact_without_an_engine_says_so(mount: MountProfile) -> None:
     """The command over a profile that layered the seam and no backend.
 
     Silence would read as "nothing to compact", which is a different and false
     statement — the automatic path is the one that is right to say nothing.
     """
     ctx = await mount({"id": "command-compact", "name": "command-compact"})
-    session = ctx.sessions.create("engineless")
-    agent = ctx.agents.create(session, FAKE_OPTIONS)
+    session = ctx.require(SESSIONS).create("engineless")
+    agent = ctx.require(AGENTS).create(session, FAKE_OPTIONS)
 
-    reply = await ctx.commands.dispatch("/compact", session=session, agent=agent)
+    reply = await ctx.require(COMMANDS).dispatch("/compact", session=session, agent=agent)
 
     assert "no compaction engine" in (reply or "")
 
@@ -1244,7 +1265,7 @@ async def test_compact_without_an_engine_says_so(mount: Any) -> None:
 # ----------------------------------------------------------------- the notes --
 
 
-async def test_a_note_tells_the_summarizer_what_survives_the_cut(mount: Any) -> None:
+async def test_a_note_tells_the_summarizer_what_survives_the_cut(mount: MountProfile) -> None:
     """G10's mechanism, without G10's producer.
 
     A summary replaces *conversation*; a note is how a plugin says "this other
@@ -1254,24 +1275,26 @@ async def test_a_note_tells_the_summarizer_what_survives_the_cut(mount: Any) -> 
     """
     ctx = await mount(profile=PROFILE)
     _route(ctx)
-    ctx.compaction.note(CompactionNote(name="test:state", text=lambda _s: "`df` is still loaded"))
+    ctx.require(COMPACTION).note(
+        CompactionNote(name="test:state", text=lambda _s: "`df` is still loaded")
+    )
     agent = await _conversation(ctx, "notes")
 
-    await ctx.commands.dispatch("/compact", session=agent.session, agent=agent)
+    await ctx.require(COMMANDS).dispatch("/compact", session=agent.session, agent=agent)
 
     (request,) = _summary_requests(ctx)
     assert "`df` is still loaded" in _instruction(request)
 
 
-async def test_a_note_that_renders_nothing_costs_no_prompt(mount: Any) -> None:
+async def test_a_note_that_renders_nothing_costs_no_prompt(mount: MountProfile) -> None:
     """Empty means absent, the rule `PromptContext` already uses — so a note
     about a namespace holding nothing does not spend a paragraph saying so."""
     ctx = await mount(profile=PROFILE)
     _route(ctx)
-    ctx.compaction.note(CompactionNote(name="test:empty", text=lambda _s: ""))
+    ctx.require(COMPACTION).note(CompactionNote(name="test:empty", text=lambda _s: ""))
     agent = await _conversation(ctx, "empty-note")
 
-    await ctx.commands.dispatch("/compact", session=agent.session, agent=agent)
+    await ctx.require(COMMANDS).dispatch("/compact", session=agent.session, agent=agent)
 
     (request,) = _summary_requests(ctx)
     assert "state_that_survives_this_summary" not in _instruction(request)

@@ -40,10 +40,12 @@ from typing import Any
 
 import pytest
 
+from ph.keys import AGENTS, COMMANDS, FS, SESSIONS, SKILLS, SYSTEM_PROMPT, TOOLS
 from ph.llm.types import text_of
-from ph.testing import FAKE_OPTIONS, report_section, run_tool
+from ph.testing import FAKE_OPTIONS, MountProfile, report_section, run_tool
 from ph.testing.git import git, git_repo
 from ph.testing.jj import jj_repo
+from ph_code_graph import CODE_GRAPH
 from ph_code_graph._extract import (
     INHERITS,
     Definition,
@@ -137,7 +139,9 @@ def _agent(ctx: Any) -> Any:
     query call) would otherwise collide on the session id, which fails as
     `SESSION_ALREADY_EXISTS` several frames from the cause.
     """
-    return ctx.agents.create(ctx.sessions.create(f"cg-{next(_SEQ)}"), FAKE_OPTIONS)
+    return ctx.require(AGENTS).create(
+        ctx.require(SESSIONS).create(f"cg-{next(_SEQ)}"), FAKE_OPTIONS
+    )
 
 
 def _tree(root: Path) -> None:
@@ -146,7 +150,7 @@ def _tree(root: Path) -> None:
     (root / "pkg" / "helpers.py").write_text(OTHER, encoding="utf-8")
 
 
-async def _indexed(mount: Any, tmp_path: Path, **config: Any) -> Any:
+async def _indexed(mount: MountProfile, tmp_path: Path, **config: Any) -> Any:
     settings = {"path": str(tmp_path / "graph.db"), **config}
     ctx = await mount({**ROW, "config": settings})
     return ctx
@@ -278,7 +282,7 @@ def test_language_detection_reads_the_extension() -> None:
 
 
 async def test_indexing_then_asking_answers_with_a_readable_pointer(
-    mount: Any, tmp_path: Path
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """End to end: the whole reason the package exists."""
     _tree(tmp_path)
@@ -304,7 +308,7 @@ async def test_indexing_then_asking_answers_with_a_readable_pointer(
 
 
 async def test_callers_names_the_calling_symbol_and_the_calling_line(
-    mount: Any, tmp_path: Path
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """Not the definition's line — the line to open."""
     _tree(tmp_path)
@@ -326,7 +330,7 @@ async def test_callers_names_the_calling_symbol_and_the_calling_line(
         assert "shared(" in line, f"ref_line {one['ref_line']} reads {line!r}"
 
 
-async def test_callees_reports_what_a_symbol_reaches(mount: Any, tmp_path: Path) -> None:
+async def test_callees_reports_what_a_symbol_reaches(mount: MountProfile, tmp_path: Path) -> None:
     _tree(tmp_path)
     ctx = await _indexed(mount, tmp_path)
     agent = _agent(ctx)
@@ -338,7 +342,7 @@ async def test_callees_reports_what_a_symbol_reaches(mount: Any, tmp_path: Path)
     assert "outer" in {one["name"] for one in found.value["edges"]}
 
 
-async def test_impact_walks_transitively_ring_by_ring(mount: Any, tmp_path: Path) -> None:
+async def test_impact_walks_transitively_ring_by_ring(mount: MountProfile, tmp_path: Path) -> None:
     """The recursive CTE — the query `pyturso` refuses. `shared` <- inner <- outer."""
     _tree(tmp_path)
     ctx = await _indexed(mount, tmp_path)
@@ -364,7 +368,7 @@ async def test_impact_walks_transitively_ring_by_ring(mount: Any, tmp_path: Path
 
 
 async def test_a_symbol_reached_twice_is_reported_at_the_nearer_distance(
-    mount: Any, tmp_path: Path
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """`MIN(depth)` in the CTE — what makes the rings a budget, not a multiset."""
     (tmp_path / "pkg").mkdir()
@@ -386,7 +390,7 @@ async def test_a_symbol_reached_twice_is_reported_at_the_nearer_distance(
     assert all("top" not in names for depth, names in rings.items() if depth > 1)
 
 
-async def test_search_ranks_by_name_and_docstring(mount: Any, tmp_path: Path) -> None:
+async def test_search_ranks_by_name_and_docstring(mount: MountProfile, tmp_path: Path) -> None:
     """FTS5 — the other query `pyturso` cannot serve."""
     _tree(tmp_path)
     ctx = await _indexed(mount, tmp_path)
@@ -401,7 +405,9 @@ async def test_search_ranks_by_name_and_docstring(mount: Any, tmp_path: Path) ->
     assert "shared" in {one["name"] for one in found.value["symbols"]}
 
 
-async def test_a_models_punctuation_does_not_become_fts_syntax(mount: Any, tmp_path: Path) -> None:
+async def test_a_models_punctuation_does_not_become_fts_syntax(
+    mount: MountProfile, tmp_path: Path
+) -> None:
     """`read-before-edit` is an FTS5 syntax error and `a:b` is a column filter.
 
     A model writing prose meant neither, and a tool that raised on the phrasing
@@ -417,7 +423,9 @@ async def test_a_models_punctuation_does_not_become_fts_syntax(mount: Any, tmp_p
         assert not found.is_error, f"{query!r} raised: {text_of(found.content)}"
 
 
-async def test_entities_lists_the_biggest_definitions_first(mount: Any, tmp_path: Path) -> None:
+async def test_entities_lists_the_biggest_definitions_first(
+    mount: MountProfile, tmp_path: Path
+) -> None:
     _tree(tmp_path)
     ctx = await _indexed(mount, tmp_path)
     agent = _agent(ctx)
@@ -434,7 +442,7 @@ async def test_entities_lists_the_biggest_definitions_first(mount: Any, tmp_path
     assert "offset=4" in text_of(found.content)
 
 
-async def test_an_ambiguous_name_says_it_is_ambiguous(mount: Any, tmp_path: Path) -> None:
+async def test_an_ambiguous_name_says_it_is_ambiguous(mount: MountProfile, tmp_path: Path) -> None:
     """The honest ceiling of a name-based graph, surfaced rather than hidden."""
     (tmp_path / "pkg").mkdir()
     (tmp_path / "pkg" / "a.py").write_text("def register():\n    return 1\n", encoding="utf-8")
@@ -457,7 +465,7 @@ async def test_an_ambiguous_name_says_it_is_ambiguous(mount: Any, tmp_path: Path
 
 
 async def test_a_second_pass_over_an_unchanged_tree_parses_nothing(
-    mount: Any, tmp_path: Path
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """Content-keyed, so re-running after a turn is cheap and correct."""
     _tree(tmp_path)
@@ -493,7 +501,9 @@ def _counting_reads(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     return reads
 
 
-async def test_a_touched_but_unmodified_file_stays_unchanged(mount: Any, tmp_path: Path) -> None:
+async def test_a_touched_but_unmodified_file_stays_unchanged(
+    mount: MountProfile, tmp_path: Path
+) -> None:
     """An mtime is not content. A rebase moves every mtime in the tree."""
     _tree(tmp_path)
     ctx = await _indexed(mount, tmp_path)
@@ -507,7 +517,9 @@ async def test_a_touched_but_unmodified_file_stays_unchanged(mount: Any, tmp_pat
     assert again.value["indexed"] == 0
 
 
-async def test_an_edit_is_picked_up_and_replaces_the_old_rows(mount: Any, tmp_path: Path) -> None:
+async def test_an_edit_is_picked_up_and_replaces_the_old_rows(
+    mount: MountProfile, tmp_path: Path
+) -> None:
     _tree(tmp_path)
     ctx = await _indexed(mount, tmp_path)
     agent = _agent(ctx)
@@ -525,7 +537,7 @@ async def test_an_edit_is_picked_up_and_replaces_the_old_rows(mount: Any, tmp_pa
     assert here.value["symbols"], "the new symbol was not indexed"
 
 
-async def test_forget_removes_a_path_from_the_index(mount: Any, tmp_path: Path) -> None:
+async def test_forget_removes_a_path_from_the_index(mount: MountProfile, tmp_path: Path) -> None:
     _tree(tmp_path)
     ctx = await _indexed(mount, tmp_path)
     agent = _agent(ctx)
@@ -545,7 +557,7 @@ async def test_forget_removes_a_path_from_the_index(mount: Any, tmp_path: Path) 
 
 
 async def test_non_code_and_oversized_files_are_skipped_not_fatal(
-    mount: Any, tmp_path: Path
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """A tree walk must not fail because it found a bundle or a README."""
     _tree(tmp_path)
@@ -565,7 +577,9 @@ async def test_non_code_and_oversized_files_are_skipped_not_fatal(
     assert not indexable("markdown"), "the predicate this rests on"
 
 
-async def test_a_query_before_any_index_says_what_to_do(mount: Any, tmp_path: Path) -> None:
+async def test_a_query_before_any_index_says_what_to_do(
+    mount: MountProfile, tmp_path: Path
+) -> None:
     ctx = await _indexed(mount, tmp_path)
 
     found = await run_tool(
@@ -576,7 +590,7 @@ async def test_a_query_before_any_index_says_what_to_do(mount: Any, tmp_path: Pa
     assert "run `code_index` first" in text_of(found.content)
 
 
-async def test_a_mode_that_needs_a_query_says_so(mount: Any, tmp_path: Path) -> None:
+async def test_a_mode_that_needs_a_query_says_so(mount: MountProfile, tmp_path: Path) -> None:
     _tree(tmp_path)
     ctx = await _indexed(mount, tmp_path)
     agent = _agent(ctx)
@@ -588,7 +602,7 @@ async def test_a_mode_that_needs_a_query_says_so(mount: Any, tmp_path: Path) -> 
     assert "needs `query`" in text_of(found.content)
 
 
-async def test_indexing_reads_through_the_fs_seam(mount: Any, tmp_path: Path) -> None:
+async def test_indexing_reads_through_the_fs_seam(mount: MountProfile, tmp_path: Path) -> None:
     """The claim that makes this a tool and not a tree-reading primitive (I-9).
 
     A screen registered on `ctx.fs` decides what a walk may show, so a file it
@@ -598,7 +612,7 @@ async def test_indexing_reads_through_the_fs_seam(mount: Any, tmp_path: Path) ->
     _tree(tmp_path)
     (tmp_path / "pkg" / "secret.py").write_text("def hidden():\n    return 1\n", encoding="utf-8")
     ctx = await _indexed(mount, tmp_path)
-    ctx.fs.screen(
+    ctx.require(FS).screen(
         lambda path, name, agent, is_dir: "skip" if name == "secret.py" else "yield",
         scope=ctx,
     )
@@ -611,7 +625,7 @@ async def test_indexing_reads_through_the_fs_seam(mount: Any, tmp_path: Path) ->
     assert found.value["symbols"] == [], "a screened file reached the index"
 
 
-async def test_the_row_reports_itself_to_doctor(mount: Any, tmp_path: Path) -> None:
+async def test_the_row_reports_itself_to_doctor(mount: MountProfile, tmp_path: Path) -> None:
     ctx = await _indexed(mount, tmp_path)
 
     rows = report_section(ctx, "Code graph")
@@ -622,7 +636,9 @@ async def test_the_row_reports_itself_to_doctor(mount: Any, tmp_path: Path) -> N
     assert rows["files"] == "0", "nothing was indexed in this test"
 
 
-async def test_a_callees_reference_line_names_its_own_file(mount: Any, tmp_path: Path) -> None:
+async def test_a_callees_reference_line_names_its_own_file(
+    mount: MountProfile, tmp_path: Path
+) -> None:
     """`path` and `ref_path` are different files for `callees`, and both matter.
 
     The symbol is the callee's *definition*; the reference is a line in the
@@ -700,7 +716,7 @@ def test_c_has_definitions_but_no_call_references() -> None:
 
 
 async def test_an_unwritable_grammar_cache_refuses_with_a_sentence(
-    mount: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    mount: MountProfile, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A deployment fact an operator can fix, not a traceback.
 
@@ -794,7 +810,7 @@ async def test_the_rlm_indexed_profile_layers_this_bundle() -> None:
 
 
 async def test_code_mode_hands_the_model_both_tools_through_the_sdk(
-    mount: Any, tmp_path: Path
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """The claim the whole package rests on for its intended caller.
 
@@ -812,12 +828,12 @@ async def test_code_mode_hands_the_model_both_tools_through_the_sdk(
     )
     agent = _agent(ctx)
 
-    view = ctx.tools.view(scope=agent.ctx)
+    view = ctx.require(TOOLS).view(scope=agent.ctx)
     assert view.mode == "code"
     assert view.schemas == (), "Code Mode offers one callable, not schemas"
     assert {"code_index", "code_graph"} <= set(view.visible)
 
-    prompt = await ctx.system_prompt.assemble(agent=agent, scope=agent.ctx)
+    prompt = await ctx.require(SYSTEM_PROMPT).assemble(agent=agent, scope=agent.ctx)
     sdk = dict(prompt.sections)["tools:sdk"]
     # The exact spelling the model will write, not merely the name somewhere.
     assert "async def tools.code_index(" in sdk
@@ -879,7 +895,7 @@ async def test_every_row_in_the_rlm_indexed_profile_activates(
         # And the point of the profile: the RLM's own surface has all four.
         from ph.cordis import DEPLOYMENT
 
-        visible = set(ctx.tools.view(scope=DEPLOYMENT).visible)
+        visible = set(ctx.require(TOOLS).view(scope=DEPLOYMENT).visible)
         assert {"code_index", "code_graph", "text_index", "text_search"} <= visible
         assert {"read", "grep", "glob"} <= visible, "the tools these point at"
     finally:
@@ -890,7 +906,7 @@ async def test_every_row_in_the_rlm_indexed_profile_activates(
 # --------------------------------------------------- provisioning, and the skill ----
 
 
-async def test_the_command_reports_grammar_readiness(mount: Any, tmp_path: Path) -> None:
+async def test_the_command_reports_grammar_readiness(mount: MountProfile, tmp_path: Path) -> None:
     """A person asks before an agent does. Costs no model turn — the seam's rule.
 
     It matters less here than for `text-index`, because 26 grammars are inside
@@ -900,17 +916,19 @@ async def test_the_command_reports_grammar_readiness(mount: Any, tmp_path: Path)
     ctx = await mount({**ROW, "config": {"path": str(tmp_path / "graph.db")}})
     agent = _agent(ctx)
 
-    said = await ctx.commands.dispatch("/code-graph status", agent=agent, scope=agent.ctx)
+    said = await ctx.require(COMMANDS).dispatch("/code-graph status", agent=agent, scope=agent.ctx)
 
-    assert "ready" in said
+    assert said is not None and "ready" in said
     # The path it names is the one `use_cache` chose, not `~/.cache`.
-    assert "tree-sitter" in said
-    installed = await ctx.commands.dispatch("/code-graph install", agent=agent, scope=agent.ctx)
-    assert "grammars ready" in installed
+    assert said is not None and "tree-sitter" in said
+    installed = await ctx.require(COMMANDS).dispatch(
+        "/code-graph install", agent=agent, scope=agent.ctx
+    )
+    assert installed is not None and "grammars ready" in installed
 
 
 async def test_a_name_that_is_not_an_indexable_language_is_filtered_out(
-    mount: Any, tmp_path: Path
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """Not "missing" — not applicable, which is a different sentence.
 
@@ -930,16 +948,16 @@ async def test_a_name_that_is_not_an_indexable_language_is_filtered_out(
     )
     agent = _agent(ctx)
 
-    said = await ctx.commands.dispatch("/code-graph install", agent=agent, scope=agent.ctx)
+    said = await ctx.require(COMMANDS).dispatch("/code-graph install", agent=agent, scope=agent.ctx)
 
     # One of the three can yield an edge, so one is what the count reports.
-    assert "1 grammar" in said, said
+    assert said is not None and "1 grammar" in said, said
     assert "not-a-language" not in said
     assert not indexable("sql"), "the premise: sql has a parser and no tags query"
 
 
 async def test_a_grammar_that_is_not_on_disk_is_named(
-    mount: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    mount: MountProfile, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Reported by name, because "19 of 20" sends a person looking.
 
@@ -962,17 +980,19 @@ async def test_a_grammar_that_is_not_on_disk_is_named(
     )
     agent = _agent(ctx)
 
-    status = await ctx.commands.dispatch("/code-graph status", agent=agent, scope=agent.ctx)
-    assert "0 of 1 ready" in status
-    assert "missing python" in status
+    status = await ctx.require(COMMANDS).dispatch(
+        "/code-graph status", agent=agent, scope=agent.ctx
+    )
+    assert status is not None and "0 of 1 ready" in status
+    assert status is not None and "missing python" in status
 
-    said = await ctx.commands.dispatch("/code-graph install", agent=agent, scope=agent.ctx)
-    assert "could not fetch python" in said
-    assert "needs network the first time" in said
+    said = await ctx.require(COMMANDS).dispatch("/code-graph install", agent=agent, scope=agent.ctx)
+    assert said is not None and "could not fetch python" in said
+    assert said is not None and "needs network the first time" in said
 
 
 async def test_the_grammars_are_cached_under_a_ph_root(
-    mount: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    mount: MountProfile, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Not `$XDG_CACHE_HOME`, which no pH root covers and no `ph doctor` names.
 
@@ -985,13 +1005,13 @@ async def test_the_grammars_are_cached_under_a_ph_root(
 
     ctx = await mount({**ROW, "config": {"path": str(tmp_path / "graph.db")}})
 
-    assert ctx.code_graph.grammars == tmp_path / "cache" / "tree-sitter"
-    assert ctx.code_graph.grammars.is_dir()
+    assert ctx.require(CODE_GRAPH).grammars == tmp_path / "cache" / "tree-sitter"
+    assert ctx.require(CODE_GRAPH).grammars.is_dir()
     rows = report_section(ctx, "Code graph")
     assert rows["grammars"] == str(tmp_path / "cache" / "tree-sitter")
 
 
-async def test_the_skill_arrives_with_the_plugin(mount: Any, tmp_path: Path) -> None:
+async def test_the_skill_arrives_with_the_plugin(mount: MountProfile, tmp_path: Path) -> None:
     """What the RLM reads before it reaches for these tools.
 
     Registered by the row, so the catalog entry exists exactly when the tools
@@ -1004,24 +1024,24 @@ async def test_the_skill_arrives_with_the_plugin(mount: Any, tmp_path: Path) -> 
 
     ctx = await mount({**ROW, "config": {"path": str(tmp_path / "graph.db")}})
 
-    assert "code-graph" in {one.name for one in ctx.skills.list(scope=DEPLOYMENT)}
-    skill = ctx.skills.get("code-graph", DEPLOYMENT)
+    assert "code-graph" in {one.name for one in ctx.require(SKILLS).list(scope=DEPLOYMENT)}
+    skill = ctx.require(SKILLS).get("code-graph", DEPLOYMENT)
     assert skill is not None
     assert {"code_index", "code_graph"} <= set(skill.allowed_tools)
     # G9: a line in every prompt, a page on disk.
     assert len(skill.description) < 300
-    body = ctx.skills.body("code-graph", DEPLOYMENT)
+    body = ctx.require(SKILLS).body("code-graph", DEPLOYMENT)
     assert body is not None and len(body) > 1_500
     assert 'code_graph(mode="impact"' in body
 
 
-async def test_the_skill_goes_away_with_the_row(mount: Any) -> None:
+async def test_the_skill_goes_away_with_the_row(mount: MountProfile) -> None:
     """A catalog entry for tools nobody has is the failure this must not have."""
     from ph.cordis import DEPLOYMENT
 
     ctx = await mount()
 
-    assert "code-graph" not in {one.name for one in ctx.skills.list(scope=DEPLOYMENT)}
+    assert "code-graph" not in {one.name for one in ctx.require(SKILLS).list(scope=DEPLOYMENT)}
 
 
 def test_the_grammar_cache_release_restores_the_base_it_replaced(
@@ -1072,7 +1092,7 @@ def test_the_grammar_cache_release_restores_the_base_it_replaced(
 
 @pytest.mark.needs_git
 async def test_a_reindex_under_git_never_opens_an_unchanged_file(
-    mount: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    mount: MountProfile, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The point of the filter: proved unchanged, so never read.
 
@@ -1102,7 +1122,9 @@ async def test_a_reindex_under_git_never_opens_an_unchanged_file(
 
 
 @pytest.mark.needs_git
-async def test_an_edited_file_is_still_read_and_reindexed(mount: Any, tmp_path: Path) -> None:
+async def test_an_edited_file_is_still_read_and_reindexed(
+    mount: MountProfile, tmp_path: Path
+) -> None:
     """The safe direction. git's index still holds the old blob id for it, so
     this is `status` doing its job — see `ph.seams.changes`."""
     ctx = await mount({**ROW, "config": {"path": str(tmp_path / "graph.db")}})
@@ -1125,7 +1147,7 @@ async def test_an_edited_file_is_still_read_and_reindexed(mount: Any, tmp_path: 
 
 @pytest.mark.needs_jj
 async def test_a_reindex_under_jj_never_opens_an_unchanged_file(
-    mount: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    mount: MountProfile, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """jj needs no commit — it snapshots the working copy, so the token moves.
 
@@ -1148,7 +1170,9 @@ async def test_a_reindex_under_jj_never_opens_an_unchanged_file(
     assert reads == [], f"jj vouched for the file and it was read anyway: {reads}"
 
 
-async def test_a_tree_with_no_version_control_still_indexes(mount: Any, tmp_path: Path) -> None:
+async def test_a_tree_with_no_version_control_still_indexes(
+    mount: MountProfile, tmp_path: Path
+) -> None:
     """The filter is an optimisation, so losing it must cost nothing but speed.
 
     This is the property that makes it safe to put in front of an indexer at

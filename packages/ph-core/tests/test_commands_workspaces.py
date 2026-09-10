@@ -24,8 +24,9 @@ from typing import Any
 
 import pytest
 
+from ph.keys import AGENTS, COMMANDS, FS, SESSIONS, WORKSPACE
 from ph.seams.workspace import WorkspaceRecord
-from ph.testing import FAKE_OPTIONS
+from ph.testing import FAKE_OPTIONS, MountProfile
 from ph.testing.git import git, git_repo
 
 pytestmark = [pytest.mark.anyio, pytest.mark.needs_git]
@@ -36,7 +37,9 @@ ROWS = (
 )
 
 
-async def _tiered(mount: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Any, Path]:
+async def _tiered(
+    mount: MountProfile, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[Any, Path]:
     """A mounted profile with the tier and the command, over a real repository.
 
     `ctx.fs.root` is the process's directory — this checkout — so the command,
@@ -45,7 +48,7 @@ async def _tiered(mount: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
     """
     ctx = await mount(*ROWS)
     base = await git_repo(ctx, tmp_path / "repo")
-    monkeypatch.setattr(ctx.fs, "root", base)
+    monkeypatch.setattr(ctx.require(FS), "root", base)
     return ctx, base
 
 
@@ -57,17 +60,19 @@ async def _left_behind(ctx: Any, base: Path, agent_id: str, *, work: bool) -> Pa
     leaves is a branch with the agent's work on it and no directory — which is why
     no test here has to `git commit` by hand any more.
     """
-    workspace = await ctx.workspace.acquire(
+    workspace = await ctx.require(WORKSPACE).acquire(
         session_id="s1", agent_id=agent_id, base=base, access="write"
     )
     if work:
         (workspace.root / "work.txt").write_text("real\n", encoding="utf-8")
-    await ctx.workspace.dispose(agent_id)
-    return workspace.root
+    await ctx.require(WORKSPACE).dispose(agent_id)
+    root = workspace.root
+    assert isinstance(root, Path)
+    return root
 
 
 async def _run(ctx: Any, argument: str = "") -> str:
-    shown = await ctx.commands.dispatch(f"/workspaces {argument}".strip())
+    shown = await ctx.require(COMMANDS).dispatch(f"/workspaces {argument}".strip())
     assert shown is not None
     return str(shown)
 
@@ -76,7 +81,7 @@ async def _run(ctx: Any, argument: str = "") -> str:
 
 
 async def test_listing_shows_what_the_policy_left_behind(
-    mount: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    mount: MountProfile, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The whole reason the command exists: an agent's work is committed to a
     branch deliberately, and nothing else in the harness would tell a person it
@@ -93,7 +98,7 @@ async def test_listing_shows_what_the_policy_left_behind(
 
 
 async def test_listing_ignores_worktrees_ph_did_not_make(
-    mount: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    mount: MountProfile, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A repository is full of branches and worktrees that are not pH's, and a
     management command that offered to delete those would be a different and much
@@ -118,21 +123,23 @@ async def test_listing_ignores_worktrees_ph_did_not_make(
 
 
 async def test_a_workspace_a_live_agent_holds_is_refused(
-    mount: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    mount: MountProfile, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Asked of the seam, not the filesystem: a worktree that is clean this
     instant belongs to an agent that may write to it in the next."""
     ctx, base = await _tiered(mount, tmp_path, monkeypatch)
-    await ctx.workspace.acquire(session_id="s1", agent_id="live", base=base, access="write")
+    await ctx.require(WORKSPACE).acquire(
+        session_id="s1", agent_id="live", base=base, access="write"
+    )
 
     shown = await _run(ctx, "remove live")
 
     assert "still holds" in shown
-    assert ctx.workspace.of("live") is not None
+    assert ctx.require(WORKSPACE).of("live") is not None
 
 
 async def test_an_unmerged_branch_is_kept_and_the_flag_is_named(
-    mount: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    mount: MountProfile, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """`-d`, never `-D`. A clean worktree is not evidence that its branch was
     merged — an agent that committed its work leaves nothing in `git status` —
@@ -149,7 +156,7 @@ async def test_an_unmerged_branch_is_kept_and_the_flag_is_named(
 
 
 async def test_force_branch_alone_means_nothing(
-    mount: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    mount: MountProfile, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A flag that silently does nothing is worse than one that refuses."""
     ctx, _base = await _tiered(mount, tmp_path, monkeypatch)
@@ -160,7 +167,7 @@ async def test_force_branch_alone_means_nothing(
 
 
 async def test_an_unknown_name_lists_what_there_is(
-    mount: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    mount: MountProfile, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     ctx, base = await _tiered(mount, tmp_path, monkeypatch)
     await _left_behind(ctx, base, "kept-one", work=True)
@@ -174,7 +181,7 @@ async def test_an_unknown_name_lists_what_there_is(
 
 
 async def test_remove_with_branch_takes_both_when_the_branch_is_merged(
-    mount: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    mount: MountProfile, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The accumulation, actually finished. `wtp`'s README opens on exactly this
     — remove the worktree, forget the branch, orphans pile up — and one command
@@ -192,7 +199,7 @@ async def test_remove_with_branch_takes_both_when_the_branch_is_merged(
 
 
 async def test_merge_brings_the_work_back_to_the_tree_the_person_is_in(
-    mount: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    mount: MountProfile, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The parent reviews a diff rather than trusting sibling writes (E2) — this
     is where that diff gets taken."""
@@ -208,7 +215,7 @@ async def test_merge_brings_the_work_back_to_the_tree_the_person_is_in(
 # ---------------------------------------------------------------------- LIFO --
 
 
-async def test_an_agents_subprocesses_unwind_before_its_workspace(mount: Any) -> None:
+async def test_an_agents_subprocesses_unwind_before_its_workspace(mount: MountProfile) -> None:
     """A worktree cannot be removed out from under a process still running in it.
 
     True today by construction — `ctx.effect` unwinds LIFO and a kernel is
@@ -217,18 +224,18 @@ async def test_an_agents_subprocesses_unwind_before_its_workspace(mount: Any) ->
     same rule by refusing to remove the worktree you are standing in.
     """
     ctx = await mount()
-    session = ctx.sessions.create("s")
-    agent = ctx.agents.create(session, FAKE_OPTIONS)
+    session = ctx.require(SESSIONS).create("s")
+    agent = ctx.require(AGENTS).create(session, FAKE_OPTIONS)
     order: list[str] = []
 
     await agent.prompt("hello")
-    assert ctx.workspace.of(agent.id) is not None
+    assert ctx.require(WORKSPACE).of(agent.id) is not None
     # Registered *after* the workspace, the way a kernel started for this agent
     # is, so LIFO must tear it down first.
     await agent.ctx.effect(lambda: lambda: order.append("subprocess"), label="pretend-kernel")
     ctx.on("session/event", lambda _s, event: order.append(event.type), global_=True)
 
-    await ctx.agents.dispose(agent.id)
+    await ctx.require(AGENTS).dispose(agent.id)
 
     assert order.index("subprocess") < order.index("workspace/disposed")
 
@@ -237,7 +244,7 @@ async def test_an_agents_subprocesses_unwind_before_its_workspace(mount: Any) ->
 
 
 async def test_export_names_the_branch_a_worktree_is_already_on(
-    mount: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    mount: MountProfile, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """**One verb for both isolating tiers, and this is the trivial half.**
 
@@ -250,7 +257,7 @@ async def test_export_names_the_branch_a_worktree_is_already_on(
     ctx, base = await _tiered(mount, tmp_path, monkeypatch)
     await _left_behind(ctx, base, "a1", work=True)
 
-    ref = await ctx.workspace.export(
+    ref = await ctx.require(WORKSPACE).export(
         WorkspaceRecord(session_id="s1", agent_id="a1", kind="worktree", root=base, ref="ph/s1/a1")
     )
 
@@ -258,7 +265,7 @@ async def test_export_names_the_branch_a_worktree_is_already_on(
 
 
 async def test_merge_takes_a_branch_that_has_no_worktree(
-    mount: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    mount: MountProfile, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """**What makes `export`'s own closing sentence true.**
 
@@ -279,7 +286,7 @@ async def test_merge_takes_a_branch_that_has_no_worktree(
 
 
 async def test_removing_a_branch_only_row_asks_for_the_flag(
-    mount: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    mount: MountProfile, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The refusal that keeps `--with-branch` meaning what it says.
 
@@ -301,7 +308,7 @@ async def test_removing_a_branch_only_row_asks_for_the_flag(
 
 
 async def test_a_checkout_disposal_could_not_remove_is_listed_as_a_stray(
-    mount: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    mount: MountProfile, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The one way a directory outlives its agent, and the reason `dirty` survives.
 

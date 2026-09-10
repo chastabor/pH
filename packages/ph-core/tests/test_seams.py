@@ -21,7 +21,7 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar, Literal
 
 import anyio
 import pytest
@@ -42,7 +42,7 @@ from ph.seams.compaction import (
     CompactionSeam,
 )
 from ph.seams.credentials import CredentialService
-from ph.seams.jobs import JobService
+from ph.seams.jobs import Job, JobService, JobState
 from ph.seams.permission_presets import PermissionPresetService
 from ph.seams.sandbox import SandboxError, SandboxPolicy, SandboxSeam
 from ph.seams.settings import SettingsService
@@ -57,7 +57,7 @@ from ph.seams.subprocess import (
 from ph.seams.tui_screens import ID_MAX, ScreenDefinition, TuiScreenRegistry
 from ph.seams.tui_status import StatusField, StatusReading, TuiStatusRegistry
 from ph.session import Session
-from ph.testing import StubAgent
+from ph.testing import StubAgent, noted
 
 pytestmark = pytest.mark.anyio
 
@@ -184,7 +184,7 @@ async def test_a_never_policy_answers_without_asking_anyone() -> None:
     service = ApprovalService(ctx=root)
     service.set_policy(session, "never")
     asked: list[str] = []
-    root.on("approval/request", lambda request, next_: asked.append("asked") or "allowed-once")
+    root.on("approval/request", lambda request, next_: noted(asked, "asked", "allowed-once"))
 
     assert await service.request(agent=_agent(session), tool_name="edit") == "rejected"
     assert asked == []
@@ -499,7 +499,7 @@ async def test_only_one_engine_may_hold_the_seam() -> None:
         async def compact_if_needed(self, agent: Any, trigger: Any) -> Any:
             return None
 
-        async def compact_now(self, agent: Any) -> Any:
+        async def compact_now(self, agent: Any, *, instructions: str = "") -> Any:
             return None
 
     release = seam.register(Engine())
@@ -604,8 +604,8 @@ async def test_a_persistent_runtime_must_promise_to_snapshot() -> None:
 
     class Forgetful:
         language = "python"
-        isolation = "process"
-        persistence = "namespace"
+        isolation: ClassVar[Literal["process"]] = "process"
+        persistence: ClassVar[Literal["namespace"]] = "namespace"
 
         async def run(self, request: Any) -> Any: ...
 
@@ -627,13 +627,26 @@ async def test_a_stateless_runtime_registers_freely() -> None:
 
     class Fresh:
         language = "python"
-        isolation = "process"
-        persistence = "none"
+        isolation: ClassVar[Literal["process"]] = "process"
+        persistence: ClassVar[Literal["none"]] = "none"
 
         async def run(self, request: Any) -> Any: ...
 
     seam.register(Fresh())
     assert seam.provider is not None
+
+
+def state_of(job: Job) -> JobState:
+    """This job's state, read without narrowing the attribute.
+
+    `assert job.state == "running"` narrows `job.state` to
+    `Literal["running"]` for the rest of the function, and mypy does not widen
+    it across the `await` that moves the job on — so a later
+    `assert job.state == "done"` is reported as a comparison that can never
+    hold. Going through a call gives the declared `JobState` each time, which is
+    what a test watching a job progress actually has.
+    """
+    return job.state
 
 
 @pytest.mark.parametrize("name", ["class", "await", "interface", "2fast", "has-dash", ""])
@@ -739,10 +752,10 @@ async def test_start_does_not_wait_for_the_body() -> None:
         return "eventually"
 
     job = await service.start(kind="test", label="slow", run=body)
-    assert job.state == "running", "start waited for the body"
+    assert state_of(job) == "running", "start waited for the body"
     release.set()
     await root.drain()
-    assert job.state == "done"
+    assert state_of(job) == "done"
     assert job.result == "eventually"
     assert entered.is_set()
 
@@ -875,11 +888,11 @@ async def test_cancelling_a_queued_job_stops_the_wait_and_takes_no_slot() -> Non
     first = await service.start(kind="test", label="holds", run=body, slot=("k", 1))
     queued = await service.start(kind="test", label="waits", run=body, slot=("k", 1))
     await _settled(lambda: len(ran) == 1, "the first job to take the slot")
-    assert queued.state == "queued"
+    assert state_of(queued) == "queued"
 
     service.cancel(queued.id)
     await _settled(
-        lambda: queued.state == "cancelled",
+        lambda: state_of(queued) == "cancelled",
         "the cancelled job to leave the queue while the slot is still held",
     )
     assert ran == [first.id], "a cancelled job ran anyway"
@@ -1012,10 +1025,10 @@ async def test_disposing_an_owner_stops_a_job_that_is_still_queued() -> None:
     holder = await service.start(kind="t", label="holds", run=body, slot=("k", 1), scope=owner)
     queued = await service.start(kind="t", label="waits", run=body, slot=("k", 1), scope=owner)
     await _settled(lambda: len(ran) == 1, "the first job to take the slot")
-    assert queued.state == "queued"
+    assert state_of(queued) == "queued"
 
     await owner.dispose()
-    await _settled(lambda: queued.state == "cancelled", "the queued job to be abandoned")
+    await _settled(lambda: state_of(queued) == "cancelled", "the queued job to be abandoned")
     assert ran == [holder.id], "a job whose owner went away ran anyway"
 
     gate.set()
@@ -1216,9 +1229,10 @@ def test_a_skill_name_and_a_screen_id_are_one_rule_at_two_bounds() -> None:
     # which is the claim: nothing *else* about the refusal may diverge.
     skill, screen = refuse_skill("two words"), refuse_screen("two words")
     assert skill is not None and screen is not None
-    normalize = lambda text, kind, bound: text.replace(kind, "<kind>").replace(  # noqa: E731
-        f"1..{bound}", "<bound>"
-    )
+
+    def normalize(text: str, kind: str, bound: int) -> str:
+        return text.replace(kind, "<kind>").replace(f"1..{bound}", "<bound>")
+
     assert normalize(skill, "skill name", NAME_MAX) == normalize(screen, "screen id", ID_MAX)
     assert SLUG_CHARACTERS in screen
 

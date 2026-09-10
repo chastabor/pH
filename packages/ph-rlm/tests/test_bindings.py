@@ -12,9 +12,13 @@ from collections.abc import Callable
 from typing import Any
 
 import pytest
-from conftest import BINDINGS_ROW, PROVIDER_ROW
+from rlm_fixtures import BINDINGS_ROW, PROVIDER_ROW
 from runtime_helpers import run_cell
 
+from ph.agent.types import AgentHandle
+from ph.cordis import Context
+from ph.keys import SYSTEM_PROMPT, TOOLS
+from ph.session import Session
 from ph.system_prompt.assembly import render_prompt
 from ph.tools import Deny
 from ph.tools.registry import ToolRestriction
@@ -30,13 +34,14 @@ Mounted = Callable[..., Any]
 def delegating_runtime(mounted_runtime: Mounted) -> Callable[..., Any]:
     """The real kernel plus the delegation rows, so a cell can spawn for real."""
 
-    async def build(**kwargs: Any) -> tuple[Any, Any, Any]:
-        return await mounted_runtime(
+    async def build(**kwargs: Any) -> tuple[Context, Session, AgentHandle]:
+        built: tuple[Context, Session, AgentHandle] = await mounted_runtime(
             session_id="parent",
             presentation=True,
             extra_rows=[PROVIDER_ROW, BINDINGS_ROW, *kwargs.pop("extra_rows", [])],
             **kwargs,
         )
+        return built
 
     return build
 
@@ -51,7 +56,7 @@ async def _cell(ctx: Any, program: str, *, agent: Any, session: Any, call_id: st
 async def test_the_namespace_appears_in_the_sdk_block(delegating_runtime: Mounted) -> None:
     """One SDK route per capability: the namespaced form, not the tool name."""
     ctx, _session, agent = await delegating_runtime()
-    assembly = await ctx.system_prompt.assemble(agent.ctx, agent=agent)
+    assembly = await ctx.require(SYSTEM_PROMPT).assemble(agent.ctx, agent=agent)
     text = render_prompt(assembly)
 
     assert f"{NAMESPACE}.run" in text
@@ -67,9 +72,9 @@ async def test_a_restricted_tool_leaves_the_sdk_block(delegating_runtime: Mounte
     a cell could not call — the claim the previous test's docstring used to make
     without checking."""
     ctx, _session, agent = await delegating_runtime()
-    ctx.tools.restrict(ToolRestriction(deny=frozenset({DELETE_TOOL})), scope=agent.ctx)
+    ctx.require(TOOLS).restrict(ToolRestriction(deny=frozenset({DELETE_TOOL})), scope=agent.ctx)
 
-    assembly = await ctx.system_prompt.assemble(agent.ctx, agent=agent)
+    assembly = await ctx.require(SYSTEM_PROMPT).assemble(agent.ctx, agent=agent)
     text = render_prompt(assembly)
     assert f"{NAMESPACE}.run" in text
     assert f"{NAMESPACE}.delete_subagent" not in text

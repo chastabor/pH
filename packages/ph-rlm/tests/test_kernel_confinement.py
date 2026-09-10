@@ -34,7 +34,9 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from rlm_fixtures import MountedRuntime
 
+from ph.keys import AGENTS, CODE_RUNTIME, SANDBOX, WORKSPACE
 from ph.seams.code_runtime import CodeRunRequest
 from ph.seams.sandbox import DENIED, ConfinedArgv, SandboxPolicy
 from ph.seams.sandbox_local import Bubblewrap, Seatbelt, local_backend
@@ -43,6 +45,7 @@ from ph.testing import StubSandboxProvider, report_section
 from ph_rlm.kernel.journal import OrphanJournal
 from ph_rlm.kernel.manager import Kernel, KernelLimits, PythonCodeRuntime
 from ph_rlm.kernel.venv import resolve_interpreter
+from ph_rlm.keys import PYTHON_RUNTIME
 from ph_runtime.protocol import FD_ENV
 
 pytestmark = pytest.mark.anyio
@@ -106,10 +109,10 @@ async def _agent_with_workspace(ctx: Any, session: Any, agent: Any, base: Path) 
     missing cwd fails the spawn rather than the confinement.
     """
     base.mkdir(parents=True, exist_ok=True)
-    return await ctx.workspace.acquire(session_id=session.id, agent_id=agent.id, base=base)
+    return await ctx.require(WORKSPACE).acquire(session_id=session.id, agent_id=agent.id, base=base)
 
 
-async def _confined(mounted_runtime: Any, tmp_path: Path) -> tuple[Any, Any, Any]:
+async def _confined(mounted_runtime: MountedRuntime, tmp_path: Path) -> tuple[Any, Any, Any]:
     """A mounted runtime whose kernels will really be confined, plus the agent and
     its workspace — or a skip that says why not.
 
@@ -118,22 +121,22 @@ async def _confined(mounted_runtime: Any, tmp_path: Path) -> tuple[Any, Any, Any
     whether a binary is on PATH.
     """
     ctx, session, agent = await mounted_runtime(extra_rows=[SANDBOX_ROW])
-    if ctx.sandbox.provider is None:
+    if ctx.require(SANDBOX).provider is None:
         pytest.skip("no enforcing sandbox backend on this host")
     workspace = await _agent_with_workspace(ctx, session, agent, tmp_path / "project")
     return ctx, agent, workspace
 
 
 async def test_a_kernel_is_confined_against_its_own_agents_workspace(
-    mounted_runtime: Any, tmp_path: Path
+    mounted_runtime: MountedRuntime, tmp_path: Path
 ) -> None:
     """The writable set is the agent's own workspace and scratch — `ctx.shell`'s
     policy, from the same `workspace_policy`, so a deployment cannot end up with
     `tool-bash` confined and `run_code` not."""
     ctx, session, agent = await mounted_runtime()
-    ctx.sandbox.register_provider(StubSandboxProvider())
+    ctx.require(SANDBOX).register_provider(StubSandboxProvider())
     workspace = await _agent_with_workspace(ctx, session, agent, tmp_path)
-    runtime: PythonCodeRuntime = ctx.python_runtime
+    runtime: PythonCodeRuntime = ctx.require(PYTHON_RUNTIME)
 
     confine = runtime.confiner(agent.id)
 
@@ -147,38 +150,40 @@ async def test_a_kernel_is_confined_against_its_own_agents_workspace(
 
 
 async def test_no_backend_and_no_workspace_are_both_declines_not_passthroughs(
-    mounted_runtime: Any, tmp_path: Path
+    mounted_runtime: MountedRuntime, tmp_path: Path
 ) -> None:
     """`None`, never an unwrapped argv: the seam refuses rather than pretending, so
     a kernel that cannot be bounded says so instead of looking bounded."""
     ctx, session, agent = await mounted_runtime()
-    runtime: PythonCodeRuntime = ctx.python_runtime
+    runtime: PythonCodeRuntime = ctx.require(PYTHON_RUNTIME)
 
     await _agent_with_workspace(ctx, session, agent, tmp_path)
     assert runtime.confiner(agent.id) is None, "a workspace with no backend is not confinement"
 
-    ctx.sandbox.register_provider(StubSandboxProvider())
+    ctx.require(SANDBOX).register_provider(StubSandboxProvider())
     assert runtime.confiner(agent.id) is not None, "with both, it confines"
     assert runtime.confiner("an-agent-with-no-workspace") is None
 
 
-async def test_the_runtime_asks_for_the_seam_when_a_kernel_starts(mounted_runtime: Any) -> None:
+async def test_the_runtime_asks_for_the_seam_when_a_kernel_starts(
+    mounted_runtime: MountedRuntime,
+) -> None:
     """A backend layered *after* this row still bounds the kernels it spawns —
     the reason the seam is a resolver rather than a value read at mount."""
     ctx, _session, _agent = await mounted_runtime()
-    runtime: PythonCodeRuntime = ctx.python_runtime
+    runtime: PythonCodeRuntime = ctx.require(PYTHON_RUNTIME)
     assert runtime.sandbox is not None
-    assert runtime.sandbox() is ctx.sandbox
+    assert runtime.sandbox() is ctx.require(SANDBOX)
 
 
-async def test_doctor_says_whether_cells_are_confined(mounted_runtime: Any) -> None:
+async def test_doctor_says_whether_cells_are_confined(mounted_runtime: MountedRuntime) -> None:
     """ "Are my code cells bounded" is a question asked of the tool, and the answer
     is conditional — on a backend, and on the agent having a workspace."""
     ctx, _session, _agent = await mounted_runtime()
 
     assert "no sandbox backend" in report_section(ctx, "Code runtime")["cells confined by"]
 
-    ctx.sandbox.register_provider(StubSandboxProvider())
+    ctx.require(SANDBOX).register_provider(StubSandboxProvider())
     assert report_section(ctx, "Code runtime")["cells confined by"].startswith(
         "a backend is mounted"
     )
@@ -188,7 +193,7 @@ async def test_doctor_says_whether_cells_are_confined(mounted_runtime: Any) -> N
 
 
 async def test_a_cell_cannot_write_an_absolute_path_outside_its_workspace(
-    mounted_runtime: Any, tmp_path: Path
+    mounted_runtime: MountedRuntime, tmp_path: Path
 ) -> None:
     """**The gate.** A cell's raw `open()` on an absolute path is refused by the
     kernel and the host file is untouched — the one thing `worktree` cannot do
@@ -212,7 +217,7 @@ async def test_a_cell_cannot_write_an_absolute_path_outside_its_workspace(
 
 
 async def test_a_confined_kernel_reports_the_backend_that_bounds_it(
-    mounted_runtime: Any, tmp_path: Path
+    mounted_runtime: MountedRuntime, tmp_path: Path
 ) -> None:
     """`ph doctor` names it, read from the kernels actually running rather than
     from what would be true."""
@@ -221,17 +226,17 @@ async def test_a_confined_kernel_reports_the_backend_that_bounds_it(
     assert (await _run_cell(ctx, agent.id, "x = 1")).error is None
 
     confined = report_section(ctx, "Code runtime")["cells confined by"]
-    assert confined.startswith(f"{ctx.sandbox.provider.backend} —"), confined
+    assert confined.startswith(f"{ctx.require(SANDBOX).provider.backend} —"), confined
 
 
 async def _run_cell(ctx: Any, agent_id: str, program: str) -> Any:
     """One cell in this agent's own namespace — which *is* the agent id, so the
     kernel it reaches is the one confined against that agent's workspace."""
-    return await ctx.code_runtime.run(CodeRunRequest(program=program, namespace=agent_id))
+    return await ctx.require(CODE_RUNTIME).run(CodeRunRequest(program=program, namespace=agent_id))
 
 
 async def test_a_cell_refused_by_the_kernel_leaves_the_same_record_bash_would(
-    mounted_runtime: Any, tmp_path: Path
+    mounted_runtime: MountedRuntime, tmp_path: Path
 ) -> None:
     """The seam's rule — a refusal is a record, not a silence — reaches cells.
 
@@ -243,7 +248,7 @@ async def test_a_cell_refused_by_the_kernel_leaves_the_same_record_bash_would(
     it is refusing.
     """
     ctx, agent, _workspace = await _confined(mounted_runtime, tmp_path)
-    session = ctx.agents.get(agent.id).session
+    session = ctx.require(AGENTS).get(agent.id).session
     outside = tmp_path / "nope.txt"
 
     refused = await _run_cell(ctx, agent.id, f"open({str(outside)!r}, 'w').write('x')")
@@ -258,12 +263,12 @@ async def test_a_cell_refused_by_the_kernel_leaves_the_same_record_bash_would(
 
 
 async def test_a_cell_that_merely_prints_the_words_is_not_a_refusal(
-    mounted_runtime: Any, tmp_path: Path
+    mounted_runtime: MountedRuntime, tmp_path: Path
 ) -> None:
     """`report_denial`'s own requirement, from this caller: a run that succeeded was
     refused nothing, whatever it printed."""
     ctx, agent, _workspace = await _confined(mounted_runtime, tmp_path)
-    session = ctx.agents.get(agent.id).session
+    session = ctx.require(AGENTS).get(agent.id).session
 
     ran = await _run_cell(ctx, agent.id, "print('Read-only file system')")
 
@@ -297,7 +302,7 @@ async def test_the_signal_route_follows_the_backend_not_whether_it_confined(
         limits=KernelLimits(),
         journal=OrphanJournal(path=tmp_path / "processes.jsonl"),
     )
-    kernel._process = _FakeProcess(signalled)
+    setattr(kernel, "_process", _FakeProcess(signalled))  # noqa: B010
     kernel.confined = ConfinedArgv(
         argv=("python",), enforcement="full", backend="stub", forwards_signals=forwards
     )

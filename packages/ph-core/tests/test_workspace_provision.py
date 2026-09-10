@@ -87,7 +87,7 @@ def test_a_path_that_is_not_relative_is_refused_at_config_load(field: str, raw: 
     fields = {"source": ".env", field: raw}
 
     with pytest.raises(ValidationError):
-        ProvisionEntry(**fields)
+        ProvisionEntry(**fields)  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize(

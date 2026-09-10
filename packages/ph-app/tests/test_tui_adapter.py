@@ -19,6 +19,7 @@ import pytest
 
 from ph.agent.types import AgentOptions
 from ph.cordis import Context
+from ph.keys import AGENTS, LLM, SESSIONS, TOOLS
 from ph.llm.adapter import ResolvedModel
 from ph.llm.types import (
     BlockEnd,
@@ -34,7 +35,7 @@ from ph.llm.types import (
 )
 from ph.session import Session, SessionEvent, SurfaceIntent, SurfaceReplace
 from ph.session.known_event_types import KNOWN_SESSION_EVENT_TYPES
-from ph.testing import assistant_payload, plugin_payload, simple_tool, user_payload
+from ph.testing import MountProfile, assistant_payload, plugin_payload, simple_tool, user_payload
 from ph_app.tui.adapter import HANDLERS, RECORDLESS, REPLAY, TuiEventAdapter
 from ph_app.tui.state import TuiState
 
@@ -80,7 +81,7 @@ def _replay(session: Session) -> TuiState:
     return TuiEventAdapter().replay(session)
 
 
-async def _drive(mount: Any, *, prompt: str = "hello there") -> tuple[TuiState, Session]:
+async def _drive(mount: MountProfile, *, prompt: str = "hello there") -> tuple[TuiState, Session]:
     """Run one prompt with a tool registered, collecting the live transcript."""
     ctx: Context = await mount()
     live = TuiEventAdapter(tools=ctx.get("tools"))
@@ -89,22 +90,22 @@ async def _drive(mount: Any, *, prompt: str = "hello there") -> tuple[TuiState, 
         live.apply(event)
 
     ctx.on("session/event", observe)
-    ctx.tools.register(simple_tool("ping", lambda _args, _run: "pong"))
-    ctx.llm.register_adapter(("scripted",), _CallsThenAnswers())
-    session = ctx.sessions.create("tui-gate")
-    agent = ctx.agents.create(session, SCRIPTED)
+    ctx.require(TOOLS).register(simple_tool("ping", lambda _args, _run: "pong"))
+    ctx.require(LLM).register_adapter(("scripted",), _CallsThenAnswers())
+    session = ctx.require(SESSIONS).create("tui-gate")
+    agent = ctx.require(AGENTS).create(session, SCRIPTED)
     await agent.prompt(prompt)
     return live.state, session
 
 
-async def test_replay_and_live_agree(mount: Any) -> None:
+async def test_replay_and_live_agree(mount: MountProfile) -> None:
     live_state, session = await _drive(mount)
     # Non-trivial: the prompt, the tool card, and the answer.
     assert [role for role, _ in _shape(live_state)] == ["user", "tool", "assistant"]
     assert _shape(_replay(session)) == _shape(live_state)
 
 
-async def test_the_tool_card_settles_the_same_way_on_replay(mount: Any) -> None:
+async def test_the_tool_card_settles_the_same_way_on_replay(mount: MountProfile) -> None:
     live_state, session = await _drive(mount)
     replayed = _replay(session)
     live_card = next(item.tool for item in live_state.items if item.tool is not None)
@@ -115,12 +116,12 @@ async def test_the_tool_card_settles_the_same_way_on_replay(mount: Any) -> None:
     assert live_card.body == replayed_card.body
 
 
-async def test_the_user_prompt_reaches_the_transcript(mount: Any) -> None:
+async def test_the_user_prompt_reaches_the_transcript(mount: MountProfile) -> None:
     live_state, _ = await _drive(mount, prompt="hello there")
     assert ("user", "hello there") in _shape(live_state)
 
 
-async def test_bracketed_text_is_carried_verbatim(mount: Any) -> None:
+async def test_bracketed_text_is_carried_verbatim(mount: MountProfile) -> None:
     """Markup is never parsed on the way in — the widgets do that check too."""
     typed = "run foo[0] and [bold]not bold[/bold]"
     live_state, session = await _drive(mount, prompt=typed)
@@ -128,9 +129,9 @@ async def test_bracketed_text_is_carried_verbatim(mount: Any) -> None:
     assert ("user", typed) in _shape(_replay(session))
 
 
-async def test_a_malformed_event_costs_one_row_not_the_transcript(mount: Any) -> None:
+async def test_a_malformed_event_costs_one_row_not_the_transcript(mount: MountProfile) -> None:
     ctx: Context = await mount()
-    session = ctx.sessions.create("tui-malformed")
+    session = ctx.require(SESSIONS).create("tui-malformed")
     adapter = TuiEventAdapter()
     session.append("user/message", {"content": "not a block list"}, SurfaceIntent("append"))
     session.append("tool/result", {"message": None}, SurfaceIntent("append"))
@@ -140,7 +141,7 @@ async def test_a_malformed_event_costs_one_row_not_the_transcript(mount: Any) ->
     assert isinstance(adapter.state.items, list)
 
 
-async def test_an_unknown_event_type_is_ignored(mount: Any) -> None:
+async def test_an_unknown_event_type_is_ignored(mount: MountProfile) -> None:
     adapter = TuiEventAdapter()
     adapter.apply(
         SessionEvent.from_wire(
@@ -150,14 +151,14 @@ async def test_an_unknown_event_type_is_ignored(mount: Any) -> None:
     assert adapter.state.items == []
 
 
-async def test_compaction_marks_what_it_replaced_and_keeps_it(mount: Any) -> None:
+async def test_compaction_marks_what_it_replaced_and_keeps_it(mount: MountProfile) -> None:
     """The gate's other half: a compacted range is dimmed, never dropped.
 
     Rebuilding from `derive_messages()` would delete these rows, because that is
     the model's view and the summary shadows them there.
     """
     ctx: Context = await mount()
-    session = ctx.sessions.create("tui-compaction")
+    session = ctx.require(SESSIONS).create("tui-compaction")
     first = session.append(
         "user/message", user_payload("the original question", "m1"), SurfaceIntent("append")
     )
@@ -189,7 +190,7 @@ async def test_compaction_marks_what_it_replaced_and_keeps_it(mount: Any) -> Non
 
 
 async def test_an_argument_truncation_does_not_add_a_second_assistant_row(
-    mount: Any,
+    mount: MountProfile,
 ) -> None:
     """Argument truncation (P4-03) rewrites an old assistant message in place.
 
@@ -200,7 +201,7 @@ async def test_an_argument_truncation_does_not_add_a_second_assistant_row(
     was elided.
     """
     ctx: Context = await mount()
-    session = ctx.sessions.create("tui-truncated")
+    session = ctx.require(SESSIONS).create("tui-truncated")
     original = session.append(
         "assistant/message",
         {
@@ -223,7 +224,7 @@ async def test_an_argument_truncation_does_not_add_a_second_assistant_row(
 
 
 async def test_a_truncation_replacement_does_not_reset_the_token_footer(
-    mount: Any,
+    mount: MountProfile,
 ) -> None:
     """The other half of the same hazard, and the one a reader would not guess.
 
@@ -233,7 +234,7 @@ async def test_a_truncation_replacement_does_not_reset_the_token_footer(
     engine avoids by dropping `usage` from the replacement.
     """
     ctx: Context = await mount()
-    session = ctx.sessions.create("tui-truncated-usage")
+    session = ctx.require(SESSIONS).create("tui-truncated-usage")
     old = session.append(
         "assistant/message",
         {**assistant_payload("first", "a1"), "usage": {"inputTokens": 100, "outputTokens": 0}},
@@ -256,11 +257,11 @@ async def test_a_truncation_replacement_does_not_reset_the_token_footer(
     assert adapter.state.tokens == 900
 
 
-async def test_truncated_arguments_are_announced(mount: Any) -> None:
+async def test_truncated_arguments_are_announced(mount: MountProfile) -> None:
     """The tool cards above still show the arguments as sent, so this notice is
     the only place the transcript can say the model is no longer shown them."""
     ctx: Context = await mount()
-    session = ctx.sessions.create("tui-truncation-notice")
+    session = ctx.require(SESSIONS).create("tui-truncation-notice")
     session.append(
         "compaction/args-truncated",
         {"trigger": "pressure", "seqs": [3, 7], "savedChars": 41_000},
@@ -274,7 +275,7 @@ async def test_truncated_arguments_are_announced(mount: Any) -> None:
     assert "41000" in row.text
 
 
-async def test_a_declined_compaction_is_a_notice(mount: Any) -> None:
+async def test_a_declined_compaction_is_a_notice(mount: MountProfile) -> None:
     """A compaction that did not happen leaves no row of its own.
 
     Its successful sibling does — the summary the replacement carries — which is
@@ -283,7 +284,7 @@ async def test_a_declined_compaction_is_a_notice(mount: Any) -> None:
     thing they may see is a turn ending in a provider refusal.
     """
     ctx: Context = await mount()
-    session = ctx.sessions.create("tui-declined")
+    session = ctx.require(SESSIONS).create("tui-declined")
     session.append(
         "compaction/declined",
         {"trigger": "overflow", "code": "summary", "reason": "the summarize call failed"},
@@ -296,7 +297,7 @@ async def test_a_declined_compaction_is_a_notice(mount: Any) -> None:
     assert "the summarize call failed" in row.text
 
 
-async def test_a_plugins_replacement_is_not_called_a_compaction(mount: Any) -> None:
+async def test_a_plugins_replacement_is_not_called_a_compaction(mount: MountProfile) -> None:
     """A surface `replace` is a mechanism, not a cause (P4-02).
 
     `input-offload` is the first row to substitute on the surface for a reason
@@ -307,7 +308,7 @@ async def test_a_plugins_replacement_is_not_called_a_compaction(mount: Any) -> N
     — and the shadowing, which *is* the mechanism, applies either way.
     """
     ctx: Context = await mount()
-    session = ctx.sessions.create("tui-offload")
+    session = ctx.require(SESSIONS).create("tui-offload")
     pasted = session.append(
         "user/message", user_payload("a two megabyte paste", "m1"), SurfaceIntent("append")
     )
@@ -332,7 +333,7 @@ async def test_a_plugins_replacement_is_not_called_a_compaction(mount: Any) -> N
     assert ("user", True) in roles, "the paste is still there, dimmed — the mechanism holds"
 
 
-async def test_usage_feeds_the_context_gauge(mount: Any) -> None:
+async def test_usage_feeds_the_context_gauge(mount: MountProfile) -> None:
     """The gauge reads the provider's count from `assistant/message.usage`."""
     live_state, session = await _drive(mount)
     assert live_state.tokens > 0
@@ -341,7 +342,7 @@ async def test_usage_feeds_the_context_gauge(mount: Any) -> None:
     assert _replay(session).tokens == live_state.tokens
 
 
-async def test_a_refinement_says_what_changed(mount: Any) -> None:
+async def test_a_refinement_says_what_changed(mount: MountProfile) -> None:
     """A refinement changes the model's own prompt, so it is a row, not a record.
 
     `/refine` is only one way here — the planner refines at turn end with no
@@ -349,7 +350,7 @@ async def test_a_refinement_says_what_changed(mount: Any) -> None:
     to know why the next turn behaves differently.
     """
     ctx: Context = await mount()
-    session = ctx.sessions.create("tui-harness")
+    session = ctx.require(SESSIONS).create("tui-harness")
     session.append(
         "harness/refined",
         {
@@ -376,11 +377,11 @@ async def test_a_refinement_says_what_changed(mount: Any) -> None:
     assert "Rolled back refine-1" in rolled
 
 
-async def test_a_corpus_is_a_row_only_when_it_changed(mount: Any) -> None:
+async def test_a_corpus_is_a_row_only_when_it_changed(mount: MountProfile) -> None:
     """The ordinary load is already described in the system prompt; what is news
     is the corpus having changed under a conversation that was told about it."""
     ctx: Context = await mount()
-    session = ctx.sessions.create("tui-context")
+    session = ctx.require(SESSIONS).create("tui-context")
     session.append("context/loaded", {"corpus": "notes", "digest": "a", "note": ""})
     session.append(
         "context/loaded",

@@ -20,6 +20,7 @@ from typing import Any
 import pytest
 from runtime_helpers import run_cell
 
+from ph.keys import AGENTS, CODE_RUNTIME, FS, SESSIONS, SYSTEM_PROMPT, TOOLS, WORKSPACE
 from ph.testing import FAKE_OPTIONS, StubWorkspaceProvider, run_tool, simple_tool
 from ph.tools.registry import RUN_CODE
 
@@ -32,7 +33,7 @@ async def test_the_runtime_registers_as_the_code_runtime_provider(
     mounted_runtime: Mounted,
 ) -> None:
     ctx, _session, _agent = await mounted_runtime(snapshots=False)
-    provider = ctx.code_runtime.require()
+    provider = ctx.require(CODE_RUNTIME).require()
     assert provider.language == "python"
     assert provider.isolation == "process"
     assert provider.persistence == "namespace"
@@ -54,7 +55,7 @@ async def test_each_binding_call_is_its_own_governed_dispatch(mounted_runtime: M
     would have been one `tool/call` and one `tool/result`.
     """
     ctx, session, agent = await mounted_runtime(snapshots=False)
-    ctx.tools.register(simple_tool("ping", lambda _args, _run: "pong"))
+    ctx.require(TOOLS).register(simple_tool("ping", lambda _args, _run: "pong"))
 
     result = await run_cell(
         ctx,
@@ -87,7 +88,7 @@ async def test_dispatch_records_are_log_only(mounted_runtime: Mounted) -> None:
     replaced.
     """
     ctx, session, agent = await mounted_runtime(snapshots=False)
-    ctx.tools.register(simple_tool("ping", lambda _args, _run: "pong"))
+    ctx.require(TOOLS).register(simple_tool("ping", lambda _args, _run: "pong"))
     await run_cell(ctx, "await tools.ping()", agent=agent, session=session)
 
     rendered = repr([message.to_wire() for message in session.derive_messages()])
@@ -97,7 +98,7 @@ async def test_dispatch_records_are_log_only(mounted_runtime: Mounted) -> None:
 
 async def test_a_tools_result_reaches_the_program(mounted_runtime: Mounted) -> None:
     ctx, session, agent = await mounted_runtime(snapshots=False)
-    ctx.tools.register(simple_tool("echo", lambda args, _run: f"heard {args.get('what')}"))
+    ctx.require(TOOLS).register(simple_tool("echo", lambda args, _run: f"heard {args.get('what')}"))
     result = await run_cell(
         ctx, "reply = await tools.echo(what='you')\nreply", agent=agent, session=session
     )
@@ -116,8 +117,8 @@ async def test_the_namespace_is_the_agent_and_persists_between_calls(
 
 async def test_two_agents_do_not_share_a_namespace(mounted_runtime: Mounted) -> None:
     ctx, first_session, first = await mounted_runtime(session_id="agent-one", snapshots=False)
-    second_session = ctx.sessions.create("agent-two")
-    second = ctx.agents.create(second_session, FAKE_OPTIONS)
+    second_session = ctx.require(SESSIONS).create("agent-two")
+    second = ctx.require(AGENTS).create(second_session, FAKE_OPTIONS)
 
     await run_cell(ctx, "mine = 'first'", agent=first, session=first_session)
     result = await run_cell(ctx, "'mine' in dir()", agent=second, session=second_session)
@@ -131,8 +132,8 @@ async def test_the_sdk_section_lists_the_bindings(mounted_runtime: Mounted) -> N
     that no longer exists.
     """
     ctx, _session, agent = await mounted_runtime(snapshots=False)
-    ctx.tools.register(simple_tool("ping", lambda _args, _run: "pong"))
-    assembly = await ctx.system_prompt.assemble(agent.ctx, agent=agent)
+    ctx.require(TOOLS).register(simple_tool("ping", lambda _args, _run: "pong"))
+    assembly = await ctx.require(SYSTEM_PROMPT).assemble(agent.ctx, agent=agent)
     text = "\n".join(body for _name, body in assembly.sections)
     assert "tools.ping" in text
     # And the rule that only the transport may be called directly (C6's prompt half).
@@ -142,7 +143,7 @@ async def test_the_sdk_section_lists_the_bindings(mounted_runtime: Mounted) -> N
 async def test_a_native_call_under_code_mode_is_refused(mounted_runtime: Mounted) -> None:
     """C6, with the runtime mounted: the denial names the route back."""
     ctx, session, agent = await mounted_runtime(snapshots=False)
-    ctx.tools.register(simple_tool("ping", lambda _args, _run: "pong"))
+    ctx.require(TOOLS).register(simple_tool("ping", lambda _args, _run: "pong"))
     result = await run_tool(ctx, "ping", agent=agent, session=session, call_id="native-1")
     assert result.is_error is True
     assert RUN_CODE in repr(result.content) or "run_code" in repr(result.error)
@@ -156,7 +157,7 @@ async def test_the_kernel_closes_when_the_agent_is_disposed(mounted_runtime: Mou
     assert agent.id in runtime._kernels  # the kernel table is the subject
 
     # Disposal unwinds the agent's scope, and the kernel is an effect of it.
-    await ctx.agents.dispose(agent.id)
+    await ctx.require(AGENTS).dispose(agent.id)
     assert agent.id not in runtime._kernels
 
 
@@ -181,15 +182,15 @@ async def test_a_cell_runs_inside_the_agents_workspace(
     """
     ctx, session, agent = await mounted_runtime(snapshots=False)
     scratch = tmp_path / "scratch"
-    ctx.workspace.register_provider(
+    ctx.require(WORKSPACE).register_provider(
         StubWorkspaceProvider(
             root=tmp_path / "trees", env={"PYTHONPYCACHEPREFIX": str(scratch / "pycache")}
         )
     )
-    await ctx.workspace.acquire(
-        session_id=session.id, agent_id=agent.id, base=ctx.fs.root, session=session
+    await ctx.require(WORKSPACE).acquire(
+        session_id=session.id, agent_id=agent.id, base=ctx.require(FS).root, session=session
     )
-    root = ctx.workspace.of(agent.id).root
+    root = ctx.require(WORKSPACE).of(agent.id).root
 
     result = await run_cell(
         ctx,

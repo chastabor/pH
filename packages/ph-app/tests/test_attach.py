@@ -20,8 +20,10 @@ from typing import Any
 
 import pytest
 
+from ph.keys import AGENTS, ATTACHMENTS, LLM_FAKE, SESSIONS
 from ph.llm.types import attachment_of, text_of
 from ph.session import Session, thaw_json
+from ph.session.json import as_seq
 from ph_app.attach import AttachmentUnavailable, ingest, prompt_message
 from ph_app.modes import run_print
 from ph_app.profiles import compose_profile
@@ -91,12 +93,12 @@ async def test_the_attachment_is_stored_and_carried_on_the_message(
         (ref,) = _media_blocks(session)
         assert ref.name == "diagram.png"
         assert ref.mime == "image/png"
-        assert await ctx.attachments.load_bytes(ref) == PNG
+        assert await ctx.require(ATTACHMENTS).load_bytes(ref) == PNG
         # The *loop* built a message carrying the block — which is the half this
         # row adds. What the fake route then received is a pointer, because it
         # declares no media; that is `media-degrade`'s doing and is asserted
         # separately below.
-        (request,) = [one for one in ctx.llm_fake.requests if one.is_loop_request]
+        (request,) = [one for one in ctx.require(LLM_FAKE).requests if one.is_loop_request]
         assert not any(attachment_of(block) is not None for block in request.messages[0].content)
         assert "was not sent" in text_of(request.messages[0].content)
 
@@ -117,7 +119,7 @@ async def test_the_same_file_attached_twice_stores_one_blob(
         session_id="twice",
         attachments=[first, second],
     ) as (ctx, _session):
-        assert len(list(ctx.attachments.root.iterdir())) == 1
+        assert len(list(ctx.require(ATTACHMENTS).root.iterdir())) == 1
 
 
 # ----------------------------------------------------------------- refusing --
@@ -145,7 +147,9 @@ async def test_a_route_that_cannot_read_it_says_so_three_ways(
         attachments=[source],
     ) as (_ctx, session):
         (degraded,) = [one for one in session.events if one.type == "attachment/degraded"]
-        assert list(degraded.data["attachmentIds"]) == [_media_blocks(session)[0].attachment_id]
+        assert list(as_seq(degraded.data["attachmentIds"])) == [
+            _media_blocks(session)[0].attachment_id
+        ]
         assert "does not accept" in json.dumps(thaw_json(degraded.data))
         # Ignorable: the model read a pointer, and that rides the `user/message`
         # it was already carried by.
@@ -163,9 +167,9 @@ async def test_the_refusal_is_recorded_once_not_once_per_step(
 
     source = _attach(tmp_path)
     async with mounted(compose_profile("headless")) as ctx:
-        session = ctx.sessions.create("repeat")
+        session = ctx.require(SESSIONS).create("repeat")
         refs = await ingest(ctx, [source])
-        agent = ctx.agents.create(session, AgentOptions(provider="fake", model="fake-1"))
+        agent = ctx.require(AGENTS).create(session, AgentOptions(provider="fake", model="fake-1"))
         agent.followup(prompt_message("look", refs))
         await agent.run()
         await agent.prompt("and again")

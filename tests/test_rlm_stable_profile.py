@@ -28,8 +28,10 @@ from typing import Any
 import pytest
 
 from ph.cordis import DEPLOYMENT, Profile
-from ph.testing import FAKE_OPTIONS, run_tool
+from ph.keys import AGENTS, APPROVAL, CONTAINMENT, SESSIONS, TOOLS
+from ph.testing import FAKE_OPTIONS, MountProfile, run_tool
 from ph_app.profiles import available_profiles, resolve_profile
+from ph_stabilize.permissions_fs import FS_PERMISSIONS
 
 pytestmark = pytest.mark.anyio
 
@@ -93,26 +95,26 @@ def test_the_human_gate_names_calls_rather_than_everything() -> None:
     assert "edit" not in gated["run_code"]["allowedDecisions"]
 
 
-async def test_the_profile_boots_and_runs_a_turn(mount: Any) -> None:
+async def test_the_profile_boots_and_runs_a_turn(mount: MountProfile) -> None:
     """The gate. Mounted through the real resolution, so a row that cannot
     activate beside the other bundle's rows fails here rather than at a user's
     first prompt."""
     ctx = await mount(profile=resolve_profile(PROFILE))
-    session = ctx.sessions.create("stable")
-    agent = ctx.agents.create(session, FAKE_OPTIONS)
+    session = ctx.require(SESSIONS).create("stable")
+    agent = ctx.require(AGENTS).create(session, FAKE_OPTIONS)
 
     await agent.prompt("hello")
 
     assert [event.type for event in session.events].count("turn/start") == 1
     # A live tool, not just composed config: `tool-todo` is the row that ships
     # disabled, so its tool existing is the flip having actually taken effect.
-    assert ctx.tools.get("write_todos", scope=DEPLOYMENT) is not None
+    assert ctx.require(TOOLS).get("write_todos", scope=DEPLOYMENT) is not None
     # And both bundles' postures survived meeting each other.
-    assert ctx.fs_permissions.rules, "the stabilize write scope is not in force"
-    assert ctx.containment.for_role(child=True) == "worktree"
+    assert ctx.require(FS_PERMISSIONS).rules, "the stabilize write scope is not in force"
+    assert ctx.require(CONTAINMENT).for_role(child=True) == "worktree"
 
 
-async def test_the_human_gate_fires_on_the_renamed_transport(mount: Any) -> None:
+async def test_the_human_gate_fires_on_the_renamed_transport(mount: MountProfile) -> None:
     """The claim the first draft of this file could not make.
 
     A profile writes `run_code` because that is the *reserved* transport name,
@@ -122,14 +124,14 @@ async def test_the_human_gate_fires_on_the_renamed_transport(mount: Any) -> None
     reads the YAML back passes, and nothing ever asks.
     """
     ctx = await mount(profile=resolve_profile(PROFILE))
-    session = ctx.sessions.create("gated")
-    agent = ctx.agents.create(session, FAKE_OPTIONS)
+    session = ctx.require(SESSIONS).create("gated")
+    agent = ctx.require(AGENTS).create(session, FAKE_OPTIONS)
     asked: list[str] = []
-    ctx.approval.register_answerer(
+    ctx.require(APPROVAL).register_answerer(
         lambda request, next_: asked.append(request.tool_name) or "rejected"  # type: ignore[func-returns-value]
     )
 
-    assert ctx.tools.view(DEPLOYMENT).transport_name == "ipython", (
+    assert ctx.require(TOOLS).view(DEPLOYMENT).transport_name == "ipython", (
         "the premise of this test changed"
     )
     await run_tool(ctx, "ipython", {"code": "import subprocess"}, agent=agent, session=session)
@@ -137,14 +139,14 @@ async def test_the_human_gate_fires_on_the_renamed_transport(mount: Any) -> None
     assert asked, "the gate never fired: the rule is keyed to a name nothing presents"
 
 
-async def test_an_ordinary_program_is_not_gated(mount: Any) -> None:
+async def test_an_ordinary_program_is_not_gated(mount: MountProfile) -> None:
     """The other half, and the reason the rule carries a condition: a gate that
     asks about every cell is one a person learns to approve without reading."""
     ctx = await mount(profile=resolve_profile(PROFILE))
-    session = ctx.sessions.create("ungated")
-    agent = ctx.agents.create(session, FAKE_OPTIONS)
+    session = ctx.require(SESSIONS).create("ungated")
+    agent = ctx.require(AGENTS).create(session, FAKE_OPTIONS)
     asked: list[str] = []
-    ctx.approval.register_answerer(
+    ctx.require(APPROVAL).register_answerer(
         lambda request, next_: asked.append(request.tool_name) or "rejected"  # type: ignore[func-returns-value]
     )
 

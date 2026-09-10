@@ -20,15 +20,17 @@ import pytest
 from stabilize_helpers import PROFILE, bash_call, result_text, run_tool_calls, todo_call
 
 from ph.cordis import DEPLOYMENT, Context, Profile, load_profile_documents
+from ph.keys import SESSIONS, SYSTEM_PROMPT, TOOLS
 from ph.llm.types import ToolCallBlock
 from ph.session import Session
+from ph.session.json import as_obj, as_seq
 from ph.session.known_event_types import KNOWN_SESSION_EVENT_TYPES
 from ph.system_prompt.assembly import (
     join_context_sections,
     render_context_sections,
     render_prompt,
 )
-from ph.testing import StubAgent
+from ph.testing import MountProfile, StubAgent
 from ph_stabilize import BUNDLE
 from ph_stabilize.todo import (
     MAX_TODO_CONTENT,
@@ -116,7 +118,7 @@ async def test_every_enabled_row_in_the_profile_activates(
         await ctx.dispose()
 
 
-async def test_the_row_is_opt_in(mount: Any) -> None:
+async def test_the_row_is_opt_in(mount: MountProfile) -> None:
     """Layering the bundle does not, by itself, hand the model a tool.
 
     `disabled: true` in the bundle, flipped by the profile that wants it — the
@@ -125,23 +127,23 @@ async def test_the_row_is_opt_in(mount: Any) -> None:
     *other* stabilization row would make the comment beside it a lie.
     """
     without = await mount(profile=PROFILE)
-    assert without.tools.get(TOOL_NAME, scope=DEPLOYMENT) is None
+    assert without.require(TOOLS).get(TOOL_NAME, scope=DEPLOYMENT) is None
 
     enabled = await mount(ENABLED, profile=PROFILE)
-    assert enabled.tools.get(TOOL_NAME, scope=DEPLOYMENT) is not None
+    assert enabled.require(TOOLS).get(TOOL_NAME, scope=DEPLOYMENT) is not None
 
 
 # ------------------------------------------------------------------ the list --
 
 
-async def test_the_list_is_written_to_the_log_and_nowhere_else(mount: Any) -> None:
+async def test_the_list_is_written_to_the_log_and_nowhere_else(mount: MountProfile) -> None:
     """The storage design: a fold, not a table.
 
     That is what makes the list survive a resume and a fork for free, and what
     keeps the sidebar and the model's view one projection rather than two.
     """
     ctx = await mount(ENABLED, profile=PROFILE)
-    session = ctx.sessions.create("planning")
+    session = ctx.require(SESSIONS).create("planning")
 
     await _run(
         ctx, session, todo_call("c1", _todos(("survey", "in_progress"), ("port", "pending")))
@@ -152,10 +154,10 @@ async def test_the_list_is_written_to_the_log_and_nowhere_else(mount: Any) -> No
     assert _plan(session) == [("survey", "in_progress"), ("port", "pending")]
 
 
-async def test_a_second_call_replaces_the_whole_list(mount: Any) -> None:
+async def test_a_second_call_replaces_the_whole_list(mount: MountProfile) -> None:
     """Whole-list replacement, which is why two calls in one turn are ambiguous."""
     ctx = await mount(ENABLED, profile=PROFILE)
-    session = ctx.sessions.create("planning")
+    session = ctx.require(SESSIONS).create("planning")
 
     await _run(ctx, session, todo_call("c1", _todos(("survey", "in_progress"))))
     await _run(
@@ -169,7 +171,7 @@ async def test_a_second_call_replaces_the_whole_list(mount: Any) -> None:
 # ------------------------------------------------------------------- bounded --
 
 
-async def test_a_runaway_entry_is_refused_and_writes_nothing(mount: Any) -> None:
+async def test_a_runaway_entry_is_refused_and_writes_nothing(mount: MountProfile) -> None:
     """The list is the one model-written string that rides *every* later prompt.
 
     It is a `context`, rebuilt each turn, and once compaction has shadowed the
@@ -186,24 +188,24 @@ async def test_a_runaway_entry_is_refused_and_writes_nothing(mount: Any) -> None
     the prompt of every turn that follows.
     """
     ctx = await mount(ENABLED, profile=PROFILE)
-    session = ctx.sessions.create("runaway")
+    session = ctx.require(SESSIONS).create("runaway")
 
     await _run(ctx, session, todo_call("c1", _todos(("x" * (MAX_TODO_CONTENT + 1), "pending"))))
 
     assert todos_of(session) == [], "nothing was written"
     result = session.latest("tool/result")
     assert result is not None
-    assert result.data["message"]["content"][0]["isError"] is True
+    assert as_obj(as_seq(as_obj(result.data["message"])["content"])[0])["isError"] is True
 
 
-async def test_a_list_longer_than_the_cap_is_refused(mount: Any) -> None:
+async def test_a_list_longer_than_the_cap_is_refused(mount: MountProfile) -> None:
     """The count bounds the product: entries inside the length limit still add up.
 
     Well past any real plan — upstream's own guidance is to skip the tool
     entirely when the work is "a few tool calls".
     """
     ctx = await mount(ENABLED, profile=PROFILE)
-    session = ctx.sessions.create("too-many")
+    session = ctx.require(SESSIONS).create("too-many")
 
     over = tuple((f"step {n}", "pending") for n in range(MAX_TODOS + 1))
     await _run(ctx, session, todo_call("c1", _todos(*over)))
@@ -231,7 +233,7 @@ def _with(content: str, status: str, requires: list[str]) -> dict[str, Any]:
     return {"content": content, "status": status, "requires": requires}
 
 
-async def test_a_plan_states_its_own_dependencies(mount: Any) -> None:
+async def test_a_plan_states_its_own_dependencies(mount: MountProfile) -> None:
     """**P7-16's first half.** The fork from langchain, and what it buys.
 
     Upstream's schema is `{content, status}`, and the absence of dependencies is
@@ -241,7 +243,7 @@ async def test_a_plan_states_its_own_dependencies(mount: Any) -> None:
     the convention could only gesture at: what is actually startable now.
     """
     ctx = await mount(ENABLED, profile=PROFILE)
-    session = ctx.sessions.create("ordered")
+    session = ctx.require(SESSIONS).create("ordered")
 
     await _run(
         ctx,
@@ -264,7 +266,7 @@ async def test_a_plan_states_its_own_dependencies(mount: Any) -> None:
     assert "(waiting on: write the seam)" in render_todo_list(todos_of(session))
 
 
-async def test_a_dependency_on_nothing_is_refused(mount: Any) -> None:
+async def test_a_dependency_on_nothing_is_refused(mount: MountProfile) -> None:
     """A reference the list cannot satisfy is a plan error, not a silent no-op.
 
     Sabotage: drop the membership check and the entry waits forever on a name
@@ -272,7 +274,7 @@ async def test_a_dependency_on_nothing_is_refused(mount: Any) -> None:
     nothing saying why.
     """
     ctx = await mount(ENABLED, profile=PROFILE)
-    session = ctx.sessions.create("dangling")
+    session = ctx.require(SESSIONS).create("dangling")
 
     await _run(
         ctx, session, todo_call("c1", [_with("gate it", "pending", ["a step I never wrote"])])
@@ -282,7 +284,7 @@ async def test_a_dependency_on_nothing_is_refused(mount: Any) -> None:
     assert "not in the list" in result_text(session, "c1")
 
 
-async def test_a_cycle_is_refused(mount: Any) -> None:
+async def test_a_cycle_is_refused(mount: MountProfile) -> None:
     """An unsatisfiable plan, caught where the model can still fix it.
 
     Playbooks' own `ResolveStepOrder` only guards its recursion with a visited
@@ -291,7 +293,7 @@ async def test_a_cycle_is_refused(mount: Any) -> None:
     wrote by mistake.
     """
     ctx = await mount(ENABLED, profile=PROFILE)
-    session = ctx.sessions.create("cyclic")
+    session = ctx.require(SESSIONS).create("cyclic")
 
     await _run(
         ctx,
@@ -303,7 +305,7 @@ async def test_a_cycle_is_refused(mount: Any) -> None:
     assert "cycle" in result_text(session, "c1")
 
 
-async def test_an_entry_that_waits_on_itself_is_the_one_node_cycle(mount: Any) -> None:
+async def test_an_entry_that_waits_on_itself_is_the_one_node_cycle(mount: MountProfile) -> None:
     """Caught by the cycle walk rather than by a rule of its own.
 
     A separate self-reference check was one more branch saying what the DFS
@@ -311,7 +313,7 @@ async def test_an_entry_that_waits_on_itself_is_the_one_node_cycle(mount: Any) -
     contradiction is how they come to disagree.
     """
     ctx = await mount(ENABLED, profile=PROFILE)
-    session = ctx.sessions.create("ouroboros")
+    session = ctx.require(SESSIONS).create("ouroboros")
 
     await _run(ctx, session, todo_call("c1", [_with("a", "pending", ["a"])]))
 
@@ -321,7 +323,9 @@ async def test_an_entry_that_waits_on_itself_is_the_one_node_cycle(mount: Any) -
     )
 
 
-async def test_claiming_to_have_started_something_still_blocked_is_refused(mount: Any) -> None:
+async def test_claiming_to_have_started_something_still_blocked_is_refused(
+    mount: MountProfile,
+) -> None:
     """The model checked against its own statement — not against a policy.
 
     An entry `in_progress` while something it *said* it waits on is unfinished is
@@ -331,7 +335,7 @@ async def test_claiming_to_have_started_something_still_blocked_is_refused(mount
     here has an opinion about its plan.
     """
     ctx = await mount(ENABLED, profile=PROFILE)
-    session = ctx.sessions.create("jumped")
+    session = ctx.require(SESSIONS).create("jumped")
 
     await _run(
         ctx,
@@ -346,7 +350,7 @@ async def test_claiming_to_have_started_something_still_blocked_is_refused(mount
 # ------------------------------------------------------- the fork: evidence --
 
 
-async def test_a_completion_carries_what_the_harness_saw(mount: Any) -> None:
+async def test_a_completion_carries_what_the_harness_saw(mount: MountProfile) -> None:
     """**P7-16's second half.** The one field in the list the model does not write.
 
     `worked` is counted from `tool/call` — which since P7-15 exists only for a
@@ -358,7 +362,7 @@ async def test_a_completion_carries_what_the_harness_saw(mount: Any) -> None:
     box without doing anything can say otherwise.
     """
     ctx = await mount(ENABLED, profile=PROFILE)
-    session = ctx.sessions.create("witnessed")
+    session = ctx.require(SESSIONS).create("witnessed")
 
     await _run(ctx, session, todo_call("c1", _todos(("survey", "in_progress"))))
     await _run(ctx, session, bash_call("b1", "true"), step=2)
@@ -369,7 +373,7 @@ async def test_a_completion_carries_what_the_harness_saw(mount: Any) -> None:
     assert unevidenced(todos_of(session)) == []
 
 
-async def test_a_box_ticked_with_no_work_behind_it_is_visible(mount: Any) -> None:
+async def test_a_box_ticked_with_no_work_behind_it_is_visible(mount: MountProfile) -> None:
     """The failure a model-marked checklist otherwise hides (P5-16, G1).
 
     Nothing ran between the two writes, so the completion is a bare claim. It is
@@ -378,7 +382,7 @@ async def test_a_box_ticked_with_no_work_behind_it_is_visible(mount: Any) -> Non
     what a person watching a plan wants, and what the list could not say before.
     """
     ctx = await mount(ENABLED, profile=PROFILE)
-    session = ctx.sessions.create("bare")
+    session = ctx.require(SESSIONS).create("bare")
 
     await _run(ctx, session, todo_call("c1", _todos(("port the row", "in_progress"))))
     await _run(ctx, session, todo_call("c2", _todos(("port the row", "completed"))), step=2)
@@ -386,7 +390,7 @@ async def test_a_box_ticked_with_no_work_behind_it_is_visible(mount: Any) -> Non
     assert unevidenced(todos_of(session)) == ["port the row"]
 
 
-async def test_a_receipt_travels_with_its_entry(mount: Any) -> None:
+async def test_a_receipt_travels_with_its_entry(mount: MountProfile) -> None:
     """A write replaces the whole list, so evidence has to be carried forward.
 
     An entry's receipt is about the window it was *finished* in, not the window
@@ -394,7 +398,7 @@ async def test_a_receipt_travels_with_its_entry(mount: Any) -> None:
     tools must not erase what an earlier one witnessed.
     """
     ctx = await mount(ENABLED, profile=PROFILE)
-    session = ctx.sessions.create("carried")
+    session = ctx.require(SESSIONS).create("carried")
 
     await _run(ctx, session, todo_call("c1", _todos(("first", "in_progress"))))
     await _run(ctx, session, bash_call("b1", "true"), step=2)
@@ -421,14 +425,14 @@ async def test_a_receipt_travels_with_its_entry(mount: Any) -> None:
 # --------------------------------------------------------- the parallel rule --
 
 
-async def test_two_calls_in_one_message_both_fail_and_write_nothing(mount: Any) -> None:
+async def test_two_calls_in_one_message_both_fail_and_write_nothing(mount: MountProfile) -> None:
     """The row's gate, with upstream's own second assertion.
 
     Both calls are refused *before* either body runs, so the session is left
     with no list at all — not with the first call's.
     """
     ctx = await mount(ENABLED, profile=PROFILE)
-    session = ctx.sessions.create("parallel")
+    session = ctx.require(SESSIONS).create("parallel")
 
     await _run(
         ctx,
@@ -450,14 +454,14 @@ async def test_two_calls_in_one_message_both_fail_and_write_nothing(mount: Any) 
     assert todos_of(session) == [], "a refused call must not leave a list behind"
 
 
-async def test_one_call_in_a_message_is_allowed(mount: Any) -> None:
+async def test_one_call_in_a_message_is_allowed(mount: MountProfile) -> None:
     """The gate's own falsifiability: the rule is about *parallel* calls.
 
     Without this, a listener that denied every `write_todos` would pass the test
     above and nothing else here would notice.
     """
     ctx = await mount(ENABLED, profile=PROFILE)
-    session = ctx.sessions.create("single")
+    session = ctx.require(SESSIONS).create("single")
 
     await _run(ctx, session, todo_call("c1", _todos(("survey", "in_progress"))))
 
@@ -466,14 +470,14 @@ async def test_one_call_in_a_message_is_allowed(mount: Any) -> None:
     assert _plan(session) == [("survey", "in_progress")]
 
 
-async def test_two_calls_across_two_messages_are_both_allowed(mount: Any) -> None:
+async def test_two_calls_across_two_messages_are_both_allowed(mount: MountProfile) -> None:
     """ "Parallel" means one assistant message, not one session.
 
     A rule that counted every `write_todos` in the log would refuse the second
     turn of every planned task.
     """
     ctx = await mount(ENABLED, profile=PROFILE)
-    session = ctx.sessions.create("sequential")
+    session = ctx.require(SESSIONS).create("sequential")
 
     await _run(ctx, session, todo_call("c1", _todos(("survey", "in_progress"))))
     await _run(ctx, session, todo_call("c2", _todos(("survey", "completed"))))
@@ -488,7 +492,7 @@ async def test_two_calls_across_two_messages_are_both_allowed(mount: Any) -> Non
 # ------------------------------------------------------------ the prompt text --
 
 
-async def test_the_reminder_text_reaches_the_prompt_verbatim(mount: Any) -> None:
+async def test_the_reminder_text_reaches_the_prompt_verbatim(mount: MountProfile) -> None:
     """The row's other gate.
 
     Asserted against the *assembled* prompt rather than against the registered
@@ -497,7 +501,7 @@ async def test_the_reminder_text_reaches_the_prompt_verbatim(mount: Any) -> None
     claim.
     """
     ctx = await mount(ENABLED, profile=PROFILE)
-    text = render_prompt(await ctx.system_prompt.assemble(DEPLOYMENT))
+    text = render_prompt(await ctx.require(SYSTEM_PROMPT).assemble(DEPLOYMENT))
 
     assert WRITE_TODOS_SYSTEM_PROMPT in text
     # The four sentences the port plan names, so the gate is tied to the plan
@@ -511,18 +515,18 @@ async def test_the_reminder_text_reaches_the_prompt_verbatim(mount: Any) -> None
         assert sentence in text, sentence
 
 
-async def test_the_list_rides_the_context_and_not_the_cached_prefix(mount: Any) -> None:
+async def test_the_list_rides_the_context_and_not_the_cached_prefix(mount: MountProfile) -> None:
     """A12. The advice is static, so it caches; the list changes, so it must not.
 
     A plan update that moved the prefix would invalidate the cache on every
     `write_todos` call — which is exactly the turn a long task makes most often.
     """
     ctx = await mount(ENABLED, profile=PROFILE)
-    session = ctx.sessions.create("cache")
+    session = ctx.require(SESSIONS).create("cache")
     agent = StubAgent(ctx, session)
 
     async def assembled() -> Any:
-        return await ctx.system_prompt.assemble(agent.ctx, agent=agent)
+        return await ctx.require(SYSTEM_PROMPT).assemble(agent.ctx, agent=agent)
 
     before = await assembled()
     await _run(ctx, session, todo_call("c1", _todos(("survey", "in_progress"))))

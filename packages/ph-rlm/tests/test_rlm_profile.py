@@ -16,19 +16,20 @@ for a user, and nothing else in the suite would notice.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
 import pytest
-from conftest import HOST_INTERPRETER
+from rlm_fixtures import HOST_INTERPRETER
 from runtime_helpers import dispatch_names, run_ipython_cell
 
 from ph.bundles import installed_bundles, resolve_bundle
 from ph.cordis import Profile
+from ph.keys import AGENTS, COMMANDS, SESSIONS, TOOLS
 from ph.session.json import freeze_json_value
-from ph.testing import FAKE_OPTIONS
+from ph.testing import FAKE_OPTIONS, MountProfile
 from ph.tools import ToolResult
 from ph_app.profiles import available_profiles, resolve_profile
 from ph_rlm import BUNDLE
+from ph_rlm.keys import HARNESS
 from ph_rlm.presentation import IPYTHON
 
 pytestmark = pytest.mark.anyio
@@ -92,7 +93,7 @@ def test_the_composed_profile_is_code_mode_on_the_shipped_runtime() -> None:
 # ------------------------------------------------------------ the smoke run --
 
 
-async def test_a_turn_runs_end_to_end_on_the_composed_profile(mount: Any) -> None:
+async def test_a_turn_runs_end_to_end_on_the_composed_profile(mount: MountProfile) -> None:
     """P3-20's gate: the profile boots and a turn goes through it.
 
     Mounted from `resolve_profile("rlm")` through the shared `mount` fixture, so
@@ -106,8 +107,8 @@ async def test_a_turn_runs_end_to_end_on_the_composed_profile(mount: Any) -> Non
         {"id": "code-runtime-python", "config": HOST_INTERPRETER},
         profile=resolve_profile("rlm"),
     )
-    session = ctx.sessions.create("smoke")
-    agent = ctx.agents.create(session, FAKE_OPTIONS)
+    session = ctx.require(SESSIONS).create("smoke")
+    agent = ctx.require(AGENTS).create(session, FAKE_OPTIONS)
 
     # The whole stack in one call: a cell into the kernel, a governed binding
     # call back out through the tool pipeline, and a value returned.
@@ -122,18 +123,22 @@ async def test_a_turn_runs_end_to_end_on_the_composed_profile(mount: Any) -> Non
     assert dispatch_names(session) == ["glob"]
 
     # And the model's surface is the one the profile promises.
-    assert ctx.tools.get(IPYTHON, scope=agent.ctx) is not None
-    assert ctx.harness is not None
-    assert ctx.commands.get("refine") is not None
+    assert ctx.require(TOOLS).get(IPYTHON, scope=agent.ctx) is not None
+    assert ctx.require(HARNESS) is not None
+    assert ctx.require(COMMANDS).get("refine") is not None
 
     # What the TUI's card is built from, read off the *mounted* definition. Both
     # halves of P3-19's cell hid here: `present_call` computed the program and
     # dropped it, and `present_result` tested its meta with `isinstance(..., dict)`
     # — which a frozen `MappingProxyType` off the log is not. Every widget test
     # constructs a `ToolCard` by hand, so nothing else crosses this seam.
-    definition = ctx.tools.get(IPYTHON, scope=agent.ctx)
+    definition = ctx.require(TOOLS).get(IPYTHON, scope=agent.ctx)
     assert definition is not None
+    assert definition.present_call is not None, "the mounted definition renders a card"
+    assert definition.present_result is not None
+    assert definition.output.presentation_meta is not None
     call_view = definition.present_call({"program": "rows = 1\nrows"})
+    assert call_view is not None
     assert call_view.card == "terminal"
     assert call_view.input == "rows = 1", "the header line"
     assert call_view.body == "rows = 1\nrows", "the program the code cell renders"

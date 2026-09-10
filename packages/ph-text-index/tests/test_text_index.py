@@ -42,10 +42,12 @@ import numpy as np
 import pytest
 
 from ph.cordis import DEPLOYMENT
+from ph.keys import AGENTS, COMMANDS, FS, SESSIONS, SKILLS, SYSTEM_PROMPT, TOOLS
 from ph.llm.types import text_of
-from ph.testing import FAKE_OPTIONS, report_section, run_tool
+from ph.testing import FAKE_OPTIONS, MountProfile, report_section, run_tool
 from ph.testing.git import git, git_repo
 from ph.testing.jj import jj_repo
+from ph_text_index import TEXT_INDEX
 from ph_text_index._chunk import chunk_text
 from ph_text_index._store import IndexMismatch, TextIndex
 
@@ -102,10 +104,14 @@ def _agent(ctx: Any) -> Any:
     on the session id and fail as `SESSION_ALREADY_EXISTS`, several frames from
     the cause. The sibling package's helper says the same.
     """
-    return ctx.agents.create(ctx.sessions.create(f"ti-{next(_SEQ)}"), FAKE_OPTIONS)
+    return ctx.require(AGENTS).create(
+        ctx.require(SESSIONS).create(f"ti-{next(_SEQ)}"), FAKE_OPTIONS
+    )
 
 
-async def _mounted(mount: Any, tmp_path: Path, **config: Any) -> tuple[Any, HashingEmbedder]:
+async def _mounted(
+    mount: MountProfile, tmp_path: Path, **config: Any
+) -> tuple[Any, HashingEmbedder]:
     """The seam, plus a stub embedder claimed the way a provider row claims one.
 
     The `reconcile()` matters and is not ceremony: the tools are registered
@@ -118,7 +124,7 @@ async def _mounted(mount: Any, tmp_path: Path, **config: Any) -> tuple[Any, Hash
     settings = {"path": str(tmp_path / "index"), **config}
     ctx = await mount({**ROW, "config": settings})
     embedder = HashingEmbedder()
-    ctx.text_index.register(embedder)
+    ctx.require(TEXT_INDEX).register(embedder)
     await ctx.reconcile()
     return ctx, embedder
 
@@ -334,23 +340,25 @@ def test_searching_an_empty_index_is_empty_and_not_an_error(tmp_path: Path) -> N
 # ---------------------------------------------------------------- the whole row ----
 
 
-async def test_no_embedder_means_no_tools(mount: Any, tmp_path: Path) -> None:
+async def test_no_embedder_means_no_tools(mount: MountProfile, tmp_path: Path) -> None:
     """A tool refused on every call would teach a capability nobody has."""
     ctx = await mount({**ROW, "config": {"path": str(tmp_path / "index")}})
 
-    assert ctx.tools.get("text_index", scope=DEPLOYMENT) is None
-    assert ctx.tools.get("text_search", scope=DEPLOYMENT) is None
+    assert ctx.require(TOOLS).get("text_index", scope=DEPLOYMENT) is None
+    assert ctx.require(TOOLS).get("text_search", scope=DEPLOYMENT) is None
 
 
-async def test_an_embedder_claimed_anywhere_brings_both_tools(mount: Any, tmp_path: Path) -> None:
+async def test_an_embedder_claimed_anywhere_brings_both_tools(
+    mount: MountProfile, tmp_path: Path
+) -> None:
     ctx, _ = await _mounted(mount, tmp_path)
 
-    assert ctx.tools.get("text_index", scope=DEPLOYMENT) is not None
-    assert ctx.tools.get("text_search", scope=DEPLOYMENT) is not None
+    assert ctx.require(TOOLS).get("text_index", scope=DEPLOYMENT) is not None
+    assert ctx.require(TOOLS).get("text_search", scope=DEPLOYMENT) is not None
 
 
 async def test_indexing_a_directory_then_searching_finds_the_passage(
-    mount: Any, tmp_path: Path
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """End to end through both tools and the real index."""
     (tmp_path / "docs").mkdir()
@@ -386,7 +394,7 @@ async def test_indexing_a_directory_then_searching_finds_the_passage(
 
 
 async def test_a_hits_line_span_names_the_lines_in_the_real_file(
-    mount: Any, tmp_path: Path
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """The span has to survive `glob`'s relative naming and the rejoin."""
     (tmp_path / "docs").mkdir()
@@ -405,7 +413,7 @@ async def test_a_hits_line_span_names_the_lines_in_the_real_file(
     assert hit["text"].split("\n\n")[0] in span
 
 
-async def test_a_paths_filter_narrows_the_search(mount: Any, tmp_path: Path) -> None:
+async def test_a_paths_filter_narrows_the_search(mount: MountProfile, tmp_path: Path) -> None:
     for directory in ("docs", "notes"):
         (tmp_path / directory).mkdir()
         (tmp_path / directory / "w.md").write_text(DOCUMENT, encoding="utf-8")
@@ -421,10 +429,12 @@ async def test_a_paths_filter_narrows_the_search(mount: Any, tmp_path: Path) -> 
     )
 
     assert {hit["path"] for hit in found.value["hits"]} == {"notes/w.md"}
-    assert found.value["searched"] < ctx.text_index._index.stats()["chunks"]
+    assert found.value["searched"] < ctx.require(TEXT_INDEX)._index.stats()["chunks"]
 
 
-async def test_forget_removes_a_document_through_the_tool(mount: Any, tmp_path: Path) -> None:
+async def test_forget_removes_a_document_through_the_tool(
+    mount: MountProfile, tmp_path: Path
+) -> None:
     (tmp_path / "a.md").write_text(DOCUMENT, encoding="utf-8")
     ctx, _ = await _mounted(mount, tmp_path, max_chars=200, overlap_chars=0)
     agent = _agent(ctx)
@@ -439,7 +449,7 @@ async def test_forget_removes_a_document_through_the_tool(mount: Any, tmp_path: 
 
 
 async def test_a_document_past_the_size_limit_is_reported_and_not_an_error(
-    mount: Any, tmp_path: Path
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """A call over a directory must not fail because it found a bundle — and the
     caller has to learn what was skipped, or a quiet corpus looks like a quiet
@@ -458,7 +468,9 @@ async def test_a_document_past_the_size_limit_is_reported_and_not_an_error(
     assert "skipped docs/huge.md" in text_of(indexed.content)
 
 
-async def test_a_search_over_an_unindexed_corpus_says_so(mount: Any, tmp_path: Path) -> None:
+async def test_a_search_over_an_unindexed_corpus_says_so(
+    mount: MountProfile, tmp_path: Path
+) -> None:
     """The empty result a model would otherwise read as "no such thing"."""
     ctx, _ = await _mounted(mount, tmp_path)
 
@@ -469,7 +481,7 @@ async def test_a_search_over_an_unindexed_corpus_says_so(mount: Any, tmp_path: P
     assert "Index the documents first" in text_of(found.content)
 
 
-async def test_indexing_reads_through_the_fs_seam(mount: Any, tmp_path: Path) -> None:
+async def test_indexing_reads_through_the_fs_seam(mount: MountProfile, tmp_path: Path) -> None:
     """The claim that makes this a tool and not an exfiltration primitive (I-9).
 
     A screen registered on `ctx.fs` decides what the walk may show, so a
@@ -480,7 +492,7 @@ async def test_indexing_reads_through_the_fs_seam(mount: Any, tmp_path: Path) ->
     (tmp_path / "docs" / "public.md").write_text(DOCUMENT, encoding="utf-8")
     (tmp_path / "docs" / "secret.md").write_text(DOCUMENT, encoding="utf-8")
     ctx, _ = await _mounted(mount, tmp_path, max_chars=200, overlap_chars=0)
-    ctx.fs.screen(
+    ctx.require(FS).screen(
         lambda path, name, agent, is_dir: "skip" if name == "secret.md" else "yield",
         scope=ctx,
     )
@@ -490,13 +502,15 @@ async def test_indexing_reads_through_the_fs_seam(mount: Any, tmp_path: Path) ->
     assert indexed.value["documents"] == ["docs/public.md"]
 
 
-async def test_the_row_reports_itself_to_doctor(mount: Any, tmp_path: Path) -> None:
+async def test_the_row_reports_itself_to_doctor(mount: MountProfile, tmp_path: Path) -> None:
     ctx, embedder = await _mounted(mount, tmp_path)
 
     assert report_section(ctx, "Text index")["embedder"] == embedder.name
 
 
-async def test_doctor_says_when_no_embedder_is_registered(mount: Any, tmp_path: Path) -> None:
+async def test_doctor_says_when_no_embedder_is_registered(
+    mount: MountProfile, tmp_path: Path
+) -> None:
     """The one thing an operator needs told when the tools are simply absent."""
     ctx = await mount({**ROW, "config": {"path": str(tmp_path / "index")}})
 
@@ -553,7 +567,7 @@ async def test_the_rlm_indexed_profile_layers_this_bundle() -> None:
 
 
 async def test_code_mode_hands_the_model_both_tools_through_the_sdk(
-    mount: Any, tmp_path: Path
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """Under Code Mode "can the RLM use this" is "are these in the SDK listing".
 
@@ -568,21 +582,23 @@ async def test_code_mode_hands_the_model_both_tools_through_the_sdk(
         {"id": "code-runtime-stub", "name": "code-runtime-stub"},
         {**ROW, "config": {"path": str(tmp_path / "index")}},
     )
-    ctx.text_index.register(HashingEmbedder())
+    ctx.require(TEXT_INDEX).register(HashingEmbedder())
     agent = _agent(ctx)
 
-    view = ctx.tools.view(scope=agent.ctx)
+    view = ctx.require(TOOLS).view(scope=agent.ctx)
     assert view.mode == "code"
     assert {"text_index", "text_search"} <= set(view.visible)
 
-    prompt = await ctx.system_prompt.assemble(agent=agent, scope=agent.ctx)
+    prompt = await ctx.require(SYSTEM_PROMPT).assemble(agent=agent, scope=agent.ctx)
     sdk = dict(prompt.sections)["tools:sdk"]
     assert "async def tools.text_index(" in sdk
     assert "async def tools.text_search(" in sdk
     assert "Search the text index by meaning" in sdk
 
 
-async def test_no_embedder_means_the_sdk_offers_nothing_either(mount: Any, tmp_path: Path) -> None:
+async def test_no_embedder_means_the_sdk_offers_nothing_either(
+    mount: MountProfile, tmp_path: Path
+) -> None:
     """The absence is complete, not partial: no tool, and no SDK line.
 
     A listing that named `text_search` while the seam had no provider would
@@ -597,7 +613,7 @@ async def test_no_embedder_means_the_sdk_offers_nothing_either(mount: Any, tmp_p
     )
     agent = _agent(ctx)
 
-    prompt = await ctx.system_prompt.assemble(agent=agent, scope=agent.ctx)
+    prompt = await ctx.require(SYSTEM_PROMPT).assemble(agent=agent, scope=agent.ctx)
     sdk = dict(prompt.sections)["tools:sdk"]
     assert "text_search" not in sdk
     assert "text_index" not in sdk
@@ -651,7 +667,9 @@ def test_the_prefixes_are_in_the_identity_but_the_trust_flag_is_not() -> None:
     assert plain.name == trusted.name, "a trust grant must not move the index"
 
 
-async def test_switching_the_model_gets_its_own_index_directory(mount: Any, tmp_path: Path) -> None:
+async def test_switching_the_model_gets_its_own_index_directory(
+    mount: MountProfile, tmp_path: Path
+) -> None:
     """What makes trying a bigger model safe: no collision, and no re-embedding
     the old one to switch back.
 
@@ -663,7 +681,7 @@ async def test_switching_the_model_gets_its_own_index_directory(mount: Any, tmp_
     a finding about the index path.
     """
     ctx = await mount({**ROW})
-    seam = ctx.text_index
+    seam = ctx.require(TEXT_INDEX)
 
     seam.provider = HashingEmbedder(dim=96)
     small = seam.root()
@@ -712,7 +730,7 @@ class LoadableEmbedder(HashingEmbedder):
         return self.loaded
 
 
-async def test_the_command_reports_and_then_provisions(mount: Any, tmp_path: Path) -> None:
+async def test_the_command_reports_and_then_provisions(mount: MountProfile, tmp_path: Path) -> None:
     """A person types this, and it costs no model turn — the seam's own rule.
 
     `status` before `install` is the point of the pair: "can I download it" is a
@@ -721,22 +739,26 @@ async def test_the_command_reports_and_then_provisions(mount: Any, tmp_path: Pat
     """
     ctx = await mount({**ROW, "config": {"path": str(tmp_path / "index")}})
     embedder = LoadableEmbedder()
-    ctx.text_index.register(embedder)
+    ctx.require(TEXT_INDEX).register(embedder)
     agent = _agent(ctx)
 
-    before = await ctx.commands.dispatch("/text-index status", agent=agent, scope=agent.ctx)
-    assert "not loaded" in before
+    before = await ctx.require(COMMANDS).dispatch(
+        "/text-index status", agent=agent, scope=agent.ctx
+    )
+    assert before is not None and "not loaded" in before
     assert embedder.loads == 0, "status must not download anything"
 
-    said = await ctx.commands.dispatch("/text-index install", agent=agent, scope=agent.ctx)
-    assert "is ready (96-dimensional)" in said
+    said = await ctx.require(COMMANDS).dispatch("/text-index install", agent=agent, scope=agent.ctx)
+    assert said is not None and "is ready (96-dimensional)" in said
     assert embedder.loads == 1
 
-    after = await ctx.commands.dispatch("/text-index status", agent=agent, scope=agent.ctx)
-    assert "loaded" in after and "not loaded" not in after
+    after = await ctx.require(COMMANDS).dispatch("/text-index status", agent=agent, scope=agent.ctx)
+    assert after is not None and "loaded" in after and "not loaded" not in after
 
 
-async def test_a_failed_install_says_what_upstream_said(mount: Any, tmp_path: Path) -> None:
+async def test_a_failed_install_says_what_upstream_said(
+    mount: MountProfile, tmp_path: Path
+) -> None:
     """**The `einops` case, and why the message is passed through verbatim.**
 
     `nomic-embed-text-v1.5` downloads its weights and its remote modelling code
@@ -747,40 +769,44 @@ async def test_a_failed_install_says_what_upstream_said(mount: Any, tmp_path: Pa
     than raising, because a person asked and is waiting for words.
     """
     ctx = await mount({**ROW, "config": {"path": str(tmp_path / "index")}})
-    ctx.text_index.register(LoadableEmbedder(fails="requires the following packages ...: einops"))
+    ctx.require(TEXT_INDEX).register(
+        LoadableEmbedder(fails="requires the following packages ...: einops")
+    )
     agent = _agent(ctx)
 
-    said = await ctx.commands.dispatch("/text-index install", agent=agent, scope=agent.ctx)
+    said = await ctx.require(COMMANDS).dispatch("/text-index install", agent=agent, scope=agent.ctx)
 
-    assert "did not load" in said
-    assert "einops" in said, "the actionable half of the message was dropped"
+    assert said is not None and "did not load" in said
+    assert said is not None and "einops" in said, "the actionable half of the message was dropped"
 
 
-async def test_an_embedder_with_nothing_to_download_says_so(mount: Any, tmp_path: Path) -> None:
+async def test_an_embedder_with_nothing_to_download_says_so(
+    mount: MountProfile, tmp_path: Path
+) -> None:
     """An endpoint-backed embedder has no weights, and must not be made to pretend."""
     ctx = await mount({**ROW, "config": {"path": str(tmp_path / "index")}})
-    ctx.text_index.register(HashingEmbedder())
+    ctx.require(TEXT_INDEX).register(HashingEmbedder())
     agent = _agent(ctx)
 
-    said = await ctx.commands.dispatch("/text-index install", agent=agent, scope=agent.ctx)
+    said = await ctx.require(COMMANDS).dispatch("/text-index install", agent=agent, scope=agent.ctx)
 
-    assert "needs no download" in said
+    assert said is not None and "needs no download" in said
 
 
 async def test_the_command_is_absent_rather_than_broken_without_a_provider(
-    mount: Any, tmp_path: Path
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """It is still registered — a person may type it to find out *why* nothing works."""
     ctx = await mount({**ROW, "config": {"path": str(tmp_path / "index")}})
     agent = _agent(ctx)
 
-    said = await ctx.commands.dispatch("/text-index install", agent=agent, scope=agent.ctx)
+    said = await ctx.require(COMMANDS).dispatch("/text-index install", agent=agent, scope=agent.ctx)
 
-    assert "No embedder is registered" in said
+    assert said is not None and "No embedder is registered" in said
 
 
 async def test_preload_refuses_the_mount_rather_than_failing_mid_turn(
-    mount: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    mount: MountProfile, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The cookbook's rule, and the whole reason `preload` exists.
 
@@ -813,7 +839,7 @@ async def test_preload_refuses_the_mount_rather_than_failing_mid_turn(
 
 
 async def test_without_preload_the_mount_survives_a_model_that_cannot_load(
-    mount: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    mount: MountProfile, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The default, and why it is the default.
 
@@ -835,13 +861,13 @@ async def test_without_preload_the_mount_survives_a_model_that_cannot_load(
     agent = _agent(ctx)
 
     # Mounted, tools offered — and the command is where the truth comes out.
-    assert ctx.tools.get("text_search", scope=DEPLOYMENT) is not None
-    said = await ctx.commands.dispatch("/text-index install", agent=agent, scope=agent.ctx)
-    assert "no network" in said
+    assert ctx.require(TOOLS).get("text_search", scope=DEPLOYMENT) is not None
+    said = await ctx.require(COMMANDS).dispatch("/text-index install", agent=agent, scope=agent.ctx)
+    assert said is not None and "no network" in said
 
 
 async def test_the_weights_land_under_the_cache_root(
-    mount: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    mount: MountProfile, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Not `~/.cache/huggingface`, which no pH root covers.
 
@@ -866,7 +892,7 @@ async def test_the_weights_land_under_the_cache_root(
 # ------------------------------------------------------------------- the skill ----
 
 
-async def test_the_skill_arrives_with_the_plugin(mount: Any, tmp_path: Path) -> None:
+async def test_the_skill_arrives_with_the_plugin(mount: MountProfile, tmp_path: Path) -> None:
     """What the RLM reads before it reaches for these tools.
 
     Registered on the **provider's** scope, so it is in the catalog exactly when
@@ -878,25 +904,25 @@ async def test_the_skill_arrives_with_the_plugin(mount: Any, tmp_path: Path) -> 
 
     ctx, _ = await _mounted(mount, tmp_path)
 
-    names = {one.name for one in ctx.skills.list(scope=DEPLOYMENT)}
+    names = {one.name for one in ctx.require(SKILLS).list(scope=DEPLOYMENT)}
     assert "text-search" in names
 
-    skill = ctx.skills.get("text-search", DEPLOYMENT)
+    skill = ctx.require(SKILLS).get("text-search", DEPLOYMENT)
     assert skill is not None
     assert "meaning" in skill.description
     # The tools it names are the ones this package registers.
     assert {"text_index", "text_search"} <= set(skill.allowed_tools)
 
 
-async def test_only_the_description_rides_the_prompt(mount: Any, tmp_path: Path) -> None:
+async def test_only_the_description_rides_the_prompt(mount: MountProfile, tmp_path: Path) -> None:
     """G9: the catalog is in every request, the body is read when asked for."""
     from ph.cordis import DEPLOYMENT
 
     ctx, _ = await _mounted(mount, tmp_path)
 
-    skill = ctx.skills.get("text-search", DEPLOYMENT)
+    skill = ctx.require(SKILLS).get("text-search", DEPLOYMENT)
     assert skill is not None and len(skill.description) < 300
-    body = ctx.skills.body("text-search", DEPLOYMENT)
+    body = ctx.require(SKILLS).body("text-search", DEPLOYMENT)
     assert body is not None and len(body) > 1_500, "the body is a page, and stays on disk"
     assert "text_search(query=" in body
 
@@ -906,7 +932,7 @@ async def test_only_the_description_rides_the_prompt(mount: Any, tmp_path: Path)
 
 @pytest.mark.needs_git
 async def test_git_stops_an_unchanged_document_being_re_embedded(
-    mount: Any, tmp_path: Path
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """**The expensive saving.** This loop has no digest short-circuit of its
     own, so before the filter an unchanged document was re-read, re-cut and
@@ -938,7 +964,7 @@ async def test_git_stops_an_unchanged_document_being_re_embedded(
 
 
 @pytest.mark.needs_git
-async def test_an_edited_document_is_re_embedded(mount: Any, tmp_path: Path) -> None:
+async def test_an_edited_document_is_re_embedded(mount: MountProfile, tmp_path: Path) -> None:
     """The safe direction, and it must survive an *uncommitted* edit — which is
     `status`'s job, since git's index still holds the old blob id."""
     ctx, embedder = await _mounted(mount, tmp_path)
@@ -961,7 +987,9 @@ async def test_an_edited_document_is_re_embedded(mount: Any, tmp_path: Path) -> 
 
 
 @pytest.mark.needs_jj
-async def test_jj_stops_an_unchanged_document_being_re_embedded(mount: Any, tmp_path: Path) -> None:
+async def test_jj_stops_an_unchanged_document_being_re_embedded(
+    mount: MountProfile, tmp_path: Path
+) -> None:
     """No commit needed — jj snapshots the working copy on any command."""
     ctx, embedder = await _mounted(mount, tmp_path)
     root = await jj_repo(ctx, tmp_path)
@@ -979,7 +1007,7 @@ async def test_jj_stops_an_unchanged_document_being_re_embedded(mount: Any, tmp_
 
 
 async def test_a_document_the_index_never_held_is_not_vouched_for(
-    mount: Any, tmp_path: Path
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """**The guard in front of `vouches_for`, and why it cannot be skipped.**
 
@@ -1018,7 +1046,7 @@ async def test_a_document_the_index_never_held_is_not_vouched_for(
 
 
 async def test_without_version_control_the_behaviour_is_what_it_was(
-    mount: Any, tmp_path: Path
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """The filter is an optimisation, and losing it must cost only speed.
 

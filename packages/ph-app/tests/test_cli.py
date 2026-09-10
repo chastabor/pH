@@ -21,7 +21,7 @@ from filelock import FileLock
 from typer.testing import CliRunner
 
 from ph.paths import resolve_roots
-from ph.testing import stored_log
+from ph.testing import not_none, stored_log
 from ph_app.cli import app
 from ph_app.profiles import (
     compose_profile,
@@ -836,7 +836,9 @@ def test_every_public_command_is_registered_and_nothing_private_leaked() -> None
     """
     from ph_app.cli import app
 
-    registered = {command.name or command.callback.__name__ for command in app.registered_commands}
+    registered = {
+        command.name or not_none(command.callback).__name__ for command in app.registered_commands
+    }
     assert {"daemon", "doctor"} <= registered, f"a command stopped being registered: {registered}"
     private = {name for name in registered if name.startswith("_")}
     assert not private, f"a helper was captured by an @app.command() decorator: {private}"

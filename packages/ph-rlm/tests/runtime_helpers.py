@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from ph.seams.code_runtime import CodeBindingNamespace
 from ph.testing import run_tool
 from ph.tools.registry import RUN_CODE
 
@@ -50,7 +51,7 @@ async def run_ipython_cell(
     return await run_cell(ctx, program, agent=agent, session=session, call_id=call_id, name=IPYTHON)
 
 
-def namespace(name: str, **handlers: Any) -> Any:
+def namespace(name: str, **handlers: Any) -> CodeBindingNamespace:
     """A `CodeBindingNamespace` whose bindings are the handlers given.
 
     Here rather than in one test module because two wanted it and the second

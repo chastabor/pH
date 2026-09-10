@@ -36,8 +36,9 @@ import pytest
 from ph.agent.types import AgentOptions
 from ph.bundles import BASE, HEADLESS
 from ph.cordis import Context
+from ph.keys import AGENTS, ATTACHMENTS, SESSIONS, UPLOADS
 from ph.llm.types import FILE_EXPIRED, MediaBlock, create_user_message
-from ph.testing import anthropic_reply
+from ph.testing import MountProfile, anthropic_reply
 from ph_app.adapters._http import HttpClient, failure_from_status
 from ph_app.adapters.anthropic import _is_missing_file, _is_overflow
 
@@ -123,14 +124,16 @@ def wire(monkeypatch: pytest.MonkeyPatch) -> _FileApi:
 
 
 async def _attached(ctx: Context, mime: str = "application/pdf", name: str = "paper.pdf") -> Any:
-    ref = await ctx.attachments.save_bytes(content=PDF, mime=mime, name=name)
+    ref = await ctx.require(ATTACHMENTS).save_bytes(content=PDF, mime=mime, name=name)
     return create_user_message(
         content=[{"type": "text", "text": "what happens here?"}, MediaBlock(attachment=ref)],
         source={"kind": "user"},
     )
 
 
-async def test_a_file_is_uploaded_once_and_then_referenced(mount: Any, wire: _FileApi) -> None:
+async def test_a_file_is_uploaded_once_and_then_referenced(
+    mount: MountProfile, wire: _FileApi
+) -> None:
     """The half of the gate that is about shape.
 
     The file goes up once and the request carries an id. Asserted on the body
@@ -139,8 +142,8 @@ async def test_a_file_is_uploaded_once_and_then_referenced(mount: Any, wire: _Fi
     that will not take it inline.
     """
     ctx: Context = await mount(ROUTE, profile=PROFILE)
-    session = ctx.sessions.create("video")
-    agent = ctx.agents.create(session, OPTIONS)
+    session = ctx.require(SESSIONS).create("video")
+    agent = ctx.require(AGENTS).create(session, OPTIONS)
 
     agent.followup(await _attached(ctx))
     await agent.run()
@@ -157,7 +160,7 @@ async def test_a_file_is_uploaded_once_and_then_referenced(mount: Any, wire: _Fi
     assert "file_001" not in str(record.data)
 
 
-async def test_the_second_turn_reuses_the_handle(mount: Any, wire: _FileApi) -> None:
+async def test_the_second_turn_reuses_the_handle(mount: MountProfile, wire: _FileApi) -> None:
     """What the cache is for, and the reason it is keyed on the digest.
 
     The same bytes are not uploaded twice — not on the next step of this turn,
@@ -165,12 +168,12 @@ async def test_the_second_turn_reuses_the_handle(mount: Any, wire: _FileApi) -> 
     the session) not from a second session either.
     """
     ctx: Context = await mount(ROUTE, profile=PROFILE)
-    agent = ctx.agents.create(ctx.sessions.create("reuse"), OPTIONS)
+    agent = ctx.require(AGENTS).create(ctx.require(SESSIONS).create("reuse"), OPTIONS)
     agent.followup(await _attached(ctx))
     await agent.run()
 
     await agent.prompt("and now?")
-    other = ctx.agents.create(ctx.sessions.create("second-session"), OPTIONS)
+    other = ctx.require(AGENTS).create(ctx.require(SESSIONS).create("second-session"), OPTIONS)
     other.followup(await _attached(ctx))
     await other.run()
 
@@ -179,7 +182,7 @@ async def test_the_second_turn_reuses_the_handle(mount: Any, wire: _FileApi) -> 
 
 
 async def test_an_expired_handle_is_re_uploaded_rather_than_failing_the_turn(
-    mount: Any, wire: _FileApi
+    mount: MountProfile, wire: _FileApi
 ) -> None:
     """The gate's other half, and the failure it is written against.
 
@@ -190,8 +193,8 @@ async def test_an_expired_handle_is_re_uploaded_rather_than_failing_the_turn(
     instead of repeating a request that cannot work.
     """
     ctx: Context = await mount(ROUTE, profile=PROFILE)
-    session = ctx.sessions.create("expired")
-    agent = ctx.agents.create(session, OPTIONS)
+    session = ctx.require(SESSIONS).create("expired")
+    agent = ctx.require(AGENTS).create(session, OPTIONS)
     agent.followup(await _attached(ctx))
     await agent.run()
 
@@ -208,7 +211,7 @@ async def test_an_expired_handle_is_re_uploaded_rather_than_failing_the_turn(
 
 
 async def test_a_404_that_names_no_handle_of_ours_is_not_retried(
-    mount: Any, wire: _FileApi
+    mount: MountProfile, wire: _FileApi
 ) -> None:
     """The half of the classification that keeps it honest.
 
@@ -218,8 +221,8 @@ async def test_a_404_that_names_no_handle_of_ours_is_not_retried(
     missing, **and** it named one this request sent.
     """
     ctx: Context = await mount(ROUTE, profile=PROFILE)
-    session = ctx.sessions.create("stranger")
-    agent = ctx.agents.create(session, OPTIONS)
+    session = ctx.require(SESSIONS).create("stranger")
+    agent = ctx.require(AGENTS).create(session, OPTIONS)
     agent.followup(await _attached(ctx))
     await agent.run()
 
@@ -232,7 +235,7 @@ async def test_a_404_that_names_no_handle_of_ours_is_not_retried(
 
 
 async def test_a_route_that_declares_no_uploads_sends_bytes_as_before(
-    mount: Any, wire: _FileApi
+    mount: MountProfile, wire: _FileApi
 ) -> None:
     """The default, and the one every existing deployment keeps.
 
@@ -254,18 +257,20 @@ async def test_a_route_that_declares_no_uploads_sends_bytes_as_before(
         ]
     }
     ctx: Context = await mount(route, profile=PROFILE)
-    agent = ctx.agents.create(ctx.sessions.create("inline"), OPTIONS)
+    agent = ctx.require(AGENTS).create(ctx.require(SESSIONS).create("inline"), OPTIONS)
 
     agent.followup(await _attached(ctx))
     await agent.run()
 
     assert wire.uploaded == []
     assert "base64" in str(wire.bodies[-1])
-    assert ctx.uploads.uploaders == {}, "no uploader is registered for a route that wants none"
+    assert ctx.require(UPLOADS).uploaders == {}, (
+        "no uploader is registered for a route that wants none"
+    )
 
 
 async def test_a_format_this_wire_cannot_express_degrades_even_when_uploaded(
-    mount: Any, wire: _FileApi
+    mount: MountProfile, wire: _FileApi
 ) -> None:
     """Where video actually stands today, asserted rather than implied.
 
@@ -295,7 +300,7 @@ async def test_a_format_this_wire_cannot_express_degrades_even_when_uploaded(
         ]
     }
     ctx: Context = await mount(route, profile=PROFILE)
-    agent = ctx.agents.create(ctx.sessions.create("video"), OPTIONS)
+    agent = ctx.require(AGENTS).create(ctx.require(SESSIONS).create("video"), OPTIONS)
 
     agent.followup(await _attached(ctx, mime="video/mp4", name="clip.mp4"))
     await agent.run()
@@ -305,7 +310,9 @@ async def test_a_format_this_wire_cannot_express_degrades_even_when_uploaded(
     assert "was not sent" in str(wire.bodies[-1]), "so the model reads a pointer"
 
 
-async def test_only_the_handle_the_provider_named_is_forgotten(mount: Any, wire: _FileApi) -> None:
+async def test_only_the_handle_the_provider_named_is_forgotten(
+    mount: MountProfile, wire: _FileApi
+) -> None:
     """The other half of the invalidation, and a bug the first draft shipped.
 
     A request carries two files and the provider says one of them is gone. A
@@ -314,10 +321,12 @@ async def test_only_the_handle_the_provider_named_is_forgotten(mount: Any, wire:
     dead one, and pays for all twenty again on the retry.
     """
     ctx: Context = await mount(ROUTE, profile=PROFILE)
-    session = ctx.sessions.create("pair")
-    agent = ctx.agents.create(session, OPTIONS)
-    first = await ctx.attachments.save_bytes(content=PDF, mime="application/pdf", name="a.pdf")
-    second = await ctx.attachments.save_bytes(
+    session = ctx.require(SESSIONS).create("pair")
+    agent = ctx.require(AGENTS).create(session, OPTIONS)
+    first = await ctx.require(ATTACHMENTS).save_bytes(
+        content=PDF, mime="application/pdf", name="a.pdf"
+    )
+    second = await ctx.require(ATTACHMENTS).save_bytes(
         content=PDF + b"other", mime="application/pdf", name="b.pdf"
     )
     agent.followup(
@@ -341,7 +350,7 @@ async def test_only_the_handle_the_provider_named_is_forgotten(mount: Any, wire:
     assert wire.referenced(wire.bodies[-1]) == ["file_003", "file_002"]
 
 
-async def test_a_referenced_file_is_never_also_encoded(mount: Any, wire: _FileApi) -> None:
+async def test_a_referenced_file_is_never_also_encoded(mount: MountProfile, wire: _FileApi) -> None:
     """What makes an upload cheaper rather than merely different.
 
     Before this, a referenced attachment was still read and base64-encoded for a
@@ -351,17 +360,17 @@ async def test_a_referenced_file_is_never_also_encoded(mount: Any, wire: _FileAp
     is where the cost actually landed.
     """
     ctx: Context = await mount(ROUTE, profile=PROFILE)
-    agent = ctx.agents.create(ctx.sessions.create("unencoded"), OPTIONS)
+    agent = ctx.require(AGENTS).create(ctx.require(SESSIONS).create("unencoded"), OPTIONS)
 
     agent.followup(await _attached(ctx))
     await agent.run()
 
     assert wire.uploaded == ["file_001"], "it went up"
-    assert ctx.attachments._encoded == {}, "and was never encoded to be thrown away"
+    assert ctx.require(ATTACHMENTS)._encoded == {}, "and was never encoded to be thrown away"
 
 
 async def test_the_files_beta_rides_only_requests_that_reference_one(
-    mount: Any, wire: _FileApi
+    mount: MountProfile, wire: _FileApi
 ) -> None:
     """A capability the deployment declared must not become an outage on requests
     that never used it.
@@ -372,7 +381,7 @@ async def test_the_files_beta_rides_only_requests_that_reference_one(
     id — not about the route.
     """
     ctx: Context = await mount(ROUTE, profile=PROFILE)
-    agent = ctx.agents.create(ctx.sessions.create("beta"), OPTIONS)
+    agent = ctx.require(AGENTS).create(ctx.require(SESSIONS).create("beta"), OPTIONS)
 
     await agent.prompt("no attachment here")
     agent.followup(await _attached(ctx))
@@ -384,7 +393,7 @@ async def test_the_files_beta_rides_only_requests_that_reference_one(
 
 
 async def test_a_second_provider_re_uploads_from_the_same_stored_blob(
-    mount: Any, wire: _FileApi
+    mount: MountProfile, wire: _FileApi
 ) -> None:
     """Running the same attachment against another route costs an upload, not a file.
 
@@ -416,15 +425,17 @@ async def test_a_second_provider_re_uploads_from_the_same_stored_blob(
     ctx: Context = await mount(two_routes, profile=PROFILE)
 
     for name in ("first", "second"):
-        agent = ctx.agents.create(ctx.sessions.create(name), AgentOptions(provider=name, model="m"))
+        agent = ctx.require(AGENTS).create(
+            ctx.require(SESSIONS).create(name), AgentOptions(provider=name, model="m")
+        )
         agent.followup(await _attached(ctx))
         await agent.run()
 
     assert wire.uploaded == ["file_001", "file_002"], "each route needs its own copy"
     assert [wire.referenced(body) for body in wire.bodies] == [["file_001"], ["file_002"]]
     # One set of bytes, kept: the originals are not the provider's copy.
-    assert len(list(ctx.attachments.root.iterdir())) == 1
-    assert sorted(path.parent.name for path in ctx.uploads.root.rglob("*.json")) == [
+    assert len(list(ctx.require(ATTACHMENTS).root.iterdir())) == 1
+    assert sorted(path.parent.name for path in ctx.require(UPLOADS).root.rglob("*.json")) == [
         "first",
         "second",
     ]

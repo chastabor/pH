@@ -26,10 +26,11 @@ from test_dimensions import png
 from ph.agent.types import AgentOptions
 from ph.cancel import CancelToken
 from ph.cordis import Context
+from ph.keys import AGENTS, ATTACHMENTS, LLM_FAKE, SESSIONS, TOOLS
 from ph.llm.adapter import ResolvedModel
 from ph.llm.types import ToolCallBlock, attachment_of
 from ph.session.json import dumps
-from ph.testing import run_tool
+from ph.testing import MountProfile, run_tool
 from ph.tools.batch import execute_tool_calls
 from ph.tools.builtin.attach_tool import MAX_ATTACH_BYTES
 
@@ -44,7 +45,7 @@ def _takes_images() -> ResolvedModel:
 
 
 async def _agent(ctx: Context, name: str) -> Any:
-    return ctx.agents.create(ctx.sessions.create(name), OPTIONS)
+    return ctx.require(AGENTS).create(ctx.require(SESSIONS).create(name), OPTIONS)
 
 
 async def _dispatch(ctx: Context, agent: Any, name: str, arguments: Any) -> list[Any]:
@@ -80,7 +81,7 @@ def _media(request: Any) -> list[Any]:
 
 
 async def test_a_file_the_model_attached_reaches_the_next_request(
-    mount: Any, tmp_path: Path
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """The whole path, end to end, asserted where it counts.
 
@@ -92,7 +93,7 @@ async def test_a_file_the_model_attached_reaches_the_next_request(
     result.
     """
     ctx: Context = await mount()
-    ctx.llm_fake.route = _takes_images()
+    ctx.require(LLM_FAKE).route = _takes_images()
     (tmp_path / "shot.png").write_bytes(PNG)
     agent = await _agent(ctx, "attached")
 
@@ -110,13 +111,13 @@ async def test_a_file_the_model_attached_reaches_the_next_request(
     assert (result.value["width"], result.value["height"]) == (1024, 768)
     assert "It follows this result." in str(result.content)
 
-    (attached,) = _media(ctx.llm_fake.requests[-1])
+    (attached,) = _media(ctx.require(LLM_FAKE).requests[-1])
     assert attached.attachment_id == result.value["attachment_id"]
     assert attached.name == "shot.png"
-    assert ctx.attachments.exists(attached), "the bytes are in the store, not in the log"
+    assert ctx.require(ATTACHMENTS).exists(attached), "the bytes are in the store, not in the log"
 
 
-async def test_the_media_is_not_in_the_tool_result(mount: Any, tmp_path: Path) -> None:
+async def test_the_media_is_not_in_the_tool_result(mount: MountProfile, tmp_path: Path) -> None:
     """The drop this row is written against, pinned at the seam it would happen.
 
     A `MediaBlock` in the result content becomes a block inside `tool-result`, and
@@ -135,7 +136,9 @@ async def test_the_media_is_not_in_the_tool_result(mount: Any, tmp_path: Path) -
     assert result.additional_contexts[0].source.form == "relay", "a person did not attach this"
 
 
-async def test_the_read_gate_bounds_what_a_model_may_attach(mount: Any, tmp_path: Path) -> None:
+async def test_the_read_gate_bounds_what_a_model_may_attach(
+    mount: MountProfile, tmp_path: Path
+) -> None:
     """I-9's whole point, and the reason this is not `save_path`.
 
     A rule that refuses a read refuses the attach, with no second rule to write
@@ -159,11 +162,15 @@ async def test_the_read_gate_bounds_what_a_model_may_attach(mount: Any, tmp_path
     assert result.error.kind == "denied", "a policy refusal must not read as a tool failure"
     assert "keys are not readable" in result.error.message
     assert not result.additional_contexts, "nothing was put in front of the model"
-    assert not list(ctx.attachments.root.iterdir()) if ctx.attachments.root.exists() else True
+    assert (
+        not list(ctx.require(ATTACHMENTS).root.iterdir())
+        if ctx.require(ATTACHMENTS).root.exists()
+        else True
+    )
 
 
 async def test_a_file_no_provider_ingests_is_refused_with_the_way_out(
-    mount: Any, tmp_path: Path
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """`MediaBlock` is not a general file block, and this is where a model finds out.
 
@@ -186,11 +193,13 @@ async def test_a_file_no_provider_ingests_is_refused_with_the_way_out(
     # An extension nothing classifies reads as "no recognisable type" rather than
     # as the literal `application/octet-stream`, which names a MIME the model
     # might reasonably try to fix by renaming the file.
-    assert "no recognisable type" in unknown.error.message  # type: ignore[union-attr]
-    assert "text/plain" in text.error.message  # type: ignore[union-attr]
+    assert "no recognisable type" in unknown.error.message
+    assert "text/plain" in text.error.message
 
 
-async def test_an_oversized_file_is_refused_before_it_is_read(mount: Any, tmp_path: Path) -> None:
+async def test_an_oversized_file_is_refused_before_it_is_read(
+    mount: MountProfile, tmp_path: Path
+) -> None:
     """The cap is the harness's, not the route's, and it is answered by `stat`.
 
     A route's ceiling is `media-degrade`'s to apply, per request, with a pointer —
@@ -210,7 +219,7 @@ async def test_an_oversized_file_is_refused_before_it_is_read(mount: Any, tmp_pa
     assert not result.additional_contexts
 
 
-async def test_the_tool_is_absent_without_a_store(mount: Any) -> None:
+async def test_the_tool_is_absent_without_a_store(mount: MountProfile) -> None:
     """A capability the deployment does not have is not advertised.
 
     `inject` names `attachments`, so a profile that mounts no store never
@@ -221,7 +230,7 @@ async def test_the_tool_is_absent_without_a_store(mount: Any) -> None:
     ctx: Context = await mount({"id": "attachments", "disabled": True})
 
     assert ctx.get("attachments") is None
-    assert "attach" not in ctx.tools.view(ctx).visible
+    assert "attach" not in ctx.require(TOOLS).view(ctx).visible
 
 
 def test_the_default_cap_is_larger_than_either_route_declares() -> None:

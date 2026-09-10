@@ -31,6 +31,7 @@ from __future__ import annotations
 import pytest
 
 from ph.agent.types import AgentOptions
+from ph.keys import AGENTS, COMMANDS, GOALS, SESSIONS
 from ph.seams.goals import (
     Budget,
     Goal,
@@ -194,23 +195,23 @@ async def test_the_command_opens_a_goal_and_reports_its_spend(mount: object) -> 
     "what is it doing" is what a person types when they come back to a session.
     """
     ctx = await mount()  # type: ignore[operator]
-    session = ctx.sessions.create("cmd")
+    session = ctx.require(SESSIONS).create("cmd")
 
-    opened = await ctx.commands.dispatch(
+    opened = await ctx.require(COMMANDS).dispatch(
         "/autonomous make the tests pass -- pytest -q; mypy", session=session
     )
     assert "make the tests pass" in opened
     assert "pytest -q, mypy" in opened
 
-    state = ctx.goals.open(session)
+    state = ctx.require(GOALS).open(session)
     assert state is not None and state.goal.gates == ["pytest -q", "mypy"]
 
-    status = await ctx.commands.dispatch("/autonomous", session=session)
+    status = await ctx.require(COMMANDS).dispatch("/autonomous", session=session)
     assert "continuations 0/3" in status and "turns 0/12" in status
 
-    again = await ctx.commands.dispatch("/autonomous something else", session=session)
+    again = await ctx.require(COMMANDS).dispatch("/autonomous something else", session=session)
     assert "already open" in again
-    assert len(ctx.goals.states(session)) == 1, "a second goal was recorded anyway"
+    assert len(ctx.require(GOALS).states(session)) == 1, "a second goal was recorded anyway"
 
 
 @pytest.mark.anyio
@@ -226,10 +227,12 @@ async def test_the_loop_continues_a_turn_until_a_budget_stops_it(mount: object) 
     row's first acceptance gate: `budget_limited`, naming the limit that bound.
     """
     ctx = await mount({"id": "autonomous", "config": {"maxContinuations": 2}})  # type: ignore[operator]
-    session = ctx.sessions.create("loop")
-    agent = ctx.agents.create(session, AgentOptions(provider="fake", model="fake-1"))
+    session = ctx.require(SESSIONS).create("loop")
+    agent = ctx.require(AGENTS).create(session, AgentOptions(provider="fake", model="fake-1"))
 
-    await ctx.commands.dispatch("/autonomous fix it -- false", session=session, agent=agent)
+    await ctx.require(COMMANDS).dispatch(
+        "/autonomous fix it -- false", session=session, agent=agent
+    )
     await agent.prompt("go")
 
     types = [event.type for event in session.events_from(0)]
@@ -245,7 +248,7 @@ async def test_the_loop_continues_a_turn_until_a_budget_stops_it(mount: object) 
     settled = next(e for e in session.events_from(0) if e.type == "goal/settled")
     assert settled.data["outcome"] == "budget_limited"
     assert settled.data["detail"] == "max_continuations", "the trace does not say which budget"
-    assert ctx.goals.open(session) is None
+    assert ctx.require(GOALS).open(session) is None
 
 
 @pytest.mark.anyio
@@ -256,10 +259,12 @@ async def test_a_run_whose_gates_pass_is_achieved_and_stops(mount: object) -> No
     end — no continuation is spent, because there is nothing left to do.
     """
     ctx = await mount()  # type: ignore[operator]
-    session = ctx.sessions.create("done")
-    agent = ctx.agents.create(session, AgentOptions(provider="fake", model="fake-1"))
+    session = ctx.require(SESSIONS).create("done")
+    agent = ctx.require(AGENTS).create(session, AgentOptions(provider="fake", model="fake-1"))
 
-    await ctx.commands.dispatch("/autonomous ship it -- true", session=session, agent=agent)
+    await ctx.require(COMMANDS).dispatch(
+        "/autonomous ship it -- true", session=session, agent=agent
+    )
     await agent.prompt("go")
 
     types = [event.type for event in session.events_from(0)]
@@ -277,12 +282,12 @@ async def test_stop_abandons_the_open_goal(mount: object) -> None:
     run, and `abandoned` had no production caller at all.
     """
     ctx = await mount()  # type: ignore[operator]
-    session = ctx.sessions.create("stopped")
+    session = ctx.require(SESSIONS).create("stopped")
 
-    await ctx.commands.dispatch("/autonomous something long", session=session)
-    said = await ctx.commands.dispatch("/autonomous stop", session=session)
+    await ctx.require(COMMANDS).dispatch("/autonomous something long", session=session)
+    said = await ctx.require(COMMANDS).dispatch("/autonomous stop", session=session)
 
     assert "something long" in said
-    assert ctx.goals.open(session) is None
+    assert ctx.require(GOALS).open(session) is None
     settled = next(e for e in session.events_from(0) if e.type == "goal/settled")
     assert settled.data["outcome"] == "abandoned"

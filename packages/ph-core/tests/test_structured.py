@@ -255,6 +255,10 @@ async def test_a_degenerate_schema_warns_on_the_call(caplog: Any) -> None:
     with caplog.at_level(logging.WARNING, logger="ph.llm.structured"):
         # It *validates* — the field is present — which is exactly why nothing
         # else would catch a schema that constrains nothing on the wire.
-        await ask_for_shape(stream, _options(), {"required": ["severity"], "type": "object"})
+        await ask_for_shape(
+            stream,
+            _options(),
+            {"required": ["severity"], "type": "object"},  # type: ignore[arg-type]
+        )
 
     assert any("will not constrain" in record.message for record in caplog.records)

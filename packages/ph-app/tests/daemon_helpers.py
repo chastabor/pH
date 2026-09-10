@@ -28,7 +28,7 @@ from ph.bundles import BASE, HEADLESS
 from ph.cordis import Profile
 from ph.paths import resolve_roots
 from ph_app.daemon.client import DaemonClient
-from ph_app.daemon.server import serve
+from ph_app.daemon.server import DaemonServer, serve
 
 __all__ = [
     "PROFILE",
@@ -50,11 +50,27 @@ class _Daemon:
 
     path: Path
     tasks: Any
-    server: Any = None
+    server: DaemonServer | None = None
     """The `DaemonServer` behind the socket, for the tests whose subject is the
-    supervisor itself rather than the wire."""
+    supervisor itself rather than the wire.
+
+    Named rather than `Any`: `sweep` below hands back what the supervisor
+    returns, and while this was `Any` its declared `list[str]` was a claim
+    nothing checked."""
     clients: list[DaemonClient] = field(default_factory=list)
     """Every client handed out, so teardown can close them. See `close_clients`."""
+
+    @property
+    def running(self) -> DaemonServer:
+        """The server, for the members whose subject is the supervisor itself.
+
+        `server` is optional because `_Daemon` is built before `serve` fills it
+        in; by the time any of these members is called it is there. One
+        accessor rather than four `assert`s — and rather than the `Any` that
+        used to make every read of it unchecked (issue 32).
+        """
+        assert self.server is not None, "the daemon has not started yet"
+        return self.server
 
     async def client(self, *capabilities: str, on_notify: Any = None) -> DaemonClient:
         """One connected, pumping client. `capabilities` are what it declares.
@@ -100,7 +116,7 @@ class _Daemon:
 
     async def root(self, session_id: str = "root") -> Any:
         """One live root, started the way `session/attach` starts one."""
-        return await self.server.supervisor.start(session_id)
+        return await self.running.supervisor.start(session_id)
 
     def held(self, session_id: str) -> Any:
         """The root this daemon is *already* holding, or `KeyError`.
@@ -111,14 +127,14 @@ class _Daemon:
 
         Here rather than in each test file because `server.supervisor.roots` is
         this helper's own internals — it was reaching out of three files."""
-        return self.server.supervisor.roots[session_id]
+        return self.running.supervisor.roots[session_id]
 
     def holds(self, session_id: str) -> bool:
-        return session_id in self.server.supervisor.roots
+        return session_id in self.running.supervisor.roots
 
     async def sweep(self, *, after: float = 0.0) -> list[str]:
         """Release every root quiet longer than `after`. Returns their ids."""
-        return await self.server.supervisor.sweep(after=after)
+        return await self.running.supervisor.sweep(after=after)
 
 
 Daemon = _Daemon

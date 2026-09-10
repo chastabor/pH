@@ -13,11 +13,13 @@ from collections.abc import Callable
 from typing import Any
 
 import pytest
-from conftest import MESSAGING_ROW, PROVIDER_ROW
+from rlm_fixtures import MESSAGING_ROW, PROVIDER_ROW
 
+from ph.keys import AGENTS, JOBS, SESSIONS, SUBAGENTS
 from ph.seams.subagents import SubagentRequest, family_reach, reachable_family
-from ph.testing import FAKE_OPTIONS, run_tool
+from ph.testing import FAKE_OPTIONS, MountProfile, run_tool
 from ph.tools import Allow
+from ph_rlm.keys import RLM_CHILDREN
 from ph_rlm.messaging import (
     OBSERVE_GET_TOOL,
     OUT_OF_REACH,
@@ -34,7 +36,7 @@ ROWS: list[dict[str, Any]] = [PROVIDER_ROW, MESSAGING_ROW]
 
 
 @pytest.fixture
-def family_ctx(mount: Any) -> Callable[..., Any]:
+def family_ctx(mount: MountProfile) -> Callable[..., Any]:
     """`await family_ctx()` → `(ctx, parent_session, parent)` with messaging on."""
 
     async def build(**config: Any) -> tuple[Any, Any, Any]:
@@ -42,14 +44,14 @@ def family_ctx(mount: Any) -> Callable[..., Any]:
         if config:
             rows[1]["config"] = config
         ctx = await mount(*rows)
-        session = ctx.sessions.create("parent")
-        return ctx, session, ctx.agents.create(session, FAKE_OPTIONS)
+        session = ctx.require(SESSIONS).create("parent")
+        return ctx, session, ctx.require(AGENTS).create(session, FAKE_OPTIONS)
 
     return build
 
 
 async def _spawn(ctx: Any, parent: Any, name: str) -> Any:
-    return await ctx.subagents.start(
+    return await ctx.require(SUBAGENTS).start(
         PROVIDER_NAME, SubagentRequest(prompt=f"work on {name}", parent=parent, name=name)
     )
 
@@ -62,12 +64,12 @@ async def _siblings(family_ctx: Mounted, **config: Any) -> tuple[Any, Any, Any, 
     into its parent's inbox, which is itself pending input.
     """
     ctx, first_session, first = await family_ctx(**config)
-    second_session = ctx.sessions.create("other-root")
-    return ctx, first_session, first, ctx.agents.create(second_session, FAKE_OPTIONS)
+    second_session = ctx.require(SESSIONS).create("other-root")
+    return ctx, first_session, first, ctx.require(AGENTS).create(second_session, FAKE_OPTIONS)
 
 
 def _agent(ctx: Any, run: Any) -> Any:
-    agent = ctx.agents.get(run.session_id)
+    agent = ctx.require(AGENTS).get(run.session_id)
     assert agent is not None, "the child agent is not running"
     return agent
 
@@ -125,7 +127,11 @@ async def test_a_child_reaches_its_parent(family_ctx: Mounted) -> None:
     child = _agent(ctx, run)
 
     result = await _send(
-        ctx, child, ctx.sessions.get(run.session_id), message="found it", receiver_role="parent"
+        ctx,
+        child,
+        ctx.require(SESSIONS).get(run.session_id),
+        message="found it",
+        receiver_role="parent",
     )
     assert result.is_error is False
     assert result.value["receiverId"] == session.id
@@ -141,7 +147,9 @@ async def test_the_message_reaches_the_target_verbatim(family_ctx: Mounted) -> N
     child = _agent(ctx, run)
 
     body = "the bug is in parser.py line 40"
-    await _send(ctx, child, ctx.sessions.get(run.session_id), message=body, receiver_role="parent")
+    await _send(
+        ctx, child, ctx.require(SESSIONS).get(run.session_id), message=body, receiver_role="parent"
+    )
     delivered = [
         repr(event.data)
         for event in session.events
@@ -173,7 +181,7 @@ async def test_addressing_a_settled_child_wakes_it(family_ctx: Mounted) -> None:
     ctx, session, parent = await family_ctx()
     run = await _spawn(ctx, parent, "scout")
     await ctx.drain()
-    assert ctx.agents.get(run.session_id) is None, "the child should have settled"
+    assert ctx.require(AGENTS).get(run.session_id) is None, "the child should have settled"
 
     result = await _send(
         ctx, parent, session, message="are you there", receiver_role="child", receiver_name="scout"
@@ -181,7 +189,7 @@ async def test_addressing_a_settled_child_wakes_it(family_ctx: Mounted) -> None:
     assert result.is_error is False
     assert result.value["receiverId"] == run.session_id
     # Checked before draining: the woken child settles again once its job runs.
-    assert ctx.agents.get(run.session_id) is not None, "the child was not woken"
+    assert ctx.require(AGENTS).get(run.session_id) is not None, "the child was not woken"
 
     await ctx.drain()
     # The roster says it was *woken*, distinctly from a child still on its first
@@ -225,18 +233,18 @@ async def test_repeated_wakes_do_not_accrete_jobs(family_ctx: Mounted) -> None:
         assert sent.is_error is False
         await ctx.drain()
 
-    assert [job for job in ctx.jobs.list() if job.kind == "subagent"] == []
+    assert [job for job in ctx.require(JOBS).list() if job.kind == "subagent"] == []
 
 
 async def test_disposing_the_parent_abandons_a_running_drive(family_ctx: Mounted) -> None:
     """The other half: work still in flight when its owner goes is cancelled."""
     ctx, _session, parent = await family_ctx()
     await _spawn(ctx, parent, "scout")
-    running = [job for job in ctx.jobs.list() if job.kind == "subagent"]
+    running = [job for job in ctx.require(JOBS).list() if job.kind == "subagent"]
     assert running, "the drive job was never registered"
 
-    await ctx.agents.dispose(parent.id)
-    assert [job for job in ctx.jobs.list() if job.kind == "subagent"] == []
+    await ctx.require(AGENTS).dispose(parent.id)
+    assert [job for job in ctx.require(JOBS).list() if job.kind == "subagent"] == []
     assert running[0].token.cancelled
 
 
@@ -246,12 +254,12 @@ async def test_a_revoked_child_is_not_quietly_revived(family_ctx: Mounted) -> No
     ctx, session, parent = await family_ctx()
     run = await _spawn(ctx, parent, "scout")
     await ctx.drain()
-    assert await ctx.rlm_children.delete(session, run.id, reason="user") is True
+    assert await ctx.require(RLM_CHILDREN).delete(session, run.id, reason="user") is True
 
     # Both doors: the service refuses because `forget()` dropped the run, and the
     # provider refuses because `_release` dropped the child.
-    assert await ctx.subagents.rehydrate(run.id) is False
-    assert await ctx.rlm_children.rehydrate(run.id) is False
+    assert await ctx.require(SUBAGENTS).rehydrate(run.id) is False
+    assert await ctx.require(RLM_CHILDREN).rehydrate(run.id) is False
 
     result = await _send(
         ctx, parent, session, message="come back", receiver_role="child", receiver_name="scout"
@@ -260,7 +268,7 @@ async def test_a_revoked_child_is_not_quietly_revived(family_ctx: Mounted) -> No
     assert result.error.kind == "failed", "not addressable is not a policy refusal"
     assert "could not be woken" in result.error.message
     assert "agent_observe" in result.error.message
-    assert ctx.agents.get(run.session_id) is None
+    assert ctx.require(AGENTS).get(run.session_id) is None
 
 
 async def test_a_send_outside_the_family_is_refused_by_a_guard(family_ctx: Mounted) -> None:
@@ -288,7 +296,7 @@ async def test_a_send_outside_the_family_is_refused_by_a_guard(family_ctx: Mount
     assert OUT_OF_REACH in result.error.message or "no child is named" in result.error.message
     # And the grandchild exists and is reachable from its own parent, so the
     # refusal is about the boundary rather than about a missing agent.
-    assert ctx.sessions.get(grandchild.session_id) is not None
+    assert ctx.require(SESSIONS).get(grandchild.session_id) is not None
 
 
 async def test_the_denial_names_the_reachable_roles(family_ctx: Mounted) -> None:
@@ -376,10 +384,14 @@ async def test_a_childs_send_records_that_it_replied(family_ctx: Mounted) -> Non
     child = _agent(ctx, run)
 
     sent = await _send(
-        ctx, child, ctx.sessions.get(run.session_id), message="here it is", receiver_role="parent"
+        ctx,
+        child,
+        ctx.require(SESSIONS).get(run.session_id),
+        message="here it is",
+        receiver_role="parent",
     )
     assert sent.is_error is False
-    assert ctx.rlm_children._children[run.id].replied is True
+    assert ctx.require(RLM_CHILDREN)._children[run.id].replied is True
 
 
 # ------------------------------------------------------------------ observe --

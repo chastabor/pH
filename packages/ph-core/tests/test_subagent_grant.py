@@ -33,17 +33,28 @@ from typing import Any
 
 import pytest
 
+from ph.keys import AGENTS, SESSIONS, SKILLS, SUBAGENTS, SYSTEM_PROMPT, TOOLS
 from ph.seams._restriction import NameFilter
 from ph.seams.skills import SkillRestriction
 from ph.seams.subagents import Grant, SubagentRequest, SubagentSpawnError
 from ph.system_prompt import render_prompt
-from ph.testing import FAKE_OPTIONS, StubSubagentProvider, run_tool, simple_tool, skill, write_skill
+from ph.testing import (
+    FAKE_OPTIONS,
+    MountProfile,
+    StubSubagentProvider,
+    run_tool,
+    simple_tool,
+    skill,
+    write_skill,
+)
 
 pytestmark = pytest.mark.anyio
 
 
 def _agent(ctx: Any, name: str = "parent", *, parent: Any = None) -> Any:
-    return ctx.agents.create(ctx.sessions.create(name), FAKE_OPTIONS, parent=parent)
+    return ctx.require(AGENTS).create(
+        ctx.require(SESSIONS).create(name), FAKE_OPTIONS, parent=parent
+    )
 
 
 async def _spawn(ctx: Any, parent: Any, **request: Any) -> Any:
@@ -53,35 +64,37 @@ async def _spawn(ctx: Any, parent: Any, **request: Any) -> Any:
     materialization and the application are three steps on one path, and a test
     that called the last of them directly would pass while the path was broken.
     """
-    if ctx.subagents.provider_names() == []:
-        ctx.subagents.register_provider("stub", StubSubagentProvider(root=ctx))
-    return await ctx.subagents.start("stub", SubagentRequest(prompt="go", parent=parent, **request))
+    if ctx.require(SUBAGENTS).provider_names() == []:
+        ctx.require(SUBAGENTS).register_provider("stub", StubSubagentProvider(root=ctx))
+    return await ctx.require(SUBAGENTS).start(
+        "stub", SubagentRequest(prompt="go", parent=parent, **request)
+    )
 
 
-async def _granted(mount: Any, *names: str, rows: Any = None) -> tuple[Any, Any]:
+async def _granted(mount: MountProfile, *names: str, rows: Any = None) -> tuple[Any, Any]:
     """`(ctx, parent)` with these skills installed and a provider mounted."""
     ctx = await mount(*(rows or []))
     for name in names:
-        ctx.skills.register(skill(name))
-    ctx.subagents.register_provider("stub", StubSubagentProvider(root=ctx))
+        ctx.require(SKILLS).register(skill(name))
+    ctx.require(SUBAGENTS).register_provider("stub", StubSubagentProvider(root=ctx))
     return ctx, _agent(ctx)
 
 
 # ------------------------------------------------------------------- the seam --
 
 
-async def test_a_child_may_be_narrowed_to_a_subset(mount: Any) -> None:
+async def test_a_child_may_be_narrowed_to_a_subset(mount: MountProfile) -> None:
     ctx, parent = await _granted(mount, "review", "deploy")
 
     run = await _spawn(ctx, parent, skills=("review",))
 
-    assert [one.name for one in ctx.skills.list(run.scope)] == ["review"]
+    assert [one.name for one in ctx.require(SKILLS).list(run.scope)] == ["review"]
     # And the parent is untouched, which is what makes this narrowing rather
     # than a deployment-wide policy change.
-    assert [one.name for one in ctx.skills.list(parent.ctx)] == ["deploy", "review"]
+    assert [one.name for one in ctx.require(SKILLS).list(parent.ctx)] == ["deploy", "review"]
 
 
-async def test_a_spawn_cannot_name_a_skill_the_parent_does_not_hold(mount: Any) -> None:
+async def test_a_spawn_cannot_name_a_skill_the_parent_does_not_hold(mount: MountProfile) -> None:
     """The whole security content of the row. A spawn that could widen would
     make delegation the privilege escalation I7 exists to prevent."""
     ctx, parent = await _granted(mount, "review")
@@ -95,7 +108,7 @@ async def test_a_spawn_cannot_name_a_skill_the_parent_does_not_hold(mount: Any) 
     assert "Grant it to the parent first" in str(refused.value)
 
 
-async def test_a_narrowed_parent_cannot_re_grant_what_it_lost(mount: Any) -> None:
+async def test_a_narrowed_parent_cannot_re_grant_what_it_lost(mount: MountProfile) -> None:
     """Transitivity, which is what makes the root's grant bound the whole tree.
 
     A child narrowed to `review` is a parent in turn, and the skill it no longer
@@ -103,13 +116,13 @@ async def test_a_narrowed_parent_cannot_re_grant_what_it_lost(mount: Any) -> Non
     bind the first generation.
     """
     ctx, parent = await _granted(mount, "review", "deploy")
-    ctx.skills.restrict(SkillRestriction(allow=frozenset({"review"})), scope=parent.ctx)
+    ctx.require(SKILLS).restrict(SkillRestriction(allow=frozenset({"review"})), scope=parent.ctx)
 
     with pytest.raises(SubagentSpawnError):
         await _spawn(ctx, parent, skills=("deploy",))
 
 
-async def test_a_child_never_holds_more_than_its_narrowed_parent(mount: Any) -> None:
+async def test_a_child_never_holds_more_than_its_narrowed_parent(mount: MountProfile) -> None:
     """The ceiling, through the seam path, whichever way it is enforced.
 
     This asserted the *opposite structure* until P6-27 — `run.scope.isolation is
@@ -125,51 +138,53 @@ async def test_a_child_never_holds_more_than_its_narrowed_parent(mount: Any) -> 
     not either.
     """
     ctx, parent = await _granted(mount, "review", "deploy")
-    ctx.skills.restrict(SkillRestriction(allow=frozenset({"review"})), scope=parent.ctx)
+    ctx.require(SKILLS).restrict(SkillRestriction(allow=frozenset({"review"})), scope=parent.ctx)
 
     run = await _spawn(ctx, parent)
 
-    assert [one.name for one in ctx.skills.list(run.scope)] == ["review"]
+    assert [one.name for one in ctx.require(SKILLS).list(run.scope)] == ["review"]
 
 
-async def test_an_empty_selection_is_a_real_answer(mount: Any) -> None:
+async def test_an_empty_selection_is_a_real_answer(mount: MountProfile) -> None:
     """`()` says "no skills", which a caller may legitimately mean — and which
     `None` cannot express."""
     ctx, parent = await _granted(mount, "review")
 
     run = await _spawn(ctx, parent, skills=())
 
-    assert ctx.skills.list(run.scope) == []
+    assert ctx.require(SKILLS).list(run.scope) == []
 
 
-async def test_restrictions_intersect_rather_than_replace(mount: Any) -> None:
+async def test_restrictions_intersect_rather_than_replace(mount: MountProfile) -> None:
     """Two narrowings compose to the narrower of them. If the second replaced
     the first, a nested spawn would be a way back out."""
     ctx, parent = await _granted(mount, "one", "two", "three")
-    ctx.skills.restrict(SkillRestriction(allow=frozenset({"one", "two"})), scope=parent.ctx)
+    ctx.require(SKILLS).restrict(
+        SkillRestriction(allow=frozenset({"one", "two"})), scope=parent.ctx
+    )
     inner = parent.ctx.scope("inner")
 
-    ctx.skills.restrict(SkillRestriction(deny=frozenset({"one"})), scope=inner)
+    ctx.require(SKILLS).restrict(SkillRestriction(deny=frozenset({"one"})), scope=inner)
 
-    assert [one.name for one in ctx.skills.list(inner)] == ["two"]
+    assert [one.name for one in ctx.require(SKILLS).list(inner)] == ["two"]
 
 
 # ------------------------------------------------------------------ the tools --
 
 
-async def test_a_child_may_be_narrowed_to_a_subset_of_tools(mount: Any) -> None:
+async def test_a_child_may_be_narrowed_to_a_subset_of_tools(mount: MountProfile) -> None:
     ctx, parent = await _granted(mount)
-    before = set(ctx.tools.view(parent.ctx).visible)
+    before = set(ctx.require(TOOLS).view(parent.ctx).visible)
     assert {"read", "write"} <= before
 
     run = await _spawn(ctx, parent, tools=("read",))
 
-    assert "read" in ctx.tools.view(run.scope).visible
-    assert "write" not in ctx.tools.view(run.scope).visible
-    assert set(ctx.tools.view(parent.ctx).visible) == before
+    assert "read" in ctx.require(TOOLS).view(run.scope).visible
+    assert "write" not in ctx.require(TOOLS).view(run.scope).visible
+    assert set(ctx.require(TOOLS).view(parent.ctx).visible) == before
 
 
-async def test_a_spawn_cannot_name_a_tool_the_parent_does_not_hold(mount: Any) -> None:
+async def test_a_spawn_cannot_name_a_tool_the_parent_does_not_hold(mount: MountProfile) -> None:
     ctx, parent = await _granted(mount)
 
     with pytest.raises(SubagentSpawnError) as refused:
@@ -178,7 +193,7 @@ async def test_a_spawn_cannot_name_a_tool_the_parent_does_not_hold(mount: Any) -
     assert "nonesuch" in str(refused.value)
 
 
-async def test_a_provider_with_no_child_scope_cannot_be_narrowed(mount: Any) -> None:
+async def test_a_provider_with_no_child_scope_cannot_be_narrowed(mount: MountProfile) -> None:
     """Fail-closed, and narrowly. A provider that hands back no scope cannot be
     bounded, so it is refused the moment a spawn means to narrow — and left
     alone in a deployment where nothing is restricted, which is every provider
@@ -186,13 +201,15 @@ async def test_a_provider_with_no_child_scope_cannot_be_narrowed(mount: Any) -> 
     # Two installed, one named — otherwise "narrowed to the only skill there is"
     # is not a narrowing and the check correctly says nothing.
     ctx, parent = await _granted(mount, "review", "deploy")
-    ctx.subagents.register_provider("blind", StubSubagentProvider())
+    ctx.require(SUBAGENTS).register_provider("blind", StubSubagentProvider())
 
-    unnarrowed = await ctx.subagents.start("blind", SubagentRequest(prompt="go", parent=parent))
+    unnarrowed = await ctx.require(SUBAGENTS).start(
+        "blind", SubagentRequest(prompt="go", parent=parent)
+    )
     assert unnarrowed.scope is None
 
     with pytest.raises(SubagentSpawnError) as refused:
-        await ctx.subagents.start(
+        await ctx.require(SUBAGENTS).start(
             "blind", SubagentRequest(prompt="go", parent=parent, skills=("review",))
         )
 
@@ -202,7 +219,7 @@ async def test_a_provider_with_no_child_scope_cannot_be_narrowed(mount: Any) -> 
 # ----------------------------------------------------------------- direction --
 
 
-async def test_a_named_skill_is_in_the_childs_prompt(mount: Any, tmp_path: Path) -> None:
+async def test_a_named_skill_is_in_the_childs_prompt(mount: MountProfile, tmp_path: Path) -> None:
     """G9 inverted for the one case where the question it defers is already
     answered: a child spawned *for* this skill will need it, certainly."""
     write_skill(tmp_path, "review", body="Read the diff. Say what is wrong. Do not fix it.")
@@ -211,13 +228,15 @@ async def test_a_named_skill_is_in_the_childs_prompt(mount: Any, tmp_path: Path)
     )
 
     run = await _spawn(ctx, parent, skills=("review",))
-    prompt = render_prompt(await ctx.system_prompt.assemble(run.scope))
+    prompt = render_prompt(await ctx.require(SYSTEM_PROMPT).assemble(run.scope))
 
     assert "Read the diff. Say what is wrong." in prompt
     assert "not background reading" in prompt
 
 
-async def test_an_unnamed_skill_stays_out_of_the_prompt(mount: Any, tmp_path: Path) -> None:
+async def test_an_unnamed_skill_stays_out_of_the_prompt(
+    mount: MountProfile, tmp_path: Path
+) -> None:
     """The other half of G9: a skill the child merely *may* use is a catalog
     line, not a body. Otherwise narrowing a child to five skills would put five
     bodies in every one of its requests."""
@@ -228,14 +247,14 @@ async def test_an_unnamed_skill_stays_out_of_the_prompt(mount: Any, tmp_path: Pa
     )
 
     run = await _spawn(ctx, parent, skills=("review",))
-    prompt = render_prompt(await ctx.system_prompt.assemble(run.scope))
+    prompt = render_prompt(await ctx.require(SYSTEM_PROMPT).assemble(run.scope))
 
     assert "Read the diff carefully." in prompt
     assert "Push the button twice." not in prompt
     assert "**deploy**" not in prompt, "a skill it cannot reach was still advertised"
 
 
-async def test_the_brief_is_read_once_not_per_assembly(mount: Any, tmp_path: Path) -> None:
+async def test_the_brief_is_read_once_not_per_assembly(mount: MountProfile, tmp_path: Path) -> None:
     """A `PromptSection` is the *cached prefix*; one that hits the filesystem on
     every model step is neither static nor free — and a skill body may be 10 MiB."""
     write_skill(tmp_path, "review", body="Read the diff carefully.")
@@ -256,7 +275,7 @@ async def test_the_brief_is_read_once_not_per_assembly(mount: Any, tmp_path: Pat
     Path.open = counted  # type: ignore[method-assign]
     try:
         for _ in range(3):
-            await ctx.system_prompt.assemble(run.scope)
+            await ctx.require(SYSTEM_PROMPT).assemble(run.scope)
     finally:
         Path.open = original  # type: ignore[method-assign]
 
@@ -272,12 +291,12 @@ PRESET_ROW = {
 }
 
 
-async def test_a_preset_fills_in_what_the_caller_did_not_name(mount: Any) -> None:
+async def test_a_preset_fills_in_what_the_caller_did_not_name(mount: MountProfile) -> None:
     """A deployment writes "what a reviewer is" once. The direction still comes
     from the skill, which is why a preset has no prompt of its own."""
     ctx, parent = await _granted(mount, "review", rows=[PRESET_ROW])
 
-    resolved = ctx.subagents.resolve_preset(
+    resolved = ctx.require(SUBAGENTS).resolve_preset(
         SubagentRequest(prompt="go", parent=parent, preset="reviewer")
     )
 
@@ -285,7 +304,7 @@ async def test_a_preset_fills_in_what_the_caller_did_not_name(mount: Any) -> Non
     assert resolved.tools == ("read",)
 
 
-async def test_a_preset_cannot_grant_past_the_parent(mount: Any) -> None:
+async def test_a_preset_cannot_grant_past_the_parent(mount: MountProfile) -> None:
     """The reason a preset is a menu and not a grant: one that widened whatever
     selected it would put the escalation one indirection away, and under the
     model's control rather than a human's."""
@@ -293,8 +312,8 @@ async def test_a_preset_cannot_grant_past_the_parent(mount: Any) -> None:
     ctx, parent = await _granted(mount, rows=[PRESET_ROW])
 
     with pytest.raises(SubagentSpawnError) as refused:
-        ctx.subagents.check_grant(
-            ctx.subagents.resolve_preset(
+        ctx.require(SUBAGENTS).check_grant(
+            ctx.require(SUBAGENTS).resolve_preset(
                 SubagentRequest(prompt="go", parent=parent, preset="reviewer")
             )
         )
@@ -302,22 +321,24 @@ async def test_a_preset_cannot_grant_past_the_parent(mount: Any) -> None:
     assert "review" in str(refused.value)
 
 
-async def test_an_unknown_preset_is_refused_rather_than_ignored(mount: Any) -> None:
+async def test_an_unknown_preset_is_refused_rather_than_ignored(mount: MountProfile) -> None:
     """A spawn that asked for a `reviewer` and silently got a generic child is
     the failure `_resolve_model` refuses one field over, for the same reason."""
     ctx, parent = await _granted(mount, rows=[PRESET_ROW])
 
     with pytest.raises(SubagentSpawnError) as refused:
-        ctx.subagents.resolve_preset(SubagentRequest(prompt="go", parent=parent, preset="nonesuch"))
+        ctx.require(SUBAGENTS).resolve_preset(
+            SubagentRequest(prompt="go", parent=parent, preset="nonesuch")
+        )
 
     assert "reviewer" in str(refused.value), "the refusal did not say what is on offer"
 
 
-async def test_an_explicit_selection_still_narrows_a_preset(mount: Any) -> None:
+async def test_an_explicit_selection_still_narrows_a_preset(mount: MountProfile) -> None:
     """Defaults, not a ceiling — the ceiling is the parent."""
     ctx, parent = await _granted(mount, rows=[PRESET_ROW])
 
-    resolved = ctx.subagents.resolve_preset(
+    resolved = ctx.require(SUBAGENTS).resolve_preset(
         SubagentRequest(prompt="go", parent=parent, preset="reviewer", skills=())
     )
 
@@ -327,13 +348,13 @@ async def test_an_explicit_selection_still_narrows_a_preset(mount: Any) -> None:
 # ------------------------------------------------------------- through a tool --
 
 
-async def test_the_task_tool_carries_the_selection(mount: Any) -> None:
+async def test_the_task_tool_carries_the_selection(mount: MountProfile) -> None:
     """End to end through the model-facing surface, since that is where a
     selector that never reaches the request would look like it worked."""
     provider = StubSubagentProvider()
     ctx = await mount({"id": "subagent-task"})
-    ctx.skills.register(skill("review"))
-    ctx.subagents.register_provider("stub", provider)
+    ctx.require(SKILLS).register(skill("review"))
+    ctx.require(SUBAGENTS).register_provider("stub", provider)
     await ctx.serial("profile/mounted")
     parent = _agent(ctx)
 
@@ -348,9 +369,9 @@ async def test_the_task_tool_carries_the_selection(mount: Any) -> None:
     assert provider.last().tools == ("read",)
 
 
-async def test_the_task_tool_refuses_to_widen(mount: Any) -> None:
+async def test_the_task_tool_refuses_to_widen(mount: MountProfile) -> None:
     ctx = await mount({"id": "subagent-task"})
-    ctx.subagents.register_provider("stub", StubSubagentProvider())
+    ctx.require(SUBAGENTS).register_provider("stub", StubSubagentProvider())
     await ctx.serial("profile/mounted")
     parent = _agent(ctx)
 
@@ -359,7 +380,9 @@ async def test_the_task_tool_refuses_to_widen(mount: Any) -> None:
     assert result.is_error
 
 
-async def test_a_child_without_the_tool_is_not_told_to_use_it(mount: Any, tmp_path: Path) -> None:
+async def test_a_child_without_the_tool_is_not_told_to_use_it(
+    mount: MountProfile, tmp_path: Path
+) -> None:
     """The catalog names the `skill` tool, so it must ask whether *this* agent
     has it. Telling a model to call something absent from its schema reads as
     the model's mistake rather than the profile's."""
@@ -369,7 +392,7 @@ async def test_a_child_without_the_tool_is_not_told_to_use_it(mount: Any, tmp_pa
     )
     run = await _spawn(ctx, parent, tools=("read",))
 
-    prompt = render_prompt(await ctx.system_prompt.assemble(run.scope))
+    prompt = render_prompt(await ctx.require(SYSTEM_PROMPT).assemble(run.scope))
 
     assert "**review**" in prompt, "the child can still reach the skill"
     assert "`skill` tool" not in prompt, "it was told to call a tool it does not have"
@@ -396,7 +419,7 @@ def _agents(ctx: Any) -> tuple[Any, Any]:
     return parent, _agent(ctx, "p627-child", parent=parent)
 
 
-async def test_a_childs_scope_nests_inside_its_parents(mount: Any) -> None:
+async def test_a_childs_scope_nests_inside_its_parents(mount: MountProfile) -> None:
     """The structural claim, and the two questions that follow from it.
 
     `reaches` is the visibility rule shared by event dispatch and every scoped
@@ -416,7 +439,7 @@ async def test_a_childs_scope_nests_inside_its_parents(mount: Any) -> None:
 
 
 async def test_a_child_inherits_its_parents_narrowing_with_no_grant_applied(
-    mount: Any,
+    mount: MountProfile,
 ) -> None:
     """The point of the row: the ceiling is the tree, not a list somebody wrote.
 
@@ -426,17 +449,19 @@ async def test_a_child_inherits_its_parents_narrowing_with_no_grant_applied(
     nothing would hand the child of a narrowed parent the deployment-wide set".
     """
     ctx = await mount()
-    ctx.tools.register(simple_tool("p627_tool"))
+    ctx.require(TOOLS).register(simple_tool("p627_tool"))
     parent, child = _agents(ctx)
 
-    assert "p627_tool" in ctx.tools.view(child.ctx).visible
-    ctx.tools.restrict(NameFilter(deny=("p627_tool",)), scope=parent.ctx)
+    assert "p627_tool" in ctx.require(TOOLS).view(child.ctx).visible
+    ctx.require(TOOLS).restrict(NameFilter(deny=frozenset({"p627_tool"})), scope=parent.ctx)
 
-    assert "p627_tool" not in ctx.tools.view(parent.ctx).visible
-    assert "p627_tool" not in ctx.tools.view(child.ctx).visible, "the child outran its parent"
+    assert "p627_tool" not in ctx.require(TOOLS).view(parent.ctx).visible
+    assert "p627_tool" not in ctx.require(TOOLS).view(child.ctx).visible, (
+        "the child outran its parent"
+    )
 
 
-async def test_a_child_can_be_narrowed_below_its_parent(mount: Any) -> None:
+async def test_a_child_can_be_narrowed_below_its_parent(mount: MountProfile) -> None:
     """The prerequisite this row needed, and why it was invisible before.
 
     `_build_view` filtered **global** names only, so a restriction could never
@@ -448,15 +473,15 @@ async def test_a_child_can_be_narrowed_below_its_parent(mount: Any) -> None:
     """
     ctx = await mount()
     parent, child = _agents(ctx)
-    ctx.tools.register(simple_tool("parent_scoped"), scope=parent.ctx)
-    assert "parent_scoped" in ctx.tools.view(child.ctx).visible, "it should inherit first"
+    ctx.require(TOOLS).register(simple_tool("parent_scoped"), scope=parent.ctx)
+    assert "parent_scoped" in ctx.require(TOOLS).view(child.ctx).visible, "it should inherit first"
 
-    ctx.tools.restrict(NameFilter(deny=("parent_scoped",)), scope=child.ctx)
-    assert "parent_scoped" not in ctx.tools.view(child.ctx).visible
-    assert "parent_scoped" in ctx.tools.view(parent.ctx).visible, "the parent kept its own"
+    ctx.require(TOOLS).restrict(NameFilter(deny=frozenset({"parent_scoped"})), scope=child.ctx)
+    assert "parent_scoped" not in ctx.require(TOOLS).view(child.ctx).visible
+    assert "parent_scoped" in ctx.require(TOOLS).view(parent.ctx).visible, "the parent kept its own"
 
 
-async def test_a_scope_still_owns_its_own_registration(mount: Any) -> None:
+async def test_a_scope_still_owns_its_own_registration(mount: MountProfile) -> None:
     """The half of the old guard that was right, kept.
 
     "An agent's own registration cannot be masked out from under it" — a filter
@@ -466,13 +491,13 @@ async def test_a_scope_still_owns_its_own_registration(mount: Any) -> None:
     """
     ctx = await mount()
     _parent, child = _agents(ctx)
-    ctx.tools.register(simple_tool("mine"), scope=child.ctx)
-    ctx.tools.restrict(NameFilter(deny=("mine",)), scope=child.ctx)
+    ctx.require(TOOLS).register(simple_tool("mine"), scope=child.ctx)
+    ctx.require(TOOLS).restrict(NameFilter(deny=frozenset({"mine"})), scope=child.ctx)
 
-    assert "mine" in ctx.tools.view(child.ctx).visible
+    assert "mine" in ctx.require(TOOLS).view(child.ctx).visible
 
 
-async def test_disposing_the_parent_disposes_the_childs_scope(mount: Any) -> None:
+async def test_disposing_the_parent_disposes_the_childs_scope(mount: MountProfile) -> None:
     """Teardown follows the shape rather than a registered effect.
 
     `Context.dispose` unwinds `_children` before its own effects, so a child goes
@@ -485,11 +510,11 @@ async def test_disposing_the_parent_disposes_the_childs_scope(mount: Any) -> Non
     parent, child = _agents(ctx)
     assert child.ctx.active
 
-    await ctx.agents.dispose(parent.id)
+    await ctx.require(AGENTS).dispose(parent.id)
     assert not child.ctx.active, "the child's scope outlived its parent's"
 
 
-async def test_a_childs_capability_is_fixed_at_admission(mount: Any) -> None:
+async def test_a_childs_capability_is_fixed_at_admission(mount: MountProfile) -> None:
     """The ruling P6-27 settled, and the reason `Grant` survives nesting.
 
     Nesting makes the *chain* bound a child — "no more than the parent holds" —
@@ -508,19 +533,21 @@ async def test_a_childs_capability_is_fixed_at_admission(mount: Any) -> None:
     redundant — this is what would stop them.
     """
     ctx = await mount()
-    ctx.tools.register(simple_tool("at_admission"))
+    ctx.require(TOOLS).register(simple_tool("at_admission"))
     parent, child = _agents(ctx)
 
     # `names`, not a hand-rolled fold of `view().visible`: `held_by`'s docstring
     # is about exactly this — "computing them three times in three spellings is
     # how the three come to disagree about what 'holds' means".
-    held = tuple(ctx.tools.names(scope=parent.ctx))
+    held = tuple(ctx.require(TOOLS).names(scope=parent.ctx))
     Grant(skills=(), tools=held).apply(ctx, child.ctx)
-    assert "at_admission" in ctx.tools.view(child.ctx).visible
+    assert "at_admission" in ctx.require(TOOLS).view(child.ctx).visible
 
-    ctx.tools.register(simple_tool("after_admission"))
-    assert "after_admission" in ctx.tools.view(parent.ctx).visible, "the parent did gain it"
-    assert "after_admission" not in ctx.tools.view(child.ctx).visible, (
+    ctx.require(TOOLS).register(simple_tool("after_admission"))
+    assert "after_admission" in ctx.require(TOOLS).view(parent.ctx).visible, (
+        "the parent did gain it"
+    )
+    assert "after_admission" not in ctx.require(TOOLS).view(child.ctx).visible, (
         "a running child widened when its parent did — the ceiling must be the one "
         "the admission recorded, not the one the parent happens to hold now"
     )
@@ -529,7 +556,7 @@ async def test_a_childs_capability_is_fixed_at_admission(mount: Any) -> None:
 # --- P6-31: the ceiling is computed in the boundary the caller stated ---------
 
 
-async def test_a_spawn_computes_its_ceiling_in_the_stated_boundary(mount: Any) -> None:
+async def test_a_spawn_computes_its_ceiling_in_the_stated_boundary(mount: MountProfile) -> None:
     """P6-31's first half, and the shape `fs_tools` had before P6-24.
 
     `held_by` derived the ceiling's boundary from `request.parent` — the field
@@ -543,21 +570,23 @@ async def test_a_spawn_computes_its_ceiling_in_the_stated_boundary(mount: Any) -
     granted something the stated boundary does not hold.
     """
     ctx = await mount()
-    ctx.tools.register(simple_tool("wide_open"))
+    ctx.require(TOOLS).register(simple_tool("wide_open"))
     parent = _agent(ctx, "p631-parent")
     stated = ctx.scope("the-delegating-boundary")
-    ctx.tools.restrict(NameFilter(deny=("wide_open",)), scope=stated)
+    ctx.require(TOOLS).restrict(NameFilter(deny=frozenset({"wide_open"})), scope=stated)
 
-    _, held = ctx.subagents.held_by(SubagentRequest(prompt="go", parent=parent, scope=stated))
+    _, held = ctx.require(SUBAGENTS).held_by(
+        SubagentRequest(prompt="go", parent=parent, scope=stated)
+    )
     assert "wide_open" not in held, (
         "the ceiling was computed from the agent, not the boundary the caller stated"
     )
-    _, from_agent = ctx.subagents.held_by(SubagentRequest(prompt="go", parent=parent))
+    _, from_agent = ctx.require(SUBAGENTS).held_by(SubagentRequest(prompt="go", parent=parent))
     assert "wide_open" in from_agent, "the un-narrowed agent is the control for that"
 
 
 async def test_an_unreadable_parent_refuses_instead_of_granting_everything(
-    mount: Any,
+    mount: MountProfile,
 ) -> None:
     """P6-31's second half: `None` was not "no ceiling", it was the widest one.
 
@@ -574,46 +603,58 @@ async def test_an_unreadable_parent_refuses_instead_of_granting_everything(
     ceiling where its own was 6**.
     """
     ctx = await mount()
-    ctx.tools.register(simple_tool("wide_open"))
+    ctx.require(TOOLS).register(simple_tool("wide_open"))
     parent = _agent(ctx, "p631-narrowed")
-    ctx.tools.restrict(NameFilter(deny=("wide_open",)), scope=parent.ctx)
+    ctx.require(TOOLS).restrict(NameFilter(deny=frozenset({"wide_open"})), scope=parent.ctx)
 
     class NoCtx:
-        """A parent-shaped handle that never assigned `self.ctx`."""
+        """A parent-shaped handle that never assigned `self.ctx`.
+
+        Deliberately *not* an `AgentDriver`: what the three asserts below claim
+        is that such a parent is refused, so each call site carries the
+        `arg-type` pragma rather than the stub pretending to satisfy the type.
+        """
 
         id = "broken"
 
     with pytest.raises(SubagentSpawnError, match="ceiling this child inherits is unknowable"):
-        ctx.subagents.held_by(SubagentRequest(prompt="go", parent=NoCtx()))
+        ctx.require(SUBAGENTS).held_by(
+            SubagentRequest(prompt="go", parent=NoCtx())  # type: ignore[arg-type]
+        )
 
     # The three that must keep working, because refusing is only worth it if it
     # refuses nothing else.
-    _, narrowed = ctx.subagents.held_by(SubagentRequest(prompt="go", parent=parent))
+    _, narrowed = ctx.require(SUBAGENTS).held_by(SubagentRequest(prompt="go", parent=parent))
     assert "wide_open" not in narrowed, "a readable parent still narrows"
-    _, stated = ctx.subagents.held_by(
-        SubagentRequest(prompt="go", parent=NoCtx(), scope=parent.ctx)
+    _, stated = ctx.require(SUBAGENTS).held_by(
+        SubagentRequest(prompt="go", parent=NoCtx(), scope=parent.ctx)  # type: ignore[arg-type]
     )
     assert "wide_open" not in stated, "a stated boundary answers whatever the parent looks like"
-    _, rootless = ctx.subagents.held_by(SubagentRequest(prompt="go", parent=None))
+    # `None` past the declared type on purpose: `held_by` computes a grant and
+    # never spawns, so `_boundary_for`'s no-parent branch is reachable here and
+    # nowhere else. `SubagentRequest.parent` says why it stays required.
+    _, rootless = ctx.require(SUBAGENTS).held_by(
+        SubagentRequest(prompt="go", parent=None)  # type: ignore[arg-type]
+    )
     assert "wide_open" in rootless, "a spawn with no parent is a root delegation"
 
 
-async def test_a_guard_refuses_before_the_provider_is_asked(mount: Any) -> None:
+async def test_a_guard_refuses_before_the_provider_is_asked(mount: MountProfile) -> None:
     """`ctx.subagents.guard` (P4-04): deny-only, asked before admission, and
     unwound with the scope that registered it."""
     ctx = await mount()
     parent = _agent(ctx)
     provider = StubSubagentProvider(root=ctx)
-    ctx.subagents.register_provider("stub", provider)
+    ctx.require(SUBAGENTS).register_provider("stub", provider)
     policy = ctx.scope("policy")
-    ctx.subagents.guard(
+    ctx.require(SUBAGENTS).guard(
         lambda request: "not today" if request.prompt == "no" else None, scope=policy
     )
 
-    await ctx.subagents.start("stub", SubagentRequest(prompt="yes", parent=parent))
+    await ctx.require(SUBAGENTS).start("stub", SubagentRequest(prompt="yes", parent=parent))
     with pytest.raises(SubagentSpawnError, match="not today"):
-        await ctx.subagents.start("stub", SubagentRequest(prompt="no", parent=parent))
+        await ctx.require(SUBAGENTS).start("stub", SubagentRequest(prompt="no", parent=parent))
     assert [request.prompt for request in provider.requests] == ["yes"]
 
     await policy.dispose()
-    await ctx.subagents.start("stub", SubagentRequest(prompt="no", parent=parent))
+    await ctx.require(SUBAGENTS).start("stub", SubagentRequest(prompt="no", parent=parent))

@@ -12,8 +12,12 @@ move — which is how one crash becomes two side effects.
 
 from __future__ import annotations
 
+from pathlib import Path
+from typing import Any
+
 import pytest
 
+from ph.keys import SESSION_PERSISTENCE, SESSIONS
 from ph.persistence.repair import (
     TOOL_NOT_STARTED,
     TOOL_OUTCOME_UNKNOWN,
@@ -22,10 +26,11 @@ from ph.persistence.repair import (
 )
 from ph.seams.approval import pending_approvals
 from ph.session import Session, SurfaceIntent
-from ph.testing import assistant_payload, user_payload
+from ph.session.json import as_obj, as_seq
+from ph.testing import MountProfile, assistant_payload, user_payload
 
 
-def _assistant_with_call(call_id: str, *, turn: int = 1, step: int = 1) -> dict:
+def _assistant_with_call(call_id: str, *, turn: int = 1, step: int = 1) -> dict[str, Any]:
     payload = assistant_payload("working on it", "m2", turn=turn, step=step)
     payload["message"]["content"].append(
         {"type": "tool-call", "id": call_id, "name": "edit", "arguments": "{}"}
@@ -74,11 +79,11 @@ def test_a_call_that_never_started_is_closed_as_not_started() -> None:
     assert [event.type for event in closers] == ["tool/result", "step/end", "turn/end"]
 
     result = closers[0]
-    assert result.data["error"]["code"] == TOOL_NOT_STARTED
-    assert (
-        "before the Harness recorded it as started"
-        in (result.data["message"]["content"][0]["content"][0]["text"])
-    )
+    assert as_obj(result.data["error"])["code"] == TOOL_NOT_STARTED
+    text = as_obj(
+        as_seq(as_obj(as_seq(as_obj(result.data["message"])["content"])[0])["content"])[0]
+    )["text"]
+    assert "before the Harness recorded it as started" in str(text)
     # Nothing ran, so it cites no call event.
     assert result.source_event_seqs is None
 
@@ -91,11 +96,13 @@ def test_a_recorded_call_is_closed_as_outcome_unknown() -> None:
 
     closers = interrupted_turn_closers(session.events)
     result = closers[0]
-    assert result.data["error"]["code"] == TOOL_OUTCOME_UNKNOWN
-    text = result.data["message"]["content"][0]["content"][0]["text"]
+    assert as_obj(result.data["error"])["code"] == TOOL_OUTCOME_UNKNOWN
+    text = as_obj(
+        as_seq(as_obj(as_seq(as_obj(result.data["message"])["content"])[0])["content"])[0]
+    )["text"]
     # The model is told to reason from the tool, not to retry blindly.
-    assert "Do not retry blindly." in text
-    assert "read-only or idempotent" in text
+    assert "Do not retry blindly." in str(text)
+    assert "read-only or idempotent" in str(text)
     assert result.source_event_seqs == (call_seq,)
 
 
@@ -175,11 +182,13 @@ def test_a_turn_parked_on_a_human_is_closed_as_interrupted() -> None:
     closers = interrupted_turn_closers(session.events)
 
     assert [event.type for event in closers] == ["tool/result", "step/end", "turn/end"]
-    assert closers[-1].data["reason"]["kind"] == "interrupted", "parked reads as interrupted"
+    assert as_obj(closers[-1].data["reason"])["kind"] == "interrupted", (
+        "parked reads as interrupted"
+    )
     # Not started — because nothing was. The synthesized result is what keeps the
     # rebuilt log something a provider will accept.
-    assert closers[0].data["error"]["code"] == TOOL_NOT_STARTED
-    assert closers[0].data["message"]["source"]["callId"] == "c1"
+    assert as_obj(closers[0].data["error"])["code"] == TOOL_NOT_STARTED
+    assert as_obj(as_obj(closers[0].data["message"])["source"])["callId"] == "c1"
 
 
 def test_a_log_parked_before_p7_15_still_repairs_honestly() -> None:
@@ -193,7 +202,7 @@ def test_a_log_parked_before_p7_15_still_repairs_honestly() -> None:
     """
     closers = interrupted_turn_closers(_parked_turn(recorded_call=True).events)
 
-    assert closers[0].data["error"]["code"] == TOOL_OUTCOME_UNKNOWN
+    assert as_obj(closers[0].data["error"])["code"] == TOOL_OUTCOME_UNKNOWN
     assert closers[0].source_event_seqs is not None, "and it cites the record it found"
 
 
@@ -229,17 +238,17 @@ def test_a_turn_with_no_open_step_closes_only_the_turn() -> None:
 
 
 @pytest.mark.anyio
-async def test_resume_repairs_a_crashed_log_on_load(mount, tmp_path) -> None:
+async def test_resume_repairs_a_crashed_log_on_load(mount: MountProfile, tmp_path: Path) -> None:
     """The repair is on the load path, so nothing downstream sees an open turn."""
     from ph.persistence import resume_session
 
     ctx = await mount({"id": "session-persistence", "config": {"root": str(tmp_path / "sessions")}})
-    session = ctx.sessions.create("crashed")
+    session = ctx.require(SESSIONS).create("crashed")
     session.append("turn/start", {"turn": 1})
     session.append("step/start", {"turn": 1, "step": 1})
     session.append("assistant/message", _assistant_with_call("c1"), SurfaceIntent("append", ()))
-    await ctx.sessions.flush(session)
-    ctx.sessions.dispose("crashed")
+    await ctx.require(SESSIONS).flush(session)
+    ctx.require(SESSIONS).dispose("crashed")
 
     revived = await resume_session(ctx, "crashed")
     types = [event.type for event in revived.events]
@@ -257,7 +266,7 @@ async def test_resume_repairs_a_crashed_log_on_load(mount, tmp_path) -> None:
 
 
 @pytest.mark.anyio
-async def test_a_session_can_be_resumed_more_than_once(mount, tmp_path) -> None:
+async def test_a_session_can_be_resumed_more_than_once(mount: MountProfile, tmp_path: Path) -> None:
     """The seam's wiring: `resume_session` tells the store what it already holds.
 
     A resume adds two events nobody wrote — the repair closers and the
@@ -278,23 +287,23 @@ async def test_a_session_can_be_resumed_more_than_once(mount, tmp_path) -> None:
     from ph.persistence import resume_session
 
     ctx = await mount({"id": "session-persistence", "config": {"root": str(tmp_path / "sessions")}})
-    session = ctx.sessions.create("reopened")
+    session = ctx.require(SESSIONS).create("reopened")
     session.append("turn/start", {"turn": 1})
     session.append("step/start", {"turn": 1, "step": 1})
     session.append("assistant/message", _assistant_with_call("c1"), SurfaceIntent("append", ()))
-    await ctx.sessions.flush(session)
-    ctx.sessions.dispose("reopened")
+    await ctx.require(SESSIONS).flush(session)
+    ctx.require(SESSIONS).dispose("reopened")
 
-    store = ctx.session_persistence
+    store = ctx.require(SESSION_PERSISTENCE)
     for reopen in (1, 2, 3):
         revived = await resume_session(ctx, "reopened")
         assert revived.durable_length > 0, f"reopen {reopen}: nothing was declared durable"
-        await ctx.sessions.flush(revived)
+        await ctx.require(SESSIONS).flush(revived)
         _, stored = store.read("reopened")
         assert [event.seq for event in stored] == list(range(len(stored))), (
             f"reopen {reopen} left a hole in the seq space; the next resume would be refused"
         )
-        ctx.sessions.dispose("reopened")
+        ctx.require(SESSIONS).dispose("reopened")
 
     # The repair became durable on the way through, so the stored log no longer
     # reads as crashed — and a later reopen is a clean one.

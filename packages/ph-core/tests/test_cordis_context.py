@@ -14,6 +14,7 @@ import pytest
 
 from ph.cordis import (
     Context,
+    Disposer,
     InactiveScopeError,
     ServiceConflictError,
     ServiceNotFoundError,
@@ -29,13 +30,13 @@ async def test_services_resolve_most_specific_first() -> None:
     root = Context()
     root.provide("tools", "global-tools")
     agent = root.scope("agent:a")
-    assert agent.tools == "global-tools"
+    assert agent.require("tools") == "global-tools"
 
     agent.provide("tools", "agent-tools")
-    assert agent.tools == "agent-tools"
+    assert agent.require("tools") == "agent-tools"
     # Shadowing is one-directional: the agent sees its own, the root still sees
     # the global one. That asymmetry is what makes a per-agent tool set safe.
-    assert root.tools == "global-tools"
+    assert root.require("tools") == "global-tools"
 
     await root.dispose()
 
@@ -43,7 +44,7 @@ async def test_services_resolve_most_specific_first() -> None:
 async def test_missing_service_raises_attribute_error() -> None:
     root = Context()
     with pytest.raises(ServiceNotFoundError):
-        _ = root.nothing
+        _ = root.require("nothing")
     # AttributeError subclassing keeps getattr/hasattr behaving normally.
     assert getattr(root, "nothing", "fallback") == "fallback"
     assert not root.has("nothing")
@@ -74,7 +75,7 @@ async def test_async_effect_acquires_and_releases() -> None:
     root = Context()
     released: list[str] = []
 
-    async def acquire() -> object:
+    async def acquire() -> Disposer:
         def release() -> None:
             released.append("worktree")
 
@@ -106,7 +107,7 @@ async def test_disposing_a_provider_removes_the_service() -> None:
 
     fork = root.plugin(provider)
     await root.reconcile()
-    assert root.thing == "value"
+    assert root.require("thing") == "value"
 
     await fork.dispose()
     assert not root.has("thing")
@@ -146,13 +147,13 @@ async def test_plugin_provides_into_the_realm_it_was_mounted_in() -> None:
 
     @plugin("consumer", inject=["shared"])
     async def consumer(ctx: Context, config: object) -> None:
-        ctx.provide("saw", ctx.shared)
+        ctx.provide("saw", ctx.require("shared"))
 
     root.plugin(provider)
     root.plugin(consumer)
     await root.reconcile()
     # A row's service is visible to every sibling row, not trapped in the fork.
-    assert root.saw == "yes"
+    assert root.require("saw") == "yes"
 
 
 async def test_failed_activation_unwinds_its_own_scope() -> None:
@@ -178,7 +179,7 @@ async def test_activation_scopes_are_transparent_and_agent_scopes_isolate() -> N
 
     root.plugin(row)
     await root.reconcile()
-    activation: Context = root.row_scope
+    activation: Context = root.require("row_scope")
     agent = root.scope("agent")
     other = root.scope("other")
     # A row reaches every agent; an agent reaches only itself.

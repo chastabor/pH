@@ -42,6 +42,7 @@ import pytest
 from filelock import FileLock
 
 from ph.cordis import Profile
+from ph.keys import SESSION_TELEMETRY
 from ph.persistence import SessionBusy, read_session
 from ph.testing import stored_log
 from ph_app.modes import render_transcript, run_json, run_rpc, run_transcript
@@ -267,7 +268,7 @@ async def test_a_refused_open_leaves_an_ops_record(profile: Profile, tmp_path: P
     seen: list[Any] = []
     with _held("held", tmp_path):
         async with mounted(profile) as ctx:
-            ctx.session_telemetry.add_sink(seen.append)
+            ctx.require(SESSION_TELEMETRY).add_sink(seen.append)
             with pytest.raises(SessionBusy):
                 await open_session(ctx, "held")
 

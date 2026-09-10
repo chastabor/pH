@@ -19,6 +19,7 @@ from typing import Any
 import pytest
 
 from ph.bundles import BASE, HEADLESS
+from ph.keys import AGENTS, APPROVAL, SESSIONS, WORKSPACE
 from ph.llm.types import ToolCallBlock, ToolResultBlock, text_of
 from ph.seams.spill import SpillStore
 from ph.session import derive_event_message
@@ -159,7 +160,7 @@ def answer_approvals(ctx: Any, answer: Any) -> list[Any]:
         # it has looked at the log mid-flight, say.
         return await chosen if inspect.isawaitable(chosen) else chosen
 
-    ctx.approval.register_answerer(respond)
+    ctx.require(APPROVAL).register_answerer(respond)
     return asked
 
 
@@ -170,10 +171,10 @@ async def scoped_agent(ctx: Any, tmp_path: Path, *, session_id: str = "s1") -> t
     path inside the workspace the seam handed out", which is true of every tier
     that hands out a fresh root. `test_workspace_git.py` owns the checkout.
     """
-    session = ctx.sessions.create(session_id)
-    agent = ctx.agents.create(session, FAKE_OPTIONS)
-    ctx.workspace.register_provider(StubWorkspaceProvider(root=tmp_path / "trees"))
-    workspace = await ctx.workspace.acquire(
+    session = ctx.require(SESSIONS).create(session_id)
+    agent = ctx.require(AGENTS).create(session, FAKE_OPTIONS)
+    ctx.require(WORKSPACE).register_provider(StubWorkspaceProvider(root=tmp_path / "trees"))
+    workspace = await ctx.require(WORKSPACE).acquire(
         session_id=session_id,
         agent_id=agent.id,
         base=tmp_path / "project",

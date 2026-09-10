@@ -115,9 +115,9 @@ async def test_the_running_daemon_reports_them_beside_the_root_count(tmp_path: P
     where the assumption is, not in a document beside it.
     """
     async with running(tmp_path) as daemon:
-        await daemon.server.supervisor.start("one")
-        await daemon.server.supervisor.start("two")
-        status = daemon.server.status()
+        await daemon.running.supervisor.start("one")
+        await daemon.running.supervisor.start("two")
+        status = daemon.running.status()
 
         assert status.roots == 2, "the line that invites the assumption"
         titles = [section.title for section in status.sections]
@@ -146,14 +146,16 @@ async def test_a_roots_own_crash_is_contained_and_the_process_is_the_boundary(
     # `test_daemon.py`'s own ladder tests shorten it the same way.
     monkeypatch.setattr(recovery, "RETRY_DELAYS", (0.01, 0.01, 0.01))
     async with running(tmp_path) as daemon:
-        supervisor = daemon.server.supervisor
+        supervisor = daemon.running.supervisor
         broken = await supervisor.start("broken")
         healthy = await supervisor.start("healthy")
 
         async def explode() -> None:
             raise RuntimeError("this root's task is broken")
 
-        broken.agent.run = explode
+        # `setattr`: replacing a bound method on a live handle, which is the
+        # crash this test provokes.
+        setattr(broken.agent, "run", explode)  # noqa: B010
         await supervisor.prompt("broken", "go")
         with anyio.fail_after(10):
             while not broken.recovery.failed:
@@ -163,7 +165,7 @@ async def test_a_roots_own_crash_is_contained_and_the_process_is_the_boundary(
         # still answering — which is the containment the row claims.
         assert broken.status == "failed"
         assert healthy.status == "idle", "one root's crash is not another's"
-        assert daemon.server.status().roots == 2
+        assert daemon.running.status().roots == 2
 
         await supervisor.prompt("healthy", "and you?")
         with anyio.fail_after(10):

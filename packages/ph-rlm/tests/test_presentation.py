@@ -17,6 +17,7 @@ import pytest
 from runtime_helpers import run_cell
 
 from ph.cancel import CancelToken
+from ph.keys import TOOLS
 from ph.llm.types import ToolCallBlock
 from ph.testing import simple_tool
 from ph.tools.batch import execute_tool_calls
@@ -42,7 +43,7 @@ async def test_the_description_is_prime_agents_verbatim(mounted_runtime: Mounted
     wording has to be deliberate.
     """
     ctx, _session, agent = await mounted_runtime(presentation=True)
-    definition = ctx.tools.get(IPYTHON, scope=agent.ctx)
+    definition = ctx.require(TOOLS).get(IPYTHON, scope=agent.ctx)
     assert definition is not None
     assert definition.description == IPYTHON_DESCRIPTION
     assert "%%bash" in definition.description
@@ -156,7 +157,7 @@ async def test_a_reset_kernel_reports_it_on_the_card(mounted_runtime: Mounted) -
 async def test_a_real_cell_produces_the_card_and_the_text(mounted_runtime: Mounted) -> None:
     """The two projections, computed by the pipeline rather than called directly."""
     ctx, session, agent = await mounted_runtime(presentation=True)
-    ctx.tools.register(simple_tool("ping", lambda _args, _run: "pong"))
+    ctx.require(TOOLS).register(simple_tool("ping", lambda _args, _run: "pong"))
     result = await _cell(
         ctx,
         "print('hello')\nawait tools.ping()\n'done'",
@@ -215,6 +216,6 @@ async def test_without_the_row_the_transport_keeps_its_reserved_name(
     """The rename is the profile's, not the runtime's: a deployment that mounts
     the kernel without this row still gets `run_code`."""
     ctx, session, agent = await mounted_runtime(snapshots=False)
-    assert ctx.tools.view(agent.ctx).transport_name == RUN_CODE
+    assert ctx.require(TOOLS).view(agent.ctx).transport_name == RUN_CODE
     result = await run_cell(ctx, "1 + 1", agent=agent, session=session)
     assert result.value["value"] == 2

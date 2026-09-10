@@ -27,6 +27,7 @@ import pytest
 from ph.agent.types import AgentOptions
 from ph.bundles import BASE, HEADLESS
 from ph.cordis import Context
+from ph.keys import AGENTS, ATTACHMENTS, LLM, SESSIONS, UPLOADS
 from ph.llm.types import (
     FILE_EXPIRED,
     MediaBlock,
@@ -38,9 +39,11 @@ from ph.llm.types import (
     create_user_message,
 )
 from ph.seams.attachments import digest_of
+from ph.testing import MountProfile
 from ph_app.adapters._http import HttpClient, failure_from_status
 from ph_app.adapters.google import (
     MAX_TRANSFERS,
+    GoogleAdapter,
     _call_names,
     _is_missing_file,
     _is_overflow,
@@ -54,7 +57,7 @@ pytestmark = pytest.mark.anyio
 PROFILE = [BASE, HEADLESS]
 CLIP = b"\x00\x00\x00\x18ftypmp42" + b"frames" * 128
 OPTIONS = AgentOptions(provider="google", model="gemini-test")
-ROUTE = {
+ROUTE: dict[str, list[dict[str, Any]]] = {
     "insert": [
         {
             "id": "llm-google",
@@ -173,14 +176,16 @@ def wire(monkeypatch: pytest.MonkeyPatch) -> _FileApi:
 
 
 async def _attached(ctx: Context, mime: str = "video/mp4", name: str = "clip.mp4") -> Any:
-    ref = await ctx.attachments.save_bytes(content=CLIP, mime=mime, name=name)
+    ref = await ctx.require(ATTACHMENTS).save_bytes(content=CLIP, mime=mime, name=name)
     return create_user_message(
         content=[{"type": "text", "text": "what happens in this?"}, MediaBlock(attachment=ref)],
         source={"kind": "user"},
     )
 
 
-async def test_a_video_reaches_a_route_that_accepts_one(mount: Any, wire: _FileApi) -> None:
+async def test_a_video_reaches_a_route_that_accepts_one(
+    mount: MountProfile, wire: _FileApi
+) -> None:
     """P7-03's gate, whole, for the first time.
 
     The transport was built and proven a phase ago against a PDF; what could not
@@ -189,8 +194,8 @@ async def test_a_video_reaches_a_route_that_accepts_one(mount: Any, wire: _FileA
     carries a `fileData` part naming it, and the bytes are nowhere in the body.
     """
     ctx: Context = await mount(ROUTE, profile=PROFILE)
-    session = ctx.sessions.create("video")
-    agent = ctx.agents.create(session, OPTIONS)
+    session = ctx.require(SESSIONS).create("video")
+    agent = ctx.require(AGENTS).create(session, OPTIONS)
 
     agent.followup(await _attached(ctx))
     await agent.run()
@@ -208,7 +213,9 @@ async def test_a_video_reaches_a_route_that_accepts_one(mount: Any, wire: _FileA
     assert "files.example" not in str(record.data)
 
 
-async def test_the_upload_waits_for_the_file_to_become_usable(mount: Any, wire: _FileApi) -> None:
+async def test_the_upload_waits_for_the_file_to_become_usable(
+    mount: MountProfile, wire: _FileApi
+) -> None:
     """The way this uploader differs in kind from its two siblings.
 
     A video is *processed* after it is stored, and a `fileUri` referenced before
@@ -219,19 +226,19 @@ async def test_the_upload_waits_for_the_file_to_become_usable(mount: Any, wire: 
     """
     wire.processing = 2
     ctx: Context = await mount(ROUTE, profile=PROFILE)
-    agent = ctx.agents.create(ctx.sessions.create("processing"), OPTIONS)
+    agent = ctx.require(AGENTS).create(ctx.require(SESSIONS).create("processing"), OPTIONS)
 
     agent.followup(await _attached(ctx))
     await agent.run()
 
     assert wire.polls == 2, "it waited exactly as long as the file was not ready"
     assert wire.referenced(wire.bodies[-1]) == ["https://files.example/files/clip1"]
-    stored = ctx.uploads.cached("google", digest_of(CLIP))
+    stored = ctx.require(UPLOADS).cached("google", digest_of(CLIP))
     assert stored is not None and stored.expires_at == 2_000_000_000_000
 
 
 async def test_a_file_that_never_becomes_ready_falls_back_to_the_bytes(
-    mount: Any, wire: _FileApi
+    mount: MountProfile, wire: _FileApi
 ) -> None:
     """The budget, and why running out of it is not a lost turn.
 
@@ -242,8 +249,8 @@ async def test_a_file_that_never_becomes_ready_falls_back_to_the_bytes(
     """
     wire.processing = 1_000  # never ready inside the budget
     ctx: Context = await mount(_impatient(), profile=PROFILE)
-    session = ctx.sessions.create("slow")
-    agent = ctx.agents.create(session, OPTIONS)
+    session = ctx.require(SESSIONS).create("slow")
+    agent = ctx.require(AGENTS).create(session, OPTIONS)
 
     agent.followup(await _attached(ctx))
     await agent.run()
@@ -272,7 +279,7 @@ def _impatient(**config: Any) -> dict[str, Any]:
 
 
 async def test_a_transfer_that_ran_out_of_patience_is_resumed_not_re_sent(
-    mount: Any, wire: _FileApi
+    mount: MountProfile, wire: _FileApi
 ) -> None:
     """**The step after a slow transcode polls the file; it does not re-send it.**
 
@@ -289,8 +296,8 @@ async def test_a_transfer_that_ran_out_of_patience_is_resumed_not_re_sent(
     """
     wire.processing = 3  # ready on the third poll, which is past one budget
     ctx: Context = await mount(_impatient(), profile=PROFILE)
-    session = ctx.sessions.create("resumed")
-    agent = ctx.agents.create(session, OPTIONS)
+    session = ctx.require(SESSIONS).create("resumed")
+    agent = ctx.require(AGENTS).create(session, OPTIONS)
 
     agent.followup(await _attached(ctx))
     await agent.run()
@@ -305,7 +312,9 @@ async def test_a_transfer_that_ran_out_of_patience_is_resumed_not_re_sent(
     assert record.data["mime"] == "video/mp4"
 
 
-async def test_a_remembered_file_that_is_gone_is_uploaded_again(mount: Any, wire: _FileApi) -> None:
+async def test_a_remembered_file_that_is_gone_is_uploaded_again(
+    mount: MountProfile, wire: _FileApi
+) -> None:
     """The memo is a shortcut, never a source of truth.
 
     A file deleted from another session, an expiry, a revoked key — each makes the
@@ -316,7 +325,7 @@ async def test_a_remembered_file_that_is_gone_is_uploaded_again(mount: Any, wire
     """
     wire.processing = 3
     ctx: Context = await mount(_impatient(), profile=PROFILE)
-    agent = ctx.agents.create(ctx.sessions.create("gone"), OPTIONS)
+    agent = ctx.require(AGENTS).create(ctx.require(SESSIONS).create("gone"), OPTIONS)
 
     agent.followup(await _attached(ctx))
     await agent.run()
@@ -330,7 +339,9 @@ async def test_a_remembered_file_that_is_gone_is_uploaded_again(mount: Any, wire
     assert wire.referenced(wire.bodies[-1]) == ["https://files.example/files/clip2"]
 
 
-async def test_a_file_the_provider_rejects_is_not_remembered(mount: Any, wire: _FileApi) -> None:
+async def test_a_file_the_provider_rejects_is_not_remembered(
+    mount: MountProfile, wire: _FileApi
+) -> None:
     """`FAILED` forgets where the budget remembers, and the asymmetry is the point.
 
     A file that is merely slow is worth waiting for on the next step. One the
@@ -339,18 +350,21 @@ async def test_a_file_the_provider_rejects_is_not_remembered(mount: Any, wire: _
     back to the bytes.
     """
     ctx: Context = await mount(_impatient(), profile=PROFILE)
-    agent = ctx.agents.create(ctx.sessions.create("failed"), OPTIONS)
+    agent = ctx.require(AGENTS).create(ctx.require(SESSIONS).create("failed"), OPTIONS)
     wire.fails = True
 
     agent.followup(await _attached(ctx))
     await agent.run()
 
-    adapter = ctx.llm.adapter_for("google")
+    adapter = ctx.require(LLM).adapter_for("google")
+    assert isinstance(adapter, GoogleAdapter)
     assert adapter._pending == {}, "a file that will never work was remembered"
     assert "inlineData" in str(wire.bodies[-1])
 
 
-async def test_a_file_the_route_keeps_refusing_stops_being_sent(mount: Any, wire: _FileApi) -> None:
+async def test_a_file_the_route_keeps_refusing_stops_being_sent(
+    mount: MountProfile, wire: _FileApi
+) -> None:
     """**The loop nothing above this bounds.**
 
     `load_handles` catches every upload failure and sends the block inline, so an
@@ -365,7 +379,7 @@ async def test_a_file_the_route_keeps_refusing_stops_being_sent(mount: Any, wire
     one the model can read.
     """
     ctx: Context = await mount(_impatient(), profile=PROFILE)
-    agent = ctx.agents.create(ctx.sessions.create("refused"), OPTIONS)
+    agent = ctx.require(AGENTS).create(ctx.require(SESSIONS).create("refused"), OPTIONS)
     wire.fails = True  # every upload lands in `FAILED`
 
     agent.followup(await _attached(ctx))
@@ -377,7 +391,9 @@ async def test_a_file_the_route_keeps_refusing_stops_being_sent(mount: Any, wire
     assert "inlineData" in str(wire.bodies[-1]), "and the clip still reaches the model"
 
 
-async def test_a_slow_transcode_is_not_charged_against_the_cap(mount: Any, wire: _FileApi) -> None:
+async def test_a_slow_transcode_is_not_charged_against_the_cap(
+    mount: MountProfile, wire: _FileApi
+) -> None:
     """The distinction the cap turns on: transfers, not attempts.
 
     A step that timed out with a resumable file remembered has not paid for the
@@ -388,7 +404,7 @@ async def test_a_slow_transcode_is_not_charged_against_the_cap(mount: Any, wire:
     """
     wire.processing = 3 * MAX_TRANSFERS  # ready long after the cap would have fired
     ctx: Context = await mount(_impatient(), profile=PROFILE)
-    agent = ctx.agents.create(ctx.sessions.create("slow"), OPTIONS)
+    agent = ctx.require(AGENTS).create(ctx.require(SESSIONS).create("slow"), OPTIONS)
 
     agent.followup(await _attached(ctx))
     await agent.run()
@@ -400,7 +416,7 @@ async def test_a_slow_transcode_is_not_charged_against_the_cap(mount: Any, wire:
 
 
 async def test_a_revoked_file_is_re_uploaded_rather_than_failing_the_turn(
-    mount: Any, wire: _FileApi
+    mount: MountProfile, wire: _FileApi
 ) -> None:
     """This provider's own way of saying a file is gone.
 
@@ -410,8 +426,8 @@ async def test_a_revoked_file_is_re_uploaded_rather_than_failing_the_turn(
     then read as a missing file and retry for ever.
     """
     ctx: Context = await mount(ROUTE, profile=PROFILE)
-    session = ctx.sessions.create("revoked")
-    agent = ctx.agents.create(session, OPTIONS)
+    session = ctx.require(SESSIONS).create("revoked")
+    agent = ctx.require(AGENTS).create(session, OPTIONS)
     agent.followup(await _attached(ctx))
     await agent.run()
 
@@ -425,7 +441,7 @@ async def test_a_revoked_file_is_re_uploaded_rather_than_failing_the_turn(
 
 
 async def test_an_image_rides_inline_because_only_video_is_referenced(
-    mount: Any, wire: _FileApi
+    mount: MountProfile, wire: _FileApi
 ) -> None:
     """`uploads` defaults to the video family, not to everything it accepts.
 
@@ -434,7 +450,7 @@ async def test_an_image_rides_inline_because_only_video_is_referenced(
     inline, so video goes by reference.
     """
     ctx: Context = await mount(ROUTE, profile=PROFILE)
-    agent = ctx.agents.create(ctx.sessions.create("image"), OPTIONS)
+    agent = ctx.require(AGENTS).create(ctx.require(SESSIONS).create("image"), OPTIONS)
 
     agent.followup(await _attached(ctx, mime="image/png", name="shot.png"))
     await agent.run()

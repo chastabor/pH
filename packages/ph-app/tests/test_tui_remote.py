@@ -27,8 +27,10 @@ import pytest
 from daemon_helpers import running, until
 from tui_helpers import StubHost
 
+from ph.keys import APPROVAL, USER_QUESTIONS
 from ph.seams.tui_status import StatusReading
 from ph.seams.user_questions import UserQuestion
+from ph.session.json import as_int
 from ph.testing import StubAgent
 from ph_app.daemon.follow import Followed
 from ph_app.payloads import StatusFacts
@@ -191,15 +193,18 @@ async def test_an_event_arriving_on_both_routes_is_folded_once() -> None:
     folded: list[int] = []
     feed = Followed(
         session_id="s",
-        on_events=lambda pairs: folded.extend(int(one.get("seq", -1)) for one, _ in pairs),
-        on_status=lambda params: None,
+        on_events=lambda pairs, _live: folded.extend(
+            as_int(one.get("seq"), -1) for one, _ in pairs
+        ),
+        on_status=lambda _facts: None,
     )
 
     # A live frame arrives during catch-up and is held.
     feed("session.event", {"sessionId": "s", "event": {"seq": 2, "type": "turn/end"}})
     # The page that follows already contains it.
     feed.on_events(
-        [({"seq": 1, "type": "turn/start"}, None), ({"seq": 2, "type": "turn/end"}, None)]
+        [({"seq": 1, "type": "turn/start"}, None), ({"seq": 2, "type": "turn/end"}, None)],
+        False,
     )
     feed.seen = 2
     feed.live()
@@ -346,7 +351,7 @@ async def test_a_daemon_verb_is_dispatched_over_the_wire(tmp_path: Path) -> None
         # palette, dispatched one way, whichever end executes it.
         await remote.run("", None)
         await front.run_command(f"/{remote.name}")
-        root = daemon.server.supervisor.roots["remote"]
+        root = daemon.running.supervisor.roots["remote"]
         assert any(one.type == "command/run" for one in root.session.events)
 
 
@@ -369,7 +374,7 @@ async def test_a_local_verb_never_reaches_the_daemon(tmp_path: Path) -> None:
         await front.run_command("/model")
 
         assert ran == ["open_models"]
-        root = daemon.server.supervisor.roots["remote"]
+        root = daemon.running.supervisor.roots["remote"]
         assert not any(one.type == "command/run" for one in root.session.events)
 
 
@@ -437,9 +442,9 @@ async def test_an_approval_from_the_daemon_reaches_this_screen(tmp_path: Path) -
         # Held, not discarded: this front end being attached is what makes the
         # desk have somebody to ask.
         _front_end, host = await _front(daemon)
-        root = daemon.server.supervisor.roots["remote"]
+        root = daemon.running.supervisor.roots["remote"]
 
-        outcome = await root.ctx.approval.request(
+        outcome = await root.ctx.require(APPROVAL).request(
             agent=StubAgent(ctx=root.ctx, session=root.session),
             tool_name="write",
             call_id="c1",
@@ -460,9 +465,9 @@ async def test_a_question_from_the_daemon_reaches_this_screen(tmp_path: Path) ->
     async with running(tmp_path) as daemon:
         # Held for the same reason: `attended` is true because this is attached.
         _front_end, host = await _front(daemon)
-        root = daemon.server.supervisor.roots["remote"]
+        root = daemon.running.supervisor.roots["remote"]
 
-        answer = await root.ctx.user_questions.ask(
+        answer = await root.ctx.require(USER_QUESTIONS).ask(
             UserQuestion(question="which port?", ask_id="q1"), session=root.session
         )
 
@@ -491,7 +496,7 @@ async def test_a_turn_started_here_finishes_after_this_front_end_is_gone(
     """
     async with running(tmp_path) as daemon:
         front, _ = await _front(daemon, "outlives")
-        root = daemon.server.supervisor.roots["outlives"]
+        root = daemon.running.supervisor.roots["outlives"]
 
         await front.client.prompt("outlives", "keep going")
         await front.close()
@@ -515,5 +520,5 @@ async def test_closing_a_front_end_leaves_the_root_running(tmp_path: Path) -> No
 
         await front.close()
 
-        assert "kept" in daemon.server.supervisor.roots
-        assert not daemon.server.stop.is_set()
+        assert "kept" in daemon.running.supervisor.roots
+        assert not daemon.running.stop.is_set()

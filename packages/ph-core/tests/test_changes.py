@@ -34,6 +34,7 @@ from typing import Any
 import pytest
 
 from ph.cordis import Context
+from ph.keys import WORKSPACE
 from ph.seams.changes import (
     Backend,
     TreeState,
@@ -41,6 +42,7 @@ from ph.seams.changes import (
     backend_for,
     tree_state,
 )
+from ph.testing import MountProfile
 from ph.testing.git import git, git_repo
 from ph.testing.jj import jj_repo
 
@@ -173,7 +175,7 @@ def test_the_protocol_matches_a_provider_that_declares_the_attribute() -> None:
 
 
 @pytest.mark.needs_git
-async def test_git_vouches_for_a_committed_file(mount: Any, tmp_path: Path) -> None:
+async def test_git_vouches_for_a_committed_file(mount: MountProfile, tmp_path: Path) -> None:
     """The win: a clean file is proved unchanged without being opened."""
     ctx = await mount()
     root = await git_repo(ctx, tmp_path / "repo")
@@ -190,7 +192,9 @@ async def test_git_vouches_for_a_committed_file(mount: Any, tmp_path: Path) -> N
 
 
 @pytest.mark.needs_git
-async def test_git_refuses_to_vouch_for_a_modified_file(mount: Any, tmp_path: Path) -> None:
+async def test_git_refuses_to_vouch_for_a_modified_file(
+    mount: MountProfile, tmp_path: Path
+) -> None:
     """**The reason `suspect` exists.**
 
     `ls-files -s` reports the *index*, so a modified-unstaged file still carries
@@ -214,7 +218,9 @@ async def test_git_refuses_to_vouch_for_a_modified_file(mount: Any, tmp_path: Pa
 
 
 @pytest.mark.needs_git
-async def test_git_refuses_to_vouch_for_an_untracked_file(mount: Any, tmp_path: Path) -> None:
+async def test_git_refuses_to_vouch_for_an_untracked_file(
+    mount: MountProfile, tmp_path: Path
+) -> None:
     ctx = await mount()
     root = await git_repo(ctx, tmp_path / "repo")
     (root / "fresh.py").write_text("f = 1\n", encoding="utf-8")
@@ -226,7 +232,9 @@ async def test_git_refuses_to_vouch_for_an_untracked_file(mount: Any, tmp_path: 
 
 
 @pytest.mark.needs_git
-async def test_git_treats_both_ends_of_a_rename_as_suspect(mount: Any, tmp_path: Path) -> None:
+async def test_git_treats_both_ends_of_a_rename_as_suspect(
+    mount: MountProfile, tmp_path: Path
+) -> None:
     """A caller may hold a record under either name, so neither is vouched for."""
     ctx = await mount()
     root = await git_repo(ctx, tmp_path / "repo")
@@ -241,7 +249,9 @@ async def test_git_treats_both_ends_of_a_rename_as_suspect(mount: Any, tmp_path:
 
 
 @pytest.mark.needs_git
-async def test_git_answers_in_the_asked_about_trees_spelling(mount: Any, tmp_path: Path) -> None:
+async def test_git_answers_in_the_asked_about_trees_spelling(
+    mount: MountProfile, tmp_path: Path
+) -> None:
     """**A subdirectory is not the repository, and the two git commands disagree.**
 
     `ls-files` names paths from the directory it runs in; `status --porcelain`
@@ -288,7 +298,7 @@ async def test_git_answers_in_the_asked_about_trees_spelling(mount: Any, tmp_pat
 
 @pytest.mark.needs_jj
 async def test_jj_reports_a_token_and_vouches_for_nothing_on_a_first_run(
-    mount: Any, tmp_path: Path
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """Nothing to diff from, so nothing is proved — but the token is returned.
 
@@ -307,7 +317,9 @@ async def test_jj_reports_a_token_and_vouches_for_nothing_on_a_first_run(
 
 
 @pytest.mark.needs_jj
-async def test_jj_vouches_for_everything_it_did_not_diff(mount: Any, tmp_path: Path) -> None:
+async def test_jj_vouches_for_everything_it_did_not_diff(
+    mount: MountProfile, tmp_path: Path
+) -> None:
     """One call, and it covers **uncommitted** work — jj snapshots on any command."""
     ctx = await mount()
     root = await jj_repo(ctx, tmp_path / "repo")
@@ -329,7 +341,7 @@ async def test_jj_vouches_for_everything_it_did_not_diff(mount: Any, tmp_path: P
 
 @pytest.mark.needs_jj
 async def test_jj_vouches_for_nothing_when_the_token_is_unusable(
-    mount: Any, tmp_path: Path
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """A token predating a rebuilt repository is not an error — just a re-read.
 
@@ -348,7 +360,7 @@ async def test_jj_vouches_for_nothing_when_the_token_is_unusable(
 
 
 @pytest.mark.needs_jj
-async def test_a_jj_tree_is_reported_as_jj_not_git(mount: Any, tmp_path: Path) -> None:
+async def test_a_jj_tree_is_reported_as_jj_not_git(mount: MountProfile, tmp_path: Path) -> None:
     """`jj git init` leaves a `.git` too, so the order in `_probed` is load-bearing."""
     ctx = await mount()
     root = await jj_repo(ctx, tmp_path / "repo")
@@ -366,7 +378,9 @@ which the `mount` fixture already points at `tmp_path`."""
 
 
 @pytest.mark.needs_git
-async def test_an_overlay_answers_git_from_inside_its_own_mount(mount: Any, tmp_path: Path) -> None:
+async def test_an_overlay_answers_git_from_inside_its_own_mount(
+    mount: MountProfile, tmp_path: Path
+) -> None:
     """**The third backend that should not exist.**
 
     An AgentFS overlay keeps a log of everything it has layered over the base, and
@@ -383,7 +397,7 @@ async def test_an_overlay_answers_git_from_inside_its_own_mount(mount: Any, tmp_
     override the probe and read nothing.
     """
     ctx = await mount(OVERLAY_ROW)
-    if ctx.workspace.provider is None:
+    if ctx.require(WORKSPACE).provider is None:
         pytest.skip("no working overlay on this host")
     base = await git_repo(ctx, tmp_path / "repo")
     (base / "a.py").write_text("a = 1\n", encoding="utf-8")
@@ -391,7 +405,7 @@ async def test_an_overlay_answers_git_from_inside_its_own_mount(mount: Any, tmp_
     await git(ctx, base, "add", "-A")
     await git(ctx, base, "commit", "-qm", "base")
 
-    workspace = await ctx.workspace.acquire(
+    workspace = await ctx.require(WORKSPACE).acquire(
         session_id="s", agent_id="a1", base=base, access="write"
     )
     assert workspace is not None and workspace.kind == "overlay"
@@ -418,7 +432,7 @@ async def test_an_overlay_answers_git_from_inside_its_own_mount(mount: Any, tmp_
 
 
 async def test_a_directory_that_is_not_a_repository_answers_empty(
-    mount: Any, tmp_path: Path
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """No backend, no exception, and a state that proves nothing."""
     ctx = await mount()

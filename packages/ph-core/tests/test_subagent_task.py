@@ -24,8 +24,9 @@ from typing import Any
 import pytest
 
 from ph.cordis import DEPLOYMENT
+from ph.keys import AGENTS, SESSIONS, SUBAGENTS, TOOLS
 from ph.llm.types import text_of
-from ph.testing import FAKE_OPTIONS, StubSubagentProvider, run_tool
+from ph.testing import FAKE_OPTIONS, MountProfile, StubSubagentProvider, run_tool
 
 pytestmark = pytest.mark.anyio
 
@@ -34,7 +35,9 @@ ROW: dict[str, Any] = {"id": "subagent-task"}
 addressing an existing id by name would mount the plugin twice."""
 
 
-async def _mounted(mount: Any, *providers: tuple[str, StubSubagentProvider], **config: Any) -> Any:
+async def _mounted(
+    mount: MountProfile, *providers: tuple[str, StubSubagentProvider], **config: Any
+) -> Any:
     """A profile with these providers, composed the way a real one is.
 
     The providers land *after* the row's `apply` and before the composed
@@ -45,34 +48,34 @@ async def _mounted(mount: Any, *providers: tuple[str, StubSubagentProvider], **c
     """
     ctx = await mount({**ROW, "config": config} if config else ROW)
     for name, provider in providers:
-        ctx.subagents.register_provider(name, provider)
+        ctx.require(SUBAGENTS).register_provider(name, provider)
     await ctx.serial("profile/mounted")
     return ctx
 
 
 def _agent(ctx: Any) -> Any:
-    return ctx.agents.create(ctx.sessions.create("s"), FAKE_OPTIONS)
+    return ctx.require(AGENTS).create(ctx.require(SESSIONS).create("s"), FAKE_OPTIONS)
 
 
-async def test_no_provider_means_no_tool(mount: Any) -> None:
+async def test_no_provider_means_no_tool(mount: MountProfile) -> None:
     """`ph-base` mounts the seam and no provider, so the shipped profiles get
     the row and no `task` — the model is told about delegation exactly when the
     deployment can perform it."""
     ctx = await mount(ROW)
 
-    assert ctx.tools.get("task", scope=DEPLOYMENT) is None
+    assert ctx.require(TOOLS).get("task", scope=DEPLOYMENT) is None
 
 
-async def test_a_provider_layered_anywhere_still_gets_the_tool(mount: Any) -> None:
+async def test_a_provider_layered_anywhere_still_gets_the_tool(mount: MountProfile) -> None:
     """The reason the check is at `profile/mounted` and not at this row's own
     `apply`: a profile that layers its provider after this row would otherwise
     silently lose delegation, and nothing would report it."""
     ctx = await _mounted(mount, ("stub", StubSubagentProvider()))
 
-    assert ctx.tools.get("task", scope=DEPLOYMENT) is not None
+    assert ctx.require(TOOLS).get("task", scope=DEPLOYMENT) is not None
 
 
-async def test_the_answer_comes_back_as_the_result(mount: Any) -> None:
+async def test_the_answer_comes_back_as_the_result(mount: MountProfile) -> None:
     provider = StubSubagentProvider(answer="Found it in loader.py:88.")
     ctx = await _mounted(mount, ("stub", provider))
 
@@ -86,7 +89,7 @@ async def test_the_answer_comes_back_as_the_result(mount: Any) -> None:
     assert provider.last().name == "scout"
 
 
-async def test_read_is_what_a_child_gets_unless_asked(mount: Any) -> None:
+async def test_read_is_what_a_child_gets_unless_asked(mount: MountProfile) -> None:
     """The seam's own default, restated here because a delegation tool that
     quietly asked for `write` would hand every child the parent's tree."""
     provider = StubSubagentProvider()
@@ -97,10 +100,10 @@ async def test_read_is_what_a_child_gets_unless_asked(mount: Any) -> None:
     assert provider.last().access == "read"
 
 
-async def test_a_downgrade_is_reported_to_the_parent(mount: Any) -> None:
+async def test_a_downgrade_is_reported_to_the_parent(mount: MountProfile) -> None:
     """A child that asked for `write` and got `read` will fail at its first edit,
     and the parent is the one that has to understand why."""
-    provider = StubSubagentProvider(grants="read", downgrade_reason="no-workspace-tier")
+    provider = StubSubagentProvider(grants="read", downgrade_reason="workspace-not-mounted")
     ctx = await _mounted(mount, ("stub", provider))
 
     result = await run_tool(
@@ -112,7 +115,7 @@ async def test_a_downgrade_is_reported_to_the_parent(mount: Any) -> None:
     assert result.value["note"] in text_of(result.content), "the model was not told"
 
 
-async def test_a_child_that_failed_is_an_error_not_an_empty_answer(mount: Any) -> None:
+async def test_a_child_that_failed_is_an_error_not_an_empty_answer(mount: MountProfile) -> None:
     """The misreading this prevents: `answer: ""` looks like "it found nothing",
     which is a conclusion — and a parent acting on it has been told something
     false by a delegation that never ran."""
@@ -125,7 +128,7 @@ async def test_a_child_that_failed_is_an_error_not_an_empty_answer(mount: Any) -
     assert "the model refused" in text_of(result.content)
 
 
-async def test_a_provider_that_cannot_be_waited_on_is_refused(mount: Any) -> None:
+async def test_a_provider_that_cannot_be_waited_on_is_refused(mount: MountProfile) -> None:
     """`SubagentRun.result` is `None` for a provider whose children only reply by
     message. Blocking on one is not possible, so the call says so rather than
     returning an empty answer or hanging."""
@@ -137,16 +140,16 @@ async def test_a_provider_that_cannot_be_waited_on_is_refused(mount: Any) -> Non
     assert "cannot be waited on" in text_of(result.content)
 
 
-async def test_two_providers_and_no_choice_stands_the_row_down(mount: Any) -> None:
+async def test_two_providers_and_no_choice_stands_the_row_down(mount: MountProfile) -> None:
     """ "Run a child agent" having two answers is why the seam names providers at
     all; picking one here would make that choice silently, in the row least
     entitled to make it."""
     ctx = await _mounted(mount, ("stub", StubSubagentProvider()), ("other", StubSubagentProvider()))
 
-    assert ctx.tools.get("task", scope=DEPLOYMENT) is None
+    assert ctx.require(TOOLS).get("task", scope=DEPLOYMENT) is None
 
 
-async def test_a_named_provider_settles_the_ambiguity(mount: Any) -> None:
+async def test_a_named_provider_settles_the_ambiguity(mount: MountProfile) -> None:
     ctx = await _mounted(
         mount,
         ("stub", StubSubagentProvider(answer="wrong one")),

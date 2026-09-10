@@ -25,6 +25,7 @@ import anyio
 import pytest
 from daemon_helpers import running
 
+from ph.keys import APPROVAL, USER_QUESTIONS
 from ph.seams.user_questions import UserQuestion
 from ph.testing import StubAgent
 
@@ -33,12 +34,12 @@ pytestmark = pytest.mark.anyio
 
 async def _root(daemon: Any, session_id: str = "asked") -> Any:
     """One live root, started the way `session/attach` starts one."""
-    return await daemon.server.supervisor.start(session_id)
+    return await daemon.running.supervisor.start(session_id)
 
 
 async def _ask(root: Any) -> Any:
     """Fire one approval through the seam, exactly as a gated tool does."""
-    return await root.ctx.approval.request(
+    return await root.ctx.require(APPROVAL).request(
         agent=StubAgent(ctx=root.ctx, session=root.session), tool_name="write", call_id="c1"
     )
 
@@ -186,7 +187,7 @@ async def test_a_root_parked_on_a_person_may_be_released(tmp_path: Any) -> None:
     """
     async with running(tmp_path) as daemon:
         root = await _root(daemon)
-        supervisor = daemon.server.supervisor
+        supervisor = daemon.running.supervisor
 
         async with anyio.create_task_group() as tasks:
             tasks.start_soon(_ask, root)
@@ -273,7 +274,7 @@ async def test_answering_is_declared_once_for_a_connection_not_per_attach(
 
 async def _ask_question(root: Any) -> Any:
     """One question through the seam, exactly as `ask_user` puts it."""
-    return await root.ctx.user_questions.ask(
+    return await root.ctx.require(USER_QUESTIONS).ask(
         UserQuestion(question="which port?", ask_id="call-1"), session=root.session
     )
 

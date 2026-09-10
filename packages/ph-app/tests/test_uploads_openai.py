@@ -30,8 +30,10 @@ import pytest
 from ph.agent.types import AgentOptions
 from ph.bundles import BASE, HEADLESS
 from ph.cordis import Context
+from ph.keys import AGENTS, ATTACHMENTS, SESSIONS, UPLOADS
 from ph.llm.types import FILE_EXPIRED, MediaBlock, create_user_message
 from ph.seams.attachments import digest_of
+from ph.testing import MountProfile
 from ph_app.adapters._http import HttpClient, failure_from_status
 from ph_app.adapters.openai_compatible import _is_missing_file, _is_overflow
 
@@ -137,7 +139,7 @@ def wire(monkeypatch: pytest.MonkeyPatch) -> _FileApi:
 
 
 async def _attached(ctx: Context, mime: str = "application/pdf", name: str = "paper.pdf") -> Any:
-    ref = await ctx.attachments.save_bytes(content=PDF, mime=mime, name=name)
+    ref = await ctx.require(ATTACHMENTS).save_bytes(content=PDF, mime=mime, name=name)
     return create_user_message(
         content=[{"type": "text", "text": "what happens here?"}, MediaBlock(attachment=ref)],
         source={"kind": "user"},
@@ -145,7 +147,7 @@ async def _attached(ctx: Context, mime: str = "application/pdf", name: str = "pa
 
 
 async def test_a_document_is_uploaded_with_a_purpose_and_then_referenced(
-    mount: Any, wire: _FileApi
+    mount: MountProfile, wire: _FileApi
 ) -> None:
     """The shape half of the gate on this wire.
 
@@ -154,8 +156,8 @@ async def test_a_document_is_uploaded_with_a_purpose_and_then_referenced(
     4 MB PDF is 5.5 MB of base64 on every step of the session otherwise.
     """
     ctx: Context = await mount(REFERENCING, profile=PROFILE)
-    session = ctx.sessions.create("referenced")
-    agent = ctx.agents.create(session, OPTIONS)
+    session = ctx.require(SESSIONS).create("referenced")
+    agent = ctx.require(AGENTS).create(session, OPTIONS)
 
     agent.followup(await _attached(ctx))
     await agent.run()
@@ -173,7 +175,7 @@ async def test_a_document_is_uploaded_with_a_purpose_and_then_referenced(
 
 
 async def test_a_stated_expiry_is_read_in_the_units_the_provider_used(
-    mount: Any, wire: _FileApi
+    mount: MountProfile, wire: _FileApi
 ) -> None:
     """Seconds on the wire, milliseconds in the cache.
 
@@ -184,19 +186,19 @@ async def test_a_stated_expiry_is_read_in_the_units_the_provider_used(
     """
     wire.expires_at = 2_000_000_000  # seconds
     ctx: Context = await mount(REFERENCING, profile=PROFILE)
-    agent = ctx.agents.create(ctx.sessions.create("expiry"), OPTIONS)
+    agent = ctx.require(AGENTS).create(ctx.require(SESSIONS).create("expiry"), OPTIONS)
 
     agent.followup(await _attached(ctx))
     await agent.run()
     await agent.prompt("again")
 
-    stored = ctx.uploads.cached("openai", digest_of(PDF))
+    stored = ctx.require(UPLOADS).cached("openai", digest_of(PDF))
     assert stored is not None and stored.expires_at == 2_000_000_000_000
     assert wire.uploaded == ["file-001"], "a live handle was treated as expired"
 
 
 async def test_an_expired_handle_is_re_uploaded_rather_than_failing_the_turn(
-    mount: Any, wire: _FileApi
+    mount: MountProfile, wire: _FileApi
 ) -> None:
     """The same recovery as the Anthropic row, through this wire's own prose.
 
@@ -205,8 +207,8 @@ async def test_an_expired_handle_is_re_uploaded_rather_than_failing_the_turn(
     shared. The turn must survive either way.
     """
     ctx: Context = await mount(REFERENCING, profile=PROFILE)
-    session = ctx.sessions.create("expired")
-    agent = ctx.agents.create(session, OPTIONS)
+    session = ctx.require(SESSIONS).create("expired")
+    agent = ctx.require(AGENTS).create(session, OPTIONS)
     agent.followup(await _attached(ctx))
     await agent.run()
 
@@ -221,7 +223,7 @@ async def test_an_expired_handle_is_re_uploaded_rather_than_failing_the_turn(
 
 
 async def test_a_404_that_names_no_handle_of_ours_is_not_retried(
-    mount: Any, wire: _FileApi
+    mount: MountProfile, wire: _FileApi
 ) -> None:
     """A missing-file message about somebody else's id is somebody else's problem.
 
@@ -230,8 +232,8 @@ async def test_a_404_that_names_no_handle_of_ours_is_not_retried(
     missing, **and** it named one this request sent.
     """
     ctx: Context = await mount(REFERENCING, profile=PROFILE)
-    session = ctx.sessions.create("stranger")
-    agent = ctx.agents.create(session, OPTIONS)
+    session = ctx.require(SESSIONS).create("stranger")
+    agent = ctx.require(AGENTS).create(session, OPTIONS)
     agent.followup(await _attached(ctx))
     await agent.run()
 
@@ -243,7 +245,7 @@ async def test_a_404_that_names_no_handle_of_ours_is_not_retried(
 
 
 async def test_a_declared_mime_this_wire_cannot_reference_is_not_uploaded(
-    mount: Any, wire: _FileApi
+    mount: MountProfile, wire: _FileApi
 ) -> None:
     """Where this row diverges from the Anthropic one, and why it must.
 
@@ -258,7 +260,7 @@ async def test_a_declared_mime_this_wire_cannot_reference_is_not_uploaded(
     """
     route = _route(accepts=["image/png"], uploads=["image/png"])
     ctx: Context = await mount(route, profile=PROFILE)
-    agent = ctx.agents.create(ctx.sessions.create("image"), OPTIONS)
+    agent = ctx.require(AGENTS).create(ctx.require(SESSIONS).create("image"), OPTIONS)
 
     agent.followup(await _attached(ctx, mime="image/png", name="shot.png"))
     await agent.run()
@@ -268,7 +270,7 @@ async def test_a_declared_mime_this_wire_cannot_reference_is_not_uploaded(
 
 
 async def test_a_route_that_declares_no_uploads_sends_bytes_as_before(
-    mount: Any, wire: _FileApi
+    mount: MountProfile, wire: _FileApi
 ) -> None:
     """The default every existing deployment keeps.
 
@@ -278,13 +280,13 @@ async def test_a_route_that_declares_no_uploads_sends_bytes_as_before(
     inline as `file_data` — which is also the fallback when an upload fails.
     """
     ctx: Context = await mount(_route(), profile=PROFILE)
-    agent = ctx.agents.create(ctx.sessions.create("inline"), OPTIONS)
+    agent = ctx.require(AGENTS).create(ctx.require(SESSIONS).create("inline"), OPTIONS)
 
     agent.followup(await _attached(ctx))
     await agent.run()
 
     assert wire.uploaded == []
-    assert ctx.uploads.uploaders == {}, "no uploader for a route that wants none"
+    assert ctx.require(UPLOADS).uploaders == {}, "no uploader for a route that wants none"
     (part,) = [
         block
         for message in wire.bodies[-1]["messages"]
@@ -296,7 +298,7 @@ async def test_a_route_that_declares_no_uploads_sends_bytes_as_before(
 
 
 async def test_a_failed_upload_falls_back_to_the_bytes(
-    mount: Any, wire: _FileApi, monkeypatch: pytest.MonkeyPatch
+    mount: MountProfile, wire: _FileApi, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The seam's contract, kept by this wire's inline spelling.
 
@@ -311,8 +313,8 @@ async def test_a_failed_upload_falls_back_to_the_bytes(
 
     monkeypatch.setattr(HttpClient, "post_multipart", failing)
     ctx: Context = await mount(REFERENCING, profile=PROFILE)
-    session = ctx.sessions.create("fallback")
-    agent = ctx.agents.create(session, OPTIONS)
+    session = ctx.require(SESSIONS).create("fallback")
+    agent = ctx.require(AGENTS).create(session, OPTIONS)
 
     agent.followup(await _attached(ctx))
     await agent.run()

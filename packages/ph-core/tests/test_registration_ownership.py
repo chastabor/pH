@@ -92,6 +92,8 @@ import ph
 from ph.cordis import DEPLOYMENT, Context, events, plugin, running
 from ph.cordis.context import maybe_await
 from ph.cordis.events import DispatchMode
+from ph.keys import AGENTS, COMMANDS, SESSIONS, SYSTEM_PROMPT, TOOLS
+from ph.testing import MountProfile
 
 pytestmark = pytest.mark.anyio
 
@@ -159,7 +161,7 @@ def test_no_module_is_skipped_for_a_bad_reason() -> None:
 _IMPORTED: list[Any] = []
 
 
-def _declared_classes() -> Iterator[Any]:
+def _declared_classes() -> Iterator[type]:
     """Every class *defined* in the `ph` tree, once each.
 
     The `cls.__module__ != module.__name__` test is what keeps every walk in this
@@ -351,9 +353,9 @@ def _invariant(service: Any) -> Any:
 
 
 def _status(service: Any) -> Any:
-    from ph.seams.tui_status import StatusField
+    from ph.seams.tui_status import StatusField, StatusReading
 
-    return service.register(StatusField(id="p612", read=lambda _s: "x"))
+    return service.register(StatusField(id="p612", read=lambda _s: StatusReading(text="x")))
 
 
 def _skill(service: Any) -> Any:
@@ -393,7 +395,7 @@ def _tool(service: Any) -> Any:
 def _restrict(service: Any) -> Any:
     from ph.seams._restriction import NameFilter
 
-    return service.restrict(NameFilter(deny=("nothing",)))
+    return service.restrict(NameFilter(deny=frozenset({"nothing"})))
 
 
 def _approval(service: Any) -> Any:
@@ -453,7 +455,9 @@ referenced, and an import-order dependency between the decorators running and
 
 
 @pytest.mark.parametrize("name", sorted(RECIPES))
-async def test_a_registration_is_an_effect_of_the_row_that_made_it(mount: Any, name: str) -> None:
+async def test_a_registration_is_an_effect_of_the_row_that_made_it(
+    mount: MountProfile, name: str
+) -> None:
     """The gate. A row registers, the row unmounts, the registration goes.
 
     Asserted **against the seam's own context**, not against the registry's
@@ -488,7 +492,7 @@ async def test_a_registration_is_an_effect_of_the_row_that_made_it(mount: Any, n
 
 
 async def test_a_registration_outside_any_activation_still_lands_on_the_service(
-    mount: Any,
+    mount: MountProfile,
 ) -> None:
     """Today's behaviour, kept — which is what makes the change strictly additive.
 
@@ -498,7 +502,7 @@ async def test_a_registration_outside_any_activation_still_lands_on_the_service(
     changes.
     """
     root = await mount()
-    commands = root.commands
+    commands = root.require(COMMANDS)
     before = len(commands.ctx._effects)
 
     commands.register(_definition("bare"))
@@ -506,7 +510,7 @@ async def test_a_registration_outside_any_activation_still_lands_on_the_service(
     assert Context.current_owner() is None, "no activation is in flight here"
 
 
-async def test_an_explicit_scope_still_wins(mount: Any) -> None:
+async def test_an_explicit_scope_still_wins(mount: MountProfile) -> None:
     """`scope=` keeps meaning "register on someone else's lifetime".
 
     The agent-shadowing case, which is the reason the parameter exists: a
@@ -516,12 +520,12 @@ async def test_an_explicit_scope_still_wins(mount: Any) -> None:
     right.
     """
     root = await mount()
-    commands = root.commands
+    commands = root.require(COMMANDS)
     agent = root.scope("agent")
 
     @plugin("p612-scoped", inject=["commands"])
     async def row(ctx: Context, _config: Any) -> None:
-        ctx.commands.register(_definition("scoped"), scope=agent)
+        ctx.require(COMMANDS).register(_definition("scoped"), scope=agent)
 
     fork = root.plugin(row)
     await root.reconcile()
@@ -813,7 +817,7 @@ def _definition(name: str, run: Any = None) -> Any:
     return CommandDefinition(name=name, summary="s", run=run or (lambda *a, **k: None))
 
 
-async def test_a_listener_registers_on_its_own_scope_not_the_emitters(mount: Any) -> None:
+async def test_a_listener_registers_on_its_own_scope_not_the_emitters(mount: MountProfile) -> None:
     """Gap one: the dispatch that *steals*.
 
     Row B writes a listener; row A emits during its own `apply`; B's listener
@@ -824,11 +828,11 @@ async def test_a_listener_registers_on_its_own_scope_not_the_emitters(mount: Any
     """
     event = PROBE["emit"]
     root = await mount()
-    commands = root.commands
+    commands = root.require(COMMANDS)
 
     @plugin("p625-b", inject=["commands"])
     async def row_b(ctx: Context, _config: Any) -> None:
-        ctx.on(event, lambda: ctx.commands.register(_definition("from-b")))
+        ctx.on(event, lambda: ctx.require(COMMANDS).register(_definition("from-b")))
 
     @plugin("p625-a", inject=["commands"])
     async def row_a(ctx: Context, _config: Any) -> None:
@@ -848,7 +852,7 @@ async def test_a_listener_registers_on_its_own_scope_not_the_emitters(mount: Any
 
 
 async def test_a_registration_made_after_apply_returns_still_belongs_to_its_row(
-    mount: Any,
+    mount: MountProfile,
 ) -> None:
     """Gap two: the dispatch that *leaks*, and the bigger half.
 
@@ -868,11 +872,11 @@ async def test_a_registration_made_after_apply_returns_still_belongs_to_its_row(
     """
     event = PROBE["emit"]
     root = await mount()
-    commands = root.commands
+    commands = root.require(COMMANDS)
 
     @plugin("p625-late", inject=["commands"])
     async def late(ctx: Context, _config: Any) -> None:
-        ctx.on(event, lambda: ctx.commands.register(_definition("deferred")))
+        ctx.on(event, lambda: ctx.require(COMMANDS).register(_definition("deferred")))
 
     fork = root.plugin(late)
     await root.reconcile()
@@ -883,7 +887,7 @@ async def test_a_registration_made_after_apply_returns_still_belongs_to_its_row(
     assert commands.get("deferred") is None, "a deferred registration outlived its row"
 
 
-async def test_register_when_composed_needs_no_explicit_scope(mount: Any) -> None:
+async def test_register_when_composed_needs_no_explicit_scope(mount: MountProfile) -> None:
     """The gate's third clause, and the reason it is worth asserting.
 
     That helper's `scope=ctx` was load-bearing and is now redundant. Removing it
@@ -893,7 +897,7 @@ async def test_register_when_composed_needs_no_explicit_scope(mount: Any) -> Non
     from ph.tools.registry import register_when_composed
 
     root = await mount()
-    tools = root.tools
+    tools = root.require(TOOLS)
 
     @plugin("p625-composed", inject=["tools"])
     async def row(ctx: Context, _config: Any) -> None:
@@ -915,7 +919,7 @@ async def test_register_when_composed_needs_no_explicit_scope(mount: Any) -> Non
 @pytest.mark.parametrize("mode", sorted(get_args(DispatchMode)))
 @pytest.mark.parametrize("shape", ["sync", "async"])
 async def test_every_dispatch_mode_runs_a_listener_as_its_own_scope(
-    mount: Any, mode: str, shape: str
+    mount: MountProfile, mode: str, shape: str
 ) -> None:
     """Every mode, and **both listener shapes** — which is the axis that mattered.
 
@@ -941,16 +945,16 @@ async def test_every_dispatch_mode_runs_a_listener_as_its_own_scope(
     async def row(ctx: Context, _config: Any) -> None:
         if shape == "sync":
 
-            def listener(*args: Any) -> None:
+            def sync_listener(*args: Any) -> None:
                 seen.append(Context.current_owner())
 
-            ctx.on(event, listener)
+            ctx.on(event, sync_listener)
         else:
 
-            async def listener(*args: Any) -> None:
+            async def async_listener(*args: Any) -> None:
                 seen.append(Context.current_owner())
 
-            ctx.on(event, listener)
+            ctx.on(event, async_listener)
 
     fork = root.plugin(row)
     await root.reconcile()
@@ -989,7 +993,7 @@ def test_the_declared_modes_and_the_registry_agree() -> None:
 # made structural.
 
 
-async def test_a_tool_body_registers_inside_the_agent_it_runs_for(mount: Any) -> None:
+async def test_a_tool_body_registers_inside_the_agent_it_runs_for(mount: MountProfile) -> None:
     """The containment half, and why this row carries B7 rather than only I2.
 
     A tool body is ordinary Python that a row wrote and an agent invoked. Before
@@ -1001,22 +1005,26 @@ async def test_a_tool_body_registers_inside_the_agent_it_runs_for(mount: Any) ->
     from ph.testing import FAKE_OPTIONS, run_tool, simple_tool
 
     ctx = await mount()
-    parent = ctx.agents.create(ctx.sessions.create("p626-parent"), FAKE_OPTIONS)
-    child = ctx.agents.create(ctx.sessions.create("p626-child"), FAKE_OPTIONS, parent=parent)
+    parent = ctx.require(AGENTS).create(ctx.require(SESSIONS).create("p626-parent"), FAKE_OPTIONS)
+    child = ctx.require(AGENTS).create(
+        ctx.require(SESSIONS).create("p626-child"), FAKE_OPTIONS, parent=parent
+    )
 
     def smuggle(_args: Any, run: Any) -> str:
-        run.scope.tools.register(simple_tool("p626_smuggled"))
+        run.scope.require(TOOLS).register(simple_tool("p626_smuggled"))
         return "done"
 
-    ctx.tools.register(simple_tool("p626_smuggler", execute=smuggle))
+    ctx.require(TOOLS).register(simple_tool("p626_smuggler", execute=smuggle))
     await run_tool(ctx, "p626_smuggler", {}, agent=child)
 
-    assert "p626_smuggled" in ctx.tools.view(child.ctx).visible, "the child kept what it made"
-    assert "p626_smuggled" not in ctx.tools.view(parent.ctx).visible, "it escaped upward"
-    assert "p626_smuggled" not in ctx.tools.view(ctx).visible, "it reached the deployment"
+    assert "p626_smuggled" in ctx.require(TOOLS).view(child.ctx).visible, (
+        "the child kept what it made"
+    )
+    assert "p626_smuggled" not in ctx.require(TOOLS).view(parent.ctx).visible, "it escaped upward"
+    assert "p626_smuggled" not in ctx.require(TOOLS).view(ctx).visible, "it reached the deployment"
 
 
-async def test_a_row_registering_at_mount_still_lands_globally(mount: Any) -> None:
+async def test_a_row_registering_at_mount_still_lands_globally(mount: MountProfile) -> None:
     """The half that must not have moved, and the reason it did not have to.
 
     `layer_for` following "who is running" was held back on the grounds that
@@ -1029,20 +1037,24 @@ async def test_a_row_registering_at_mount_still_lands_globally(mount: Any) -> No
     from ph.testing import FAKE_OPTIONS, simple_tool
 
     ctx = await mount()
-    agent = ctx.agents.create(ctx.sessions.create("p626-plain"), FAKE_OPTIONS)
+    agent = ctx.require(AGENTS).create(ctx.require(SESSIONS).create("p626-plain"), FAKE_OPTIONS)
 
     @plugin("p626-row", inject=["tools"])
     async def row(scope: Context, _config: Any) -> None:
-        scope.tools.register(simple_tool("p626_global"))
+        scope.require(TOOLS).register(simple_tool("p626_global"))
 
     ctx.plugin(row)
     await ctx.reconcile()
 
-    assert "p626_global" in ctx.tools.view(ctx).visible
-    assert "p626_global" in ctx.tools.view(agent.ctx).visible, "a row's tool stopped being global"
+    assert "p626_global" in ctx.require(TOOLS).view(ctx).visible
+    assert "p626_global" in ctx.require(TOOLS).view(agent.ctx).visible, (
+        "a row's tool stopped being global"
+    )
 
 
-async def test_a_command_body_runs_as_its_row_for_the_agent_that_typed_it(mount: Any) -> None:
+async def test_a_command_body_runs_as_its_row_for_the_agent_that_typed_it(
+    mount: MountProfile,
+) -> None:
     """The same gap one registry over, and both halves of the answer (P6-29).
 
     `CommandRegistry.dispatch` handed the body `CommandContext(ctx=self.ctx, …)` —
@@ -1060,12 +1072,12 @@ async def test_a_command_body_runs_as_its_row_for_the_agent_that_typed_it(mount:
     from ph.testing import FAKE_OPTIONS
 
     ctx = await mount()
-    agent = ctx.agents.create(ctx.sessions.create("p629-cmd"), FAKE_OPTIONS)
+    agent = ctx.require(AGENTS).create(ctx.require(SESSIONS).create("p629-cmd"), FAKE_OPTIONS)
     seen: list[tuple[Context | None, Context | None]] = []
 
     @plugin("p629-row", inject=["commands"])
     async def row(scope: Context, _config: Any) -> None:
-        scope.commands.register(
+        scope.require(COMMANDS).register(
             _definition(
                 "p629",
                 run=lambda _arg, _run: seen.append(
@@ -1076,7 +1088,7 @@ async def test_a_command_body_runs_as_its_row_for_the_agent_that_typed_it(mount:
 
     fork = ctx.plugin(row)
     await ctx.reconcile()
-    await ctx.commands.dispatch("/p629", agent=agent)
+    await ctx.require(COMMANDS).dispatch("/p629", agent=agent)
 
     assert seen == [(fork.ctx, agent.ctx)], (
         "the command body must run as the row that registered it, for the agent that typed it"
@@ -1084,11 +1096,11 @@ async def test_a_command_body_runs_as_its_row_for_the_agent_that_typed_it(mount:
 
     # And with no agent there is still an answer, where P6-26 bound nothing.
     seen.clear()
-    await ctx.commands.dispatch("/p629")
+    await ctx.require(COMMANDS).dispatch("/p629")
     assert seen == [(fork.ctx, fork.ctx)], "a command dispatched without an agent ran as nobody"
 
 
-async def test_a_tool_body_registers_as_its_row_and_for_its_agent(mount: Any) -> None:
+async def test_a_tool_body_registers_as_its_row_and_for_its_agent(mount: MountProfile) -> None:
     """P6-29's property, and the two ways one `Context` got it wrong.
 
     A tool body is the registering row's code, run for one agent. Those are two
@@ -1112,41 +1124,45 @@ async def test_a_tool_body_registers_as_its_row_and_for_its_agent(mount: Any) ->
 
     for ends_first in ("the row", "the agent"):
         ctx = await mount()
-        agent = ctx.agents.create(ctx.sessions.create("p629-tool"), FAKE_OPTIONS)
-        other = ctx.agents.create(ctx.sessions.create("p629-other"), FAKE_OPTIONS)
+        agent = ctx.require(AGENTS).create(ctx.require(SESSIONS).create("p629-tool"), FAKE_OPTIONS)
+        other = ctx.require(AGENTS).create(ctx.require(SESSIONS).create("p629-other"), FAKE_OPTIONS)
 
         def smuggle(_args: Any, run: Any) -> str:
-            run.scope.tools.register(simple_tool("p629_made"))
+            run.scope.require(TOOLS).register(simple_tool("p629_made"))
             return "done"
 
         @plugin("p629-tool-row", inject=["tools"])
         async def row(scope: Context, _config: Any) -> None:
-            scope.tools.register(simple_tool("p629_carrier", execute=smuggle))
+            scope.require(TOOLS).register(simple_tool("p629_carrier", execute=smuggle))
 
         fork = ctx.plugin(row)
         await ctx.reconcile()
         await run_tool(ctx, "p629_carrier", {}, agent=agent)
 
         # B7: the layer is the agent it ran for, and nobody else.
-        assert "p629_made" in ctx.tools.view(agent.ctx).visible, "the agent lost what it made"
-        assert "p629_made" not in ctx.tools.view(other.ctx).visible, "it reached another agent"
-        assert "p629_made" not in ctx.tools.view(ctx).visible, "it reached the deployment"
+        assert "p629_made" in ctx.require(TOOLS).view(agent.ctx).visible, (
+            "the agent lost what it made"
+        )
+        assert "p629_made" not in ctx.require(TOOLS).view(other.ctx).visible, (
+            "it reached another agent"
+        )
+        assert "p629_made" not in ctx.require(TOOLS).view(ctx).visible, "it reached the deployment"
 
-        layers = len(ctx.tools._layers)
+        layers = len(ctx.require(TOOLS)._layers)
         if ends_first == "the row":
             await fork.dispose()
-            assert "p629_made" not in ctx.tools.view(agent.ctx).visible, (
+            assert "p629_made" not in ctx.require(TOOLS).view(agent.ctx).visible, (
                 "a tool made by a tool body outlived the row that registered the tool (I2)"
             )
         else:
             await agent.ctx.dispose()
-        assert len(ctx.tools._layers) == layers - 1, (
+        assert len(ctx.require(TOOLS)._layers) == layers - 1, (
             f"{ends_first} ended and the agent's layer was stranded under a dead key"
         )
 
 
 async def test_a_prompt_provider_runs_as_its_row_for_the_scope_being_assembled(
-    mount: Any,
+    mount: MountProfile,
 ) -> None:
     """Two of the four bindings `assemble` enters, proved one at a time.
 
@@ -1166,7 +1182,7 @@ async def test_a_prompt_provider_runs_as_its_row_for_the_scope_being_assembled(
     from ph.testing import FAKE_OPTIONS
 
     ctx = await mount()
-    agent = ctx.agents.create(ctx.sessions.create("p629-prompt"), FAKE_OPTIONS)
+    agent = ctx.require(AGENTS).create(ctx.require(SESSIONS).create("p629-prompt"), FAKE_OPTIONS)
     seen: dict[str, tuple[Context | None, Context | None]] = {}
 
     @plugin("p629-prompt-row", inject=["system_prompt"])
@@ -1179,19 +1195,19 @@ async def test_a_prompt_provider_runs_as_its_row_for_the_scope_being_assembled(
             seen["tools"] = (Context.current_owner(), Context.current_layer())
             return []
 
-        scope.system_prompt.variable("p629", variable)
-        scope.system_prompt.tools(tools)
+        scope.require(SYSTEM_PROMPT).variable("p629", variable)
+        scope.require(SYSTEM_PROMPT).tools(tools)
 
     fork = ctx.plugin(row)
     await ctx.reconcile()
 
-    await ctx.system_prompt.assemble(agent.ctx)
+    await ctx.require(SYSTEM_PROMPT).assemble(agent.ctx)
 
     assert seen["variable"] == (fork.ctx, agent.ctx), "the variable provider ran as the wrong scope"
     assert seen["tools"] == (fork.ctx, agent.ctx), "the tools provider ran as the wrong scope"
 
 
-async def test_a_refused_registration_does_not_reassign_the_survivor(mount: Any) -> None:
+async def test_a_refused_registration_does_not_reassign_the_survivor(mount: MountProfile) -> None:
     """The pair is written only once the mutation it describes is accepted.
 
     `_Layer.by` is a dict parallel to `_Layer.tools`, which is the shape the five
@@ -1216,15 +1232,15 @@ async def test_a_refused_registration_does_not_reassign_the_survivor(mount: Any)
     first, second = ctx.scope("row-a"), ctx.scope("row-b")
 
     with running(first, ctx):
-        ctx.tools.register(simple_tool("p629_dup"))
+        ctx.require(TOOLS).register(simple_tool("p629_dup"))
     with pytest.raises(ValueError), running(second, ctx):
-        ctx.tools.register(simple_tool("p629_dup"))
+        ctx.require(TOOLS).register(simple_tool("p629_dup"))
 
     # Force the rebuild the stale view was hiding behind.
     with running(first, ctx):
-        ctx.tools.register(simple_tool("p629_other"))
+        ctx.require(TOOLS).register(simple_tool("p629_other"))
 
-    assert ctx.tools.view(ctx).by["p629_dup"].owner is first, (
+    assert ctx.require(TOOLS).view(ctx).by["p629_dup"].owner is first, (
         "a refused registration reassigned the surviving tool to the rejected row"
     )
 
@@ -1570,7 +1586,7 @@ def test_the_body_classifications_do_not_overlap() -> None:
     assert both == [], f"classified as both bound and unbound: {both}"
 
 
-async def test_a_command_body_is_told_the_boundary_the_caller_stated(mount: Any) -> None:
+async def test_a_command_body_is_told_the_boundary_the_caller_stated(mount: MountProfile) -> None:
     """P6-24's commands half: the boundary reaches the body, not just the binding.
 
     `dispatch` gained `scope=` and spent it on the ambient binding, and stopped
@@ -1588,16 +1604,16 @@ async def test_a_command_body_is_told_the_boundary_the_caller_stated(mount: Any)
     from ph.testing import FAKE_OPTIONS
 
     ctx = await mount()
-    agent = ctx.agents.create(ctx.sessions.create("p624-cmd"), FAKE_OPTIONS)
+    agent = ctx.require(AGENTS).create(ctx.require(SESSIONS).create("p624-cmd"), FAKE_OPTIONS)
     stated = ctx.scope("the-stated-boundary")
     seen: list[Context] = []
 
-    ctx.commands.register(
+    ctx.require(COMMANDS).register(
         _definition("p624", run=lambda _arg, invocation: seen.append(invocation.scope))
     )
-    await ctx.commands.dispatch("/p624", scope=stated, agent=agent)
+    await ctx.require(COMMANDS).dispatch("/p624", scope=stated, agent=agent)
     assert seen == [stated], "the body was handed the agent's scope, not the stated one"
 
     seen.clear()
-    await ctx.commands.dispatch("/p624", agent=agent)
+    await ctx.require(COMMANDS).dispatch("/p624", agent=agent)
     assert seen == [agent.ctx], "with no stated scope the agent is still the fallback"

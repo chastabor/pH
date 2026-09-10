@@ -100,7 +100,7 @@ def test_every_declared_type_name_is_checked() -> None:
     `1`. Both would let a tool receive an argument of the wrong kind from a
     server whose schema was right.
     """
-    accepted = {
+    accepted: dict[str, Any] = {
         "null": None,
         "boolean": True,
         "string": "s",

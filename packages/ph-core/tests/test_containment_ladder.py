@@ -36,9 +36,10 @@ from typing import Any
 
 import pytest
 
+from ph.keys import AGENTS, SESSIONS, SUBPROCESS, WORKSPACE
 from ph.seams.containment import TIERS
 from ph.seams.subprocess import SubprocessSpawnSpec, scrub_env
-from ph.testing import report_section
+from ph.testing import MountProfile, report_section
 from ph.testing.git import WORKTREE_ROWS, worktree_agent
 
 pytestmark = pytest.mark.anyio
@@ -51,7 +52,7 @@ async def _write(ctx: Any, workspace: Any, target: str) -> tuple[int, str]:
     applied — which is what anything that is not a pH tool does, and exactly the
     surface the table's first two columns are about.
     """
-    outcome = await ctx.subprocess.run(
+    outcome = await ctx.require(SUBPROCESS).run(
         SubprocessSpawnSpec(
             argv=(sys.executable, "-c", f"open({target!r}, 'w').write('written')"),
             cwd=workspace.root,
@@ -65,7 +66,9 @@ async def _write(ctx: Any, workspace: Any, target: str) -> tuple[int, str]:
 
 
 @pytest.mark.needs_git
-async def test_a_relative_raw_write_is_bounded_by_the_tree(mount: Any, tmp_path: Path) -> None:
+async def test_a_relative_raw_write_is_bounded_by_the_tree(
+    mount: MountProfile, tmp_path: Path
+) -> None:
     """A relative path resolves against the process's cwd, and under `worktree`
     that cwd is the agent's own checkout — which is the whole of what the rung
     buys: eight children writing `notes.txt` write eight files instead of racing
@@ -83,7 +86,7 @@ async def test_a_relative_raw_write_is_bounded_by_the_tree(mount: Any, tmp_path:
 
 
 @pytest.mark.needs_git
-async def test_an_absolute_raw_write_escapes_the_tree(mount: Any, tmp_path: Path) -> None:
+async def test_an_absolute_raw_write_escapes_the_tree(mount: MountProfile, tmp_path: Path) -> None:
     """E13, asserted so the table cannot regress.
 
     This is the test that keeps `ph doctor` honest. A raw write to an absolute
@@ -115,7 +118,9 @@ async def test_an_absolute_raw_write_escapes_the_tree(mount: Any, tmp_path: Path
 
 
 @pytest.mark.needs_git
-async def test_an_ephemeral_tree_is_discarded_with_its_work(mount: Any, tmp_path: Path) -> None:
+async def test_an_ephemeral_tree_is_discarded_with_its_work(
+    mount: MountProfile, tmp_path: Path
+) -> None:
     """Revertibility, through the path a real agent takes.
 
     `test_workspace_git.py` asserts the same discard through
@@ -126,11 +131,11 @@ async def test_an_ephemeral_tree_is_discarded_with_its_work(mount: Any, tmp_path
     thing being discarded (E5).
     """
     ctx, _session, parent, _workspace = await worktree_agent(mount, tmp_path)
-    child_session = ctx.sessions.create("child")
+    child_session = ctx.require(SESSIONS).create("child")
     # `parent=`: a child's scope nests inside its parent's (P6-27), and this
     # test is about a child's *rung*, so it must be shaped like a real one.
-    child = ctx.agents.create(child_session, parent.options, parent=parent)
-    ephemeral = await ctx.workspace.acquire(
+    child = ctx.require(AGENTS).create(child_session, parent.options, parent=parent)
+    ephemeral = await ctx.require(WORKSPACE).acquire(
         session_id=child_session.id,
         agent_id=child.id,
         base=tmp_path / "repo",
@@ -145,7 +150,7 @@ async def test_an_ephemeral_tree_is_discarded_with_its_work(mount: Any, tmp_path
     code, output = await _write(ctx, ephemeral, "draft.txt")
     assert code == 0, output
 
-    await ctx.agents.dispose(child.id)
+    await ctx.require(AGENTS).dispose(child.id)
 
     assert not ephemeral.root.exists(), "an ephemeral tree survived with work in it"
     assert ephemeral.scratch.exists(), "scratch went with the tree it was meant to outlive"
@@ -168,7 +173,7 @@ def test_the_table_says_what_the_two_writes_above_showed() -> None:
     assert "confinement" in TIERS["sandbox"].buys
 
 
-async def test_doctor_reports_a_real_tier_as_the_rung_in_force(mount: Any) -> None:
+async def test_doctor_reports_a_real_tier_as_the_rung_in_force(mount: MountProfile) -> None:
     """E10 against the shipped provider rather than a stub — the one thing
     `test_diagnostics.py` cannot say, since it registers `StubWorkspaceProvider`.
 

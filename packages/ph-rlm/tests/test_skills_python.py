@@ -19,14 +19,16 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from conftest import HOST_RUNTIME_ROW
+from rlm_fixtures import HOST_RUNTIME_ROW, MountedRuntime
 from runtime_helpers import run_ipython_cell
 
 from ph.cordis import DEPLOYMENT
+from ph.keys import AGENTS, SESSIONS, SKILLS, SYSTEM_PROMPT
 from ph.seams.skills import discover_skills
 from ph.system_prompt import render_prompt
-from ph.testing import FAKE_OPTIONS
+from ph.testing import FAKE_OPTIONS, MountProfile, not_none
 from ph.testing import write_skill as write_skill_md
+from ph_rlm.keys import PYTHON_RUNTIME
 from ph_rlm.skills import python_half
 
 pytestmark = pytest.mark.anyio
@@ -110,35 +112,39 @@ def test_a_package_skill_carries_its_import_name(tmp_path: Path) -> None:
 
 
 async def test_the_row_registers_the_catalog_and_feeds_the_runtime(
-    mount: Any, tmp_path: Path
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """The two lists are two: a requirement spec to install, a module to import."""
     write_skill(tmp_path, "acme-websearch", package=True)
     write_skill(tmp_path, "note-taking")
     ctx = await mount(HOST_RUNTIME_ROW, row([tmp_path]))
 
-    assert [skill.name for skill in ctx.skills.list(DEPLOYMENT)] == [
+    assert [skill.name for skill in ctx.require(SKILLS).list(DEPLOYMENT)] == [
         "acme-websearch",
         "note-taking",
     ]
-    assert ctx.skills.get("acme-websearch", DEPLOYMENT).source == "rlm-skills-python"
+    assert (
+        not_none(ctx.require(SKILLS).get("acme-websearch", DEPLOYMENT)).source
+        == "rlm-skills-python"
+    )
     # The body stays on disk until something asks for it (G9).
-    assert "Instructions here." in ctx.skills.body("acme-websearch", DEPLOYMENT)
+    body = ctx.require(SKILLS).body("acme-websearch", DEPLOYMENT)
+    assert body is not None and "Instructions here." in body
 
-    runtime = ctx.python_runtime
+    runtime = ctx.require(PYTHON_RUNTIME)
     assert runtime.skills == (str(tmp_path / "acme-websearch"),)
     assert runtime.skill_modules == ("acme_websearch",)
     assert "note-taking" not in " ".join(runtime.skill_modules), "a docs-only skill was installed"
 
 
 async def test_the_catalog_reaches_the_prompt_without_the_bodies(
-    mount: Any, tmp_path: Path
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     write_skill(tmp_path, "acme-websearch", package=True)
     ctx = await mount(HOST_RUNTIME_ROW, row([tmp_path]))
-    session = ctx.sessions.create("skills")
-    agent = ctx.agents.create(session, FAKE_OPTIONS)
-    assembly = await ctx.system_prompt.assemble(agent.ctx, agent=agent)
+    session = ctx.require(SESSIONS).create("skills")
+    agent = ctx.require(AGENTS).create(session, FAKE_OPTIONS)
+    assembly = await ctx.require(SYSTEM_PROMPT).assemble(agent.ctx, agent=agent)
     prompt = render_prompt(assembly)
 
     # One catalog, `skills-progressive`'s, with this row's hint attached to the
@@ -148,17 +154,17 @@ async def test_the_catalog_reaches_the_prompt_without_the_bodies(
     assert "Instructions here." not in prompt, "a skill body reached the prompt"
 
 
-async def test_no_paths_means_no_row(mount: Any) -> None:
+async def test_no_paths_means_no_row(mount: MountProfile) -> None:
     ctx = await mount(HOST_RUNTIME_ROW, {"id": "rlm-skills-python", "name": "rlm-skills-python"})
-    assert ctx.skills.list(DEPLOYMENT) == []
-    assert ctx.python_runtime.skill_modules == ()
+    assert ctx.require(SKILLS).list(DEPLOYMENT) == []
+    assert ctx.require(PYTHON_RUNTIME).skill_modules == ()
 
 
 # ------------------------------------------------------------- the gate --
 
 
 async def test_a_skills_run_is_callable_in_a_cell(
-    mounted_runtime: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    mounted_runtime: MountedRuntime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The row's gate, end to end on a real kernel.
 
@@ -180,7 +186,7 @@ async def test_a_skills_run_is_callable_in_a_cell(
     ctx, session, agent = await mounted_runtime(
         session_id="skills-gate", presentation=True, extra_rows=[row([tmp_path])]
     )
-    assert ctx.python_runtime.skill_modules == ("greeter",)
+    assert ctx.require(PYTHON_RUNTIME).skill_modules == ("greeter",)
 
     result = await run_ipython_cell(
         ctx,
@@ -192,7 +198,9 @@ async def test_a_skills_run_is_callable_in_a_cell(
     assert result.value["value"] == ["hello world", 3]
 
 
-async def test_a_skill_that_does_not_import_says_so(mounted_runtime: Any, tmp_path: Path) -> None:
+async def test_a_skill_that_does_not_import_says_so(
+    mounted_runtime: MountedRuntime, tmp_path: Path
+) -> None:
     """A model that finds a name undefined reads it as its own mistake and spends
     a turn working around it. A stub that explains itself costs one line."""
     write_skill(tmp_path, "broken", package=True)
