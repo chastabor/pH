@@ -11,11 +11,11 @@ ships" is true by construction rather than by two copies of one recipe.
 
 from __future__ import annotations
 
-from typing import Any
+from pathlib import Path
 
 import pytest
 import yaml
-from rlm_fixtures import HOST_INTERPRETER
+from rlm_fixtures import HOST_INTERPRETER, ShippedProfile
 from runtime_helpers import dispatch_names, run_ipython_cell
 
 from ph.bundles import BASE, HEADLESS
@@ -50,7 +50,7 @@ def test_a_patch_in_the_bundle_addresses_a_row_that_exists() -> None:
 
 
 async def test_every_row_in_the_profile_activates(
-    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A row that mounts nothing is worse than one that fails: it looks fine.
 
@@ -77,7 +77,7 @@ async def test_every_row_in_the_profile_activates(
         await ctx.dispose()
 
 
-async def test_the_bundle_mounts_over_base(shipped_profile: Any) -> None:
+async def test_the_bundle_mounts_over_base(shipped_profile: ShippedProfile) -> None:
     ctx, _session, _agent = await shipped_profile()
     provider = ctx.require(CODE_RUNTIME).require()
     assert provider.language == "python"
@@ -87,7 +87,7 @@ async def test_the_bundle_mounts_over_base(shipped_profile: Any) -> None:
     assert ctx.require(PYTHON_RUNTIME).snapshots is not None
 
 
-async def test_a_cell_runs_and_its_state_reaches_the_log(shipped_profile: Any) -> None:
+async def test_a_cell_runs_and_its_state_reaches_the_log(shipped_profile: ShippedProfile) -> None:
     """The end-to-end claim of everything landed so far, in one test.
 
     Called as `ipython`, because that is the only name this profile's model is
@@ -103,7 +103,9 @@ async def test_a_cell_runs_and_its_state_reaches_the_log(shipped_profile: Any) -
     assert any(event.type == "kernel/snapshot" for event in session.events)
 
 
-async def test_the_shipped_profile_offers_exactly_one_callable(shipped_profile: Any) -> None:
+async def test_the_shipped_profile_offers_exactly_one_callable(
+    shipped_profile: ShippedProfile,
+) -> None:
     """Prime Agent's surface, kept: one entry, and the reserved name is not it."""
     ctx, _session, agent = await shipped_profile()
     view = ctx.require(TOOLS).view(agent.ctx)
@@ -119,7 +121,9 @@ async def test_the_shipped_profile_offers_exactly_one_callable(shipped_profile: 
     assert len(view.visible) > 1
 
 
-async def test_the_shipped_sdk_block_lists_the_four_namespaces(shipped_profile: Any) -> None:
+async def test_the_shipped_sdk_block_lists_the_four_namespaces(
+    shipped_profile: ShippedProfile,
+) -> None:
     """P3-09's gate, satisfiable only now that P3-10's four namespaces exist.
 
     `tools` is Code Mode's own; `rlm`, `agent_message` and `agent_observe` are
@@ -139,7 +143,9 @@ async def test_the_shipped_sdk_block_lists_the_four_namespaces(shipped_profile: 
         assert tool not in text, f"{tool} is offered twice"
 
 
-async def test_a_cell_can_delegate_through_the_shipped_profile(shipped_profile: Any) -> None:
+async def test_a_cell_can_delegate_through_the_shipped_profile(
+    shipped_profile: ShippedProfile,
+) -> None:
     """The rows that must arrive together: transport, bindings, provider.
 
     Every one has unit tests; this is the claim that the *shipped* composition
@@ -165,7 +171,9 @@ async def test_a_cell_can_delegate_through_the_shipped_profile(shipped_profile: 
     assert admitted[0].data["grantedAccess"] == "write"
 
 
-async def test_the_shipped_runtime_gets_the_configured_graces(shipped_profile: Any) -> None:
+async def test_the_shipped_runtime_gets_the_configured_graces(
+    shipped_profile: ShippedProfile,
+) -> None:
     """The `Config → PythonCodeRuntime → Kernel` handoff, which nothing covered.
 
     Three timing knobs travel that path field by field, and a knob added to
@@ -181,7 +189,9 @@ async def test_the_shipped_runtime_gets_the_configured_graces(shipped_profile: A
     assert runtime.boot_timeout == 30.0, "an untouched knob keeps its default"
 
 
-async def test_the_runtime_tells_doctor_what_runs_model_code(shipped_profile: Any) -> None:
+async def test_the_runtime_tells_doctor_what_runs_model_code(
+    shipped_profile: ShippedProfile,
+) -> None:
     """I-2's reading, contributed rather than imported (P4-12).
 
     `ph-app` cannot import this package, so the worker model reaches `ph doctor`

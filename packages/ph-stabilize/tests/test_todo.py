@@ -14,6 +14,7 @@ pipeline's answer rather than this module's opinion of it.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -97,7 +98,7 @@ def test_every_row_in_the_bundle_names_a_resolvable_plugin() -> None:
 
 
 async def test_every_enabled_row_in_the_profile_activates(
-    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A row that mounts nothing is worse than one that fails: it looks fine.
 

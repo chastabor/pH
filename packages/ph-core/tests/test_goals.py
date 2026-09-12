@@ -40,7 +40,7 @@ from ph.seams.goals import (
     goals,
 )
 from ph.session import Session, SurfaceIntent
-from ph.testing import assistant_payload
+from ph.testing import MountProfile, assistant_payload, not_none
 
 
 def _open(session: Session, service: GoalService, gates: list[str] | None = None) -> Goal:
@@ -186,7 +186,7 @@ def test_an_unknown_outcome_leaves_the_goal_open() -> None:
 
 
 @pytest.mark.anyio
-async def test_the_command_opens_a_goal_and_reports_its_spend(mount: object) -> None:
+async def test_the_command_opens_a_goal_and_reports_its_spend(mount: MountProfile) -> None:
     """`/autonomous` is a command, not a host handler (C2).
 
     It reaches `ctx.goals` and `ctx.shell` — the same governed surfaces a tool
@@ -194,11 +194,13 @@ async def test_the_command_opens_a_goal_and_reports_its_spend(mount: object) -> 
     record. The bare form reports rather than starting a second one, because
     "what is it doing" is what a person types when they come back to a session.
     """
-    ctx = await mount()  # type: ignore[operator]
+    ctx = await mount()
     session = ctx.require(SESSIONS).create("cmd")
 
-    opened = await ctx.require(COMMANDS).dispatch(
-        "/autonomous make the tests pass -- pytest -q; mypy", session=session
+    opened = not_none(
+        await ctx.require(COMMANDS).dispatch(
+            "/autonomous make the tests pass -- pytest -q; mypy", session=session
+        )
     )
     assert "make the tests pass" in opened
     assert "pytest -q, mypy" in opened
@@ -206,16 +208,18 @@ async def test_the_command_opens_a_goal_and_reports_its_spend(mount: object) -> 
     state = ctx.require(GOALS).open(session)
     assert state is not None and state.goal.gates == ["pytest -q", "mypy"]
 
-    status = await ctx.require(COMMANDS).dispatch("/autonomous", session=session)
+    status = not_none(await ctx.require(COMMANDS).dispatch("/autonomous", session=session))
     assert "continuations 0/3" in status and "turns 0/12" in status
 
-    again = await ctx.require(COMMANDS).dispatch("/autonomous something else", session=session)
+    again = not_none(
+        await ctx.require(COMMANDS).dispatch("/autonomous something else", session=session)
+    )
     assert "already open" in again
     assert len(ctx.require(GOALS).states(session)) == 1, "a second goal was recorded anyway"
 
 
 @pytest.mark.anyio
-async def test_the_loop_continues_a_turn_until_a_budget_stops_it(mount: object) -> None:
+async def test_the_loop_continues_a_turn_until_a_budget_stops_it(mount: MountProfile) -> None:
     """The driver, which is a policy plugin on `agent/turn-stopping` (§6.7).
 
     Not a daemon and not a second loop: the hook the agent loop already fires,
@@ -226,7 +230,7 @@ async def test_the_loop_continues_a_turn_until_a_budget_stops_it(mount: object) 
     A gate that always fails means the run can only end one way, which is the
     row's first acceptance gate: `budget_limited`, naming the limit that bound.
     """
-    ctx = await mount({"id": "autonomous", "config": {"maxContinuations": 2}})  # type: ignore[operator]
+    ctx = await mount({"id": "autonomous", "config": {"maxContinuations": 2}})
     session = ctx.require(SESSIONS).create("loop")
     agent = ctx.require(AGENTS).create(session, AgentOptions(provider="fake", model="fake-1"))
 
@@ -252,13 +256,13 @@ async def test_the_loop_continues_a_turn_until_a_budget_stops_it(mount: object) 
 
 
 @pytest.mark.anyio
-async def test_a_run_whose_gates_pass_is_achieved_and_stops(mount: object) -> None:
+async def test_a_run_whose_gates_pass_is_achieved_and_stops(mount: MountProfile) -> None:
     """The other ending, and the one that must not be reachable by accident.
 
     A gate that passes settles the goal as `achieved` and the turn is allowed to
     end — no continuation is spent, because there is nothing left to do.
     """
-    ctx = await mount()  # type: ignore[operator]
+    ctx = await mount()
     session = ctx.require(SESSIONS).create("done")
     agent = ctx.require(AGENTS).create(session, AgentOptions(provider="fake", model="fake-1"))
 
@@ -274,18 +278,18 @@ async def test_a_run_whose_gates_pass_is_achieved_and_stops(mount: object) -> No
 
 
 @pytest.mark.anyio
-async def test_stop_abandons_the_open_goal(mount: object) -> None:
+async def test_stop_abandons_the_open_goal(mount: MountProfile) -> None:
     """`/autonomous stop` reaches the third outcome.
 
     It was unreachable: the "a goal is already open" branch returned first, so
     the message telling a person to use `stop` pointed at a verb that could not
     run, and `abandoned` had no production caller at all.
     """
-    ctx = await mount()  # type: ignore[operator]
+    ctx = await mount()
     session = ctx.require(SESSIONS).create("stopped")
 
     await ctx.require(COMMANDS).dispatch("/autonomous something long", session=session)
-    said = await ctx.require(COMMANDS).dispatch("/autonomous stop", session=session)
+    said = not_none(await ctx.require(COMMANDS).dispatch("/autonomous stop", session=session))
 
     assert "something long" in said
     assert ctx.require(GOALS).open(session) is None

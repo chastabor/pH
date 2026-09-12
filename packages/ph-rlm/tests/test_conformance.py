@@ -23,10 +23,11 @@ from __future__ import annotations
 
 import socket
 import subprocess
-from typing import Any
+from pathlib import Path
 
 import anyio
 import pytest
+from rlm_fixtures import ShippedProfile
 from runtime_helpers import run_ipython_cell
 
 from ph.keys import TOOLS
@@ -111,7 +112,7 @@ def test_the_unproduced_frame_is_still_decodable() -> None:
 # ------------------------------------------------------------- the frames --
 
 
-async def test_a_protocol_mismatch_is_refused_at_boot(tmp_path: Any) -> None:
+async def test_a_protocol_mismatch_is_refused_at_boot(tmp_path: Path) -> None:
     """The `fault` frame's one producer, and D7's whole point.
 
     A guest that cannot serve this protocol says so once and exits, rather than
@@ -157,7 +158,9 @@ async def test_a_protocol_mismatch_is_refused_at_boot(tmp_path: Any) -> None:
 # --------------------------------------------------------- the namespaces --
 
 
-async def test_every_shipped_namespace_is_callable_from_a_cell(shipped_profile: Any) -> None:
+async def test_every_shipped_namespace_is_callable_from_a_cell(
+    shipped_profile: ShippedProfile,
+) -> None:
     """One test per binding namespace, enumerated from the *mounted* profile.
 
     A namespace the SDK block advertises and a cell cannot reach is the failure

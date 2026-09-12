@@ -146,7 +146,7 @@ from ph.agent.inbox import InboxTarget
 from ph.agent_loop.driver import ReactLoopAgent
 from ph.keys import SCHEDULE, SESSIONS, WORKSPACE
 from ph.seams.schedule import Schedule
-from ph.testing import stored_log
+from ph.testing import ReapedHost, stored_log
 from ph_app.daemon import recovery, server
 from ph_app.daemon import supervisor as supervisor_module
 from ph_app.daemon.client import DaemonClient
@@ -156,14 +156,6 @@ from ph_app.daemon.supervisor import Supervisor
 from ph_app.protocol import DaemonError
 
 pytestmark = pytest.mark.anyio
-
-ReapedHost = Callable[..., Path]
-"""The repo-root `reaped_host` fixture, spelled where it is read.
-
-Structurally rather than by `from conftest import …`: that name resolves to the
-*nearest* conftest on `sys.path`, which for this package is
-`packages/ph-app/tests/conftest.py` and not the root one the fixture lives in.
-"""
 
 
 async def _history(

@@ -15,8 +15,6 @@ for a user, and nothing else in the suite would notice.
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 from rlm_fixtures import HOST_INTERPRETER
 from runtime_helpers import dispatch_names, run_ipython_cell
@@ -33,13 +31,6 @@ from ph_rlm.keys import HARNESS
 from ph_rlm.presentation import IPYTHON
 
 pytestmark = pytest.mark.anyio
-
-
-@pytest.fixture(autouse=True)
-def _isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """`resolve_profile` appends `$PH_HOME/profiles/<name>.yaml` when it exists,
-    so a developer with a real `rlm.yaml` overlay would fail these otherwise."""
-    monkeypatch.setenv("PH_HOME", str(tmp_path))
 
 
 # ------------------------------------------------------------- discovery --

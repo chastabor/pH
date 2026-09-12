@@ -233,7 +233,7 @@ async def test_a_held_workspace_is_never_reconciled(mount: MountProfile, tmp_pat
 
 
 async def test_a_leak_no_mounted_tier_can_reclaim_is_left_alone(
-    mount: MountProfile, tmp_path: Path, caplog: Any
+    mount: MountProfile, tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     """Reported, not removed. The tree belongs to a tier this profile does not
     have, and deleting a directory on the strength of a record written by a

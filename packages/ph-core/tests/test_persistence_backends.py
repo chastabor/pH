@@ -118,7 +118,7 @@ APPEND = SurfaceIntent("append")
 
 
 @pytest.fixture(params=BACKENDS)
-def store(request: Any, tmp_path: Path) -> SessionPersistence:
+def store(request: pytest.FixtureRequest, tmp_path: Path) -> SessionPersistence:
     """A mounted-shape store of each kind, built directly.
 
     Directly rather than through `mount`, because what is under test is the
@@ -1028,7 +1028,7 @@ async def test_a_flush_that_does_not_happen_still_owes_its_events(
 
 
 async def test_a_failed_write_is_retried_rather_than_lost(
-    store: SessionPersistence, monkeypatch: Any
+    store: SessionPersistence, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The other half of the same window: an `OSError` — a full disk, a
     read-only mount — leaves the events owed rather than consumed."""

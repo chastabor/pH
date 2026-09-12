@@ -19,20 +19,16 @@ from __future__ import annotations
 
 import ast
 import pathlib
-from collections.abc import Callable
 
 import pytest
 from daemon_helpers import Daemon
-from tui_helpers import root_of, running, until
+from tui_helpers import MakeApp, root_of, running, until
 
 import ph_app.tui.app
 from ph.keys import TUI_STATUS
 from ph.seams.tui_status import StatusField, StatusReading
-from ph_app.tui.app import PHTuiApp
 
 pytestmark = pytest.mark.anyio
-
-MakeApp = Callable[..., PHTuiApp]
 
 
 async def test_a_burst_of_changes_draws_once(make_tui_app: MakeApp) -> None:

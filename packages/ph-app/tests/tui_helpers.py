@@ -29,6 +29,15 @@ if TYPE_CHECKING:
     from daemon_helpers import Daemon
 
 
+MakeApp = Callable[..., PHTuiApp]
+"""`make_tui_app(...)` → an app wired for a test, from `app_fixtures`.
+
+Beside the helpers rather than in each suite: three had written it out, which is
+the sprawl `ph.testing.MountProfile`'s docstring argues against one package up.
+Not in `ph.testing`, because `PHTuiApp` is ph-app's and ph-core may not name it.
+"""
+
+
 def tui_app(
     *, home: Path, project: Path | None = None, trusted: bool = True, **overrides: Any
 ) -> PHTuiApp:

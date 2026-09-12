@@ -28,7 +28,6 @@ import os
 import sys
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
 
 import pytest
 
@@ -45,12 +44,12 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def _clear(monkeypatch: Any) -> None:
+def _clear(monkeypatch: pytest.MonkeyPatch) -> None:
     for name in ("PH_HOME", "PH_CACHE", "PH_RUNTIME", "XDG_RUNTIME_DIR", "TMPDIR"):
         monkeypatch.delenv(name, raising=False)
 
 
-def test_explicit_overrides_win(tmp_path: Path, monkeypatch: Any) -> None:
+def test_explicit_overrides_win(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _clear(monkeypatch)
     monkeypatch.setenv("PH_HOME", str(tmp_path / "home"))
     monkeypatch.setenv("PH_CACHE", str(tmp_path / "cache"))
@@ -62,7 +61,7 @@ def test_explicit_overrides_win(tmp_path: Path, monkeypatch: Any) -> None:
     assert roots.runtime_tier == "override"
 
 
-def test_xdg_runtime_dir_is_tier_one(tmp_path: Path, monkeypatch: Any) -> None:
+def test_xdg_runtime_dir_is_tier_one(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _clear(monkeypatch)
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
     roots = resolve_roots()
@@ -94,7 +93,7 @@ def test_a_file_where_a_directory_belongs_is_refused(tmp_path: Path) -> None:
         _check_private_dir(plain, require_mode=False)
 
 
-def test_resolution_creates_nothing(tmp_path: Path, monkeypatch: Any) -> None:
+def test_resolution_creates_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _clear(monkeypatch)
     monkeypatch.setenv("PH_HOME", str(tmp_path / "home"))
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "xdg"))
@@ -104,7 +103,7 @@ def test_resolution_creates_nothing(tmp_path: Path, monkeypatch: Any) -> None:
     assert not roots.runtime.exists()
 
 
-def test_roots_are_created_on_demand(tmp_path: Path, monkeypatch: Any) -> None:
+def test_roots_are_created_on_demand(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _clear(monkeypatch)
     monkeypatch.setenv("PH_HOME", str(tmp_path / "home"))
     monkeypatch.setenv("PH_CACHE", str(tmp_path / "cache"))
@@ -117,7 +116,7 @@ def test_roots_are_created_on_demand(tmp_path: Path, monkeypatch: Any) -> None:
     assert oct(roots.runtime.stat().st_mode)[-3:] == "700"
 
 
-def test_describe_names_the_tier(tmp_path: Path, monkeypatch: Any) -> None:
+def test_describe_names_the_tier(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _clear(monkeypatch)
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
     rows = dict(resolve_roots().describe())
@@ -125,7 +124,7 @@ def test_describe_names_the_tier(tmp_path: Path, monkeypatch: Any) -> None:
     assert "tier: xdg-runtime" in rows["PH_RUNTIME"]
 
 
-def test_derived_directories_hang_off_home(tmp_path: Path, monkeypatch: Any) -> None:
+def test_derived_directories_hang_off_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _clear(monkeypatch)
     monkeypatch.setenv("PH_HOME", str(tmp_path))
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
@@ -135,7 +134,7 @@ def test_derived_directories_hang_off_home(tmp_path: Path, monkeypatch: Any) -> 
     assert roots.profiles_dir() == tmp_path / "profiles"
 
 
-def test_cache_follows_xdg(tmp_path: Path, monkeypatch: Any) -> None:
+def test_cache_follows_xdg(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _clear(monkeypatch)
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdgcache"))
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
@@ -153,7 +152,7 @@ def test_cache_follows_xdg(tmp_path: Path, monkeypatch: Any) -> None:
 # falling through to the checked `/tmp` name.
 
 
-def test_a_per_user_tmpdir_is_tier_two(tmp_path: Path, monkeypatch: Any) -> None:
+def test_a_per_user_tmpdir_is_tier_two(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The macOS shape: a `$TMPDIR` the OS made ours is used as-is."""
     _clear(monkeypatch)
     private = tmp_path / "folders"
@@ -167,7 +166,7 @@ def test_a_per_user_tmpdir_is_tier_two(tmp_path: Path, monkeypatch: Any) -> None
     assert roots.runtime_source == "TMPDIR"
 
 
-def test_a_shared_tmpdir_is_not_a_tier(tmp_path: Path, monkeypatch: Any) -> None:
+def test_a_shared_tmpdir_is_not_a_tier(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A world-readable `$TMPDIR` is Linux's `/tmp` under another name.
 
     Adopting it would give tier 2's *trust* to a directory with none of tier 2's
@@ -182,7 +181,9 @@ def test_a_shared_tmpdir_is_not_a_tier(tmp_path: Path, monkeypatch: Any) -> None
     assert resolve_roots().runtime_tier == "tmp-uid"
 
 
-def test_a_tmpdir_that_is_not_there_is_not_a_tier(tmp_path: Path, monkeypatch: Any) -> None:
+def test_a_tmpdir_that_is_not_there_is_not_a_tier(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """`$TMPDIR` naming nothing must not raise on the way to the fallback: the
     variable is somebody's stale export, not a reason to refuse to start."""
     _clear(monkeypatch)
@@ -191,7 +192,9 @@ def test_a_tmpdir_that_is_not_there_is_not_a_tier(tmp_path: Path, monkeypatch: A
     assert resolve_roots().runtime_tier == "tmp-uid"
 
 
-def test_an_existing_tier_two_directory_is_still_checked(tmp_path: Path, monkeypatch: Any) -> None:
+def test_an_existing_tier_two_directory_is_still_checked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Tier 2 verifies ownership and not mode, and the asymmetry is deliberate.
 
     The OS made the *parent* per-user, so `ph` inside it inherits that; what it
@@ -208,7 +211,9 @@ def test_an_existing_tier_two_directory_is_still_checked(tmp_path: Path, monkeyp
         resolve_roots()
 
 
-def test_a_tier_two_directory_of_the_wrong_mode_is_kept(tmp_path: Path, monkeypatch: Any) -> None:
+def test_a_tier_two_directory_of_the_wrong_mode_is_kept(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The other half of that asymmetry, stated so a reader does not assume 0700
     is required everywhere it is desirable."""
     _clear(monkeypatch)
@@ -220,7 +225,9 @@ def test_a_tier_two_directory_of_the_wrong_mode_is_kept(tmp_path: Path, monkeypa
     assert resolve_roots().runtime_tier == "tmpdir"
 
 
-def test_a_directory_owned_by_somebody_else_is_refused(tmp_path: Path, monkeypatch: Any) -> None:
+def test_a_directory_owned_by_somebody_else_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """F9's gate, at the check rather than through the resolver.
 
     Driven by patching `getuid` rather than by finding a directory owned by
@@ -235,7 +242,9 @@ def test_a_directory_owned_by_somebody_else_is_refused(tmp_path: Path, monkeypat
         _check_private_dir(directory, require_mode=True)
 
 
-def test_the_tier_three_directory_is_created_private(tmp_path: Path, monkeypatch: Any) -> None:
+def test_the_tier_three_directory_is_created_private(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Tier 3 is created 0700 and never adopted, which is one rule in two halves.
 
     `resolve_roots` refused anything pre-existing that failed its check, so by
@@ -274,11 +283,11 @@ def test_the_tier_three_directory_is_created_private(tmp_path: Path, monkeypatch
 # to the code under test and nothing to anybody else.
 
 
-def _on_windows(monkeypatch: Any) -> None:
+def _on_windows(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("ph.paths.sys", SimpleNamespace(platform="win32"))
 
 
-def test_the_windows_roots_follow_the_platform_variables(monkeypatch: Any) -> None:
+def test_the_windows_roots_follow_the_platform_variables(monkeypatch: pytest.MonkeyPatch) -> None:
     """`%APPDATA%` for home and `%LOCALAPPDATA%` for cache, which is the split
     Windows makes: roaming state follows a user between machines and a cache
     does not. The runtime tier has no equivalent, so it hangs off the cache."""
@@ -295,7 +304,9 @@ def test_the_windows_roots_follow_the_platform_variables(monkeypatch: Any) -> No
     assert runtime == _default_cache() / "runtime"
 
 
-def test_the_windows_runtime_names_the_variable_it_actually_read(monkeypatch: Any) -> None:
+def test_the_windows_runtime_names_the_variable_it_actually_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The drift this replaced: a `{tier: variable}` table said `LOCALAPPDATA`
     for every Windows tier, including the one that falls through to
     `$XDG_CACHE_HOME`. `_cache_source` reads the same branches `_default_cache`
@@ -311,7 +322,9 @@ def test_the_windows_runtime_names_the_variable_it_actually_read(monkeypatch: An
     assert tier == "windows" and source == "XDG_CACHE_HOME"
 
 
-def test_a_windows_host_with_neither_variable_still_resolves(monkeypatch: Any) -> None:
+def test_a_windows_host_with_neither_variable_still_resolves(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """`~` is the last resort, and it names no variable rather than naming one it
     did not read — which is what `ph doctor` prints under "source"."""
     from ph.paths import _default_cache, _default_home, _resolve_runtime
@@ -329,7 +342,7 @@ def test_a_windows_host_with_neither_variable_still_resolves(monkeypatch: Any) -
 
 
 def test_the_roots_are_canonical_because_everything_minted_under_them_must_be(
-    tmp_path: Path, monkeypatch: Any
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The kernel matches the path it *resolves*: Seatbelt refused a workspace spelled
     `/var/folders/…` its own writes, because that is `/private/var/…` to it. Every

@@ -32,17 +32,16 @@ work around it.
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator, Callable
-from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
 import anyio
 import pytest
-from daemon_helpers import Daemon, private_runtime, serving
+from daemon_helpers import private_runtime, serving
 from typer.testing import CliRunner
 
 from ph.json import JsonObject, as_obj
+from ph.testing import ReapedHost
 from ph_app.cli import app
 from ph_app.payloads import DaemonStatusReply
 from ph_app.protocol import Cursor
@@ -50,25 +49,6 @@ from ph_app.protocol import Cursor
 pytestmark = pytest.mark.anyio
 
 runner = CliRunner()
-
-ReapedHost = Callable[..., Path]
-"""The repo-root `reaped_host` fixture, spelled where it is read — structurally
-rather than by `from conftest import …`, which resolves to this package's own
-conftest rather than to the root one the fixture lives in."""
-
-
-@asynccontextmanager
-async def _daemon(tmp_path: Path, monkeypatch: Any, **options: Any) -> AsyncIterator[Daemon]:
-    """A supervisor listening where `ph agents` will look for it.
-
-    Through the shared `running`, which is where `serve()`'s startup contract
-    lives — a second copy of it here would be the one that gets missed when that
-    contract changes, and a missed one fails as a hang rather than as a diff.
-    The socket is the one `$PH_RUNTIME` derives, and it is handed to `serve` so
-    the two halves are pinned to *the same* derivation rather than to two.
-    """
-    async with serving(tmp_path, monkeypatch, **options) as daemon:
-        yield daemon
 
 
 async def _watchers(client: Any, session_id: str) -> int:
@@ -101,7 +81,7 @@ async def _ph(*args: str) -> Any:
 
 
 async def test_send_queues_a_turn_and_attach_shows_the_answer(
-    tmp_path: Path, monkeypatch: Any
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The pair a person actually types, and the round trip that matters.
 
@@ -110,7 +90,7 @@ async def test_send_queues_a_turn_and_attach_shows_the_answer(
     is for. Whether the turn finishes before the attach or during it, the same
     assertion holds: catch-up and the live stream are one rendering of one log.
     """
-    async with _daemon(tmp_path, monkeypatch):
+    async with serving(tmp_path, monkeypatch):
         sent = await _ph("agents", "send", "alpha", "what is the answer")
         assert sent.exit_code == 0, sent.output
         assert "queued on alpha" in sent.output
@@ -128,7 +108,7 @@ async def test_send_queues_a_turn_and_attach_shows_the_answer(
 
 
 async def test_until_idle_exits_non_zero_when_the_last_turn_errored(
-    tmp_path: Path, monkeypatch: Any
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Idle is how "answered" and "the last answer failed" both look (P5-04).
 
@@ -144,7 +124,7 @@ async def test_until_idle_exits_non_zero_when_the_last_turn_errored(
         yield  # pragma: no cover
 
     monkeypatch.setattr(FakeAdapter, "stream", exploding)
-    async with _daemon(tmp_path, monkeypatch):
+    async with serving(tmp_path, monkeypatch):
         assert (await _ph("agents", "send", "sour", "answer me")).exit_code == 0
 
         followed = await _ph("agents", "attach", "sour", "--until-idle")
@@ -155,10 +135,10 @@ async def test_until_idle_exits_non_zero_when_the_last_turn_errored(
 
 
 async def test_until_idle_exits_zero_when_the_turn_completed(
-    tmp_path: Path, monkeypatch: Any
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The other half, so the exit code is a signal rather than a constant."""
-    async with _daemon(tmp_path, monkeypatch):
+    async with serving(tmp_path, monkeypatch):
         assert (await _ph("agents", "send", "sweet", "answer me")).exit_code == 0
 
         followed = await _ph("agents", "attach", "sweet", "--until-idle")
@@ -168,7 +148,7 @@ async def test_until_idle_exits_zero_when_the_turn_completed(
 
 
 async def test_since_skips_the_history_a_client_already_has(
-    tmp_path: Path, monkeypatch: Any
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A reattach is not a replay.
 
@@ -178,7 +158,7 @@ async def test_since_skips_the_history_a_client_already_has(
     form a person types at a session they were just watching; the verifiable
     form is the next test's.
     """
-    async with _daemon(tmp_path, monkeypatch) as daemon:
+    async with serving(tmp_path, monkeypatch) as daemon:
         client = await daemon.client()
         await _ph("agents", "send", "resumed", "the first thing")
         whole = await _ph("agents", "attach", "resumed", "--until-idle")
@@ -200,7 +180,7 @@ async def test_since_skips_the_history_a_client_already_has(
 
 
 async def test_a_full_cursor_is_verified_and_a_stale_one_skips_nothing(
-    tmp_path: Path, monkeypatch: Any
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """**The hole.** A bare `--since` was the only form, and it was stamped with the
     *current* generation — so a sequence kept from another incarnation of the log
@@ -214,7 +194,7 @@ async def test_a_full_cursor_is_verified_and_a_stale_one_skips_nothing(
     to be silent and lossy — `seen` was pre-set to `since - 1`, so the first `since`
     events of the new incarnation were dropped as already seen.
     """
-    async with _daemon(tmp_path, monkeypatch) as daemon:
+    async with serving(tmp_path, monkeypatch) as daemon:
         client = await daemon.client()
         await _ph("agents", "send", "kept", "the first thing")
         await _ph("agents", "attach", "kept", "--until-idle")
@@ -244,11 +224,11 @@ async def test_a_full_cursor_is_verified_and_a_stale_one_skips_nothing(
 
 
 async def test_status_prints_the_cursor_attach_can_take_back(
-    tmp_path: Path, monkeypatch: Any
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The two halves of a cursor were printed as two rows a script would have to
     reassemble; the `resume with` row is the one form `--since` can verify."""
-    async with _daemon(tmp_path, monkeypatch):
+    async with serving(tmp_path, monkeypatch):
         await _ph("agents", "send", "shown", "hello")
         await _ph("agents", "attach", "shown", "--until-idle")
 
@@ -307,10 +287,10 @@ def test_the_cli_refuses_an_unparseable_since_with_exit_two() -> None:
 
 
 async def test_agents_lists_every_root_the_daemon_is_running(
-    tmp_path: Path, monkeypatch: Any
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The bare command is the listing — the question a person asks first."""
-    async with _daemon(tmp_path, monkeypatch):
+    async with serving(tmp_path, monkeypatch):
         empty = await _ph("agents")
         assert empty.exit_code == 0, empty.output
         assert "no roots running" in empty.output
@@ -324,9 +304,11 @@ async def test_agents_lists_every_root_the_daemon_is_running(
         assert "idle" in listed.output
 
 
-async def test_status_reports_one_root_in_detail(tmp_path: Path, monkeypatch: Any) -> None:
+async def test_status_reports_one_root_in_detail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """What the listing has no room for: the ladder, and what is still to fire."""
-    async with _daemon(tmp_path, monkeypatch):
+    async with serving(tmp_path, monkeypatch):
         await _ph("agents", "send", "gamma", "hello")
         await _ph("agents", "attach", "gamma", "--until-idle")
 
@@ -341,14 +323,16 @@ async def test_status_reports_one_root_in_detail(tmp_path: Path, monkeypatch: An
         assert "no session" in missing.output
 
 
-async def test_schedule_creates_lists_and_cancels(tmp_path: Path, monkeypatch: Any) -> None:
+async def test_schedule_creates_lists_and_cancels(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """All three verbs of one command, against the seam that owns them.
 
     The timing flag picks the kind, so nothing here spells `--kind interval`:
     that pair is the wire's shape, and putting it in front of a person is how a
     CLI comes to be a transcription of a protocol.
     """
-    async with _daemon(tmp_path, monkeypatch, tick_every=0.0):
+    async with serving(tmp_path, monkeypatch, tick_every=0.0):
         empty = await _ph("agents", "schedule", "delta")
         # Listing refuses on a root nobody has started — the honest answer, and
         # the same one `session/snapshot` gives.
@@ -381,7 +365,7 @@ async def test_schedule_creates_lists_and_cancels(tmp_path: Path, monkeypatch: A
 
 
 async def test_a_schedule_needs_one_timing_and_something_to_say(
-    tmp_path: Path, monkeypatch: Any
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Two refusals that would otherwise be silent, permanent mistakes.
 
@@ -390,7 +374,7 @@ async def test_a_schedule_needs_one_timing_and_something_to_say(
     timing flags is the other half: whichever one lost would be a schedule
     firing on a rule its author did not write.
     """
-    async with _daemon(tmp_path, monkeypatch, tick_every=0.0):
+    async with serving(tmp_path, monkeypatch, tick_every=0.0):
         mute = await _ph("agents", "schedule", "eps", "--every", "60000")
         assert mute.exit_code == 2
         assert "--prompt" in mute.output
@@ -402,7 +386,7 @@ async def test_a_schedule_needs_one_timing_and_something_to_say(
 
 
 async def test_doctor_reports_the_socket_the_daemon_actually_bound(
-    tmp_path: Path, monkeypatch: Any
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Read back over the wire, never re-derived on this side.
 
@@ -411,7 +395,7 @@ async def test_doctor_reports_the_socket_the_daemon_actually_bound(
     all. The passivation policy is the sharpest case: it is a flag on `ph
     daemon`, and the client has no way to guess it.
     """
-    async with _daemon(tmp_path, monkeypatch, passivate_after=600.0) as daemon:
+    async with serving(tmp_path, monkeypatch, passivate_after=600.0) as daemon:
         reported = await _ph("agents", "doctor")
         assert reported.exit_code == 0, reported.output
         assert str(daemon.path) in reported.output
@@ -423,7 +407,7 @@ async def test_doctor_reports_the_socket_the_daemon_actually_bound(
 
 
 async def test_shutdown_waits_for_the_daemon_to_actually_be_gone(
-    tmp_path: Path, monkeypatch: Any
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """ "I asked" and "it stopped" are different claims, and this makes the second.
 
@@ -431,7 +415,7 @@ async def test_shutdown_waits_for_the_daemon_to_actually_be_gone(
     confirmation is the connection the daemon closes on its way out — which is
     also when roots are flushed and leases released.
     """
-    async with _daemon(tmp_path, monkeypatch) as daemon:
+    async with serving(tmp_path, monkeypatch) as daemon:
         stopped = await _ph("agents", "shutdown")
         assert stopped.exit_code == 0, stopped.output
         assert "daemon stopped" in stopped.output
@@ -440,7 +424,9 @@ async def test_shutdown_waits_for_the_daemon_to_actually_be_gone(
                 await anyio.sleep(0.02)
 
 
-async def test_a_follow_ends_when_the_daemon_goes_away(tmp_path: Path, monkeypatch: Any) -> None:
+async def test_a_follow_ends_when_the_daemon_goes_away(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The other way a follow ends, and the one nothing else would notice.
 
     `attach` without `--until-idle` waits for a root that may never go idle, so
@@ -449,7 +435,7 @@ async def test_a_follow_ends_when_the_daemon_goes_away(tmp_path: Path, monkeypat
     is set by a pump that is no longer reading. Both halves are exercised here:
     the wait, and the `session/detach` in the teardown behind it.
     """
-    async with _daemon(tmp_path, monkeypatch) as daemon:
+    async with serving(tmp_path, monkeypatch) as daemon:
         client = await daemon.client()
         await _ph("agents", "send", "watched", "hello")
         followed: list[Any] = []
@@ -484,7 +470,7 @@ async def test_a_follow_ends_when_the_daemon_goes_away(tmp_path: Path, monkeypat
 
 
 async def test_no_daemon_names_the_socket_and_how_to_start_one(
-    tmp_path: Path, monkeypatch: Any
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     private_runtime(tmp_path, monkeypatch)
     for command in (
@@ -503,7 +489,7 @@ async def test_no_daemon_names_the_socket_and_how_to_start_one(
 
 
 async def test_a_socket_nobody_answers_is_told_apart_from_no_socket(
-    tmp_path: Path, monkeypatch: Any
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Two failures, two next steps.
 
@@ -553,7 +539,7 @@ async def test_a_reaped_socket_is_not_reported_as_one_never_started(
 
 
 async def test_an_ordinary_missing_socket_still_just_says_start_one(
-    tmp_path: Path, monkeypatch: Any, reaped_host: ReapedHost
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reaped_host: ReapedHost
 ) -> None:
     """The advice is conditional, which is what keeps it worth reading.
 
@@ -570,7 +556,7 @@ async def test_an_ordinary_missing_socket_still_just_says_start_one(
 
 
 async def test_doctor_prints_the_lifetime_the_daemon_reports(
-    tmp_path: Path, monkeypatch: Any, reaped_host: ReapedHost
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reaped_host: ReapedHost
 ) -> None:
     """Read back over the wire like every other row in that table.
 
@@ -580,7 +566,7 @@ async def test_doctor_prints_the_lifetime_the_daemon_reports(
     test above.
     """
     reaped_host()
-    async with _daemon(tmp_path, monkeypatch):
+    async with serving(tmp_path, monkeypatch):
         reported = await _ph("agents", "doctor")
         assert reported.exit_code == 0, reported.output
         assert "socket lifetime" in reported.output
@@ -616,7 +602,7 @@ def test_every_agents_command_is_registered() -> None:
 
 
 def test_the_daemon_status_reply_is_json_and_says_what_it_is(
-    tmp_path: Path, monkeypatch: Any
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The reply `doctor` renders, checked as data.
 
@@ -692,7 +678,7 @@ async def test_the_follower_shows_each_event_once_and_in_the_log_s_order(
 
 
 async def test_attach_reads_the_status_it_was_handed_rather_than_asking_again(
-    tmp_path: Path, monkeypatch: Any
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """**The round trip is gone, and that is the point of `Followed.seed`.**
 
@@ -718,7 +704,7 @@ async def test_attach_reads_the_status_it_was_handed_rather_than_asking_again(
         return await original(self, verb, params, **fields)
 
     monkeypatch.setattr(DaemonClient, "call", recording)
-    async with _daemon(tmp_path, monkeypatch):
+    async with serving(tmp_path, monkeypatch):
         assert (await _ph("agents", "send", "asked", "answer me")).exit_code == 0
         called.clear()
 
@@ -730,7 +716,7 @@ async def test_attach_reads_the_status_it_was_handed_rather_than_asking_again(
 
 
 def test_the_attach_reply_is_the_first_status_and_stops_an_already_idle_root(
-    capsys: Any,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     """A root idle *before* the attach announces nothing afterwards, so the reply is
     the only status this feed will ever see.
@@ -761,7 +747,9 @@ def test_the_attach_reply_is_the_first_status_and_stops_an_already_idle_root(
     assert "idle" in printed and "last turn error" in printed, printed
 
 
-def test_a_busy_root_is_seeded_without_ending_the_follow(capsys: Any) -> None:
+def test_a_busy_root_is_seeded_without_ending_the_follow(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     """The other half, for `probe_sandbox`'s reason: a seed that always stopped the
     follow would pass the test above while making `attach` useless. The reply is
     still printed — a person is told what they attached to — and the wait stands."""
@@ -814,14 +802,14 @@ def test_a_followed_line_says_what_the_event_says() -> None:
 
 
 async def test_a_follow_leaves_out_the_keystroke_log_unless_asked(
-    tmp_path: Path, monkeypatch: Any
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A turn is mostly `assistant/chunk`, and its text arrives again as the
     message that closes it — so showing both is a keystroke log wrapped around
     the thing a person came to read. It was also 98 µs of rendering per frame,
     which is 196 ms a turn spent on output nobody reads.
     """
-    async with _daemon(tmp_path, monkeypatch):
+    async with serving(tmp_path, monkeypatch):
         await _ph("agents", "send", "quiet", "hello")
         default = await _ph("agents", "attach", "quiet", "--until-idle")
         assert default.exit_code == 0, default.output
@@ -834,11 +822,11 @@ async def test_a_follow_leaves_out_the_keystroke_log_unless_asked(
 
 
 async def test_a_follow_filters_to_a_namespace_and_drills_into_one(
-    tmp_path: Path, monkeypatch: Any
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """P6-33 through the follower: `--type` selects, and a namespace is not a
     substring. `log:turn` must bring turn boundaries and nothing else."""
-    async with _daemon(tmp_path, monkeypatch):
+    async with serving(tmp_path, monkeypatch):
         await _ph("agents", "send", "picky", "hello")
 
         turns = await _ph("agents", "attach", "picky", "--until-idle", "--type", "turn")
@@ -852,7 +840,7 @@ async def test_a_follow_filters_to_a_namespace_and_drills_into_one(
 
 
 async def test_a_named_namespace_overrides_the_per_delta_hush(
-    tmp_path: Path, monkeypatch: Any
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Naming a namespace is a stronger signal than the default quiet.
 
@@ -861,24 +849,26 @@ async def test_a_named_namespace_overrides_the_per_delta_hush(
     `--type assistant/chunk` asked for exactly that, and making them add `--all`
     on top would answer a question they did not ask.
     """
-    async with _daemon(tmp_path, monkeypatch):
+    async with serving(tmp_path, monkeypatch):
         await _ph("agents", "send", "loud", "hello")
         result = await _ph("agents", "attach", "loud", "--until-idle", "--type", "assistant/chunk")
         assert result.exit_code == 0, result.output
         assert "assistant/chunk" in result.output, "asked for by name, and still hidden"
 
 
-async def test_a_follow_refuses_the_other_vocabulary(tmp_path: Path, monkeypatch: Any) -> None:
+async def test_a_follow_refuses_the_other_vocabulary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """`bus:tools` follows nothing — this is a session log. Refused rather than
     answered with an empty stream, which would read as a quiet session."""
-    async with _daemon(tmp_path, monkeypatch):
+    async with serving(tmp_path, monkeypatch):
         result = await _ph("agents", "attach", "wrong", "--type", "bus:tools")
         assert result.exit_code == 2, result.output
         assert "does not serve" in result.output
 
 
 async def test_an_unnamed_failure_surfaces_as_itself_not_as_a_group(
-    tmp_path: Path, monkeypatch: Any
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """What a person sees when something goes wrong that nobody anticipated.
 
@@ -896,6 +886,6 @@ async def test_an_unnamed_failure_surfaces_as_itself_not_as_a_group(
     def invoke() -> None:
         _ask(boom)
 
-    async with _daemon(tmp_path, monkeypatch):
+    async with serving(tmp_path, monkeypatch):
         with pytest.raises(ValueError, match="nothing to do with the daemon"):
             await anyio.to_thread.run_sync(invoke)

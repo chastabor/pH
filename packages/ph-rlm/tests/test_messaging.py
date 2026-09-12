@@ -13,7 +13,7 @@ from collections.abc import Callable
 from typing import Any
 
 import pytest
-from rlm_fixtures import MESSAGING_ROW, PROVIDER_ROW
+from rlm_fixtures import MESSAGING_ROW, PROVIDER_ROW, MountedRuntime
 
 from ph.keys import AGENTS, JOBS, SESSIONS, SUBAGENTS
 from ph.seams.subagents import SubagentRequest, family_reach, reachable_family
@@ -30,7 +30,6 @@ from ph_rlm.subagents import PROVIDER_NAME
 
 pytestmark = pytest.mark.anyio
 
-Mounted = Callable[..., Any]
 
 ROWS: list[dict[str, Any]] = [PROVIDER_ROW, MESSAGING_ROW]
 
@@ -56,7 +55,7 @@ async def _spawn(ctx: Any, parent: Any, name: str) -> Any:
     )
 
 
-async def _siblings(family_ctx: Mounted, **config: Any) -> tuple[Any, Any, Any, Any]:
+async def _siblings(family_ctx: MountedRuntime, **config: Any) -> tuple[Any, Any, Any, Any]:
     """Two root agents, which the reach rule makes siblings of each other.
 
     Used for the limit tests because they must not race a child's completion:
@@ -121,7 +120,7 @@ def test_the_reach_rule_and_its_enumeration_are_one_implementation() -> None:
             assert (two.id in reach) is predicate
 
 
-async def test_a_child_reaches_its_parent(family_ctx: Mounted) -> None:
+async def test_a_child_reaches_its_parent(family_ctx: MountedRuntime) -> None:
     ctx, session, parent = await family_ctx()
     run = await _spawn(ctx, parent, "scout")
     child = _agent(ctx, run)
@@ -139,7 +138,7 @@ async def test_a_child_reaches_its_parent(family_ctx: Mounted) -> None:
     assert result.value["deliveryStatus"] in {"delivered", "queued"}
 
 
-async def test_the_message_reaches_the_target_verbatim(family_ctx: Mounted) -> None:
+async def test_the_message_reaches_the_target_verbatim(family_ctx: MountedRuntime) -> None:
     """Framing is the sender's; a harness that rewrote the body would make the
     log stop saying what the target actually read."""
     ctx, session, parent = await family_ctx()
@@ -161,7 +160,7 @@ async def test_the_message_reaches_the_target_verbatim(family_ctx: Mounted) -> N
     assert f"From: {run.session_id}" in delivered[0]
 
 
-async def test_siblings_reach_each_other(family_ctx: Mounted) -> None:
+async def test_siblings_reach_each_other(family_ctx: MountedRuntime) -> None:
     """Two roots are siblings under the rule, which is what lets two top-level
     agents in one deployment talk."""
     ctx, session, sender, target = await _siblings(family_ctx)
@@ -171,7 +170,7 @@ async def test_siblings_reach_each_other(family_ctx: Mounted) -> None:
     assert ok.value["receiverRole"] == "sibling"
 
 
-async def test_addressing_a_settled_child_wakes_it(family_ctx: Mounted) -> None:
+async def test_addressing_a_settled_child_wakes_it(family_ctx: MountedRuntime) -> None:
     """P3-13: a completed child stays addressable, and a send is the trigger.
 
     Settlement releases the agent — which is what holds an inbox — but the
@@ -211,7 +210,7 @@ async def test_addressing_a_settled_child_wakes_it(family_ctx: Mounted) -> None:
     assert causes == [None, None, "rehydrated", None]
 
 
-async def test_repeated_wakes_do_not_accrete_jobs(family_ctx: Mounted) -> None:
+async def test_repeated_wakes_do_not_accrete_jobs(family_ctx: MountedRuntime) -> None:
     """A drive job is an effect of the delegation, released when the child settles.
 
     Every message to a settled child wakes it, and each wake starts a job. Without
@@ -236,7 +235,7 @@ async def test_repeated_wakes_do_not_accrete_jobs(family_ctx: Mounted) -> None:
     assert [job for job in ctx.require(JOBS).list() if job.kind == "subagent"] == []
 
 
-async def test_disposing_the_parent_abandons_a_running_drive(family_ctx: Mounted) -> None:
+async def test_disposing_the_parent_abandons_a_running_drive(family_ctx: MountedRuntime) -> None:
     """The other half: work still in flight when its owner goes is cancelled."""
     ctx, _session, parent = await family_ctx()
     await _spawn(ctx, parent, "scout")
@@ -248,7 +247,7 @@ async def test_disposing_the_parent_abandons_a_running_drive(family_ctx: Mounted
     assert running[0].token.cancelled
 
 
-async def test_a_revoked_child_is_not_quietly_revived(family_ctx: Mounted) -> None:
+async def test_a_revoked_child_is_not_quietly_revived(family_ctx: MountedRuntime) -> None:
     """The tombstone is the parent's record that it revoked the child; waking one
     behind that record would make the record false."""
     ctx, session, parent = await family_ctx()
@@ -271,7 +270,7 @@ async def test_a_revoked_child_is_not_quietly_revived(family_ctx: Mounted) -> No
     assert ctx.require(AGENTS).get(run.session_id) is None
 
 
-async def test_a_send_outside_the_family_is_refused_by_a_guard(family_ctx: Mounted) -> None:
+async def test_a_send_outside_the_family_is_refused_by_a_guard(family_ctx: MountedRuntime) -> None:
     """C7: the guard is deny-only and runs last, so nothing re-permits it."""
     ctx, session, parent = await family_ctx()
     run = await _spawn(ctx, parent, "scout")
@@ -299,7 +298,7 @@ async def test_a_send_outside_the_family_is_refused_by_a_guard(family_ctx: Mount
     assert ctx.require(SESSIONS).get(grandchild.session_id) is not None
 
 
-async def test_the_denial_names_the_reachable_roles(family_ctx: Mounted) -> None:
+async def test_the_denial_names_the_reachable_roles(family_ctx: MountedRuntime) -> None:
     """A root agent with no family gets a refusal it can act on."""
     ctx, session, parent = await family_ctx()
     result = await _send(ctx, parent, session, message="anyone?", receiver_role="parent")
@@ -307,7 +306,7 @@ async def test_the_denial_names_the_reachable_roles(family_ctx: Mounted) -> None
     assert OUT_OF_REACH in result.error.message
 
 
-async def test_an_ambiguous_role_asks_for_a_name(family_ctx: Mounted) -> None:
+async def test_an_ambiguous_role_asks_for_a_name(family_ctx: MountedRuntime) -> None:
     ctx, session, parent = await family_ctx()
     await _spawn(ctx, parent, "alpha")
     await _spawn(ctx, parent, "beta")
@@ -321,7 +320,7 @@ async def test_an_ambiguous_role_asks_for_a_name(family_ctx: Mounted) -> None:
 
 
 async def test_an_oversized_message_is_refused_with_the_alternative(
-    family_ctx: Mounted,
+    family_ctx: MountedRuntime,
 ) -> None:
     ctx, session, sender, _target = await _siblings(family_ctx, maxMessageChars=64)
 
@@ -331,7 +330,7 @@ async def test_an_oversized_message_is_refused_with_the_alternative(
     assert "send the path" in result.error.message
 
 
-async def test_the_rate_limit_fails_rather_than_denies(family_ctx: Mounted) -> None:
+async def test_the_rate_limit_fails_rather_than_denies(family_ctx: MountedRuntime) -> None:
     """C8, and the deliberate deviation: backpressure is the program's to handle.
 
     A *denial* would end the whole cell under C3, which is not what four messages
@@ -354,7 +353,7 @@ async def test_the_rate_limit_fails_rather_than_denies(family_ctx: Mounted) -> N
     assert "backpressure, not a refusal" in limited.error.message
 
 
-async def test_a_target_at_the_pending_cap_refuses_more(family_ctx: Mounted) -> None:
+async def test_a_target_at_the_pending_cap_refuses_more(family_ctx: MountedRuntime) -> None:
     ctx, session, sender, _target = await _siblings(family_ctx, maxPending=2, rateCapacity=99)
 
     for index in range(2):
@@ -370,7 +369,7 @@ async def test_a_target_at_the_pending_cap_refuses_more(family_ctx: Mounted) -> 
 # ------------------------------------------------------------------ replies --
 
 
-async def test_a_childs_send_records_that_it_replied(family_ctx: Mounted) -> None:
+async def test_a_childs_send_records_that_it_replied(family_ctx: MountedRuntime) -> None:
     """The wiring that suppresses the "finished without replying" notice.
 
     Asserted on the provider's record rather than on the notice's absence: a
@@ -397,7 +396,7 @@ async def test_a_childs_send_records_that_it_replied(family_ctx: Mounted) -> Non
 # ------------------------------------------------------------------ observe --
 
 
-async def test_observe_is_bounded_by_the_same_reach_rule(family_ctx: Mounted) -> None:
+async def test_observe_is_bounded_by_the_same_reach_rule(family_ctx: MountedRuntime) -> None:
     ctx, session, parent = await family_ctx()
     run = await _spawn(ctx, parent, "scout")
     child = _agent(ctx, run)
@@ -424,7 +423,7 @@ async def test_observe_is_bounded_by_the_same_reach_rule(family_ctx: Mounted) ->
     assert OUT_OF_REACH in refused.error.message
 
 
-async def test_an_observe_read_is_capped(family_ctx: Mounted) -> None:
+async def test_an_observe_read_is_capped(family_ctx: MountedRuntime) -> None:
     ctx, session, parent = await family_ctx(observeMaxMessages=1)
     run = await _spawn(ctx, parent, "scout")
     await ctx.drain()

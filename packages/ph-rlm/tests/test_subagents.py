@@ -38,8 +38,9 @@ from typing import Any
 
 import anyio
 import pytest
-from rlm_fixtures import PROVIDER_ROW
+from rlm_fixtures import PROVIDER_ROW, MountedRuntime
 
+from ph.json import as_obj
 from ph.keys import AGENTS, SESSIONS, SKILLS, SUBAGENTS, TOOLS, WORKSPACE
 from ph.llm.types import text_of
 from ph.persistence import resume_session
@@ -63,8 +64,6 @@ from ph_rlm.keys import RLM_CHILDREN
 from ph_rlm.subagents import PROVIDER_NAME, TASK_PREFIX, delegation_depth
 
 pytestmark = pytest.mark.anyio
-
-Mounted = Callable[..., Any]
 
 
 @pytest.fixture
@@ -91,7 +90,7 @@ async def _spawn(ctx: Any, parent: Any, prompt: str = "research the thing", **kw
 # ------------------------------------------------------------------ admission --
 
 
-async def test_admission_returns_before_the_child_answers(delegating: Mounted) -> None:
+async def test_admission_returns_before_the_child_answers(delegating: MountedRuntime) -> None:
     """The property the whole design exists for: a parent fans out and keeps
     working, instead of blocking on each child in turn."""
     ctx, session, parent = await delegating()
@@ -115,7 +114,7 @@ async def test_admission_returns_before_the_child_answers(delegating: Mounted) -
     assert delegation_depth(child_session) == 1
 
 
-async def test_the_admission_is_logged_before_any_status(delegating: Mounted) -> None:
+async def test_the_admission_is_logged_before_any_status(delegating: MountedRuntime) -> None:
     """A fold that met status for an unadmitted child would show a family that
     does not exist, so the order is not incidental."""
     ctx, session, parent = await delegating()
@@ -127,7 +126,7 @@ async def test_the_admission_is_logged_before_any_status(delegating: Mounted) ->
     assert "subagent/status" in kinds
 
 
-async def test_eight_children_are_all_admitted_without_waiting(delegating: Mounted) -> None:
+async def test_eight_children_are_all_admitted_without_waiting(delegating: MountedRuntime) -> None:
     ctx, session, parent = await delegating()
     runs = [await _spawn(ctx, parent, f"task {index}") for index in range(8)]
 
@@ -137,7 +136,7 @@ async def test_eight_children_are_all_admitted_without_waiting(delegating: Mount
     assert len(ctx.require(SUBAGENTS).list(parent_id=parent.id)) == 8
 
 
-async def test_the_child_gets_the_task_labelled_as_the_parents(delegating: Mounted) -> None:
+async def test_the_child_gets_the_task_labelled_as_the_parents(delegating: MountedRuntime) -> None:
     """`[task from parent]` is what the child's own prompt recognizes."""
     ctx, _session, parent = await delegating()
     run = await _spawn(ctx, parent, "count the files")
@@ -152,13 +151,13 @@ async def test_the_child_gets_the_task_labelled_as_the_parents(delegating: Mount
     ]
     assert relayed, "the child never received the task"
     assert "count the files" in repr(relayed[0].data)
-    assert relayed[0].data["source"]["form"] == "relay"
+    assert as_obj(relayed[0].data["source"])["form"] == "relay"
 
 
 # ----------------------------------------------------------------- the gates --
 
 
-async def test_the_depth_gate_names_both_numbers(delegating: Mounted) -> None:
+async def test_the_depth_gate_names_both_numbers(delegating: MountedRuntime) -> None:
     """Prime Agent's wording, so a model that has seen it need not re-learn it."""
     ctx, session, parent = await delegating(maxDepth=0)
     with pytest.raises(SubagentSpawnError, match=r"RLM_DEPTH=0, RLM_MAX_DEPTH=0"):
@@ -168,7 +167,7 @@ async def test_the_depth_gate_names_both_numbers(delegating: Mounted) -> None:
     assert [event for event in session.events if event.type.startswith("subagent/")] == []
 
 
-async def test_a_child_cannot_delegate_past_the_depth_limit(delegating: Mounted) -> None:
+async def test_a_child_cannot_delegate_past_the_depth_limit(delegating: MountedRuntime) -> None:
     ctx, _session, parent = await delegating(maxDepth=1)
     run = await _spawn(ctx, parent)
     child_session = ctx.require(SESSIONS).get(run.session_id)
@@ -179,20 +178,20 @@ async def test_a_child_cannot_delegate_past_the_depth_limit(delegating: Mounted)
         await _spawn(ctx, child, "delegate again")
 
 
-async def test_a_prompt_is_required(delegating: Mounted) -> None:
+async def test_a_prompt_is_required(delegating: MountedRuntime) -> None:
     ctx, _session, parent = await delegating()
     with pytest.raises(SubagentSpawnError, match="needs a prompt"):
         await _spawn(ctx, parent, "   ")
 
 
-async def test_a_sibling_name_collision_is_refused(delegating: Mounted) -> None:
+async def test_a_sibling_name_collision_is_refused(delegating: MountedRuntime) -> None:
     ctx, _session, parent = await delegating()
     await _spawn(ctx, parent, "first", name="scout")
     with pytest.raises(SubagentSpawnError, match="already named"):
         await _spawn(ctx, parent, "second", name="scout")
 
 
-async def test_an_unroutable_provider_is_refused_at_admission(delegating: Mounted) -> None:
+async def test_an_unroutable_provider_is_refused_at_admission(delegating: MountedRuntime) -> None:
     """The preflight that exists today: no adapter, no child. Nothing is
     substituted — a child answering on a model the parent did not choose is a
     result the parent cannot interpret."""
@@ -202,7 +201,7 @@ async def test_an_unroutable_provider_is_refused_at_admission(delegating: Mounte
 
 
 async def test_the_default_shapes_the_request_and_the_tier_answers_it(
-    delegating: Mounted,
+    delegating: MountedRuntime,
 ) -> None:
     """E4 and E3 together, at the `advisory` tier — which is the shipped default.
 
@@ -239,7 +238,7 @@ async def test_the_default_shapes_the_request_and_the_tier_answers_it(
 
 
 async def test_a_read_child_gets_an_isolated_checkout_where_a_tier_can_give_one(
-    delegating: Mounted, tmp_path: Path
+    delegating: MountedRuntime, tmp_path: Path
 ) -> None:
     """E3, through the spawn path: the same request, a tier that can answer it.
 
@@ -329,7 +328,7 @@ def _notices(session: Any) -> list[str]:
     ]
 
 
-async def test_a_child_that_never_replies_is_announced(delegating: Mounted) -> None:
+async def test_a_child_that_never_replies_is_announced(delegating: MountedRuntime) -> None:
     """Silence is indistinguishable from a hang, so it is reported."""
     ctx, session, parent = await delegating()
     run = await _spawn(ctx, parent, "say nothing")
@@ -343,7 +342,7 @@ async def test_a_child_that_never_replies_is_announced(delegating: Mounted) -> N
 
 
 async def test_the_notice_reaches_the_parents_context_on_its_next_step(
-    delegating: Mounted,
+    delegating: MountedRuntime,
 ) -> None:
     """Delivered means the model actually sees it, not that it sits in a queue."""
     ctx, session, parent = await delegating()
@@ -360,7 +359,7 @@ async def test_the_notice_reaches_the_parents_context_on_its_next_step(
     assert run.name in claimed[0]
 
 
-async def test_a_child_that_replied_is_not_announced_as_silent(delegating: Mounted) -> None:
+async def test_a_child_that_replied_is_not_announced_as_silent(delegating: MountedRuntime) -> None:
     """The reply is the notice, so the parent is not told the same thing twice.
 
     `mark_replied` is called here directly, which is the only way to fix the
@@ -377,7 +376,7 @@ async def test_a_child_that_replied_is_not_announced_as_silent(delegating: Mount
     assert _statuses(session, run.id)[-1] == "done"
 
 
-async def test_the_child_status_reaches_the_parents_log(delegating: Mounted) -> None:
+async def test_the_child_status_reaches_the_parents_log(delegating: MountedRuntime) -> None:
     ctx, session, parent = await delegating()
     run = await _spawn(ctx, parent)
     await ctx.drain()
@@ -387,7 +386,7 @@ async def test_the_child_status_reaches_the_parents_log(delegating: Mounted) -> 
     assert statuses[-1] in {"done", "error"}
 
 
-async def test_a_waiter_can_still_block_on_completion(delegating: Mounted) -> None:
+async def test_a_waiter_can_still_block_on_completion(delegating: MountedRuntime) -> None:
     """The generic `task` contract: the answer is reachable, just never the thing
     admission hands back."""
     ctx, _session, parent = await delegating()
@@ -399,7 +398,7 @@ async def test_a_waiter_can_still_block_on_completion(delegating: Mounted) -> No
     assert outcome.answer == "ok"
 
 
-async def test_child_usage_is_attributed_to_the_parent(delegating: Mounted) -> None:
+async def test_child_usage_is_attributed_to_the_parent(delegating: MountedRuntime) -> None:
     """Without this a fan-out of eight reads as context pressure on the parent
     and triggers a compaction it does not need."""
     ctx, session, parent = await delegating()
@@ -419,7 +418,7 @@ async def test_child_usage_is_attributed_to_the_parent(delegating: Mounted) -> N
 # --------------------------------------------------------- roster and deletion --
 
 
-async def test_the_roster_is_a_fold_over_the_parents_own_log(delegating: Mounted) -> None:
+async def test_the_roster_is_a_fold_over_the_parents_own_log(delegating: MountedRuntime) -> None:
     """P3-13 by construction: no side table, so restart and compaction are free."""
     ctx, session, parent = await delegating()
     first = await _spawn(ctx, parent, "one", name="alpha")
@@ -432,7 +431,7 @@ async def test_the_roster_is_a_fold_over_the_parents_own_log(delegating: Mounted
     assert roster[second.id]["status"] in {"done", "error"}, "status folded onto the row"
 
 
-async def test_deleting_a_child_leaves_a_tombstone(delegating: Mounted) -> None:
+async def test_deleting_a_child_leaves_a_tombstone(delegating: MountedRuntime) -> None:
     """The transcript stays on disk, so the revocation must be findable."""
     ctx, session, parent = await delegating()
     run = await _spawn(ctx, parent, "doomed")
@@ -457,7 +456,7 @@ async def test_deleting_a_child_leaves_a_tombstone(delegating: Mounted) -> None:
     assert ctx.require(SESSIONS).get(run.session_id) is not None
 
 
-async def test_a_settled_child_releases_its_agent_scope(delegating: Mounted) -> None:
+async def test_a_settled_child_releases_its_agent_scope(delegating: MountedRuntime) -> None:
     """A child's scope owns its kernel subprocess, so holding it leaks a CPython
     per delegation. The terminal result survives the release."""
     ctx, _session, parent = await delegating()
@@ -470,7 +469,7 @@ async def test_a_settled_child_releases_its_agent_scope(delegating: Mounted) -> 
     assert (await run.result()).status == "done"
 
 
-async def test_disposing_the_parent_unwinds_its_children(delegating: Mounted) -> None:
+async def test_disposing_the_parent_unwinds_its_children(delegating: MountedRuntime) -> None:
     """I2: a child is an artifact of the parent's scope, so it is released by the
     same unwinding rather than by someone remembering to."""
     ctx, session, parent = await delegating()
@@ -482,7 +481,7 @@ async def test_disposing_the_parent_unwinds_its_children(delegating: Mounted) ->
     assert [event.data["reason"] for event in tombstones] == ["parent-teardown"]
 
 
-async def test_the_status_and_usage_records_are_ignorable(delegating: Mounted) -> None:
+async def test_the_status_and_usage_records_are_ignorable(delegating: MountedRuntime) -> None:
     """A different build may skip them; it may *not* skip an admission, because
     that would show the parent the wrong family."""
     ctx, session, parent = await delegating()
@@ -533,7 +532,7 @@ def test_a_default_name_describes_the_task_and_stays_unique() -> None:
 # ------------------------------------------------------------------- the grant --
 
 
-async def test_a_real_child_is_narrowed_by_its_spawn(delegating: Mounted) -> None:
+async def test_a_real_child_is_narrowed_by_its_spawn(delegating: MountedRuntime) -> None:
     """P4-13b through the provider that actually ships it.
 
     The seam refuses what the parent does not hold and the provider applies the
@@ -547,7 +546,9 @@ async def test_a_real_child_is_narrowed_by_its_spawn(delegating: Mounted) -> Non
 
     run = await _spawn(ctx, parent, skills=("review",), tools=("read",))
     child_scope = next(
-        one.ctx for one in ctx.require(AGENTS).list() if one.session.id == run.session_id
+        one.ctx
+        for one in ctx.require(AGENTS).list()
+        if one.session is not None and one.session.id == run.session_id
     )
 
     assert [one.name for one in ctx.require(SKILLS).list(child_scope)] == ["review"]
@@ -557,7 +558,7 @@ async def test_a_real_child_is_narrowed_by_its_spawn(delegating: Mounted) -> Non
     assert "write" in ctx.require(TOOLS).view(parent.ctx).visible
 
 
-async def test_a_real_spawn_cannot_widen(delegating: Mounted) -> None:
+async def test_a_real_spawn_cannot_widen(delegating: MountedRuntime) -> None:
     ctx, _session, parent = await delegating()
 
     with pytest.raises(SubagentSpawnError) as refused:
@@ -566,7 +567,7 @@ async def test_a_real_spawn_cannot_widen(delegating: Mounted) -> None:
     assert "Grant it to the parent first" in str(refused.value)
 
 
-async def test_a_rehydrated_child_is_narrowed_again(delegating: Mounted) -> None:
+async def test_a_rehydrated_child_is_narrowed_again(delegating: MountedRuntime) -> None:
     """The hole this row nearly shipped, and the reason the seam owns the ceiling.
 
     Settlement disposes the child's scope, and the filters bounding it are
@@ -622,7 +623,7 @@ def _marks(ctx: Any, run: Any) -> list[str]:
 
 
 async def test_a_child_is_retained_from_the_moment_its_tree_exists(
-    delegating: Mounted, tmp_path: Path
+    delegating: MountedRuntime, tmp_path: Path
 ) -> None:
     """Retain-by-default, and why it cannot be retain-on-failure (P6-28).
 
@@ -637,11 +638,15 @@ async def test_a_child_is_retained_from_the_moment_its_tree_exists(
     run = await _tiered_child(ctx, parent, tmp_path, "get cancelled")
 
     assert _marks(ctx, run) == ["the child has not settled cleanly"]
-    (record,) = workspace_survivors(ctx.require(SESSIONS).get(run.session_id))
+    (record,) = workspace_survivors(
+        not_none(ctx.require(SESSIONS).get(run.session_id), "the child session")
+    )
     assert record.outcome == "retained"
 
 
-async def test_a_clean_child_leaves_nothing_behind(delegating: Mounted, tmp_path: Path) -> None:
+async def test_a_clean_child_leaves_nothing_behind(
+    delegating: MountedRuntime, tmp_path: Path
+) -> None:
     """The other half, and the one that keeps the kind's promise.
 
     Without the withdrawal, retain-by-default would invert `worktree-ephemeral`
@@ -659,12 +664,16 @@ async def test_a_clean_child_leaves_nothing_behind(delegating: Mounted, tmp_path
     # with no `release` and so keeps every tree — under the real `worktree`
     # provider this checkout is discarded and there is no survivor at all, which
     # is precisely the promise the withdrawal restores.
-    (record,) = workspace_survivors(ctx.require(SESSIONS).get(run.session_id))
+    (record,) = workspace_survivors(
+        not_none(ctx.require(SESSIONS).get(run.session_id), "the child session")
+    )
     assert record.outcome != "retained", "a successful child's checkout is not evidence"
     assert record.reason == ""
 
 
-async def test_a_cancelled_child_keeps_its_evidence(delegating: Mounted, tmp_path: Path) -> None:
+async def test_a_cancelled_child_keeps_its_evidence(
+    delegating: MountedRuntime, tmp_path: Path
+) -> None:
     """The case the row was written for, through the path that cannot mark.
 
     `parent-teardown` disposes the child's scope before the settle handler runs,
@@ -677,13 +686,13 @@ async def test_a_cancelled_child_keeps_its_evidence(delegating: Mounted, tmp_pat
 
     await ctx.require(AGENTS).dispose(parent.id)
 
-    (record,) = workspace_survivors(child_session)
+    (record,) = workspace_survivors(not_none(child_session, "the child session"))
     assert record.outcome == "retained"
     assert record.reason == "the child has not settled cleanly"
     assert record.closed is True, "the pair still closed; only the discard was skipped"
 
 
-async def test_a_write_child_is_not_retained(delegating: Mounted, tmp_path: Path) -> None:
+async def test_a_write_child_is_not_retained(delegating: MountedRuntime, tmp_path: Path) -> None:
     """Only the kind that discards, because only that kind can lose evidence.
 
     An ordinary `worktree` already keeps a dirty tree for review and a committed
@@ -698,7 +707,7 @@ async def test_a_write_child_is_not_retained(delegating: Mounted, tmp_path: Path
 
 
 async def test_a_failed_child_tells_its_parent_where_the_tree_is(
-    delegating: Mounted, tmp_path: Path
+    delegating: MountedRuntime, tmp_path: Path
 ) -> None:
     """Retention keeps the checkout; this is what stops it being evidence nobody
     can find.
@@ -710,8 +719,8 @@ async def test_a_failed_child_tells_its_parent_where_the_tree_is(
     """
     ctx, session, parent = await delegating()
     run = await _tiered_child(ctx, parent, tmp_path, "fail please")
-    child = ctx.require(AGENTS).get(run.session_id)
-    root = ctx.require(WORKSPACE).of(child.id).root
+    child = not_none(ctx.require(AGENTS).get(run.session_id), "the child agent")
+    root = not_none(ctx.require(WORKSPACE).of(child.id), "the child workspace").root
     _breaks(child)
     await ctx.drain()
 
@@ -730,7 +739,7 @@ def _breaks(agent: Any) -> None:
 
 
 async def test_a_child_with_no_tree_is_announced_without_naming_one(
-    delegating: Mounted,
+    delegating: MountedRuntime,
 ) -> None:
     """Silence rather than a fabricated path.
 
@@ -817,7 +826,7 @@ async def _until(predicate: Callable[[], bool], what: str) -> None:
 
 
 async def test_a_full_parent_queues_the_next_child_until_a_slot_frees(
-    delegating: Mounted, gate: _Gate
+    delegating: MountedRuntime, gate: _Gate
 ) -> None:
     """`maxConcurrent` is a queue: the parent gets every child it asked for, one
     slot at a time, in admission order — and never a refusal."""
@@ -842,7 +851,7 @@ async def test_a_full_parent_queues_the_next_child_until_a_slot_frees(
 
 
 async def test_a_child_that_failed_frees_its_slot(
-    delegating: Mounted, gate: _Gate, monkeypatch: pytest.MonkeyPatch
+    delegating: MountedRuntime, gate: _Gate, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The queue cannot wedge on a failure: the provider's `error` path releases
     the slot exactly as `done` does.
@@ -879,12 +888,12 @@ async def test_a_child_that_failed_frees_its_slot(
 
 
 async def test_deleting_a_queued_child_stops_its_wait_and_takes_no_slot(
-    delegating: Mounted, gate: _Gate
+    delegating: MountedRuntime, gate: _Gate
 ) -> None:
     """A child revoked before it ran is cancelled where it waits, and the slot it
     never held is not leaked — the next child still gets it."""
     ctx, session, parent = await delegating(maxConcurrent=1)
-    provider = ctx.require(SUBAGENTS).require(PROVIDER_NAME).provider
+    provider = ctx.require(RLM_CHILDREN)
     first = await _spawn(ctx, parent, "first")
     second = await _spawn(ctx, parent, "second")
     await _until(lambda: gate.arrived == 1, "the first child to reach the model")
@@ -950,7 +959,7 @@ async def _restart(
 
 
 async def test_a_queued_child_is_re_driven_after_a_restart(
-    delegating: Mounted, gate: _Gate, mount: MountProfile
+    delegating: MountedRuntime, gate: _Gate, mount: MountProfile
 ) -> None:
     """The work was described in the parent's log and running nowhere (P5-04).
 
@@ -986,7 +995,7 @@ async def test_a_queued_child_is_re_driven_after_a_restart(
 
 
 async def test_a_child_caught_mid_turn_climbs_the_ladder_with_its_task_re_presented(
-    delegating: Mounted, gate: _Gate, mount: MountProfile
+    delegating: MountedRuntime, gate: _Gate, mount: MountProfile
 ) -> None:
     """The ladder, and the thing that makes it a real attempt rather than a lie.
 
@@ -1049,7 +1058,7 @@ async def _stalled(ctx: Any, session: Any, parent: Any, gate: _Gate, *, restarts
 
 
 async def test_the_ladder_gives_up_and_says_so(
-    delegating: Mounted, gate: _Gate, mount: MountProfile
+    delegating: MountedRuntime, gate: _Gate, mount: MountProfile
 ) -> None:
     """Three restarts with nothing achieved between them is not bad luck.
 
@@ -1072,7 +1081,7 @@ async def test_the_ladder_gives_up_and_says_so(
 
 
 async def test_progress_since_the_last_restart_clears_the_ladder(
-    delegating: Mounted, gate: _Gate, mount: MountProfile
+    delegating: MountedRuntime, gate: _Gate, mount: MountProfile
 ) -> None:
     """A child stopped, working an hour, then stopped again met two incidents.
 
@@ -1102,7 +1111,7 @@ async def test_progress_since_the_last_restart_clears_the_ladder(
 
 
 async def test_a_readmitted_child_does_not_come_back_wider_than_it_was_admitted(
-    delegating: Mounted, gate: _Gate, mount: MountProfile
+    delegating: MountedRuntime, gate: _Gate, mount: MountProfile
 ) -> None:
     """§6.5 across a power cut, which is why the narrowing is in the record.
 
@@ -1136,7 +1145,7 @@ async def test_a_readmitted_child_does_not_come_back_wider_than_it_was_admitted(
 
 
 async def test_a_child_no_provider_can_resume_is_settled_not_left_queued(
-    delegating: Mounted, gate: _Gate, mount: MountProfile
+    delegating: MountedRuntime, gate: _Gate, mount: MountProfile
 ) -> None:
     """A `queued` row nothing will pick up is worse than an honest failure.
 

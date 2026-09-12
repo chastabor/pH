@@ -14,23 +14,21 @@ exist to undo.
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from typing import Any
+from pathlib import Path
 
 import pytest
+from rlm_fixtures import MountedRuntime
 from runtime_helpers import run_cell
 
 from ph.keys import AGENTS, CODE_RUNTIME, FS, SESSIONS, SYSTEM_PROMPT, TOOLS, WORKSPACE
-from ph.testing import FAKE_OPTIONS, StubWorkspaceProvider, run_tool, simple_tool
+from ph.testing import FAKE_OPTIONS, StubWorkspaceProvider, not_none, run_tool, simple_tool
 from ph.tools.registry import RUN_CODE
 
 pytestmark = pytest.mark.anyio
 
-Mounted = Callable[..., Any]
-
 
 async def test_the_runtime_registers_as_the_code_runtime_provider(
-    mounted_runtime: Mounted,
+    mounted_runtime: MountedRuntime,
 ) -> None:
     ctx, _session, _agent = await mounted_runtime(snapshots=False)
     provider = ctx.require(CODE_RUNTIME).require()
@@ -38,17 +36,19 @@ async def test_the_runtime_registers_as_the_code_runtime_provider(
     assert provider.isolation == "process"
     assert provider.persistence == "namespace"
     # The promise the seam checked at registration (D6).
-    assert provider.declares_kernel_snapshots is True
+    assert getattr(provider, "declares_kernel_snapshots", False) is True
 
 
-async def test_a_cell_runs_through_the_transport(mounted_runtime: Mounted) -> None:
+async def test_a_cell_runs_through_the_transport(mounted_runtime: MountedRuntime) -> None:
     ctx, session, agent = await mounted_runtime(snapshots=False)
     result = await run_cell(ctx, "6 * 7", agent=agent, session=session)
     assert result.is_error is False
     assert result.value["value"] == 42
 
 
-async def test_each_binding_call_is_its_own_governed_dispatch(mounted_runtime: Mounted) -> None:
+async def test_each_binding_call_is_its_own_governed_dispatch(
+    mounted_runtime: MountedRuntime,
+) -> None:
     """C2: three calls, three durable pairs, and `ToolCallLimit` sees three.
 
     The gate's own wording. Under one bespoke `ipython` tool these three writes
@@ -80,7 +80,7 @@ async def test_each_binding_call_is_its_own_governed_dispatch(mounted_runtime: M
     assert {event.data["parentCallId"] for event in starts} == {"call-1"}
 
 
-async def test_dispatch_records_are_log_only(mounted_runtime: Mounted) -> None:
+async def test_dispatch_records_are_log_only(mounted_runtime: MountedRuntime) -> None:
     """C2's other half: sub-calls never re-enter model context.
 
     Forty dispatch records in the log must not become forty messages in the next
@@ -96,7 +96,7 @@ async def test_dispatch_records_are_log_only(mounted_runtime: Mounted) -> None:
     assert any(event.type == "tool/code-dispatch" for event in session.events)
 
 
-async def test_a_tools_result_reaches_the_program(mounted_runtime: Mounted) -> None:
+async def test_a_tools_result_reaches_the_program(mounted_runtime: MountedRuntime) -> None:
     ctx, session, agent = await mounted_runtime(snapshots=False)
     ctx.require(TOOLS).register(simple_tool("echo", lambda args, _run: f"heard {args.get('what')}"))
     result = await run_cell(
@@ -106,7 +106,7 @@ async def test_a_tools_result_reaches_the_program(mounted_runtime: Mounted) -> N
 
 
 async def test_the_namespace_is_the_agent_and_persists_between_calls(
-    mounted_runtime: Mounted,
+    mounted_runtime: MountedRuntime,
 ) -> None:
     """The namespace key is the agent id, so a kernel is scoped like its tools."""
     ctx, session, agent = await mounted_runtime(snapshots=False)
@@ -115,7 +115,7 @@ async def test_the_namespace_is_the_agent_and_persists_between_calls(
     assert result.value["value"] == "from the first call"
 
 
-async def test_two_agents_do_not_share_a_namespace(mounted_runtime: Mounted) -> None:
+async def test_two_agents_do_not_share_a_namespace(mounted_runtime: MountedRuntime) -> None:
     ctx, first_session, first = await mounted_runtime(session_id="agent-one", snapshots=False)
     second_session = ctx.require(SESSIONS).create("agent-two")
     second = ctx.require(AGENTS).create(second_session, FAKE_OPTIONS)
@@ -125,7 +125,7 @@ async def test_two_agents_do_not_share_a_namespace(mounted_runtime: Mounted) -> 
     assert result.value["value"] is False
 
 
-async def test_the_sdk_section_lists_the_bindings(mounted_runtime: Mounted) -> None:
+async def test_the_sdk_section_lists_the_bindings(mounted_runtime: MountedRuntime) -> None:
     """The generated block replaces prime-agent's hand-written call contract.
 
     Mechanically generated from the registry, so it cannot describe a surface
@@ -140,7 +140,7 @@ async def test_the_sdk_section_lists_the_bindings(mounted_runtime: Mounted) -> N
     assert RUN_CODE in text
 
 
-async def test_a_native_call_under_code_mode_is_refused(mounted_runtime: Mounted) -> None:
+async def test_a_native_call_under_code_mode_is_refused(mounted_runtime: MountedRuntime) -> None:
     """C6, with the runtime mounted: the denial names the route back."""
     ctx, session, agent = await mounted_runtime(snapshots=False)
     ctx.require(TOOLS).register(simple_tool("ping", lambda _args, _run: "pong"))
@@ -149,7 +149,9 @@ async def test_a_native_call_under_code_mode_is_refused(mounted_runtime: Mounted
     assert RUN_CODE in repr(result.content) or "run_code" in repr(result.error)
 
 
-async def test_the_kernel_closes_when_the_agent_is_disposed(mounted_runtime: Mounted) -> None:
+async def test_the_kernel_closes_when_the_agent_is_disposed(
+    mounted_runtime: MountedRuntime,
+) -> None:
     """The namespace is the agent id, so the child unwinds with the agent (F1)."""
     ctx, session, agent = await mounted_runtime(snapshots=False)
     await run_cell(ctx, "1", agent=agent, session=session)
@@ -165,7 +167,7 @@ async def test_the_kernel_closes_when_the_agent_is_disposed(mounted_runtime: Mou
 
 
 async def test_a_cell_runs_inside_the_agents_workspace(
-    mounted_runtime: Mounted, tmp_path: Any
+    mounted_runtime: MountedRuntime, tmp_path: Path
 ) -> None:
     """D21, and the sentence the whole `worktree` tier rests on.
 
@@ -190,7 +192,7 @@ async def test_a_cell_runs_inside_the_agents_workspace(
     await ctx.require(WORKSPACE).acquire(
         session_id=session.id, agent_id=agent.id, base=ctx.require(FS).root, session=session
     )
-    root = ctx.require(WORKSPACE).of(agent.id).root
+    root = not_none(ctx.require(WORKSPACE).of(agent.id), "the agent workspace").root
 
     result = await run_cell(
         ctx,

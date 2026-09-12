@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import json
 import sys
-from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -23,7 +22,7 @@ from typer.testing import CliRunner
 from ph import bundles
 from ph.bundles import BASE, HEADLESS, resolve_bundle
 from ph.paths import resolve_roots
-from ph.testing import not_none, stored_log
+from ph.testing import ReapedHost, not_none, stored_log
 from ph_app import profiles
 from ph_app.cli import app
 from ph_app.profiles import (
@@ -37,11 +36,6 @@ from ph_app.profiles import (
 )
 
 runner = CliRunner()
-
-ReapedHost = Callable[..., Path]
-"""The repo-root `reaped_host` fixture, spelled where it is read — structurally
-rather than by `from conftest import …`, which resolves to this package's own
-conftest rather than to the root one the fixture lives in."""
 
 
 def test_dump_config_shows_the_composed_rows() -> None:
@@ -59,7 +53,9 @@ def test_dump_config_shows_the_composed_rows() -> None:
     assert fake["layer"].endswith("headless.yaml")
 
 
-def test_machine_readable_output_stays_parseable_under_force_color(monkeypatch: Any) -> None:
+def test_machine_readable_output_stays_parseable_under_force_color(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """`--dump-config` and `ph events --json` are documents, not prose.
 
     Rich decides colour from the environment, and `FORCE_COLOR` is set by CI
@@ -121,7 +117,7 @@ def test_doctor_says_whether_the_daemon_socket_survives_logout(
 
 
 def test_starting_a_daemon_that_will_not_outlive_logout_says_so_first(
-    tmp_path: Path, monkeypatch: Any, reaped_host: ReapedHost
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reaped_host: ReapedHost
 ) -> None:
     """The row's own wording: *names `enable-linger` when a daemon is configured
     without it* — and this is the moment it is being configured.
@@ -639,7 +635,7 @@ def test_the_children_cap_refuses_a_number_that_bounds_nothing() -> None:
 
 
 def test_print_mode_refuses_a_session_another_process_holds(
-    tmp_path: Path, monkeypatch: Any
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """One sentence and exit 2, not a traceback — the daemon's own refusal (P5-03)."""
     monkeypatch.setenv("PH_HOME", str(tmp_path))
@@ -656,7 +652,9 @@ def test_print_mode_refuses_a_session_another_process_holds(
     assert not log_path.exists(), "a refused run writes nothing"
 
 
-def test_print_mode_answers_and_writes_a_readable_log(tmp_path: Path, monkeypatch: Any) -> None:
+def test_print_mode_answers_and_writes_a_readable_log(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setenv("PH_HOME", str(tmp_path))
     result = runner.invoke(app, ["-p", "what is a session log?", "--session", "demo"])
     assert result.exit_code == 0, result.output
@@ -695,7 +693,9 @@ def test_print_mode_answers_and_writes_a_readable_log(tmp_path: Path, monkeypatc
     assert [m.role for m in session.derive_messages()] == ["user", "assistant"]
 
 
-def test_each_mode_is_reachable_from_the_command_line(tmp_path: Path, monkeypatch: Any) -> None:
+def test_each_mode_is_reachable_from_the_command_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setenv("PH_HOME", str(tmp_path))
 
     text = runner.invoke(app, ["-p", "hello"])

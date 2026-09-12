@@ -23,6 +23,7 @@ import pytest
 from ph.bundles import BASE, HEADLESS
 from ph.cordis import Context, Profile, load_profile_documents
 from ph.cordis.loader import compose_rows
+from ph.testing import ReapedHost
 
 pytest_plugins = ["app_fixtures", "rlm_fixtures"]
 """The two per-package fixture sets, registered from the **one** conftest.
@@ -228,9 +229,6 @@ def _isolated_home(tmp_path: Path) -> Iterator[None]:
 @pytest.fixture
 def anyio_backend() -> str:
     return "asyncio"
-
-
-ReapedHost = Callable[..., Path]
 
 
 @pytest.fixture

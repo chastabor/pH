@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, TypeAlias
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
+    from pathlib import Path
 
     from ..cordis import Context
 
@@ -92,11 +93,21 @@ was invisible to the checker — 1,581 of them, which is what issue 32 counted.
 Naming the type is what let mypy find them.
 """
 
+ReapedHost: TypeAlias = "Callable[..., Path]"
+"""`reaped_host(...)` → a `$PH_HOME` whose daemon is reaped when the test ends.
+
+Here for the reason above, and it was the same five-file sprawl: the root
+conftest declares the fixture, and four suites had each written the alias out
+again rather than reach for `from conftest import`, which is the import issue 32
+removed.
+"""
+
 __all__ = [
     "FAKE_OPTIONS",
     "REPLAY_ROW",
     "FakeAdapter",
     "MountProfile",
+    "ReapedHost",
     "RecordedStep",
     "ReplayAdapter",
     "StubAgent",

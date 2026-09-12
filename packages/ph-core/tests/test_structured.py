@@ -248,7 +248,7 @@ async def test_structure_and_tools_are_refused_together() -> None:
         )
 
 
-async def test_a_degenerate_schema_warns_on_the_call(caplog: Any) -> None:
+async def test_a_degenerate_schema_warns_on_the_call(caplog: pytest.LogCaptureFixture) -> None:
     """Once, at the call — not on the third retry, where nobody is reading."""
     stream, _seen = _replies('{"severity": "high"}')
 

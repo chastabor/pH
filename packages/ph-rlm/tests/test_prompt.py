@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from rlm_fixtures import BINDINGS_ROW, DOCTRINE_ROW, PROVIDER_ROW
+from rlm_fixtures import BINDINGS_ROW, DOCTRINE_ROW, PROVIDER_ROW, MountedRuntime
 
 from ph.agent.types import AgentHandle
 from ph.cordis import Context
@@ -36,11 +36,9 @@ from ph_rlm.subagents import PROVIDER_NAME, RLM_MAX_DEPTH
 
 pytestmark = pytest.mark.anyio
 
-Mounted = Callable[..., Any]
-
 
 @pytest.fixture
-def prompted(mounted_runtime: Mounted) -> Callable[..., Any]:
+def prompted(mounted_runtime: MountedRuntime) -> Callable[..., Any]:
     """The real transport plus the doctrine, optionally plus delegation.
 
     `extra_rows` is *additive*, so a test that wants a config patch passes only
@@ -82,7 +80,7 @@ async def _snapshot(ctx: Any, agent: Any) -> str:
 # ---------------------------------------------------------------- doctrine --
 
 
-async def test_the_doctrine_names_the_one_callable_and_the_kernel(prompted: Mounted) -> None:
+async def test_the_doctrine_names_the_one_callable_and_the_kernel(prompted: MountedRuntime) -> None:
     ctx, _session, agent = await prompted()
     text = await _prompt(ctx, agent)
 
@@ -98,7 +96,7 @@ async def test_the_doctrine_names_the_one_callable_and_the_kernel(prompted: Moun
     assert "no IPython magics" in DOCTRINE
 
 
-async def test_the_doctrine_does_not_re_describe_the_sdk_surface(prompted: Mounted) -> None:
+async def test_the_doctrine_does_not_re_describe_the_sdk_surface(prompted: MountedRuntime) -> None:
     """Prime Agent's "RLM-native call contract" paragraph is dropped on purpose.
 
     It existed because prime-agent had no generated listing; `tools:sdk` *is*
@@ -116,7 +114,7 @@ async def test_the_doctrine_does_not_re_describe_the_sdk_surface(prompted: Mount
         assert call not in DELEGATION, f"{call} is described twice"
 
 
-async def test_the_doctrine_comes_after_the_sdk_block(prompted: Mounted) -> None:
+async def test_the_doctrine_comes_after_the_sdk_block(prompted: MountedRuntime) -> None:
     """It refers to "the SDK block above", so the order is load-bearing."""
     ctx, _session, agent = await prompted()
     text = await _prompt(ctx, agent)
@@ -126,7 +124,9 @@ async def test_the_doctrine_comes_after_the_sdk_block(prompted: Mounted) -> None
 # -------------------------------------------------------------- delegation --
 
 
-async def test_the_delegation_section_states_the_non_blocking_rule(prompted: Mounted) -> None:
+async def test_the_delegation_section_states_the_non_blocking_rule(
+    prompted: MountedRuntime,
+) -> None:
     """`rlm.run` returns a handle, so a model that waits waits forever."""
     ctx, _session, agent = await prompted()
     text = await _prompt(ctx, agent)
@@ -139,7 +139,7 @@ async def test_the_delegation_section_states_the_non_blocking_rule(prompted: Mou
     assert "access" in DELEGATION and '"read"' in DELEGATION
 
 
-async def test_no_delegation_section_without_the_namespace(prompted: Mounted) -> None:
+async def test_no_delegation_section_without_the_namespace(prompted: MountedRuntime) -> None:
     """The prompt must not advertise a call the agent would be denied."""
     ctx, _session, agent = await prompted(delegation=False)
     text = await _prompt(ctx, agent)
@@ -154,7 +154,7 @@ async def test_no_delegation_section_without_the_namespace(prompted: Mounted) ->
     assert "rlm:doctrine" in names
 
 
-async def test_a_child_is_told_it_is_a_child(prompted: Mounted) -> None:
+async def test_a_child_is_told_it_is_a_child(prompted: MountedRuntime) -> None:
     """Depth > 0 gets the reply instruction; a root does not."""
     ctx, _session, parent = await prompted()
     assert CHILD_DOCTRINE.strip() not in await _prompt(ctx, parent)
@@ -172,7 +172,7 @@ async def test_a_child_is_told_it_is_a_child(prompted: Mounted) -> None:
 # ------------------------------------------------------- the facts snapshot --
 
 
-async def test_the_volatile_facts_are_a_context_not_a_section(prompted: Mounted) -> None:
+async def test_the_volatile_facts_are_a_context_not_a_section(prompted: MountedRuntime) -> None:
     """A12: depth, cwd and family move between turns, so they must not sit in the
     cached prefix."""
     ctx, session, agent = await prompted()
@@ -185,7 +185,7 @@ async def test_the_volatile_facts_are_a_context_not_a_section(prompted: Mounted)
     assert f"Conversation log: {session.id}" in snapshot
 
 
-async def test_the_snapshot_says_no_workspace_has_been_acquired(prompted: Mounted) -> None:
+async def test_the_snapshot_says_no_workspace_has_been_acquired(prompted: MountedRuntime) -> None:
     """A child told nothing about its workspace attempts writes and reads the
     failures as its own bug — which is the failure this line exists to prevent,
     so it ships saying what is true now: the seam is mounted (P4-07) but nothing
@@ -197,7 +197,9 @@ async def test_the_snapshot_says_no_workspace_has_been_acquired(prompted: Mounte
     assert "recorded but not granted" in snapshot
 
 
-async def test_an_acquired_workspace_replaces_the_none_acquired_line(prompted: Mounted) -> None:
+async def test_an_acquired_workspace_replaces_the_none_acquired_line(
+    prompted: MountedRuntime,
+) -> None:
     """The line is reached by *asking the seam for this agent*, so acquiring one
     changes the answer.
 
@@ -220,7 +222,7 @@ async def test_an_acquired_workspace_replaces_the_none_acquired_line(prompted: M
     assert "Writable scratch: " in snapshot
 
 
-async def test_the_snapshot_lists_the_family_and_the_children(prompted: Mounted) -> None:
+async def test_the_snapshot_lists_the_family_and_the_children(prompted: MountedRuntime) -> None:
     ctx, _session, parent = await prompted()
     run = await ctx.require(SUBAGENTS).start(
         PROVIDER_NAME, SubagentRequest(prompt="find it", parent=parent, name="scout")
@@ -237,7 +239,7 @@ async def test_the_snapshot_lists_the_family_and_the_children(prompted: Mounted)
     assert f"Recursive agent depth: 1 of {RLM_MAX_DEPTH}" in child_snapshot
 
 
-async def test_a_child_at_the_depth_limit_is_told_so(prompted: Mounted) -> None:
+async def test_a_child_at_the_depth_limit_is_told_so(prompted: MountedRuntime) -> None:
     """Reading a depth without the limit is how a model spends a turn on a denial."""
     ctx, _session, parent = await prompted(
         extra_rows=[{"id": "rlm-subagent-provider", "config": {"maxDepth": 1}}]

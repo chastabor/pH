@@ -12,7 +12,7 @@ from collections.abc import Callable
 from typing import Any
 
 import pytest
-from rlm_fixtures import BINDINGS_ROW, PROVIDER_ROW
+from rlm_fixtures import BINDINGS_ROW, PROVIDER_ROW, MountedRuntime
 from runtime_helpers import run_cell
 
 from ph.agent.types import AgentHandle
@@ -27,11 +27,9 @@ from ph_rlm.presentation import IPYTHON
 
 pytestmark = pytest.mark.anyio
 
-Mounted = Callable[..., Any]
-
 
 @pytest.fixture
-def delegating_runtime(mounted_runtime: Mounted) -> Callable[..., Any]:
+def delegating_runtime(mounted_runtime: MountedRuntime) -> Callable[..., Any]:
     """The real kernel plus the delegation rows, so a cell can spawn for real."""
 
     async def build(**kwargs: Any) -> tuple[Context, Session, AgentHandle]:
@@ -53,7 +51,7 @@ async def _cell(ctx: Any, program: str, *, agent: Any, session: Any, call_id: st
 # ------------------------------------------------------------------- surface --
 
 
-async def test_the_namespace_appears_in_the_sdk_block(delegating_runtime: Mounted) -> None:
+async def test_the_namespace_appears_in_the_sdk_block(delegating_runtime: MountedRuntime) -> None:
     """One SDK route per capability: the namespaced form, not the tool name."""
     ctx, _session, agent = await delegating_runtime()
     assembly = await ctx.require(SYSTEM_PROMPT).assemble(agent.ctx, agent=agent)
@@ -67,7 +65,7 @@ async def test_the_namespace_appears_in_the_sdk_block(delegating_runtime: Mounte
     assert f"tools.{RUN_TOOL}" not in text
 
 
-async def test_a_restricted_tool_leaves_the_sdk_block(delegating_runtime: Mounted) -> None:
+async def test_a_restricted_tool_leaves_the_sdk_block(delegating_runtime: MountedRuntime) -> None:
     """The prompt asks the same factory the run does, so it cannot advertise what
     a cell could not call — the claim the previous test's docstring used to make
     without checking."""
@@ -81,7 +79,7 @@ async def test_a_restricted_tool_leaves_the_sdk_block(delegating_runtime: Mounte
 
 
 async def test_the_tools_are_not_directly_callable_under_code_mode(
-    delegating_runtime: Mounted,
+    delegating_runtime: MountedRuntime,
 ) -> None:
     """C6: the model reaches them through the transport or not at all."""
     ctx, session, agent = await delegating_runtime()
@@ -95,7 +93,9 @@ async def test_the_tools_are_not_directly_callable_under_code_mode(
 # -------------------------------------------------------------- the dispatch --
 
 
-async def test_a_spawn_from_a_cell_is_a_durable_dispatch(delegating_runtime: Mounted) -> None:
+async def test_a_spawn_from_a_cell_is_a_durable_dispatch(
+    delegating_runtime: MountedRuntime,
+) -> None:
     """C2: one governed dispatch pair per spawn, not one blob per cell."""
     ctx, session, agent = await delegating_runtime()
     result = await _cell(
@@ -118,7 +118,7 @@ async def test_a_spawn_from_a_cell_is_a_durable_dispatch(delegating_runtime: Mou
     assert admitted[0].data["name"] == "scout"
 
 
-async def test_the_handle_is_not_the_answer(delegating_runtime: Mounted) -> None:
+async def test_the_handle_is_not_the_answer(delegating_runtime: MountedRuntime) -> None:
     """A cell gets admission facts, so the model knows to keep working."""
     ctx, session, agent = await delegating_runtime()
     result = await _cell(
@@ -132,7 +132,7 @@ async def test_the_handle_is_not_the_answer(delegating_runtime: Mounted) -> None
     assert "answer" not in keys and "result" not in keys
 
 
-async def test_access_defaults_to_read_from_a_cell(delegating_runtime: Mounted) -> None:
+async def test_access_defaults_to_read_from_a_cell(delegating_runtime: MountedRuntime) -> None:
     """E4 all the way through: the binding's default is the seam's default.
 
     What comes back is the *tier's* answer, and the shipped tier is `advisory`,
@@ -150,7 +150,7 @@ async def test_access_defaults_to_read_from_a_cell(delegating_runtime: Mounted) 
     assert result.value["value"] == ["read", "write"]
 
 
-async def test_nothing_narrowed_means_no_note_to_read(delegating_runtime: Mounted) -> None:
+async def test_nothing_narrowed_means_no_note_to_read(delegating_runtime: MountedRuntime) -> None:
     """The note is for a *narrowing*, and there is none at this tier.
 
     A note on every spawn is one a model learns to skip; this one appears when a
@@ -171,7 +171,7 @@ async def test_nothing_narrowed_means_no_note_to_read(delegating_runtime: Mounte
 # ---------------------------------------------------------------- governance --
 
 
-async def test_a_policy_row_can_deny_spawning(delegating_runtime: Mounted) -> None:
+async def test_a_policy_row_can_deny_spawning(delegating_runtime: MountedRuntime) -> None:
     """C3: the denial ends the run, and the program cannot catch past it.
 
     This is the property prime-agent's comm channel could not have: spawning is
@@ -197,7 +197,7 @@ async def test_a_policy_row_can_deny_spawning(delegating_runtime: Mounted) -> No
     assert [e for e in session.events if e.type == "subagent/admitted"] == []
 
 
-async def test_the_spawn_budget_bounds_one_cell(delegating_runtime: Mounted) -> None:
+async def test_the_spawn_budget_bounds_one_cell(delegating_runtime: MountedRuntime) -> None:
     """C4: one approved cell cannot fan out without limit on that one approval."""
     ctx, session, agent = await delegating_runtime(
         extra_rows=[{"id": "tools-code-mode", "config": {"maxSubagentSpawnsPerRun": 2}}]
@@ -213,7 +213,9 @@ async def test_the_spawn_budget_bounds_one_cell(delegating_runtime: Mounted) -> 
     assert len([e for e in session.events if e.type == "subagent/admitted"]) == 2
 
 
-async def test_a_refused_spawn_is_the_programs_to_handle(delegating_runtime: Mounted) -> None:
+async def test_a_refused_spawn_is_the_programs_to_handle(
+    delegating_runtime: MountedRuntime,
+) -> None:
     """A *failed* spawn is not a denial: the model may re-plan around it."""
     ctx, session, agent = await delegating_runtime()
     result = await _cell(
@@ -235,7 +237,7 @@ async def test_a_refused_spawn_is_the_programs_to_handle(delegating_runtime: Mou
 # --------------------------------------------------------- roster and delete --
 
 
-async def test_the_roster_a_cell_reads_is_the_fold(delegating_runtime: Mounted) -> None:
+async def test_the_roster_a_cell_reads_is_the_fold(delegating_runtime: MountedRuntime) -> None:
     ctx, session, agent = await delegating_runtime()
     await _cell(
         ctx,
@@ -255,7 +257,9 @@ async def test_the_roster_a_cell_reads_is_the_fold(delegating_runtime: Mounted) 
     assert result.value["value"] == ["alpha", "beta"]
 
 
-async def test_deleting_from_a_cell_tombstones_the_child(delegating_runtime: Mounted) -> None:
+async def test_deleting_from_a_cell_tombstones_the_child(
+    delegating_runtime: MountedRuntime,
+) -> None:
     ctx, session, agent = await delegating_runtime()
     spawn = await _cell(
         ctx, "h = await rlm.run(prompt='doomed')\nh['childId']", agent=agent, session=session

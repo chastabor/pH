@@ -16,13 +16,12 @@ from __future__ import annotations
 
 import ast
 import json
-from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 import pytest
 from daemon_helpers import Daemon
-from tui_helpers import root_of, running, turn_done, until
+from tui_helpers import MakeApp, root_of, running, turn_done, until
 
 import ph_app.tui
 from ph.keys import TUI_SCREENS
@@ -34,8 +33,6 @@ from ph_app.tui.trajectory_screen import SCREEN_ID, TRAJECTORY_KEY, TrajectorySc
 from ph_app.tui.widgets.prompt import PromptInput
 
 pytestmark = pytest.mark.anyio
-
-MakeApp = Callable[..., PHTuiApp]
 
 
 @pytest.fixture

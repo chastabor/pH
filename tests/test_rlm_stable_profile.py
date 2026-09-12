@@ -22,7 +22,6 @@ Mode half of the gate was inert.
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 
 import pytest
@@ -36,17 +35,6 @@ from ph_stabilize.permissions_fs import FS_PERMISSIONS
 pytestmark = pytest.mark.anyio
 
 PROFILE = "rlm-stable"
-
-
-@pytest.fixture(autouse=True)
-def _isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """`resolve_profile` appends `$PH_HOME/profiles/<name>.yaml` when it exists.
-
-    Autouse because the tests that read the composition never touch the `mount`
-    fixture, which is the only other thing that sets `PH_HOME` — so a developer
-    with a personal `rlm-stable.yaml` overlay would otherwise be testing theirs.
-    """
-    monkeypatch.setenv("PH_HOME", str(tmp_path))
 
 
 def _rows() -> dict[str, Any]:

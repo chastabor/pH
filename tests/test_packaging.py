@@ -28,7 +28,7 @@ import tomllib
 from importlib import import_module
 from pathlib import Path
 
-REPO = Path(__file__).resolve().parent.parent
+from workspace_layout import REPO, workspace_tests
 
 
 def scripts_of(pyproject: Path) -> dict[str, str]:
@@ -54,3 +54,31 @@ def test_every_declared_console_script_resolves() -> None:
             module_name, _, attribute = target.partition(":")
             entry = getattr(import_module(module_name), attribute, None)
             assert callable(entry), f"{source.name}: `{command}` points at nothing callable"
+
+
+def test_every_suite_is_type_checked_and_collected() -> None:
+    """A `packages/*/tests` this workspace has, against the two lists that must name it.
+
+    `workspace_layout` discovers those directories and `test_fixture_types.py`
+    walks them; `pyproject.toml` writes them out by hand. A new package whose
+    suite is missing from these two is the quiet failure — mypy checks nobody's
+    annotations there and pytest collects none of its tests, while every gate
+    that globs keeps reporting green.
+
+    **Only these two.** `pythonpath` and `mypy_path` name the suites that ship an
+    *importable helper* beside their tests, which is a smaller set on purpose:
+    `ph-code-graph` and `ph-text-index` hold nothing but `test_*.py`, so their
+    absence there is correct and asserting all four lists together would fail on
+    a truth.
+    """
+    config = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))
+    suites = {name.rsplit("/", 1)[0] for name, _ in workspace_tests() if "/" in name}
+    checked = set(config["tool"]["mypy"]["files"])
+    collected = set(config["tool"]["pytest"]["ini_options"]["testpaths"])
+
+    assert suites <= checked, (
+        f"`mypy.files` does not name {sorted(suites - checked)} — nothing type-checks it"
+    )
+    assert suites <= collected, (
+        f"`pytest.testpaths` does not name {sorted(suites - collected)} — nothing runs it"
+    )

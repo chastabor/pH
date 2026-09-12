@@ -20,8 +20,6 @@ everything here skips when they are absent.
 
 from __future__ import annotations
 
-from typing import Any
-
 import pytest
 from fixture_replay import (
     SHAPES_FILE,
@@ -31,6 +29,7 @@ from fixture_replay import (
     recorded_shapes,
     to_wire,
 )
+from rlm_fixtures import ShippedProfile
 
 from ph.keys import TOOLS
 from ph_app.profiles import resolve_profile
@@ -136,7 +135,7 @@ def test_the_fixtures_are_the_coding_agent_not_the_rlm(shapes: dict[str, Traject
 
 
 async def test_every_tool_the_fixtures_called_exists_under_the_rlm_profile(
-    shipped_profile: Any, shapes: dict[str, TrajectoryShape]
+    shipped_profile: ShippedProfile, shapes: dict[str, TrajectoryShape]
 ) -> None:
     """The claim that makes the trajectory expressible at all.
 

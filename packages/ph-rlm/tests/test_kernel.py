@@ -506,7 +506,7 @@ def test_the_guest_never_imports_the_harness() -> None:
 
 
 async def test_a_running_cell_never_interrupts_the_frame_read(
-    make_kernel: MakeKernel, monkeypatch: Any
+    make_kernel: MakeKernel, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The reason the stop ladder's clock is a sibling task.
 

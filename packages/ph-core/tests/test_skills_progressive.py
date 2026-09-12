@@ -383,7 +383,7 @@ async def test_a_step_is_rendered_like_the_prose_around_it(
 
 
 async def test_a_skill_that_declares_no_inputs_is_still_scanned(
-    mount: MountProfile, tmp_path: Any
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """There is no shortcut for a skill with no `parameters:` block, and there was.
 
@@ -451,7 +451,7 @@ def test_the_readmes_example_is_a_skill_this_build_can_load() -> None:
 
 
 async def test_a_listener_that_fails_does_not_fail_the_read(
-    mount: MountProfile, tmp_path: Any
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """A skill read cannot be un-read, which is what `contained=` is for.
 

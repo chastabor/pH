@@ -22,21 +22,16 @@ from __future__ import annotations
 
 import os
 import sys
-from collections.abc import Callable
 from pathlib import Path
 
 import pytest
 
 from ph.lingering import lifetime, linger_state, socket_identity
+from ph.testing import ReapedHost
 
 pytestmark = pytest.mark.skipif(
     sys.platform == "win32", reason="a logind property; Windows reaps no runtime dir"
 )
-
-ReapedHost = Callable[..., Path]
-"""The repo-root `reaped_host` fixture, spelled where it is read — structurally
-rather than by `from conftest import …`, which resolves to the nearest conftest
-on `sys.path` rather than to the root one the fixture lives in."""
 
 
 # ---------------------------------------------------------------- the probe --

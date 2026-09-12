@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
 import pytest
 from daemon_helpers import Daemon, daemon_socket, running
+from tui_helpers import MakeApp
 
 from ph.paths import resolve_roots
 from ph_app.profiles import compose_profile
@@ -49,7 +50,7 @@ async def tui_daemon(
 
 
 @pytest.fixture
-async def make_tui_app(tmp_path: Path, tui_daemon: Daemon) -> Callable[..., PHTuiApp]:
+async def make_tui_app(tmp_path: Path, tui_daemon: Daemon) -> MakeApp:
     """`make_tui_app(**overrides)` → a TUI attached to `tui_daemon`.
 
     The construction itself is `tui_helpers.tui_app`, shared with the snapshot

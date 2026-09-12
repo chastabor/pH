@@ -13,6 +13,7 @@ once per step.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -107,7 +108,7 @@ def test_a_request_with_nothing_to_degrade_is_left_identical() -> None:
     assert rewritten[0] is messages[0], "an untouched message was copied"
 
 
-def test_an_acceptable_attachment_is_left_alone(tmp_path: Any) -> None:
+def test_an_acceptable_attachment_is_left_alone(tmp_path: Path) -> None:
     """Only what cannot go is rewritten; the rest reaches the adapter as media."""
     message = _message(MediaBlock(attachment=_ref()))
 
@@ -120,7 +121,7 @@ def test_an_acceptable_attachment_is_left_alone(tmp_path: Any) -> None:
 # ------------------------------------------------------------- the notice --
 
 
-async def test_the_row_degrades_and_records_once(mount: MountProfile, tmp_path: Any) -> None:
+async def test_the_row_degrades_and_records_once(mount: MountProfile, tmp_path: Path) -> None:
     """End to end through the waterfall, on the fake route — which declares no
     media, and so is every text-only provider's path too.
 
@@ -217,7 +218,7 @@ def test_an_image_larger_than_the_route_uses_is_sent_and_flagged() -> None:
 
 
 async def test_the_oversized_notice_lands_once_and_names_the_picture(
-    mount: MountProfile, tmp_path: Any
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """End to end, and `record_degraded`'s rule applied to its sibling.
 

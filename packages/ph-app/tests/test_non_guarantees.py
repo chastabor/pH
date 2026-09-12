@@ -37,7 +37,6 @@ assumes a crontab is the reader this table exists for.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
 import anyio
 import pytest
@@ -87,7 +86,7 @@ def test_every_non_guarantee_is_stated_and_none_has_gone_soft() -> None:
 
 
 def test_ph_doctor_prints_the_worker_model_without_a_daemon(
-    tmp_path: Path, monkeypatch: Any
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The gate's first half, and the reader who has not started one yet.
 

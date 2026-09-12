@@ -34,14 +34,16 @@ cell**.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
 import pytest
+from rlm_fixtures import MountedRuntime
 from runtime_helpers import run_cell
 
 from ph.cordis import DEPLOYMENT
+from ph.json import as_seq
 from ph.keys import AGENTS, COMPACTION, SESSIONS, SPILL_STORE
 from ph.llm.types import text_of
 from ph.session import IGNORABLE_SESSION_EVENT_TYPES, SurfaceIntent
@@ -56,8 +58,6 @@ from ph_rlm.snapshot import (
 
 pytestmark = pytest.mark.anyio
 
-Mounted = Callable[..., Any]
-
 
 def _snapshots(session: Any) -> list[dict[str, Any]]:
     return [
@@ -68,7 +68,7 @@ def _snapshots(session: Any) -> list[dict[str, Any]]:
 # ------------------------------------------------------------------ recording --
 
 
-async def test_a_variable_becomes_a_snapshot_event(mounted_runtime: Mounted) -> None:
+async def test_a_variable_becomes_a_snapshot_event(mounted_runtime: MountedRuntime) -> None:
     ctx, session, agent = await mounted_runtime(session_id="kernel-state")
     await run_cell(ctx, "answer = 42", agent=agent, session=session)
     records = _snapshots(session)
@@ -78,7 +78,7 @@ async def test_a_variable_becomes_a_snapshot_event(mounted_runtime: Mounted) -> 
     assert records[0]["tag"], "the payload is tagged against the session"
 
 
-async def test_the_records_are_ignorable(mounted_runtime: Mounted) -> None:
+async def test_the_records_are_ignorable(mounted_runtime: MountedRuntime) -> None:
     """A different build may skip them without misreading the session.
 
     They describe state, not conversation, so an older pH reading this log should
@@ -96,7 +96,7 @@ async def test_the_records_are_ignorable(mounted_runtime: Mounted) -> None:
     assert all(not event.ignorable for event in conversation)
 
 
-async def test_an_unchanged_variable_costs_nothing(mounted_runtime: Mounted) -> None:
+async def test_an_unchanged_variable_costs_nothing(mounted_runtime: MountedRuntime) -> None:
     """Per-variable digesting is what keeps growth linear rather than quadratic.
 
     Snapshotting the namespace as one blob would re-append `kept` on every cell
@@ -111,7 +111,7 @@ async def test_an_unchanged_variable_costs_nothing(mounted_runtime: Mounted) -> 
     assert [record["var"] for record in records[after_first:]] == ["unrelated"]
 
 
-async def test_a_deleted_variable_is_cleared_not_forgotten(mounted_runtime: Mounted) -> None:
+async def test_a_deleted_variable_is_cleared_not_forgotten(mounted_runtime: MountedRuntime) -> None:
     """A restore must *say* the name is gone.
 
     A model that finds a name undefined mid-session reads it as its own bug and
@@ -128,7 +128,7 @@ async def test_a_deleted_variable_is_cleared_not_forgotten(mounted_runtime: Moun
 # ------------------------------------------------------------------ restoring --
 
 
-async def test_a_new_kernel_gets_the_namespace_back(mounted_runtime: Mounted) -> None:
+async def test_a_new_kernel_gets_the_namespace_back(mounted_runtime: MountedRuntime) -> None:
     """The resume path: a fresh child, the same namespace."""
     ctx, session, agent = await mounted_runtime(session_id="kernel-state")
     await run_cell(ctx, "carried = {'over': [1, 2, 3]}", agent=agent, session=session, call_id="c1")
@@ -142,11 +142,11 @@ async def test_a_new_kernel_gets_the_namespace_back(mounted_runtime: Mounted) ->
     assert result.value["value"] == [1, 2, 3]
     restored = [event for event in session.events if event.type == "kernel/restored"]
     assert restored
-    assert "carried" in restored[-1].data["restored"]
+    assert "carried" in as_seq(restored[-1].data["restored"])
 
 
 async def test_a_crash_does_not_silently_reconstitute_the_namespace(
-    mounted_runtime: Mounted,
+    mounted_runtime: MountedRuntime,
 ) -> None:
     """After `os._exit`, the model was told the namespace is empty. It must be.
 
@@ -162,7 +162,7 @@ async def test_a_crash_does_not_silently_reconstitute_the_namespace(
 
 
 async def test_a_tag_from_another_session_is_refused(
-    mounted_runtime: Mounted, tmp_path: Path
+    mounted_runtime: MountedRuntime, tmp_path: Path
 ) -> None:
     """`dill.loads` on arbitrary bytes executes arbitrary code.
 
@@ -189,7 +189,7 @@ async def test_a_tag_from_another_session_is_refused(
 
 
 async def test_a_large_payload_goes_to_spill_and_the_event_names_it(
-    mounted_runtime: Mounted,
+    mounted_runtime: MountedRuntime,
 ) -> None:
     ctx, session, agent = await mounted_runtime(
         session_id="kernel-state", snapshot_config={"inlineBlobMax": 256}
@@ -204,7 +204,7 @@ async def test_a_large_payload_goes_to_spill_and_the_event_names_it(
     assert Path(record["locator"]).stat().st_size == record["bytes"]
 
 
-async def test_a_spilled_variable_still_restores(mounted_runtime: Mounted) -> None:
+async def test_a_spilled_variable_still_restores(mounted_runtime: MountedRuntime) -> None:
     ctx, session, agent = await mounted_runtime(
         session_id="kernel-state", snapshot_config={"inlineBlobMax": 256}
     )
@@ -229,7 +229,7 @@ def _kernel_locators(session: Any) -> set[str]:
     }
 
 
-async def test_unreferenced_blobs_are_swept(mounted_runtime: Mounted) -> None:
+async def test_unreferenced_blobs_are_swept(mounted_runtime: MountedRuntime) -> None:
     """F7: a blob whose event never landed is otherwise never reconciled."""
     ctx, session, agent = await mounted_runtime(
         session_id="kernel-state", snapshot_config={"inlineBlobMax": 256}
@@ -246,7 +246,7 @@ async def test_unreferenced_blobs_are_swept(mounted_runtime: Mounted) -> None:
     assert all(Path(locator).exists() for locator in kept)
 
 
-async def test_a_sweep_leaves_another_sessions_blobs_alone(mounted_runtime: Mounted) -> None:
+async def test_a_sweep_leaves_another_sessions_blobs_alone(mounted_runtime: MountedRuntime) -> None:
     """The namespaces to visit come from the same log as the locators to keep.
 
     Sweeping every namespace the process had seen against *one* session's
@@ -276,7 +276,7 @@ async def test_a_sweep_leaves_another_sessions_blobs_alone(mounted_runtime: Moun
 
 
 async def test_the_fold_reconstructs_the_namespace_as_of_a_boundary(
-    mounted_runtime: Mounted,
+    mounted_runtime: MountedRuntime,
 ) -> None:
     """What a side file could not express, and the reason D17 chose events.
 
@@ -293,7 +293,7 @@ async def test_the_fold_reconstructs_the_namespace_as_of_a_boundary(
     assert set(fold_namespace(prefix_of(session, boundary), agent.id)) == {"first"}
 
 
-async def test_a_foreign_record_does_not_break_the_fold(mounted_runtime: Mounted) -> None:
+async def test_a_foreign_record_does_not_break_the_fold(mounted_runtime: MountedRuntime) -> None:
     _ctx, session, agent = await mounted_runtime(session_id="kernel-state")
     session.append(
         "kernel/snapshot",
@@ -302,7 +302,7 @@ async def test_a_foreign_record_does_not_break_the_fold(mounted_runtime: Mounted
     assert fold_namespace(session, agent.id) == {}
 
 
-async def test_a_namespace_only_sees_its_own_records(mounted_runtime: Mounted) -> None:
+async def test_a_namespace_only_sees_its_own_records(mounted_runtime: MountedRuntime) -> None:
     ctx, session, agent = await mounted_runtime(session_id="kernel-state")
     await run_cell(ctx, "mine = 1", agent=agent, session=session)
     assert set(fold_namespace(session, agent.id)) == {"mine"}
@@ -318,7 +318,7 @@ async def test_a_namespace_only_sees_its_own_records(mounted_runtime: Mounted) -
 
 
 async def test_the_note_names_the_variables_the_kernel_still_holds(
-    mounted_runtime: Mounted,
+    mounted_runtime: MountedRuntime,
 ) -> None:
     """Read from the same fold `materialize` restores from, so what a summary
     promises and what a restart delivers cannot disagree."""
@@ -333,7 +333,7 @@ async def test_the_note_names_the_variables_the_kernel_still_holds(
 
 
 async def test_a_variable_that_is_gone_is_not_promised(
-    mounted_runtime: Mounted,
+    mounted_runtime: MountedRuntime,
 ) -> None:
     """The failure worth guarding: a note is a *claim* the model will act on, so
     a name the fold has cleared must not appear in it."""
@@ -344,7 +344,7 @@ async def test_a_variable_that_is_gone_is_not_promised(
     assert render_live_variables(session) == ""
 
 
-async def test_an_empty_namespace_contributes_no_note(mounted_runtime: Mounted) -> None:
+async def test_an_empty_namespace_contributes_no_note(mounted_runtime: MountedRuntime) -> None:
     """Empty means absent — a session that has run no cell spends no prompt on a
     paragraph saying its kernel holds nothing."""
     _ctx, session, _agent = await mounted_runtime(session_id="nothing-yet")
@@ -352,7 +352,7 @@ async def test_an_empty_namespace_contributes_no_note(mounted_runtime: Mounted) 
 
 
 async def test_the_note_is_registered_on_the_compaction_seam(
-    mounted_runtime: Mounted,
+    mounted_runtime: MountedRuntime,
 ) -> None:
     """The wiring, which is `ctx.inject` rather than this row's own `inject`.
 
@@ -370,7 +370,7 @@ async def test_the_note_is_registered_on_the_compaction_seam(
 
 
 async def test_the_namespace_outlives_a_compaction_of_the_conversation(
-    mounted_runtime: Mounted,
+    mounted_runtime: MountedRuntime,
 ) -> None:
     """ "Runtime state itself is untouched" (G10), with a real kernel.
 

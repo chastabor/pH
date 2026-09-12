@@ -64,7 +64,7 @@ def _entry(
     return entry
 
 
-async def _reading(mount: MountProfile, tmp_path: Any) -> Any:
+async def _reading(mount: MountProfile, tmp_path: Path) -> Any:
     """A mounted deployment that has just read a three-step skill."""
     write_skill(tmp_path, "port", description="port a row", extra=STEPS, body="Do it.")
     ctx = await mount(
@@ -80,7 +80,7 @@ async def _reading(mount: MountProfile, tmp_path: Any) -> Any:
 
 
 async def test_reading_a_skill_turns_its_steps_into_work(
-    mount: MountProfile, tmp_path: Any
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """The declaration becomes entries, in order, waiting on each other.
 
@@ -97,7 +97,7 @@ async def test_reading_a_skill_turns_its_steps_into_work(
 
 
 async def test_reading_the_same_skill_twice_does_not_duplicate_it(
-    mount: MountProfile, tmp_path: Any
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """A model re-reads instructions it half-remembers; a second copy of the
     procedure would be a plan that can never be finished."""
@@ -137,7 +137,7 @@ def test_a_step_whose_text_the_model_already_used_is_not_seeded() -> None:
 # ------------------------------------------------------- the model's hands --
 
 
-async def test_the_model_may_mark_a_seeded_step_done(mount: MountProfile, tmp_path: Any) -> None:
+async def test_the_model_may_mark_a_seeded_step_done(mount: MountProfile, tmp_path: Path) -> None:
     """Marking progress is the one thing it *may* change — the whole point."""
     ctx, session, _agent = await _reading(mount, tmp_path)
     steps = steps_of(todos_of(session))
@@ -161,7 +161,7 @@ async def test_the_model_may_mark_a_seeded_step_done(mount: MountProfile, tmp_pa
 
 
 async def test_the_model_may_add_its_own_entries_beside_them(
-    mount: MountProfile, tmp_path: Any
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """A procedure is not a cage: its own plan lives alongside."""
     ctx, session, _agent = await _reading(mount, tmp_path)
@@ -187,7 +187,7 @@ async def test_the_model_may_add_its_own_entries_beside_them(
 
 
 async def test_a_write_that_drops_a_seeded_step_is_refused(
-    mount: MountProfile, tmp_path: Any
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """**The rule the row exists for.**
 
@@ -208,7 +208,7 @@ async def test_a_write_that_drops_a_seeded_step_is_refused(
     assert "drops 2 steps" in said and repr(steps[1]) in said, "it names what went missing"
 
 
-async def test_a_write_that_reorders_them_is_refused(mount: MountProfile, tmp_path: Any) -> None:
+async def test_a_write_that_reorders_them_is_refused(mount: MountProfile, tmp_path: Path) -> None:
     """Order is the procedure. `requires` alone would not notice a swap between
     two steps that happen not to depend on each other."""
     ctx, session, _agent = await _reading(mount, tmp_path)
@@ -332,7 +332,7 @@ class _Stopping:
 
 
 async def test_a_turn_trying_to_end_with_a_procedure_unfinished_is_steered(
-    mount: MountProfile, tmp_path: Any
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """The row's whole purpose, at the boundary the agent loop already fires.
 
@@ -353,7 +353,7 @@ async def test_a_turn_trying_to_end_with_a_procedure_unfinished_is_steered(
     )
 
 
-async def test_a_finished_procedure_lets_the_turn_end(mount: MountProfile, tmp_path: Any) -> None:
+async def test_a_finished_procedure_lets_the_turn_end(mount: MountProfile, tmp_path: Path) -> None:
     """The other half, and the one a steer that never stands down would break."""
     ctx, session, _agent = await _reading(mount, tmp_path)
     await run_tool_calls(
@@ -367,7 +367,7 @@ async def test_a_finished_procedure_lets_the_turn_end(mount: MountProfile, tmp_p
 
 
 async def test_a_session_with_no_procedure_is_never_steered(
-    mount: MountProfile, tmp_path: Any
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """A row that is mounted must cost a session that does not use it nothing."""
     ctx = await mount(*ROWS, profile=PROFILE)
@@ -382,7 +382,7 @@ async def test_a_session_with_no_procedure_is_never_steered(
 
 
 async def test_the_row_stands_down_when_its_nudges_change_nothing(
-    mount: MountProfile, tmp_path: Any
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """The ceiling `/autonomous` has and the first cut of this row did not.
 
@@ -403,7 +403,7 @@ async def test_the_row_stands_down_when_its_nudges_change_nothing(
     assert len(stopping.steers) == MAX_NUDGES, "it stops after the plan has not moved"
 
 
-async def test_progress_on_the_plan_earns_more_nudges(mount: MountProfile, tmp_path: Any) -> None:
+async def test_progress_on_the_plan_earns_more_nudges(mount: MountProfile, tmp_path: Path) -> None:
     """A run that is getting somewhere is never cut off — which is what makes the
     ceiling a stall detector rather than a budget."""
     ctx, session, _agent = await _reading(mount, tmp_path)

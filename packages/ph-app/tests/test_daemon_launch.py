@@ -29,7 +29,7 @@ from typing import Any
 
 import anyio
 import pytest
-from daemon_helpers import running, shut_down
+from daemon_helpers import private_runtime, running, shut_down
 
 from ph_app.cli import spawn_command
 from ph_app.daemon.launch import DaemonAbsent, ensure_daemon
@@ -41,14 +41,19 @@ ARGV = spawn_command(profile="headless", provider="fake", model="fake-1")
 
 
 @pytest.fixture(autouse=True)
-def _runtime(tmp_path: Path, monkeypatch: Any) -> None:
+def _runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A `$PH_RUNTIME` of this test's own, so the socket path is ours.
 
     `ensure_daemon` resolves the socket rather than taking one, deliberately — a
     UI that could be pointed at a socket of its own construction is a UI that can
     disagree with `ph agents` about where the daemon is.
+
+    Through the shared `private_runtime`, which is the same pin plus the `mkdir`
+    this fixture used to leave out — a plain function rather than a fixture, so
+    a suite that wants it autouse says so here and one that wants it per test
+    calls it there, which `test_agents_cli.py` does.
     """
-    monkeypatch.setenv("PH_RUNTIME", str(tmp_path / "run"))
+    private_runtime(tmp_path, monkeypatch)
 
 
 # ------------------------------------------------------------------- argv --

@@ -10,10 +10,10 @@ payload is derived from the durable result alone.
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
 from typing import Any
 
 import pytest
+from rlm_fixtures import MountedRuntime
 from runtime_helpers import run_cell
 
 from ph.cancel import CancelToken
@@ -26,8 +26,6 @@ from ph_rlm.presentation import IPYTHON, IPYTHON_DESCRIPTION, cell_details, rend
 
 pytestmark = pytest.mark.anyio
 
-Mounted = Callable[..., Any]
-
 
 async def _cell(ctx: Any, program: str, *, agent: Any, session: Any, call_id: str = "c1") -> Any:
     return await run_cell(ctx, program, agent=agent, session=session, call_id=call_id, name=IPYTHON)
@@ -36,7 +34,7 @@ async def _cell(ctx: Any, program: str, *, agent: Any, session: Any, call_id: st
 # ------------------------------------------------------------------ surface --
 
 
-async def test_the_description_is_prime_agents_verbatim(mounted_runtime: Mounted) -> None:
+async def test_the_description_is_prime_agents_verbatim(mounted_runtime: MountedRuntime) -> None:
     """The description is the contract the model was trained against.
 
     Asserted against the constant rather than a paraphrase so an edit to the
@@ -50,14 +48,14 @@ async def test_the_description_is_prime_agents_verbatim(mounted_runtime: Mounted
     assert "the target project's own environment" in definition.description
 
 
-async def test_a_cell_runs_under_the_presented_name(mounted_runtime: Mounted) -> None:
+async def test_a_cell_runs_under_the_presented_name(mounted_runtime: MountedRuntime) -> None:
     ctx, session, agent = await mounted_runtime(presentation=True)
     result = await _cell(ctx, "6 * 7", agent=agent, session=session)
     assert result.is_error is False
     assert result.value["value"] == 42
 
 
-async def test_the_log_records_the_name_the_model_used(mounted_runtime: Mounted) -> None:
+async def test_the_log_records_the_name_the_model_used(mounted_runtime: MountedRuntime) -> None:
     """I3: model-visible means logged, and the model never saw `run_code`.
 
     Through the batch scheduler rather than `tools.execute`, because that is the
@@ -136,7 +134,7 @@ def test_the_details_payload_reports_a_reset_namespace() -> None:
     assert details["status"] == "ok"
 
 
-async def test_a_reset_kernel_reports_it_on_the_card(mounted_runtime: Mounted) -> None:
+async def test_a_reset_kernel_reports_it_on_the_card(mounted_runtime: MountedRuntime) -> None:
     """The card flag is the runtime's own boolean, not a sniff of the notice.
 
     Recovering it from the log prefix froze the notice's wording forever and let
@@ -154,7 +152,7 @@ async def test_a_reset_kernel_reports_it_on_the_card(mounted_runtime: Mounted) -
     assert forged.meta["reset"] is False
 
 
-async def test_a_real_cell_produces_the_card_and_the_text(mounted_runtime: Mounted) -> None:
+async def test_a_real_cell_produces_the_card_and_the_text(mounted_runtime: MountedRuntime) -> None:
     """The two projections, computed by the pipeline rather than called directly."""
     ctx, session, agent = await mounted_runtime(presentation=True)
     ctx.require(TOOLS).register(simple_tool("ping", lambda _args, _run: "pong"))
@@ -178,7 +176,7 @@ async def test_a_real_cell_produces_the_card_and_the_text(mounted_runtime: Mount
     }
 
 
-async def test_a_capped_cell_says_so_on_its_card(mounted_runtime: Mounted) -> None:
+async def test_a_capped_cell_says_so_on_its_card(mounted_runtime: MountedRuntime) -> None:
     """`truncated` reached the card only after `run_code` stopped dropping it.
 
     Both `truncated` and `displays` were on `CodeRunResult` and absent from the
@@ -196,7 +194,9 @@ async def test_a_capped_cell_says_so_on_its_card(mounted_runtime: Mounted) -> No
     assert "output truncated" in text
 
 
-async def test_a_failing_cell_is_an_error_carrying_its_traceback(mounted_runtime: Mounted) -> None:
+async def test_a_failing_cell_is_an_error_carrying_its_traceback(
+    mounted_runtime: MountedRuntime,
+) -> None:
     ctx, session, agent = await mounted_runtime(presentation=True)
     result = await _cell(ctx, "1 / 0", agent=agent, session=session)
     # The cell failed, but the *tool call* succeeded: a traceback is the model's
@@ -211,7 +211,7 @@ async def test_a_failing_cell_is_an_error_carrying_its_traceback(mounted_runtime
 
 
 async def test_without_the_row_the_transport_keeps_its_reserved_name(
-    mounted_runtime: Mounted,
+    mounted_runtime: MountedRuntime,
 ) -> None:
     """The rename is the profile's, not the runtime's: a deployment that mounts
     the kernel without this row still gets `run_code`."""

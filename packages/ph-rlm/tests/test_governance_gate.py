@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from rlm_fixtures import ShippedProfile
 from runtime_helpers import dispatch_names, run_ipython_cell, settled_dispatches
 
 from ph.keys import AGENTS, SESSIONS, SUBAGENTS
@@ -52,7 +53,7 @@ pytestmark = pytest.mark.anyio
 
 
 async def test_a_a_governed_write_is_intercepted_before_it_touches_disk(
-    shipped_profile: Any, tmp_path: Path
+    shipped_profile: ShippedProfile, tmp_path: Path
 ) -> None:
     """C1: the cell's write goes through the seam, not around it.
 
@@ -91,7 +92,7 @@ async def test_a_a_governed_write_is_intercepted_before_it_touches_disk(
 
 
 async def test_a_a_denied_dispatch_ends_the_run_uncatchably(
-    shipped_profile: Any, tmp_path: Path
+    shipped_profile: ShippedProfile, tmp_path: Path
 ) -> None:
     """C3, and the one deliberate divergence from dsh.
 
@@ -145,7 +146,7 @@ async def test_a_a_denied_dispatch_ends_the_run_uncatchably(
 
 
 async def test_b_three_binding_calls_are_three_governed_evaluations(
-    shipped_profile: Any, tmp_path: Path
+    shipped_profile: ShippedProfile, tmp_path: Path
 ) -> None:
     """C2: the number prime-agent's single tool made invisible.
 
@@ -185,7 +186,7 @@ async def test_b_three_binding_calls_are_three_governed_evaluations(
 
 
 async def test_c_one_oversized_dispatch_is_offloaded_without_its_siblings(
-    shipped_profile: Any, tmp_path: Path
+    shipped_profile: ShippedProfile, tmp_path: Path
 ) -> None:
     """C5: offload is per dispatch, so one big read does not melt the others.
 
@@ -239,7 +240,7 @@ async def test_c_one_oversized_dispatch_is_offloaded_without_its_siblings(
 # ------------------------------------------------------------------- (d) --
 
 
-async def test_d_a_non_family_send_cannot_be_re_permitted(shipped_profile: Any) -> None:
+async def test_d_a_non_family_send_cannot_be_re_permitted(shipped_profile: ShippedProfile) -> None:
     """C7: the family boundary is a monotonic guard, not a policy listener.
 
     Guards run *last* and are deny-only, so there is no ordering in which a
@@ -279,7 +280,9 @@ async def test_d_a_non_family_send_cannot_be_re_permitted(shipped_profile: Any) 
 # ------------------------------------------------------------------- (e) --
 
 
-async def test_e_a_runaway_cell_fails_at_its_budget(shipped_profile: Any, tmp_path: Path) -> None:
+async def test_e_a_runaway_cell_fails_at_its_budget(
+    shipped_profile: ShippedProfile, tmp_path: Path
+) -> None:
     """C4: one approved cell is still one decision.
 
     Without a per-cell cap, a single approval buys unbounded governed calls — the
@@ -303,7 +306,7 @@ async def test_e_a_runaway_cell_fails_at_its_budget(shipped_profile: Any, tmp_pa
 
 
 async def test_the_shipped_profile_still_refuses_a_native_tool_call(
-    shipped_profile: Any,
+    shipped_profile: ShippedProfile,
 ) -> None:
     """C6, and the gate's own foundation, as one observable property.
 

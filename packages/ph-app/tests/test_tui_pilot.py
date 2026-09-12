@@ -15,7 +15,6 @@ dialog appeared.
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -24,7 +23,7 @@ from daemon_helpers import Daemon
 from daemon_helpers import until as settled
 from textual.binding import Binding
 from textual.widgets import Input
-from tui_helpers import root_of, running, turn_done, until
+from tui_helpers import MakeApp, root_of, running, turn_done, until
 
 from ph.keys import APPROVAL, COMMANDS, CREDENTIALS, TOOLS
 from ph.seams.approval import ApprovalRequest, Edited, Responded
@@ -32,7 +31,6 @@ from ph.seams.commands import CommandDefinition
 from ph.seams.user_questions import UserQuestion
 from ph.testing import StubAgent, not_none, simple_tool
 from ph_app.trust import TrustStore
-from ph_app.tui.app import PHTuiApp
 from ph_app.tui.modals.approval import ApprovalModal
 from ph_app.tui.modals.ask_user import AskUserModal
 from ph_app.tui.modals.base import Choice, ChoicePicker, ConfirmModal
@@ -40,8 +38,6 @@ from ph_app.tui.modals.trust import plan_review_modal, project_trust_modal
 from ph_app.tui.widgets.prompt import PromptInput
 
 pytestmark = pytest.mark.anyio
-
-MakeApp = Callable[..., PHTuiApp]
 
 
 def _command(name: str = "tidy") -> CommandDefinition:

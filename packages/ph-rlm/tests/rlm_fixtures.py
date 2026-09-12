@@ -21,7 +21,7 @@ from typing import Any
 
 import pytest
 
-from ph.agent.types import AgentHandle
+from ph.agent.types import AgentDriver
 from ph.cordis import Context
 from ph.keys import AGENTS, SESSIONS
 from ph.session import Session
@@ -37,12 +37,25 @@ type MakeKernel = Callable[..., Awaitable["Kernel"]]
 `async` — the alias said otherwise and nothing checked while the trees were
 outside mypy (issue 32)."""
 
-type MountedRuntime = Callable[..., Awaitable[tuple[Context, Session, AgentHandle]]]
+type ShippedProfile = Callable[..., Awaitable[tuple[Context, Session, AgentDriver]]]
+"""`await shipped_profile(...)` → `(ctx, session, agent)` on the shipped bundle.
+
+The same triple `MountedRuntime` hands back and a separate name on purpose: what
+differs is *which* profile was mounted, which is the whole point of the fixture
+below, and a test annotated with the other one would read as the wrong mount."""
+
+type MountedRuntime = Callable[..., Awaitable[tuple[Context, Session, AgentDriver]]]
 """`await mounted_runtime(...)` → `(ctx, session, agent)` on the real profile.
 
 Named because seventeen tests took it as `Any` and then read services off
 the `ctx` it hands back, which is how 1,581 untyped reads hid behind one
-fixture (issue 32)."""
+fixture (issue 32).
+
+**`AgentDriver`, not `AgentHandle`** — the handle is the read-only half and
+`AgentRegistry.create` hands back the driver. The narrower name stood here while
+only three suites used the alias, none of which steered the agent; the seven that
+spelled it `Any` did, so `await agent.prompt(...)` failed the moment they were
+pointed at it."""
 
 HOST_RUNTIME_ROW: dict[str, Any] = {
     "id": "code-runtime-python",
@@ -147,7 +160,7 @@ async def make_kernel(tmp_path: Path) -> AsyncIterator[MakeKernel]:
 
 
 @pytest.fixture
-def shipped_profile(mount: MountProfile) -> Callable[..., Any]:
+def shipped_profile(mount: MountProfile) -> ShippedProfile:
     """`await shipped_profile()` → `(ctx, session, agent)` on the real `rlm` bundle.
 
     `ph-base` + `headless` + `rlm/bundle.yaml` through the loader, so a row
@@ -172,7 +185,7 @@ def shipped_profile(mount: MountProfile) -> Callable[..., Any]:
         *,
         session_id: str = "profile",
         profile: Any = BUNDLE,
-    ) -> tuple[Any, Any, Any]:
+    ) -> tuple[Context, Session, AgentDriver]:
         merged: dict[str, dict[str, Any]] = {"code-runtime-python": dict(HOST_INTERPRETER)}
         for row_id, overrides in (config or {}).items():
             merged.setdefault(row_id, {}).update(overrides)
@@ -205,7 +218,7 @@ def mounted_runtime(mount: MountProfile) -> MountedRuntime:
         presentation: bool = False,
         snapshot_config: dict[str, Any] | None = None,
         extra_rows: list[dict[str, Any]] | None = None,
-    ) -> tuple[Context, Session, AgentHandle]:
+    ) -> tuple[Context, Session, AgentDriver]:
         rows = [*CODE_MODE_ROWS, HOST_RUNTIME_ROW]
         if snapshots:
             rows.append(
