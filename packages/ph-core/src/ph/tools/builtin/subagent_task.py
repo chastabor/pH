@@ -40,6 +40,7 @@ from ...seams.subagents import (
     SubagentStatus,
     downgrade_text,
 )
+from ...session import as_str
 from ...wire import WireModel
 from ..definition import ToolModel, ToolOutput, ToolRunContext, define_tool, text_content
 from ..presentation import ToolCallView, ToolResultView
@@ -121,9 +122,9 @@ class Config(WireModel):
 
 
 def _render(_args: Any, value: Any) -> list[ContentBlock]:
-    parts = [str(value.get("answer") or "(the child produced no answer)")]
+    parts = [as_str(value.get("answer"), "(the child produced no answer)")]
     if value.get("note"):
-        parts.append(str(value["note"]))
+        parts.append(as_str(value["note"]))
     return text_content("\n\n".join(parts))
 
 

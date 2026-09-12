@@ -59,7 +59,7 @@ from .protocol import (
     cursor_text,
     parse_cursor,
 )
-from .wire import as_obj, describe, message_of, one_line, result_block, text_of_wire
+from .wire import as_obj, as_str, describe, message_of, one_line, result_block, text_of_wire
 
 __all__ = ["agents_app"]
 
@@ -226,7 +226,7 @@ def _reachability(facts: DaemonStatusReply) -> list[tuple[str, str]]:
 
 
 def _line(event: JsonObject) -> str:
-    kind = str(event.get("type", ""))
+    kind = as_str(event.get("type"))
     body = _summary(kind, event)
     seq = f"{event.get('seq', '')!s:>5}"
     if not body:
@@ -352,7 +352,7 @@ class _Follow:
         predicate, and recomputed `bool(self.selectors)` — a value fixed at
         construction — on every frame of a replayed history.
         """
-        kind = str(event.get("type", ""))
+        kind = as_str(event.get("type"))
         if self.selectors:
             return matches_any(kind, self.selectors)
         return self.everything or kind not in NOISE

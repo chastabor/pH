@@ -37,6 +37,7 @@ from ph.session.request_header import parse_request_header
 from ..wire import (
     as_int,
     as_obj,
+    as_str,
     describe,
     message_of,
     one_line,
@@ -259,7 +260,7 @@ class _Builder:
 
     def on_tool_call(self, event: SessionEvent) -> None:
         data = event.data
-        name = str(data.get("name") or "?")
+        name = as_str(data.get("name"), "?")
         self.add(
             kind="tool",
             source_seq=event.seq,
@@ -288,7 +289,7 @@ class _Builder:
     def on_sub_dispatch(self, event: SessionEvent) -> None:
         """A Code Mode sub-call: `subtool`, the kind C2 exists to make visible."""
         data = event.data
-        name = str(data.get("name") or "?")
+        name = as_str(data.get("name"), "?")
         text = _text(data.get("content"))
         self.add(
             kind="subtool",

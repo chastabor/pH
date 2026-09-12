@@ -34,7 +34,7 @@ from ..cordis import Context, plugin
 from ..keys import COMMANDS, SUBPROCESS, TOOLS, WORKSPACE
 from ..seams.commands import CommandDefinition
 from ..seams.workspace import checkpoints, workspace_of
-from ..session import Session
+from ..session import Session, as_str
 
 __all__ = ["apply"]
 
@@ -76,18 +76,18 @@ async def apply(ctx: Context, _config: Any) -> None:
             return f"refusing: no restore point at {raw!r} (known: {known})\n{USAGE}"
 
         point = points[seq]
-        call_id = str(point.get("callId", ""))
+        call_id = as_str(point.get("callId"))
         # By id, not by comparing roots: a restore point belongs to the agent
         # that took it, and asking the seam a second time for that agent's root
         # was both a second spelling of one question and *less* safe — a disposed
         # agent whose directory got reused would have compared equal.
-        if workspace is None or getattr(invocation.agent, "id", "") != str(point["agentId"]):
+        if workspace is None or getattr(invocation.agent, "id", "") != as_str(point["agentId"]):
             return (
                 f"refusing: restore point {raw} belongs to agent "
                 f"{point['agentId']!r}, which does not hold a workspace here"
             )
         try:
-            removed = await ctx.require(WORKSPACE).restore(workspace, str(point["tree"]))
+            removed = await ctx.require(WORKSPACE).restore(workspace, as_str(point["tree"]))
         except FileNotFoundError as gone:
             # The write-ahead window (A10): the event was appended before the ref
             # that keeps the tree alive, so a crash in between leaves a restore
@@ -138,11 +138,11 @@ def _not_undone(ctx: Context, scope: Context, session: Session, call_id: str) ->
     # (P6-24). This is a policy read — which tools a revert covers — so the
     # boundary has to be the one the caller named.
     outside = [
-        (str(event.data.get("name", "?")), event.data.get("arguments"))
+        (as_str(event.data.get("name"), "?"), event.data.get("arguments"))
         for event in session.events
         if event.type == "tool/code-dispatch-start"
-        and str(event.data.get("parentCallId", "")) == call_id
-        and not _covered(ctx, str(event.data.get("name", "?")), scope)
+        and as_str(event.data.get("parentCallId")) == call_id
+        and not _covered(ctx, as_str(event.data.get("name"), "?"), scope)
     ]
     if not outside:
         return []

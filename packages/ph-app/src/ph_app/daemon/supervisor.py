@@ -74,7 +74,7 @@ from ..protocol import Refusal, cursor_of
 from ..runtime import mounted, open_session
 from ..sessions import recorded_cwd
 from ..shell import run_shell
-from ..wire import as_obj
+from ..wire import as_obj, as_str
 from .cards import CARD_EVENTS, presentation_of
 from .frontend import AskDesk
 from .projections import commands_of, readings_of, screens_of
@@ -644,7 +644,7 @@ class Supervisor:
             # mid-ladder does not start the count over and retry forever).
             root.recovery = recovery_of(session)
             root.commands.update(
-                str(event.data.get("command", ""))
+                as_str(event.data.get("command"))
                 for event in session.events_from(0)
                 if event.type == COMMAND_ACCEPTED
             )

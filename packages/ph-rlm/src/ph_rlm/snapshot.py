@@ -47,7 +47,7 @@ from ph.cordis import Context, plugin
 from ph.keys import AGENTS, COMPACTION, SESSIONS, SPILL_STORE
 from ph.seams.compaction import CompactionNote
 from ph.seams.spill import SpillClaim
-from ph.session import Session
+from ph.session import Session, as_str
 from ph.wire import WireModel
 
 from .keys import KERNEL_SNAPSHOTS, PYTHON_RUNTIME
@@ -120,7 +120,7 @@ def fold_namespace(session: Session, namespace: str) -> dict[str, SnapshotRecord
     for event in session.events:
         if event.type != "kernel/snapshot":
             continue
-        if str(event.data.get("namespace")) != namespace:
+        if as_str(event.data.get("namespace")) != namespace:
             continue
         try:
             record = SnapshotRecord.model_validate(event.data.get("record"))
@@ -369,7 +369,7 @@ async def apply(ctx: Context, config: Config) -> None:
             SpillClaim(
                 label="rlm-kernel-snapshot",
                 event_type="kernel/snapshot",
-                owner=lambda data: _owner(str(data["namespace"])),
+                owner=lambda data: _owner(as_str(data["namespace"])),
                 locator=lambda data: (data.get("record") or {}).get("locator"),
             ),
             scope=scope,

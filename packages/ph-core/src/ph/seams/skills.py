@@ -44,6 +44,7 @@ from ..cordis import (
     safe_yaml_load,
 )
 from ..keys import SKILLS, SYSTEM_PROMPT, TOOLS
+from ..session import as_str
 from ..system_prompt.assembly import ORDER_TOOL_GUIDANCE, AssembleContext, PromptSection
 from ..tools.definition import ToolModel, ToolOutput, ToolRunContext, define_tool, text_content
 from ..tools.presentation import simple_views
@@ -527,8 +528,8 @@ def read_skill(path: Path, *, source: str = "skills-progressive") -> Skill | Non
         log.warning("ph.seams.skills: %s frontmatter is not a mapping", path)
         return None
 
-    name = str(front.get("name") or "")
-    description = str(front.get("description") or "")
+    name = as_str(front.get("name"))
+    description = as_str(front.get("description"))
     if NAME_PATTERN.match(name) is None:
         log.warning("ph.seams.skills: %s has an invalid name %r", path, name)
         return None
@@ -557,12 +558,12 @@ def _optional_front(front: dict[str, Any], path: Path) -> dict[str, Any] | None:
     Kebab-case on the wire and snake_case on the model, which is the convention
     the format already follows for every multi-word key an author writes.
     """
-    version = str(front.get("version") or "")
+    version = as_str(front.get("version"))
     if version and VERSION_PATTERN.match(version) is None:
         log.warning("ph.seams.skills: %s has an unusable version %r", path, version)
         return None
 
-    hint = str(front.get("argument-hint") or "")
+    hint = as_str(front.get("argument-hint"))
     if len(hint) > ARGUMENT_HINT_MAX:
         log.warning(
             "ph.seams.skills: %s has an argument-hint over %s chars", path, ARGUMENT_HINT_MAX
@@ -650,7 +651,7 @@ def _parameter_schema(declared: Any, path: Path) -> dict[str, Any] | None:
         if not isinstance(spec, dict):
             log.warning("ph.seams.skills: %s parameter %r is not a mapping", path, name)
             return None
-        kind = PARAMETER_TYPES.get(str(spec.get("type") or "string"))
+        kind = PARAMETER_TYPES.get(as_str(spec.get("type"), "string"))
         if kind is None:
             log.warning(
                 "ph.seams.skills: %s parameter %r has an unsupported type %r",
@@ -661,7 +662,7 @@ def _parameter_schema(declared: Any, path: Path) -> dict[str, Any] | None:
             return None
         entry: dict[str, Any] = {"type": kind}
         if spec.get("hint"):
-            entry["description"] = str(spec["hint"])
+            entry["description"] = as_str(spec["hint"])
         choices = spec.get("enum")
         if choices is not None:
             if not isinstance(choices, list) or not choices:
@@ -749,7 +750,7 @@ def rendered_skill(body: str, skill: Skill, arguments: dict[str, Any]) -> tuple[
         if name not in declared:
             missing.append(name)
             return found.group(0)
-        return str(values.get(name, ""))
+        return as_str(values.get(name))
 
     filled = PLACEHOLDER.sub(fill, body)
     steps = [PLACEHOLDER.sub(fill, step) for step in skill.steps]

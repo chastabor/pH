@@ -58,7 +58,7 @@ from pydantic import Field
 from ph.cordis import Context, plugin
 from ph.keys import FS, SYSTEM_PROMPT, TOOLS
 from ph.llm.types import ContentBlock
-from ph.session import Session
+from ph.session import Session, as_str
 from ph.system_prompt.assembly import ORDER_TOOL_GUIDANCE, PromptSection
 from ph.tools import ToolModel, define_tool, text_content
 from ph.wire import WireModel
@@ -408,8 +408,8 @@ class ContextService:
         if cached is not None:
             return cached
         previous = session.latest(LOADED)
-        if previous is not None and str(previous.data.get("digest")) == self.corpus.digest:
-            note = str(previous.data.get("note") or "")
+        if previous is not None and as_str(previous.data.get("digest")) == self.corpus.digest:
+            note = as_str(previous.data.get("note"))
             self._notes[session.id] = note
             return note
 

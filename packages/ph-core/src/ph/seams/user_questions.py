@@ -41,7 +41,7 @@ from typing import Any
 
 from ..cordis import Context, Disposer, events, plugin
 from ..keys import USER_QUESTIONS
-from ..session import Session
+from ..session import Session, as_str
 from ..wire import WireModel
 from ._registry import claim_entry
 
@@ -112,7 +112,7 @@ def pending_questions(session: Session) -> list[PendingQuestion]:
     """
     asked: dict[str, PendingQuestion] = {}
     for event in session.events:
-        ask_id = str(event.data.get("askId", ""))
+        ask_id = as_str(event.data.get("askId"))
         if event.type == "question/asked":
             # `model_validate` off the event data, the way `RequestContext` and
             # `Message` are already rehydrated: `WireModel` owns the camelCase

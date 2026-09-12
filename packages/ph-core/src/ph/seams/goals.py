@@ -43,7 +43,7 @@ from pydantic import Field
 from ..cordis import Context, plugin
 from ..keys import GOALS
 from ..llm.types import TokenUsage
-from ..session import Session, SessionFoldCache
+from ..session import Session, SessionFoldCache, as_str
 from ..wire import WireModel, literal_lookup
 from .invariants import contribute_fold_cache
 
@@ -213,19 +213,19 @@ def fold_goal_event(found: dict[str, GoalState], event: Any) -> None:
     # event belong to" and the service's "is one open" are the same question
     # over the same order — asked once, here, rather than written twice and
     # required to agree.
-    current = found.get(str(data.get("id", ""))) if data.get("id") else open_goal(found)
+    current = found.get(as_str(data.get("id"))) if data.get("id") else open_goal(found)
     if current is None:
         return
     if event.type == CONTINUED:
         current.spent.continuations += 1
     elif event.type == GATE:
-        current.gates[(str(data.get("gate", "")), str(data.get("tree", "")))] = bool(
+        current.gates[(as_str(data.get("gate")), as_str(data.get("tree")))] = bool(
             data.get("passed")
         )
     elif event.type == SETTLED:
         # Through the lookup, the way every other `Literal` read off a payload
         # is checked. `literal_lookup` says why.
-        current.outcome = GOAL_OUTCOMES.get(str(data.get("outcome", "")))
+        current.outcome = GOAL_OUTCOMES.get(as_str(data.get("outcome")))
     elif event.type == "turn/end":
         current.spent.turns += 1
     elif "usage" in data:

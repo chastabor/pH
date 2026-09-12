@@ -31,7 +31,7 @@ from ..agent.types import AgentHandle
 from ..cancel import CancelToken, is_cancelled
 from ..cordis import Context, Disposer, events, plugin
 from ..keys import APPROVAL
-from ..session import Session
+from ..session import Session, as_str
 from ..wire import WireModel, literal_lookup
 
 __all__ = [
@@ -179,7 +179,7 @@ def answer_from_wire(raw: Any) -> ApprovalAnswer:
         if kind == "edited":
             return Edited(arguments=raw.get("arguments"))
         if kind == "responded":
-            return Responded(message=str(raw.get("message", "")))
+            return Responded(message=as_str(raw.get("message")))
     return "unavailable"
 
 
@@ -257,16 +257,16 @@ def pending_approvals(session: Session) -> list[PendingApproval]:
     asked: dict[str, PendingApproval] = {}
     for event in session.events:
         if event.type == "approval/asked":
-            key = str(event.data.get("callId") or event.data.get("toolName"))
+            key = as_str(event.data.get("callId") or event.data.get("toolName"))
             call_id, reason = event.data.get("callId"), event.data.get("reason")
             asked[key] = PendingApproval(
                 seq=event.seq,
-                tool_name=str(event.data.get("toolName", "")),
+                tool_name=as_str(event.data.get("toolName")),
                 call_id=call_id if isinstance(call_id, str) else None,
                 reason=reason if isinstance(reason, str) else None,
             )
         elif event.type == "approval/decided":
-            asked.pop(str(event.data.get("callId") or event.data.get("toolName")), None)
+            asked.pop(as_str(event.data.get("callId") or event.data.get("toolName")), None)
     return sorted(asked.values(), key=lambda pending: pending.seq)
 
 

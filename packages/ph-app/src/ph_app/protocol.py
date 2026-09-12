@@ -37,6 +37,7 @@ from typing import Any, Literal, NotRequired, TypeAlias, TypedDict
 
 from pydantic import Field, ValidationError
 
+from ph.session import as_str
 from ph.wire import WireModel, validation_errors
 
 __all__ = [
@@ -247,7 +248,7 @@ class DaemonError(RuntimeError):
         """Rebuild the refusal from an error frame."""
         data = error.get("data")
         reason = data.get("reason", "") if isinstance(data, dict) else ""
-        return cls(str(error.get("message", "the daemon refused")), str(reason))
+        return cls(as_str(error.get("message"), "the daemon refused"), str(reason))
 
 
 class DaemonGone(DaemonError):
@@ -414,7 +415,7 @@ def parse_cursor(text: str, current: Any) -> Cursor | None:
     generation, separator, sequence = text.rpartition(":")
     if not separator:
         fields = current if isinstance(current, dict) else {}
-        generation, sequence = str(fields.get("generation", "")), text
+        generation, sequence = as_str(fields.get("generation")), text
     if not (sequence.isdigit() and generation.isdigit()):
         return None
     return Cursor(generation=generation, sequence=int(sequence))
@@ -581,7 +582,7 @@ async def respond(request_frame: dict[str, Any], dispatch: Dispatch) -> ReplyFra
     method whose answer nobody wants (`shutdown`), and its body still has to run.
     """
     request_id: int | str | None = request_frame.get("id")
-    method = str(request_frame.get("method", ""))
+    method = as_str(request_frame.get("method"))
     params = request_frame.get("params") or {}
     try:
         answer = await dispatch(method, params)

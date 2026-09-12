@@ -96,7 +96,7 @@ from ph.session import (
     thaw_json,
 )
 from ph.session.events import SurfaceReplace
-from ph.session.json import as_obj, as_seq, dumps
+from ph.session.json import as_obj, as_seq, as_str, dumps
 from ph.text import count_of
 from ph.wire import WireModel
 
@@ -494,7 +494,7 @@ def _elided_arguments(
     arguments = block.get("arguments")
     if not isinstance(arguments, str) or len(arguments) <= max_length:
         return None
-    if not elides(str(block.get("name"))):
+    if not elides(as_str(block.get("name"))):
         return None
     shorter = truncated_arguments(arguments, max_length)
     return None if shorter is None else (shorter, len(arguments))

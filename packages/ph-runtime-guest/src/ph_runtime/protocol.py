@@ -38,6 +38,7 @@ __all__ = [
     "PROTOCOL_FD",
     "PROTOCOL_VERSION",
     "UNPRODUCED_FRAMES",
+    "as_str",
     "truncation_marker",
 ]
 
@@ -116,6 +117,23 @@ FRAME_FIELDS: Final[dict[str, tuple[frozenset[str], frozenset[str]]]] = {
 Data rather than docstrings, because this is what the mirror test compares. A
 field added on one side and not the other is a failing assertion instead of a
 frame the other half silently ignores."""
+
+
+def as_str(value: object, default: str = "") -> str:
+    """A JSON string, or `default` — the guest's copy of `ph.session.as_str`.
+
+    **Copied rather than imported, for `truncation_marker`'s reason one line
+    down**: this package ships into the guest venv with `dill` as its only
+    dependency, so it cannot reach `ph.session` and a gate that demanded the
+    import would demand the dependency this package exists to not have.
+
+    Unlike `truncation_marker` this needs no mirror test: it has no wire
+    contract to keep byte-identical with the host, only a policy — a value that
+    is not a string is not a string — and a copy that drifts from that would be
+    visibly wrong on its own. `runner.py` was already narrowing frames by hand
+    (`isinstance(run_id, int)`) with no name for what it was doing.
+    """
+    return value if isinstance(value, str) else default
 
 
 def truncation_marker(dropped: int, cap: int) -> str:

@@ -53,6 +53,7 @@ from ph.session import (
     Session,
     SessionEvent,
     SessionFoldCache,
+    as_str,
     derive_event_message,
 )
 from ph.tools.definition import Deny, ToolExecution
@@ -326,10 +327,10 @@ def _extend(previous: Counts, session: Session, from_seq: int) -> Counts:
             session_steps += 1
             turn_steps += 1
         elif event.type in ("tool/call", "tool/code-dispatch-start"):
-            name = str(event.data.get("name") or "")
+            name = as_str(event.data.get("name"))
             # `callId` for a model's call, `subCallId` for a dispatch: the id the
             # settling record will cite, so the breaker can pair them.
-            call_id = str(event.data.get("callId") or event.data.get("subCallId") or "")
+            call_id = as_str(event.data.get("callId") or event.data.get("subCallId"))
             if call_id:
                 names[call_id] = name
             session_tools += 1
@@ -376,7 +377,7 @@ def _result_facts(event: SessionEvent) -> tuple[str, bool]:
     start branch unified the same way, on `callId or subCallId`.
     """
     if event.type == "tool/code-dispatch":
-        return str(event.data.get("subCallId") or ""), bool(event.data.get("isError"))
+        return as_str(event.data.get("subCallId")), bool(event.data.get("isError"))
     message = derive_event_message(event)
     block = next(
         (one for one in (message.content if message else ()) if isinstance(one, ToolResultBlock)),

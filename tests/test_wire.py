@@ -40,17 +40,15 @@ from __future__ import annotations
 
 import importlib
 import inspect
-import pathlib
 import pkgutil
 from typing import Any
 
 import pytest
 from pydantic import BaseModel
 from pydantic.alias_generators import to_camel
+from workspace_layout import workspace_packages
 
 from ph.wire import WireModel, wire_alias
-
-REPO = pathlib.Path(__file__).resolve().parent.parent
 
 
 def _workspace_packages() -> list[str]:
@@ -59,16 +57,11 @@ def _workspace_packages() -> list[str]:
     Discovered, not listed. A list is exactly what went stale here — this file
     walked `ph` and said "every pH model" — and a list would go stale again the
     next time a package is added, in the same silent direction: the gate keeps
-    passing while covering less.
-
-    `packages/<dist>/src/<package>` is the layout every distribution here uses,
-    and `pyproject.toml` states it; a package that is present but does not import
-    fails below rather than being skipped, because a skip is how 113 models went
-    unchecked.
+    passing while covering less. The walk itself is `workspace_layout`'s, because
+    a second gate needed it and two implementations of "discovered" drift the
+    same way a list does.
     """
-    return sorted(
-        path.name for path in (REPO / "packages").glob("*/src/*") if (path / "__init__.py").exists()
-    )
+    return [package.name for package in workspace_packages()]
 
 
 def _models_in(package: str) -> dict[str, type[BaseModel]]:

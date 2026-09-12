@@ -50,7 +50,7 @@ from .channel import Channel
 from .errors import RunStopped, ToolFailed
 from .lifecycle import die_with_parent
 from .limits import CpuBudgetExceeded, apply_limits, arm_cpu_budget
-from .protocol import PROTOCOL_VERSION, truncation_marker
+from .protocol import PROTOCOL_VERSION, as_str, truncation_marker
 from .proxies import build_namespaces
 from .skill import UnavailableSkill, wrap_skill_module
 
@@ -242,7 +242,7 @@ class Runner:
             )
             return
         self._run = asyncio.get_running_loop().create_task(
-            self._execute(run_id, str(frame.get("program", "")))
+            self._execute(run_id, as_str(frame.get("program")))
         )
 
     def _resolve(self, frame: dict[str, Any]) -> None:
@@ -253,11 +253,11 @@ class Runner:
         if frame.get("ok"):
             future.set_result(frame.get("value"))
             return
-        message = str(frame.get("message") or "the call was refused")
+        message = as_str(frame.get("message"), "the call was refused")
         if frame.get("fatal"):
             future.set_exception(RunStopped(message))
         else:
-            future.set_exception(ToolFailed(str(frame.get("name") or "the call"), message))
+            future.set_exception(ToolFailed(as_str(frame.get("name"), "the call"), message))
 
     def _restore(self, frame: dict[str, Any]) -> None:
         variables = frame.get("variables")

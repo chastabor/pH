@@ -55,6 +55,7 @@ from typing import Any
 import anyio
 from anyio.abc import ByteStream
 
+from ph.session import as_str
 from ph.wire import WireModel
 
 from ..payloads import SessionAsk
@@ -344,7 +345,7 @@ class Peer:
         terminal is not the place to print the same traceback per event.
         """
         try:
-            self.on_notify(str(frame.get("method") or ""), frame.get("params") or {})  # type: ignore[misc]
+            self.on_notify(as_str(frame.get("method")), frame.get("params") or {})  # type: ignore[misc]
         except Exception:
             log.log(
                 logging.WARNING if not self._unwatchable else logging.DEBUG,

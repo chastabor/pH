@@ -65,7 +65,7 @@ from ph.llm.types import (
     attachment_of,
 )
 from ph.seams.uploads import FileHandle
-from ph.session import now_ms
+from ph.session import as_str, now_ms
 from ph.wire import WireModel
 
 from ._http import HttpClient, resolve_secret
@@ -302,7 +302,7 @@ class GoogleAdapter:
         resumed = await self._resume(ref)
         try:
             record = resumed if resumed is not None else await self._transfer(ref, content)
-            uri = str(record.get("uri") or "")
+            uri = as_str(record.get("uri"))
             if not uri:
                 raise LlmError("the files API returned no uri", "REQUEST_FAILED")
             record = await self._ready(record, ref.attachment_id)
@@ -407,16 +407,16 @@ class GoogleAdapter:
         work, so the useful thing is to forget it and fall back to the bytes,
         where a slow one is worth waiting for on the next step.
         """
-        name = str(record.get("name") or "")
+        name = as_str(record.get("name"))
         waited = 0
-        while str(record.get("state") or "ACTIVE") == "PROCESSING":
+        while as_str(record.get("state"), "ACTIVE") == "PROCESSING":
             if waited >= self.config.upload_ready_ms:
                 self._pending[attachment_id] = name
                 raise LlmError(f"{name} was still processing after the upload budget", "TIMEOUT")
             await anyio.sleep(UPLOAD_POLL_MS / 1000)
             waited += UPLOAD_POLL_MS
             record = _file_record(await self._file(name))
-        if str(record.get("state") or "") == "FAILED":
+        if as_str(record.get("state")) == "FAILED":
             self._pending.pop(attachment_id, None)
             raise LlmError(f"{name} could not be processed", "REQUEST_FAILED")
         return record
@@ -680,7 +680,7 @@ class _StreamState:
             streamed = _Call(
                 index=self._claim(),
                 id=f"call-{len(self.calls) + 1}",
-                name=str(call.get("name") or ""),
+                name=as_str(call.get("name")),
                 arguments=json.dumps(call.get("args") or {}),
             )
             self.calls.append(streamed)

@@ -68,7 +68,16 @@ from ph.tools import ToolCallView, ToolResult, ToolResultView
 from ph.tools.presentation import render_call_view, render_result_view
 
 from ..shell import shell_body
-from ..wire import as_int, as_obj, as_seq, media_labels, one_line, result_block, text_of_wire
+from ..wire import (
+    as_int,
+    as_obj,
+    as_seq,
+    as_str,
+    media_labels,
+    one_line,
+    result_block,
+    text_of_wire,
+)
 from .state import ChatItem, ItemRole, Surface, ToolCard, TuiState
 
 __all__ = [
@@ -235,9 +244,9 @@ class TuiEventAdapter:
         turn, step = as_int(event.data.get("turn")), as_int(event.data.get("step"))
         kind = chunk.get("type")
         if kind == "text-delta":
-            self._append_stream(turn, step, "assistant", str(chunk.get("text", "")), event.seq)
+            self._append_stream(turn, step, "assistant", as_str(chunk.get("text")), event.seq)
         elif kind == "reasoning-delta":
-            self._append_stream(turn, step, "thinking", str(chunk.get("text", "")), event.seq)
+            self._append_stream(turn, step, "thinking", as_str(chunk.get("text")), event.seq)
 
     def _append_stream(self, turn: int, step: int, role: ItemRole, text: str, seq: int) -> None:
         if not text:
@@ -304,10 +313,10 @@ class TuiEventAdapter:
     # --------------------------------------------------------------- tools --
 
     def _on_tool_call(self, event: SessionEvent, frame: Frame) -> None:
-        name = str(event.data.get("name"))
+        name = as_str(event.data.get("name"))
         card = self._card_row(
             ToolCard(
-                call_id=str(event.data.get("callId")),
+                call_id=as_str(event.data.get("callId")),
                 name=name,
                 arguments=str(event.data.get("arguments", "")),
                 title=name,
@@ -339,7 +348,7 @@ class TuiEventAdapter:
 
     def _on_tool_result(self, event: SessionEvent, frame: Frame) -> None:
         message = as_obj(event.data.get("message"))
-        call_id = str(as_obj(message.get("source")).get("callId"))
+        call_id = as_str(as_obj(message.get("source")).get("callId"))
         # One `tool_result` block carries both the text and the error flag; read
         # it once rather than indexing the content twice.
         result = result_block(message)
@@ -350,7 +359,7 @@ class TuiEventAdapter:
             return
         card.settled = True
         card.is_error = bool(result.get("isError"))
-        card.failure_kind = str(event.data.get("failureKind", ""))
+        card.failure_kind = as_str(event.data.get("failureKind"))
         card.body = body
         self._present_result(card, event.data.get("meta"), frame.view)
 
@@ -375,14 +384,14 @@ class TuiEventAdapter:
         card.details = dict(view.meta or {})
 
     def _on_tool_code_dispatch_start(self, event: SessionEvent, frame: Frame) -> None:
-        parent = self.state.card(str(event.data.get("parentCallId")))
+        parent = self.state.card(as_str(event.data.get("parentCallId")))
         if parent is None:
             return
-        name = str(event.data.get("name"))
+        name = as_str(event.data.get("name"))
         parent.dispatches.append(
             self.state.register_card(
                 ToolCard(
-                    call_id=str(event.data.get("subCallId")),
+                    call_id=as_str(event.data.get("subCallId")),
                     name=name,
                     arguments=one_line(json.dumps(thaw_json(event.data.get("arguments")))),
                     title=name,
@@ -391,7 +400,7 @@ class TuiEventAdapter:
         )
 
     def _on_tool_code_dispatch(self, event: SessionEvent, frame: Frame) -> None:
-        dispatch = self.state.card(str(event.data.get("subCallId")))
+        dispatch = self.state.card(as_str(event.data.get("subCallId")))
         if dispatch is None:
             return
         dispatch.settled = True
@@ -435,7 +444,7 @@ class TuiEventAdapter:
         self._row("ask", "notice", f"Approval requested for {event.data.get('toolName')}.", event)
 
     def _on_approval_decided(self, event: SessionEvent, frame: Frame) -> None:
-        outcome = str(event.data.get("outcome"))
+        outcome = as_str(event.data.get("outcome"))
         role: ItemRole = "notice" if outcome == "allowed-once" else "error"
         self._row("decided", role, f"{event.data.get('toolName')}: {outcome}", event)
 
@@ -464,7 +473,7 @@ class TuiEventAdapter:
         the event's own seq, because a person may run the same command twice and
         two cards is the truthful account of that.
         """
-        command = str(event.data.get("command", ""))
+        command = as_str(event.data.get("command"))
         self._card_row(
             ToolCard(
                 call_id=f"shell-{event.seq}",
@@ -494,7 +503,7 @@ class TuiEventAdapter:
         card.body = shell_body(event.data)
 
     def _on_question_asked(self, event: SessionEvent, frame: Frame) -> None:
-        header = str(event.data.get("header") or "").strip()
+        header = as_str(event.data.get("header")).strip()
         label = f"{header}: " if header else ""
         self._row("asked", "notice", f"{label}{event.data.get('question')}", event)
 
@@ -505,16 +514,16 @@ class TuiEventAdapter:
             # reads as the person having answered something invisible.
             self._row("answered", "notice", "No answer given.", event)
             return
-        self._row("answered", "user", str(event.data.get("answer", "")), event)
+        self._row("answered", "user", as_str(event.data.get("answer")), event)
 
     def _on_command_run(self, event: SessionEvent, frame: Frame) -> None:
-        argument = str(event.data.get("argument", "")).strip()
+        argument = as_str(event.data.get("argument")).strip()
         label = f"/{event.data.get('name')}" + (f" {argument}" if argument else "")
         self._row("cmd", "notice", label, event)
 
     def _on_command_done(self, event: SessionEvent, frame: Frame) -> None:
         if event.data.get("outcome") == "error":
-            detail = str(event.data.get("detail", "the command failed"))
+            detail = as_str(event.data.get("detail"), "the command failed")
             self._row("cmderr", "error", detail, event)
 
     def _on_llm_retry(self, event: SessionEvent, frame: Frame) -> None:
@@ -549,7 +558,7 @@ class TuiEventAdapter:
         not the end of the run, and without this the two are identical on screen
         — which makes a routine segment look like a session that stopped.
         """
-        continues = str(event.data.get("continues", ""))
+        continues = as_str(event.data.get("continues"))
         text = (
             f"Continued in session {continues} — this log ends here."
             if continues
@@ -571,7 +580,7 @@ class TuiEventAdapter:
         attempt, of = event.data.get("attempt", "?"), event.data.get("of", "?")
         seconds = as_int(event.data.get("delayMs")) / 1000
         restored = " after restoring the tree" if event.data.get("restored") else ""
-        reason = str(event.data.get("reason", "")).strip()
+        reason = as_str(event.data.get("reason")).strip()
         detail = f": {reason}" if reason else ""
         self._row(
             "retry",
@@ -589,7 +598,7 @@ class TuiEventAdapter:
         waits on indefinitely.
         """
         attempts = event.data.get("attempts", "several")
-        reason = str(event.data.get("reason", "")).strip() or "no reason recorded"
+        reason = as_str(event.data.get("reason")).strip() or "no reason recorded"
         self._row(
             "failed",
             "error",
@@ -634,8 +643,8 @@ class TuiEventAdapter:
         one command, and a notice that named a problem without its fix would
         send that reader to a search engine.
         """
-        advice = str(event.data.get("advice") or "")
-        reason = str(event.data.get("reason") or "removed")
+        advice = as_str(event.data.get("advice"))
+        reason = as_str(event.data.get("reason"), "removed")
         was = "was removed" if reason == "removed" else "was replaced by another daemon's"
         self._row(
             "unreachable",
@@ -674,8 +683,8 @@ class TuiEventAdapter:
         report work the run did not do — which is the failure this whole layer
         exists to make impossible.
         """
-        outcome = str(event.data.get("outcome", ""))
-        detail = str(event.data.get("detail", "")).strip()
+        outcome = as_str(event.data.get("outcome"))
+        detail = as_str(event.data.get("detail")).strip()
         said = {
             "achieved": "Goal achieved — every gate passed",
             "budget_limited": "Stopped: out of budget, with gates still failing",
@@ -711,7 +720,7 @@ class TuiEventAdapter:
         differently. Rejections are on the same row: an edit the harness refused
         is the interesting half.
         """
-        summary = str(event.data.get("summary") or "the harness")
+        summary = as_str(event.data.get("summary"), "the harness")
         edits = len(as_seq(event.data.get("appliedEdits")))
         rejected = len(as_seq(event.data.get("rejected")))
         rolled = event.data.get("rollbackOf")
@@ -734,7 +743,7 @@ class TuiEventAdapter:
         """
         if event.data.get("trigger") != "user":
             return
-        reason = str(event.data.get("reason") or "nothing to record")
+        reason = as_str(event.data.get("reason"), "nothing to record")
         self._row("harness", "notice", f"No refinement: {reason}", event)
 
     def _on_context_loaded(self, event: SessionEvent, frame: Frame) -> None:
@@ -744,7 +753,7 @@ class TuiEventAdapter:
         is the corpus having *changed* under a conversation that was told about
         it, or a source that could not be read.
         """
-        note = str(event.data.get("note") or "")
+        note = as_str(event.data.get("note"))
         if not note:
             return
         self._row("context", "notice", note, event)
@@ -769,7 +778,7 @@ class TuiEventAdapter:
     def _on_limits_exceeded(self, event: SessionEvent, frame: Frame) -> None:
         """Why the turn stopped (P4-04). The person's only account of it —
         `turn/end{blocked}` says that it stopped, not what stopped it."""
-        self._row("limits", "notice", str(event.data.get("message") or "Limit reached."), event)
+        self._row("limits", "notice", as_str(event.data.get("message"), "Limit reached."), event)
 
     def _on_sandbox_denied(self, event: SessionEvent, frame: Frame) -> None:
         """A boundary the sandbox held (P6-38), and the `/sandbox` line that lifts it.
@@ -781,7 +790,7 @@ class TuiEventAdapter:
         self._row(
             "sandbox",
             "notice",
-            str(event.data.get("message") or "The sandbox refused something."),
+            as_str(event.data.get("message"), "The sandbox refused something."),
             event,
         )
 
@@ -805,8 +814,8 @@ class TuiEventAdapter:
         items = [as_obj(one) for one in as_seq(event.data.get("attachments"))]
         if not items:
             return
-        names = ", ".join(str(one.get("name") or one.get("mime") or "?") for one in items)
-        reason = str(items[0].get("reason") or "this model cannot read it")
+        names = ", ".join(as_str(one.get("name") or one.get("mime"), "?") for one in items)
+        reason = as_str(items[0].get("reason"), "this model cannot read it")
         self._row("attachment", "notice", f"Not sent to the model: {names} — {reason}.", event)
 
     def _on_attachment_oversized(self, event: SessionEvent, frame: Frame) -> None:
@@ -821,7 +830,7 @@ class TuiEventAdapter:
         if not items:
             return
         first = items[0]
-        names = ", ".join(str(one.get("name") or one.get("mime") or "?") for one in items)
+        names = ", ".join(as_str(one.get("name") or one.get("mime"), "?") for one in items)
         self._row(
             "attachment",
             "notice",
@@ -839,7 +848,7 @@ class TuiEventAdapter:
         third party. The handle is deliberately absent — it is cache state, it
         expires, and it would read as something to keep.
         """
-        name = str(event.data.get("name") or event.data.get("attachmentId") or "?")
+        name = as_str(event.data.get("name") or event.data.get("attachmentId"), "?")
         self._row(
             "attachment",
             "notice",
@@ -856,7 +865,7 @@ class TuiEventAdapter:
         record-less by contrast — the summary row the replacement produces is
         already the visible half of a compaction that worked.
         """
-        reason = str(event.data.get("reason") or event.data.get("code") or "no reason given")
+        reason = as_str(event.data.get("reason") or event.data.get("code"), "no reason given")
         self._row("compaction", "notice", f"Compaction declined: {reason}", event)
 
     def _on_subagent_admitted(self, event: SessionEvent, frame: Frame) -> None:
@@ -867,9 +876,9 @@ class TuiEventAdapter:
         transcript later without it makes the child's eventual reply arrive from
         nowhere.
         """
-        name = str(event.data.get("name") or event.data.get("runId") or "child")
-        model = str(event.data.get("model") or "?")
-        access = str(event.data.get("grantedAccess") or "read")
+        name = as_str(event.data.get("name") or event.data.get("runId"), "child")
+        model = as_str(event.data.get("model"), "?")
+        access = as_str(event.data.get("grantedAccess"), "read")
         self._fold_roster(event)
         text = f"Delegated to {name} on {model} ({access} workspace)."
         reason = event.data.get("downgradeReason")
@@ -908,7 +917,7 @@ class TuiEventAdapter:
         the seam does not keep one.
         """
         self._fold_roster(event)
-        row = self.state.subagents.get(str(event.data.get("runId")))
+        row = self.state.subagents.get(as_str(event.data.get("runId")))
         if row is None:
             return
         usage = as_obj(event.data.get("childUsage"))
@@ -916,8 +925,8 @@ class TuiEventAdapter:
 
     def _on_subagent_deleted(self, event: SessionEvent, frame: Frame) -> None:
         """A revoked child. The transcript stays on disk; the row says it went."""
-        run_id = str(event.data.get("runId") or "child")
-        reason = str(event.data.get("reason") or "user")
+        run_id = as_str(event.data.get("runId"), "child")
+        reason = as_str(event.data.get("reason"), "user")
         # A tombstone, not a removal — the seam's rule, applied by the seam.
         self._fold_roster(event)
         self._row("subagent", "notice", f"Revoked child {run_id} ({reason}).", event)
@@ -939,7 +948,7 @@ class TuiEventAdapter:
         the tool produced far more, and the path is how they get the rest —
         the same thing the model was told.
         """
-        locator = str(event.data.get("locator") or "")
+        locator = as_str(event.data.get("locator"))
         size = as_int(event.data.get("bytes"))
         what = "Message" if event.type == "offload/input-spilled" else "Result"
         self._row(

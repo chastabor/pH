@@ -55,7 +55,7 @@ from ph.llm.types import (
 )
 from ph.seams.diagnostics import Diagnostic, contribute
 from ph.seams.uploads import FileHandle
-from ph.session import as_int, as_obj, as_seq, now_ms
+from ph.session import as_int, as_obj, as_seq, as_str, now_ms
 from ph.wire import WireModel
 
 from ._http import HttpClient, resolve_secret
@@ -263,7 +263,7 @@ class OpenAiCompatibleAdapter:
             data={"purpose": self.profile.upload_purpose},
             is_overflow=_is_overflow,
         )
-        handle = str(reply.get("id") or "")
+        handle = as_str(reply.get("id"))
         if not handle:
             raise LlmError("the files API returned no id", "REQUEST_FAILED")
         expires = reply.get("expires_at")
@@ -431,10 +431,10 @@ class _StreamState:
                     )
                 record = self.tool_calls[position]
                 if call.get("id"):
-                    record["id"] = str(call["id"])
+                    record["id"] = as_str(call["id"])
                 function = call.get("function") or {}
                 if function.get("name"):
-                    record["name"] = str(function["name"])
+                    record["name"] = as_str(function["name"])
                 fragment = function.get("arguments") or ""
                 record["arguments"] += fragment
                 out.append(

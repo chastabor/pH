@@ -21,6 +21,7 @@ from textual.widgets import Static
 
 from ph.seams.subagents import child_is_live
 from ph.seams.tui_status import StatusReading
+from ph.session import as_str
 from ph.text import thousands
 
 from ..state import CatalogEntry, TuiState
@@ -357,7 +358,7 @@ tick with work behind it and a tick without now look different.
 
 def _todo_line(todo: dict[str, Any]) -> str:
     """One entry, with the receipt when it is empty."""
-    glyph = TODO_GLYPHS.get(str(todo.get("status")), "○")
+    glyph = TODO_GLYPHS.get(as_str(todo.get("status")), "○")
     bare = todo.get("status") == "completed" and not todo.get("worked")
     return f"{glyph} {todo.get('content', '')}{NO_WORK_SEEN if bare else ''}"
 

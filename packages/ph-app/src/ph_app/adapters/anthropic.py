@@ -54,7 +54,7 @@ from ph.llm.types import (
     UsageChunk,
 )
 from ph.seams.uploads import FileHandle
-from ph.session import now_ms
+from ph.session import as_str, now_ms
 from ph.wire import WireModel
 
 from ._http import HttpClient, resolve_secret
@@ -279,7 +279,7 @@ class AnthropicAdapter:
             mime=ref.mime,
             is_overflow=_is_overflow,
         )
-        handle = str(reply.get("id") or "")
+        handle = as_str(reply.get("id"))
         if not handle:
             raise LlmError("the files API returned no id", "REQUEST_FAILED")
         return FileHandle(
@@ -418,15 +418,15 @@ class _StreamState:
         elif kind == "content_block_start":
             index = int(payload.get("index", 0))
             block = payload.get("content_block") or {}
-            block_type = str(block.get("type", "text"))
+            block_type = as_str(block.get("type"), "text")
             if block_type == "thinking":
                 self.blocks[index] = _Open(kind="reasoning")
                 out.append(BlockStart(index=index, block_type="reasoning"))
             elif block_type == "tool_use":
                 self.blocks[index] = _Open(
                     kind="tool-call",
-                    tool_id=str(block.get("id", "")),
-                    tool_name=str(block.get("name", "")),
+                    tool_id=as_str(block.get("id")),
+                    tool_name=as_str(block.get("name")),
                 )
                 out.append(BlockStart(index=index, block_type="tool-call"))
             else:
@@ -439,11 +439,11 @@ class _StreamState:
             if open_block is None:
                 return out
             if delta.get("type") == "thinking_delta":
-                fragment = str(delta.get("thinking", ""))
+                fragment = as_str(delta.get("thinking"))
                 open_block.text += fragment
                 out.append(ReasoningDelta(index=index, text=fragment))
             elif delta.get("type") == "input_json_delta":
-                fragment = str(delta.get("partial_json", ""))
+                fragment = as_str(delta.get("partial_json"))
                 open_block.arguments += fragment
                 out.append(
                     ToolCallDelta(
@@ -454,7 +454,7 @@ class _StreamState:
                     )
                 )
             else:
-                fragment = str(delta.get("text", ""))
+                fragment = as_str(delta.get("text"))
                 open_block.text += fragment
                 out.append(TextDelta(index=index, text=fragment))
         elif kind == "content_block_stop":

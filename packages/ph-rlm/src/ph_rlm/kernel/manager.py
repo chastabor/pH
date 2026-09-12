@@ -65,7 +65,7 @@ from ph.seams.diagnostics import Diagnostic, contribute
 from ph.seams.sandbox import ConfinedArgv, SandboxPolicy
 from ph.seams.subprocess import first_line, scrub_env
 from ph.seams.workspace import workspace_of, workspace_policy
-from ph.session.json import thaw_json
+from ph.session.json import as_str, thaw_json
 from ph.tools.code_mode import CodeRunFailure, ToolCallError
 from ph.tools.errors import error_message
 from ph.wire import WireModel
@@ -502,7 +502,7 @@ class Kernel:
                 self.applied_limits = frame["limits"]
                 return None
             if frame["type"] == "fault":
-                return str(frame["message"])
+                return as_str(frame["message"])
             # Readable, and still not one of the two frames that exist before the
             # guest is ready. Looping here is how a `log` or `done` arriving early
             # became the same silent `boot_timeout` an undecodable line did.
@@ -770,7 +770,7 @@ class Kernel:
         error = frame.get("error")
         if isinstance(error, dict):
             settled = active.settle(
-                error=str(error.get("message") or error.get("kind") or "the program failed")
+                error=as_str(error.get("message") or error.get("kind"), "the program failed")
             )
         else:
             settled = active.settle(value=frame.get("value"))

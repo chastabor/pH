@@ -38,6 +38,7 @@ __all__ = [
     "as_int",
     "as_obj",
     "as_seq",
+    "as_str",
     "describe",
     "first",
     "index_at_or_before",

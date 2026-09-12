@@ -17,6 +17,8 @@ from dataclasses import dataclass, field
 from enum import IntFlag
 from typing import Any, Literal, TypeAlias
 
+from ph.session import as_str
+
 __all__ = [
     "CatalogEntry",
     "ChatItem",
@@ -228,10 +230,10 @@ class TuiState:
             row = self.subagents.get(run_id)
             if row is None:
                 row = self.subagents[run_id] = SubagentRow(run_id=run_id)
-            row.name = str(entry.get("name") or run_id)
-            row.status = str(entry.get("status") or "queued")
-            row.model = str(entry.get("model") or "")
-            row.cause = str(entry.get("cause") or "")
+            row.name = as_str(entry.get("name") or run_id)
+            row.status = as_str(entry.get("status"), "queued")
+            row.model = as_str(entry.get("model"))
+            row.cause = as_str(entry.get("cause"))
             row.deleted = bool(entry.get("deleted"))
 
     # ------------------------------------------------------------------ rows --

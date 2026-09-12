@@ -54,6 +54,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from ph.session import as_str
+
 from ._chunk import Chunk
 
 __all__ = ["CALIBRATION_SAMPLE", "IndexMismatch", "Record", "TextIndex"]
@@ -169,7 +171,7 @@ class TextIndex:
                 f"{self.sidecar_path} is format {version}, and this row reads {FORMAT}; "
                 "delete the directory to rebuild"
             )
-        stored = str(raw.get("model", ""))
+        stored = as_str(raw.get("model"))
         if stored != self.model:
             raise IndexMismatch(
                 f"{self.root} was built with embedder {stored!r} and this deployment "
@@ -177,17 +179,17 @@ class TextIndex:
                 "other, so delete the directory and re-index"
             )
         self._next_id = int(raw.get("next_id", 1))
-        self._token = str(raw.get("vcs", ""))
+        self._token = as_str(raw.get("vcs"))
         self._vcs_ids = {str(path): str(one) for path, one in (raw.get("vcs_ids") or {}).items()}
         if self.index_path.exists():
             self._index = _turbovec().IdMapIndex.load(str(self.index_path))
         held = {
             record["id"]: Record(
                 id=int(record["id"]),
-                path=str(record["path"]),
+                path=as_str(record["path"]),
                 start_line=int(record["start_line"]),
                 end_line=int(record["end_line"]),
-                text=str(record["text"]),
+                text=as_str(record["text"]),
             )
             for record in raw.get("records", [])
         }

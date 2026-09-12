@@ -31,7 +31,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from ..session import SessionEvent, as_int, as_obj, as_seq
+from ..session import SessionEvent, as_int, as_obj, as_seq, as_str
 from ..session.json import freeze_json_value
 
 __all__ = [
@@ -94,14 +94,14 @@ def interrupted_turn_closers(events: Sequence[SessionEvent]) -> list[SessionEven
             content = as_seq(as_obj(event.data.get("message")).get("content"))
             for block in (as_obj(one) for one in content):
                 if block.get("type") == "tool-call":
-                    pending[str(block.get("id"))] = _Pending(step=as_int(event.data.get("step")))
+                    pending[as_str(block.get("id"))] = _Pending(step=as_int(event.data.get("step")))
         elif event.type == "tool/call":
-            entry = pending.get(str(event.data.get("callId")))
+            entry = pending.get(as_str(event.data.get("callId")))
             if entry is not None:
                 entry.call_seq = event.seq
         elif event.type == "tool/result":
             source = as_obj(as_obj(event.data.get("message")).get("source"))
-            pending.pop(str(source.get("callId")), None)
+            pending.pop(as_str(source.get("callId")), None)
 
     if open_turn is None or not events:
         return []

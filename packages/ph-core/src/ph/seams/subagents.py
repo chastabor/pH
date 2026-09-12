@@ -38,7 +38,7 @@ from pydantic import Field
 from ..agent.types import AgentDriver
 from ..cordis import Context, Disposer, Running, plugin, running
 from ..keys import AGENTS, SESSIONS, SKILLS, SUBAGENT_PRESETS, SUBAGENTS, SYSTEM_PROMPT, TOOLS
-from ..session import Session, SessionFoldCache
+from ..session import Session, SessionFoldCache, as_str
 from ..system_prompt.assembly import PromptSection
 from ..tools.registry import ToolRestriction
 from ..wire import WireModel
@@ -165,7 +165,7 @@ def child_is_live(row: Mapping[str, Any]) -> bool:
     """
     if row.get("deleted"):
         return False
-    return str(row.get("status", "queued")) not in SETTLED_STATUSES
+    return as_str(row.get("status"), "queued") not in SETTLED_STATUSES
 
 
 """A child's lifecycle, as the parent's roster and the TUI panel see it.
@@ -458,6 +458,18 @@ class SubagentProvider(Protocol):
     """
 
     async def start(self, request: SubagentRequest) -> SubagentRun: ...
+
+
+def _optional(row: Mapping[str, Any], key: str) -> str | None:
+    """One optional string off a roster row: the value, or `None` for absent.
+
+    `None` and not `""`, because these feed `SubagentRequest`'s optional fields
+    where the two mean different things — absent inherits from the parent, empty
+    would be a name of no characters. Six fields on the readmission path spelled
+    this out as `as_str(row.get(k)) or None`, which is one typo'd key away from
+    reading as a deliberate `None`.
+    """
+    return as_str(row.get(key)) or None
 
 
 @dataclass(frozen=True, slots=True)
@@ -974,21 +986,21 @@ class SubagentService:
         self, parent: AgentDriver, run_id: str, row: Mapping[str, Any]
     ) -> SubagentRun | None:
         """One child, through the admission path it originally took."""
-        owner = str(row.get("owner") or "")
+        owner = as_str(row.get("owner"))
         name = self.resolve(owner or None)
         entry = self._providers.get(name or "")
         if entry is None or not isinstance(entry.provider, ReadmittingProvider):
             return None
         request = self.resolve_preset(
             SubagentRequest(
-                prompt=str(row.get("prompt") or ""),
+                prompt=as_str(row.get("prompt")),
                 parent=parent,
-                name=str(row.get("name") or "") or None,
-                provider=str(row.get("modelProvider") or "") or None,
-                model=str(row.get("model") or "") or None,
-                reasoning_effort=str(row.get("reasoningEffort") or "") or None,
+                name=_optional(row, "name"),
+                provider=_optional(row, "modelProvider"),
+                model=_optional(row, "model"),
+                reasoning_effort=_optional(row, "reasoningEffort"),
                 access=cast(Access, row.get("requestedAccess") or "read"),
-                preset=str(row.get("preset") or "") or None,
+                preset=_optional(row, "preset"),
                 # `None` inherits everything, which is what an absent key means —
                 # and what a log written before the narrowing was recorded says.
                 skills=None if row.get("skills") is None else tuple(row["skills"]),
@@ -1003,7 +1015,7 @@ class SubagentService:
             run = await entry.provider.readmit(
                 request,
                 run_id=run_id,
-                session_id=str(row.get("sessionId") or ""),
+                session_id=as_str(row.get("sessionId")),
                 # How many times this child has *already* been started, which is
                 # what tells a restart from a first run — and it is `starts`,
                 # never `attempts`: progress clears the ladder, so a child that
@@ -1025,7 +1037,7 @@ class SubagentService:
         Asked *before* a child is re-queued, so the sweep never labels one
         `queued` that nothing will ever pick up — see `resume_children`.
         """
-        name = self.resolve(str(row.get("owner") or "") or None)
+        name = self.resolve(_optional(row, "owner"))
         entry = self._providers.get(name or "")
         if entry is None or not isinstance(entry.provider, ReadmittingProvider):
             return None
@@ -1240,7 +1252,7 @@ def fold_subagent_event(roster: dict[str, dict[str, Any]], event: Any) -> None:
     # costs a mapping get and a string per event.
     if event.type not in _ROSTER_TYPES:
         return
-    run_id = str(event.data.get("runId"))
+    run_id = as_str(event.data.get("runId"))
     if event.type == ADMITTED:
         # `queued` by default: `to_wire()` deliberately omits status, and the
         # first `subagent/status` comes from a detached job — so without this
@@ -1401,7 +1413,7 @@ def _name_in(roster: dict[str, dict[str, Any]], agent_id: str) -> str:
     """The name a folded roster gives one session, or the id."""
     for row in roster.values():
         if row.get("sessionId") == agent_id:
-            return str(row.get("name") or agent_id)
+            return as_str(row.get("name") or agent_id)
     return agent_id
 
 

@@ -38,7 +38,7 @@ from typing import Any, Literal, TypeAlias
 from ..cordis import Context, plugin
 from ..keys import SCHEDULE
 from ..paths import resolve_roots
-from ..session import Session, SessionFoldCache, as_int, now_ms
+from ..session import Session, SessionFoldCache, as_int, as_str, now_ms
 from ..wire import WireModel
 from .invariants import contribute_fold_cache
 from .schedule_index import ScheduleIndex
@@ -151,11 +151,11 @@ def schedules(session: Session) -> dict[str, ScheduleState]:
             schedule = Schedule.model_validate(dict(data))
             found[schedule.id] = ScheduleState(schedule=schedule, created_at=int(event.time))
         elif event.type == CANCELLED:
-            state = found.get(str(data.get("id", "")))
+            state = found.get(as_str(data.get("id")))
             if state is not None:
                 state.cancelled = True
         elif event.type == TICK:
-            state = found.get(str(data.get("id", "")))
+            state = found.get(as_str(data.get("id")))
             if state is not None:
                 state.last_tick = as_int(data.get("dueAt"))
     return found

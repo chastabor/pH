@@ -53,7 +53,7 @@ from pydantic import Field
 from ..cordis import Context, Disposer, Running, plugin, running
 from ..keys import AGENTS, SANDBOX, TUI_STATUS
 from ..paths import canonical
-from ..session import Session
+from ..session import Session, as_str
 from ..tools.errors import FailureKind, HarnessError
 from ..wire import WireModel, literal_lookup
 from ._registry import claim_slot, contribute_item
@@ -579,7 +579,7 @@ class SandboxSeam:
         if session is not None:
             event = session.latest("sandbox/mode")
             if event is not None:
-                return SANDBOX_MODES.get(str(event.data.get("mode", "")), self.default_mode)
+                return SANDBOX_MODES.get(as_str(event.data.get("mode")), self.default_mode)
         return self.default_mode
 
     def set_mode(self, session: Session, mode: SandboxMode) -> None:

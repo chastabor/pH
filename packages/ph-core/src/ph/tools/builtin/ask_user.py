@@ -32,6 +32,7 @@ from pydantic import Field
 from ...cordis import Context, plugin
 from ...keys import TOOLS, USER_QUESTIONS
 from ...seams.user_questions import UserQuestion
+from ...session import as_str
 from ..definition import ToolModel, ToolOutput, ToolRunContext, define_tool, text_content
 from ..presentation import ToolCallView, ToolResultView
 
@@ -106,7 +107,7 @@ async def apply(ctx: Context, config: None) -> None:
             output=ToolOutput(
                 schema=AskUserValue,
                 render=lambda args, value: text_content(
-                    str(value["answer"]) if value["answered"] else UNATTENDED
+                    as_str(value["answer"]) if value["answered"] else UNATTENDED
                 ),
             ),
             execute=ask_user,
@@ -114,11 +115,11 @@ async def apply(ctx: Context, config: None) -> None:
             # costs is a person's attention, which no gate can give back.
             is_irreversible=False,
             present_call=lambda args: ToolCallView(
-                title=str(args.get("header") or "Question"),
+                title=as_str(args.get("header"), "Question"),
                 input=str(args.get("question", "")),
             ),
             present_result=lambda args, result: ToolResultView(
-                title=str(args.get("header") or "Question"),
+                title=as_str(args.get("header"), "Question"),
                 subtitle=str(args.get("question", ""))[:120],
                 is_error=result.is_error,
             ),

@@ -19,6 +19,7 @@ from pydantic import Field
 from ...cordis import Context, plugin
 from ...keys import SHELL, TOOLS
 from ...llm.types import ContentBlock
+from ...session import as_str
 from ...text import truncation_marker
 from ..definition import ToolModel, ToolOutput, ToolRunContext, define_tool, text_content
 from ..presentation import ToolCallView, ToolResultView
@@ -113,12 +114,12 @@ async def apply(ctx: Context, config: None) -> None:
             is_irreversible=True,
             present_call=lambda args: ToolCallView(
                 card="terminal",
-                title=str(args.get("description") or "Run command"),
+                title=as_str(args.get("description"), "Run command"),
                 input=str(args.get("command", "")),
             ),
             present_result=lambda args, result: ToolResultView(
                 card="terminal",
-                title=str(args.get("description") or "Run command"),
+                title=as_str(args.get("description"), "Run command"),
                 subtitle=str(args.get("command", ""))[:120],
                 is_error=result.is_error,
             ),

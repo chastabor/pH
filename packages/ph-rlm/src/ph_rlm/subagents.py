@@ -73,7 +73,7 @@ from ph.seams.subagents import (
 )
 from ph.seams.workspace import discards_writes, project_access, workspace_survivors
 from ph.session import Session, SessionEvent, derive_event_message
-from ph.session.json import thaw_json
+from ph.session.json import as_str, thaw_json
 from ph.wire import WireModel
 
 from .keys import RLM_CHILDREN
@@ -227,7 +227,7 @@ class RlmChildProvider:
 
         run_id = f"child-{secrets.token_hex(6)}"
         taken = [
-            str(row.get("name"))
+            as_str(row.get("name"))
             for row in self.ctx.require(SUBAGENTS).roster(parent_session).values()
         ]
         name = self._resolve_name(request.name, prompt, run_id, taken)

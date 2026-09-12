@@ -40,7 +40,7 @@ from ph.session import Session, SessionEvent
 from ph.tools import ToolResult
 from ph.tools.presentation import CARD_VIEWS, render_call_view, render_result_view
 
-from ..wire import as_obj, result_block
+from ..wire import as_obj, as_str, result_block
 
 __all__ = ["CARD_EVENTS", "presentation_of"]
 
@@ -62,14 +62,14 @@ def presentation_of(tools: Any, session: Session, event: SessionEvent) -> dict[s
     the log alone.
     """
     if event.type == "tool/call":
-        view = render_call_view(tools, str(event.data.get("name", "")), event.data.get("arguments"))
+        view = render_call_view(tools, as_str(event.data.get("name")), event.data.get("arguments"))
         return None if view is None else view.to_wire()
     call = _call_of(session, event)
     if call is None:
         return None
     settled = render_result_view(
         tools,
-        str(call.data.get("name", "")),
+        as_str(call.data.get("name")),
         call.data.get("arguments"),
         ToolResult(
             content=(),

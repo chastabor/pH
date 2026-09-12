@@ -48,7 +48,7 @@ from ..agent.types import AgentHandle
 from ..cordis import Context, Disposer, Running, maybe_await, plugin, running, safe_yaml_load
 from ..keys import AGENTS, CONTAINMENT, FS, SESSION_PERSISTENCE, SESSIONS, TOOLS, WORKSPACE
 from ..paths import canonical, default_home_path
-from ..session import Session, SessionEvent
+from ..session import Session, SessionEvent, as_str
 from ..tools.definition import ToolExecution
 from ..tools.errors import HarnessError
 from ..wire import WireModel, literal_lookup
@@ -1667,7 +1667,7 @@ def workspace_survivors(session: Session) -> list[WorkspaceRecord]:
         if event.type not in _SURVIVOR_TYPES:
             continue
         data = event.data
-        agent_id = str(data.get("agentId") or "")
+        agent_id = as_str(data.get("agentId"))
         if not agent_id:
             continue
         if event.type == RETAINED:
@@ -1680,7 +1680,7 @@ def workspace_survivors(session: Session) -> list[WorkspaceRecord]:
                 # the outcome an open acquire has by default. Reading it as a
                 # retention with a blank reason would make a clean settle the
                 # thing that pins a tree forever.
-                open_records[agent_id] = replace(marked, reason=str(data.get("retained") or ""))
+                open_records[agent_id] = replace(marked, reason=as_str(data.get("retained")))
             continue
         if event.type == DISPOSED:
             record = open_records.pop(agent_id, None)
@@ -1690,21 +1690,21 @@ def workspace_survivors(session: Session) -> list[WorkspaceRecord]:
             # closing half repeats it precisely so an orderly release says it,
             # and a policy that discarded a tree it had been asked to keep would
             # have written `kept: false` about a directory that is still there.
-            reason = str(data.get("retained") or record.reason)
+            reason = as_str(data.get("retained") or record.reason)
             if reason or data.get("kept"):
                 closed.append(replace(record, closed=True, reason=reason))
             continue
         # A Literal read off JSON is a claim to check, not a cast to make.
         # Built once at import beside the alias rather than per event:
         # `get_args` is not memoized and rebuilds its tuple on every call.
-        kind = _WORKSPACE_KINDS.get(str(data.get("kind", "")), "shared")
+        kind = _WORKSPACE_KINDS.get(as_str(data.get("kind")), "shared")
         if not fresh_root(kind):
             continue
         ref = data.get("ref")
         open_records[agent_id] = WorkspaceRecord(
             agent_id=agent_id,
             kind=kind,
-            root=Path(str(data.get("root", ""))),
+            root=Path(as_str(data.get("root"))),
             ref=str(ref) if ref else None,
             session_id=session.id,
         )
@@ -1756,9 +1756,9 @@ class _CheckpointOf:
         still the newest one this agent took, and answering with an *older* tree
         would revert further than the log says to.
         """
-        if str(event.data.get("agentId", "")) != self.agent_id:
+        if as_str(event.data.get("agentId")) != self.agent_id:
             return None
-        return str(event.data.get("tree", ""))
+        return as_str(event.data.get("tree"))
 
 
 def latest_checkpoint(session: Session, agent_id: str) -> str:

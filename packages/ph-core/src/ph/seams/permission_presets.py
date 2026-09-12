@@ -16,7 +16,7 @@ from typing import Literal, TypeAlias
 
 from ..cordis import Context, plugin
 from ..keys import APPROVAL, PERMISSION_PRESETS, SANDBOX, TUI_STATUS
-from ..session import Session
+from ..session import Session, as_str
 from ..wire import WireModel
 from ._registry import contribute_item
 from .approval import ApprovalPolicy
@@ -164,7 +164,7 @@ class PermissionPresetService:
             # Through the lookup, which is the membership test *and* the
             # narrowing — the `in PRESETS` / `cast` pair it replaced did the
             # first and needed the second to say so.
-            name = PRESET_NAMES.get(str(event.data.get("preset", ""))) if event else None
+            name = PRESET_NAMES.get(as_str(event.data.get("preset"))) if event else None
             if name is not None:
                 return PRESETS[name]
         return PRESETS[self.active]

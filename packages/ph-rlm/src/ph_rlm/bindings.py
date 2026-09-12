@@ -44,6 +44,7 @@ from ph.seams.subagents import (
     SubagentSpawnError,
     downgrade_text,
 )
+from ph.session import as_str
 from ph.tools import ToolModel, ToolOutput, define_tool, text_content
 from ph.tools.code_mode import CodeBindingsRequest, ToolCallError, governed_binding
 from ph.wire import WireModel
@@ -125,7 +126,7 @@ def _render_handle(_args: Any, value: Any) -> list[ContentBlock]:
         f"workspace access: {value['grantedAccess']} (requested {value['requestedAccess']})",
     ]
     if value.get("note"):
-        lines.append(str(value["note"]))
+        lines.append(as_str(value["note"]))
     lines.append("It will reply by agent message; keep working and check later.")
     return text_content("\n".join(lines))
 

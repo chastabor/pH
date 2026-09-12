@@ -51,7 +51,7 @@ from pydantic import Field
 from ph.cordis import Context, plugin
 from ph.keys import SYSTEM_PROMPT, TOOLS
 from ph.llm.types import ToolCallBlock
-from ph.session import Session, as_seq, derive_event_message, thaw_json
+from ph.session import Session, as_seq, as_str, derive_event_message, thaw_json
 from ph.system_prompt.assembly import (
     ORDER_TOOL_GUIDANCE,
     AssembleContext,
@@ -333,7 +333,7 @@ def steps_of(todos: list[dict[str, Any]]) -> list[str]:
     different procedure, and `requires` alone would not notice a swap between two
     steps that happen not to depend on each other.
     """
-    return [str(one.get("content")) for one in todos if one.get("source") == SKILL]
+    return [_content(one) for one in todos if one.get("source") == SKILL]
 
 
 def startable(todos: list[dict[str, Any]]) -> list[str]:
@@ -346,9 +346,9 @@ def startable(todos: list[dict[str, Any]]) -> list[str]:
     """
     waiting = blocked_by(todos)
     return [
-        str(one.get("content"))
+        _content(one)
         for one in todos
-        if one.get("status") != "completed" and str(one.get("content")) not in waiting
+        if one.get("status") != "completed" and _content(one) not in waiting
     ]
 
 
@@ -369,7 +369,7 @@ def outstanding_steps(session: Session | None) -> set[str]:
     """
     previous = session.latest("todo/write") if session is not None else None
     return {
-        str(one.get("content"))
+        _content(one)
         for one in _recorded(previous)
         if one.get("source") == SKILL and one.get("status") != "completed"
     }
@@ -382,12 +382,12 @@ def blocked_by(todos: list[dict[str, Any]]) -> dict[str, list[str]]:
     question about the whole list, and before this it was a question only prose
     could ask. An entry missing from the result is startable.
     """
-    done = {str(one.get("content")) for one in todos if one.get("status") == "completed"}
+    done = {_content(one) for one in todos if one.get("status") == "completed"}
     waiting: dict[str, list[str]] = {}
     for todo in todos:
-        pending = [str(name) for name in todo.get("requires") or () if str(name) not in done]
+        pending = [name for name in _requires(todo) if name not in done]
         if pending:
-            waiting[str(todo.get("content"))] = pending
+            waiting[_content(todo)] = pending
     return waiting
 
 
@@ -402,9 +402,7 @@ def unevidenced(todos: list[dict[str, Any]]) -> list[str]:
     exactly what a checklist the model marks itself otherwise hides (P5-16).
     """
     return [
-        str(one.get("content"))
-        for one in todos
-        if one.get("status") == "completed" and not one.get("worked")
+        _content(one) for one in todos if one.get("status") == "completed" and not one.get("worked")
     ]
 
 
@@ -421,8 +419,8 @@ def render_todo_list(todos: list[dict[str, Any]]) -> str:
     waiting = blocked_by(todos)
     lines = []
     for todo in todos:
-        content = str(todo.get("content", ""))
-        glyph = GLYPHS.get(str(todo.get("status")), "[ ]")
+        content = _content(todo)
+        glyph = GLYPHS.get(as_str(todo.get("status")), "[ ]")
         blockers = waiting.get(content) if todo.get("status") != "completed" else None
         suffix = f" (waiting on: {', '.join(blockers)})" if blockers else ""
         lines.append(f"{glyph} {content}{suffix}")
@@ -445,13 +443,13 @@ def _checked(todos: list[dict[str, Any]]) -> None:
     """
     edges: dict[str, list[str]] = {}
     for todo in todos:
-        content = str(todo.get("content", ""))
+        content = _content(todo)
         if content in edges:
             raise PlanError(
                 f"two entries share the content {content!r}; `requires` names entries by "
                 "their content, so each must be distinct"
             )
-        edges[content] = [str(name) for name in todo.get("requires") or ()]
+        edges[content] = _requires(todo)
     for content, wants in edges.items():
         for name in wants:
             if name not in edges:
@@ -480,7 +478,7 @@ def _checked(todos: list[dict[str, Any]]) -> None:
 
     waiting = blocked_by(todos)
     for todo in todos:
-        content = str(todo.get("content", ""))
+        content = _content(todo)
         if todo.get("status") in ("in_progress", "completed") and content in waiting:
             raise PlanError(
                 f"{content!r} is {todo.get('status')} but waits on "
@@ -502,8 +500,30 @@ def _work_since(session: Session, since: int) -> int:
     return sum(
         1
         for event in session.events_from(since + 1)
-        if event.type == "tool/call" and str(event.data.get("name")) != TOOL_NAME
+        if event.type == "tool/call" and as_str(event.data.get("name")) != TOOL_NAME
     )
+
+
+def _content(entry: Mapping[str, Any]) -> str:
+    """One entry's `content`, which is this module's join key.
+
+    Every rule here keys on it — `blocked_by`'s dict, `_carried`'s `seeded` map,
+    `_witnessed`'s `was` map, `_checked`'s edge table — and it was spelled out
+    fifteen times in two spellings. One reader, for `_recorded`'s stated reason:
+    a key extracted fifteen ways is fifteen places to drift the day it is
+    normalised (`.strip()`) or renamed.
+    """
+    return as_str(entry.get("content"))
+
+
+def _requires(entry: Mapping[str, Any]) -> list[str]:
+    """What this entry says it waits on, narrowed the same way `content` is.
+
+    The names were read with a bare `str()` — so a `requires: [3]` compared a
+    fabricated `"3"` against a `done` set built with `as_str`, two narrowings of
+    one field five lines apart.
+    """
+    return [as_str(name) for name in entry.get("requires") or ()]
 
 
 def _recorded(previous: Any) -> list[Mapping[str, Any]]:
@@ -538,10 +558,10 @@ def _carried(
     A write that has never seen a skill is untouched, which is every write in a
     deployment that installs no procedural skills.
     """
-    seeded = {str(one.get("content")): one for one in recorded if one.get("source") == SKILL}
+    seeded = {_content(one): one for one in recorded if one.get("source") == SKILL}
     if not seeded:
         return todos
-    kept = [name for name in (str(one.get("content")) for one in todos) if name in seeded]
+    kept = [name for name in (_content(one) for one in todos) if name in seeded]
     if kept != list(seeded):
         # Two refusals, because they are two mistakes and the fix differs. A
         # reorder that named every step as "dropped" told the model all of them
@@ -559,7 +579,7 @@ def _carried(
             "You may add your own entries around them and mark these done."
         )
     for todo in todos:
-        before = seeded.get(str(todo.get("content")))
+        before = seeded.get(_content(todo))
         if before is not None:
             todo["source"] = SKILL
             todo["requires"] = list(before.get("requires") or ())
@@ -585,12 +605,12 @@ def _witnessed(
     finished in, not this one. An entry moved *back* out of `completed` loses it
     — it is no longer a claim, so there is nothing to witness.
     """
-    was = {str(one.get("content")): (one.get("status"), one.get("worked")) for one in recorded}
+    was = {_content(one): (one.get("status"), one.get("worked")) for one in recorded}
     worked = _work_since(session, previous.seq if previous else -1)
     for todo in todos:
         if todo.get("status") != "completed":
             continue
-        before = was.get(str(todo.get("content")))
+        before = was.get(_content(todo))
         todo["worked"] = int(before[1] or 0) if before and before[0] == "completed" else worked
     return todos
 
@@ -733,7 +753,7 @@ def _counts(todos: list[Any], *, bare: int = 0) -> str:
     `unevidenced`'s reader — the card, not the prompt, because it is a fact about
     the model that the model has no use for and cannot act on.
     """
-    tally = Counter(str(todo.get("status")) for todo in todos if isinstance(todo, Mapping))
+    tally = Counter(as_str(todo.get("status")) for todo in todos if isinstance(todo, Mapping))
     labelled = (("completed", "done"), ("in_progress", "doing"), ("pending", "to do"))
     line = " · ".join(f"{tally[status]} {label}" for status, label in labelled)
     return f"{line} · {bare} unevidenced" if bare else line

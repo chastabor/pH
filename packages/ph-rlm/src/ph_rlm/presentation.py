@@ -39,6 +39,7 @@ from typing import Any
 
 from ph.cordis import Context, plugin
 from ph.keys import TOOLS
+from ph.session import as_str
 from ph.text import count_of
 from ph.tools.code_mode import CodeCellValue
 from ph.tools.definition import ToolOutput, ToolResult, TransportPresentation, text_content
@@ -101,7 +102,7 @@ def render_cell(_args: Any, value: Any) -> list[Any]:
     three empty lines above a traceback has to work out that they mean nothing.
     """
     parts: list[str] = []
-    logs = str(value.get("logs") or "").rstrip()
+    logs = as_str(value.get("logs")).rstrip()
     if logs:
         parts.append(logs)
     result = value.get("value")
