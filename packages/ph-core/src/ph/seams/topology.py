@@ -21,8 +21,6 @@ seam would make the report a precondition for the thing being reported on — an
 
 from __future__ import annotations
 
-from typing import Any
-
 from ..cordis import Context, plugin
 from ..keys import MOUNT
 from .diagnostics import ORDER_SELF_ASSESSMENT, Diagnostic, contribute
@@ -31,7 +29,7 @@ __all__ = ["apply"]
 
 
 @plugin("topology", inject=[MOUNT])
-async def apply(ctx: Context, _config: Any) -> None:
+async def apply(ctx: Context, config: None) -> None:
     """Offer the mount's account of itself as a section."""
     contribute(
         ctx,

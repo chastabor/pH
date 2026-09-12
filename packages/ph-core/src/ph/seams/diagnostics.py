@@ -36,7 +36,6 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from typing import Any
 
 from ..cordis import Context, Disposer, Running, plugin, running
 from ..keys import DIAGNOSTICS
@@ -156,6 +155,6 @@ def contribute(ctx: Context, diagnostic: Diagnostic) -> None:
 
 
 @plugin("diagnostics")
-async def apply(ctx: Context, _config: Any) -> None:
+async def apply(ctx: Context, config: None) -> None:
     """Mount the registration seam. No section ships in `ph-base`."""
     ctx.provide(DIAGNOSTICS, DiagnosticsRegistry(ctx=ctx))

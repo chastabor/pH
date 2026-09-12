@@ -134,16 +134,16 @@ async def test_mounting_activates_only_rows_whose_injections_resolve() -> None:
     applied: list[str] = []
 
     @plugin("t-provider")
-    async def provider(ctx: Context, config: object) -> None:
+    async def provider(ctx: Context, config: None) -> None:
         applied.append("provider")
         ctx.provide("t_thing", 1)
 
     @plugin("t-consumer", inject=["t_thing"])
-    async def consumer(ctx: Context, config: object) -> None:
+    async def consumer(ctx: Context, config: None) -> None:
         applied.append("consumer")
 
     @plugin("t-orphan", inject=["t_absent"])
-    async def orphan(ctx: Context, config: object) -> None:
+    async def orphan(ctx: Context, config: None) -> None:
         applied.append("orphan")
 
     import sys
@@ -191,15 +191,15 @@ async def test_topology_reports_what_the_mount_became_not_what_was_written() -> 
     """
 
     @plugin("t-provider")
-    async def provider(ctx: Context, config: object) -> None:
+    async def provider(ctx: Context, config: None) -> None:
         ctx.provide("t_thing", 1)
 
     @plugin("t-consumer", inject=["t_thing"])
-    async def consumer(ctx: Context, config: object) -> None:
+    async def consumer(ctx: Context, config: None) -> None:
         pass
 
     @plugin("t-orphan", inject=["t_thing", "t_absent"])
-    async def orphan(ctx: Context, config: object) -> None:
+    async def orphan(ctx: Context, config: None) -> None:
         pass
 
     _fake_module("ph_test_topology", provider=provider, consumer=consumer, orphan=orphan)
@@ -252,11 +252,11 @@ async def test_topology_follows_a_fiber_through_a_provider_swap() -> None:
     withdraw: list[Disposer] = []
 
     @plugin("t-provider")
-    async def provider(ctx: Context, config: object) -> None:
+    async def provider(ctx: Context, config: None) -> None:
         withdraw.append(ctx.provide("t_thing", 1))
 
     @plugin("t-consumer", inject=["t_thing"])
-    async def consumer(ctx: Context, config: object) -> None:
+    async def consumer(ctx: Context, config: None) -> None:
         pass
 
     _fake_module("ph_test_swap", provider=provider, consumer=consumer)
@@ -306,7 +306,7 @@ def test_a_fork_that_never_activated_is_not_reported_as_unwound() -> None:
     """
 
     @plugin("t-consumer", inject=["t_absent"])
-    async def consumer(ctx: Context, config: object) -> None:
+    async def consumer(ctx: Context, config: None) -> None:
         pass
 
     fork = Context().plugin(consumer)
@@ -505,15 +505,15 @@ async def test_a_private_copy_that_cannot_activate_is_refused_not_fallen_through
     """
 
     @plugin("t-needy-fs", inject=["t_late"])
-    async def needy(ctx: Context, config: object) -> None:
+    async def needy(ctx: Context, config: None) -> None:
         ctx.provide("t_fs", {"root": "private"})
 
     @plugin("t-late")
-    async def late(ctx: Context, config: object) -> None:
+    async def late(ctx: Context, config: None) -> None:
         ctx.provide("t_late", True)
 
     @plugin("t-reader", inject=["t_fs"])
-    async def reader(ctx: Context, config: object) -> None:
+    async def reader(ctx: Context, config: None) -> None:
         ctx.provide("t_seen", ctx.require("t_fs"))
 
     _fake_module("ph_test_realm_needy", needy=needy, late=late, reader=reader)

@@ -198,7 +198,7 @@ def _summary(kind: str, event: JsonObject) -> str:
     if kind in ("user/message", "assistant/message"):
         return one_line(text_of_wire(message_of(data).get("content")))
     if kind == "tool/call":
-        return f"{data.get('name') or '?'} {one_line(str(data.get('arguments') or ''), 60)}"
+        return f"{data.get('name') or '?'} {one_line(as_str(data.get('arguments')), 60)}"
     if kind == "tool/result":
         return one_line(text_of_wire(result_block(message_of(data)).get("content")))
     return describe(data)

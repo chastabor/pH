@@ -45,8 +45,6 @@ see.
 
 from __future__ import annotations
 
-from typing import Any
-
 from ..cordis import Context, plugin
 from .invariants import Invariant, contribute
 
@@ -71,7 +69,7 @@ def violations(root: Context) -> list[str]:
 
 
 @plugin("scope-invariant")
-async def apply(ctx: Context, _config: Any) -> None:
+async def apply(ctx: Context, config: None) -> None:
     """Declare I2's structural half, pollable.
 
     Rooted at the *deployment* context rather than at this row's activation

@@ -263,7 +263,7 @@ def contribute_fold_cache(
 
 
 @plugin("invariants")
-async def apply(ctx: Context, _config: Any) -> None:
+async def apply(ctx: Context, config: None) -> None:
     """Mount the registration seam. No invariant ships in `ph-base` from here."""
     registry = InvariantRegistry(ctx=ctx)
     ctx.provide(INVARIANTS, registry)

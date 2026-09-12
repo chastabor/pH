@@ -102,7 +102,7 @@ async def test_disposing_a_provider_removes_the_service() -> None:
     root = Context()
 
     @plugin("provider")
-    async def provider(ctx: Context, config: object) -> None:
+    async def provider(ctx: Context, config: None) -> None:
         ctx.provide("thing", "value")
 
     fork = root.plugin(provider)
@@ -118,7 +118,7 @@ async def test_plugin_waits_for_its_injected_services() -> None:
     applied: list[str] = []
 
     @plugin("dependent", inject=["base"])
-    async def dependent(ctx: Context, config: object) -> None:
+    async def dependent(ctx: Context, config: None) -> None:
         applied.append("dependent")
 
     root.plugin(dependent)
@@ -142,11 +142,11 @@ async def test_plugin_provides_into_the_realm_it_was_mounted_in() -> None:
     root = Context()
 
     @plugin("provider")
-    async def provider(ctx: Context, config: object) -> None:
+    async def provider(ctx: Context, config: None) -> None:
         ctx.provide("shared", "yes")
 
     @plugin("consumer", inject=["shared"])
-    async def consumer(ctx: Context, config: object) -> None:
+    async def consumer(ctx: Context, config: None) -> None:
         ctx.provide("saw", ctx.require("shared"))
 
     root.plugin(provider)
@@ -160,7 +160,7 @@ async def test_failed_activation_unwinds_its_own_scope() -> None:
     root = Context()
 
     @plugin("broken")
-    async def broken(ctx: Context, config: object) -> None:
+    async def broken(ctx: Context, config: None) -> None:
         ctx.provide("half", 1)
         raise RuntimeError("boom")
 
@@ -174,7 +174,7 @@ async def test_activation_scopes_are_transparent_and_agent_scopes_isolate() -> N
     root = Context()
 
     @plugin("row")
-    async def row(ctx: Context, config: object) -> None:
+    async def row(ctx: Context, config: None) -> None:
         ctx.provide("row_scope", ctx)
 
     root.plugin(row)

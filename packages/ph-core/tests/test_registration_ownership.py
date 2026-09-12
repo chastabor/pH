@@ -71,6 +71,7 @@ returned.
 
 from __future__ import annotations
 
+import ast
 import dataclasses
 import importlib
 import inspect
@@ -87,6 +88,7 @@ from itertools import accumulate
 from typing import Any, get_args
 
 import pytest
+from workspace_layout import workspace_modules, workspace_tests
 
 import ph
 from ph.cordis import DEPLOYMENT, Context, events, plugin, running
@@ -247,6 +249,70 @@ def _scope_parameters() -> Iterator[tuple[str, inspect.Parameter]]:
             parameter = signature.parameters.get("scope")
             if parameter is not None:
                 yield f"{cls.__name__}.{method_name}", parameter
+
+
+def _plugin_rows() -> list[tuple[str, int, str, str]]:
+    """Every `@plugin(...)` body, with what it declares and what it was given.
+
+    Read rather than imported: a row is a decorator and a signature sitting one
+    line apart, and both are visible in the source. Importing them instead would
+    make the gate depend on every plugin's own imports resolving, for an answer
+    the text already holds.
+    """
+    found: list[tuple[str, int, str, str]] = []
+    for name, path in workspace_modules() + workspace_tests():
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.AsyncFunctionDef | ast.FunctionDef):
+                continue
+            call = next(
+                (
+                    d
+                    for d in node.decorator_list
+                    if isinstance(d, ast.Call)
+                    and isinstance(d.func, ast.Name)
+                    and d.func.id == "plugin"
+                ),
+                None,
+            )
+            if call is None or len(node.args.args) != 2:
+                continue
+            model = next((k.value for k in call.keywords if k.arg == "config"), None)
+            arg = node.args.args[1]
+            found.append(
+                (
+                    name,
+                    arg.lineno,
+                    ast.unparse(arg.annotation) if arg.annotation else "nothing",
+                    "None" if model is None else ast.unparse(model),
+                )
+            )
+    return found
+
+
+def test_a_plugin_declares_the_config_it_is_handed() -> None:
+    """The row's second parameter says what `resolve_config` will pass it.
+
+    `plugin()` is overloaded so that a row without a `config=` model is typed
+    `Callable[[Context, None], ...]` — but parameters are contravariant, so
+    `Any` and `object` both satisfy that slot silently, and twenty-seven rows
+    had drifted to one or the other. The overload cannot catch what it accepts;
+    this can.
+
+    Worth a gate rather than a sweep because the sweep has happened: a body that
+    reads config it was never handed type-checks under `Any` and fails at mount,
+    which is the failure this moves forward to the checker.
+    """
+    offenders = [
+        f"{name}:{line}: declares `{written}`, is handed `{handed}`"
+        for name, line, written, handed in _plugin_rows()
+        if written != handed
+    ]
+    assert offenders == [], (
+        "a plugin row's second parameter must name what the loader hands it — "
+        "`None` when the decorator declares no `config=` model, that model "
+        "otherwise:\n  " + "\n  ".join(offenders)
+    )
 
 
 def test_a_boundary_parameter_never_has_a_default() -> None:
@@ -474,7 +540,7 @@ async def test_a_registration_is_an_effect_of_the_row_that_made_it(
     seam_effects = len(service.ctx._effects)
 
     @plugin(f"p612-{key}", inject=[key])
-    async def row(ctx: Context, _config: Any) -> None:
+    async def row(ctx: Context, config: None) -> None:
         register(ctx.get(key))
 
     fork = root.plugin(row)
@@ -524,7 +590,7 @@ async def test_an_explicit_scope_still_wins(mount: MountProfile) -> None:
     agent = root.scope("agent")
 
     @plugin("p612-scoped", inject=["commands"])
-    async def row(ctx: Context, _config: Any) -> None:
+    async def row(ctx: Context, config: None) -> None:
         ctx.require(COMMANDS).register(_definition("scoped"), scope=agent)
 
     fork = root.plugin(row)
@@ -831,11 +897,11 @@ async def test_a_listener_registers_on_its_own_scope_not_the_emitters(mount: Mou
     commands = root.require(COMMANDS)
 
     @plugin("p625-b", inject=["commands"])
-    async def row_b(ctx: Context, _config: Any) -> None:
+    async def row_b(ctx: Context, config: None) -> None:
         ctx.on(event, lambda: ctx.require(COMMANDS).register(_definition("from-b")))
 
     @plugin("p625-a", inject=["commands"])
-    async def row_a(ctx: Context, _config: Any) -> None:
+    async def row_a(ctx: Context, config: None) -> None:
         ctx.emit(event)
 
     b = root.plugin(row_b)
@@ -875,7 +941,7 @@ async def test_a_registration_made_after_apply_returns_still_belongs_to_its_row(
     commands = root.require(COMMANDS)
 
     @plugin("p625-late", inject=["commands"])
-    async def late(ctx: Context, _config: Any) -> None:
+    async def late(ctx: Context, config: None) -> None:
         ctx.on(event, lambda: ctx.require(COMMANDS).register(_definition("deferred")))
 
     fork = root.plugin(late)
@@ -900,7 +966,7 @@ async def test_register_when_composed_needs_no_explicit_scope(mount: MountProfil
     tools = root.require(TOOLS)
 
     @plugin("p625-composed", inject=["tools"])
-    async def row(ctx: Context, _config: Any) -> None:
+    async def row(ctx: Context, config: None) -> None:
         from ph.testing import simple_tool
 
         register_when_composed(ctx, lambda: simple_tool("p625_tool"))
@@ -942,7 +1008,7 @@ async def test_every_dispatch_mode_runs_a_listener_as_its_own_scope(
     seen: list[Context | None] = []
 
     @plugin(f"p625-{mode}-{shape}", inject=["commands"])
-    async def row(ctx: Context, _config: Any) -> None:
+    async def row(ctx: Context, config: None) -> None:
         if shape == "sync":
 
             def sync_listener(*args: Any) -> None:
@@ -1040,7 +1106,7 @@ async def test_a_row_registering_at_mount_still_lands_globally(mount: MountProfi
     agent = ctx.require(AGENTS).create(ctx.require(SESSIONS).create("p626-plain"), FAKE_OPTIONS)
 
     @plugin("p626-row", inject=["tools"])
-    async def row(scope: Context, _config: Any) -> None:
+    async def row(scope: Context, config: None) -> None:
         scope.require(TOOLS).register(simple_tool("p626_global"))
 
     ctx.plugin(row)
@@ -1076,7 +1142,7 @@ async def test_a_command_body_runs_as_its_row_for_the_agent_that_typed_it(
     seen: list[tuple[Context | None, Context | None]] = []
 
     @plugin("p629-row", inject=["commands"])
-    async def row(scope: Context, _config: Any) -> None:
+    async def row(scope: Context, config: None) -> None:
         scope.require(COMMANDS).register(
             _definition(
                 "p629",
@@ -1132,7 +1198,7 @@ async def test_a_tool_body_registers_as_its_row_and_for_its_agent(mount: MountPr
             return "done"
 
         @plugin("p629-tool-row", inject=["tools"])
-        async def row(scope: Context, _config: Any) -> None:
+        async def row(scope: Context, config: None) -> None:
             scope.require(TOOLS).register(simple_tool("p629_carrier", execute=smuggle))
 
         fork = ctx.plugin(row)
@@ -1186,7 +1252,7 @@ async def test_a_prompt_provider_runs_as_its_row_for_the_scope_being_assembled(
     seen: dict[str, tuple[Context | None, Context | None]] = {}
 
     @plugin("p629-prompt-row", inject=["system_prompt"])
-    async def row(scope: Context, _config: Any) -> None:
+    async def row(scope: Context, config: None) -> None:
         def variable() -> str:
             seen["variable"] = (Context.current_owner(), Context.current_layer())
             return "v"

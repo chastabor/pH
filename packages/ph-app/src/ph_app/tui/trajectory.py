@@ -252,12 +252,13 @@ class _Builder:
     def on_tool_call(self, event: SessionEvent) -> None:
         data = event.data
         name = as_str(data.get("name"), "?")
+        arguments = as_str(data.get("arguments"))
         self.add(
             kind="tool",
             source_seq=event.seq,
             title=name,
-            summary=one_line(str(data.get("arguments") or "")),
-            detail=str(data.get("arguments") or ""),
+            summary=one_line(arguments),
+            detail=arguments,
             source=SourceRef(kind="tool", name=name),
             turn=self.turn,
         )

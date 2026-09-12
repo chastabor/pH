@@ -93,9 +93,6 @@ ALLOWED: frozenset[tuple[str, str]] = frozenset(
         ("ph/tools/builtin/ask_user.py", 'str(args.get("question", ""))'),
         ("ph/tools/builtin/bash_tool.py", 'str(args.get("command", ""))'),
         ("ph/tools/builtin/subagent_task.py", 'str(args.get("prompt", ""))'),
-        ("ph_app/tui/adapter.py", 'str(event.data.get("arguments", ""))'),
-        ("ph_app/tui/trajectory.py", 'str(data.get("arguments") or "")'),
-        ("ph_app/agents.py", "str(data.get('arguments') or '')"),
         # A row's `name:` is YAML beside the `id:` two lines above it, and the
         # same argument applies: `name: 3` is an int and `"3"` is the answer.
         ("ph/cordis/loader.py", 'str(entry["name"])'),

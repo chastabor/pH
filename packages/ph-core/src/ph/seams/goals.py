@@ -355,7 +355,7 @@ class GoalService:
 
 
 @plugin("goals")
-async def apply(ctx: Context, _config: Any) -> None:
+async def apply(ctx: Context, config: None) -> None:
     """Publish `ctx.goals`."""
     service = GoalService()
     ctx.provide(GOALS, service)

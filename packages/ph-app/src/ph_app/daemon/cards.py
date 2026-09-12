@@ -63,7 +63,9 @@ def presentation_of(tools: Any, session: Session, event: SessionEvent) -> dict[s
     the log alone.
     """
     if event.type == "tool/call":
-        view = render_call_view(tools, as_str(event.data.get("name")), event.data.get("arguments"))
+        view = render_call_view(
+            tools, as_str(event.data.get("name")), as_str(event.data.get("arguments"))
+        )
         return None if view is None else view.to_wire()
     call = _call_of(session, event)
     if call is None:
@@ -71,7 +73,7 @@ def presentation_of(tools: Any, session: Session, event: SessionEvent) -> dict[s
     settled = render_result_view(
         tools,
         as_str(call.data.get("name")),
-        call.data.get("arguments"),
+        as_str(call.data.get("arguments")),
         ToolResult(
             content=(),
             is_error=as_bool(result_block(as_obj(event.data.get("message"))).get("isError")),

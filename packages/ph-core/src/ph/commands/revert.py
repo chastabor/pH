@@ -31,7 +31,7 @@ from itertools import islice
 from typing import Any
 
 from ..cordis import Context, plugin
-from ..json import as_str
+from ..json import JsonValue, as_str
 from ..keys import COMMANDS, SUBPROCESS, TOOLS, WORKSPACE
 from ..seams.commands import CommandDefinition
 from ..seams.workspace import checkpoints, workspace_of
@@ -45,7 +45,7 @@ USAGE = "usage: /revert <seq>   (/revert with no argument lists the restore poin
 
 
 @plugin("workspace-revert", inject=[COMMANDS, WORKSPACE, SUBPROCESS])
-async def apply(ctx: Context, _config: Any) -> None:
+async def apply(ctx: Context, config: None) -> None:
     """Register `/revert`."""
 
     async def revert(argument: str, invocation: Any) -> str:
@@ -168,7 +168,7 @@ def _covered(ctx: Context, name: str, scope: Any) -> bool:
     return bool(definition is not None and definition.effects_confined_to_workspace)
 
 
-def _brief(arguments: Any) -> str:
+def _brief(arguments: JsonValue) -> str:
     """Enough of the arguments to recognise the call, never the whole payload.
 
     `Mapping`, not `dict`: the log freezes payloads into `MappingProxyType`,
@@ -182,6 +182,6 @@ def _brief(arguments: Any) -> str:
     return ", ".join(f"{key}={_clip(value)}" for key, value in islice(arguments.items(), 2))
 
 
-def _clip(value: Any) -> str:
+def _clip(value: JsonValue) -> str:
     text = str(value)
     return text if len(text) <= 40 else f"{text[:37]}..."

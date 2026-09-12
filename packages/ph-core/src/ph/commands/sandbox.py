@@ -315,7 +315,7 @@ class _Denials:
 
 
 @plugin("sandbox-commands", inject=[COMMANDS, SANDBOX, MOUNT])
-async def apply(ctx: Context, _config: Any) -> None:
+async def apply(ctx: Context, config: None) -> None:
     """Register `/sandbox`, and the footer reading that says refusals happened."""
 
     async def sandbox(argument: str, invocation: Any) -> str:

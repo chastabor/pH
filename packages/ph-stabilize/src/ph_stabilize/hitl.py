@@ -51,6 +51,7 @@ from typing import Any, Final, Literal
 from pydantic import Field
 
 from ph.cordis import Context, plugin
+from ph.json import JsonValue
 from ph.keys import APPROVAL, TOOLS
 from ph.seams.approval import ApprovalDecisionName
 from ph.session import Session
@@ -120,7 +121,7 @@ class Rule(WireModel):
         """
         return bool(self.preset or self.when)
 
-    def found_in(self, arguments: Any) -> list[str]:
+    def found_in(self, arguments: JsonValue) -> list[str]:
         """What this rule found in one call's arguments, in a person's words.
 
         The preset's parser first, then the deployment's own patterns. Both read
@@ -162,7 +163,7 @@ def _compiled(patterns: tuple[str, ...]) -> tuple[re.Pattern[str], ...]:
     return tuple(re.compile(one, re.IGNORECASE | re.DOTALL) for one in patterns)
 
 
-def _matches(arguments: Any, patterns: tuple[str, ...]) -> list[str]:
+def _matches(arguments: JsonValue, patterns: tuple[str, ...]) -> list[str]:
     """What a deployment's own patterns matched — the *text*, not the rule.
 
     Each decoded string leaf is scanned separately rather than the arguments

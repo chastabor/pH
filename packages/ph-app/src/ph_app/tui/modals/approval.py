@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Any
 
 from textual.app import ComposeResult
 from textual.containers import Vertical
@@ -34,6 +33,7 @@ from textual.content import Content
 from textual.widgets import Button, Input, Static
 from textual.widgets.button import ButtonVariant
 
+from ph.json import JsonValue
 from ph.seams.approval import (
     ApprovalAnswer,
     ApprovalDecisionName,
@@ -180,7 +180,7 @@ class ApprovalModal(PhModal[ApprovalDecision]):
         self.dismiss(ApprovalDecision(answer="rejected", reason=typed))
 
 
-def _as_json(arguments: Any) -> str:
+def _as_json(arguments: JsonValue) -> str:
     """The edit box opens on the call as it stands, when it can be rendered."""
     try:
         return json.dumps(arguments)

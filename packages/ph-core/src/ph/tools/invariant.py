@@ -21,8 +21,6 @@ cost exactly the memoization it is checking.
 
 from __future__ import annotations
 
-from typing import Any
-
 from ..cordis import Context, plugin
 from ..keys import TOOLS
 from ..seams.invariants import Invariant, contribute
@@ -40,7 +38,7 @@ def violations(ctx: Context) -> list[str]:
 
 
 @plugin("tools-invariant", inject=[TOOLS])
-async def apply(ctx: Context, _config: Any) -> None:
+async def apply(ctx: Context, config: None) -> None:
     """Declare the view cache's half of I6, pollable.
 
     `inject=[TOOLS]` for the reason `skills-invariant` states: guarding on

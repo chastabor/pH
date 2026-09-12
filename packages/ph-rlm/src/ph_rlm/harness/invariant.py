@@ -44,7 +44,7 @@ def stale_folds(ctx: Context, sessions: Any) -> list[str]:
 
 
 @plugin("harness-invariant", inject=[HARNESS])
-async def apply(ctx: Context, _config: Any) -> None:
+async def apply(ctx: Context, config: None) -> None:
     """Declare I6's harness half, pollable.
 
     `inject=[HARNESS]` because, unlike the *declaration* seam, the thing being

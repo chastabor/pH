@@ -2098,7 +2098,7 @@ async def reconcile(ctx: Context, config: None) -> None:
 
 
 @plugin("workspace-checkpoint", inject=[TOOLS, WORKSPACE])
-async def checkpoint_policy(ctx: Context, _config: Any) -> None:
+async def checkpoint_policy(ctx: Context, config: None) -> None:
     """Take a restore point before every code run that has a workspace to save.
 
     Around the *transport*, because a run is the unit that can be denied with work

@@ -215,7 +215,7 @@ async def test_disposal_removes_listeners() -> None:
     heard: list[int] = []
 
     @plugin("listener")
-    async def listener(ctx: Context, config: object) -> None:
+    async def listener(ctx: Context, config: None) -> None:
         ctx.on("test/emit", lambda value: heard.append(value))
 
     fork = root.plugin(listener)

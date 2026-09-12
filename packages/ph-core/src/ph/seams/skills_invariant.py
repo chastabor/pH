@@ -22,8 +22,6 @@ report naming which cache drifted is what a person can act on.
 
 from __future__ import annotations
 
-from typing import Any
-
 from ..cordis import Context, plugin
 from ..keys import SKILLS
 from .invariants import Invariant, contribute
@@ -41,7 +39,7 @@ def violations(ctx: Context) -> list[str]:
 
 
 @plugin("skills-invariant", inject=[SKILLS])
-async def apply(ctx: Context, _config: Any) -> None:
+async def apply(ctx: Context, config: None) -> None:
     """Declare the reach cache's half of I6, pollable.
 
     `inject=[SKILLS]` because an unmet key means the row never activates, so a

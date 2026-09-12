@@ -162,7 +162,7 @@ def _present_result(args: JsonObject, result: ToolResult) -> ToolResultView:
 
 
 @plugin("rlm-presentation", inject=[TOOLS])
-async def apply(ctx: Context, _config: Any) -> None:
+async def apply(ctx: Context, config: None) -> None:
     """Present the transport as `ipython`, with the RLM cell projections.
 
     `present_as("code")` is *not* called here. The mode is the profile's, set by

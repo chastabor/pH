@@ -103,7 +103,7 @@ class KeptWorktree:
 
 
 @plugin("workspace-commands", inject=[COMMANDS, WORKSPACE, FS])
-async def apply(ctx: Context, _config: Any) -> None:
+async def apply(ctx: Context, config: None) -> None:
     """Register `/workspaces`.
 
     No `root` setting any more. It existed to filter the worktree join and had to be

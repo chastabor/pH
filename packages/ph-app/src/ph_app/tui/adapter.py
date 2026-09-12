@@ -308,7 +308,7 @@ class TuiEventAdapter:
             ToolCard(
                 call_id=as_str(event.data.get("callId")),
                 name=name,
-                arguments=str(event.data.get("arguments", "")),
+                arguments=as_str(event.data.get("arguments")),
                 title=name,
             ),
             event,

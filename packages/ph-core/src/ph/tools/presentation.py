@@ -67,8 +67,13 @@ class ToolResultView(WireModel):
     meta: dict[str, Any] | None = None
 
 
-def render_call_view(tools: Any, name: str, arguments: Any) -> ToolCallView | None:
+def render_call_view(tools: Any, name: str, arguments: str) -> ToolCallView | None:
     """Ask the tool how its pending call looks. `None` when it cannot say.
+
+    `arguments` is a `str` because that is what the writer records — the model's
+    own bytes, unparsed (`batch._append_call`). A log another build wrote could
+    hold something else there; its reader narrows, so such a call arrives here as
+    no arguments rather than as a shape `parse_arguments` would refuse.
 
     **Here rather than in either front end**, because there are now two callers
     and they must not drift: the terminal renders in process, and the daemon
@@ -93,7 +98,7 @@ def render_call_view(tools: Any, name: str, arguments: Any) -> ToolCallView | No
     return view
 
 
-def render_result_view(tools: Any, name: str, arguments: Any, result: Any) -> ToolResultView | None:
+def render_result_view(tools: Any, name: str, arguments: str, result: Any) -> ToolResultView | None:
     """Ask the tool how its settled call looks. `None` when it cannot say.
 
     `arguments` are the *call's*, not the result's: a tool presents its outcome

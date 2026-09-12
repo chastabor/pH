@@ -34,7 +34,7 @@ class ReadValue(ToolModel):
 
 
 @plugin("tool-read", inject=["tools", "fs"])
-async def apply(ctx: Context, config: Any) -> None:
+async def apply(ctx: Context, config: None) -> None:
     async def read(args: ReadArgs, run: ToolRunContext) -> Any:
         window = await ctx.fs.read(
             args.path,

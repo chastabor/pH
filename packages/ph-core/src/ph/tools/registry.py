@@ -40,7 +40,7 @@ from ..cordis import (
     plugin,
     running,
 )
-from ..json import thaw_json
+from ..json import JsonValue, thaw_json
 from ..keys import APPROVAL, TOOLS
 from ..llm.types import ToolSchema, text_of
 from ..seams._restriction import NameFilter
@@ -736,7 +736,7 @@ class ToolRuntime:
             return await self.finalize(prepared.run, prepared.result)
         return self.finish(prepared.run, prepared.result)
 
-    def _execution(self, call: ToolExecutionInput, arguments: Any) -> ToolExecution:
+    def _execution(self, call: ToolExecutionInput, arguments: JsonValue) -> ToolExecution:
         return ToolExecution(
             call_id=call.call_id,
             root_call_id=call.root_call_id or call.call_id,

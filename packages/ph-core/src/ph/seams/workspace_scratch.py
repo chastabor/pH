@@ -78,7 +78,7 @@ class ReadonlyScratchProvider:
 
 
 @plugin("workspace-readonly-scratch", inject=[WORKSPACE, SANDBOX])
-async def apply(ctx: Context, _config: object) -> None:
+async def apply(ctx: Context, config: None) -> None:
     """Claim the `sandbox` rung on `profile/mounted`, once a backend can enforce it."""
     contribute(
         ctx,

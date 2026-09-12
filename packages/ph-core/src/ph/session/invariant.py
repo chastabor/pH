@@ -14,8 +14,6 @@ on append: doing it there would make the log's cost quadratic in its own length.
 
 from __future__ import annotations
 
-from typing import Any
-
 from ..cordis import Context, plugin
 from ..keys import SESSIONS
 from ..seams.invariants import Invariant, contribute
@@ -29,7 +27,7 @@ def violations(ctx: Context) -> list[str]:
 
 
 @plugin("session-invariant", inject=[SESSIONS])
-async def apply(ctx: Context, _config: Any) -> None:
+async def apply(ctx: Context, config: None) -> None:
     """Declare the session half of I6, pollable.
 
     `inject=[SESSIONS]` for the reason `skills-invariant` states: a deployment
