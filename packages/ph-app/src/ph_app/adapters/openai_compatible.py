@@ -51,6 +51,7 @@ from ph.llm.types import (
     attachment_of,
     text_of,
 )
+from ph.seams.diagnostics import Diagnostic, contribute
 from ph.seams.uploads import FileHandle
 from ph.session import now_ms
 from ph.wire import WireModel
@@ -101,6 +102,27 @@ class ProviderProfile(WireModel):
     base_url: str = "https://api.openai.com/v1"
     api_key_env: str = "OPENAI_API_KEY"
     context_window: int | None = None
+    """The window pH budgets and compacts against, in tokens.
+
+    **What a *slot* holds, not what the server holds**, on a llama.cpp route —
+    which is the number nobody can be expected to keep right by hand, and the
+    reason for the field below. `discover_context_window` asks the server and
+    leaves this as the fallback."""
+    discover_context_window: bool = False
+    """Ask the server for its window at mount, and use `context_window` if it
+    will not say.
+
+    Two fields rather than a keyword in the one above, because the case that
+    matters is discovery *with* a fallback: "ask, and here is what to do when
+    the answer does not come" is two facts and a single value cannot carry both.
+    A route wanting discovery and no fallback sets this and leaves
+    `context_window` unset.
+
+    Only llama.cpp answers today (`GET /props`), and asking costs one request at
+    mount that no other route answers. A server that does not publish it leaves
+    the configured number in force; nothing refuses to start over this, because
+    a window pH guessed low is a session that compacts early and a mount that
+    refused is a person who cannot work at all."""
     default_max_tokens: int | None = None
     accepts: tuple[str, ...] = ACCEPTED_MEDIA
     """MIME types this route takes as message content (P7-01).
@@ -552,12 +574,113 @@ def _to_openai(
     return [{"role": "user", "content": text_of(message.content)}]
 
 
+PROBE_TIMEOUT = 2.0
+"""How long a mount waits for a server to describe itself, in seconds.
+
+Short because nothing is blocked on the *answer* — a route that does not reply
+keeps its configured window — while everything is blocked on the *asking*: this
+runs during `apply`, so the budget is a person waiting for a TUI to open. Two
+seconds is generous for a server on localhost, which is the only kind that
+answers this at all."""
+
+SERVER_PROPS = "/props"
+"""llama.cpp's own description of what it loaded, beside `/v1` rather than under it.
+
+The one endpoint in this file that is not the OpenAI wire, and it is asked for
+exactly one field. `default_generation_settings.n_ctx` is already **per slot** —
+llama.cpp divides `--ctx-size` by `--parallel` before it reports here — which is
+the whole value of asking: that division is the arithmetic a person gets wrong,
+and getting it wrong upward means every agent budgets against a window it does
+not have."""
+
+
+async def discover_window(adapter: OpenAiCompatibleAdapter) -> int | None:
+    """One slot's context window, as the server states it, or `None`.
+
+    `None` for every way this can fail — not a llama.cpp server, `/props` not
+    published, the server down, a field of the wrong shape — because the caller
+    does one thing with all of them. A route that cannot be asked is the
+    ordinary case here: this adapter also serves OpenAI, DeepSeek and every
+    gateway in between, and none of them publishes a window anywhere.
+    """
+    root = adapter.profile.base_url.rstrip("/").removesuffix("/v1").rstrip("/")
+    try:
+        # Credentialled when there is a credential, and unauthenticated when
+        # there is not. `/props` needs no key on a llama.cpp server started
+        # without `--api-key`, and `ph doctor` is precisely the command someone
+        # runs *before* exporting anything — a probe that failed there would
+        # report the fallback to the person least able to tell it from the truth.
+        # A server that does want a key answers 401 and the fallback stands.
+        try:
+            headers = adapter._headers()
+        except Exception:
+            # Any reason at all, and deliberately not just `LlmError`: the point
+            # of this branch is to carry on without a header, so narrowing it
+            # would turn some *other* failure to build one into a probe that
+            # does not happen — which reads as "the server did not say".
+            headers = {"Content-Type": "application/json"}
+        props = await adapter.http.get_json(
+            f"{root}{SERVER_PROPS}",
+            headers=headers,
+            is_overflow=_is_overflow,
+            timeout=PROBE_TIMEOUT,
+        )
+    except Exception:
+        log.debug("ph_app.adapters: %s did not answer %s", root, SERVER_PROPS, exc_info=True)
+        return None
+    window = (props.get("default_generation_settings") or {}).get("n_ctx")
+    return window if isinstance(window, int) and window > 0 else None
+
+
+@dataclass(slots=True)
+class _Windows:
+    """What `ph doctor` says about each route's window, read when it is asked.
+
+    A small object rather than a closure over `apply`: a `Diagnostic` outlives
+    the mount that registered it, so a lambda here would hold `config`, every
+    `ProviderProfile` and the loop's locals for the life of the row. This holds
+    the adapters it actually reads and nothing else.
+    """
+
+    adapters: list[OpenAiCompatibleAdapter] = field(default_factory=list)
+    asked: set[str] = field(default_factory=set)
+    """Providers whose window came back from the server, so the row can say which
+    of the two numbers a person is looking at."""
+
+    def describe(self) -> list[tuple[str, str]]:
+        rows: list[tuple[str, str]] = []
+        for adapter in self.adapters:
+            route = adapter.profile
+            window = route.context_window
+            if window is None:
+                source = "not declared; nothing budgets or compacts against a window"
+            elif route.provider in self.asked:
+                source = f"from {SERVER_PROPS}"
+            elif route.discover_context_window:
+                source = "configured; the server did not say"
+            else:
+                source = "configured"
+            rows.append((route.provider, f"{window if window is not None else '—'} ({source})"))
+        return rows
+
+
 @plugin("llm-openai-compatible", config=Config, inject=[LLM, CREDENTIALS])
 async def apply(ctx: Context, config: Config) -> None:
     """Register every configured OpenAI-compatible route."""
     uploads = ctx.get(UPLOADS)
+    routes = _Windows()
     for profile in config.profiles:
         adapter = OpenAiCompatibleAdapter(ctx=ctx, profile=profile)
+        if profile.discover_context_window:
+            # At mount and once, so `resolve_model` stays synchronous — every
+            # layer above reads a window per request, and a probe there would be
+            # an HTTP round trip inside a projection. A failure keeps the
+            # configured number: see `discover_context_window`.
+            found = await discover_window(adapter)
+            if found is not None:
+                adapter.profile = profile.model_copy(update={"context_window": found})
+                routes.asked.add(profile.provider)
+        routes.adapters.append(adapter)
         handle = ctx.require(LLM).register_adapter([profile.provider], adapter)
         ctx.add_disposer(handle.dispose, label=f"llm({profile.provider})")
         if uploads is not None and profile.uploads:
@@ -571,3 +694,16 @@ async def apply(ctx: Context, config: Config) -> None:
                 label=f"uploader({profile.provider})",
             )
         ctx.add_disposer(adapter.http.aclose, label=f"http({profile.provider})")
+    if routes.adapters:
+        # Every route this row serves, not only the ones that probed: `ph doctor`
+        # answering for one of five is a report a person reads as "the others
+        # have none". Read live from the adapter rather than snapshotted at
+        # mount, like every other `Diagnostic` here — the number `resolve_model`
+        # answers with is the number this has to print, and a copy taken at
+        # mount is a second one free to drift.
+        contribute(
+            ctx,
+            Diagnostic(
+                id="llm-context-window", title="Context window", read=routes.describe, order=6
+            ),
+        )

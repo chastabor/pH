@@ -97,7 +97,7 @@ def test_every_handler_answers_with_the_reply_its_verb_declares() -> None:
     resolves every annotation or none. The return alone is what this asserts,
     so the return alone is what it evaluates.
 
-    The four projections are skipped by name and not silently: `_projection` is
+    The generic projections are skipped by name and not silently: `_projection` is
     generic, so its handler's return annotation is the type variable `N` and
     there is nothing to compare. They need no guard — `_projection` takes the
     verb and answers through `verb.read`, so the model cannot differ from the
@@ -108,7 +108,13 @@ def test_every_handler_answers_with_the_reply_its_verb_declares() -> None:
     `None` — so what this asserts there is that both halves still say nothing.
     """
     namespace = vars(server)
-    projections = {"session/readings", "commands/list", "screens/list", "tools/list"}
+    projections = {
+        "session/readings",
+        "commands/list",
+        "screens/list",
+        "tools/list",
+        "skills/list",
+    }
     checked = 0
     for method, row in {**METHODS, **MUTATIONS}.items():
         answers = row.handle if isinstance(row, Method | Announced) else row.act

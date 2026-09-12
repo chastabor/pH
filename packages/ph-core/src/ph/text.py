@@ -11,7 +11,7 @@ a half, in the one place among four that had inlined the ternary by hand.
 
 from __future__ import annotations
 
-__all__ = ["count_of", "truncation_marker"]
+__all__ = ["count_of", "thousands", "truncation_marker"]
 
 
 def count_of(count: int, noun: str, plural: str = "") -> str:
@@ -24,6 +24,18 @@ def count_of(count: int, noun: str, plural: str = "") -> str:
     if count == 1:
         return f"{count} {noun}"
     return f"{count} {plural or f'{noun}s'}"
+
+
+def thousands(count: int) -> str:
+    """`1777` → `1.8k`, `900` → `900`. One abbreviation for a token count.
+
+    This module's own rule, and the fifth-time-wrongly had already happened on
+    one screen: the subagent panel truncated (`row.tokens // 1000` → `1k`) while
+    the footer's cache field rounded (`1.8k`), so the same magnitude was printed
+    two ways a few rows apart. Rounding is the one kept, because the figure is
+    read as a size rather than counted with.
+    """
+    return f"{count / 1000:.1f}k" if count >= 1000 else str(count)
 
 
 def truncation_marker(dropped: int, cap: int) -> str:

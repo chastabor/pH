@@ -175,10 +175,29 @@ class HttpClient:
         return parsed, response.headers
 
     async def get_json(
-        self, url: str, *, headers: dict[str, str], is_overflow: Callable[[str], bool]
+        self,
+        url: str,
+        *,
+        headers: dict[str, str],
+        is_overflow: Callable[[str], bool],
+        timeout: float | None = None,
     ) -> dict[str, Any]:
-        """GET and parse — the poll half of an upload that finishes asynchronously."""
-        response = await self._get().get(url, headers=headers)
+        """GET and parse — the poll half of an upload that finishes asynchronously.
+
+        `timeout` overrides `TIMEOUT` for one call, and exists for the caller
+        that is not waiting on a model: a *mount-time* probe inherits a ten
+        minute read budget otherwise, so a host that accepts the socket and then
+        stalls holds up plugin mount — and with it a TUI start and `ph doctor`.
+        A request whose answer nobody is blocked on keeps the generous default.
+        """
+        response = await self._get().get(
+            url,
+            headers=headers,
+            # httpx's own sentinel rather than a splat: "say nothing and take the
+            # client's" is a value here, and spreading a conditional dict past a
+            # keyword-typed signature is a hole the checker cannot see through.
+            timeout=httpx.Timeout(timeout) if timeout is not None else httpx.USE_CLIENT_DEFAULT,
+        )
         if response.status_code >= 400:
             raise failure_from_status(response.status_code, response.text, is_overflow=is_overflow)
         parsed: dict[str, Any] = response.json()

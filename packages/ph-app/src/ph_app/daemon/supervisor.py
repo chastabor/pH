@@ -38,7 +38,15 @@ from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStre
 
 from ph.agent.types import AgentDriver, AgentOptions
 from ph.cordis import Context, Profile
-from ph.keys import AGENTS, SCHEDULE, SESSION_PERSISTENCE, SESSIONS, SUBAGENTS, TOOLS, WORKSPACE
+from ph.keys import (
+    AGENTS,
+    SCHEDULE,
+    SESSION_PERSISTENCE,
+    SESSIONS,
+    SUBAGENTS,
+    TOOLS,
+    WORKSPACE,
+)
 from ph.llm.types import AttachmentRef
 from ph.paths import resolve_roots
 from ph.persistence import resumption_of

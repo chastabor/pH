@@ -67,9 +67,9 @@ from ph.tools.presentation import render_call_view, render_result_view
 
 from ..shell import shell_body
 from ..wire import as_int, as_obj, as_seq, media_labels, one_line, result_block, text_of_wire
-from .state import ChatItem, ItemRole, ToolCard, TuiState
+from .state import ChatItem, ItemRole, Surface, ToolCard, TuiState
 
-__all__ = ["HANDLERS", "RECORDLESS", "REPLAY", "Frame", "TuiEventAdapter"]
+__all__ = ["HANDLERS", "RECORDLESS", "REPLAY", "SURFACES", "Frame", "TuiEventAdapter"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,6 +108,14 @@ class TuiEventAdapter:
     tool's own `present_call`/`present_result`. `None` over a socket, where the
     daemon renders the same views and sends them beside the event — see `Frame.view`."""
     _fragment: int = 0
+    touched: Surface = Surface.NOTHING
+    """What has changed since the last draw asked — see `take_touched`.
+
+    Nothing to begin with: this answers "what did the events I just folded
+    move", and before any have been folded the honest answer is none. The
+    *first* draw is the app's own business — `PHTuiApp._dirty` starts at `ALL`
+    — and an adapter that also claimed it would have made the first batch
+    report everything whatever it contained."""
 
     # --------------------------------------------------------------- entry --
 
@@ -122,8 +130,27 @@ class TuiEventAdapter:
     def apply(self, event: SessionEvent, frame: Frame = Frame()) -> None:
         """Fold one event in, with what travelled beside it."""
         handler = HANDLERS.get(event.type)
+        # **Asked of the table first, and independently of the handler.** What
+        # an event *draws* and what it *changes* are different questions:
+        # `sandbox/mode` draws no row at all, and still moves the posture the
+        # footer and the session panel both read. A type the table does not
+        # name falls back to "everything" when something renders it, and to
+        # nothing when this adapter ignores it.
+        self.touched |= SURFACES.get(
+            event.type, Surface.ALL if handler is not None else Surface.NOTHING
+        )
         if handler is not None:
             handler(self, event, frame)
+
+    def take_touched(self) -> Surface:
+        """What has moved since this was last asked, and reset.
+
+        Read once per delivered batch rather than per event, because the draw is
+        coalesced per batch too — the caller is asking "what do I have to
+        redraw", and the answer is the union over everything it just folded.
+        """
+        touched, self.touched = self.touched, Surface.NOTHING
+        return touched
 
     # ---------------------------------------------------------------- rows --
 
@@ -477,9 +504,6 @@ class TuiEventAdapter:
 
     def _on_permission_preset(self, event: SessionEvent, frame: Frame) -> None:
         self.state.preset = str(event.data.get("preset", self.state.preset))
-
-    def _on_sandbox_mode(self, event: SessionEvent, frame: Frame) -> None:
-        self.state.sandbox_mode = str(event.data.get("mode", self.state.sandbox_mode))
 
     def _on_command_run(self, event: SessionEvent, frame: Frame) -> None:
         argument = str(event.data.get("argument", "")).strip()
@@ -929,6 +953,42 @@ class TuiEventAdapter:
         self.state.queued = max(0, self.state.queued + inserted - removed)
 
 
+SURFACES: Mapping[str, Surface] = {
+    # **Only the events worth narrowing.** Anything absent is `Surface.ALL`,
+    # which is the safe answer: a pane left stale is worse than a redraw nobody
+    # needed, so an event earns an entry here rather than losing one.
+    #
+    # `assistant/chunk` is the entry that pays for the table. It arrives faster
+    # than the coalescing window for the whole of a streaming turn, and it can
+    # move exactly one thing — the transcript.
+    "assistant/chunk": Surface.TRANSCRIPT,
+    # A settled message carries the usage the footer's gauge and cache field
+    # read, and a row.
+    "assistant/message": Surface.TRANSCRIPT | Surface.FOOTER,
+    "user/message": Surface.TRANSCRIPT,
+    "turn/start": Surface.TRANSCRIPT | Surface.FOOTER,
+    "turn/end": Surface.TRANSCRIPT | Surface.FOOTER,
+    "request/context": Surface.FOOTER,
+    "permission/preset": Surface.FOOTER,
+    "todo/write": Surface.SIDEBAR,
+    "sandbox/mode": Surface.FOOTER | Surface.SIDEBAR,
+    # **A delegation is a row *and* a panel entry.** Both of these were declared
+    # `SIDEBAR` alone, which is the drift this table invites and the failure it
+    # exists to prevent: "Delegated to reviewer" would have waited in the fold
+    # until some unrelated event happened to mark the transcript. The two below
+    # them really are panel-only — a child's status and its token counter draw
+    # no row, which `RECORDLESS` says in as many words.
+    #
+    # `test_a_handler_that_draws_a_row_declares_the_transcript` is what stops
+    # this happening again: the half of this table that can be derived from the
+    # handler's own body is now checked against it.
+    "subagent/admitted": Surface.TRANSCRIPT | Surface.SIDEBAR,
+    "subagent/deleted": Surface.TRANSCRIPT | Surface.SIDEBAR,
+    "subagent/status": Surface.SIDEBAR,
+    "subagent/usage-attributed": Surface.SIDEBAR,
+}
+
+
 Handler = Callable[[TuiEventAdapter, SessionEvent, Frame], None]
 
 HANDLERS: Mapping[str, Handler] = {
@@ -949,7 +1009,6 @@ HANDLERS: Mapping[str, Handler] = {
     "question/asked": TuiEventAdapter._on_question_asked,
     "question/answered": TuiEventAdapter._on_question_answered,
     "permission/preset": TuiEventAdapter._on_permission_preset,
-    "sandbox/mode": TuiEventAdapter._on_sandbox_mode,
     "sandbox/denied": TuiEventAdapter._on_sandbox_denied,
     "command/run": TuiEventAdapter._on_command_run,
     "command/done": TuiEventAdapter._on_command_done,
@@ -1000,6 +1059,10 @@ RECORDLESS: frozenset[str] = frozenset(
         "goal/continued",
         "goal/gate",
         "request/header",
+        # Both change a *reading* rather than the transcript: the posture is
+        # contributed by the row that owns it, so there is nothing to fold
+        # here and `SURFACES` is what says the footer must redraw.
+        "sandbox/mode",
         "step/start",
         "step/end",
         "approval/mode",

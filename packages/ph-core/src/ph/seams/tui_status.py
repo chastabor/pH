@@ -42,6 +42,7 @@ from ._registry import claim_key
 __all__ = [
     "ID_MAX",
     "ReadingLevel",
+    "ReadingSlot",
     "StatusField",
     "StatusReading",
     "TuiStatusRegistry",
@@ -64,6 +65,13 @@ footer can express without becoming a legend; a third would be a breaking
 change for every front end, which is the right amount of friction."""
 
 
+ReadingSlot: TypeAlias = Literal["line", "session"]
+"""Where a reading belongs: the footer line, or the session panel.
+
+Two values for `ReadingLevel`'s reason — two is what a front end can express
+without a legend, and a third is a breaking change for every one of them."""
+
+
 class StatusReading(WireModel):
     """What one field currently says.
 
@@ -75,6 +83,18 @@ class StatusReading(WireModel):
     so there is one extras policy rather than two.
     """
 
+    id: str = ""
+    slot: ReadingSlot = "line"
+    """The contributing field's `slot`, stamped by the registry beside `id`."""
+    """Which field this came from, stamped by the registry rather than written
+    by the row (see `readings`).
+
+    A reading used to be an anonymous string on one line, so a front end could
+    only render the lot in order. Naming them is what lets a *particular* one be
+    placed — the sandbox posture belongs in the sidebar's session panel, beside
+    the directory it bounds — without the fact travelling as a bespoke field on
+    every status frame. A client that does not recognise an id still renders it
+    on the line, which is what keeps a new reading additive."""
     text: str
     level: ReadingLevel = "normal"
 
@@ -92,6 +112,19 @@ class StatusField:
     id: str
     read: Callable[[Session], StatusReading | None]
     order: int = 0
+    slot: ReadingSlot = "line"
+    """Where this belongs on screen, semantically — not which widget draws it.
+
+    `level`'s shape, and for `level`'s reason: the meaning is the contributing
+    row's and the *looks* are the front end's. The sandbox posture is a fact
+    about the session — it bounds the directory the session panel already names
+    — while a budget or a cache rate is a live figure that belongs on the line
+    with the others.
+
+    Front ends that draw only one region ignore this and render everything; the
+    alternative it replaced was a hardcoded set of ids in `ph_app`'s status
+    widget, which put a placement decision about a ph-core row in the consumer,
+    where a renamed id would silently relocate the reading."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -156,7 +189,12 @@ class TuiStatusRegistry:
                 )
                 continue
             if reading is not None:
-                readings.append(reading)
+                # Stamped here, not trusted from the row: the id is the
+                # registry's own key, and a field free to answer with somebody
+                # else's would let one row's reading be placed as another's.
+                readings.append(
+                    reading.model_copy(update={"id": status_field.id, "slot": status_field.slot})
+                )
         return readings
 
 

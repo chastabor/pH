@@ -191,6 +191,65 @@ def test_cached_tokens_count_toward_the_baseline() -> None:
     assert meter.baseline(session).tokens == 1_010
 
 
+def test_the_cache_reading_says_nothing_until_a_provider_reports_cache() -> None:
+    """`StatusField.read`'s rule, against the shape every session starts with.
+
+    A first request has no cache to hit and most routes report no cache fields
+    at all, so a footer field that rendered `cache 0%` there would occupy the
+    one line a person reads for the whole session to say nothing.
+    """
+    meter = TokenMeter(ctx=None)  # type: ignore[arg-type]
+    session = Session("s")
+    assert meter.cache_reading(session) is None, "an empty log says nothing"
+
+    payload = assistant_payload("hi", "m1")
+    payload["usage"] = TokenUsage(input_tokens=1_781, output_tokens=64).to_wire()
+    session.append("assistant/message", payload, SurfaceIntent("append", ()))
+
+    assert meter.cache_reading(session) is None, "and so does a route that reports no cache"
+
+
+def test_the_cache_reading_is_the_share_of_the_prompt_the_provider_reused() -> None:
+    """The real shape, from a llama.cpp session: 1 777 of 1 810 prompt tokens.
+
+    The percentage is of the *prompt* and not of the request, because output
+    tokens are never cacheable — counting them would make a perfect hit rate
+    read as a falling one on a long answer, which is the opposite of what this
+    field is for.
+    """
+    meter = TokenMeter(ctx=None)  # type: ignore[arg-type]
+    session = Session("s")
+    payload = assistant_payload("a reply", "m1")
+    payload["usage"] = TokenUsage(
+        input_tokens=33, output_tokens=391, cache_read_tokens=1_777
+    ).to_wire()
+    session.append("assistant/message", payload, SurfaceIntent("append", ()))
+
+    reading = meter.cache_reading(session)
+    assert reading is not None
+    assert reading.text == "cache 1.8k hit (98%)"
+
+
+def test_a_stored_prefix_is_not_reported_as_a_hit() -> None:
+    """Anthropic's first cached request: everything written, nothing read.
+
+    Two different facts — what this request paid to store, and what it saved by
+    reusing — and a field that added them would report the most expensive
+    request of a session as its best-cached one.
+    """
+    meter = TokenMeter(ctx=None)  # type: ignore[arg-type]
+    session = Session("s")
+    payload = assistant_payload("a reply", "m1")
+    payload["usage"] = TokenUsage(
+        input_tokens=12, output_tokens=40, cache_write_tokens=2_048
+    ).to_wire()
+    session.append("assistant/message", payload, SurfaceIntent("append", ()))
+
+    reading = meter.cache_reading(session)
+    assert reading is not None
+    assert reading.text == "cache 2.0k stored"
+
+
 def test_measuring_a_message_covers_every_text_carrying_block() -> None:
     meter = TokenMeter(ctx=None)  # type: ignore[arg-type]
     message = create_user_message(

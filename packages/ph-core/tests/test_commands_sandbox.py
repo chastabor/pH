@@ -150,11 +150,23 @@ async def test_a_profile_without_the_row_is_told_so(mount: MountProfile) -> None
     assert "mounts no sandbox-allow row" in shown
 
 
+def _refusals(ctx: Any, session: Any) -> Any:
+    """This row's reading, by id — `sandbox` is the refusal count.
+
+    The mode is `sandbox-mode`, contributed by the seam's own row: two facts
+    about one seam, which is why each has to be named rather than taken as
+    "the reading".
+    """
+    return next(
+        (one for one in ctx.require(TUI_STATUS).readings(session) if one.id == "sandbox"), None
+    )
+
+
 async def test_the_footer_counts_refusals_and_show_lists_them(mount: MountProfile) -> None:
     ctx = await mount()
     session = ctx.require(SESSIONS).create("s")
     agent = ctx.require(AGENTS).create(session, AgentOptions(provider="fake", model="f"))
-    assert ctx.require(TUI_STATUS).readings(session) == [], "nothing refused, nothing said"
+    assert _refusals(ctx, session) is None, "nothing refused, nothing said"
 
     ctx.require(SANDBOX).record_denial(
         Denial(kind="network", via="proxy", host="h", port=443), agent=agent.id
@@ -163,9 +175,9 @@ async def test_the_footer_counts_refusals_and_show_lists_them(mount: MountProfil
         Denial(kind="filesystem", via="output", evidence="e"), agent=agent.id
     )
 
-    assert StatusReading(text="sandbox: 2 refusals", level="warning") in ctx.require(
-        TUI_STATUS
-    ).readings(session)
+    assert _refusals(ctx, session) == StatusReading(
+        id="sandbox", text="sandbox: 2 refusals", level="warning"
+    )
     shown = await _run(ctx, "/sandbox", session=session)
     assert "denied this session: 2" in shown
     assert "Sandbox blocked network access to h:443" in shown

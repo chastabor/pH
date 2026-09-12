@@ -55,7 +55,7 @@ event, or a child process.
 
 | `--profile` | route | credential |
 |---|---|---|
-| `llama` | a local llama.cpp server (`LLAMA_BASE_URL`, default `http://127.0.0.1:9931/v1`) | `LLAMA_API_KEY` — a formality llama.cpp ignores without `--api-key`, but it must be set |
+| `llama` | a local llama.cpp server (`LLAMA_BASE_URL`, default `http://127.0.0.1:9931/v1`); its context window is read from `/props` at mount | `LLAMA_API_KEY` — a formality llama.cpp ignores without `--api-key`, but it must be set |
 | `deepseek` | DeepSeek | `DEEPSEEK_API_KEY` |
 | `anthropic` | Anthropic messages API | `ANTHROPIC_API_KEY` |
 | `google` | Gemini | `GEMINI_API_KEY` |
@@ -66,6 +66,13 @@ event, or a child process.
 `ph doctor` prints the list this install can actually compose. Profiles compose,
 so `--profile llama` is `base` plus the llama route; the interactive profiles
 layer `headless` and then their own rows.
+
+**Every one of them also layers `ph-stabilize`**, so a conversation is compacted
+at 85% of the window rather than growing until the provider refuses it, and
+`/compact` is there to do it by hand. That layer is *optional*: an install
+without the distribution composes the same profiles and simply never compacts —
+which is the one place a profile's behaviour depends on what is installed, and
+`ph doctor` reports what actually activated.
 
 ## One prompt
 

@@ -15,10 +15,12 @@ from dataclasses import dataclass
 from typing import Literal, TypeAlias
 
 from ..cordis import Context, plugin
-from ..keys import APPROVAL, PERMISSION_PRESETS, SANDBOX
+from ..keys import APPROVAL, PERMISSION_PRESETS, SANDBOX, TUI_STATUS
 from ..session import Session
+from ._registry import contribute_item
 from .approval import ApprovalPolicy
 from .sandbox import SandboxMode
+from .tui_status import StatusField, StatusReading
 
 __all__ = [
     "PRESETS",
@@ -64,6 +66,12 @@ PRESETS: dict[PresetName, PermissionPreset] = {
 }
 
 PRESET_NAMES: Mapping[str, PresetName] = {name: name for name in PRESETS}
+
+_POSTURE_READINGS: dict[str, StatusReading] = {
+    name: StatusReading(text=f"{name} accepted") for name in PRESETS
+}
+"""One reading per preset, built once — there are three, and the field is read
+on every footer refresh."""
 """Every preset name by its own spelling.
 
 A person's pick arrives as a `str` — off a picker, off a wire — and this is the
@@ -97,6 +105,19 @@ class PermissionPresetService:
                 approval.set_policy(session, preset.approval_policy)
         return preset
 
+    def posture_reading(self, session: Session) -> StatusReading:
+        """`read-only accepted` — what runs without anybody being asked.
+
+        The verb is load-bearing. All three presets are *named* for the sandbox
+        mode they set, so the bare word reads equally as the posture and as the
+        mode, and the two are different questions: this one is about prompting,
+        the sandbox reading is about what the kernel permits.
+
+        A bound method over a memo rather than a closure building an f-string,
+        because there are three postures and this is read on every refresh.
+        """
+        return _POSTURE_READINGS[self.resolve(session).name]
+
     def resolve(self, session: Session | None = None) -> PermissionPreset:
         if session is not None:
             event = session.latest("permission/preset")
@@ -111,5 +132,12 @@ class PermissionPresetService:
 
 @plugin("permission-presets")
 async def apply(ctx: Context, config: None) -> None:
-    """Mount the permission-preset mapping."""
-    ctx.provide(PERMISSION_PRESETS, PermissionPresetService(ctx=ctx))
+    """Mount the permission-preset mapping, and the posture it can state."""
+    service = PermissionPresetService(ctx=ctx)
+    ctx.provide(PERMISSION_PRESETS, service)
+    contribute_item(
+        ctx,
+        TUI_STATUS,
+        StatusField(id="posture", read=service.posture_reading, order=10),
+        label="permission-presets(status)",
+    )

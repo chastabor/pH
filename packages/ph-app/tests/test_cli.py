@@ -20,10 +20,15 @@ import yaml
 from filelock import FileLock
 from typer.testing import CliRunner
 
+from ph import bundles
+from ph.bundles import BASE, HEADLESS, resolve_bundle
 from ph.paths import resolve_roots
 from ph.testing import not_none, stored_log
+from ph_app import profiles
 from ph_app.cli import app
 from ph_app.profiles import (
+    PROFILE_DIR,
+    available_profiles,
     compose_profile,
     profile_file,
     profile_name,
@@ -517,8 +522,13 @@ def test_the_catalog_says_what_the_profile_sets_not_only_what_the_code_defaults(
     default stands), and one it sets (that is what runs). Composed, never
     mounted — no agent is started and no session opened to answer it.
     """
-    absent = _config("--row", "limits", "--profile", "headless")
-    assert "row not mounted" in absent.output, "headless ships no limits row"
+    # `rlm-harness` and not `limits`: every shipped profile carries the stabilize
+    # bundle now, so `limits` *is* mounted everywhere and stopped being an
+    # example of the state this asserts. It has to be a row with options of its
+    # own — a row that takes no configuration is omitted from this catalog
+    # entirely, which is "no row matched" and a fourth state, not this one.
+    absent = _config("--row", "rlm-harness", "--profile", "headless")
+    assert "row not mounted" in absent.output, "headless ships no RLM row"
 
     # A row a profile switches *off* is not mounted either, and a dump keeps it
     # — reading that as "mounted, the default stands" was the third state told
@@ -718,9 +728,70 @@ def test_bare_invocation_prints_help() -> None:
 
 def test_profiles_resolve_to_bundle_documents() -> None:
     documents = resolve_profile("headless")
-    assert [path.name for path in documents] == ["base.yaml", "headless.yaml"]
+    # By resolved path, not by basename: two bundles in this workspace are both
+    # called `bundle.yaml`, so a name comparison would pass for either.
+    assert documents == [BASE, HEADLESS, resolve_bundle("stabilize")]
     with pytest.raises(ValueError):
         resolve_profile("nope")
+
+
+def test_every_shipped_profile_carries_the_stabilize_layer() -> None:
+    """Context management is not a posture — it is in every profile pH offers.
+
+    Asserted over the whole table rather than for the one profile somebody had
+    in mind, because the failure this prevents is a *new* profile added without
+    it: a session that grows until the provider refuses is a defect in any
+    posture, and the table is where that is decided.
+    """
+    stabilize = resolve_bundle("stabilize")
+    assert stabilize is not None, "this workspace installs ph-stabilize"
+    for name in available_profiles():
+        assert stabilize in resolve_profile(name), f"{name} composes without compaction"
+
+
+def test_the_stabilize_layer_is_composed_once_however_often_it_is_named() -> None:
+    """`rlm-stable` names it required *and* inherits the optional one.
+
+    Layering a document twice is not a harmless repeat — its rows are appended,
+    so the second `compaction-summarize` claims a slot the first already holds
+    and the mount fails. The gate is the count, because the symptom is a
+    `ph doctor` that refuses a profile this table says is fine.
+    """
+    documents = resolve_profile("rlm-stable")
+    stabilize = not_none(resolve_bundle("stabilize"))
+
+    assert documents.count(stabilize) == 1
+    assert len(documents) == len(set(documents)), "no layer is composed twice"
+
+
+def test_an_optional_bundle_that_is_absent_costs_the_profile_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The lean install: `ph-app` alone, with no `ph-stabilize` to resolve.
+
+    The whole reason the layer is optional. `available_profiles` gates on
+    bundles resolving, so a *required* stabilize would have taken `--profile
+    tui` away from an install that had it — trading a working profile for a
+    feature, which is the deal `rlm-indexed`'s own comment refuses.
+    """
+    installed = bundles.resolve_bundle
+    monkeypatch.setattr(
+        profiles,
+        "resolve_bundle",
+        lambda name: None if name == "stabilize" else installed(name),
+    )
+
+    assert "tui" in available_profiles(), "the profile survives its absence"
+    assert "llama" in available_profiles()
+    assert resolve_profile("tui") == [BASE, HEADLESS, PROFILE_DIR / "tui.yaml"]
+
+    # The same bundle, named *required* one profile over, is still refused and
+    # still names the distribution to install — which is the whole distinction
+    # the flag draws, and it is drawn here against one bundle so the test cannot
+    # pass by two bundles behaving differently for some other reason.
+    assert "rlm-stable" not in available_profiles()
+    with pytest.raises(ValueError, match="ph-stabilize"):
+        resolve_profile("rlm-stable")
 
 
 def test_an_unknown_profile_names_what_is_available() -> None:
@@ -737,7 +808,11 @@ def test_an_unknown_profile_names_what_is_available() -> None:
 
 def test_the_tui_profile_layers_onto_headless() -> None:
     documents = resolve_profile("tui")
-    assert [path.name for path in documents] == ["base.yaml", "headless.yaml", "tui.yaml"]
+    stabilize = not_none(resolve_bundle("stabilize"))
+    assert documents == [BASE, HEADLESS, stabilize, PROFILE_DIR / "tui.yaml"]
+    # The bundle before the profile's own document, so `tui.yaml` — and a user
+    # overlay after it — can address a stabilize row by id.
+    assert documents.index(stabilize) < documents.index(PROFILE_DIR / "tui.yaml")
 
 
 def test_the_tui_profile_makes_the_workspace_writable() -> None:
@@ -933,9 +1008,9 @@ def test_a_launchs_lifetime_choice_reaches_its_tabs() -> None:
 def test_drop_ins_compose_after_the_overlay(roots: Path) -> None:
     """P6-38: what pH wrote on the person's behalf layers over what they wrote,
     in name order — and a file profile has no name to write under."""
-    profiles = resolve_roots().profiles_dir()
-    (profiles / "headless.yaml").parent.mkdir(parents=True, exist_ok=True)
-    (profiles / "headless.yaml").write_text("[]", encoding="utf-8")
+    profiles_dir = resolve_roots().profiles_dir()
+    (profiles_dir / "headless.yaml").parent.mkdir(parents=True, exist_ok=True)
+    (profiles_dir / "headless.yaml").write_text("[]", encoding="utf-8")
     dropins = resolve_roots().profile_dropins("headless")
     dropins.mkdir()
     (dropins / "sandbox.yaml").write_text("[]", encoding="utf-8")
@@ -944,12 +1019,15 @@ def test_drop_ins_compose_after_the_overlay(roots: Path) -> None:
 
     documents = resolve_profile("headless")
 
-    assert [path.name for path in documents] == [
-        "base.yaml",
-        "headless.yaml",
-        "headless.yaml",
-        "a-first.yaml",
-        "sandbox.yaml",
+    assert documents == [
+        BASE,
+        HEADLESS,
+        not_none(resolve_bundle("stabilize")),
+        # The person's own overlay, which shares a basename with the bundle it
+        # layers over — the reason this compares resolved paths.
+        profiles_dir / "headless.yaml",
+        dropins / "a-first.yaml",
+        dropins / "sandbox.yaml",
     ]
     assert profile_name("headless") == "headless"
     assert compose_profile("headless").name == "headless"
@@ -957,7 +1035,7 @@ def test_drop_ins_compose_after_the_overlay(roots: Path) -> None:
     # that exists is a file profile with no name to write a drop-in under, and one
     # that does not exist is a name — which then fails resolution by that name
     # rather than resolving here and refusing there.
-    written = profiles / "ad-hoc.yaml"
+    written = profiles_dir / "ad-hoc.yaml"
     written.write_text("[]", encoding="utf-8")
     assert profile_file(str(written)) == written
     assert profile_name(str(written)) == ""

@@ -103,6 +103,10 @@ def test_the_auditor_renders_what_the_transcript_does_not() -> None:
         "request/header",
         "approval/mode",
         "approval/policy",
+        # The posture is a `StatusField` the sandbox row contributes, so the
+        # conversation view folds nothing for it — while an auditor wants the
+        # moment it moved and who moved it.
+        "sandbox/mode",
         "fs/observed",
         "session/end-seed",
         "compaction/summarized",

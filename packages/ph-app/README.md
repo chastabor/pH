@@ -159,6 +159,12 @@ The table lives in `src/ph_app/profiles.py`, the documents in
 | `base` | `ph-base` | — |
 | `headless` | `base` + the fake adapter | — |
 | `tui` | `headless` + `tui.yaml` (writable workspace, `/trajectory`, `ask_user` armed) | — |
+
+Every row of that table also layers the **`stabilize` bundle**, so every profile
+compacts at 85% of its window and offers `/compact`. It is layered *optionally*:
+an install without `ph-stabilize` composes each of these profiles unchanged and
+simply never compacts, which is what keeps the lean `uv tool install
+./packages/ph-app` target whole. `ph doctor` reports which rows activated.
 | `llama` | `base` + a local llama.cpp route | `LLAMA_API_KEY` (a formality llama.cpp ignores, but it must be set) |
 | `deepseek` | `base` + DeepSeek over the OpenAI-compatible wire | `DEEPSEEK_API_KEY` |
 | `anthropic` | `base` + the messages API | `ANTHROPIC_API_KEY` |

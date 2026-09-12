@@ -93,7 +93,9 @@ from ..payloads import (
     QuestionAskReply,
     SessionCommandsNotice,
     SessionScreensNotice,
+    SessionSkillsReply,
     SessionStagedNotice,
+    SessionToolsReply,
     StatusFacts,
     notice_of,
 )
@@ -104,7 +106,7 @@ from .adapter import Frame, TuiEventAdapter
 from .commands import action_command, local_commands
 from .frontend import ModalHost
 from .screens import open_screen_action
-from .state import TuiState
+from .state import CatalogEntry, Surface, TuiState
 from .trajectory_screen import CLIENT_SIDE as TRAJECTORY
 
 __all__ = ["LOCAL_SCREENS", "DaemonSession", "attach_session"]
@@ -260,7 +262,9 @@ class DaemonSession:
                 self.adapter.apply(event, Frame(live=live, view=view_of(event.type, sidecar)))
             except Exception:
                 log.exception("ph_app.tui: the adapter refused an event")
-        self.host.state_changed()
+        # What this batch moved, not everything: the adapter accumulated it per
+        # event and the draw is coalesced per batch, so the two line up.
+        self.host.state_changed(self.adapter.take_touched())
 
     def _status(self, facts: StatusFacts) -> None:
         """`session.status`, which carries the footer beside it.
@@ -283,7 +287,9 @@ class DaemonSession:
             self.state.status = facts.status
             self._moved.set()
             self._moved = anyio.Event()
-        self.host.state_changed()
+        # Both, because the readings this frame carries are placed on both: the
+        # footer draws all of them but the one the sidebar claims by id.
+        self.host.state_changed(Surface.FOOTER | Surface.SIDEBAR)
 
     def dispatch(self, method: str, params: dict[str, Any]) -> None:
         """Every notification this front end reads, in one place.
@@ -602,13 +608,24 @@ async def attach_session(
     configs: list[DaemonConfigReply] = []
     listed_commands: list[SessionCommandsNotice] = []
     listed_screens: list[SessionScreensNotice] = []
+    listed_tools: list[SessionToolsReply] = []
+    listed_skills: list[SessionSkillsReply] = []
     asked = SessionParams(session_id=session_id)
     async with anyio.create_task_group() as tasks:
         tasks.start_soon(fetch, verbs.DAEMON_CONFIG, NoParams(), configs)
         tasks.start_soon(fetch, verbs.COMMANDS_LIST, asked, listed_commands)
         tasks.start_soon(fetch, verbs.SCREENS_LIST, asked, listed_screens)
+        # Two more reads in the same group rather than on demand, because both
+        # are drawn in the sidebar from the first frame — a panel that filled in
+        # a moment later would be a second kind of "not yet" beside the history
+        # still paging. Neither changes while a session is open: a row that
+        # registers a tool does it at mount, and installing a skill is a restart.
+        tasks.start_soon(fetch, verbs.TOOLS_LIST, asked, listed_tools)
+        tasks.start_soon(fetch, verbs.SKILLS_LIST, asked, listed_skills)
 
     config = configs[0]
+    state.tools = _catalog(listed_tools[0].tools)
+    state.skills = _catalog(listed_skills[0].skills)
     front = DaemonSession(
         client=client,
         session_id=session_id,
@@ -641,6 +658,16 @@ async def attach_session(
     await front.feed.catch_up(client, attached.cursor.model_copy(update={"sequence": 0}))
     front.feed.live()
     return front
+
+
+def _catalog(entries: Sequence[Any]) -> tuple[CatalogEntry, ...]:
+    """A projected catalog as the panels read it: a name and what it is for.
+
+    One function for tools and skills because the two wire models differ in
+    everything the sidebar does not draw — a tool's parameter schema, a skill's
+    path and version — and agree on the two fields it does.
+    """
+    return tuple(CatalogEntry(name=one.name, description=one.description) for one in entries)
 
 
 def _remote_command(

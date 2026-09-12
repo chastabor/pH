@@ -156,7 +156,9 @@ would have made the choice for you:
 - **`subagents`** — no child-agent provider, which is why `subagent-task`
   registers no tool in `ph-base`.
 - **`compaction`** — the seam records and replaces; *when* and *what to say* are
-  `ph-stabilize`'s `compaction-summarize`.
+  `ph-stabilize`'s `compaction-summarize`. Every profile `ph-app` offers layers
+  that bundle when it is installed, so a *profile* compacts; `ph-base` composed
+  on its own still does not.
 - **`uploads`** — mounted with no uploader; each adapter row registers its own,
   so a profile with no file API sends every byte inline.
 

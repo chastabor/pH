@@ -119,6 +119,7 @@ from .projections import (
     credentials_of,
     readings_of,
     screens_of,
+    skills_of,
     tools_of,
 )
 from .recovery import EPHEMERAL_QUIET, PASSIVATE_AFTER, WAKE_WITHIN
@@ -985,6 +986,7 @@ METHODS: dict[str, _Row] = dict(
         _projection(verbs.COMMANDS_LIST, "commands", commands_of),
         _projection(verbs.SCREENS_LIST, "screens", screens_of),
         _projection(verbs.TOOLS_LIST, "tools", tools_of),
+        _projection(verbs.SKILLS_LIST, "skills", skills_of),
         _unkeyed(verbs.SCHEDULE_CREATE, _Connection._schedule_create),
         _unkeyed(verbs.SCHEDULE_CANCEL, _Connection._schedule_cancel),
         _unkeyed(verbs.SCHEDULE_LIST, _Connection._schedule_list),

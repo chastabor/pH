@@ -36,8 +36,8 @@ from ph.llm.types import (
 from ph.session import Session, SessionEvent, SurfaceIntent, SurfaceReplace
 from ph.session.known_event_types import KNOWN_SESSION_EVENT_TYPES
 from ph.testing import MountProfile, assistant_payload, plugin_payload, simple_tool, user_payload
-from ph_app.tui.adapter import HANDLERS, RECORDLESS, REPLAY, TuiEventAdapter
-from ph_app.tui.state import TuiState
+from ph_app.tui.adapter import HANDLERS, RECORDLESS, REPLAY, SURFACES, TuiEventAdapter
+from ph_app.tui.state import Surface, TuiState
 
 pytestmark = pytest.mark.anyio
 
@@ -139,6 +139,103 @@ async def test_a_malformed_event_costs_one_row_not_the_transcript(mount: MountPr
         adapter.apply(event)
     # No exception, and the transcript is still a list of rows.
     assert isinstance(adapter.state.items, list)
+
+
+async def test_a_chunk_moves_the_transcript_and_nothing_else(mount: MountProfile) -> None:
+    """The entry the surface table exists for.
+
+    An `assistant/chunk` arrives faster than the draw's coalescing window for
+    the whole of a streaming turn, so before the table every one of them redrew
+    the session panel, the todo list and the subagent fold — none of which a
+    chunk can move. The draw asks `take_touched` what actually changed.
+    """
+    ctx: Context = await mount()
+    session = ctx.require(SESSIONS).create("tui-surfaces")
+    adapter = TuiEventAdapter()
+    session.append("assistant/chunk", {"turn": 1, "step": 1, "chunk": {"type": "text-delta"}})
+    for event in session.events:
+        adapter.apply(event)
+
+    assert adapter.take_touched() == Surface.TRANSCRIPT
+    assert adapter.take_touched() == Surface.NOTHING, "and asking again finds nothing new"
+
+
+async def test_a_panel_event_does_not_redraw_the_transcript(mount: MountProfile) -> None:
+    """The other direction, so the table is not just "chunks are cheap".
+
+    A todo write and a child's token counter move the sidebar and nothing else;
+    re-syncing a long transcript for either is the cost this avoids.
+    """
+    ctx: Context = await mount()
+    session = ctx.require(SESSIONS).create("tui-panels")
+    adapter = TuiEventAdapter()
+    session.append("todo/write", {"todos": []})
+    for event in session.events:
+        adapter.apply(event)
+
+    assert adapter.take_touched() == Surface.SIDEBAR
+
+
+async def test_an_event_the_table_does_not_name_redraws_everything(mount: MountProfile) -> None:
+    """`ALL` is the default, and that is the safety property.
+
+    A surface left stale shows yesterday's answer; a redraw nobody needed costs
+    a frame. So an event type earns a narrow entry rather than losing one, and
+    a handler added without touching `SURFACES` is correct by default.
+    """
+    ctx: Context = await mount()
+    session = ctx.require(SESSIONS).create("tui-default")
+    adapter = TuiEventAdapter()
+    unlisted = next(one for one in HANDLERS if one not in SURFACES)
+    session.append(unlisted, {})
+    for event in session.events:
+        adapter.apply(event)
+
+    assert adapter.take_touched() == Surface.ALL
+
+
+def test_a_handler_that_draws_a_row_declares_the_transcript() -> None:
+    """The half of `SURFACES` that can be derived, held against what it says.
+
+    A second table keyed by event type is a table free to disagree with the
+    handlers it describes, and it did within a day of being written:
+    `subagent/admitted` draws "Delegated to X" and was declared `SIDEBAR`
+    alone, so the row would have waited in the fold until something unrelated
+    marked the transcript — a stale pane, which is the exact failure the
+    per-surface draw was introduced to avoid.
+
+    **One direction only.** A handler that draws a row must declare the
+    transcript; the converse is false and must stay false —
+    `assistant/chunk` streams *into* a row that already exists rather than
+    adding one, so it declares `TRANSCRIPT` and calls neither `_row` nor
+    `_card_row`. `FOOTER` and `SIDEBAR` cannot be derived at all: a handler
+    assigning `self.state.todos` is not distinguishable by shape from one
+    assigning `queued`.
+
+    Reading the handler's source rather than running it, because the question
+    is what it *would* draw.
+    """
+    import ast
+    import inspect
+    import textwrap
+
+    from ph_app.tui.adapter import SURFACES, TuiEventAdapter
+
+    for event_type, surfaces in SURFACES.items():
+        handler = HANDLERS.get(event_type)
+        if handler is None:
+            continue
+        tree = ast.parse(textwrap.dedent(inspect.getsource(handler)))
+        draws = any(
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr in {"_row", "_card_row"}
+            for node in ast.walk(tree)
+        )
+        assert not draws or Surface.TRANSCRIPT in surfaces, (
+            f"{event_type} draws a row and does not declare TRANSCRIPT"
+        )
+    assert TuiEventAdapter is not None
 
 
 async def test_an_unknown_event_type_is_ignored(mount: MountProfile) -> None:

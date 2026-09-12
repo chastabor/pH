@@ -6,7 +6,16 @@
 # parameter on the loop, and none of them needs the loop to know it is there.
 #
 # Layered by a profile rather than by `ph-base`, because a deployment that wants
-# the plain harness should get the plain harness.
+# the plain harness should get the plain harness — and `ph-base` composed on its
+# own still is one.
+#
+# **Every profile `ph-app` offers layers this bundle**, `base` included, and as
+# an *optional* bundle: an install without this distribution composes the same
+# profiles and simply never compacts. The reason is one row rather than all
+# nine — a session that grows until the provider refuses it is a defect in any
+# posture, not a feature of an unattended one — and the rest come along because
+# a bundle is the unit a profile can name. They are inert by design, with one
+# exception worth knowing: `permissions-fs` below ships a live rule.
 
 # --- planning ---------------------------------------------------------------
 # `write_todos` + the `todo/write` event + the prompt section (G1). `disabled`

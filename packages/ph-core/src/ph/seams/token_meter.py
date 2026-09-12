@@ -24,10 +24,15 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from pydantic import ValidationError
+
 from ..cordis import Context, plugin
-from ..keys import TOKEN_METER
+from ..keys import TOKEN_METER, TUI_STATUS
 from ..llm.types import AttachmentRef, Message, TokenUsage, attachment_of
 from ..session import Session
+from ..text import thousands
+from ._registry import contribute_item
+from .tui_status import StatusField, StatusReading
 
 __all__ = [
     "CHARS_PER_TOKEN",
@@ -166,6 +171,85 @@ class TokenMeter:
                 return TokenUsage.model_validate(event.data["usage"])
         return None
 
+    def reasoning_reading(self, session: Session) -> StatusReading | None:
+        """What the route asks the model to spend on thinking, or nothing.
+
+        Off `Session.request_header` — the typed, incrementally folded accessor
+        for the event whose whole payload is the call config. The daemon walked
+        `header.config.reasoningEffort` out of a dict by its camelCase alias
+        before this, so a rename returned `""` forever instead of failing.
+
+        **Here rather than on the `llm` row, which owns the fact.** `ph.session`
+        imports `ph.llm.types`, so `ph.llm` cannot import the seam layer at
+        module scope — a `StatusField` contributed from there is an import
+        cycle. This row is the nearest honest home: it already answers "what did
+        this request cost", and effort is the setting that most changes the
+        answer.
+
+        A *reading* rather than a field on every status frame, for the reason
+        the posture beside it is one. The field it replaced cost an entry on two
+        payload models, a resolver in the supervisor, a line in the client's
+        status sink and one in `TuiState`.
+        """
+        header = session.request_header()
+        effort = header.config.reasoning_effort if header is not None else None
+        return StatusReading(text=str(effort)) if effort else None
+
+    def cache_reading(self, session: Session) -> StatusReading | None:
+        """What the last request did with the provider's prompt cache (P7-14).
+
+        The footer already shows what the conversation *costs*; this is the
+        other half of that number — how much of it the provider did not have to
+        re-ingest. It is worth a field because a cache hit rate that falls is
+        the visible symptom of a moved prefix (A12): a section that changes
+        every turn re-bills the whole conversation, and nothing else on this
+        line would show it happening.
+
+        **Silence when the provider says nothing.** A route that reports no
+        cache figures at all — and every route does on the first request of a
+        session — has this return `None`, which the footer renders as nothing
+        rather than as `cache 0%`. `StatusField.read`'s own rule: a line that
+        always carries every field is a line where the one that matters cannot
+        be seen.
+
+        Through `latest` rather than `last_usage`, and that is the cost
+        argument: this is read on every redraw, `latest` is an incremental fold
+        that a log of mostly `assistant/chunk`s answers from a dict, and the
+        reverse scan `last_usage` performs is a whole-log walk when nothing has
+        reported usage yet. The difference in what they answer is deliberate
+        too — this says what the *last* message did, so a message that carries
+        no usage leaves the footer saying nothing rather than repeating a figure
+        from three steps ago as though it were current.
+        """
+        event = session.latest("assistant/message")
+        if event is None or "usage" not in event.data:
+            return None
+        try:
+            usage = TokenUsage.model_validate(event.data["usage"])
+        except ValidationError:
+            return None
+        read, written = usage.cache_read_tokens or 0, usage.cache_write_tokens or 0
+        if not read and not written:
+            return None
+        parts = []
+        if read:
+            # The share of the prompt, not of the request: output tokens are
+            # never cacheable, so including them would make a perfect hit rate
+            # read as a falling one on a long answer.
+            #
+            # Through `total` rather than by re-adding its terms, which is what
+            # that property exists for: a fifth billed term reaches this
+            # percentage instead of silently falling out of it.
+            prompt = usage.total - usage.output_tokens
+            share = f" ({read * 100 // prompt}%)" if prompt else ""
+            parts.append(f"{thousands(read)} hit{share}")
+        if written:
+            # What this request paid to store, which is the first-turn shape on
+            # a route that bills cache writes: it is not a hit and must not be
+            # counted as one.
+            parts.append(f"{thousands(written)} stored")
+        return StatusReading(text="cache " + " · ".join(parts))
+
     def baseline(self, session: Session, *, pending: Sequence[Message] = ()) -> TokenBaseline:
         """What the next request will cost, from usage when there is any.
 
@@ -200,5 +284,22 @@ class TokenMeter:
 
 @plugin("token-meter")
 async def apply(ctx: Context, config: None) -> None:
-    """Mount the token meter."""
-    ctx.provide(TOKEN_METER, TokenMeter(ctx=ctx))
+    """Mount the token meter, and the one reading it can answer for a footer."""
+    meter = TokenMeter(ctx=ctx)
+    ctx.provide(TOKEN_METER, meter)
+    # `contribute_item` rather than an `inject`, for `diagnostics`' reason: this
+    # row must activate in a profile that mounts no front end at all, and a
+    # dependency on `ctx.tui_status` would make the meter — which compaction
+    # needs — wait on a registry a headless run never mounts.
+    for field_id, read, order in (
+        # Ahead of the others, because it qualifies the model name the line
+        # opens with: one model at two efforts is two costs and two answers.
+        ("reasoning", meter.reasoning_reading, 5),
+        ("cache", meter.cache_reading, 14),
+    ):
+        contribute_item(
+            ctx,
+            TUI_STATUS,
+            StatusField(id=field_id, read=read, order=order),
+            label=f"token-meter({field_id})",
+        )

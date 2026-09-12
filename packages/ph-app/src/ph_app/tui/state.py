@@ -14,13 +14,63 @@ becomes its own `tool/result` row rather than a second row beside it.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import IntFlag
 from typing import Any, Literal, TypeAlias
 
-__all__ = ["ChatItem", "ItemRole", "SubagentRow", "ToolCard", "TuiState"]
+__all__ = [
+    "CatalogEntry",
+    "ChatItem",
+    "ItemRole",
+    "SubagentRow",
+    "Surface",
+    "ToolCard",
+    "TuiState",
+]
+
+
+class Surface(IntFlag):
+    """Which part of the screen a change reaches.
+
+    The redraw was one boolean, so every event redrew everything: an
+    `assistant/chunk` — which arrives faster than the coalescing window during a
+    streaming turn, and cannot change a sidebar — re-ran the session panel, the
+    todo list and the subagent fold thirty times a second. A flag lets the draw
+    ask what actually moved.
+
+    `ALL` is the default everywhere, and deliberately: a surface that should
+    have been redrawn and was not is a pane showing yesterday's answer, which is
+    far worse than a redraw nobody needed. An event type earns a narrower
+    entry by being named in `ph_app.tui.adapter.SURFACES`.
+    """
+
+    NOTHING = 0
+    """Named rather than `Surface(0)`, because a dataclass default may not be a
+    call and a zero flag is worth being able to say out loud."""
+
+    TRANSCRIPT = 1
+    FOOTER = 2
+    SIDEBAR = 4
+    ALL = TRANSCRIPT | FOOTER | SIDEBAR
+
 
 ItemRole: TypeAlias = Literal[
     "user", "assistant", "thinking", "context", "tool", "notice", "error", "boundary", "compaction"
 ]
+
+
+@dataclass(frozen=True, slots=True)
+class CatalogEntry:
+    """One entry of what this deployment offers the model: a tool, or a skill.
+
+    One type for both because the two panels ask the same two questions of
+    them — what is it called, and what is it for — and a `ToolSchema` beside a
+    `Skill` would make every renderer here branch on which it had for a field
+    both carry. The parts that differ (a tool's parameters, a skill's path and
+    version) are not what a catalog panel shows, so they are not carried.
+    """
+
+    name: str
+    description: str = ""
 
 
 @dataclass(slots=True)
@@ -133,8 +183,28 @@ class TuiState:
     writers of one fact. Widgets read `busy`, which is the bool they wanted."""
     turn: int = 0
     queued: int = 0
-    preset: str = "read-only"
-    sandbox_mode: str = "read-only"
+    preset: str = ""
+    """Which posture the permission picker pre-selects, from `permission/preset`.
+
+    **Not what anything displays** — the footer draws the `posture` reading the
+    `permission-presets` row contributes, which is correct from the first frame
+    because the row resolves it rather than watching for a change. This is the
+    change-watching remnant, kept for the one thing that needs the bare *name*:
+    which row the picker marks. Empty until somebody switches, and an empty
+    mark is the honest answer to "which one is live" from a client that has not
+    been told."""
+    tools: tuple[CatalogEntry, ...] = ()
+    """What the model may call here, as `tools/list` projected it.
+
+    Read at draw time rather than folded from events, because it is not in the
+    log: a row registers its tools at mount, so this is a fact about the
+    deployment the session is running under and not about the session. The
+    panel draws the names and `/tools` draws the descriptions — one read, two
+    renderings, which is why the description is carried rather than dropped at
+    the wire edge."""
+    skills: tuple[CatalogEntry, ...] = ()
+    """What is installed here, from `skills/list`. `tools`' reasoning, and the
+    same catalog the model's own prompt is built from."""
     tokens: int = 0
     """What the last request cost, from the provider's own usage report — the
     same count `ctx.token_meter` calls its `usage` baseline."""

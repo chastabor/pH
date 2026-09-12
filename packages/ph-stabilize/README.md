@@ -19,6 +19,13 @@ The package registers the `stabilize` **bundle** (`src/ph_stabilize/bundle.yaml`
 which `ph-app` composes through the `ph.bundles` entry-point group without
 depending on this distribution.
 
+**Every profile `ph-app` offers layers it** — `base` included — as an *optional*
+bundle: an install without this distribution composes the same profiles and
+simply never compacts. Compaction is the row that earns that, because a session
+that grows until the provider refuses it is a defect in any posture; the rest
+come along because a bundle is the unit a profile can name, and they are inert
+until configured. `ph doctor` reports which of them actually activated.
+
 ## The rows
 
 | row | what it does | shipped |
@@ -42,7 +49,15 @@ somebody's longest legitimate turn.
 
 The two that ship **off** are off for a different reason: they hand the model a
 tool or keep a turn going, and that is a posture a profile chooses rather than
-inherits. `rlm-stable` is the profile that chooses it.
+inherits. `rlm-stable` is the profile that chooses it — and the reason the
+bundle reaching every profile does not thereby give every deployment a todo
+tool.
+
+The one row that is **not** inert on arrival is `permissions-fs`: it ships a
+rule sending writes outside the agent's workspace to `interrupt`. That is E6's
+intended default rather than an oversight, but it is a behaviour change a
+deployment should know it inherited — `ph config --row permissions-fs` prints
+what is in force.
 
 ## The tool, and the command
 

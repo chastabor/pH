@@ -45,6 +45,7 @@ from pydantic import Field
 from ph.llm.types import AttachmentRef, ToolSchema
 from ph.seams.approval import ApprovalRequest
 from ph.seams.commands import CommandSchema
+from ph.seams.skills import Skill
 from ph.seams.tui_screens import ScreenSchema
 from ph.seams.tui_status import StatusReading
 from ph.seams.user_questions import UserQuestion
@@ -548,6 +549,19 @@ class SessionToolsReply(SessionNotice):
     """`tools/list` — what the model may call in this deployment."""
 
     tools: list[ToolSchema] = Field(default_factory=list)
+
+
+class SessionSkillsReply(SessionNotice):
+    """`skills/list` — what is installed here, as the catalog states it.
+
+    `Skill` itself rather than a projection of it: the seam's model is already a
+    `WireModel` carrying exactly what a catalog entry is — name, description,
+    where it came from and which revision — so a second shape here would be a
+    copy to keep in step for no field gained. `body` is not on it, which is the
+    point of progressive disclosure and the reason this listing is cheap.
+    """
+
+    skills: list[Skill] = Field(default_factory=list)
 
 
 class SessionStagedNotice(SessionNotice):

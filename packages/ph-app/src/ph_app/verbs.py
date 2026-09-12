@@ -70,6 +70,7 @@ from .payloads import (
     SessionReadingsReply,
     SessionSchedulesReply,
     SessionScreensNotice,
+    SessionSkillsReply,
     SessionStagedNotice,
     SessionToolsReply,
     ShellReply,
@@ -106,6 +107,7 @@ __all__ = [
     "SESSION_STAGE",
     "SESSION_STATUS",
     "SHUTDOWN",
+    "SKILLS_LIST",
     "TOOLS_LIST",
     "UNKEYED",
     "VOCABULARY",
@@ -153,6 +155,7 @@ SESSION_READINGS = Verb("session/readings", SessionParams, SessionReadingsReply)
 COMMANDS_LIST = Verb("commands/list", SessionParams, SessionCommandsNotice)
 SCREENS_LIST = Verb("screens/list", SessionParams, SessionScreensNotice)
 TOOLS_LIST = Verb("tools/list", SessionParams, SessionToolsReply)
+SKILLS_LIST = Verb("skills/list", SessionParams, SessionSkillsReply)
 
 # --- attachments and credentials -----------------------------------------------
 

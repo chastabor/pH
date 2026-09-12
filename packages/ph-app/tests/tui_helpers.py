@@ -18,6 +18,7 @@ from textual.pilot import Pilot
 from ph.seams.approval import ApprovalAnswer, ApprovalRequest
 from ph.seams.user_questions import UserQuestion
 from ph_app.tui.app import PHTuiApp
+from ph_app.tui.state import Surface
 
 
 def tui_app(
@@ -126,6 +127,7 @@ class StubHost:
         self.approvals: list[ApprovalRequest] = []
         self.questions: list[UserQuestion] = []
         self.redraws = 0
+        self.redrawn = Surface.NOTHING
 
     async def ask_approval(self, request: ApprovalRequest) -> tuple[ApprovalAnswer, str]:
         # `ApprovalAnswer`, not `tuple[str, str]`: `ModalHost` promises the
@@ -138,5 +140,7 @@ class StubHost:
         self.questions.append(question)
         return "42"
 
-    def state_changed(self) -> None:
+    def state_changed(self, surfaces: Surface = Surface.ALL) -> None:
+        # Unioned so a test can assert what a batch did *not* reach.
         self.redraws += 1
+        self.redrawn |= surfaces

@@ -51,12 +51,13 @@ from typing import Any, Literal, Protocol, TypeAlias, runtime_checkable
 from pydantic import Field
 
 from ..cordis import Context, Disposer, Running, plugin, running
-from ..keys import AGENTS, SANDBOX
+from ..keys import AGENTS, SANDBOX, TUI_STATUS
 from ..paths import canonical
 from ..session import Session
 from ..tools.errors import FailureKind, HarnessError
 from ..wire import WireModel, literal_lookup
-from ._registry import claim_slot
+from ._registry import claim_slot, contribute_item
+from .tui_status import StatusField, StatusReading
 
 __all__ = [
     "DEFAULT_HOSTS",
@@ -91,6 +92,13 @@ log = logging.getLogger("ph.seams.sandbox")
 SandboxMode: TypeAlias = Literal["read-only", "workspace-write", "danger-full-access"]
 Enforcement: TypeAlias = Literal["full", "partial"]
 NetworkMode: TypeAlias = Literal["off", "allowlist", "full"]
+
+_MODE_READINGS: dict[str, StatusReading] = {
+    mode: StatusReading(text=f"sandbox {mode}")
+    for mode in ("read-only", "workspace-write", "danger-full-access")
+}
+"""One reading per mode, built once: there are three of them and the field is
+read on every footer refresh."""
 
 SANDBOX_MODES: Mapping[str, SandboxMode] = literal_lookup(SandboxMode)
 """Every `SandboxMode` by its own spelling — the read-side check for a value
@@ -577,6 +585,19 @@ class SandboxSeam:
     def set_mode(self, session: Session, mode: SandboxMode) -> None:
         session.append("sandbox/mode", {"mode": mode})
 
+    def mode_reading(self, session: Session) -> StatusReading:
+        """`sandbox workspace-write` — what a confined command may write.
+
+        Labelled, because the preset beside it is *named* for this and the two
+        are different questions: a preset says what runs without anybody being
+        asked, this says what the kernel will let through at all.
+
+        A bound method rather than a lambda over the seam, so the `StatusField`
+        this lives on holds one reference to this object rather than a closure
+        cell over whatever else was in scope when the row mounted.
+        """
+        return _MODE_READINGS[self.resolve_mode(session)]
+
     @property
     def available(self) -> bool:
         return self.provider is not None
@@ -826,4 +847,20 @@ class Config(WireModel):
 @plugin("sandbox-policy", config=Config)
 async def apply(ctx: Context, config: Config) -> None:
     """Mount the sandbox seam with policy resolution and no backend."""
-    ctx.provide(SANDBOX, SandboxSeam(ctx=ctx, default_mode=config.default_mode))
+    seam = SandboxSeam(ctx=ctx, default_mode=config.default_mode)
+    ctx.provide(SANDBOX, seam)
+    # The posture, as a reading rather than as a field on every status frame.
+    # Only this row can answer it — the mode is this config's default until the
+    # log overrides it, and `resolve_mode` is where that precedence lives — and
+    # a front end that had to be *told* it needed a wire field of its own, plus
+    # a projection, plus a reader, for a string this row already has.
+    #
+    # `sandbox-mode`, because `ph.commands.sandbox` already holds `sandbox` for
+    # the refusal *count* — two facts about one seam, and the registry refuses
+    # a second claim on one id rather than letting them overwrite each other.
+    contribute_item(
+        ctx,
+        TUI_STATUS,
+        StatusField(id="sandbox-mode", read=seam.mode_reading, order=11, slot="session"),
+        label="sandbox(mode)",
+    )

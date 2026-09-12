@@ -91,6 +91,13 @@ class TuiSettings:
     turn_notification: TurnNotification = "bell"
     show_thinking: bool = True
     show_tool_results: bool = True
+    show_tools: bool = True
+    show_skills: bool = True
+    """Whether the sidebar's tools and skills panels are drawn.
+
+    Visible by default, because what fills the context window is the thing a
+    person should not have to go looking for. Hiding one hides its header too —
+    a 32-column panel cannot afford a heading over nothing."""
 
     def to_json(self) -> dict[str, Any]:
         data = asdict(self)
@@ -138,6 +145,8 @@ def tui_settings_from_json(data: Any) -> TuiSettings:
         sidebar=_coerce(data.get("sidebar"), ("left", "right", "off"), "right"),  # type: ignore[arg-type]
         turn_notification=_coerce(data.get("turn_notification"), ("off", "bell"), "bell"),  # type: ignore[arg-type]
         show_thinking=bool(data.get("show_thinking", True)),
+        show_tools=bool(data.get("show_tools", True)),
+        show_skills=bool(data.get("show_skills", True)),
         show_tool_results=bool(data.get("show_tool_results", True)),
     )
 

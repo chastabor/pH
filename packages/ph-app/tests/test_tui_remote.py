@@ -27,7 +27,10 @@ import pytest
 from daemon_helpers import running, until
 from tui_helpers import StubHost
 
-from ph.keys import APPROVAL, USER_QUESTIONS
+from ph.bundles import BASE, HEADLESS
+from ph.cordis import DEPLOYMENT, Profile, load_profile_documents
+from ph.keys import APPROVAL, SKILLS, TOOLS, USER_QUESTIONS
+from ph.seams.skills import Skill
 from ph.seams.tui_status import StatusReading
 from ph.seams.user_questions import UserQuestion
 from ph.session.json import as_int
@@ -314,6 +317,67 @@ async def test_the_footer_arrives_beside_the_status(tmp_path: Path) -> None:
         ]
 
 
+async def test_the_posture_is_read_from_the_attach_reply_not_guessed(tmp_path: Path) -> None:
+    """A front end draws the posture the daemon resolved, from the first frame.
+
+    `TuiState` held `"read-only"` and moved only on a `sandbox/mode` event —
+    which is appended when somebody *switches* and never at the start — so a
+    session under a row that says otherwise drew the wrong posture until
+    somebody changed it. The rows contribute readings now, and the attach reply
+    already carries readings, so the client has the right answer before it has
+    folded a single event.
+
+    **The row says it and the log does not**, which is the only arrangement
+    that gates the seed: a mode somebody changed is an event the client would
+    have folded anyway.
+    """
+    writable = Profile.from_documents(
+        [
+            *load_profile_documents([BASE, HEADLESS]),
+            ("test", [{"id": "sandbox", "config": {"defaultMode": "workspace-write"}}]),
+        ]
+    )
+    async with running(tmp_path, profile=writable) as daemon:
+        await daemon.root("remote")
+
+        front, _ = await _front(daemon)
+
+        drawn = {one.id: one.text for one in front.status_readings()}
+        assert drawn["sandbox-mode"] == "sandbox workspace-write", (
+            "the client must not fall back to a posture it compiled in"
+        )
+        assert drawn["posture"] == "read-only accepted"
+
+
+async def test_the_catalogs_are_read_at_attach_and_carry_their_descriptions(
+    tmp_path: Path,
+) -> None:
+    """What fills the context window, read once, for two renderings.
+
+    The panel draws the names and `/tools` draws the descriptions, so both have
+    to arrive — an earlier draft projected names alone and the command had
+    nothing to say that the sidebar had not already said. Against the seams'
+    own answers in the same mount, which is `test_daemon_projections`' rule
+    applied at the other end of the wire.
+    """
+    async with running(tmp_path) as daemon:
+        root = await daemon.root("remote")
+        root.ctx.require(SKILLS).register(
+            Skill(name="code-review", description="what to look for in a diff")
+        )
+
+        front, _ = await _front(daemon)
+
+        offered = root.ctx.require(TOOLS).schemas(scope=DEPLOYMENT)
+        assert [one.name for one in front.state.tools] == [one.name for one in offered]
+        assert [one.description for one in front.state.tools] == [
+            one.description for one in offered
+        ]
+        assert ("code-review", "what to look for in a diff") in [
+            (one.name, one.description) for one in front.state.skills
+        ]
+
+
 # ----------------------------------------------------------------- the verbs --
 
 
@@ -330,8 +394,10 @@ async def test_the_command_list_is_both_ends_merged(tmp_path: Path) -> None:
 
         names = {definition.name for definition in front.commands()}
 
-        assert names >= {verb.name for verb in TUI_VERBS}, "the terminal's own verbs are offered"
-        assert names - {verb.name for verb in TUI_VERBS}, "and so are the daemon's"
+        local = {verb.name for verb in TUI_VERBS}
+
+        assert names >= local, "the terminal's own verbs are offered"
+        assert names - local, "and so are the daemon's"
 
 
 async def test_a_daemon_verb_is_dispatched_over_the_wire(tmp_path: Path) -> None:

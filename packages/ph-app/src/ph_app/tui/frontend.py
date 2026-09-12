@@ -42,7 +42,7 @@ from ph.seams.user_questions import UserQuestion
 from ph.session import Session
 
 from ..sessions import SessionSummary
-from .state import TuiState
+from .state import Surface, TuiState
 
 __all__ = ["FrontSession", "ModalHost"]
 
@@ -58,7 +58,7 @@ class ModalHost(Protocol):
         """Put the ask-user modal up and wait. Must be called from a worker."""
         ...
 
-    def state_changed(self) -> None:
+    def state_changed(self, surfaces: Surface = Surface.ALL) -> None:
         """The state was mutated; redraw when convenient."""
         ...
 

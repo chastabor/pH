@@ -43,8 +43,17 @@ pytestmark = pytest.mark.anyio
 MakeApp = Callable[..., PHTuiApp]
 
 
-def _command(name: str = "compact") -> CommandDefinition:
-    return CommandDefinition(name=name, summary="Compact the context", run=lambda *_: None)
+def _command(name: str = "tidy") -> CommandDefinition:
+    """A command registered by the test, under a name nothing ships.
+
+    It was `compact` until every shipped profile began carrying the stabilize
+    bundle, at which point `command-compact` had already claimed that name and
+    `ctx.commands` refused the second registration — correctly, and the tests
+    that read the completion list failed with it. A fixture whose name can
+    collide with a real row is a fixture that will, so this one is a word no
+    row uses.
+    """
+    return CommandDefinition(name=name, summary="Tidy the workspace", run=lambda *_: None)
 
 
 # ------------------------------------------------------------------- prompt --
@@ -355,14 +364,14 @@ async def test_the_command_palette_inserts_a_command(
         # A command registered on the daemon reaches this palette as a
         # `session.commands` notification, so it is there a frame later rather
         # than at once — the honest cost of the list living one socket away.
-        await until(pilot, lambda: any(one.name == "compact" for one in front.commands()))
+        await until(pilot, lambda: any(one.name == "tidy" for one in front.commands()))
         await pilot.press(app.keys.command_palette)
         await pilot.pause()
         assert isinstance(app.screen, ChoicePicker)
-        await pilot.press(*"compact")
+        await pilot.press(*"tidy")
         await pilot.press("enter")
         await pilot.pause()
-        assert app.query_one(PromptInput).area.text.startswith("/compact")
+        assert app.query_one(PromptInput).area.text.startswith("/tidy")
 
 
 async def test_a_picker_blocks_the_other_global_keys(make_tui_app: MakeApp) -> None:
@@ -558,12 +567,12 @@ async def test_typing_a_slash_offers_registered_commands(
         assert app.front is not None
         root.ctx.require(COMMANDS).register(_command())
         prompt = app.query_one(PromptInput)
-        await pilot.press(*"/comp")
+        await pilot.press(*"/tid")
         await pilot.pause()
         assert prompt.has_class("-completing")
         await pilot.press(app.keys.accept_completion)
         await pilot.pause()
-        assert prompt.area.text == "/compact "
+        assert prompt.area.text == "/tidy "
         assert not prompt.has_class("-completing")
 
 
@@ -575,12 +584,15 @@ async def test_a_disposed_command_leaves_the_completion_list(
         assert app.front is not None
         dispose = root.ctx.require(COMMANDS).register(_command())
         prompt = app.query_one(PromptInput)
-        await pilot.press(*"/comp")
+        # A prefix that matches *only* the fixture command: `/comp` now also
+        # matches the shipped `/compact`, so the list would stay open after the
+        # disposal and the gate would pass for the wrong reason.
+        await pilot.press(*"/tid")
         await pilot.pause()
         assert prompt.has_class("-completing")
         prompt.clear()
         dispose()
-        await pilot.press(*"/comp")
+        await pilot.press(*"/tid")
         await pilot.pause()
         # The registry is the source of truth, so unregistering removes the row.
         assert not prompt.has_class("-completing")
@@ -623,8 +635,8 @@ async def test_a_slash_line_dispatches_instead_of_prompting(
         front = app.front
         assert front is not None
         root.ctx.require(COMMANDS).register(_command())
-        await until(pilot, lambda: any(one.name == "compact" for one in front.commands()))
-        await pilot.press(*"/compact")
+        await until(pilot, lambda: any(one.name == "tidy" for one in front.commands()))
+        await pilot.press(*"/tidy")
         await pilot.pause()
         # The completion popup claims enter first; tab accepts, then submit.
         await pilot.press(app.keys.accept_completion)
@@ -653,8 +665,15 @@ async def test_an_unknown_command_is_reported_not_prompted(
 async def test_every_verb_is_a_command_an_action_and_maybe_a_key(
     make_tui_app: MakeApp,
 ) -> None:
-    """One table, three routes: a verb missing any of them is a half-wired verb."""
-    from ph_app.tui.commands import TUI_VERBS
+    """One table, three routes: a verb missing any of them is a half-wired verb.
+
+    Every row is a command and an action again, because `/view`'s keyed
+    spellings moved out to `VIEW_KEYS` — they were never verbs, and holding
+    them here made every consumer of this table filter. That table is checked
+    below instead: a binding id it names must be remappable and must fire an
+    action that exists.
+    """
+    from ph_app.tui.commands import TUI_VERBS, VIEW_KEYS, VIEWABLE
 
     async with running(make_tui_app()) as (app, _pilot):
         front = app.front
@@ -671,6 +690,71 @@ async def test_every_verb_is_a_command_an_action_and_maybe_a_key(
             if verb.key is not None:
                 assert verb.key in bound
                 assert hasattr(app.keys, verb.key), verb.key
+        for key, word, _summary in VIEW_KEYS:
+            assert key in bound and hasattr(app.keys, key), key
+            assert word in VIEWABLE, f"{key} fires /view {word}, which /view does not take"
+
+
+async def test_view_toggles_each_panel_and_all_resolves_a_disagreement(
+    make_tui_app: MakeApp,
+) -> None:
+    """`/view` — and the one case where a toggle has no honest single answer.
+
+    Two independent flags cannot be *toggled* together when they disagree, so
+    `all` shows both: somebody typing it at a half-hidden sidebar is asking for
+    everything, not for the inverse of each. Both halves are asserted, because
+    the rule only earns its comment in the mixed case.
+
+    Persisted, unlike `/view sidebar`: a panel's visibility is a preference and
+    the window's is this window's, which is the line `TuiSettings` already
+    draws between `show_*` and the sidebar position.
+    """
+    from dataclasses import fields
+
+    from ph_app.tui.commands import VIEWS
+
+    async with running(make_tui_app()) as (app, _pilot):
+        # Every name in the table is a real settings field. `action_view` splats
+        # them into `replace` through a `dict[str, Any]`, which is the one place
+        # the checker cannot follow — so this is what stands in for it, and a
+        # renamed field fails here rather than at a keystroke.
+        declared = {one.name for one in fields(app.settings)}
+        for word, (field, _rebuild) in VIEWS.items():
+            assert field in declared, f"/view {word} flips {field}, which TuiSettings has not got"
+
+        assert app.settings.show_tools and app.settings.show_skills, "visible by default"
+
+        await app.run_action("view('tools')")
+        assert not app.settings.show_tools and app.settings.show_skills
+
+        # Mixed: one showing, one hidden. `all` makes both visible.
+        await app.run_action("view('all')")
+        assert app.settings.show_tools and app.settings.show_skills
+
+        # Agreed: `all` is an ordinary toggle again.
+        await app.run_action("view('all')")
+        assert not app.settings.show_tools and not app.settings.show_skills
+
+        await app.run_action("view('skills')")
+        assert app.settings.show_skills and not app.settings.show_tools
+
+
+async def test_view_keeps_the_keys_the_old_toggles_had(make_tui_app: MakeApp) -> None:
+    """`ctrl+o` and `ctrl+t` still do what they did, under a name that moved.
+
+    The binding *id* is what `tui.json` remaps, so a person who rebound
+    `toggle_tool_results` keeps their key across this rename — which is the whole
+    reason those rows still exist rather than the keys hanging off `/view`.
+    """
+    async with running(make_tui_app()) as (app, pilot):
+        before = app.settings.show_tool_results
+
+        await pilot.press(app.keys.toggle_tool_results)
+        await pilot.pause()
+
+        assert app.settings.show_tool_results is not before
+        bound = {binding.id for binding in app.BINDINGS if isinstance(binding, Binding)}
+        assert {"toggle_tool_results", "toggle_thinking", "toggle_sidebar"} <= bound
 
 
 async def test_login_stores_a_secret_without_logging_it(

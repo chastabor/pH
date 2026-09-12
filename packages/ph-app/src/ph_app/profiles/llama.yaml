@@ -17,12 +17,16 @@
 #
 # **`contextWindow` is the window of one slot, not of the server.** llama.cpp
 # divides `--ctx-size` by `--parallel`, so a server started `-c 1572864
-# --parallel 6` gives each of its six slots 262144 — and this is the number that
-# has to be here, because it is what pH budgets and compacts against. Reading
-# the server's total would let six agents each believe they have the whole KV
-# cache. `/slots` reports the per-slot figure directly; the default below is
-# deliberately small, since guessing high overflows a slot and guessing low only
-# compacts sooner than necessary.
+# --parallel 6` gives each of its six slots 262144 — and that is the number pH
+# budgets and compacts against. Reading the server's total would let six agents
+# each believe they have the whole KV cache.
+#
+# **So it is asked rather than written down.** `discoverContextWindow` reads
+# `default_generation_settings.n_ctx` from `/props` at mount, which llama.cpp
+# has already divided, and the line below is only the fallback for a server
+# that does not answer — deliberately small, since guessing high overflows a
+# slot and guessing low only compacts sooner than necessary. `ph doctor` prints
+# which of the two is in force.
 - insert:
     - id: llm-llama
       name: llm-openai-compatible
@@ -31,6 +35,12 @@
           - provider: llama
             baseUrl: ${env:LLAMA_BASE_URL:-http://127.0.0.1:9931/v1}
             apiKeyEnv: LLAMA_API_KEY
+            # **Asked of the server, not guessed.** `/props` reports
+            # `default_generation_settings.n_ctx`, which llama.cpp has already
+            # divided by `--parallel` — so the one number a person cannot be
+            # expected to keep right is the one number nobody has to write. A
+            # server that does not answer leaves the line below in force.
+            discoverContextWindow: true
             contextWindow: ${env:LLAMA_CONTEXT_WINDOW:-32768}
             defaultMaxTokens: 4096
             # **Images, no audio, no uploads** — and each third of that is a

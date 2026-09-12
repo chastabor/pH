@@ -34,9 +34,10 @@ from __future__ import annotations
 from typing import Any
 
 from ph.cordis import DEPLOYMENT
-from ph.keys import COMMANDS, CREDENTIALS, TOOLS, TUI_SCREENS, TUI_STATUS
+from ph.keys import COMMANDS, CREDENTIALS, SKILLS, TOOLS, TUI_SCREENS, TUI_STATUS
 from ph.llm.types import ToolSchema
 from ph.seams.commands import CommandSchema
+from ph.seams.skills import Skill
 from ph.seams.tui_screens import ScreenSchema
 from ph.seams.tui_status import StatusReading
 
@@ -113,6 +114,25 @@ def tools_of(root: Any) -> list[ToolSchema]:
     if tools is None:
         return []
     return list(tools.schemas(scope=DEPLOYMENT))
+
+
+def skills_of(root: Any) -> list[Skill]:
+    """What is installed here, for `tools_of`'s reason and against its scope.
+
+    `DEPLOYMENT` again: a child narrowed at spawn sees less, and that narrowing
+    is the child's business — a person reading a sidebar is asking what this
+    deployment has, which is the same question the tool list answers one
+    function up.
+
+    The catalog and not the bodies. `SkillService.list` is what the prompt's own
+    catalog renders from, so a panel built on this cannot drift from what the
+    model was told exists; reading a body is `ctx.skills.body`, which is a
+    request the model makes and not something a front end pages in.
+    """
+    skills = root.ctx.get(SKILLS)
+    if skills is None:
+        return []
+    return list(skills.list(DEPLOYMENT))
 
 
 def credentials_of(root: Any, names: list[str]) -> dict[str, bool]:

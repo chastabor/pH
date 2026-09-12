@@ -21,8 +21,18 @@ from daemon_helpers import running, until
 
 from ph.bundles import BASE, HEADLESS
 from ph.cordis import DEPLOYMENT, Profile, load_profile_documents
-from ph.keys import COMMANDS, FS, LLM, TOOLS, TUI_STATUS
+from ph.keys import (
+    COMMANDS,
+    FS,
+    LLM,
+    PERMISSION_PRESETS,
+    SANDBOX,
+    SKILLS,
+    TOOLS,
+    TUI_STATUS,
+)
 from ph.seams.commands import CommandDefinition
+from ph.seams.skills import Skill
 from ph.seams.tui_status import StatusField, StatusReading
 from ph.session import SessionEvent
 from ph.testing import RecordedStep, ReplayAdapter, simple_tool, text_chunks, tool_call_chunks
@@ -82,9 +92,9 @@ async def test_status_readings_over_the_wire_equal_the_seams_readings(
 
         seam = root.ctx.get("tui_status").readings(root.session)
         assert reply["readings"] == [one.to_wire() for one in seam]
-        assert {"text": "probe", "level": "warning"} in reply["readings"], (
-            "the contributed field must survive the projection, level included"
-        )
+        assert {"id": "probe", "slot": "line", "text": "probe", "level": "warning"} in reply[
+            "readings"
+        ], "the contributed field must survive the projection, id and level included"
 
 
 async def test_readings_ride_the_status_notification(tmp_path: Any) -> None:
@@ -125,8 +135,9 @@ async def test_readings_ride_the_status_notification(tmp_path: Any) -> None:
 
         assert with_readings, "no status notification carried readings"
         assert all(
-            {"text": "probe", "level": "warning"} in one["readings"] for one in with_readings
-        )
+            {"id": "probe", "slot": "line", "text": "probe", "level": "warning"} in one["readings"]
+            for one in with_readings
+        ), "the id is stamped by the registry, so it rides every frame the reading does"
 
 
 # ------------------------------------------------------- the palette et al --
@@ -192,6 +203,35 @@ async def test_the_tool_list_matches_what_the_deployment_offers(tmp_path: Any) -
 
         schemas = root.ctx.require(TOOLS).schemas(scope=DEPLOYMENT)
         assert [one["name"] for one in reply["tools"]] == [one.name for one in schemas]
+
+
+async def test_the_skill_list_matches_the_catalog_the_model_is_given(tmp_path: Any) -> None:
+    """The same set the prompt's catalog renders from, against the same scope.
+
+    `tools/list`'s argument one gate up, for the other half of what a request is
+    charged for: a sidebar that disagreed with the model's own catalog would be
+    a second account of what this deployment installs, and the one a person
+    reads would be the one nothing checks.
+
+    Registered by hand for `_furnished`'s reason — the gate must not pass or
+    fail on which skills the test profile happens to ship, and an empty list
+    equal to an empty list proves nothing about either side.
+    """
+    async with running(tmp_path) as daemon:
+        root = await daemon.root("projected")
+        root.ctx.require(SKILLS).register(
+            Skill(name="code-review", description="a skill registered by the test")
+        )
+        client = await daemon.client()
+
+        reply = await client.call("skills/list", sessionId=root.id)
+
+        installed = root.ctx.require(SKILLS).list(DEPLOYMENT)
+        assert [one["name"] for one in reply["skills"]] == [one.name for one in installed]
+        assert "code-review" in [one["name"] for one in reply["skills"]]
+        assert [one["description"] for one in reply["skills"]] == [
+            one.description for one in installed
+        ], "the description travels, because that is what /skills prints"
 
 
 async def test_the_config_rows_are_the_composed_profile(tmp_path: Any) -> None:
@@ -483,6 +523,47 @@ async def test_a_preset_switch_is_applied_and_recorded(tmp_path: Any) -> None:
 
         assert reply["preset"] == "workspace-write"
         assert [one.type for one in root.session.events].count("permission/preset") == 1
+
+
+async def test_the_posture_reaches_a_front_end_as_readings_not_as_fields(
+    tmp_path: Any,
+) -> None:
+    """The posture, carried by the mechanism that already carries the footer.
+
+    Both facts were bespoke fields on `RootDescription` — seven coordinated
+    edits each, and a `describe()` that had to know two seams by name. They are
+    `StatusField`s now: the row that owns the fact contributes it, the existing
+    readings projection carries it, and `StatusReading.id` is what lets a front
+    end place one somewhere particular.
+
+    Against the seams' own answers in the same mount, which is this module's
+    rule — and both halves of the sandbox precedence, because only the daemon
+    holds either: the mounted row's default is not in the log, and the log's
+    override is not in the row.
+    """
+    async with running(tmp_path) as daemon:
+        root = await daemon.root("postured")
+        client = await daemon.client()
+        sandbox = root.ctx.require(SANDBOX)
+        presets = root.ctx.require(PERMISSION_PRESETS)
+
+        fresh = await client.call("session/attach", sessionId=root.id)
+        readings = {one["id"]: one["text"] for one in fresh["readings"]}
+
+        assert readings["sandbox-mode"] == f"sandbox {sandbox.resolve_mode(root.session)}"
+        assert readings["sandbox-mode"] == f"sandbox {sandbox.default_mode}", (
+            "with nothing in the log the reading is the mounted row's default"
+        )
+        assert readings["posture"] == f"{presets.resolve(root.session).name} accepted"
+
+        # A preset moves both, because a preset *is* both — and the reply says
+        # so without either being a field anybody had to add.
+        await client.call("session/preset", sessionId=root.id, preset="workspace-write")
+        moved = await client.call("session/attach", sessionId=root.id)
+        after = {one["id"]: one["text"] for one in moved["readings"]}
+
+        assert after["posture"] == "workspace-write accepted"
+        assert after["sandbox-mode"] == "sandbox workspace-write" != sandbox.default_mode
 
 
 async def test_a_method_whose_seam_is_absent_says_so_and_is_not_unknown(

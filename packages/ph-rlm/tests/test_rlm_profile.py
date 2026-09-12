@@ -21,13 +21,13 @@ import pytest
 from rlm_fixtures import HOST_INTERPRETER
 from runtime_helpers import dispatch_names, run_ipython_cell
 
-from ph.bundles import installed_bundles, resolve_bundle
+from ph.bundles import BASE, HEADLESS, installed_bundles, resolve_bundle
 from ph.cordis import Profile
 from ph.keys import AGENTS, COMMANDS, SESSIONS, TOOLS
 from ph.session.json import freeze_json_value
 from ph.testing import FAKE_OPTIONS, MountProfile
 from ph.tools import ToolResult
-from ph_app.profiles import available_profiles, resolve_profile
+from ph_app.profiles import PROFILE_DIR, available_profiles, resolve_profile
 from ph_rlm import BUNDLE
 from ph_rlm.keys import HARNESS
 from ph_rlm.presentation import IPYTHON
@@ -60,11 +60,15 @@ def test_an_unregistered_bundle_resolves_to_nothing() -> None:
 def test_the_profile_is_tui_plus_the_bundle() -> None:
     """The interactive posture, because a person is present for the approvals
     Code Mode's dispatches raise."""
-    assert [path.name for path in resolve_profile("rlm")] == [
-        "base.yaml",
-        "headless.yaml",
-        "tui.yaml",
-        "bundle.yaml",
+    # Resolved paths, not basenames: this bundle and ph-stabilize's are both
+    # called `bundle.yaml`, so a name comparison cannot tell them apart — and
+    # since every profile carries the stabilize layer, both are in this list.
+    assert resolve_profile("rlm") == [
+        BASE,
+        HEADLESS,
+        resolve_bundle("stabilize"),
+        PROFILE_DIR / "tui.yaml",
+        resolve_bundle("rlm"),
     ]
 
 

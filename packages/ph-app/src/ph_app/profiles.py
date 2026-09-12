@@ -53,13 +53,55 @@ class Bundle:
     """
 
     name: str
+    required: bool = True
+    """Whether a profile naming this bundle is refused without it, or composes
+    without it.
+
+    **Required is the old behaviour and stays the default**: `rlm` without the
+    RLM bundle is not a degraded `rlm`, it is a profile whose documents patch
+    rows that do not exist, so it is better not offered. `rlm-stable.yaml` makes
+    the point in one line — it arms `tool-todo`, which only the stabilize bundle
+    mounts.
+
+    Optional is for a layer that is *additive* and that every posture wants:
+    nothing outside the stabilize bundle addresses a stabilize row, so a profile
+    without it composes and simply never compacts. That is the difference this
+    flag names — not "how much do we want it", but "does anything else here
+    refer to it".
+    """
 
 
 Layer: TypeAlias = "Path | Bundle"
 
-TUI_LAYERS: tuple[Layer, ...] = (BASE, HEADLESS, PROFILE_DIR / "tui.yaml")
+STABILIZE: Bundle = Bundle("stabilize", required=False)
+"""Context management, layered into every shipped profile.
+
+**A session that silently grows past its window is a defect in any posture**,
+not a feature of an interactive one — so this is not a thing a profile opts
+into. `ph-base` mounts the compaction *seam* with no engine and says a
+deployment wanting the plain harness should get it; that remains true of the
+bundle documents, and what changed is that every profile this package *offers*
+now layers the engine over them.
+
+**Optional rather than required, because `ph-app` must keep composing without
+`ph-stabilize`.** `available_profiles` gates on bundles resolving, so a required
+one here would take `--profile tui` away from the lean `uv tool install
+./packages/ph-app` target to add a feature — which is precisely the trade
+`rlm-indexed`'s comment refuses further down. Optional inverts it: the lean
+install keeps every profile it had, and the full install compacts.
+
+The cost is that a profile's behaviour now depends on what is installed, which
+until now it never did. That is why it is one named layer rather than a habit:
+`ph doctor` reports what actually activated, and there is exactly one bundle
+this is true of."""
+
+TUI_LAYERS: tuple[Layer, ...] = (BASE, HEADLESS, STABILIZE, PROFILE_DIR / "tui.yaml")
 """The interactive posture: `headless` plus one row. A person is present to
-answer the seams, so the workspace is writable (see tui.yaml)."""
+answer the seams, so the workspace is writable (see tui.yaml).
+
+`STABILIZE` before the profile's own document, so `tui.yaml` — and any layer
+after it — can address a stabilize row by id. A bundle layered after the
+document that patches it is a bundle whose patches are silently undone."""
 
 RLM_LAYERS: tuple[Layer, ...] = (*TUI_LAYERS, Bundle("rlm"))
 """The interactive posture plus the RLM bundle, because a person is present for
@@ -83,18 +125,22 @@ reaching a profile whose comment claimed to be built from it."""
 
 
 PROFILES: dict[str, tuple[Layer, ...]] = {
-    "base": (BASE,),
-    "headless": (BASE, HEADLESS),
+    # Every entry carries `STABILIZE`, `base` included. The bundle *documents*
+    # still ship the plain harness — `ph-base` mounts the compaction seam with
+    # no engine — and what this table says is that no profile pH offers by name
+    # is one whose conversation grows until the provider refuses it.
+    "base": (BASE, STABILIZE),
+    "headless": (BASE, HEADLESS, STABILIZE),
     "tui": TUI_LAYERS,
     # Real providers layer onto base; the fake adapter is deliberately absent so
     # a misconfigured key fails loudly instead of silently answering "ok".
-    "deepseek": (BASE, PROFILE_DIR / "deepseek.yaml"),
+    "deepseek": (BASE, STABILIZE, PROFILE_DIR / "deepseek.yaml"),
     # A server on localhost rather than a service, and the differences are in the
     # document: one slot's window rather than the whole server's, and none of the
     # media the hosted default claims.
-    "llama": (BASE, PROFILE_DIR / "llama.yaml"),
-    "anthropic": (BASE, PROFILE_DIR / "anthropic.yaml"),
-    "google": (BASE, PROFILE_DIR / "google.yaml"),
+    "llama": (BASE, STABILIZE, PROFILE_DIR / "llama.yaml"),
+    "anthropic": (BASE, STABILIZE, PROFILE_DIR / "anthropic.yaml"),
+    "google": (BASE, STABILIZE, PROFILE_DIR / "google.yaml"),
     "rlm": RLM_LAYERS,
     # Everything, with the gates on (P4-15). `rlm` plus `stabilize`, plus the
     # profile that turns on the two rows those bundles ship disabled — a bundle
@@ -122,6 +168,51 @@ def _resolve_layer(layer: Layer) -> Path | None:
     return resolve_bundle(layer.name) if isinstance(layer, Bundle) else layer
 
 
+def _composed(layers: Sequence[Layer]) -> list[Layer]:
+    """The layers as they will actually be composed: one entry per bundle.
+
+    **A bundle named twice is one layer, required if either naming was.**
+    `rlm-stable` is the case: it declares stabilize *required* — its document
+    arms `tool-todo`, so composing without the bundle would patch a row that is
+    not there — while inheriting the optional one every profile carries. Merging
+    keeps the requirement and the first position, where "first occurrence wins"
+    alone would have split one bundle's position from its requiredness.
+
+    `Path` layers are left exactly as written. An earlier form deduplicated
+    those too, which silently dropped a document a profile had deliberately
+    layered twice — a bundle is a named thing that can be asked for twice by
+    accident, and a path is not.
+    """
+    required: dict[str, bool] = {}
+    for layer in layers:
+        if isinstance(layer, Bundle):
+            required[layer.name] = required.get(layer.name, False) or layer.required
+    composed: list[Layer] = []
+    seen: set[str] = set()
+    for layer in layers:
+        if not isinstance(layer, Bundle):
+            composed.append(layer)
+        elif layer.name not in seen:
+            seen.add(layer.name)
+            composed.append(Bundle(layer.name, required=required[layer.name]))
+    return composed
+
+
+def _missing_required(layers: Sequence[Layer]) -> str:
+    """The first required bundle this install cannot provide, or `""`.
+
+    **The one predicate**, for the reason `profile_file` states about itself:
+    `available_profiles` and `resolve_profile` were asking the same question two
+    ways, and the second spelling was an inverted double negative. Two
+    predicates for one question is how a `--help` line and a command line come
+    to disagree.
+    """
+    for layer in _composed(layers):
+        if isinstance(layer, Bundle) and layer.required and _resolve_layer(layer) is None:
+            return layer.name
+    return ""
+
+
 def available_profiles() -> list[str]:
     """Every profile this install can actually compose.
 
@@ -129,11 +220,7 @@ def available_profiles() -> list[str]:
     never offered and then refused: two predicates for one question is how a
     `--help` line and a command line come to disagree.
     """
-    return sorted(
-        name
-        for name, layers in PROFILES.items()
-        if all(_resolve_layer(layer) is not None for layer in layers)
-    )
+    return sorted(name for name, layers in PROFILES.items() if not _missing_required(layers))
 
 
 def profile_file(name: str) -> Path | None:
@@ -164,17 +251,23 @@ def resolve_profile(name: str) -> list[Path]:
             f'unknown profile "{name}"; available are '
             f"{', '.join(available_profiles())}, or pass a path to a .yaml"
         )
+    missing = _missing_required(declared)
+    if missing:
+        # Naming the package is the person's next step.
+        raise ValueError(
+            f'profile "{name}" needs the "{missing}" bundle, which no installed '
+            f"distribution provides; install ph-{missing} and try again"
+        )
     layers: list[Path] = []
-    for layer in declared:
+    for layer in _composed(declared):
         resolved = _resolve_layer(layer)
         if resolved is None:
-            # Only a `Bundle` can fail to resolve, and naming the package is the
-            # person's next step.
-            assert isinstance(layer, Bundle)
-            raise ValueError(
-                f'profile "{name}" needs the "{layer.name}" bundle, which no installed '
-                f"distribution provides; install ph-{layer.name} and try again"
-            )
+            # An optional bundle this install does not have — `_missing_required`
+            # already refused every required one. Silent here and visible in
+            # `ph doctor`, which reports what activated: a warning on every
+            # command would be a warning nobody reads, about a profile that
+            # composed exactly as this table says it should.
+            continue
         layers.append(resolved)
     roots = resolve_roots()
     overlay = roots.profile_overlay(name)

@@ -62,6 +62,7 @@ from ph_app.adapters.openai_compatible import (
     _StreamState,
     _to_openai,
     _to_usage,
+    discover_window,
 )
 from ph_app.adapters.sse import iter_sse
 
@@ -78,6 +79,100 @@ class _Response:
     async def aiter_text(self) -> Any:
         for chunk in self._chunks:
             yield chunk
+
+
+class _PropsClient:
+    """An `HttpClient` that answers one GET, or raises what it was given.
+
+    Small enough to be obvious: `discover_window` asks one URL and reads one
+    field, so a stub that recorded more would be describing a request this
+    never makes.
+    """
+
+    def __init__(self, answer: Any) -> None:
+        self._answer = answer
+        self.asked: list[str] = []
+
+    async def get_json(self, url: str, **_: Any) -> dict[str, Any]:
+        self.asked.append(url)
+        if isinstance(self._answer, Exception):
+            raise self._answer
+        return dict(self._answer)
+
+
+async def test_the_window_is_asked_of_the_server_when_the_route_says_to() -> None:
+    """`discoverContextWindow` — the one number a person cannot keep right.
+
+    llama.cpp divides `--ctx-size` by `--parallel` and reports the quotient, so
+    a profile that copies the server's total budgets every agent against the
+    whole KV cache. Asking removes the arithmetic rather than documenting it.
+    """
+    adapter = OpenAiCompatibleAdapter(
+        ctx=None,  # type: ignore[arg-type]
+        profile=ProviderProfile(provider="llama", base_url="http://server/v1"),
+    )
+    adapter.http = _PropsClient({"default_generation_settings": {"n_ctx": 262_144}})  # type: ignore[assignment]
+
+    assert await discover_window(adapter) == 262_144
+    # Beside `/v1`, not under it: `/props` is llama.cpp's own endpoint and the
+    # OpenAI wire's prefix does not reach it.
+    assert adapter.http.asked == ["http://server/props"]  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize(
+    "props",
+    [
+        {},
+        {"default_generation_settings": {}},
+        {"default_generation_settings": {"n_ctx": "many"}},
+        {"default_generation_settings": {"n_ctx": 0}},
+    ],
+    ids=["no-settings", "no-n_ctx", "not-a-number", "zero"],
+)
+async def test_a_server_that_will_not_say_leaves_the_configured_window(props: Any) -> None:
+    """Every way of not answering is one answer, because the caller does one
+    thing with all of them: keep what the profile said.
+
+    Zero among them — a window of nothing is not a window, and publishing it
+    would make every request overflow before it was built."""
+    adapter = OpenAiCompatibleAdapter(
+        ctx=None,  # type: ignore[arg-type]
+        profile=ProviderProfile(provider="p", base_url="http://server/v1", context_window=32_768),
+    )
+    adapter.http = _PropsClient(props)  # type: ignore[assignment]
+
+    assert await discover_window(adapter) is None
+
+
+async def test_a_server_that_is_not_there_is_not_an_error() -> None:
+    """A mount must not fail over this. A window pH guessed low costs an early
+    compaction; a mount that refused costs the person the session."""
+    adapter = OpenAiCompatibleAdapter(
+        ctx=None,  # type: ignore[arg-type]
+        profile=ProviderProfile(provider="p", base_url="http://server/v1"),
+    )
+    adapter.http = _PropsClient(OSError("connection refused"))  # type: ignore[assignment]
+
+    assert await discover_window(adapter) is None
+
+
+def test_discovery_and_its_fallback_are_two_fields() -> None:
+    """Ask, and here is what to use when the answer does not come.
+
+    Two facts, so two fields — a single value cannot carry both, which is what a
+    `contextWindow: auto` keyword tried to do before it was removed: it said
+    "discover" by *erasing* the fallback, and being adapter-local it made the
+    same word a validation error on the two routes that share `MediaRoute`.
+    """
+    both = ProviderProfile.model_validate(
+        {"provider": "p", "contextWindow": 32_768, "discoverContextWindow": True}
+    )
+    assert (both.discover_context_window, both.context_window) == (True, 32_768)
+
+    # Discovery with no fallback is the flag and an unset window, which is the
+    # shape that needed no keyword.
+    alone = ProviderProfile.model_validate({"provider": "p", "discoverContextWindow": True})
+    assert (alone.discover_context_window, alone.context_window) == (True, None)
 
 
 async def test_sse_events_survive_a_boundary_mid_chunk() -> None:

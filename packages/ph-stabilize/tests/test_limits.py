@@ -367,6 +367,18 @@ def test_the_denial_text_is_upstreams() -> None:
 # --------------------------------------------------------------- the footer --
 
 
+def _limits_reading(ctx: Any, session: Any) -> Any:
+    """This row's reading, by id.
+
+    By id and not "the only one", which is what these asserted before
+    `StatusReading` had one: every profile now mounts rows that contribute a
+    posture and a sandbox mode, so "the single reading" stopped being this one.
+    """
+    return next(
+        (one for one in ctx.require(TUI_STATUS).readings(session) if one.id == "limits"), None
+    )
+
+
 async def test_the_footer_shows_the_tightest_budget(mount: MountProfile) -> None:
     """A live reading, not just the notice that lands when the budget is spent.
 
@@ -383,14 +395,14 @@ async def test_the_footer_shows_the_tightest_budget(mount: MountProfile) -> None
     for index in range(3):
         session.append("tool/call", {"turn": 1, "step": 1, "callId": f"c{index}", "name": "bash"})
 
-    (reading,) = ctx.require(TUI_STATUS).readings(session)
+    reading = _limits_reading(ctx, session)
 
     # 3/4 tools is tighter than 1/10 steps, and that is the one worth the line.
     assert reading.text == "tools 3/4"
     assert reading.level == "normal", "0.75 is short of the gauge's own 0.85"
 
     session.append("tool/call", {"turn": 1, "step": 1, "callId": "c3", "name": "bash"})
-    (reading,) = ctx.require(TUI_STATUS).readings(session)
+    reading = _limits_reading(ctx, session)
 
     assert reading.text == "tools 4/4"
     assert reading.level == "warning"
@@ -402,7 +414,7 @@ async def test_the_footer_says_nothing_when_no_budget_is_set(mount: MountProfile
     ctx = await mount(profile=PROFILE)
     session = ctx.require(SESSIONS).create("ungauged")
 
-    assert ctx.require(TUI_STATUS).readings(session) == []
+    assert _limits_reading(ctx, session) is None
 
 
 # ------------------------------------------------------------ code dispatches --

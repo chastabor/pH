@@ -57,7 +57,7 @@ from ..daemon.client import DaemonClient
 from ..daemon.launch import ensure_daemon
 from ..trust import TrustAnswer, TrustStore, trust_path
 from .autocomplete import PathCompleter
-from .commands import app_bindings
+from .commands import PANELS, VIEW_USAGE, VIEWS, app_bindings
 from .config import TuiKeybindings, TuiSettings, load_tui_settings, save_tui_settings
 from .frontend import FrontSession
 from .modals.approval import ApprovalModal
@@ -74,6 +74,7 @@ from .modals.pickers import (
 from .modals.trust import project_trust_modal
 from .remote import attach_session
 from .screens import Revealing, RevealSeq
+from .state import CatalogEntry, Surface
 from .terminal import TerminalTitle
 from .themes import ThemeCatalog, fallback_variables, load_catalog
 from .widgets.prompt import PromptInput
@@ -150,7 +151,7 @@ class PHTuiApp(App[str | None]):
         self._client: DaemonClient | None = None
         self.title_writer = TerminalTitle()
         self._paths = PathCompleter(root=str(self.project))
-        self._dirty = True
+        self._dirty = Surface.ALL
         self._draw_timer: Timer | None = None
         """The one scheduled draw, or `None` when none is pending.
 
@@ -338,31 +339,55 @@ class PHTuiApp(App[str | None]):
 
     # ---------------------------------------------------------------- frames --
 
-    def state_changed(self) -> None:
-        """Something the view renders has changed. Draw soon, and once.
+    def state_changed(self, surfaces: Surface = Surface.ALL) -> None:
+        """Something the view renders has changed. Draw soon, once, and narrowly.
 
         **The single entry point**, and every local mutation goes through it too
         rather than setting the flag: the flag alone was enough while a poll was
         watching it, and is a permanently stale pane now that nothing is. That is
         the one thing this change makes worse if it is got wrong, so there is one
         place to get right.
+
+        **The timer is a debounce, not a frame rate.** It is `set_timer` and it
+        is armed only when it is not already, so no event means no draw; what it
+        bounds is how often events *may* redraw. During a streaming turn they
+        arrive faster than that, which is what makes `surfaces` worth having:
+        the flag used to be one boolean, so a chunk that can only move the
+        transcript redrew the sidebar at the ceiling rate too.
+
+        `ALL` by default, so a caller that has not thought about it is correct
+        rather than stale.
         """
-        self._dirty = True
+        self._dirty |= surfaces
         if self._draw_timer is None:
             self._draw_timer = self.set_timer(FRAME_INTERVAL, self._draw)
 
     async def _draw(self) -> None:
-        """Render what has arrived since the last draw."""
+        """Render whichever surfaces have moved since the last draw."""
         self._draw_timer = None
         front, status, view = self.front, self._status, self._view
         if front is None or status is None or view is None:
             return
-        self._dirty = False
-        self._readings = front.status_readings()
-        status.show(front.state, self._readings)
-        await view.sync(self._rows(front))
-        if self._sidebar is not None and self._sidebar.display:
-            self._sidebar.show(front.state, session_id=front.session_id, cwd=str(self.project))
+        dirty, self._dirty = self._dirty, Surface.NOTHING
+        if Surface.FOOTER in dirty:
+            # The readings with the footer, because they *are* the footer's
+            # right-hand half — and each is a fold of the log, so re-reading
+            # them for a transcript-only frame is the expensive half of a draw
+            # nobody asked for.
+            self._readings = front.status_readings()
+            status.show(front.state, self._readings)
+        if Surface.TRANSCRIPT in dirty:
+            await view.sync(self._rows(front))
+        if Surface.SIDEBAR in dirty and self._sidebar is not None and self._sidebar.display:
+            self._sidebar.show(
+                front.state,
+                # The same readings the footer got: one read, two placements.
+                self._readings,
+                session_id=front.session_id,
+                cwd=str(self.project),
+                show_tools=self.settings.show_tools,
+                show_skills=self.settings.show_skills,
+            )
         self._spin(front.state.busy)
 
     def _spin(self, running: bool) -> None:
@@ -715,23 +740,91 @@ class PHTuiApp(App[str | None]):
             return
         self.notify(f"{name} set for this session", title="login", markup=False)
 
-    async def action_toggle_thinking(self) -> None:
-        self._save(replace(self.settings, show_thinking=not self.settings.show_thinking))
-        await self._rebuild()
+    async def action_view(self, what: str = "") -> None:
+        """`/view <what>` — the one verb for what is on screen.
 
-    async def action_toggle_tool_results(self) -> None:
-        self._save(replace(self.settings, show_tool_results=not self.settings.show_tool_results))
-        await self._rebuild()
+        Six things behind one name, because the question a person is asking is
+        the same one every time. Three of them were verbs of their own with
+        names that shared no word (`/thinking`, `/tools`, `/sidebar`), and the
+        two the sidebar panels needed would have made five — at which point the
+        palette lists five ways to say "show me less" and none of them says so.
+
+        Settled first, acted on second: `tools`, `skills` and `all` are panel
+        state and persist, while `sidebar` is this window's and does not — the
+        distinction `TuiSettings` already draws, kept rather than flattened.
+        """
+        chosen = what.strip().lower()
+        changed: dict[str, Any]
+        if chosen == "sidebar":
+            # The one that is this window's rather than this person's, so it
+            # persists nowhere and there is no settings field to flip.
+            if self._sidebar is not None:
+                self._sidebar.display = not self._sidebar.display
+            self.state_changed(Surface.SIDEBAR)
+            return
+        if chosen == "all":
+            # Mixed means show both. A toggle over two independent flags has no
+            # honest single answer when they disagree, and "make it all visible"
+            # is what somebody typing `all` at a half-hidden panel means.
+            both = all(getattr(self.settings, VIEWS[name][0]) for name in PANELS)
+            changed = {VIEWS[name][0]: not both for name in PANELS}
+            rebuild = False
+        elif chosen in VIEWS:
+            field, rebuild = VIEWS[chosen]
+            changed = {field: not getattr(self.settings, field)}
+        else:
+            self.notify(VIEW_USAGE, title="view", severity="warning", markup=False)
+            return
+        # `dict[str, Any]`, and the annotation is the point: `replace` is checked
+        # per keyword, so a `dict[str, bool]` splat is compared against *every*
+        # field's type and fails on the four that are not bools. `Any` is the
+        # narrow admission that a table keyed by field name cannot be checked
+        # here — `VIEWS`' names are held to the dataclass by `test_view_toggles`,
+        # which reads each one back.
+        self._save(replace(self.settings, **changed))
+        if rebuild:
+            # The transcript is *built* from these two, so it is rebuilt. The
+            # panels are read at draw time, so they are not — which is the whole
+            # of what `VIEWS`' second column records.
+            await self._rebuild()
+        # The panels either way; the transcript only when it was *not* just
+        # rebuilt above. Spelled positively, because the first form read
+        # `SIDEBAR if not rebuild else ALL` and asked a reader to invert a
+        # negation to see that the expensive branch was the one already done.
+        self.state_changed(Surface.SIDEBAR if rebuild else Surface.ALL)
 
     async def _rebuild(self) -> None:
         """Redraw from scratch — what a display toggle needs."""
         if self._view is not None and self.front is not None:
             await self._view.rebuild(self._rows(self.front))
 
-    def action_toggle_sidebar(self) -> None:
-        if self._sidebar is not None:
-            self._sidebar.display = not self._sidebar.display
-            self.state_changed()
+    def action_list_tools(self) -> None:
+        """`/tools` — the catalog, with what each one is for.
+
+        The sidebar carries the names because they are charged to every request;
+        this carries the descriptions, which are charged to every request *too*
+        and are far too long for 32 columns. Notified rather than appended to
+        the transcript: a front end may not write into a fold of the log (A11),
+        and this is the surface every other command's output already uses.
+        """
+        self._show_catalog("tools")
+
+    def action_list_skills(self) -> None:
+        """`/skills` — what is installed, and what each one is for."""
+        self._show_catalog("skills")
+
+    def _show_catalog(self, what: str) -> None:
+        front = self.front
+        if front is None:
+            return
+        entries: tuple[CatalogEntry, ...] = getattr(front.state, what)
+        if not entries:
+            self.notify(f"no {what} in this deployment", title=what, markup=False)
+            return
+        lines = [
+            f"{one.name} — {one.description}" if one.description else one.name for one in entries
+        ]
+        self.notify("\n".join(lines), title=f"{what} ({len(entries)})", markup=False)
 
     def _save(self, settings: TuiSettings) -> None:
         """Adopt new settings and persist them. A write failure costs the memory, not the change."""

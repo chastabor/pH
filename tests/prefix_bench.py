@@ -35,13 +35,19 @@ from pathlib import Path
 from typing import Any
 
 from ph.agent.types import AgentOptions
-from ph.cordis import DEPLOYMENT, Profile, ProfileDocument
+from ph.bundles import resolve_bundle
+from ph.cordis import (
+    DEPLOYMENT,
+    Profile,
+    ProfileDocument,
+    load_profile_documents,
+)
 from ph.keys import AGENTS, LLM_REPLAY, SESSIONS, TOKEN_METER, TOOLS
 from ph.llm.types import GenerateOptions
 from ph.seams.token_meter import TokenMeter
 from ph.testing import REPLAY_ROW, RecordedStep, shared_prefix, text_chunks, tool_call_chunks
 from ph.wire import WireDataclass
-from ph_app.profiles import profile_documents
+from ph_app.profiles import profile_documents, resolve_profile
 from ph_app.runtime import mounted
 
 __all__ = [
@@ -58,9 +64,16 @@ OPTIONS = AgentOptions(provider="replay", model="replay-1")
 """Routes to `llm-replay`, which serves the authored steps in order."""
 
 PROFILES = ("rlm", "rlm-stable")
-"""The A/B axis, and both are shipped profiles rather than hand-assembled row
-sets: `rlm-stable` *is* `rlm` plus the `stabilize` bundle plus the row-flips that
-profile exists for, so this measures what a person's `--profile` composes."""
+"""The A/B axis: `rlm-stable` *is* `rlm` plus the `stabilize` bundle plus the
+row-flips that profile exists for.
+
+**The control is no longer a profile anyone can type, and that is deliberate.**
+Both arms were shipped profiles when no shipped profile carried stabilize; every
+one of them does now, because a session that grows until the provider refuses is
+a defect in any posture. So the `rlm` arm is built as *the shipped profile with
+the bundle under test removed* — see `bench_layers` — which is a sharper control
+than the old pair anyway: the two arms differ by exactly the thing being
+measured, rather than by whatever else the two profile documents disagreed on."""
 
 HOST_INTERPRETER: dict[str, Any] = {"python": "host", "sweepOrphans": False}
 """`code-runtime-python`, pinned to this interpreter rather than a built venv.
@@ -281,12 +294,31 @@ async def run_all(home: Path) -> list[Measurement]:
         await run_profile(
             profile,
             home=home,
-            layers=profile_documents(profile),
+            layers=bench_layers(profile),
             context_window=window,
         )
         for window in WINDOWS
         for profile in PROFILES
     ]
+
+
+def bench_layers(profile: str) -> list[ProfileDocument]:
+    """The profile's documents, minus the bundle this benchmark is measuring.
+
+    Only for the control arm, and only for the one bundle: everything else is
+    what `--profile` composes, so a row added to `ph-base` or to the RLM bundle
+    reaches both arms of the measurement without this function changing.
+
+    Filtered by resolved *path* rather than by document name, because two
+    bundles in this workspace are both called `bundle.yaml` — dropping by name
+    would take the RLM bundle out of the control and measure nothing at all.
+    """
+    if profile != "rlm":
+        # Through the one public "name → documents" door, so an overlay or a
+        # drop-in added behind it keeps reaching the measurement.
+        return profile_documents(profile)
+    stabilize = resolve_bundle("stabilize")
+    return load_profile_documents([path for path in resolve_profile(profile) if path != stabilize])
 
 
 def render(rows: Sequence[Measurement]) -> str:
