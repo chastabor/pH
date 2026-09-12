@@ -17,6 +17,7 @@ from typing import Literal, TypeAlias
 from ..cordis import Context, plugin
 from ..keys import APPROVAL, PERMISSION_PRESETS, SANDBOX, TUI_STATUS
 from ..session import Session
+from ..wire import WireModel
 from ._registry import contribute_item
 from .approval import ApprovalPolicy
 from .sandbox import SandboxMode
@@ -28,6 +29,7 @@ __all__ = [
     "PermissionPreset",
     "PermissionPresetService",
     "PresetName",
+    "PresetSchema",
     "apply",
 ]
 
@@ -65,7 +67,38 @@ PRESETS: dict[PresetName, PermissionPreset] = {
     ),
 }
 
+
+class PresetSchema(WireModel):
+    """One posture as a front end draws it: its name, what it means, and whether
+    it is the one in force.
+
+    `CommandSchema`'s shape and its reason — a picker on the other side of a
+    socket cannot reach `PRESETS`, and a client that hardcoded the three from
+    this module would be a second statement of what a deployment offers. The
+    active flag is here rather than beside the list because "which one" is the
+    question a picker is asking, and an answer split across two fields is two
+    things a reader has to line up.
+    """
+
+    name: str
+    summary: str
+    active: bool = False
+
+
 PRESET_NAMES: Mapping[str, PresetName] = {name: name for name in PRESETS}
+
+_SCHEMAS: Mapping[str, tuple[PresetSchema, ...]] = {
+    active: tuple(
+        PresetSchema(name=one.name, summary=one.summary, active=one.name == active)
+        for one in PRESETS.values()
+    )
+    for active in PRESETS
+}
+"""Every posture list there is — one per posture that could be active.
+
+Nine immutable models built once, for `_POSTURE_READINGS`' reason two lines
+down: there are three presets, so "which list does a picker get" has exactly
+three answers and none of them needs rebuilding per call."""
 
 _POSTURE_READINGS: dict[str, StatusReading] = {
     name: StatusReading(text=f"{name} accepted") for name in PRESETS
@@ -88,9 +121,6 @@ class PermissionPresetService:
     ctx: Context
     active: PresetName = "read-only"
 
-    def list(self) -> list[PermissionPreset]:
-        return list(PRESETS.values())
-
     def apply_preset(self, name: PresetName, session: Session | None = None) -> PermissionPreset:
         """Switch posture, recording it where a reviewer will look."""
         preset = PRESETS[name]
@@ -104,6 +134,16 @@ class PermissionPresetService:
             if approval is not None:
                 approval.set_policy(session, preset.approval_policy)
         return preset
+
+    def schemas(self, session: Session | None = None) -> tuple[PresetSchema, ...]:
+        """Every posture, with the live one marked — what a picker draws.
+
+        Resolved rather than remembered, which is the whole point: the TUI folded
+        `permission/preset` events to decide what to mark, so a client attaching
+        to a session somebody had already switched marked nothing at all. The
+        seam knows without being told.
+        """
+        return _SCHEMAS[self.resolve(session).name]
 
     def posture_reading(self, session: Session) -> StatusReading:
         """`read-only accepted` — what runs without anybody being asked.

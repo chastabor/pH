@@ -40,7 +40,8 @@ class Surface(IntFlag):
     `ALL` is the default everywhere, and deliberately: a surface that should
     have been redrawn and was not is a pane showing yesterday's answer, which is
     far worse than a redraw nobody needed. An event type earns a narrower
-    entry by being named in `ph_app.tui.adapter.SURFACES`.
+    entry on its own `ph_app.tui.adapter.EventRule`, beside the handler that
+    does the folding.
     """
 
     NOTHING = 0
@@ -172,7 +173,10 @@ class ChatItem:
 
 @dataclass(slots=True)
 class TuiState:
-    """The whole front-end model: rows, live status, and the current posture."""
+    """The whole front-end model: rows and live status.
+
+    The posture is no longer here — it is a `StatusReading` the seams that own
+    it contribute, which the footer and the session panel place by slot."""
 
     items: list[ChatItem] = field(default_factory=list)
     status: str = "idle"
@@ -183,16 +187,6 @@ class TuiState:
     writers of one fact. Widgets read `busy`, which is the bool they wanted."""
     turn: int = 0
     queued: int = 0
-    preset: str = ""
-    """Which posture the permission picker pre-selects, from `permission/preset`.
-
-    **Not what anything displays** — the footer draws the `posture` reading the
-    `permission-presets` row contributes, which is correct from the first frame
-    because the row resolves it rather than watching for a change. This is the
-    change-watching remnant, kept for the one thing that needs the bare *name*:
-    which row the picker marks. Empty until somebody switches, and an empty
-    mark is the honest answer to "which one is live" from a client that has not
-    been told."""
     tools: tuple[CatalogEntry, ...] = ()
     """What the model may call here, as `tools/list` projected it.
 

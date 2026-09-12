@@ -88,6 +88,7 @@ from ..payloads import (
     SessionNotice,
     SessionSchedulesReply,
     SessionStagedNotice,
+    SessionStatusNotice,
     ShellReply,
     SnapshotPage,
 )
@@ -117,6 +118,7 @@ from .projections import (
     browse_of,
     commands_of,
     credentials_of,
+    presets_of,
     readings_of,
     screens_of,
     skills_of,
@@ -647,6 +649,11 @@ class _Connection:
             session=root.session,
             agent=root.agent,
         )
+        # A command can move a reading without moving the agent — `/sandbox` is
+        # the one that does — and nothing else would re-read them. See
+        # `_refresh_readings`; it costs one fold, and only when somebody is
+        # attached to see it.
+        _refresh_readings(root)
         return CommandShown(session_id=root.id, shown=shown)
 
     async def _prepare_shell(self, root: Root, params: ShellParams) -> tuple[ShellService, str]:
@@ -685,6 +692,7 @@ class _Connection:
         self, root: Root, params: PresetParams, presets: PermissionPresetService
     ) -> PresetApplied:
         applied = presets.apply_preset(params.preset, session=root.session)
+        _refresh_readings(root)
         return PresetApplied(session_id=root.id, preset=applied.name)
 
     async def _prepare_credential(
@@ -858,6 +866,27 @@ class _Connection:
         return SessionDetached(session_id=params.session_id, detached=was_attached)
 
 
+def _refresh_readings(root: Root) -> None:
+    """Re-read the footer and push it, for a change the *agent* did not make.
+
+    Readings ride `session.status`, and the supervisor sends one when the agent
+    moves — which is right for a budget or a token count, and wrong for the two
+    postures. A preset switch and `/sandbox` change what the footer says without
+    the agent doing anything at all, so nothing re-read them: the client redrew
+    from the list it was holding and repainted the posture it already had.
+
+    Status left empty on purpose. `StatusFacts` is "as much of it as changed",
+    and a reader keeps every field a frame does not state — so this says the
+    readings moved and claims nothing about where the agent is.
+
+    Guarded like `Supervisor.announce`'s own publish, and for its reason: a
+    reading is a fold over the log, and folding for nobody is the work the
+    check exists to skip.
+    """
+    if root.subscribers:
+        root.publish(SessionStatusNotice(session_id=root.id, readings=readings_of(root)))
+
+
 def _projection[N: SessionNotice](
     verb: Verb[SessionParams, N], key: str, fold: Callable[[Root], list[Any]]
 ) -> tuple[str, _Row]:
@@ -987,6 +1016,7 @@ METHODS: dict[str, _Row] = dict(
         _projection(verbs.SCREENS_LIST, "screens", screens_of),
         _projection(verbs.TOOLS_LIST, "tools", tools_of),
         _projection(verbs.SKILLS_LIST, "skills", skills_of),
+        _projection(verbs.PRESETS_LIST, "presets", presets_of),
         _unkeyed(verbs.SCHEDULE_CREATE, _Connection._schedule_create),
         _unkeyed(verbs.SCHEDULE_CANCEL, _Connection._schedule_cancel),
         _unkeyed(verbs.SCHEDULE_LIST, _Connection._schedule_list),

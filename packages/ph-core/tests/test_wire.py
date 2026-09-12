@@ -118,6 +118,7 @@ def _sample(model: type[BaseModel]) -> BaseModel | None:
             "source": UserSource(),
         },
         "TextBlock": {"text": "hi"},
+        "PresetSchema": {"name": "read-only", "summary": "Reads freely.", "active": True},
         "Schedule": {"id": "s1", "kind": "interval", "spec": "300000", "prompt": "go"},
         "Goal": {"id": "g1", "objective": "make the tests pass"},
         "Budget": {},

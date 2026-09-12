@@ -34,13 +34,22 @@ value silently reverted `interrupt_on` on the next mount.
 ## The surface
 
 ```text
-ctx.permission_presets.list()                    # -> the presets a UI offers
-ctx.permission_presets.resolve(name)             # -> PermissionPreset | None
-ctx.permission_presets.active(session)           # what is in force now
-ctx.permission_presets.apply_preset(session, name)
+ctx.permission_presets.schemas(session)          # -> the presets a UI offers, live one marked
+ctx.permission_presets.resolve(session)          # -> the PermissionPreset in force
+ctx.permission_presets.posture_reading(session)  # -> the footer's `<name> accepted`
+ctx.permission_presets.apply_preset(name, session)
 ```
 
 A `PermissionPreset` carries `name`, `summary`, `sandbox_mode`, `approval_policy`.
+A `PresetSchema` is the half of that a front end draws — `name`, `summary` and
+whether it is `active` — because a picker on the other side of a socket cannot
+reach `PRESETS`, and a client that hardcoded the three would be a second
+statement of what this deployment offers.
+
+**`schemas` rather than a list plus a separately-tracked name.** The TUI folded
+`permission/preset` events to decide which row to mark, so a client that
+attached to a session somebody had already switched marked nothing at all. The
+seam knows without being told, and `presets/list` carries the answer.
 
 `PresetName` is a closed `Literal` — the same rule `ApprovalOutcome`, `CardKind`
 and `WorkspaceKind` are held to, so a fourth posture fails to type-check at every

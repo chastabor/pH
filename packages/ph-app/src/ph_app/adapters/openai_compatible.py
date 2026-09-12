@@ -29,6 +29,8 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Any
 
+import anyio
+
 from ph.cordis import Context, plugin
 from ph.keys import ATTACHMENTS, CREDENTIALS, LLM, UPLOADS
 from ph.llm.adapter import LlmError, ResolvedModel, resolved
@@ -647,6 +649,18 @@ class _Windows:
     """Providers whose window came back from the server, so the row can say which
     of the two numbers a person is looking at."""
 
+    async def discover(self, adapter: OpenAiCompatibleAdapter) -> None:
+        """Ask one route for its window and adopt the answer, or keep the config.
+
+        A method rather than a closure in `apply`, because it is what the task
+        group spawns: a bound method carries this object and the adapter it was
+        handed, where a lambda would carry the mount's whole scope.
+        """
+        found = await discover_window(adapter)
+        if found is not None:
+            adapter.profile = adapter.profile.model_copy(update={"context_window": found})
+            self.asked.add(adapter.profile.provider)
+
     def describe(self) -> list[tuple[str, str]]:
         rows: list[tuple[str, str]] = []
         for adapter in self.adapters:
@@ -668,20 +682,27 @@ class _Windows:
 async def apply(ctx: Context, config: Config) -> None:
     """Register every configured OpenAI-compatible route."""
     uploads = ctx.get(UPLOADS)
-    routes = _Windows()
-    for profile in config.profiles:
-        adapter = OpenAiCompatibleAdapter(ctx=ctx, profile=profile)
-        if profile.discover_context_window:
-            # At mount and once, so `resolve_model` stays synchronous — every
-            # layer above reads a window per request, and a probe there would be
-            # an HTTP round trip inside a projection. A failure keeps the
-            # configured number: see `discover_context_window`.
-            found = await discover_window(adapter)
-            if found is not None:
-                adapter.profile = profile.model_copy(update={"context_window": found})
-                routes.asked.add(profile.provider)
-        routes.adapters.append(adapter)
-        handle = ctx.require(LLM).register_adapter([profile.provider], adapter)
+    routes = _Windows(
+        adapters=[OpenAiCompatibleAdapter(ctx=ctx, profile=profile) for profile in config.profiles]
+    )
+    # **At mount and once, so `resolve_model` stays synchronous** — every layer
+    # above reads a window per request, and a probe there would be an HTTP round
+    # trip inside a projection. A failure keeps the configured number: see
+    # `discover_context_window`.
+    #
+    # **Together rather than in turn**, because they are independent and a mount
+    # is a person waiting for a TUI to open: asking three routes in sequence
+    # spends three timeouts on a bad network where asking them at once spends
+    # one. `discover_window` answers `None` for every failure, so nothing here
+    # can raise into the group.
+    async with anyio.create_task_group() as tasks:
+        for adapter in routes.adapters:
+            if adapter.profile.discover_context_window:
+                tasks.start_soon(routes.discover, adapter)
+    llm = ctx.require(LLM)
+    for adapter in routes.adapters:
+        profile = adapter.profile
+        handle = llm.register_adapter([profile.provider], adapter)
         ctx.add_disposer(handle.dispose, label=f"llm({profile.provider})")
         if uploads is not None and profile.uploads:
             # Only for a route that references files. Most servers speaking this

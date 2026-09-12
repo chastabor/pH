@@ -431,7 +431,14 @@ async def test_the_permission_picker_records_the_posture(
         await pilot.pause()
         presets = [e for e in root.session.events if e.type == "permission/preset"]
         assert presets, "the service records the posture, not the front-end"
-        assert front.state.preset == presets[-1].data["preset"]
+        chosen = presets[-1].data["preset"]
+
+        # And the picker reads the posture back from the seam rather than from a
+        # fold of its own: it marked nothing on a session somebody had already
+        # switched, because a client that attached afterwards has no event to
+        # fold. Asked again, the mark is on what the log now says.
+        marked = [one.name for one in await front.presets() if one.active]
+        assert marked == [chosen]
 
 
 async def test_the_session_picker_lists_and_reopens(make_tui_app: MakeApp) -> None:

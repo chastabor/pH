@@ -36,7 +36,7 @@ from ph.llm.types import (
 from ph.session import Session, SessionEvent, SurfaceIntent, SurfaceReplace
 from ph.session.known_event_types import KNOWN_SESSION_EVENT_TYPES
 from ph.testing import MountProfile, assistant_payload, plugin_payload, simple_tool, user_payload
-from ph_app.tui.adapter import HANDLERS, RECORDLESS, REPLAY, SURFACES, TuiEventAdapter
+from ph_app.tui.adapter import HANDLERS, RECORDLESS, REPLAY, RULES, TuiEventAdapter
 from ph_app.tui.state import Surface, TuiState
 
 pytestmark = pytest.mark.anyio
@@ -176,18 +176,18 @@ async def test_a_panel_event_does_not_redraw_the_transcript(mount: MountProfile)
     assert adapter.take_touched() == Surface.SIDEBAR
 
 
-async def test_an_event_the_table_does_not_name_redraws_everything(mount: MountProfile) -> None:
+async def test_a_rule_written_without_surfaces_redraws_everything(mount: MountProfile) -> None:
     """`ALL` is the default, and that is the safety property.
 
     A surface left stale shows yesterday's answer; a redraw nobody needed costs
     a frame. So an event type earns a narrow entry rather than losing one, and
-    a handler added without touching `SURFACES` is correct by default.
+    a rule written without surfaces is correct by default.
     """
     ctx: Context = await mount()
     session = ctx.require(SESSIONS).create("tui-default")
     adapter = TuiEventAdapter()
-    unlisted = next(one for one in HANDLERS if one not in SURFACES)
-    session.append(unlisted, {})
+    plain = next(name for name, rule in RULES.items() if rule.surfaces == Surface.ALL)
+    session.append(plain, {})
     for event in session.events:
         adapter.apply(event)
 
@@ -195,10 +195,10 @@ async def test_an_event_the_table_does_not_name_redraws_everything(mount: MountP
 
 
 def test_a_handler_that_draws_a_row_declares_the_transcript() -> None:
-    """The half of `SURFACES` that can be derived, held against what it says.
+    """The half of a rule that can be derived, held against what it says.
 
-    A second table keyed by event type is a table free to disagree with the
-    handlers it describes, and it did within a day of being written:
+    The handler and its surfaces are one `EventRule` now, so they cannot be
+    edited apart — but a rule can still *say* the wrong thing, and one did:
     `subagent/admitted` draws "Delegated to X" and was declared `SIDEBAR`
     alone, so the row would have waited in the fold until something unrelated
     marked the transcript — a stale pane, which is the exact failure the
@@ -219,13 +219,11 @@ def test_a_handler_that_draws_a_row_declares_the_transcript() -> None:
     import inspect
     import textwrap
 
-    from ph_app.tui.adapter import SURFACES, TuiEventAdapter
-
-    for event_type, surfaces in SURFACES.items():
-        handler = HANDLERS.get(event_type)
-        if handler is None:
+    for event_type, rule in RULES.items():
+        if rule.handler is None:
             continue
-        tree = ast.parse(textwrap.dedent(inspect.getsource(handler)))
+        surfaces = rule.surfaces
+        tree = ast.parse(textwrap.dedent(inspect.getsource(rule.handler)))
         draws = any(
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Attribute)

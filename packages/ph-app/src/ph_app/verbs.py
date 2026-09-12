@@ -67,6 +67,7 @@ from .payloads import (
     SessionBrowse,
     SessionCommandsNotice,
     SessionDetached,
+    SessionPresetsReply,
     SessionReadingsReply,
     SessionSchedulesReply,
     SessionScreensNotice,
@@ -88,6 +89,7 @@ __all__ = [
     "DAEMON_STATUS",
     "INITIALIZE",
     "MUTATING",
+    "PRESETS_LIST",
     "SCHEDULE_CANCEL",
     "SCHEDULE_CREATE",
     "SCHEDULE_LIST",
@@ -156,6 +158,7 @@ COMMANDS_LIST = Verb("commands/list", SessionParams, SessionCommandsNotice)
 SCREENS_LIST = Verb("screens/list", SessionParams, SessionScreensNotice)
 TOOLS_LIST = Verb("tools/list", SessionParams, SessionToolsReply)
 SKILLS_LIST = Verb("skills/list", SessionParams, SessionSkillsReply)
+PRESETS_LIST = Verb("presets/list", SessionParams, SessionPresetsReply)
 
 # --- attachments and credentials -----------------------------------------------
 

@@ -114,6 +114,7 @@ def test_every_handler_answers_with_the_reply_its_verb_declares() -> None:
         "screens/list",
         "tools/list",
         "skills/list",
+        "presets/list",
     }
     checked = 0
     for method, row in {**METHODS, **MUTATIONS}.items():

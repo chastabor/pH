@@ -63,7 +63,7 @@ from ph.llm.types import AttachmentRef
 from ph.seams.approval import answer_to_wire
 from ph.seams.attachments import read_for_attach
 from ph.seams.commands import CommandDefinition, CommandSchema, parse_command_line
-from ph.seams.permission_presets import PresetName
+from ph.seams.permission_presets import PresetName, PresetSchema
 from ph.seams.tui_screens import ScreenDefinition, ScreenSchema
 from ph.seams.tui_status import StatusReading
 from ph.session import Session, SessionEvent, SessionHeader
@@ -354,6 +354,18 @@ class DaemonSession:
         """The daemon's own list — stored logs and its live roots, already merged."""
         reply = await self.client.call(verbs.SESSIONS_BROWSE, NoParams())
         return list(reply.sessions)
+
+    async def presets(self) -> list[PresetSchema]:
+        """The postures this root offers, asked when the picker opens.
+
+        Which is the only moment anything needs them — and the moment a fold
+        would have been wrong, because this client may have attached long after
+        the posture was last changed.
+        """
+        reply = await self.client.call(
+            verbs.PRESETS_LIST, SessionParams(session_id=self.session_id)
+        )
+        return list(reply.presets)
 
     def credential_held(self, name: str) -> bool:
         """From the last `credentials/held` answer — a fact about the *daemon's*

@@ -693,9 +693,11 @@ class PHTuiApp(App[str | None]):
         # Chosen or cancelled, the theme in force is the one the settings name.
         self.theme = self.catalog.resolve(self.settings.theme).name
 
-    def action_open_presets(self) -> None:
-        if self.front is not None:
-            self._pick("permissions", preset_choices(self.front.state.preset), self._set_preset)
+    async def action_open_presets(self) -> None:
+        """Ask the daemon which postures there are, then offer them."""
+        front = self.front
+        if front is not None:
+            self._pick("permissions", preset_choices(await front.presets()), self._set_preset)
 
     def _set_preset(self, chosen: str | None) -> None:
         front = self.front

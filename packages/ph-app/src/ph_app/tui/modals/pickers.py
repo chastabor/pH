@@ -2,8 +2,8 @@
 
 These are builders, not screens. Each one asks a service what exists and turns
 the answer into `Choice` rows — the commands come from `ctx.commands`, the
-providers from `ctx.llm`, the postures from `PRESETS`, the sessions from the
-store's directory. Nothing here keeps a parallel list of what pH can do, so a
+providers from `ctx.llm`, the postures from `ctx.permission_presets`, the
+sessions from the store's directory. Nothing here keeps a parallel list of what pH can do, so a
 plugin that registers a command or an adapter shows up in the picker without
 this module changing (I1, I7).
 
@@ -22,7 +22,7 @@ from typing import Any
 
 from rich.filesize import decimal
 
-from ph.seams.permission_presets import PRESETS
+from ph.seams.permission_presets import PresetSchema
 
 from ...sessions import SessionSummary
 from ..themes import ThemeCatalog
@@ -54,16 +54,23 @@ def command_choices(definitions: Iterable[Any]) -> list[Choice]:
     ]
 
 
-def preset_choices(active: str) -> list[Choice]:
-    """The permission postures, with the live one marked."""
+def preset_choices(presets: Sequence[PresetSchema]) -> list[Choice]:
+    """The permission postures the daemon offers, with the live one marked.
+
+    Rows from the projection rather than from `PRESETS` plus a separately folded
+    name. The *mark* is what forced it — a client that attached after somebody
+    switched had no event to fold and marked nothing — and the rows come with it
+    because a picker asking one question should get one answer. `PRESETS` is a
+    closed table today, so nothing here claims a deployment could vary it.
+    """
     return [
         Choice(
             value=preset.name,
             label=preset.name,
             detail=preset.summary,
-            marked=preset.name == active,
+            marked=preset.active,
         )
-        for preset in PRESETS.values()
+        for preset in presets
     ]
 
 

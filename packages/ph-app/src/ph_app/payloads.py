@@ -45,6 +45,7 @@ from pydantic import Field
 from ph.llm.types import AttachmentRef, ToolSchema
 from ph.seams.approval import ApprovalRequest
 from ph.seams.commands import CommandSchema
+from ph.seams.permission_presets import PresetSchema
 from ph.seams.skills import Skill
 from ph.seams.tui_screens import ScreenSchema
 from ph.seams.tui_status import StatusReading
@@ -549,6 +550,12 @@ class SessionToolsReply(SessionNotice):
     """`tools/list` — what the model may call in this deployment."""
 
     tools: list[ToolSchema] = Field(default_factory=list)
+
+
+class SessionPresetsReply(SessionNotice):
+    """`presets/list` — the postures, and which one is in force."""
+
+    presets: list[PresetSchema] = Field(default_factory=list)
 
 
 class SessionSkillsReply(SessionNotice):

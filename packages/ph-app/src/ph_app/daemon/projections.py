@@ -34,9 +34,18 @@ from __future__ import annotations
 from typing import Any
 
 from ph.cordis import DEPLOYMENT
-from ph.keys import COMMANDS, CREDENTIALS, SKILLS, TOOLS, TUI_SCREENS, TUI_STATUS
+from ph.keys import (
+    COMMANDS,
+    CREDENTIALS,
+    PERMISSION_PRESETS,
+    SKILLS,
+    TOOLS,
+    TUI_SCREENS,
+    TUI_STATUS,
+)
 from ph.llm.types import ToolSchema
 from ph.seams.commands import CommandSchema
+from ph.seams.permission_presets import PresetSchema
 from ph.seams.skills import Skill
 from ph.seams.tui_screens import ScreenSchema
 from ph.seams.tui_status import StatusReading
@@ -114,6 +123,18 @@ def tools_of(root: Any) -> list[ToolSchema]:
     if tools is None:
         return []
     return list(tools.schemas(scope=DEPLOYMENT))
+
+
+def presets_of(root: Any) -> list[PresetSchema]:
+    """The permission postures, with the live one marked.
+
+    Resolved by the seam per call, like every projection here —
+    `PermissionPresetService.schemas` says why that matters.
+    """
+    presets = root.ctx.get(PERMISSION_PRESETS)
+    if presets is None:
+        return []
+    return list(presets.schemas(root.session))
 
 
 def skills_of(root: Any) -> list[Skill]:

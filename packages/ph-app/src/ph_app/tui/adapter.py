@@ -33,10 +33,12 @@ the codebase holds to a replay, and a reader who assumed the pair here agreed wo
 be wrong in a way nothing would catch. The position itself lives in `Followed.seen`
 and in the mirror `Session` a remote front end admits into.
 
-`HANDLERS` is the closed list of what renders. Together with `RECORDLESS` — the
-known types that are an auditor's records rather than a reader's (P3-24) — it
-covers the log's whole vocabulary, and a test holds that equality so a new event
-type cannot go silently unrendered.
+`RULES` is the closed list of what this front end reacts to: one row per event
+type, holding the handler that folds it and the surfaces that folding moves.
+`HANDLERS` is derived from it — the rows that render — and together with
+`RECORDLESS`, the known types that are an auditor's records rather than a
+reader's (P3-24), it covers the log's whole vocabulary. A test holds that
+equality so a new event type cannot go silently unrendered.
 
 @module ph_app.tui.adapter
 """
@@ -69,7 +71,15 @@ from ..shell import shell_body
 from ..wire import as_int, as_obj, as_seq, media_labels, one_line, result_block, text_of_wire
 from .state import ChatItem, ItemRole, Surface, ToolCard, TuiState
 
-__all__ = ["HANDLERS", "RECORDLESS", "REPLAY", "SURFACES", "Frame", "TuiEventAdapter"]
+__all__ = [
+    "HANDLERS",
+    "RECORDLESS",
+    "REPLAY",
+    "RULES",
+    "EventRule",
+    "Frame",
+    "TuiEventAdapter",
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,18 +139,13 @@ class TuiEventAdapter:
 
     def apply(self, event: SessionEvent, frame: Frame = Frame()) -> None:
         """Fold one event in, with what travelled beside it."""
-        handler = HANDLERS.get(event.type)
-        # **Asked of the table first, and independently of the handler.** What
-        # an event *draws* and what it *changes* are different questions:
-        # `sandbox/mode` draws no row at all, and still moves the posture the
-        # footer and the session panel both read. A type the table does not
-        # name falls back to "everything" when something renders it, and to
-        # nothing when this adapter ignores it.
-        self.touched |= SURFACES.get(
-            event.type, Surface.ALL if handler is not None else Surface.NOTHING
-        )
-        if handler is not None:
-            handler(self, event, frame)
+        rule = RULES.get(event.type)
+        if rule is None:
+            # Not ours: `RECORDLESS`, or a type this build has never heard of.
+            # Either way nothing moved, so nothing is redrawn for it.
+            return
+        self.touched |= rule.surfaces
+        rule.handler(self, event, frame)
 
     def take_touched(self) -> Surface:
         """What has moved since this was last asked, and reset.
@@ -501,9 +506,6 @@ class TuiEventAdapter:
             self._row("answered", "notice", "No answer given.", event)
             return
         self._row("answered", "user", str(event.data.get("answer", "")), event)
-
-    def _on_permission_preset(self, event: SessionEvent, frame: Frame) -> None:
-        self.state.preset = str(event.data.get("preset", self.state.preset))
 
     def _on_command_run(self, event: SessionEvent, frame: Frame) -> None:
         argument = str(event.data.get("argument", "")).strip()
@@ -953,98 +955,105 @@ class TuiEventAdapter:
         self.state.queued = max(0, self.state.queued + inserted - removed)
 
 
-SURFACES: Mapping[str, Surface] = {
-    # **Only the events worth narrowing.** Anything absent is `Surface.ALL`,
-    # which is the safe answer: a pane left stale is worse than a redraw nobody
-    # needed, so an event earns an entry here rather than losing one.
-    #
-    # `assistant/chunk` is the entry that pays for the table. It arrives faster
-    # than the coalescing window for the whole of a streaming turn, and it can
-    # move exactly one thing — the transcript.
-    "assistant/chunk": Surface.TRANSCRIPT,
-    # A settled message carries the usage the footer's gauge and cache field
-    # read, and a row.
-    "assistant/message": Surface.TRANSCRIPT | Surface.FOOTER,
-    "user/message": Surface.TRANSCRIPT,
-    "turn/start": Surface.TRANSCRIPT | Surface.FOOTER,
-    "turn/end": Surface.TRANSCRIPT | Surface.FOOTER,
-    "request/context": Surface.FOOTER,
-    "permission/preset": Surface.FOOTER,
-    "todo/write": Surface.SIDEBAR,
-    "sandbox/mode": Surface.FOOTER | Surface.SIDEBAR,
-    # **A delegation is a row *and* a panel entry.** Both of these were declared
-    # `SIDEBAR` alone, which is the drift this table invites and the failure it
-    # exists to prevent: "Delegated to reviewer" would have waited in the fold
-    # until some unrelated event happened to mark the transcript. The two below
-    # them really are panel-only — a child's status and its token counter draw
-    # no row, which `RECORDLESS` says in as many words.
-    #
-    # `test_a_handler_that_draws_a_row_declares_the_transcript` is what stops
-    # this happening again: the half of this table that can be derived from the
-    # handler's own body is now checked against it.
-    "subagent/admitted": Surface.TRANSCRIPT | Surface.SIDEBAR,
-    "subagent/deleted": Surface.TRANSCRIPT | Surface.SIDEBAR,
-    "subagent/status": Surface.SIDEBAR,
-    "subagent/usage-attributed": Surface.SIDEBAR,
-}
-
-
 Handler = Callable[[TuiEventAdapter, SessionEvent, Frame], None]
 
-HANDLERS: Mapping[str, Handler] = {
-    "user/message": TuiEventAdapter._on_user_message,
-    "assistant/chunk": TuiEventAdapter._on_assistant_chunk,
-    "assistant/message": TuiEventAdapter._on_assistant_message,
-    "tool/call": TuiEventAdapter._on_tool_call,
-    "tool/result": TuiEventAdapter._on_tool_result,
-    "tool/code-dispatch-start": TuiEventAdapter._on_tool_code_dispatch_start,
-    "tool/code-dispatch": TuiEventAdapter._on_tool_code_dispatch,
-    "turn/start": TuiEventAdapter._on_turn_start,
-    "turn/end": TuiEventAdapter._on_turn_end,
-    "request/context": TuiEventAdapter._on_request_context,
-    "approval/asked": TuiEventAdapter._on_approval_asked,
-    "approval/decided": TuiEventAdapter._on_approval_decided,
-    "shell/command": TuiEventAdapter._on_shell_command,
-    "shell/result": TuiEventAdapter._on_shell_result,
-    "question/asked": TuiEventAdapter._on_question_asked,
-    "question/answered": TuiEventAdapter._on_question_answered,
-    "permission/preset": TuiEventAdapter._on_permission_preset,
-    "sandbox/denied": TuiEventAdapter._on_sandbox_denied,
-    "command/run": TuiEventAdapter._on_command_run,
-    "command/done": TuiEventAdapter._on_command_done,
-    "llm/retry": TuiEventAdapter._on_llm_retry,
-    "session/resumed": TuiEventAdapter._on_session_resumed,
-    "session/segmented": TuiEventAdapter._on_session_segmented,
-    "supervisor/retry": TuiEventAdapter._on_supervisor_retry,
-    "supervisor/failed": TuiEventAdapter._on_supervisor_failed,
-    "supervisor/recovered": TuiEventAdapter._on_supervisor_recovered,
-    "supervisor/passivated": TuiEventAdapter._on_supervisor_passivated,
-    "supervisor/unreachable": TuiEventAdapter._on_supervisor_unreachable,
-    "schedule/tick": TuiEventAdapter._on_schedule_tick,
-    "goal/set": TuiEventAdapter._on_goal_set,
-    "goal/settled": TuiEventAdapter._on_goal_settled,
-    "agent/inbox/spliced": TuiEventAdapter._on_agent_inbox_spliced,
-    "todo/write": TuiEventAdapter._on_todo_write,
-    "offload/spilled": TuiEventAdapter._on_offload_spilled,
-    "offload/input-spilled": TuiEventAdapter._on_offload_spilled,
-    "compaction/declined": TuiEventAdapter._on_compaction_declined,
-    "attachment/degraded": TuiEventAdapter._on_attachment_degraded,
-    "attachment/oversized": TuiEventAdapter._on_attachment_oversized,
-    "attachment/uploaded": TuiEventAdapter._on_attachment_uploaded,
-    "limits/exceeded": TuiEventAdapter._on_limits_exceeded,
-    "limits/breaker-tripped": TuiEventAdapter._on_breaker_tripped,
-    "compaction/args-truncated": TuiEventAdapter._on_compaction_args_truncated,
-    "kernel/restored": TuiEventAdapter._on_kernel_restored,
-    "harness/refined": TuiEventAdapter._on_harness_refined,
-    "harness/refine-considered": TuiEventAdapter._on_harness_refine_considered,
-    "context/loaded": TuiEventAdapter._on_context_loaded,
-    "subagent/admitted": TuiEventAdapter._on_subagent_admitted,
-    "subagent/deleted": TuiEventAdapter._on_subagent_deleted,
-    "subagent/status": TuiEventAdapter._on_subagent_status,
-    "subagent/usage-attributed": TuiEventAdapter._on_subagent_usage,
+
+@dataclass(frozen=True, slots=True)
+class EventRule:
+    """One event type: what folds it, and what that folding moves on screen.
+
+    **One row, because two tables drifted.** What an event *draws* and what it
+    *changes* were declared apart for a day, and in that day two entries went
+    wrong the same way: `subagent/admitted` draws "Delegated to X" and was
+    declared a panel change alone, so the row would have waited in the fold
+    until something unrelated marked the transcript. A handler and its surfaces
+    cannot be edited apart when they are one value.
+
+    `surfaces` defaults to `ALL`, which is the safe answer and the reason most
+    rows below say nothing: a pane left stale shows yesterday's answer, while a
+    redraw nobody needed costs a frame. An entry earns a narrower surface set
+    rather than losing one.
+
+    Every rule has a handler. The two postures briefly had rows here with none —
+    they render nothing, and the footer still had to redraw when they moved —
+    but a reading that changes is the *daemon's* to announce: it pushes a fresh
+    `session.status`, and the client marks both surfaces when one lands. A
+    handler-less rule was the client inferring from an event what the readings
+    frame states outright, and it inferred the redraw without the new values.
+    """
+
+    handler: Handler
+    surfaces: Surface = Surface.ALL
+
+
+RULES: Mapping[str, EventRule] = {
+    "user/message": EventRule(TuiEventAdapter._on_user_message, Surface.TRANSCRIPT),
+    "assistant/chunk": EventRule(TuiEventAdapter._on_assistant_chunk, Surface.TRANSCRIPT),
+    "assistant/message": EventRule(
+        TuiEventAdapter._on_assistant_message, Surface.TRANSCRIPT | Surface.FOOTER
+    ),
+    "tool/call": EventRule(TuiEventAdapter._on_tool_call),
+    "tool/result": EventRule(TuiEventAdapter._on_tool_result),
+    "tool/code-dispatch-start": EventRule(TuiEventAdapter._on_tool_code_dispatch_start),
+    "tool/code-dispatch": EventRule(TuiEventAdapter._on_tool_code_dispatch),
+    "turn/start": EventRule(TuiEventAdapter._on_turn_start, Surface.TRANSCRIPT | Surface.FOOTER),
+    "turn/end": EventRule(TuiEventAdapter._on_turn_end, Surface.TRANSCRIPT | Surface.FOOTER),
+    "request/context": EventRule(TuiEventAdapter._on_request_context, Surface.FOOTER),
+    "approval/asked": EventRule(TuiEventAdapter._on_approval_asked),
+    "approval/decided": EventRule(TuiEventAdapter._on_approval_decided),
+    "shell/command": EventRule(TuiEventAdapter._on_shell_command),
+    "shell/result": EventRule(TuiEventAdapter._on_shell_result),
+    "question/asked": EventRule(TuiEventAdapter._on_question_asked),
+    "question/answered": EventRule(TuiEventAdapter._on_question_answered),
+    "sandbox/denied": EventRule(TuiEventAdapter._on_sandbox_denied),
+    "command/run": EventRule(TuiEventAdapter._on_command_run),
+    "command/done": EventRule(TuiEventAdapter._on_command_done),
+    "llm/retry": EventRule(TuiEventAdapter._on_llm_retry),
+    "session/resumed": EventRule(TuiEventAdapter._on_session_resumed),
+    "session/segmented": EventRule(TuiEventAdapter._on_session_segmented),
+    "supervisor/retry": EventRule(TuiEventAdapter._on_supervisor_retry),
+    "supervisor/failed": EventRule(TuiEventAdapter._on_supervisor_failed),
+    "supervisor/recovered": EventRule(TuiEventAdapter._on_supervisor_recovered),
+    "supervisor/passivated": EventRule(TuiEventAdapter._on_supervisor_passivated),
+    "supervisor/unreachable": EventRule(TuiEventAdapter._on_supervisor_unreachable),
+    "schedule/tick": EventRule(TuiEventAdapter._on_schedule_tick),
+    "goal/set": EventRule(TuiEventAdapter._on_goal_set),
+    "goal/settled": EventRule(TuiEventAdapter._on_goal_settled),
+    "agent/inbox/spliced": EventRule(TuiEventAdapter._on_agent_inbox_spliced),
+    "todo/write": EventRule(TuiEventAdapter._on_todo_write, Surface.SIDEBAR),
+    "offload/spilled": EventRule(TuiEventAdapter._on_offload_spilled),
+    "offload/input-spilled": EventRule(TuiEventAdapter._on_offload_spilled),
+    "compaction/declined": EventRule(TuiEventAdapter._on_compaction_declined),
+    "attachment/degraded": EventRule(TuiEventAdapter._on_attachment_degraded),
+    "attachment/oversized": EventRule(TuiEventAdapter._on_attachment_oversized),
+    "attachment/uploaded": EventRule(TuiEventAdapter._on_attachment_uploaded),
+    "limits/exceeded": EventRule(TuiEventAdapter._on_limits_exceeded),
+    "limits/breaker-tripped": EventRule(TuiEventAdapter._on_breaker_tripped),
+    "compaction/args-truncated": EventRule(TuiEventAdapter._on_compaction_args_truncated),
+    "kernel/restored": EventRule(TuiEventAdapter._on_kernel_restored),
+    "harness/refined": EventRule(TuiEventAdapter._on_harness_refined),
+    "harness/refine-considered": EventRule(TuiEventAdapter._on_harness_refine_considered),
+    "context/loaded": EventRule(TuiEventAdapter._on_context_loaded),
+    "subagent/admitted": EventRule(
+        TuiEventAdapter._on_subagent_admitted, Surface.TRANSCRIPT | Surface.SIDEBAR
+    ),
+    "subagent/deleted": EventRule(
+        TuiEventAdapter._on_subagent_deleted, Surface.TRANSCRIPT | Surface.SIDEBAR
+    ),
+    "subagent/status": EventRule(TuiEventAdapter._on_subagent_status, Surface.SIDEBAR),
+    "subagent/usage-attributed": EventRule(TuiEventAdapter._on_subagent_usage, Surface.SIDEBAR),
 }
-"""Event type → handler. Explicit, so the set of what renders is a value a test
-can hold against the log's vocabulary rather than a naming convention."""
+"""Every event type this front end reacts to at all.
+
+`HANDLERS` below is derived from it, so "what renders" stays a value a test can
+hold against the log's vocabulary."""
+
+HANDLERS: Mapping[str, Handler] = {name: rule.handler for name, rule in RULES.items()}
+"""Event type → handler, derived from `RULES`.
+
+Kept as its own name because it is what the vocabulary gate compares against —
+and because "does this render" is a question worth asking without unpacking a
+rule to answer it."""
 
 RECORDLESS: frozenset[str] = frozenset(
     {
@@ -1061,7 +1070,8 @@ RECORDLESS: frozenset[str] = frozenset(
         "request/header",
         # Both change a *reading* rather than the transcript: the posture is
         # contributed by the row that owns it, so there is nothing to fold
-        # here and `SURFACES` is what says the footer must redraw.
+        # here, and the rule's surfaces are what say the footer must redraw.
+        "permission/preset",
         "sandbox/mode",
         "step/start",
         "step/end",
