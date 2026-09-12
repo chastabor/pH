@@ -47,6 +47,7 @@ from typing import Any
 import anyio
 
 from ..cordis import Context, plugin
+from ..json import JsonValue
 from ..keys import ATTACHMENTS
 from ..llm.dimensions import IMAGE_MIMES, image_dimensions
 from ..llm.types import AttachmentRef
@@ -440,7 +441,7 @@ def referenced_digests(events: Iterable[Any]) -> set[str]:
     return found
 
 
-def _walk(value: Any, found: set[str]) -> None:
+def _walk(value: JsonValue, found: set[str]) -> None:
     """Collect digest-shaped strings from a lossless-JSON payload.
 
     `Mapping` and `Sequence` rather than `dict` and `list`: the log freezes its

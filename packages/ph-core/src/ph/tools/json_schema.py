@@ -26,6 +26,8 @@ from typing import Any
 
 from pydantic import BaseModel
 
+from ..json import JsonValue
+
 __all__ = [
     "SUPPORTED_KEYWORDS",
     "schema_of",
@@ -263,12 +265,14 @@ def _validate(schema: Any, value: Any, path: str, root: dict[str, Any], out: lis
                 )
 
 
-def parse_arguments(raw: str) -> Any:
+def parse_arguments(raw: str) -> JsonValue:
     """Parse model arguments, preserving invalid JSON as text.
 
     A malformed argument string is the *tool's* problem to report, not the
     loop's to crash on: the tool sees the raw text and fails with a message the
-    model can act on.
+    model can act on. `JsonValue` says exactly that and costs nothing to say — a
+    `str` is one — and the raw text is read downstream: `ph_stabilize`'s
+    destructive gate scans it for a call whose JSON never parsed.
 
     Here, in the package's leaf module, because `presentation.py` needs it too
     and `batch` is three imports above it — `presentation` → `batch` →
@@ -278,6 +282,7 @@ def parse_arguments(raw: str) -> Any:
     if not raw:
         return {}
     try:
-        return json.loads(raw)
+        parsed: JsonValue = json.loads(raw)
     except json.JSONDecodeError:
         return raw
+    return parsed

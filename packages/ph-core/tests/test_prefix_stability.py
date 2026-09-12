@@ -37,8 +37,8 @@ from ph.testing import (
     as_kind,
     recorded_steps,
     shared_prefix,
+    simple_tool,
 )
-from ph.tools import ToolOutput, define_tool, text_content
 
 pytestmark = pytest.mark.anyio
 
@@ -167,14 +167,7 @@ async def test_a_tool_registration_is_the_kind_of_change_that_does_move_the_pref
     agent = ctx.require(AGENTS).create(session, FAKE)
     await agent.prompt("first")
     ctx.require(TOOLS).register(
-        define_tool(
-            "ping",
-            "returns pong",
-            parameters={"type": "object", "properties": {}},
-            output=ToolOutput(schema={"type": "string"}, render=lambda _a, v: text_content(v)),
-            execute=lambda _args, _run: "pong",
-            is_concurrency_safe=True,
-        )
+        simple_tool("ping", lambda _args, _run: "pong", description="returns pong", safe=True)
     )
     await agent.prompt("second")
     headers = [event for event in session.events if event.type == "request/header"]

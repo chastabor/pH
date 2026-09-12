@@ -31,7 +31,7 @@ from typing import Any
 from pydantic import Field
 
 from ...cordis import Context, plugin
-from ...json import as_str
+from ...json import JsonObject, as_str
 from ...keys import SUBAGENTS, TOOLS
 from ...llm.types import ContentBlock
 from ...seams.subagents import (
@@ -121,7 +121,7 @@ class Config(WireModel):
     """
 
 
-def _render(_args: Any, value: Any) -> list[ContentBlock]:
+def _render(_args: JsonObject, value: Any) -> list[ContentBlock]:
     parts = [as_str(value.get("answer"), "(the child produced no answer)")]
     if value.get("note"):
         parts.append(as_str(value["note"]))

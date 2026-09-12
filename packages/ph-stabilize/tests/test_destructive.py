@@ -20,6 +20,7 @@ pattern has to enumerate and a parser gets once.
 
 from __future__ import annotations
 
+from ph.json import JsonObject, JsonValue
 from ph_stabilize.destructive import (
     SHELL_RULES,
     SQL_STATEMENTS,
@@ -31,7 +32,7 @@ from ph_stabilize.destructive import (
 )
 
 
-def _texts(value: object) -> list[str]:
+def _texts(value: JsonValue) -> list[str]:
     return [str(one) for one in findings(value)]
 
 
@@ -64,7 +65,7 @@ def test_the_arguments_are_walked_not_serialized() -> None:
     payload is a `MappingProxyType`, which walks like any other mapping."""
     from types import MappingProxyType
 
-    frozen = MappingProxyType({"outer": MappingProxyType({"cmd": "rm -rf /x"}), "n": 3})
+    frozen: JsonObject = MappingProxyType({"outer": MappingProxyType({"cmd": "rm -rf /x"}), "n": 3})
     assert list(strings_in(frozen)) == ["rm -rf /x"]
 
 

@@ -24,6 +24,7 @@ from typing import Any
 from pydantic import Field
 
 from ...cordis import Context, plugin
+from ...json import JsonObject
 from ...keys import FS, TOOLS
 from ...llm.types import ContentBlock
 from ...text import count_of
@@ -100,7 +101,7 @@ class GrepValue(ToolModel):
     truncated: bool
 
 
-def _render_read(args: Any, value: Any) -> list[ContentBlock]:
+def _render_read(_args: JsonObject, value: Any) -> list[ContentBlock]:
     first = value["offset"] + 1
     last = value["offset"] + value["lines"]
     body = value["text"]
@@ -109,18 +110,18 @@ def _render_read(args: Any, value: Any) -> list[ContentBlock]:
     return text_content(f"{value['path']} (lines {first}-{last} of {value['total_lines']})\n{body}")
 
 
-def _render_write(args: Any, value: Any) -> list[ContentBlock]:
+def _render_write(_args: JsonObject, value: Any) -> list[ContentBlock]:
     verb = "Created" if value["created"] else "Wrote"
     return text_content(f"{verb} {value['path']} ({value['bytes']} bytes)")
 
 
-def _render_edit(args: Any, value: Any) -> list[ContentBlock]:
+def _render_edit(_args: JsonObject, value: Any) -> list[ContentBlock]:
     return text_content(
         f"Edited {value['path']} ({count_of(value['replacements'], 'replacement')})"
     )
 
 
-def _render_glob(args: Any, value: Any) -> list[ContentBlock]:
+def _render_glob(_args: JsonObject, value: Any) -> list[ContentBlock]:
     paths = value["paths"]
     if not paths:
         return text_content("No files matched.")
@@ -128,7 +129,7 @@ def _render_glob(args: Any, value: Any) -> list[ContentBlock]:
     return text_content(f"{len(paths)} match(es):\n" + "\n".join(paths) + suffix)
 
 
-def _render_grep(args: Any, value: Any) -> list[ContentBlock]:
+def _render_grep(_args: JsonObject, value: Any) -> list[ContentBlock]:
     matches = value["matches"]
     if not matches:
         return text_content("No matches.")

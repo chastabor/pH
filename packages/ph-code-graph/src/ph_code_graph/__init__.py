@@ -51,6 +51,7 @@ import anyio
 from pydantic import Field
 
 from ph.cordis import Context, MountRefusal, ServiceKey, plugin
+from ph.json import JsonObject, as_int
 from ph.keys import COMMANDS, FS, SKILLS, TOOLS
 from ph.llm.types import ContentBlock
 from ph.paths import default_cache_path, resolve_roots
@@ -330,7 +331,7 @@ def _doc(one: dict[str, Any]) -> str:
     return f"  — {doc[0][:70]}" if doc else ""
 
 
-def _render_index(args: Any, value: Any) -> list[ContentBlock]:
+def _render_index(args: JsonObject, value: Any) -> list[ContentBlock]:
     if args.get("forget"):
         return text_content(
             f"Removed {count_of(value['removed'], 'file')} from the index. "
@@ -364,7 +365,7 @@ def _ambiguity(value: Any) -> str:
     )
 
 
-def _render_graph(args: Any, value: Any) -> list[ContentBlock]:
+def _render_graph(args: JsonObject, value: Any) -> list[ContentBlock]:
     mode = value["mode"]
     if mode in ("search", "define"):
         if not value["symbols"]:
@@ -406,7 +407,7 @@ def _render_graph(args: Any, value: Any) -> list[ContentBlock]:
         if not value["rings"]:
             return text_content(
                 f"Nothing depends on {value['query']!r} within "
-                f"{count_of(int(args.get('distance') or 1), 'hop')}."
+                f"{count_of(as_int(args.get('distance'), 2), 'hop')}."
             )
         lines = [f"Changing {value['query']!r} reaches:"]
         for ring in value["rings"]:

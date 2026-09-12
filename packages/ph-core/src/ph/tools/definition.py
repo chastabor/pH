@@ -31,6 +31,7 @@ from pydantic import BaseModel, ConfigDict
 from ..agent.types import AgentHandle
 from ..cancel import CancelToken
 from ..cordis import Boundary, Context, Running
+from ..json import JsonObject, JsonValue, as_obj
 from ..llm.types import ContentBlock, Message, TextBlock, ToolSchema
 from ..session import Session
 
@@ -107,25 +108,30 @@ class ToolOutput:
     `presentation_meta` is the tool's private durable payload, computed only for
     top-level calls (a nested Code Mode dispatch has no card of its own).
 
-    **Both sides are `Any`, and each for its own reason.** The arguments are not
-    the model the body received: the registry calls `render` with
-    `execution.arguments` — the frozen wire mapping — and `present_call` with
-    `parse_arguments(...)`, which hands back the raw *string* when the model's
-    JSON was malformed. So a renderer reads `args.get("path")` where the body two
-    lines above it read `args.path`, and typing both as the model type-checks
-    only until you reach the six renderers that call `.get`.
+    **The arguments are not the model the body received.** The registry calls
+    `render` with `execution.arguments`, so a renderer reads `args.get("path")`
+    where the body two lines above it read `args.path`. Typing them as the
+    *model* would check only the three renderers that read `args` at all;
+    `JsonObject` is what they are, and `ToolDefinition.render` narrows to it once
+    so the annotation is true at runtime and not only on paper.
 
-    The value is `Any` because nothing in this tree says otherwise: every body
-    returns `Any` and all 24 named renderers annotate `value: Any`, so a `V`
-    threaded through here solved to `Any` at every call site — a generic that
-    checked `Any` against `Any` while costing three copies of a 17-parameter
-    signature to carry. It comes back when a value can be the output *model*,
-    which waits on the kernel codec (plan P8-02, issues 1 and 2).
+    **The value stays `Any`, and that is not laziness.** `ToolDefinition.render`
+    validates it against `output.schema` and raises `ToolOutputError` before this
+    callback is reached. That guarantees a schema's *required* fields — not a
+    `{"type": "object"}` output, and not a defaulted field, which is why a
+    renderer reaching for either uses `.get`. Typing it `JsonValue` was measured:
+    125 lines across nine files would narrow every read, `as_int(data["offset"])
+    + 1` for arithmetic a declared `int` already promised. Worse, it would not
+    even be enforced — parameters are contravariant, so a named renderer
+    declaring `value: Any` satisfies the slot and only inline lambdas would be
+    made to narrow, which is the same field read two ways depending on how its
+    renderer was spelled. It becomes the output *model* when the kernel codec can
+    carry one (plan P8-02, issues 1 and 2).
     """
 
     schema: SchemaDeclaration
-    render: Callable[[Any, Any], Sequence[ContentBlock]]
-    presentation_meta: Callable[[Any, Any], Any] | None = None
+    render: Callable[[JsonObject, Any], Sequence[ContentBlock]]
+    presentation_meta: Callable[[JsonObject, Any], Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -226,7 +232,7 @@ class ToolExecutionInput:
 
     call_id: str
     name: str
-    arguments: Any
+    arguments: JsonValue
     scope: Boundary
     """The per-agent policy boundary — **required since P6-32**.
 
@@ -266,7 +272,7 @@ class ToolExecution:
     call_id: str
     root_call_id: str
     name: str
-    arguments: Any
+    arguments: JsonValue
     token: object
     scope: Context
     session: Session | None = None
@@ -358,7 +364,7 @@ class ToolRunContext:
 
 @dataclass(frozen=True, slots=True)
 class Allow:
-    arguments: Any = None
+    arguments: JsonValue = None
     """Run it with these arguments instead of the ones the model sent.
 
     `None` — the ordinary case — leaves the call untouched. A substitution lands
@@ -547,29 +553,38 @@ class ToolDefinition:
     to take back — a URL read, a query — and over-asking is how a gate teaches its
     user to stop reading it. Whether a person is actually asked is `hitl`'s call.
     """
-    present_call: Callable[[Any], ToolCallView | None] | None = None
-    present_result: Callable[[Any, ToolResult], ToolResultView | None] | None = None
+    present_call: Callable[[JsonObject], ToolCallView | None] | None = None
+    present_result: Callable[[JsonObject, ToolResult], ToolResultView | None] | None = None
 
     def schema(self) -> ToolSchema:
         """The model-facing schema. Nothing else about the tool reaches the wire."""
         return ToolSchema(name=self.name, description=self.description, parameters=self.parameters)
 
-    def render(self, args: Any, value: Any) -> tuple[ContentBlock, ...]:
-        """Project a validated value into model-facing content."""
+    def render(self, args: JsonValue, value: Any) -> tuple[ContentBlock, ...]:
+        """Project a validated value into model-facing content.
+
+        `args` arrives as whatever `parse_arguments` made of the model's JSON —
+        the raw *string* when it was malformed — so `as_obj` is what makes a
+        renderer's `JsonObject` true rather than hopeful. It guards a door no
+        shipped tool reaches today, because every renderer that reads `args`
+        belongs to a pydantic-declared tool whose call fails validation first;
+        the same narrowing in `presentation.render_call_view` is the one with a
+        live case behind it.
+        """
         violations = validate_json_schema_value(self.output.schema, value)
         if violations:
             raise ToolOutputError(self.name, violations)
         try:
-            rendered = self.output.render(args, value)
+            rendered = self.output.render(as_obj(args), value)
         except Exception as error:
             raise ToolOutputError(self.name, [f"output.render failed: {error}"]) from error
         return tuple(rendered)
 
-    def project_meta(self, args: Any, value: Any) -> Any:
+    def project_meta(self, args: JsonValue, value: Any) -> Any:
         if self.output.presentation_meta is None:
             return None
         try:
-            return self.output.presentation_meta(args, value)
+            return self.output.presentation_meta(as_obj(args), value)
         except Exception as error:
             raise ToolOutputError(
                 self.name, [f"output.presentation_meta failed: {error}"]
@@ -604,8 +619,8 @@ class TransportPresentation:
     name: str
     description: str
     output: ToolOutput | None = None
-    present_call: Callable[[Any], ToolCallView | None] | None = None
-    present_result: Callable[[Any, ToolResult], ToolResultView | None] | None = None
+    present_call: Callable[[JsonObject], ToolCallView | None] | None = None
+    present_result: Callable[[JsonObject, ToolResult], ToolResultView | None] | None = None
 
     def rename(self, transport: ToolDefinition) -> ToolDefinition:
         """The transport as this profile presents it."""
@@ -626,8 +641,8 @@ def define_tool[A: BaseModel](
     parameters: type[A] | dict[str, Any],
     output: ToolOutput | SchemaDeclaration,
     execute: Callable[[A, ToolRunContext], Awaitable[Any] | Any],
-    render: Callable[[Any, Any], Sequence[ContentBlock]] | None = None,
-    presentation_meta: Callable[[Any, Any], Any] | None = None,
+    render: Callable[[JsonObject, Any], Sequence[ContentBlock]] | None = None,
+    presentation_meta: Callable[[JsonObject, Any], Any] | None = None,
     finalize_content: Callable[..., Sequence[ContentBlock] | None] | None = None,
     timeout_ms: int | None = None,
     self_limits: bool = False,
@@ -635,8 +650,8 @@ def define_tool[A: BaseModel](
     effects_confined_to_workspace: bool = False,
     is_concurrency_safe: Callable[[Any], bool] | bool | None = None,
     is_irreversible: Callable[[Any], bool] | bool | None = None,
-    present_call: Callable[[Any], ToolCallView | None] | None = None,
-    present_result: Callable[[Any, ToolResult], ToolResultView | None] | None = None,
+    present_call: Callable[[JsonObject], ToolCallView | None] | None = None,
+    present_result: Callable[[JsonObject, ToolResult], ToolResultView | None] | None = None,
 ) -> ToolDefinition:
     """Build a `ToolDefinition`, validating arguments before the body sees them.
 

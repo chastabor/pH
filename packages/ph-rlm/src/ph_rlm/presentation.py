@@ -38,7 +38,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from ph.cordis import Context, plugin
-from ph.json import as_bool, as_int, as_str
+from ph.json import JsonObject, as_bool, as_int, as_str
 from ph.keys import TOOLS
 from ph.text import count_of
 from ph.tools.code_mode import CodeCellValue
@@ -95,7 +95,7 @@ class IpythonToolDetails(WireModel):
     """The kernel had died and this cell got a fresh, empty namespace."""
 
 
-def render_cell(_args: Any, value: Any) -> list[Any]:
+def render_cell(_args: JsonObject, value: Any) -> list[Any]:
     """Prime Agent's four sections, in its order, minus its stream split.
 
     Absent sections are dropped rather than left as blank lines: a model reading
@@ -114,7 +114,7 @@ def render_cell(_args: Any, value: Any) -> list[Any]:
     return text_content("\n".join(parts) if parts else "(no output)")
 
 
-def cell_details(_args: Any, value: Any) -> Any:
+def cell_details(_args: JsonObject, value: Any) -> Any:
     return IpythonToolDetails(
         status="error" if value.get("error") else "ok",
         dispatches=as_int(value.get("dispatches")),
@@ -124,16 +124,19 @@ def cell_details(_args: Any, value: Any) -> Any:
     ).to_wire()
 
 
-def _program(args: Any) -> str:
-    """The cell text, from arguments that may not be a mapping.
+def _program(args: JsonObject) -> str:
+    """The cell text. Both entry points have narrowed the arguments already.
 
-    The guard is load-bearing: the TUI adapter feeds these `parse_arguments`
-    output, which is the raw *string* when the model's JSON was malformed.
+    This guarded `hasattr(args, "get")` for as long as `render_call_view` and
+    `render_result_view` handed a presenter whatever `parse_arguments` returned
+    — the raw *string* when the model's JSON was malformed. Both narrow with
+    `as_obj` now, so a string arrives as no arguments and the guard was checking
+    something that can no longer reach it.
     """
-    return str(args.get("program", "")) if hasattr(args, "get") else ""
+    return str(args.get("program", ""))
 
 
-def _present_call(args: Any) -> ToolCallView:
+def _present_call(args: JsonObject) -> ToolCallView:
     # A bounded prefix: the card wants the program, not every line of a
     # generated file these views re-materialize per replayed cell. `input` is the
     # header line, `body` the program the code cell renders under it (P3-19).
@@ -142,7 +145,7 @@ def _present_call(args: Any) -> ToolCallView:
     return ToolCallView(card="terminal", title=IPYTHON, input=first, body=head)
 
 
-def _present_result(args: Any, result: ToolResult) -> ToolResultView:
+def _present_result(args: JsonObject, result: ToolResult) -> ToolResultView:
     program = _program(args)
     count = program.count("\n") + (0 if program.endswith("\n") or not program else 1)
     subtitle = count_of(count, "line")

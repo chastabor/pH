@@ -34,7 +34,7 @@ from __future__ import annotations
 from typing import Any
 
 from ph.cordis import Context, plugin
-from ph.json import as_str
+from ph.json import JsonObject, as_str
 from ph.keys import SUBAGENTS, TOOLS
 from ph.llm.types import ContentBlock
 from ph.seams.code_runtime import CodeBindingNamespace
@@ -119,7 +119,7 @@ class Config(WireModel):
     """Which `ctx.subagents` provider `rlm.run` delegates to."""
 
 
-def _render_handle(_args: Any, value: Any) -> list[ContentBlock]:
+def _render_handle(_args: JsonObject, value: Any) -> list[ContentBlock]:
     lines = [
         f"admitted {value['name']} ({value['childId']}) on {value['model']}",
         f"session: {value['sessionId']}",
@@ -241,7 +241,7 @@ async def apply(ctx: Context, config: Config) -> None:
     tools.register_code_namespace(NAMESPACE, namespace)
 
 
-def _render_roster(_args: Any, value: Any) -> list[ContentBlock]:
+def _render_roster(_args: JsonObject, value: Any) -> list[ContentBlock]:
     rows = value.get("children") or []
     if not rows:
         return text_content("no children")
@@ -253,5 +253,5 @@ def _render_roster(_args: Any, value: Any) -> list[ContentBlock]:
     return text_content("\n".join(lines))
 
 
-def _render_deleted(_args: Any, value: Any) -> list[ContentBlock]:
+def _render_deleted(_args: JsonObject, value: Any) -> list[ContentBlock]:
     return text_content(f"deleted {value['childId']}" if value["deleted"] else "no such child")

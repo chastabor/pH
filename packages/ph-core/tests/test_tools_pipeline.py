@@ -47,8 +47,6 @@ from ph.tools import (
     Respond,
     ToolExecutionInput,
     ToolNotFoundError,
-    ToolOutput,
-    define_tool,
     text_content,
 )
 from ph.tools.definition import ToolExecutionResult
@@ -322,12 +320,8 @@ async def test_a_native_call_under_code_mode_names_the_route_back() -> None:
 async def test_a_value_violating_the_output_schema_fails_the_call() -> None:
     _root, tools = tool_runtime()
     tools.register(
-        define_tool(
-            "liar",
-            "returns the wrong type",
-            parameters={"type": "object", "properties": {}},
-            output=ToolOutput(schema={"type": "string"}, render=lambda _a, v: text_content(str(v))),
-            execute=lambda _args, _run: {"not": "a string"},
+        simple_tool(
+            "liar", lambda _args, _run: {"not": "a string"}, description="returns the wrong type"
         )
     )
     result = await tools.execute(_call("liar"))

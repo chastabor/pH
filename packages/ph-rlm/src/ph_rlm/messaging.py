@@ -39,6 +39,7 @@ from typing import Any
 import anyio
 
 from ph.cordis import Context, plugin
+from ph.json import JsonObject
 from ph.keys import AGENTS, SESSIONS, SUBAGENTS, TOOLS
 from ph.llm.types import ContentBlock, PluginSource, create_user_message, new_message_id, text_of
 from ph.seams.code_runtime import CodeBindingNamespace
@@ -495,14 +496,14 @@ def _transcript(session: Session, limit: int) -> list[dict[str, Any]]:
     return rows
 
 
-def _render_receipt(_args: Any, value: Any) -> list[ContentBlock]:
+def _render_receipt(_args: JsonObject, value: Any) -> list[ContentBlock]:
     return text_content(
         f"{value['deliveryStatus']} to {value['receiverId']} "
         f"({value['receiverRole']}); {value['pending']} pending"
     )
 
 
-def _render_agents(_args: Any, value: Any) -> list[ContentBlock]:
+def _render_agents(_args: JsonObject, value: Any) -> list[ContentBlock]:
     rows = value.get("agents") or []
     if not rows:
         return text_content("no reachable agents")
@@ -515,7 +516,7 @@ def _render_agents(_args: Any, value: Any) -> list[ContentBlock]:
     )
 
 
-def _render_transcript(_args: Any, value: Any) -> list[ContentBlock]:
+def _render_transcript(_args: JsonObject, value: Any) -> list[ContentBlock]:
     rows = value.get("messages") or []
     if not rows:
         return text_content(f"{value.get('agentId')} has said nothing")

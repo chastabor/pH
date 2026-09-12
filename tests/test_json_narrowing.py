@@ -84,7 +84,10 @@ ALLOWED: frozenset[tuple[str, str]] = frozenset(
         ("ph/cordis/loader.py", 'str(entry.get("id") or entry["name"])'),
         # Tool arguments come from the model and are *rendered*: a numeric
         # argument should show as the number, and `arguments` is often a whole
-        # object whose repr is the thing being shown.
+        # object whose repr is the thing being shown. `simple_views` is the
+        # sharpest case — two of its thirteen call sites key on a `list[str]`
+        # (`code_index` and `text_index`, both over `paths`), and narrowing
+        # blanked the card's line for them.
         ("ph/tools/presentation.py", 'str(args.get(key, ""))'),
         ("ph_rlm/presentation.py", 'str(args.get("program", ""))'),
         ("ph/tools/builtin/ask_user.py", 'str(args.get("question", ""))'),
@@ -115,9 +118,8 @@ ALLOWED: frozenset[tuple[str, str]] = frozenset(
         ("ph_app/tui/remote.py", "bool(self.held.get(name))"),
         ("ph/agent/inbox.py", 'bool(self._state["next-turn"] or self._state["next-step"])'),
         ("ph/cordis/loader.py", "bool(source.get(target))"),
-        # Not JSON either: a parsed CLI argument, a typed stats mapping, and the
-        # file descriptor the guest is handed in its environment.
-        ("ph_code_graph/__init__.py", "int(args.get('distance') or 1)"),
+        # Not JSON either: a typed stats mapping and the file descriptor the guest
+        # is handed in its environment.
         ("ph_text_index/__init__.py", 'int(store.stats()["chunks"])'),
         ("ph_runtime/channel.py", "int(os.environ.get(FD_ENV, PROTOCOL_FD))"),
         # **The five boot limits, where a quiet default is the dangerous answer.**
@@ -140,9 +142,9 @@ ALLOWED: frozenset[tuple[str, str]] = frozenset(
 Three kinds, and the reasons differ. **A value that is genuinely not of that type
 and whose coercion is wanted anyway** — an integer seq used as a string key, a
 JSON-RPC id, a YAML scalar, a model's tool argument on its way to a card.
-**A read that is not JSON at all** — a `sqlite3.Row`, a parsed CLI argument, a
-typed stats mapping, an environment variable. And **a read where the quiet
-default is the dangerous answer**, which is the guest's five boot limits: there,
+**A read that is not JSON at all** — a `sqlite3.Row`, a typed stats mapping, an
+environment variable. And **a read where the quiet default is the dangerous
+answer**, which is the guest's five boot limits: there,
 raising is the policy.
 
 `(module path, source text)` rather than a line number, so an entry survives the

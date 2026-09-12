@@ -40,6 +40,7 @@ from typing import Any
 from pydantic import Field
 
 from ...cordis import Context, plugin
+from ...json import JsonObject
 from ...keys import ATTACHMENTS, FS, TOOLS
 from ...llm.media import is_attachable
 from ...llm.types import ContentBlock, MediaBlock, PluginSource, create_user_message
@@ -106,7 +107,7 @@ class AttachValue(ToolModel):
     height: int | None = None
 
 
-def _render(args: Any, value: Any) -> list[ContentBlock]:
+def _render(_args: JsonObject, value: Any) -> list[ContentBlock]:
     """The sentence the model reads, which has to say where the file went.
 
     A confirmation alone would leave the model to guess whether it is looking at

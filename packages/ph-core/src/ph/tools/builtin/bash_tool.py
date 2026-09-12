@@ -17,7 +17,7 @@ from typing import Any
 from pydantic import Field
 
 from ...cordis import Context, plugin
-from ...json import as_str
+from ...json import JsonObject, as_str
 from ...keys import SHELL, TOOLS
 from ...llm.types import ContentBlock
 from ...text import truncation_marker
@@ -62,7 +62,7 @@ class BashValue(ToolModel):
     timed_out: bool = False
 
 
-def _render(args: Any, value: Any) -> list[ContentBlock]:
+def _render(_args: JsonObject, value: Any) -> list[ContentBlock]:
     parts: list[str] = []
     if value["stdout"]:
         parts.append(value["stdout"].rstrip())

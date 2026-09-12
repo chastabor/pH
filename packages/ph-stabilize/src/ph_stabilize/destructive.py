@@ -38,12 +38,17 @@ reader.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ph.json import JsonValue
+
 import ast
 import re
 import shlex
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Literal, TypeAlias
+from typing import Literal, TypeAlias
 
 __all__ = [
     "PYTHON_CALLS",
@@ -104,7 +109,7 @@ def decode(text: str) -> str:
     return text
 
 
-def strings_in(value: Any, *, depth: int = 0) -> Iterator[str]:
+def strings_in(value: JsonValue, *, depth: int = 0) -> Iterator[str]:
     """Every string leaf of a call's arguments, decoded.
 
     The arguments are walked rather than serialized. Rendering them to JSON and
@@ -492,7 +497,7 @@ def dialect_of(text: str) -> Dialect:
 _READERS = {"shell": _shell_findings, "sql": _sql_findings, "python": _python_findings}
 
 
-def findings(value: Any) -> list[Finding]:
+def findings(value: JsonValue) -> list[Finding]:
     """Everything destructive in one call's arguments, deduplicated in order.
 
     Each string leaf is dispatched to the reader for its own dialect, so a cell

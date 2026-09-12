@@ -16,6 +16,7 @@ from collections.abc import Callable, Mapping
 from typing import Any, Literal, TypeAlias, TypedDict
 
 from ..cordis import DEPLOYMENT
+from ..json import JsonObject, as_obj
 from ..wire import WireModel
 from .json_schema import parse_arguments
 
@@ -85,7 +86,7 @@ def render_call_view(tools: Any, name: str, arguments: Any) -> ToolCallView | No
     if definition is None or definition.present_call is None:
         return None
     try:
-        view: ToolCallView | None = definition.present_call(parse_arguments(arguments))
+        view: ToolCallView | None = definition.present_call(as_obj(parse_arguments(arguments)))
     except Exception:
         log.debug("ph.tools: %s could not present its call", name)
         return None
@@ -102,7 +103,9 @@ def render_result_view(tools: Any, name: str, arguments: Any, result: Any) -> To
     if definition is None or definition.present_result is None:
         return None
     try:
-        view: ToolResultView | None = definition.present_result(parse_arguments(arguments), result)
+        view: ToolResultView | None = definition.present_result(
+            as_obj(parse_arguments(arguments)), result
+        )
     except Exception:
         log.debug("ph.tools: %s could not present its result", name)
         return None
@@ -148,8 +151,12 @@ third card event was three edits and a silent miss if one was forgotten."""
 class ToolViews(TypedDict):
     """The two presentation hooks, shaped to unpack into `define_tool(**views)`."""
 
-    present_call: Callable[[Any], ToolCallView | None]
-    present_result: Callable[[Any, Any], ToolResultView | None]
+    present_call: Callable[[JsonObject], ToolCallView | None]
+    # The result half stays `Any`: `ToolResult` lives in `definition`, and this
+    # module is *below* it — `presentation` → `definition` → `presentation` is
+    # the cycle `parse_arguments` was moved down here to avoid. `ToolDefinition`
+    # names the type at the slot these unpack into, which is where it is checked.
+    present_result: Callable[[JsonObject, Any], ToolResultView | None]
 
 
 def simple_views(card: CardKind, title: str, key: str) -> ToolViews:
@@ -159,8 +166,12 @@ def simple_views(card: CardKind, title: str, key: str) -> ToolViews:
     Returned as kwargs so a definition reads `**simple_views("read", "Read", "path")`.
     """
 
-    def salient(args: Any) -> str:
-        return str(args.get(key, "")) if hasattr(args, "get") else ""
+    def salient(args: JsonObject) -> str:
+        # `str` and not `as_str`: two of these keys hold a *list* — `code_index`
+        # and `text_index` are both `simple_views(..., "paths")` over a
+        # `list[str]` — and the card's line is that value's repr. Narrowing blanked
+        # them, which is what `test_json_narrowing.py` exempts this expression for.
+        return str(args.get(key, ""))
 
     return ToolViews(
         present_call=lambda args: ToolCallView(card=card, title=title, input=salient(args)),

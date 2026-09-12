@@ -87,21 +87,21 @@ async def test_the_log_records_the_name_the_model_used(mounted_runtime: MountedR
 def test_the_result_text_is_logs_then_result_then_error() -> None:
     """Prime Agent's section order, with absent sections dropped."""
     [block] = render_cell(
-        None, {"logs": "printed\n", "value": 42, "error": "Traceback: boom", "dispatches": 0}
+        {}, {"logs": "printed\n", "value": 42, "error": "Traceback: boom", "dispatches": 0}
     )
     assert block.text == "printed\n[result] 42\nTraceback: boom"
 
-    [only_value] = render_cell(None, {"logs": "", "value": "x", "error": None})
+    [only_value] = render_cell({}, {"logs": "", "value": "x", "error": None})
     assert only_value.text == "[result] 'x'"
 
-    [nothing] = render_cell(None, {"logs": "", "value": None, "error": None})
+    [nothing] = render_cell({}, {"logs": "", "value": None, "error": None})
     assert nothing.text == "(no output)"
 
 
 def test_a_falsy_value_is_still_a_result() -> None:
     """`0`, `False` and `""` are answers. `None` is the absence of one."""
     for value, expected in ((0, "[result] 0"), (False, "[result] False"), ("", "[result] ''")):
-        [block] = render_cell(None, {"logs": "", "value": value, "error": None})
+        [block] = render_cell({}, {"logs": "", "value": value, "error": None})
         assert block.text == expected
 
 
@@ -109,7 +109,7 @@ def test_the_details_payload_is_derived_from_the_durable_result() -> None:
     """Nothing in the card comes from live execution state, so a replayed cell
     draws the same card as a live one (A11)."""
     details = cell_details(
-        None,
+        {},
         {
             "logs": "out",
             "value": None,
@@ -129,7 +129,7 @@ def test_the_details_payload_is_derived_from_the_durable_result() -> None:
 
 
 def test_the_details_payload_reports_a_reset_namespace() -> None:
-    details = cell_details(None, {"reset": True})
+    details = cell_details({}, {"reset": True})
     assert details["reset"] is True
     assert details["status"] == "ok"
 

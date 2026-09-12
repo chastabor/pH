@@ -56,7 +56,7 @@ import anyio
 from pydantic import Field
 
 from ph.cordis import Context, plugin
-from ph.json import as_str
+from ph.json import JsonObject, as_str
 from ph.keys import FS, SYSTEM_PROMPT, TOOLS
 from ph.llm.types import ContentBlock
 from ph.session import Session
@@ -468,7 +468,7 @@ class HeadArgs(ToolModel):
     lines: int = 40
 
 
-def _render_matches(_args: Any, value: Any) -> list[ContentBlock]:
+def _render_matches(_args: JsonObject, value: Any) -> list[ContentBlock]:
     matches = value.get("matches") or []
     if not matches:
         return text_content("no matches")
@@ -478,11 +478,11 @@ def _render_matches(_args: Any, value: Any) -> list[ContentBlock]:
     return text_content(body)
 
 
-def _render_chunk(_args: Any, value: Any) -> list[ContentBlock]:
+def _render_chunk(_args: JsonObject, value: Any) -> list[ContentBlock]:
     return text_content(f"chunk {value['index'] + 1} of {value['chunks']}\n\n{value['text']}")
 
 
-def _render_head(_args: Any, value: Any) -> list[ContentBlock]:
+def _render_head(_args: JsonObject, value: Any) -> list[ContentBlock]:
     if value.get("document"):
         return text_content(f"{value['document']}\n\n{value['text']}")
     manifest = value.get("manifest") or []

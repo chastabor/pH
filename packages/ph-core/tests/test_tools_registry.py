@@ -16,8 +16,7 @@ import pytest
 
 from ph.cordis import DEPLOYMENT
 from ph.testing import raising, simple_tool, tool_runtime
-from ph.tools import RUN_CODE, ToolExecutionInput, ToolRestriction, define_tool
-from ph.tools.definition import ToolOutput, text_content
+from ph.tools import RUN_CODE, ToolExecutionInput, ToolRestriction
 
 pytestmark = pytest.mark.anyio
 
@@ -120,14 +119,8 @@ async def test_every_mutation_announces_itself() -> None:
 async def test_schemas_expose_only_the_model_facing_fields() -> None:
     _root, tools = tool_runtime()
     tools.register(
-        define_tool(
-            "read",
-            "Read a file.",
-            parameters={"type": "object", "properties": {"path": {"type": "string"}}},
-            output=ToolOutput(schema={"type": "string"}, render=lambda _a, v: text_content(v)),
-            execute=lambda _args, _run: "x",
-            timeout_ms=5_000,
-            is_concurrency_safe=True,
+        simple_tool(
+            "read", lambda _args, _run: "x", description="Read a file.", safe=True, timeout_ms=5_000
         )
     )
     (schema,) = tools.schemas(scope=DEPLOYMENT)

@@ -53,6 +53,7 @@ import anyio
 from pydantic import Field
 
 from ph.cordis import Context, Disposer, MountRefusal, Running, ServiceKey, plugin
+from ph.json import JsonObject
 from ph.keys import COMMANDS, FS, SKILLS, TOOLS
 from ph.llm.types import ContentBlock
 from ph.paths import default_cache_path, resolve_roots
@@ -438,7 +439,7 @@ class SearchValue(ToolModel):
 # ------------------------------------------------------------------- render ----
 
 
-def _render_index(args: Any, value: Any) -> list[ContentBlock]:
+def _render_index(args: JsonObject, value: Any) -> list[ContentBlock]:
     verb = "Removed" if args.get("forget") else "Indexed"
     lines = [
         f"{verb} {count_of(len(value['documents']), 'document')}: "
@@ -465,7 +466,7 @@ def _render_index(args: Any, value: Any) -> list[ContentBlock]:
     return text_content("\n".join(lines))
 
 
-def _render_search(args: Any, value: Any) -> list[ContentBlock]:
+def _render_search(_args: JsonObject, value: Any) -> list[ContentBlock]:
     if not value["hits"]:
         return text_content(
             f"Nothing matched {value['query']!r} among "
