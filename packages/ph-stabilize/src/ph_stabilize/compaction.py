@@ -512,8 +512,8 @@ def truncated_assistant_payload(
     discover there is nothing to do was the pass's real cost.
 
     **`usage` is dropped, and that is load-bearing.** The replacement is
-    appended at the end of the log, and `TokenMeter.last_usage` scans *backward*
-    for the newest `assistant/message` carrying one — so a replacement that
+    appended at the end of the log, and `TokenMeter.last_usage` folds to the
+    newest `assistant/message` carrying one — so a replacement that
     copied an old turn's usage would become the meter's baseline and tell the
     compaction trigger the session had shrunk. The TUI's own footer reads the
     last usage it sees and would have shown the same stale number. The usage
@@ -906,9 +906,10 @@ class SummarizeEngine:
         tokens, because eliding an argument is cheap enough to do early.
 
         Takes the baseline rather than asking for one: `TokenMeter.baseline`
-        reverse-scans the log for the newest reported usage, and before any has
-        been reported it estimates the whole conversation. Two callers asked for
-        it on the same unchanged log within a few lines of each other.
+        folds to the newest reported usage, and before any has been reported it
+        estimates the whole conversation — which is the expensive half and the
+        reason this still takes the baseline rather than asking twice. Two
+        callers asked for it on the same unchanged log within a few lines.
         """
         if baseline.pressure is not None:
             return baseline.pressure >= self.config.trigger_fraction

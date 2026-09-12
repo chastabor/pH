@@ -955,7 +955,7 @@ session, and bodies at 16 KiB.
 `subagent/usage-attributed` to the **parent's** log.
 
 > It is an **additive record for readers**, not an input to any measurement: the
-> meter does not read this event — `TokenMeter.last_usage` scans only
+> meter does not read this event — `TokenMeter.last_usage` folds only
 > `assistant/message` in the log it is given (`seams/token_meter.py`), and
 > a child's messages are in the *child's* log, so the parent's measurement is
 > already correct without it. Its only consumer today is the TUI panel. The

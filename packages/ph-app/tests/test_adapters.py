@@ -29,6 +29,7 @@ import os
 from pathlib import Path
 from typing import Any
 
+import anyio
 import pytest
 
 from ph.cordis import Context
@@ -59,6 +60,7 @@ from ph_app.adapters.google import GoogleAdapter
 from ph_app.adapters.openai_compatible import (
     OpenAiCompatibleAdapter,
     ProviderProfile,
+    WindowProbe,
     _StreamState,
     _to_openai,
     _to_usage,
@@ -81,27 +83,46 @@ class _Response:
             yield chunk
 
 
-class _PropsClient:
-    """An `HttpClient` that answers one GET, or raises what it was given.
+_PROBE = WindowProbe(path="/props", field=("default_generation_settings", "n_ctx"))
+"""llama.cpp's, which is the one this ships configured for."""
 
-    Small enough to be obvious: `discover_window` asks one URL and reads one
-    field, so a stub that recorded more would be describing a request this
-    never makes.
+
+_VLLM_PROBE = WindowProbe(path="/v1/models", field=("data", 0, "max_model_len"))
+"""vLLM's, the second entry the shipped profile now carries."""
+
+
+class _ServerStub:
+    """A server that publishes some endpoints, 404s the rest, and can be slow.
+
+    The one `HttpClient` double in this file. It began as a pair — one that
+    answered every URL with the same payload, one that answered by URL — and the
+    first was a strict subset: a probe that reads one field off one endpoint is
+    `_ServerStub({url: payload})`, and "the server is not there" is
+    `_ServerStub({})`, since `_ask` treats every exception alike.
+
+    `slow` is what makes declared order testable. The probes are asked
+    concurrently now, so a stub that replied instantly to both would pass
+    whichever way the winner was chosen; delaying the *preferred* endpoint is
+    what tells index selection apart from first-past-the-post.
     """
 
-    def __init__(self, answer: Any) -> None:
-        self._answer = answer
+    def __init__(self, published: dict[str, Any], *, slow: frozenset[str] = frozenset()) -> None:
+        self._published = published
+        self._slow = slow
         self.asked: list[str] = []
 
     async def get_json(self, url: str, **_: Any) -> dict[str, Any]:
         self.asked.append(url)
-        if isinstance(self._answer, Exception):
-            raise self._answer
-        return dict(self._answer)
+        if url in self._slow:
+            await anyio.sleep(0.05)
+        answer = self._published.get(url)
+        if answer is None:
+            raise OSError(f"404 {url}")
+        return dict(answer)
 
 
 async def test_the_window_is_asked_of_the_server_when_the_route_says_to() -> None:
-    """`discoverContextWindow` — the one number a person cannot keep right.
+    """`contextWindowProbe` — the one number a person cannot keep right.
 
     llama.cpp divides `--ctx-size` by `--parallel` and reports the quotient, so
     a profile that copies the server's total budgets every agent against the
@@ -109,14 +130,103 @@ async def test_the_window_is_asked_of_the_server_when_the_route_says_to() -> Non
     """
     adapter = OpenAiCompatibleAdapter(
         ctx=None,  # type: ignore[arg-type]
-        profile=ProviderProfile(provider="llama", base_url="http://server/v1"),
+        profile=ProviderProfile(
+            provider="llama", base_url="http://server/v1", context_window_probes=(_PROBE,)
+        ),
     )
-    adapter.http = _PropsClient({"default_generation_settings": {"n_ctx": 262_144}})  # type: ignore[assignment]
+    adapter.http = _ServerStub(  # type: ignore[assignment]
+        {"http://server/props": {"default_generation_settings": {"n_ctx": 262_144}}}
+    )
 
-    assert await discover_window(adapter) == 262_144
+    assert await discover_window(adapter) == (262_144, "/props")
     # Beside `/v1`, not under it: `/props` is llama.cpp's own endpoint and the
     # OpenAI wire's prefix does not reach it.
     assert adapter.http.asked == ["http://server/props"]  # type: ignore[attr-defined]
+
+
+async def test_a_probe_step_can_index_a_list() -> None:
+    """`data[0].max_model_len` — the shape a bare key path could not reach.
+
+    The first version walked objects only, so a server answering with an array
+    was inexpressible and the second backend would have edited this file after
+    all, which is the whole thing the declarative probe exists to avoid.
+    Verified against a live `/v1/models` as well as here.
+    """
+    adapter = OpenAiCompatibleAdapter(
+        ctx=None,  # type: ignore[arg-type]
+        profile=ProviderProfile(
+            provider="vllm",
+            base_url="http://server/v1",
+            context_window_probes=(
+                WindowProbe(path="/v1/models", field=("data", 0, "max_model_len")),
+            ),
+        ),
+    )
+    adapter.http = _ServerStub(  # type: ignore[assignment]
+        {"http://server/v1/models": {"data": [{"max_model_len": 131_072}]}}
+    )
+
+    assert await discover_window(adapter) == (131_072, "/v1/models")
+    assert adapter.http.asked == ["http://server/v1/models"]  # type: ignore[attr-defined]
+
+
+async def test_the_preferred_probe_wins_even_when_it_answers_last() -> None:
+    """Order is the trust ordering, and it is decided by position, not by speed.
+
+    llama.cpp publishes both of the shipped probes, and its `/v1/models` reports
+    the server's **undivided** `n_ctx` — the number `/props` exists to correct.
+    So a server answering both must be read at `/props` however the replies
+    arrive; `/props` is delayed here precisely so that a first-past-the-post
+    race would return the wrong window and fail this.
+
+    Both are asked, which is the trade for asking them at once: sequentially a
+    hung endpoint cost `PROBE_TIMEOUT` per probe out of a mount, and a mount is
+    a person waiting for a TUI to open.
+    """
+    adapter = OpenAiCompatibleAdapter(
+        ctx=None,  # type: ignore[arg-type]
+        profile=ProviderProfile(
+            provider="llama",
+            base_url="http://server/v1",
+            context_window_probes=(_PROBE, _VLLM_PROBE),
+        ),
+    )
+    adapter.http = _ServerStub(  # type: ignore[assignment]
+        {
+            "http://server/props": {"default_generation_settings": {"n_ctx": 262_144}},
+            "http://server/v1/models": {"data": [{"max_model_len": 1_572_864}]},
+        },
+        slow=frozenset({"http://server/props"}),
+    )
+
+    assert await discover_window(adapter) == (262_144, "/props")
+
+
+async def test_a_probe_the_server_does_not_publish_falls_through_to_the_next() -> None:
+    """The reason the field is a list: one `baseUrl` outlives one server.
+
+    `LLAMA_BASE_URL` names a port. Swap llama.cpp for vLLM behind it and `/props`
+    is a 404 — which, with a single probe, left the profile's 32768 fallback in
+    force against a real window of 262144 and said nothing.
+    """
+    adapter = OpenAiCompatibleAdapter(
+        ctx=None,  # type: ignore[arg-type]
+        profile=ProviderProfile(
+            provider="llama",
+            base_url="http://server/v1",
+            context_window=32_768,
+            context_window_probes=(_PROBE, _VLLM_PROBE),
+        ),
+    )
+    adapter.http = _ServerStub(  # type: ignore[assignment]
+        {"http://server/v1/models": {"data": [{"max_model_len": 262_144}]}}
+    )
+
+    assert await discover_window(adapter) == (262_144, "/v1/models")
+    assert sorted(adapter.http.asked) == [  # type: ignore[attr-defined]
+        "http://server/props",
+        "http://server/v1/models",
+    ]
 
 
 @pytest.mark.parametrize(
@@ -126,8 +236,9 @@ async def test_the_window_is_asked_of_the_server_when_the_route_says_to() -> Non
         {"default_generation_settings": {}},
         {"default_generation_settings": {"n_ctx": "many"}},
         {"default_generation_settings": {"n_ctx": 0}},
+        {"default_generation_settings": []},
     ],
-    ids=["no-settings", "no-n_ctx", "not-a-number", "zero"],
+    ids=["no-settings", "no-n_ctx", "not-a-number", "zero", "wrong-shape"],
 )
 async def test_a_server_that_will_not_say_leaves_the_configured_window(props: Any) -> None:
     """Every way of not answering is one answer, because the caller does one
@@ -137,9 +248,14 @@ async def test_a_server_that_will_not_say_leaves_the_configured_window(props: An
     would make every request overflow before it was built."""
     adapter = OpenAiCompatibleAdapter(
         ctx=None,  # type: ignore[arg-type]
-        profile=ProviderProfile(provider="p", base_url="http://server/v1", context_window=32_768),
+        profile=ProviderProfile(
+            provider="p",
+            base_url="http://server/v1",
+            context_window=32_768,
+            context_window_probes=(_PROBE,),
+        ),
     )
-    adapter.http = _PropsClient(props)  # type: ignore[assignment]
+    adapter.http = _ServerStub({"http://server/props": props})  # type: ignore[assignment]
 
     assert await discover_window(adapter) is None
 
@@ -149,9 +265,11 @@ async def test_a_server_that_is_not_there_is_not_an_error() -> None:
     compaction; a mount that refused costs the person the session."""
     adapter = OpenAiCompatibleAdapter(
         ctx=None,  # type: ignore[arg-type]
-        profile=ProviderProfile(provider="p", base_url="http://server/v1"),
+        profile=ProviderProfile(
+            provider="p", base_url="http://server/v1", context_window_probes=(_PROBE,)
+        ),
     )
-    adapter.http = _PropsClient(OSError("connection refused"))  # type: ignore[assignment]
+    adapter.http = _ServerStub({})  # type: ignore[assignment]
 
     assert await discover_window(adapter) is None
 
@@ -165,14 +283,15 @@ def test_discovery_and_its_fallback_are_two_fields() -> None:
     same word a validation error on the two routes that share `MediaRoute`.
     """
     both = ProviderProfile.model_validate(
-        {"provider": "p", "contextWindow": 32_768, "discoverContextWindow": True}
+        {"provider": "p", "contextWindow": 32_768, "contextWindowProbes": [_PROBE.to_wire()]}
     )
-    assert (both.discover_context_window, both.context_window) == (True, 32_768)
+    assert (both.context_window_probes, both.context_window) == ((_PROBE,), 32_768)
 
-    # Discovery with no fallback is the flag and an unset window, which is the
-    # shape that needed no keyword.
-    alone = ProviderProfile.model_validate({"provider": "p", "discoverContextWindow": True})
-    assert (alone.discover_context_window, alone.context_window) == (True, None)
+    # Discovery with no fallback is the probe and an unset window.
+    alone = ProviderProfile.model_validate(
+        {"provider": "p", "contextWindowProbes": [_PROBE.to_wire()]}
+    )
+    assert (alone.context_window_probes, alone.context_window) == ((_PROBE,), None)
 
 
 async def test_sse_events_survive_a_boundary_mid_chunk() -> None:
@@ -274,6 +393,50 @@ def test_openai_cached_tokens_detail_shape_is_also_read() -> None:
     )
     assert usage.input_tokens == 400
     assert usage.cache_read_tokens == 100
+
+
+def test_vllm_cache_writes_are_subtracted_out_too() -> None:
+    """A warm turn and a cold one, with the same arithmetic on each.
+
+    vLLM folds both counts into `prompt_tokens`, so a write left inside it is
+    added twice by `TokenUsage.total` — 784 of 1256 tokens on the measured turn,
+    a 62% over-report of the window's occupancy, which is what decides when
+    compaction fires.
+    """
+    cold = _to_usage(
+        {
+            "prompt_tokens": 1_256,
+            "prompt_tokens_details": {"cached_tokens": 0, "created_cache_tokens": 784},
+            "completion_tokens": 8,
+        }
+    )
+    assert (cold.input_tokens, cold.cache_read_tokens, cold.cache_write_tokens) == (472, None, 784)
+    assert cold.total == 1_264
+
+    warm = _to_usage(
+        {
+            "prompt_tokens": 1_257,
+            "prompt_tokens_details": {"cached_tokens": 784, "created_cache_tokens": 0},
+            "completion_tokens": 8,
+        }
+    )
+    assert (warm.input_tokens, warm.cache_read_tokens, warm.cache_write_tokens) == (473, 784, None)
+    assert warm.total == 1_265
+
+
+def test_a_deepseek_cache_miss_is_not_read_as_a_write() -> None:
+    """`prompt_cache_miss_tokens` is the uncached remainder, which is what
+    `input_tokens` already means — read as a write it would zero the input and
+    call the entire prompt a cache write."""
+    usage = _to_usage(
+        {
+            "prompt_tokens": 1_000,
+            "prompt_cache_hit_tokens": 800,
+            "prompt_cache_miss_tokens": 200,
+            "completion_tokens": 20,
+        }
+    )
+    assert (usage.input_tokens, usage.cache_write_tokens) == (200, None)
 
 
 def test_a_length_finish_becomes_max_tokens() -> None:

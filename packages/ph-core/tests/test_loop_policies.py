@@ -167,6 +167,28 @@ def test_the_baseline_switches_from_estimate_to_usage() -> None:
     assert after.tokens == 1_050
 
 
+def test_a_rewritten_message_does_not_erase_the_last_reported_usage() -> None:
+    """The fold keeps what it had when a message carries no usage.
+
+    Argument truncation rewrites an `assistant/message` in place, and the
+    replacement reports none — it is the same request, not a new one. Clearing
+    on it would drop `baseline` back to an *estimate* mid-conversation, which is
+    the one thing the estimate exists not to be once a provider has counted.
+    """
+    meter = TokenMeter(ctx=None)  # type: ignore[arg-type]
+    session = Session("s")
+    counted = assistant_payload("hi", "m1")
+    counted["usage"] = TokenUsage(input_tokens=1_000, output_tokens=50).to_wire()
+    session.append("assistant/message", counted, SurfaceIntent("append", ()))
+
+    rewritten = assistant_payload("hi", "m2")
+    session.append("assistant/message", rewritten, SurfaceIntent("append", ()))
+
+    usage = meter.last_usage(session)
+    assert usage is not None and usage.input_tokens == 1_000
+    assert meter.baseline(session).source == "usage"
+
+
 def test_pressure_needs_a_known_window() -> None:
     meter = TokenMeter(ctx=None)  # type: ignore[arg-type]
     session = Session("s")

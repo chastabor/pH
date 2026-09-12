@@ -22,7 +22,7 @@ subprocess, so every delegation leaked a CPython.
 
 **Usage is recorded upward, for readers.** Each child `assistant/message` appends
 `subagent/usage-attributed` to the *parent's* log. It is an **additive record, not
-an input to any measurement**: `TokenMeter.last_usage` scans the log it is *given*,
+an input to any measurement**: `TokenMeter.last_usage` folds the log it is *given*,
 and a child's messages are in the child's log, so the parent's context measurement
 never included them and there is nothing to subtract. Nothing reads this but the
 TUI panel.
@@ -72,7 +72,7 @@ from ph.seams.subagents import (
     default_child_name,
 )
 from ph.seams.workspace import discards_writes, project_access, workspace_survivors
-from ph.session import Session, derive_event_message
+from ph.session import Session, SessionEvent, derive_event_message
 from ph.session.json import thaw_json
 from ph.wire import WireModel
 
@@ -885,23 +885,38 @@ def _task_text(prompt: str, restarts: int) -> str:
     )
 
 
-def _last_assistant_text(session: Session | None) -> str:
-    """The child's last non-empty assistant text — its answer, by convention.
+def _assistant_text(event: SessionEvent) -> str | None:
+    """One event's assistant text, or `None` when it carries none.
 
     Through `derive_event_message` + `text_of` rather than reaching into the event
     payload: those two own the rules for what an event projects to and which
     blocks carry text, and a hand-rolled copy here would go quietly wrong the day
     a new text-bearing block type lands.
+
+    Empty text answers `None` — the same as a tool-only turn — so the fold keeps
+    scanning back to the last turn that actually said something.
+    """
+    message = derive_event_message(event)
+    if message is None or message.role != "assistant":
+        return None
+    return text_of(message.content).strip() or None
+
+
+def _last_assistant_text(session: Session | None) -> str:
+    """The child's last non-empty assistant text — its answer, by convention.
+
+    An incremental fold rather than a reverse walk of `session.events`, which
+    materialised a snapshot of the child's whole log to read one turn — and this
+    is asked once per child, at the moment the log is longest.
+
+    Scoped to `assistant/message`, which is the only event type
+    `derive_event_message` projects into the assistant role; the role check stays
+    in the parser because that is the rule being relied on, not an assumption
+    about the type.
     """
     if session is None:
         return ""
-    for event in reversed(session.events):
-        message = derive_event_message(event)
-        if message is None or message.role != "assistant":
-            continue
-        if text := text_of(message.content).strip():
-            return text
-    return ""
+    return session.projection("assistant/message", _assistant_text) or ""
 
 
 @plugin(

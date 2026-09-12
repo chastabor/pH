@@ -29,7 +29,7 @@ from pydantic import ValidationError
 from ..cordis import Context, plugin
 from ..keys import TOKEN_METER, TUI_STATUS
 from ..llm.types import AttachmentRef, Message, TokenUsage, attachment_of
-from ..session import Session
+from ..session import Session, SessionEvent
 from ..text import thousands
 from ._registry import contribute_item
 from .tui_status import StatusField, StatusReading
@@ -43,6 +43,7 @@ __all__ = [
     "TokenMeter",
     "apply",
     "estimate_media_tokens",
+    "reported_usage",
 ]
 
 log = logging.getLogger("ph.seams.token_meter")
@@ -165,11 +166,19 @@ class TokenMeter:
         return sum(self.measure(message) for message in messages)
 
     def last_usage(self, session: Session) -> TokenUsage | None:
-        """The most recent reported usage in this log."""
-        for event in reversed(session.events):
-            if event.type == "assistant/message" and "usage" in event.data:
-                return TokenUsage.model_validate(event.data["usage"])
-        return None
+        """The most recent reported usage in this log.
+
+        An incremental fold, not a walk back through `session.events` — which
+        materialised a snapshot of the whole log to read one field, and grew
+        more expensive the longer a conversation ran. `baseline` asks on every
+        pressure check, so the cost landed exactly where the log was longest.
+
+        The parser stays *here*, with the row that understands `TokenUsage`, and
+        `Session` is asked to fold with it. It briefly lived on `Session`
+        itself — a method, a slot and a private parser — which made the log
+        model learn a seam's type so the seam could read it back (I5).
+        """
+        return session.projection("assistant/message", reported_usage)
 
     def reasoning_reading(self, session: Session) -> StatusReading | None:
         """What the route asks the model to spend on thinking, or nothing.
@@ -212,21 +221,17 @@ class TokenMeter:
         always carries every field is a line where the one that matters cannot
         be seen.
 
-        Through `latest` rather than `last_usage`, and that is the cost
-        argument: this is read on every redraw, `latest` is an incremental fold
-        that a log of mostly `assistant/chunk`s answers from a dict, and the
-        reverse scan `last_usage` performs is a whole-log walk when nothing has
-        reported usage yet. The difference in what they answer is deliberate
-        too — this says what the *last* message did, so a message that carries
-        no usage leaves the footer saying nothing rather than repeating a figure
-        from three steps ago as though it were current.
+        The same `last_usage` the gauge budgets against, which is what keeps the
+        two consistent: both describe the *last request*, and a message rewritten
+        in place is not a new one. This read `session.latest` directly while
+        `last_usage` was a whole-log walk — so it deliberately said nothing
+        after a rewrite rather than repeat a figure — and now that both are the
+        one incremental fold, a footer showing a cache rate beside a context
+        percentage computed from a different message is the inconsistency worth
+        avoiding.
         """
-        event = session.latest("assistant/message")
-        if event is None or "usage" not in event.data:
-            return None
-        try:
-            usage = TokenUsage.model_validate(event.data["usage"])
-        except ValidationError:
+        usage = self.last_usage(session)
+        if usage is None:
             return None
         read, written = usage.cache_read_tokens or 0, usage.cache_write_tokens or 0
         if not read and not written:
@@ -280,6 +285,26 @@ class TokenMeter:
             source="usage",
             context_window=window,
         )
+
+
+def reported_usage(event: SessionEvent) -> TokenUsage | None:
+    """One `assistant/message`'s usage, or `None` when it carries none.
+
+    Public and here rather than private in four places: this was the fourth
+    spelling of "read `TokenUsage` off an event" and the three before it
+    disagreed about missing, `null` and malformed. A payload that will not parse
+    answers `None` — the same as one that carries nothing — because the
+    alternative is a footer that raises on a frame it could have skipped, and
+    `fold_latest` then keeps the last usage that did parse.
+    """
+    usage = event.data.get("usage")
+    if not usage:
+        return None
+    try:
+        return TokenUsage.model_validate(usage)
+    except ValidationError:
+        log.warning("ph.seams.token_meter: %s carries unparseable usage", event.type)
+        return None
 
 
 @plugin("token-meter")

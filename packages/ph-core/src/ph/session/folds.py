@@ -6,9 +6,9 @@ is a fold, each is O(log), and a long session's log is mostly
 `assistant/chunk` — so a projection read once per model step must not re-scan it.
 
 The obvious answer, and the wrong one, is to attach folds to `Session` the way
-`Session.latest` is attached. It does not work for this family, and the reason is
-a property worth protecting: **these folds must stay callable on a log that is
-not the live one.** `fold_namespace` is what makes `ctx.sessions.fork(source,
+`Session.projection` attaches them. It does not work for this family, and the
+reason is a property worth protecting: **these folds must stay callable on a log
+that is not the live one.** `fold_namespace` is what makes `ctx.sessions.fork(source,
 boundary)` reconstruct a namespace *as of the boundary* (D17), and P3-24's
 trajectory view projects a stored log with nothing mounted. A fold attached to a
 live `Session` is monotonic in that log and cannot answer for an earlier prefix,
@@ -17,6 +17,13 @@ so attaching it would trade the whole point for the speed.
 So the fold stays a pure function of a log, and the *cache* is a separate thing a
 consumer owns. `session.seq` is an exact invalidation key because the log is
 append-only (A1): if it has not grown, no fold over it can have changed.
+
+**Which of the two to reach for.** `Session.projection` is the narrow family —
+"the latest event of type X, read as Y" — where the answer is one event and the
+fold can start from wherever it left off. This is the general one: an arbitrary
+fold over the whole log, which is why it has to be a pure function and why it is
+the one held to `ph.testing.folds`' laws. A projection that grows past one event
+belongs here, not there.
 
 **The one requirement**, and the only way to misuse this: the cached function
 must be a pure fold of the prefix. A function that also reads the clock, the

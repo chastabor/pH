@@ -19,14 +19,15 @@ The commands are registered on the *root* context, so they unwind with it (I2).
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, replace
 from typing import Any
 
 from textual.binding import Binding, BindingType
 
 from ph.seams.commands import CommandDefinition
 
-from .config import TuiKeybindings
+from .config import TuiKeybindings, TuiSettings
 
 __all__ = [
     "TUI_VERBS",
@@ -34,6 +35,7 @@ __all__ = [
     "VIEW_KEYS",
     "VIEW_USAGE",
     "TuiVerb",
+    "ViewToggle",
     "action_command",
     "app_bindings",
     "local_commands",
@@ -57,20 +59,36 @@ class TuiVerb:
     palette row, and the reason `_RunAction` forwards the typed argument."""
 
 
-VIEWS: dict[str, tuple[str, bool]] = {
-    "tools": ("show_tools", False),
-    "skills": ("show_skills", False),
-    "results": ("show_tool_results", True),
-    "thinking": ("show_thinking", True),
+@dataclass(frozen=True, slots=True)
+class ViewToggle:
+    """One thing `/view` can show or hide.
+
+    `flip` is a function rather than a field *name*, and that is the whole point:
+    the first version held `("show_tools", False)` and reached the field with
+    `getattr` plus a `dict[str, Any]` splat into `replace`, which is three
+    places the checker cannot follow — a renamed field type-checked, and failed
+    at the keystroke. Spelled as a call, a rename is a type error at import.
+    """
+
+    flip: Callable[[TuiSettings], TuiSettings]
+    rebuilds: bool
+    """Whether the transcript has to be rebuilt for it.
+
+    The one fact that differs between them: `results` and `thinking` are what
+    the transcript is *built* from, while the two panels are read at draw time."""
+
+
+VIEWS: dict[str, ViewToggle] = {
+    "tools": ViewToggle(lambda s: replace(s, show_tools=not s.show_tools), False),
+    "skills": ViewToggle(lambda s: replace(s, show_skills=not s.show_skills), False),
+    "results": ViewToggle(lambda s: replace(s, show_tool_results=not s.show_tool_results), True),
+    "thinking": ViewToggle(lambda s: replace(s, show_thinking=not s.show_thinking), True),
 }
-"""What `/view <name>` flips: the `TuiSettings` field, and whether the transcript
-has to be rebuilt for it.
+"""What `/view <name>` flips.
 
 A table because the same four names were being written three times — here, in
 the usage line, and in `action_view`'s branch chain — and three lists of one
-thing drift: the usage line could offer a word the chain then rejected. The
-`bool` is the one fact that differs between them: `results` and `thinking` are
-what the transcript is *built* from, while the two panels are read at draw time."""
+thing drift: the usage line could offer a word the chain then rejected."""
 
 PANELS: tuple[str, ...] = ("tools", "skills")
 """The two `/view all` means, and the two `VIEWABLE` names before the rest."""
@@ -134,13 +152,23 @@ def app_bindings(keys: TuiKeybindings) -> list[BindingType]:
     a `TextArea`, which binds `ctrl+k`, `ctrl+y` and others for editing, and a
     non-priority binding would lose to it — or, worse, fire *as well as* it.
     """
+    # `as_map()` rather than `getattr(keys, …)`: the class already exposes the
+    # binding-id → key mapping `set_keymap` takes, so this reads it the way
+    # Textual does instead of inventing a second way in.
+    #
+    # **It is not type safety** — a `dict[str, str]` subscript is as opaque to
+    # the checker as `getattr`, and a renamed field lands as a `KeyError` here
+    # rather than an `AttributeError`. What would earn that is a shared `Literal`
+    # for the binding ids across `TuiKeybindings`, `TuiVerb.key` and `VIEW_KEYS`;
+    # `as_map()`'s existence says the dataclass wants to be a mapping anyway.
+    bound = keys.as_map()
     bindings: list[BindingType] = [
-        Binding(getattr(keys, verb.key), verb.action, verb.summary, id=verb.key, priority=True)
+        Binding(bound[verb.key], verb.action, verb.summary, id=verb.key, priority=True)
         for verb in TUI_VERBS
         if verb.key is not None
     ]
     bindings.extend(
-        Binding(getattr(keys, key), f"view({word!r})", summary, id=key, priority=True)
+        Binding(bound[key], f"view({word!r})", summary, id=key, priority=True)
         for key, word, summary in VIEW_KEYS
     )
     return bindings

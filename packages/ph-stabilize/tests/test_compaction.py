@@ -569,7 +569,7 @@ async def test_the_elision_keeps_the_call_id_so_the_pair_still_balances(
 async def test_the_replacement_carries_no_usage(mount: MountProfile) -> None:
     """The hazard that makes this rewrite different from the others.
 
-    `TokenMeter.last_usage` scans *backward* for the newest `assistant/message`
+    `TokenMeter.last_usage` folds to the newest `assistant/message`
     with a usage block, and a replacement is appended at the end of the log. One
     that copied its original's usage would become the meter's baseline and tell
     the pressure trigger the session had shrunk — and the TUI footer, which

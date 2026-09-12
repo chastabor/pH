@@ -186,6 +186,94 @@ async def test_the_local_route_completes_a_turn(mount: MountProfile, route: str)
     assert any(event.type == "assistant/chunk" for event in session.events)
 
 
+UNPARSED_CALL = ("<tool_call>", "<function=", "<tools>")
+"""Markers of a tool call that reached pH as *prose*.
+
+Every one of these is a template's own syntax for a call the server was supposed
+to parse into `tool_calls` and did not. They are searched for in the assistant's
+text because that is where a mis-set parser puts them, and the failure is
+otherwise invisible: the turn completes, the JSON is valid, and the harness
+simply never sees a call."""
+
+
+async def test_a_tool_call_comes_back_parsed(
+    mount: MountProfile, route: str, tmp_path: Path
+) -> None:
+    """The wire a harness actually lives on, and the one nothing else here checks.
+
+    `test_the_local_route_completes_a_turn` passes against a server whose tool
+    parser does not match its model: the model emits a call, the server hands it
+    back as text, pH sees an ordinary answer and the turn *completes*. Measured —
+    vLLM started `--tool-call-parser hermes` in front of a model that emits
+    `<function=read><parameter=path>` XML returned the call as prose, and every
+    gate in this file was green while the harness could not use the server at
+    all. For an agent harness that is the most important fact about a local
+    route, so it is asserted rather than assumed.
+
+    **Two assertions, because a mismatched parser fails two different ways.**
+    Non-streaming, it hands the call back untouched and the markers are in the
+    text — the first assertion, which names the flag to fix. Streaming, which is
+    what pH does, it consumes the tags it recognises and discards what it cannot
+    parse, so the answer comes back *empty* and only the missing `tool/call`
+    event says anything happened. Measured, both, against the same server.
+
+    A model that answers without calling anything fails the second too, and
+    deliberately: the prompt names the tool and the file, and a model that will
+    not take that instruction is not one to run an agent on.
+
+    `tmp_path` is the mounted root (`mount` pins `project=` to it), so the file
+    the model is asked for is the file the `read` tool resolves.
+    """
+    (tmp_path / "note.txt").write_text("the secret word is marmalade\n", encoding="utf-8")
+    ctx = await mount(profile=resolve_profile("llama"))
+    session = ctx.require(SESSIONS).create("local-tools")
+    agent = ctx.require(AGENTS).create(session, _options(route, max_tokens=256))
+
+    await agent.prompt("Use the read tool to read the file note.txt, then say what it contains.")
+
+    answer = _answer(session)
+    leaked = [marker for marker in UNPARSED_CALL if marker in answer]
+    assert not leaked, (
+        f"the server returned a tool call as text, not as `tool_calls`: {leaked} appears in "
+        f"the answer. Its tool parser does not match this model's template — for a Qwen3 "
+        f"emitting `<function=...><parameter=...>` that is vLLM's `--tool-call-parser "
+        f"qwen3_coder`, not `hermes`. Answer: {answer[:400]!r}"
+    )
+    assert any(event.type == "tool/call" for event in session.events), (
+        "the model was given tools and asked to use one by name, and called nothing. "
+        f"Answer: {answer[:400]!r}"
+    )
+
+
+async def test_thinking_does_not_arrive_as_the_answer(mount: MountProfile, route: str) -> None:
+    """A reasoning block is a block, not prose with a close tag in it.
+
+    pH maps `reasoning_content` to a `ReasoningBlock` — the adapter has done so
+    since DeepSeek — so a server that splits thinking out is already handled. One
+    that does not sends the whole `<think>…</think>` inline, and then the tag is
+    in the *transcript*: it is replayed to the model on every following request,
+    it is what a person reads back, and it is what `_answer` returns.
+
+    A failure rather than a skip, which is where this parts company with the
+    vision test. `--mmproj` absent means a capability this deployment does not
+    have; a thinking tag in the answer means the log is now wrong about what the
+    model said, and that is not something to be quiet about.
+    """
+    ctx = await mount(profile=resolve_profile("llama"))
+    session = ctx.require(SESSIONS).create("local-reasoning")
+    agent = ctx.require(AGENTS).create(session, _options(route, max_tokens=256))
+
+    await agent.prompt("Say ok.")
+
+    answer = _answer(session)
+    assert "</think>" not in answer, (
+        "the model's thinking arrived as the answer: the server is not separating it into "
+        "`reasoning_content`, so the tag is now in the transcript and will be replayed to "
+        "the model. vLLM wants `--reasoning-parser qwen3` (`deepseek_r1` on older builds); "
+        f"llama.cpp wants `--reasoning-format deepseek`. Answer: {answer[:400]!r}"
+    )
+
+
 async def test_the_second_turn_reads_the_prefix_cache(mount: MountProfile, route: str) -> None:
     """A12, priced by the server: turn two re-reads turn one's prefix.
 
@@ -196,6 +284,20 @@ async def test_the_second_turn_reads_the_prefix_cache(mount: MountProfile, route
     while writing this. That is the server behaving correctly, and a
     `"cacheReadTokens" not in first` assertion would fail on the second run of
     the day for the best possible reason.
+
+    **A server that publishes no cache figures at all is inconclusive**, and is
+    skipped for `_props`' reason rather than failed: llama.cpp and OpenAI report
+    `prompt_tokens_details.cached_tokens` and DeepSeek reports
+    `prompt_cache_hit_tokens`, but a vLLM build answering
+    `"promptTokensDetails": null` says nothing about its prefix cache either way
+    — and reading that silence as "the server is reprocessing every turn" points
+    the message below at a defect that is not there. What is *not* skipped is a
+    server that publishes the field and reports nothing read on turn two; that
+    is the regression this gate exists for, and the two are told apart by
+    whether the number is missing everywhere or zero here.
+
+    It reached this file as a `KeyError` on the subscript, which is the worst of
+    both: a failure whose own sentence never printed.
     """
     ctx = await mount(profile=resolve_profile("llama"))
     session = ctx.require(SESSIONS).create("local-cache")
@@ -206,7 +308,9 @@ async def test_the_second_turn_reads_the_prefix_cache(mount: MountProfile, route
 
     usage = _usage(session)
     assert len(usage) >= 2, f"expected two answered turns, got {usage}"
-    assert usage[1]["cacheReadTokens"] > 0, (
+    if not any("cacheReadTokens" in turn for turn in usage):
+        pytest.skip(f"{_server_root()} reports no cached-token count on any turn; nothing to read")
+    assert usage[1].get("cacheReadTokens", 0) > 0, (
         "the second turn re-read no prefix: the server is reprocessing the whole "
         "conversation every turn. Either prompt caching is off, or something "
         "moved the prefix — see docs/dev-notes/prefix-cache-benchmark.md"

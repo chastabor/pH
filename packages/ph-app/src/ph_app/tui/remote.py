@@ -54,7 +54,7 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 import anyio
 from textual.binding import Binding
@@ -338,13 +338,13 @@ class DaemonSession:
     def status_readings(self) -> list[StatusReading]:
         return list(self._readings)
 
-    def commands(self) -> list[Any]:
+    def commands(self) -> list[CommandDefinition]:
         return [*self._verbs, *self.remote_commands]
 
-    def screen(self, screen_id: str) -> Any:
+    def screen(self, screen_id: str) -> ScreenDefinition | None:
         return self.screens.get(screen_id)
 
-    def providers(self) -> list[Any]:
+    def providers(self) -> list[str]:
         """Nothing yet. Not enforced (§5 rule 6): the model picker over a socket
         has no projection — `llm.list_providers()` is not on the wire — so a remote
         front end offers no `/model` choices. In process it lists them."""
@@ -672,13 +672,24 @@ async def attach_session(
     return front
 
 
-def _catalog(entries: Sequence[Any]) -> tuple[CatalogEntry, ...]:
-    """A projected catalog as the panels read it: a name and what it is for.
+class _Described(Protocol):
+    """The two fields a catalog panel draws, whatever carries them.
 
-    One function for tools and skills because the two wire models differ in
-    everything the sidebar does not draw — a tool's parameter schema, a skill's
-    path and version — and agree on the two fields it does.
+    A Protocol rather than `Any`: `ToolSchema` and `Skill` differ in everything
+    the sidebar does not show — a tool's parameter schema, a skill's path and
+    version — and agree on these two. Named, the agreement is checked; as `Any`
+    it was a comment, and a wire model that dropped `description` would have
+    failed at the first draw instead of at the call.
     """
+
+    @property
+    def name(self) -> str: ...
+    @property
+    def description(self) -> str: ...
+
+
+def _catalog(entries: Sequence[_Described]) -> tuple[CatalogEntry, ...]:
+    """A projected catalog as the panels read it: a name and what it is for."""
     return tuple(CatalogEntry(name=one.name, description=one.description) for one in entries)
 
 

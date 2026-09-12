@@ -36,7 +36,9 @@ from typing import Any, Protocol
 
 from ph.llm.types import AttachmentRef
 from ph.seams.approval import ApprovalAnswer, ApprovalRequest
+from ph.seams.commands import CommandDefinition
 from ph.seams.permission_presets import PresetName, PresetSchema
+from ph.seams.tui_screens import ScreenDefinition
 from ph.seams.tui_status import StatusReading
 from ph.seams.user_questions import UserQuestion
 from ph.session import Session
@@ -137,16 +139,24 @@ class FrontSession(Protocol):
         """Register this front end's own verbs and screens; return their disposers."""
         ...
 
-    def commands(self) -> list[Any]:
-        """Every slash command a person may run here."""
+    def commands(self) -> list[CommandDefinition]:
+        """Every slash command a person may run here.
+
+        Definitions and not `Any`: the palette reads `name`, `argument_hint` and
+        `summary` off these, and the picker that renders them had to take
+        `Iterable[Any]` to accept the answer — so a renamed field on the seam
+        reached the terminal as an `AttributeError` at the moment somebody
+        pressed `/`, which is the failure this whole layer types itself to move
+        forward to import.
+        """
         ...
 
-    def screen(self, screen_id: str) -> Any:
+    def screen(self, screen_id: str) -> ScreenDefinition | None:
         """One registered screen definition, or `None`."""
         ...
 
-    def providers(self) -> list[Any]:
-        """The model routes this deployment can reach."""
+    def providers(self) -> list[str]:
+        """The model routes this deployment can reach, by provider name."""
         ...
 
     async def browse_sessions(self) -> list[SessionSummary]:

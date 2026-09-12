@@ -13,12 +13,34 @@ over all 75 and *skipped* the ones `_sample` could not build — which is how
 `StatusReading` and `Egress`, both a required field or two away from trivial, came
 to be exempt from the one property this file asserts. A missing sample is a gap in
 the table below, not a test with nothing to say, so it fails and names the model.
+
+**And every package.** This file used to live in `packages/ph-core/tests` and
+walk `ph` alone while saying "every pH model", so every model outside ph-core was
+exempt from all of it. That is not a hypothetical gap:
+`test_every_wire_model_is_built_at_import` was written for a `ph_app` model, and
+could not have caught the regression that earned it. It is here at the workspace
+root now, because a rule about every package cannot be enforced from inside one
+of them.
+
+The structural gates — the shared base, the pinned alias, the built schema — run
+over every package `_workspace_packages` finds, because they need nothing but the
+class. No count is written down here on purpose: the function discovers the
+layout precisely so that nobody maintains a list, and a number in this paragraph
+would be the same list one indirection away, stale the next time a package lands.
+
+The round-trip is the exception, and it is a deferral rather than a boundary: it
+needs a constructible *sample* per model and that table is ph-core's, so it runs
+over ph-core's models alone. The honest fix is to stop hand-writing the table —
+generate each sample from the model's own schema — and until then
+`test_every_field_alias_equals_to_camel_of_its_name` is the casing property the
+rest are held to.
 """
 
 from __future__ import annotations
 
 import importlib
 import inspect
+import pathlib
 import pkgutil
 from typing import Any
 
@@ -28,29 +50,66 @@ from pydantic.alias_generators import to_camel
 
 from ph.wire import WireModel, wire_alias
 
+REPO = pathlib.Path(__file__).resolve().parent.parent
 
-def _all_ph_models() -> list[type[BaseModel]]:
-    """Every pH pydantic model that crosses a pH-owned JSON boundary.
+
+def _workspace_packages() -> list[str]:
+    """Every top-level package this workspace ships, read off the layout.
+
+    Discovered, not listed. A list is exactly what went stale here — this file
+    walked `ph` and said "every pH model" — and a list would go stale again the
+    next time a package is added, in the same silent direction: the gate keeps
+    passing while covering less.
+
+    `packages/<dist>/src/<package>` is the layout every distribution here uses,
+    and `pyproject.toml` states it; a package that is present but does not import
+    fails below rather than being skipped, because a skip is how 113 models went
+    unchecked.
+    """
+    return sorted(
+        path.name for path in (REPO / "packages").glob("*/src/*") if (path / "__init__.py").exists()
+    )
+
+
+def _models_in(package: str) -> dict[str, type[BaseModel]]:
+    """Every pydantic model one package defines, by qualified name.
 
     `ToolModel` subclasses are excluded because they are the one declared
     exemption (Q2): a tool's parameter names are the model's vocabulary, not
     pH's wire, so they stay snake_case.
+
+    Defined *in* the package, not merely visible from it: `inspect.getmembers`
+    sees every imported name, so without the `__module__` test a core model would
+    be checked once per package that imports it.
     """
-    import ph
     from ph.tools.definition import ToolModel
 
+    root = importlib.import_module(package)
     found: dict[str, type[BaseModel]] = {}
-    for info in pkgutil.walk_packages(ph.__path__, prefix="ph."):
+    for info in pkgutil.walk_packages(root.__path__, prefix=f"{package}."):
         module = importlib.import_module(info.name)
         for _, obj in inspect.getmembers(module, inspect.isclass):
             if (
                 issubclass(obj, BaseModel)
                 and obj not in (BaseModel, WireModel, ToolModel)
                 and not issubclass(obj, ToolModel)
-                and obj.__module__.startswith("ph.")
+                and obj.__module__.startswith(f"{package}.")
             ):
                 found[f"{obj.__module__}.{obj.__qualname__}"] = obj
+    return found
+
+
+def _all_ph_models() -> list[type[BaseModel]]:
+    """Every pH pydantic model that crosses a pH-owned JSON boundary."""
+    found: dict[str, type[BaseModel]] = {}
+    for package in _workspace_packages():
+        found.update(_models_in(package))
     return list(found.values())
+
+
+def _core_models() -> list[type[BaseModel]]:
+    """The ph-core half, which is what the `_sample` table below covers."""
+    return list(_models_in("ph").values())
 
 
 def test_tool_schemas_stay_snake_case() -> None:
@@ -90,7 +149,7 @@ def test_every_field_alias_equals_to_camel_of_its_name() -> None:
             )
 
 
-@pytest.mark.parametrize("model", _all_ph_models(), ids=lambda m: m.__name__)
+@pytest.mark.parametrize("model", _core_models(), ids=lambda m: m.__name__)
 def test_models_round_trip_by_alias(model: type[BaseModel]) -> None:
     sample = _sample(model)
     assert sample is not None, (
@@ -105,6 +164,33 @@ def test_models_round_trip_by_alias(model: type[BaseModel]) -> None:
     # Tolerant readers: the snake_case form validates too, which is what lets
     # `ph session import` ingest a foreign JSONL without a second parser.
     assert model.model_validate(sample.model_dump(exclude_none=True)) == sample
+
+
+def test_every_wire_model_is_built_at_import() -> None:
+    """No model defers its schema to a lazy rebuild at first use.
+
+    pydantic leaves `__pydantic_complete__` false when a field names a type it
+    cannot resolve yet — a class defined *below* the model that annotates it,
+    say — and quietly rebuilds on the first `model_validate`. That moves a
+    structural error off import and onto whatever path validates first, which
+    here is config load and mount: the two places a person is waiting.
+
+    It is not a thing anyone writes on purpose; it is what happens when a class
+    moves. `WindowProbe` sat 468 lines below the `ProviderProfile` that annotates
+    it and this was false for that model and the `Config` embedding it, which is
+    how the rule earned a test rather than a note.
+
+    Both of those are `ph_app` models, so the first version of this test — written
+    in `packages/ph-core/tests`, walking `ph` — passed with the class moved back
+    down. A gate that cannot fail on the case it was written for is worse than no
+    gate, and that is why the whole file moved up here.
+    """
+    deferred = [model.__name__ for model in _all_ph_models() if not model.__pydantic_complete__]
+    assert not deferred, (
+        f"these models defer their schema to a lazy rebuild: {deferred}. Define the types "
+        "they name above them, so the failure is an import error rather than a surprise "
+        "the first time something validates."
+    )
 
 
 def _sample(model: type[BaseModel]) -> BaseModel | None:

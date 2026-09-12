@@ -48,7 +48,7 @@ from ..agent.types import AgentHandle
 from ..cordis import Context, Disposer, Running, maybe_await, plugin, running, safe_yaml_load
 from ..keys import AGENTS, CONTAINMENT, FS, SESSION_PERSISTENCE, SESSIONS, TOOLS, WORKSPACE
 from ..paths import canonical, default_home_path
-from ..session import Session
+from ..session import Session, SessionEvent
 from ..tools.definition import ToolExecution
 from ..tools.errors import HarnessError
 from ..wire import WireModel, literal_lookup
@@ -1737,23 +1737,48 @@ def checkpoints(session: Session) -> dict[int, dict[str, Any]]:
     return {event.seq: dict(event.data) for event in session.events if event.type == CHECKPOINT}
 
 
+@dataclass(frozen=True, slots=True)
+class _CheckpointOf:
+    """One agent's restore point, read off a `workspace/checkpoint` event.
+
+    Frozen, so it hashes by value — which is what gets each agent its own fold
+    out of one parser class. `Session.projection` keys on `(event_type, parse)`,
+    so `_CheckpointOf("a")` and `_CheckpointOf("b")` are two keys and a closure
+    (a new object per call, hashing by identity) would be a new fold per call.
+    """
+
+    agent_id: str
+
+    def __call__(self, event: SessionEvent) -> str | None:
+        """The tree, or `None` when some other agent took this checkpoint.
+
+        `""` is a value here, not a miss: a checkpoint that recorded no tree is
+        still the newest one this agent took, and answering with an *older* tree
+        would revert further than the log says to.
+        """
+        if str(event.data.get("agentId", "")) != self.agent_id:
+            return None
+        return str(event.data.get("tree", ""))
+
+
 def latest_checkpoint(session: Session, agent_id: str) -> str:
     """The newest restore point *this agent* took, or `""` if it has none.
 
-    A reverse scan rather than `checkpoints()` plus `max()`: the caller that wants
-    one restore point does not need a dict of every restore point, and building it
-    copies each payload to discard all but the last — on a crash path that runs once
-    per retry.
+    An incremental fold rather than `checkpoints()` plus `max()`: the caller that
+    wants one restore point does not need a dict of every restore point, and
+    building it copies each payload to discard all but the last — on a crash path
+    that runs once per retry. It is not a reverse scan of `session.events`
+    either, which materialised a snapshot of the whole log to read one field;
+    `Session.projection` keeps the fold and parses only what has arrived since.
 
     Scoped to the agent, which is the rule `/revert` already states: a restore point
     belongs to the agent that took it. Only one agent writes into a root session
     today, so this is a latent difference rather than a live one — it is here so the
-    two readers of this fold cannot disagree about it later.
+    two readers of this fold cannot disagree about it later. The agent rides in
+    the *parser*, which is half `Session.projection`'s key — so two agents get
+    two folds without this having to invent a name for either.
     """
-    for event in reversed(session.events):
-        if event.type == CHECKPOINT and str(event.data.get("agentId", "")) == agent_id:
-            return str(event.data.get("tree", ""))
-    return ""
+    return session.projection(CHECKPOINT, _CheckpointOf(agent_id)) or ""
 
 
 def stored_survivors(

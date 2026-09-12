@@ -18,7 +18,13 @@ from typing import Any, cast
 
 import pytest
 
-from ph.session import KNOWN_SESSION_EVENT_TYPES, Session, SessionFoldCache, SurfaceIntent
+from ph.session import (
+    KNOWN_SESSION_EVENT_TYPES,
+    Session,
+    SessionEvent,
+    SessionFoldCache,
+    SurfaceIntent,
+)
 from ph.session.json import InvalidJsonValueError, JsonValue, as_obj, as_seq
 from ph.testing import prefix_of, user_payload
 
@@ -240,3 +246,109 @@ def test_a_fold_cache_leaves_the_fold_callable_on_a_slice() -> None:
 
     assert count_turns(session) == 2
     assert count_turns(prefix_of(session, boundary)) == 1
+
+
+# --------------------------------------------------------------- projections --
+
+
+def _turn_number(event: SessionEvent) -> int | None:
+    """A `turn/start`'s number, and `None` for the one that carries none."""
+    turn = event.data.get("turn")
+    return turn if isinstance(turn, int) else None
+
+
+def _turn_label(event: SessionEvent) -> str | None:
+    """The same event read as something else, for the key's sake."""
+    number = _turn_number(event)
+    return None if number is None else f"turn {number}"
+
+
+def test_a_projection_answers_with_the_newest_event_it_can_parse() -> None:
+    """A parser that says `None` means "not this one", not "nothing".
+
+    The rule the whole family rests on: `fold_latest`, `_LatestFold` and every
+    seam fold built on `projection` keep the last event the parser *accepted*, so
+    a frame that carries nothing of the question cannot erase the answer.
+    """
+    session = Session("s")
+    session.append("turn/start", {"turn": 1})
+    session.append("turn/start", {"turn": 2})
+
+    assert session.projection("turn/start", _turn_number) == 2
+
+    session.append("turn/start", {"turn": "not a number"})
+    assert session.projection("turn/start", _turn_number) == 2
+
+
+def test_a_projection_parses_only_what_arrived_since_it_last_answered() -> None:
+    """The whole reason this is not `for event in reversed(session.events)`.
+
+    The walk it replaced materialised a snapshot of the log to read one field and
+    grew more expensive the longer a conversation ran — asked, in the meter's
+    case, on every pressure check.
+    """
+    session = Session("s")
+    seen: list[int] = []
+
+    def counted(event: SessionEvent) -> int | None:
+        seen.append(event.seq)
+        return _turn_number(event)
+
+    for turn in range(1, 4):
+        session.append("turn/start", {"turn": turn})
+    assert session.projection("turn/start", counted) == 3
+    assert seen == [2], "the first read walked past the event that answered"
+
+    session.append("assistant/chunk", {"text": "hi"})
+    assert session.projection("turn/start", counted) == 3
+    assert seen == [2], "an event of another type was handed to the parser"
+
+    session.append("turn/start", {"turn": 4})
+    assert session.projection("turn/start", counted) == 4
+    assert seen == [2, 4], "the second read re-parsed events it had already seen"
+
+
+def test_two_parsers_of_one_event_type_do_not_share_a_fold() -> None:
+    """The parser is half the key, which is what makes the erased type sound.
+
+    Keyed on the event type alone — or on a name a caller typed — the second of
+    these would be handed the first one's *value*: an `int` where a `str` was
+    annotated, with no error until something used it.
+    """
+    session = Session("s")
+    session.append("turn/start", {"turn": 1})
+
+    assert session.projection("turn/start", _turn_number) == 1
+    assert session.projection("turn/start", _turn_label) == "turn 1"
+    assert len(session._latest) == 2
+
+
+def test_one_parser_over_two_event_types_does_not_share_a_fold() -> None:
+    """The other half. `assistant/chunk` carries no turn, so a shared fold would
+    answer this with the `turn/start` one."""
+    session = Session("s")
+    session.append("turn/start", {"turn": 1})
+    session.append("assistant/chunk", {"text": "hi"})
+
+    assert session.projection("turn/start", _turn_number) == 1
+    assert session.projection("assistant/chunk", _turn_number) is None
+
+
+def test_a_stable_parser_reuses_its_fold_rather_than_rebuilding_one() -> None:
+    """The hazard the key trades for: a parser that is a new object per call is
+    a new fold per call, and each one reparses the log from the start.
+
+    `latest` is the case that would have paid it — it passed an inline `lambda`
+    before the key included the parser — so `_the_event` is module-level and
+    pinned here. A frozen parser *object* is the same rule read the other way:
+    `_CheckpointOf("a")` hashes by value, so `workspace.latest_checkpoint` gets
+    one fold per agent and not one per call.
+    """
+    session = Session("s")
+    for turn in range(1, 4):
+        session.append("turn/start", {"turn": turn})
+
+    for _ in range(5):
+        assert session.latest("turn/start") is not None
+        assert session.projection("turn/start", _turn_number) == 3
+    assert len(session._latest) == 2, "a fold was rebuilt instead of reused"

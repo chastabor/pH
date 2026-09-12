@@ -18,10 +18,10 @@ with one node, and the list reads the same either way.
 from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
-from typing import Any
 
 from rich.filesize import decimal
 
+from ph.seams.commands import CommandDefinition
 from ph.seams.permission_presets import PresetSchema
 
 from ...sessions import SessionSummary
@@ -37,7 +37,7 @@ __all__ = [
 ]
 
 
-def command_choices(definitions: Iterable[Any]) -> list[Choice]:
+def command_choices(definitions: Iterable[CommandDefinition]) -> list[Choice]:
     """Every registered slash command.
 
     Definitions rather than the registry: the terminal asks its `FrontSession`

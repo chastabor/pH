@@ -716,19 +716,7 @@ async def test_view_toggles_each_panel_and_all_resolves_a_disagreement(
     the window's is this window's, which is the line `TuiSettings` already
     draws between `show_*` and the sidebar position.
     """
-    from dataclasses import fields
-
-    from ph_app.tui.commands import VIEWS
-
     async with running(make_tui_app()) as (app, _pilot):
-        # Every name in the table is a real settings field. `action_view` splats
-        # them into `replace` through a `dict[str, Any]`, which is the one place
-        # the checker cannot follow — so this is what stands in for it, and a
-        # renamed field fails here rather than at a keystroke.
-        declared = {one.name for one in fields(app.settings)}
-        for word, (field, _rebuild) in VIEWS.items():
-            assert field in declared, f"/view {word} flips {field}, which TuiSettings has not got"
-
         assert app.settings.show_tools and app.settings.show_skills, "visible by default"
 
         await app.run_action("view('tools')")
@@ -744,6 +732,15 @@ async def test_view_toggles_each_panel_and_all_resolves_a_disagreement(
 
         await app.run_action("view('skills')")
         assert app.settings.show_skills and not app.settings.show_tools
+
+        # The two transcript toggles, which `all` deliberately does not touch:
+        # `all` is about the panels, and rebuilding the transcript is not what
+        # somebody asking to see the sidebar meant. Asserted concretely because
+        # the table no longer carries a reader to check them generically.
+        for word, field in (("results", "show_tool_results"), ("thinking", "show_thinking")):
+            before = getattr(app.settings, field)
+            await app.run_action(f"view({word!r})")
+            assert getattr(app.settings, field) is not before, f"/view {word} flipped nothing"
 
 
 async def test_view_keeps_the_keys_the_old_toggles_had(make_tui_app: MakeApp) -> None:

@@ -21,12 +21,17 @@
 # budgets and compacts against. Reading the server's total would let six agents
 # each believe they have the whole KV cache.
 #
-# **So it is asked rather than written down.** `discoverContextWindow` reads
+# **So it is asked rather than written down.** `contextWindowProbes` reads
 # `default_generation_settings.n_ctx` from `/props` at mount, which llama.cpp
 # has already divided, and the line below is only the fallback for a server
-# that does not answer — deliberately small, since guessing high overflows a
-# slot and guessing low only compacts sooner than necessary. `ph doctor` prints
-# which of the two is in force.
+# that answers none of them — deliberately small, since guessing high overflows
+# a slot and guessing low only compacts sooner than necessary. `ph doctor`
+# prints which of the two is in force.
+#
+# **This port is not only llama.cpp.** `LLAMA_BASE_URL` names a port, and the
+# thing listening on it is llama.cpp one day and vLLM the next — so the probes
+# are a list, tried in order of trust. `ProviderProfile.context_window_probes`
+# carries that argument; it is not restated here.
 - insert:
     - id: llm-llama
       name: llm-openai-compatible
@@ -35,12 +40,22 @@
           - provider: llama
             baseUrl: ${env:LLAMA_BASE_URL:-http://127.0.0.1:9931/v1}
             apiKeyEnv: LLAMA_API_KEY
-            # **Asked of the server, not guessed.** `/props` reports
-            # `default_generation_settings.n_ctx`, which llama.cpp has already
-            # divided by `--parallel` — so the one number a person cannot be
-            # expected to keep right is the one number nobody has to write. A
-            # server that does not answer leaves the line below in force.
-            discoverContextWindow: true
+            # **Asked of the server, not guessed**, and stated here rather than
+            # selected by a flag: the adapter this row mounts also serves OpenAI,
+            # DeepSeek and every gateway in between, so the endpoints — which are
+            # these two servers' own — belong in this profile. Another server is
+            # another two lines, here, and no edit to `ph_app.adapters`.
+            #
+            # **`/props` first because llama.cpp answers both**, and its
+            # `/v1/models` reports `meta.n_ctx` *undivided* — the server's total,
+            # which is the number `/props` exists to correct. Why order decides
+            # rather than arrival is on `context_window_probes`.
+            contextWindowProbes:
+              - path: /props
+                field: [default_generation_settings, n_ctx]
+              # vLLM: one entry per model, `maxModelLen` on the entry itself.
+              - path: /v1/models
+                field: [data, 0, max_model_len]
             contextWindow: ${env:LLAMA_CONTEXT_WINDOW:-32768}
             defaultMaxTokens: 4096
             # **Images, no audio, no uploads** — and each third of that is a

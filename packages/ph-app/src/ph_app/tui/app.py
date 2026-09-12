@@ -57,7 +57,7 @@ from ..daemon.client import DaemonClient
 from ..daemon.launch import ensure_daemon
 from ..trust import TrustAnswer, TrustStore, trust_path
 from .autocomplete import PathCompleter
-from .commands import PANELS, VIEW_USAGE, VIEWS, app_bindings
+from .commands import VIEW_USAGE, VIEWS, app_bindings
 from .config import TuiKeybindings, TuiSettings, load_tui_settings, save_tui_settings
 from .frontend import FrontSession
 from .modals.approval import ApprovalModal
@@ -756,7 +756,6 @@ class PHTuiApp(App[str | None]):
         distinction `TuiSettings` already draws, kept rather than flattened.
         """
         chosen = what.strip().lower()
-        changed: dict[str, Any]
         if chosen == "sidebar":
             # The one that is this window's rather than this person's, so it
             # persists nowhere and there is no settings field to flip.
@@ -764,26 +763,27 @@ class PHTuiApp(App[str | None]):
                 self._sidebar.display = not self._sidebar.display
             self.state_changed(Surface.SIDEBAR)
             return
+        settings, rebuild = self.settings, False
         if chosen == "all":
             # Mixed means show both. A toggle over two independent flags has no
             # honest single answer when they disagree, and "make it all visible"
-            # is what somebody typing `all` at a half-hidden panel means.
-            both = all(getattr(self.settings, VIEWS[name][0]) for name in PANELS)
-            changed = {VIEWS[name][0]: not both for name in PANELS}
-            rebuild = False
+            # is what somebody typing `all` at a half-hidden panel means — so
+            # when they already agree this flips, and otherwise it shows.
+            #
+            # Named rather than routed back through `VIEWS`: reading the flags
+            # generically needed a second lambda per row whose only job was to
+            # report the field the first one flipped, and nothing but a test
+            # could say the two named the same one. Two panels, two fields, one
+            # expression the checker reads.
+            show = not (settings.show_tools and settings.show_skills)
+            settings = replace(settings, show_tools=show, show_skills=show)
         elif chosen in VIEWS:
-            field, rebuild = VIEWS[chosen]
-            changed = {field: not getattr(self.settings, field)}
+            toggle = VIEWS[chosen]
+            settings, rebuild = toggle.flip(settings), toggle.rebuilds
         else:
             self.notify(VIEW_USAGE, title="view", severity="warning", markup=False)
             return
-        # `dict[str, Any]`, and the annotation is the point: `replace` is checked
-        # per keyword, so a `dict[str, bool]` splat is compared against *every*
-        # field's type and fails on the four that are not bools. `Any` is the
-        # narrow admission that a table keyed by field name cannot be checked
-        # here — `VIEWS`' names are held to the dataclass by `test_view_toggles`,
-        # which reads each one back.
-        self._save(replace(self.settings, **changed))
+        self._save(settings)
         if rebuild:
             # The transcript is *built* from these two, so it is rebuilt. The
             # panels are read at draw time, so they are not — which is the whole
@@ -809,17 +809,21 @@ class PHTuiApp(App[str | None]):
         the transcript: a front end may not write into a fold of the log (A11),
         and this is the surface every other command's output already uses.
         """
-        self._show_catalog("tools")
+        if self.front is not None:
+            self._show_catalog("tools", self.front.state.tools)
 
     def action_list_skills(self) -> None:
         """`/skills` — what is installed, and what each one is for."""
-        self._show_catalog("skills")
+        if self.front is not None:
+            self._show_catalog("skills", self.front.state.skills)
 
-    def _show_catalog(self, what: str) -> None:
-        front = self.front
-        if front is None:
-            return
-        entries: tuple[CatalogEntry, ...] = getattr(front.state, what)
+    def _show_catalog(self, what: str, entries: tuple[CatalogEntry, ...]) -> None:
+        """Render one catalog as a toast.
+
+        Takes the entries rather than a field name to `getattr` off the state:
+        the two callers each know which tuple they mean, and a name looked up at
+        runtime is a rename that type-checks and then finds nothing.
+        """
         if not entries:
             self.notify(f"no {what} in this deployment", title=what, markup=False)
             return

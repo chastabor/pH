@@ -23,7 +23,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import PurePath
-from typing import Literal, TypeAlias
+from typing import Literal, TypeAlias, cast
 
 from pydantic import Field, NonNegativeInt, field_validator
 
@@ -141,21 +141,46 @@ class SessionHeader(WireModel):
         return self
 
 
+def _the_event(event: SessionEvent) -> SessionEvent:
+    """The parser `latest` folds with: the event itself, read as itself.
+
+    Module level, and that is the whole point. As an inline `lambda` it was a
+    new object on every `latest()` call — which is a new registry key, a new
+    fold and a fresh walk of the log each time, per `Session.projection`.
+    """
+    return event
+
+
+type _Key = tuple[str, Callable[[SessionEvent], object]]
+"""What identifies a fold: the event type it watches and the parser that reads it.
+
+Both halves are load-bearing. The type alone would collide the moment two seams
+read different things off one event; the parser alone cannot distinguish two
+folds of the same function over different types."""
+
+
 class _LatestFold[T]:
     """An incrementally maintained "latest event of type X" over a growing log."""
 
     __slots__ = ("_event_type", "_parse", "_seen", "value")
 
-    def __init__(self, event_type: str, parse: Callable[[SessionEvent], T]) -> None:
+    def __init__(self, event_type: str, parse: Callable[[SessionEvent], T | None]) -> None:
         self._event_type = event_type
         self._parse = parse
         self._seen = 0
         self.value: T | None = None
 
     def read(self, log: list[SessionEvent]) -> T | None:
-        if self._seen < len(log):
-            self.value = fold_latest(log[self._seen :], self._event_type, self._parse, self.value)
-            self._seen = len(log)
+        """The projection as of now, parsing only what has arrived since.
+
+        A cursor and `fold_latest`, not a second copy of it: this held its own
+        backwards walk for a while so it could avoid the `log[self._seen:]` copy
+        a slice makes per read per fold — one loop's worth of duplication to
+        dodge one allocation, with the rule it implements documented in the
+        other file. `since=` gets both.
+        """
+        self.value = fold_latest(log, self._event_type, self._parse, self.value, since=self._seen)
+        self._seen = len(log)
         return self.value
 
 
@@ -163,12 +188,10 @@ class Session:
     """An event-sourced session: an append-only log of `SessionEvent`s."""
 
     __slots__ = (
-        "_context_fold",
         "_derived",
         "_derived_generation",
         "_derived_nodes",
         "_events_snapshot",
-        "_header_fold",
         "_latest",
         "_log",
         "_observers",
@@ -195,9 +218,7 @@ class Session:
         self._derived: tuple[Message, ...] = ()
         self._derived_nodes = 0
         self._derived_generation = 0
-        self._header_fold = _LatestFold("request/header", parse_request_header)
-        self._context_fold = _LatestFold("request/context", parse_request_context)
-        self._latest: dict[str, _LatestFold[SessionEvent]] = {}
+        self._latest: dict[_Key, _LatestFold[object]] = {}
 
         if seed is not None:
             # Validate the seed to the SAME invariants `append` enforces. A
@@ -455,11 +476,11 @@ class Session:
 
     def request_header(self) -> EpochHeader | None:
         """The header the NEXT request will be compared against."""
-        return self._header_fold.read(self._log)
+        return self.projection("request/header", parse_request_header)
 
     def request_context(self) -> RequestContext | None:
         """The latest resolved route metadata, folded incrementally."""
-        return self._context_fold.read(self._log)
+        return self.projection("request/context", parse_request_context)
 
     # ------------------------------------------------------------- derivation --
 
@@ -550,10 +571,47 @@ class Session:
         sandbox mode, permission preset — and one a per-call check must not
         answer by scanning a log that is mostly `assistant/chunk`s.
         """
-        fold = self._latest.get(event_type)
+        return self.projection(event_type, _the_event)
+
+    def projection[T](self, event_type: str, parse: Callable[[SessionEvent], T | None]) -> T | None:
+        """Any "latest event of type X, read as Y" question, folded incrementally.
+
+        **The registry `latest` already was, opened to the seams.** Reported
+        usage arrived here as a method plus a `__slots__` entry plus a private
+        parser, which made `Session` learn `TokenUsage` so that a *seam* could
+        read it — the Consumer editing the Definition (I5), and the shape every
+        next metric would have repeated. A seam now keeps its own parser and
+        asks with it:
+
+            usage = session.projection("assistant/message", reported_usage)
+
+        **The parser is half the key, so nothing has to be named.** This took a
+        `name` first, and then a guard to check that two callers sharing a name
+        meant the same thing — which computed `(event_type, parse)`, the real
+        identity, purely to police a string a human typed. Keying on it directly
+        deletes the guard, the collision error, the "prefix it with the row that
+        owns it" convention and the constants each caller kept for its own name;
+        two rows cannot collide because two rows are not the same function.
+
+        **So `parse` must be stable across calls**, which is what every caller
+        already passes: a module-level function or a bound method is the same
+        key each time, and a frozen dataclass hashes by value — which is how
+        `workspace.latest_checkpoint` gets one fold *per agent* out of one
+        parser class, where a name would have had to carry the agent id. An
+        inline `lambda` is the one thing that does not work: it is a new key per
+        call, so it would build a fold per call and reparse the log each time.
+        `_the_event` exists for exactly that reason.
+
+        `parse` returning `None` means "this event carries nothing of that", and
+        the fold keeps what it had — see `fold_latest`.
+        """
+        key = (event_type, parse)
+        fold = self._latest.get(key)
         if fold is None:
-            fold = self._latest[event_type] = _LatestFold(event_type, lambda event: event)
-        return fold.read(self._log)
+            fold = self._latest[key] = _LatestFold[object](event_type, parse)
+        # Sound because the parser is in the key: the fold found here was built
+        # from *this* parse, so what it holds is what this parse returns.
+        return cast("T | None", fold.read(self._log))
 
     @property
     def last_event(self) -> SessionEvent | None:

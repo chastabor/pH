@@ -26,12 +26,20 @@ where each of these is a `ctx.get(...)` that may return `None`. A daemon that
 refused instead would make "this deployment has no screens" indistinguishable
 from "this deployment is broken".
 
+`Root` and `Supervisor` are imported under `TYPE_CHECKING` and nowhere else:
+`supervisor` imports *this* module, so naming their types at runtime would close
+the cycle — and `from __future__ import annotations` makes every annotation below
+a string the checker reads and the interpreter never evaluates. Both were `Any`
+for want of that import, which is `ph.keys`' own arrangement and the reason it
+works there: a projection that takes `Any` is a projection nothing checks, on the
+one layer whose whole job is not to say less than the seam does.
+
 @module ph_app.daemon.projections
 """
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING
 
 from ph.cordis import DEPLOYMENT
 from ph.keys import (
@@ -52,6 +60,9 @@ from ph.seams.tui_status import StatusReading
 
 from ..sessions import SessionSummary, session_summaries
 
+if TYPE_CHECKING:
+    from .supervisor import Root, Supervisor
+
 __all__ = [
     "browse_of",
     "commands_of",
@@ -69,7 +80,7 @@ __all__ = [
 # `to_wire()`, at the edge.
 
 
-def readings_of(root: Any) -> list[StatusReading]:
+def readings_of(root: Root) -> list[StatusReading]:
     """The footer, as the status seam currently reads it.
 
     A reading is a fold of the log, so this is cheap and correct to recompute; it
@@ -83,7 +94,7 @@ def readings_of(root: Any) -> list[StatusReading]:
     return list(registry.readings(root.session))
 
 
-def commands_of(root: Any) -> list[CommandSchema]:
+def commands_of(root: Root) -> list[CommandSchema]:
     """Every slash command a person may run against this root.
 
     `run` is deliberately not projected: it is a callable, and the client's job
@@ -97,7 +108,7 @@ def commands_of(root: Any) -> list[CommandSchema]:
     return [one.schema() for one in registry.list()]
 
 
-def screens_of(root: Any) -> list[ScreenSchema]:
+def screens_of(root: Root) -> list[ScreenSchema]:
     """The screens this deployment contributes, without their bodies.
 
     `build(session)` stays in the client and runs against the session it
@@ -112,7 +123,7 @@ def screens_of(root: Any) -> list[ScreenSchema]:
     return [one.schema() for one in registry.list()]
 
 
-def tools_of(root: Any) -> list[ToolSchema]:
+def tools_of(root: Root) -> list[ToolSchema]:
     """What the model may call here, as `--mode rpc` already answers it.
 
     `DEPLOYMENT` and not an agent's scope (P6-32): this says what the deployment
@@ -125,7 +136,7 @@ def tools_of(root: Any) -> list[ToolSchema]:
     return list(tools.schemas(scope=DEPLOYMENT))
 
 
-def presets_of(root: Any) -> list[PresetSchema]:
+def presets_of(root: Root) -> list[PresetSchema]:
     """The permission postures, with the live one marked.
 
     Resolved by the seam per call, like every projection here —
@@ -137,7 +148,7 @@ def presets_of(root: Any) -> list[PresetSchema]:
     return list(presets.schemas(root.session))
 
 
-def skills_of(root: Any) -> list[Skill]:
+def skills_of(root: Root) -> list[Skill]:
     """What is installed here, for `tools_of`'s reason and against its scope.
 
     `DEPLOYMENT` again: a child narrowed at spawn sees less, and that narrowing
@@ -156,7 +167,7 @@ def skills_of(root: Any) -> list[Skill]:
     return list(skills.list(DEPLOYMENT))
 
 
-def credentials_of(root: Any, names: list[str]) -> dict[str, bool]:
+def credentials_of(root: Root, names: list[str]) -> dict[str, bool]:
     """Which of these credentials the harness already holds — **never the values.**
 
     Held-ness rather than the secret, and the shape is what enforces it: there is
@@ -173,7 +184,7 @@ def credentials_of(root: Any, names: list[str]) -> dict[str, bool]:
     return {name: bool(service.has(service.reference(name))) for name in names}
 
 
-def browse_of(supervisor: Any) -> list[SessionSummary]:
+def browse_of(supervisor: Supervisor) -> list[SessionSummary]:
     """Every session a person could open, stored and live, folded here (P5-14).
 
     **One list from the one process that can see both halves.** The logs are on

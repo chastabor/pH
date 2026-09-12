@@ -82,15 +82,42 @@ def header_equals(a: EpochHeader, b: EpochHeader) -> bool:
 def fold_latest[T](
     events: Sequence[SessionEvent],
     event_type: str,
-    parse: Callable[[SessionEvent], T],
+    parse: Callable[[SessionEvent], T | None],
     start: T | None = None,
+    *,
+    since: int = 0,
 ) -> T | None:
-    """The latest event of one type, parsed — the shape of every snapshot fold."""
-    state = start
-    for event in events:
-        if event.type == event_type:
-            state = parse(event)
-    return state
+    """The latest event of one type, parsed — the shape of every snapshot fold.
+
+    **`parse` returning `None` keeps what the fold had**, which is why it is in
+    the signature rather than only in this paragraph. An event of the right type
+    that carries nothing of this projection is not an event that erases it: an
+    `assistant/message` rewritten in place drops its `usage`, and the most
+    recent *reported* usage is still the one before it. That reading also lets
+    `parse` act as a filter, which is what makes "latest event of type X that
+    actually says Y" an incremental fold rather than a scan.
+
+    **Backwards, and it stops at the first answer.** Forwards, this parsed every
+    matching event in the range to keep the last one — which is free for a type
+    that appears once in a while, and N `model_validate` calls for
+    `assistant/message`, where nearly every event is a match. The old code this
+    replaced walked backwards and parsed exactly one; iterating that way keeps
+    that property while gaining the incremental cursor. `start` is the answer
+    when the range holds nothing, which is the common case one append at a time.
+
+    **`since` is what made this one function instead of two.** `_LatestFold.read`
+    kept a cursor and, to avoid the `events[since:]` copy a slice would make per
+    read per fold, restated this loop by index — the same walk, the same
+    stop-at-the-first-answer rule, the same treatment of `None`, in a second
+    place, with the justification left behind as a comment pointing here. One
+    keyword closes that: indexing a `Sequence` copies nothing, so the fold gets
+    its cursor and the rule stays written once.
+    """
+    for index in range(len(events) - 1, since - 1, -1):
+        event = events[index]
+        if event.type == event_type and (parsed := parse(event)) is not None:
+            return parsed
+    return start
 
 
 def fold_request_header(

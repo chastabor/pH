@@ -55,7 +55,7 @@ from ph.llm.types import (
 )
 from ph.seams.diagnostics import Diagnostic, contribute
 from ph.seams.uploads import FileHandle
-from ph.session import now_ms
+from ph.session import as_int, as_obj, as_seq, now_ms
 from ph.wire import WireModel
 
 from ._http import HttpClient, resolve_secret
@@ -97,6 +97,32 @@ the vocabulary — `user_data` is what OpenAI's own chat completions read as an
 input file, and a compatible server may want `assistants` or nothing at all."""
 
 
+class WindowProbe(WireModel):
+    """One request that tells a server its own context window, as a profile states it.
+
+    `path` is joined to the server root — *beside* `/v1` rather than under it,
+    since the endpoint that answers this need not be part of the OpenAI wire —
+    and `field` walks the reply to the number.
+
+    **A step is a key or an index.** `["data", 0, "meta", "n_ctx"]` reads
+    llama.cpp's `/v1/models`, and the same shape reaches vLLM's
+    `data[0].max_model_len`; `["default_generation_settings", "n_ctx"]` reads
+    llama.cpp's `/props`, which is already divided by `--parallel` and is the
+    reason asking beats writing the number down. An `int` step indexes a list
+    and a `str` step reads an object, so the two kinds of JSON a server answers
+    with need no second field to tell them apart.
+
+    Defined above `ProviderProfile` because that model annotates it: pydantic
+    leaves `__pydantic_complete__` false for a forward reference it cannot
+    resolve yet and rebuilds lazily at first validate, which moves a structural
+    error onto the mount path. `test_every_wire_model_is_built_at_import` holds
+    that line.
+    """
+
+    path: str
+    field: tuple[str | int, ...]
+
+
 class ProviderProfile(WireModel):
     """One route this adapter serves."""
 
@@ -108,23 +134,35 @@ class ProviderProfile(WireModel):
 
     **What a *slot* holds, not what the server holds**, on a llama.cpp route —
     which is the number nobody can be expected to keep right by hand, and the
-    reason for the field below. `discover_context_window` asks the server and
-    leaves this as the fallback."""
-    discover_context_window: bool = False
-    """Ask the server for its window at mount, and use `context_window` if it
-    will not say.
+    reason for the field below. `context_window_probes` says where to ask, and
+    this is the fallback for a server that will not."""
+    context_window_probes: tuple[WindowProbe, ...] = ()
+    """Where to *ask* this server for its window at mount, **in order of trust.**
 
-    Two fields rather than a keyword in the one above, because the case that
+    **Declared by the profile rather than named in this file.** This adapter
+    serves OpenAI, DeepSeek, llama.cpp, vLLM and every gateway in between, and
+    the endpoints that answer this are theirs. A boolean here could only ever
+    mean "do the llama thing", so a second server would have arrived as an
+    `elif` in shared code; a path and a field mean a second server arrives as
+    four lines of YAML and no edit here.
+
+    **A list, because one `baseUrl` outlives one server.** `LLAMA_BASE_URL` names
+    a port, not an implementation: the same route is llama.cpp this morning and
+    vLLM this afternoon, and with a single probe the second one silently keeps
+    the fallback — which is the 32 768-against-262 144 mistake this field exists
+    to end, arriving through the door left open by assuming which server answers.
+    The first probe that yields a positive number wins, so **order is the trust
+    ordering, not a fallback chain**: llama.cpp publishes its per-slot window at
+    `/props` and its *undivided* total at `/v1/models`, so a profile that asked
+    the general endpoint first would read the number `/props` exists to correct.
+
+    Two fields rather than a keyword on the one above, because the case that
     matters is discovery *with* a fallback: "ask, and here is what to do when
     the answer does not come" is two facts and a single value cannot carry both.
-    A route wanting discovery and no fallback sets this and leaves
-    `context_window` unset.
 
-    Only llama.cpp answers today (`GET /props`), and asking costs one request at
-    mount that no other route answers. A server that does not publish it leaves
-    the configured number in force; nothing refuses to start over this, because
-    a window pH guessed low is a session that compacts early and a mount that
-    refused is a person who cannot work at all."""
+    A server that answers none of them leaves `context_window` in force; nothing
+    refuses to start over it, because a window pH guessed low is a session that
+    compacts early and a mount that refused is a person who cannot work."""
     default_max_tokens: int | None = None
     accepts: tuple[str, ...] = ACCEPTED_MEDIA
     """MIME types this route takes as message content (P7-01).
@@ -445,19 +483,34 @@ def _finish_kind(reason: str | None) -> Any:
 
 
 def _to_usage(raw: dict[str, Any]) -> TokenUsage:
+    """This wire's usage, made disjoint (D15).
+
+    **Three spellings of the cached prefix, and all of them are folded into
+    `prompt_tokens` here** — which is the whole difference from the Anthropic
+    adapter, where the same three counts arrive already separated and map across
+    untouched. DeepSeek says `prompt_cache_hit_tokens`; OpenAI and vLLM say
+    `prompt_tokens_details.cached_tokens`; vLLM alone also says
+    `created_cache_tokens` for the part of *this* prompt it just wrote into the
+    prefix cache. Each is subtracted, because `TokenUsage.total` adds them back
+    and a count left inside `prompt_tokens` is billed twice — on a warm turn that
+    is most of the window.
+
+    **`created_cache_tokens` is a write, not a miss**, and the distinction is
+    what keeps DeepSeek's `prompt_cache_miss_tokens` out of this function:
+    misses are the uncached remainder — already what `input_tokens` means — so
+    reading one as a write would zero the input and call the whole prompt a
+    cache write.
+    """
     prompt = int(raw.get("prompt_tokens") or 0)
-    cached = int(
-        raw.get("prompt_cache_hit_tokens")
-        or (raw.get("prompt_tokens_details") or {}).get("cached_tokens")
-        or 0
-    )
+    prompt_details = raw.get("prompt_tokens_details") or {}
+    cached = int(raw.get("prompt_cache_hit_tokens") or prompt_details.get("cached_tokens") or 0)
+    written = int(prompt_details.get("created_cache_tokens") or 0)
     details = raw.get("completion_tokens_details") or {}
     return TokenUsage(
-        # Disjoint counts (D15): DeepSeek folds cache hits into prompt_tokens,
-        # so leaving them in would bill every hit twice in pH's accounting.
-        input_tokens=max(0, prompt - cached),
+        input_tokens=max(0, prompt - cached - written),
         output_tokens=int(raw.get("completion_tokens") or 0),
         cache_read_tokens=cached or None,
+        cache_write_tokens=written or None,
         reasoning_tokens=int(details.get("reasoning_tokens") or 0) or None,
     )
 
@@ -585,53 +638,103 @@ runs during `apply`, so the budget is a person waiting for a TUI to open. Two
 seconds is generous for a server on localhost, which is the only kind that
 answers this at all."""
 
-SERVER_PROPS = "/props"
-"""llama.cpp's own description of what it loaded, beside `/v1` rather than under it.
 
-The one endpoint in this file that is not the OpenAI wire, and it is asked for
-exactly one field. `default_generation_settings.n_ctx` is already **per slot** —
-llama.cpp divides `--ctx-size` by `--parallel` before it reports here — which is
-the whole value of asking: that division is the arithmetic a person gets wrong,
-and getting it wrong upward means every agent budgets against a window it does
-not have."""
+async def discover_window(adapter: OpenAiCompatibleAdapter) -> tuple[int, str] | None:
+    """One slot's context window and the path that said so, or `None`.
 
-
-async def discover_window(adapter: OpenAiCompatibleAdapter) -> int | None:
-    """One slot's context window, as the server states it, or `None`.
-
-    `None` for every way this can fail — not a llama.cpp server, `/props` not
+    `None` for every way this can fail — no probe declared, the endpoint not
     published, the server down, a field of the wrong shape — because the caller
     does one thing with all of them. A route that cannot be asked is the
     ordinary case here: this adapter also serves OpenAI, DeepSeek and every
-    gateway in between, and none of them publishes a window anywhere.
+    gateway in between, and most publish no window anywhere.
+
+    **The answering path travels with the answer.** `ph doctor` prints which
+    endpoint the number came from, and with a list of probes the profile can no
+    longer be asked after the fact — re-deriving it would name the first probe
+    whatever answered.
+
+    **Asked at once, chosen by declared position.** The order means something
+    (see `context_window_probes`), which is why the winner is picked by *index*
+    rather than by arrival — a first-past-the-post race would let the less
+    trustworthy endpoint win by being quicker. Given that, there is no reason to
+    wait between them: sequentially the cost was `PROBE_TIMEOUT` per probe, and a
+    mount is a person waiting for a TUI to open, so two probes against a server
+    that accepts a connection and then hangs cost four seconds of that. The
+    price is one extra localhost GET against a server that would have answered
+    the first probe anyway.
     """
+    probes = adapter.profile.context_window_probes
+    if not probes:
+        return None
     root = adapter.profile.base_url.rstrip("/").removesuffix("/v1").rstrip("/")
+    headers = _probe_headers(adapter)
+    found: list[int | None] = [None] * len(probes)
+
+    async def ask(index: int, probe: WindowProbe) -> None:
+        found[index] = await _ask(adapter, probe, root, headers)
+
+    async with anyio.create_task_group() as tasks:
+        for index, probe in enumerate(probes):
+            tasks.start_soon(ask, index, probe)
+    answers = zip(found, probes, strict=True)
+    return next(((window, probe.path) for window, probe in answers if window is not None), None)
+
+
+def _probe_headers(adapter: OpenAiCompatibleAdapter) -> dict[str, str]:
+    """Credentialled when there is a credential, unauthenticated when there is not.
+
+    `/props` needs no key on a llama.cpp server started without `--api-key`, and
+    `ph doctor` is precisely the command someone runs *before* exporting
+    anything — a probe that failed there would report the fallback to the person
+    least able to tell it from the truth. A server that does want a key answers
+    401 and the fallback stands.
+
+    Resolved once per route rather than once per probe: it is a property of the
+    adapter, and every probe of one route sends the same header.
+    """
     try:
-        # Credentialled when there is a credential, and unauthenticated when
-        # there is not. `/props` needs no key on a llama.cpp server started
-        # without `--api-key`, and `ph doctor` is precisely the command someone
-        # runs *before* exporting anything — a probe that failed there would
-        # report the fallback to the person least able to tell it from the truth.
-        # A server that does want a key answers 401 and the fallback stands.
-        try:
-            headers = adapter._headers()
-        except Exception:
-            # Any reason at all, and deliberately not just `LlmError`: the point
-            # of this branch is to carry on without a header, so narrowing it
-            # would turn some *other* failure to build one into a probe that
-            # does not happen — which reads as "the server did not say".
-            headers = {"Content-Type": "application/json"}
-        props = await adapter.http.get_json(
-            f"{root}{SERVER_PROPS}",
+        return adapter._headers()
+    except Exception:
+        # Any reason at all, and deliberately not just `LlmError`: the point of
+        # this branch is to carry on without a header, so narrowing it would turn
+        # some *other* failure to build one into a probe that does not happen —
+        # which reads as "the server did not say".
+        return {"Content-Type": "application/json"}
+
+
+async def _ask(
+    adapter: OpenAiCompatibleAdapter, probe: WindowProbe, root: str, headers: dict[str, str]
+) -> int | None:
+    """One probe, answered or not."""
+    try:
+        answer: object = await adapter.http.get_json(
+            f"{root}/{probe.path.lstrip('/')}",
             headers=headers,
             is_overflow=_is_overflow,
             timeout=PROBE_TIMEOUT,
         )
     except Exception:
-        log.debug("ph_app.adapters: %s did not answer %s", root, SERVER_PROPS, exc_info=True)
+        log.debug("ph_app.adapters: %s did not answer %s", root, probe.path, exc_info=True)
         return None
-    window = (props.get("default_generation_settings") or {}).get("n_ctx")
-    return window if isinstance(window, int) and window > 0 else None
+    for step in probe.field:
+        answer = _step(answer, step)
+    window = as_int(answer)
+    return window if window > 0 else None
+
+
+def _step(value: object, step: str | int) -> object:
+    """One step of a probe's field path: a key into an object, an index into a list.
+
+    Through the `as_*` family rather than a hand-rolled `isinstance` walk, which
+    is the house narrowing and the reason this stays checked: `as_obj` and
+    `as_seq` both answer empty for the wrong shape, so a server that replies
+    with something unexpected yields `None` here instead of an `AttributeError`
+    two lines later — and `object` stays `object` rather than becoming `Any`.
+    """
+    if isinstance(step, int):
+        items = as_seq(value)
+        return items[step] if -len(items) <= step < len(items) else None
+    return as_obj(value).get(step)
 
 
 @dataclass(slots=True)
@@ -645,9 +748,12 @@ class _Windows:
     """
 
     adapters: list[OpenAiCompatibleAdapter] = field(default_factory=list)
-    asked: set[str] = field(default_factory=set)
-    """Providers whose window came back from the server, so the row can say which
-    of the two numbers a person is looking at."""
+    asked: dict[str, str] = field(default_factory=dict)
+    """Provider → the path that answered, for the routes the server told.
+
+    The path rather than a bare "yes": `describe` would otherwise re-derive it
+    from the profile, which is a projection re-deriving what the probe had
+    already established — and it needed a type suppression to do it."""
 
     async def discover(self, adapter: OpenAiCompatibleAdapter) -> None:
         """Ask one route for its window and adopt the answer, or keep the config.
@@ -657,20 +763,23 @@ class _Windows:
         handed, where a lambda would carry the mount's whole scope.
         """
         found = await discover_window(adapter)
-        if found is not None:
-            adapter.profile = adapter.profile.model_copy(update={"context_window": found})
-            self.asked.add(adapter.profile.provider)
+        if found is None:
+            return
+        window, path = found
+        adapter.profile = adapter.profile.model_copy(update={"context_window": window})
+        self.asked[adapter.profile.provider] = path
 
     def describe(self) -> list[tuple[str, str]]:
         rows: list[tuple[str, str]] = []
         for adapter in self.adapters:
             route = adapter.profile
             window = route.context_window
+            answered = self.asked.get(route.provider)
             if window is None:
                 source = "not declared; nothing budgets or compacts against a window"
-            elif route.provider in self.asked:
-                source = f"from {SERVER_PROPS}"
-            elif route.discover_context_window:
+            elif answered is not None:
+                source = f"from {answered}"
+            elif route.context_window_probes:
                 source = "configured; the server did not say"
             else:
                 source = "configured"
@@ -688,7 +797,7 @@ async def apply(ctx: Context, config: Config) -> None:
     # **At mount and once, so `resolve_model` stays synchronous** — every layer
     # above reads a window per request, and a probe there would be an HTTP round
     # trip inside a projection. A failure keeps the configured number: see
-    # `discover_context_window`.
+    # `context_window_probes`.
     #
     # **Together rather than in turn**, because they are independent and a mount
     # is a person waiting for a TUI to open: asking three routes in sequence
@@ -697,7 +806,7 @@ async def apply(ctx: Context, config: Config) -> None:
     # can raise into the group.
     async with anyio.create_task_group() as tasks:
         for adapter in routes.adapters:
-            if adapter.profile.discover_context_window:
+            if adapter.profile.context_window_probes:
                 tasks.start_soon(routes.discover, adapter)
     llm = ctx.require(LLM)
     for adapter in routes.adapters:
