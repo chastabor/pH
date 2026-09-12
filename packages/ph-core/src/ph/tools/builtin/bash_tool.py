@@ -17,9 +17,9 @@ from typing import Any
 from pydantic import Field
 
 from ...cordis import Context, plugin
+from ...json import as_str
 from ...keys import SHELL, TOOLS
 from ...llm.types import ContentBlock
-from ...session import as_str
 from ...text import truncation_marker
 from ..definition import ToolModel, ToolOutput, ToolRunContext, define_tool, text_content
 from ..presentation import ToolCallView, ToolResultView

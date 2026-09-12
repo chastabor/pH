@@ -37,12 +37,12 @@ import anyio
 import typer
 from rich.table import Table
 
+from ph.json import JsonObject, as_obj, as_str
 from ph.lingering import lifetime
 from ph.paths import RuntimeDirError, resolve_roots
 from ph.resources import GRACE_SECONDS
 from ph.seams.schedule import ScheduleKind
 from ph.selectors import Selector, matches_any
-from ph.session import JsonObject
 
 from . import verbs
 from .console import TypeOption, console, fail, section, selectors_or_exit
@@ -59,7 +59,7 @@ from .protocol import (
     cursor_text,
     parse_cursor,
 )
-from .wire import as_obj, as_str, describe, message_of, one_line, result_block, text_of_wire
+from .wire import describe, message_of, one_line, result_block, text_of_wire
 
 __all__ = ["agents_app"]
 

@@ -54,7 +54,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ph.session import as_int, as_str
+from ph.json import as_int, as_str
 
 from ._chunk import Chunk
 

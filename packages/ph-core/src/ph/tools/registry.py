@@ -40,12 +40,13 @@ from ..cordis import (
     plugin,
     running,
 )
+from ..json import thaw_json
 from ..keys import APPROVAL, TOOLS
 from ..llm.types import ToolSchema, text_of
 from ..seams._restriction import NameFilter
 from ..seams.approval import Edited, Responded, denial_reason
 from ..seams.code_runtime import CodeBindingNamespace, validate_binding_name
-from ..session.json import freeze_json_value, thaw_json
+from ..session.json import freeze_json_value
 from ..wire import WireModel
 from .definition import (
     Accept,

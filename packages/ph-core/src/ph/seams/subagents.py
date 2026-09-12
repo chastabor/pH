@@ -37,8 +37,9 @@ from pydantic import Field
 
 from ..agent.types import AgentDriver
 from ..cordis import Context, Disposer, Running, plugin, running
+from ..json import as_int, as_str
 from ..keys import AGENTS, SESSIONS, SKILLS, SUBAGENT_PRESETS, SUBAGENTS, SYSTEM_PROMPT, TOOLS
-from ..session import Session, SessionFoldCache, as_int, as_str
+from ..session import Session, SessionFoldCache
 from ..system_prompt.assembly import PromptSection
 from ..tools.registry import ToolRestriction
 from ..wire import WireModel

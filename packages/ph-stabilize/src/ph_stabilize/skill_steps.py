@@ -40,8 +40,9 @@ from pydantic import ValidationError
 
 from ph.agent.types import AgentDriver
 from ph.cordis import Context, plugin
+from ph.json import as_obj, as_str
 from ph.llm.types import PluginSource, create_user_message
-from ph.session import Session, as_obj, as_str
+from ph.session import Session
 from ph.text import count_of
 
 from .todo import (

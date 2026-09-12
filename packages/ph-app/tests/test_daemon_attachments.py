@@ -26,9 +26,9 @@ from typing import Any
 import pytest
 from daemon_helpers import running, until
 
+from ph.json import as_seq
 from ph.keys import ATTACHMENTS
 from ph.llm.types import AttachmentRef
-from ph.session import as_seq
 from ph_app.daemon.framing import MAX_ATTACHMENT_BYTES, MAX_LINE
 from ph_app.protocol import DaemonError
 

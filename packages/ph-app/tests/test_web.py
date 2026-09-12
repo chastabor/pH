@@ -28,7 +28,7 @@ from aiohttp import FormData, web
 from aiohttp.test_utils import TestClient, TestServer
 from daemon_helpers import serving, until
 
-from ph.session import as_seq
+from ph.json import as_seq
 from ph_app.daemon.framing import MAX_ATTACHMENT_BYTES
 from ph_app.web.serve import CLOSING_BODY, COOKIE, TOKEN_QUERY, WebServer
 

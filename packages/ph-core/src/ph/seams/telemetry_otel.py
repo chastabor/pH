@@ -30,8 +30,8 @@ from __future__ import annotations
 from typing import Any
 
 from ..cordis import Context, MountRefusal, plugin
+from ..json import dumps
 from ..keys import SESSION_TELEMETRY
-from ..session import dumps
 from ..wire import WireModel
 from .diagnostics import Diagnostic, contribute
 from .telemetry import SessionTelemetryRecord

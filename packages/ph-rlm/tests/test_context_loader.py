@@ -27,8 +27,8 @@ import pytest
 from rlm_fixtures import MountedRuntime
 from runtime_helpers import dispatch_names, run_ipython_cell, settled_dispatches
 
+from ph.json import as_seq
 from ph.keys import SYSTEM_PROMPT, TOOLS
-from ph.session.json import as_seq
 from ph.system_prompt import render_prompt
 from ph.tools import Accept
 from ph_rlm.context_loader import LOADED, Corpus, Document, render_manifest

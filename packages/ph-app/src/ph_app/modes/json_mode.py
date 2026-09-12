@@ -16,7 +16,8 @@ from pathlib import Path
 from typing import TextIO
 
 from ph.cordis import Context, Profile
-from ph.session import Session, SessionEvent, dumps
+from ph.json import dumps
+from ph.session import Session, SessionEvent
 
 from ..runtime import prompted
 

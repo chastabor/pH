@@ -22,7 +22,6 @@ a stray" beats a confident kill of something else.
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 import os
 import signal
@@ -32,6 +31,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ph.json import dumps
 from ph.persistence import read_records
 
 __all__ = ["JOURNAL_NAME", "OrphanJournal", "SweepReport", "argv_digest", "process_start_token"]
@@ -139,7 +139,7 @@ class OrphanJournal:
 
     def _append(self, record: dict[str, Any]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        line = json.dumps(record, separators=(",", ":")) + "\n"
+        line = dumps(record) + "\n"
         try:
             with self.path.open("a", encoding="utf-8") as handle:
                 handle.write(line)
@@ -179,7 +179,7 @@ class OrphanJournal:
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             temporary = self.path.with_name(f"{self.path.name}.tmp")
-            body = "".join(json.dumps(record, separators=(",", ":")) + "\n" for record in keep)
+            body = "".join(dumps(record) + "\n" for record in keep)
             temporary.write_text(body, encoding="utf-8")
             temporary.replace(self.path)
         except OSError:

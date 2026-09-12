@@ -17,11 +17,11 @@ from typing import Any
 import pytest
 from stabilize_helpers import PROFILE, blob, break_spill
 
+from ph.json import as_obj
 from ph.keys import AGENTS, SESSIONS
 from ph.llm.types import text_of
 from ph.session import Session, SurfaceIntent
 from ph.session.events import SurfaceReplace
-from ph.session.json import as_obj
 from ph.session.known_event_types import (
     IGNORABLE_SESSION_EVENT_TYPES,
     KNOWN_SESSION_EVENT_TYPES,

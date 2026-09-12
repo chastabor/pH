@@ -31,7 +31,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from ..session import SessionEvent, as_int, as_obj, as_seq, as_str
+from ..json import as_int, as_obj, as_seq, as_str
+from ..session import SessionEvent
 from ..session.json import freeze_json_value
 
 __all__ = [

@@ -29,6 +29,7 @@ from stabilize_helpers import PROFILE, break_spill
 from ph.agent.types import AgentOptions
 from ph.cancel import Cancelled
 from ph.cordis import DEPLOYMENT, Context
+from ph.json import thaw_json
 from ph.keys import AGENTS, COMMANDS, COMPACTION, LLM_FAKE, SESSIONS, TOKEN_METER, TOOLS
 from ph.llm.types import (
     CONTEXT_WINDOW_EXCEEDED,
@@ -43,7 +44,7 @@ from ph.llm.types import (
     text_of,
 )
 from ph.seams.compaction import CompactionNote
-from ph.session import Session, SurfaceIntent, derive_event_message, thaw_json
+from ph.session import Session, SurfaceIntent, derive_event_message
 from ph.session.known_event_types import (
     IGNORABLE_SESSION_EVENT_TYPES,
     KNOWN_SESSION_EVENT_TYPES,

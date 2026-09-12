@@ -15,8 +15,9 @@ from dataclasses import dataclass
 from typing import Literal, TypeAlias
 
 from ..cordis import Context, plugin
+from ..json import as_str
 from ..keys import APPROVAL, PERMISSION_PRESETS, SANDBOX, TUI_STATUS
-from ..session import Session, as_str
+from ..session import Session
 from ..wire import WireModel
 from ._registry import contribute_item
 from .approval import ApprovalPolicy

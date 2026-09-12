@@ -55,7 +55,7 @@ from typing import Any
 import anyio
 from anyio.abc import ByteStream
 
-from ph.session import as_str
+from ph.json import as_str
 from ph.wire import WireModel
 
 from ..payloads import SessionAsk

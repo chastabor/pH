@@ -34,6 +34,7 @@ from __future__ import annotations
 from typing import Any
 
 from ph.cordis import Context, plugin
+from ph.json import as_str
 from ph.keys import SUBAGENTS, TOOLS
 from ph.llm.types import ContentBlock
 from ph.seams.code_runtime import CodeBindingNamespace
@@ -44,7 +45,6 @@ from ph.seams.subagents import (
     SubagentSpawnError,
     downgrade_text,
 )
-from ph.session import as_str
 from ph.tools import ToolModel, ToolOutput, define_tool, text_content
 from ph.tools.code_mode import CodeBindingsRequest, ToolCallError, governed_binding
 from ph.wire import WireModel

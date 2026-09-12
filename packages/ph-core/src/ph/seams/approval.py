@@ -30,8 +30,9 @@ from pydantic import Field
 from ..agent.types import AgentHandle
 from ..cancel import CancelToken, is_cancelled
 from ..cordis import Context, Disposer, events, plugin
+from ..json import as_str
 from ..keys import APPROVAL
-from ..session import Session, as_str
+from ..session import Session
 from ..wire import WireModel, literal_lookup
 
 __all__ = [

@@ -44,11 +44,11 @@ from typing import Any
 import anyio
 
 from ..cordis import Context, plugin
+from ..json import dumps
 from ..keys import SESSIONS
 from ..paths import resolve_roots
 from ..seams.diagnostics import Diagnostic, contribute
 from ..session import Session, SessionEvent, SessionHeader
-from ..session.json import dumps
 from ..wire import WireModel
 from .families import locate_under, logs_under, path_under
 from .lease import claim_file

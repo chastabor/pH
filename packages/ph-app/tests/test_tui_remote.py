@@ -29,11 +29,11 @@ from tui_helpers import StubApp, StubHost
 
 from ph.bundles import BASE, HEADLESS
 from ph.cordis import DEPLOYMENT, Profile, load_profile_documents
+from ph.json import as_int
 from ph.keys import APPROVAL, SKILLS, TOOLS, USER_QUESTIONS
 from ph.seams.skills import Skill
 from ph.seams.tui_status import StatusReading
 from ph.seams.user_questions import UserQuestion
-from ph.session.json import as_int
 from ph.testing import StubAgent
 from ph_app.daemon.follow import Followed
 from ph_app.payloads import StatusFacts

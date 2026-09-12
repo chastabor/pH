@@ -20,10 +20,10 @@ import pytest
 from stabilize_helpers import PROFILE, bash_call, result_text, run_tool_calls, todo_call
 
 from ph.cordis import DEPLOYMENT, Context, Profile, load_profile_documents
+from ph.json import as_obj, as_seq
 from ph.keys import SESSIONS, SYSTEM_PROMPT, TOOLS
 from ph.llm.types import ToolCallBlock
 from ph.session import Session
-from ph.session.json import as_obj, as_seq
 from ph.session.known_event_types import KNOWN_SESSION_EVENT_TYPES
 from ph.system_prompt.assembly import (
     join_context_sections,

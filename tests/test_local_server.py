@@ -50,10 +50,10 @@ import httpx
 import pytest
 
 from ph.agent.types import AgentOptions
+from ph.json import as_obj
 from ph.keys import AGENTS, LLM, SESSIONS
 from ph.llm.types import text_of
 from ph.session import Session
-from ph.session.json import as_obj
 from ph.testing import MountProfile
 from ph_app.attach import ingest, prompt_message
 from ph_app.profiles import resolve_profile

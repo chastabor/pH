@@ -43,8 +43,8 @@ from ..cordis import (
     plugin,
     safe_yaml_load,
 )
+from ..json import as_str
 from ..keys import SKILLS, SYSTEM_PROMPT, TOOLS
-from ..session import as_str
 from ..system_prompt.assembly import ORDER_TOOL_GUIDANCE, AssembleContext, PromptSection
 from ..tools.definition import ToolModel, ToolOutput, ToolRunContext, define_tool, text_content
 from ..tools.presentation import simple_views

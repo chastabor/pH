@@ -53,6 +53,7 @@ import anyio.abc
 from ph.agent.types import AgentHandle
 from ph.cancel import CancelToken, is_cancelled
 from ph.cordis import Context, Disposer, plugin
+from ph.json import as_str, thaw_json
 from ph.keys import CODE_RUNTIME
 from ph.paths import resolve_roots
 from ph.seams.code_runtime import (
@@ -65,7 +66,6 @@ from ph.seams.diagnostics import Diagnostic, contribute
 from ph.seams.sandbox import ConfinedArgv, SandboxPolicy
 from ph.seams.subprocess import first_line, scrub_env
 from ph.seams.workspace import workspace_of, workspace_policy
-from ph.session.json import as_str, thaw_json
 from ph.tools.code_mode import CodeRunFailure, ToolCallError
 from ph.tools.errors import error_message
 from ph.wire import WireModel
@@ -801,9 +801,11 @@ class Kernel:
             if active.aborting_since is None:
                 await self._begin_abort(active)
         except ToolCallError as error:
-            await self._reply(frame["id"], ok=False, message=error.message)
+            await self._reply(frame["id"], ok=False, message=error.message, name=frame["name"])
         except Exception as error:
-            await self._reply(frame["id"], ok=False, message=error_message(error))
+            await self._reply(
+                frame["id"], ok=False, message=error_message(error), name=frame["name"]
+            )
         else:
             await self._reply(frame["id"], ok=True, value=_json_safe(value))
 
@@ -814,9 +816,12 @@ class Kernel:
         ok: bool,
         value: Any = None,
         message: str | None = None,
+        name: str | None = None,
         fatal: bool | None = None,
     ) -> None:
-        await self._send(ReplyFrame(id=call_id, ok=ok, value=value, message=message, fatal=fatal))
+        await self._send(
+            ReplyFrame(id=call_id, ok=ok, value=value, message=message, name=name, fatal=fatal)
+        )
 
     # ----------------------------------------------------------------- pipes --
 

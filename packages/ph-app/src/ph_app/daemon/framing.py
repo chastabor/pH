@@ -23,7 +23,7 @@ import anyio
 from anyio.abc import ByteStream
 from anyio.streams.buffered import BufferedByteReceiveStream
 
-from ph.session import dumps
+from ph.json import dumps
 
 __all__ = [
     "MAX_ATTACHMENT_BYTES",
@@ -81,7 +81,7 @@ async def write_frame(stream: ByteStream, payload: Mapping[str, object]) -> None
     module that framed only the four shapes it knew about would have to be
     told about a fifth.
 
-    `ph.session.dumps` rather than `json.dumps`: it is the canonical encoder,
+    `ph.json.dumps` rather than `json.dumps`: it is the canonical encoder,
     and a daemon that framed events differently from the log they came out of
     would make the two formats one claim short of true.
     """

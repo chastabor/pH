@@ -31,6 +31,8 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, ValidationError, model_validator
 from pydantic.alias_generators import to_camel
 
+from .json import thaw_json
+
 __all__ = [
     "WireDataclass",
     "WireModel",
@@ -124,11 +126,6 @@ class WireModel(BaseModel):
     @classmethod
     def _thaw_frozen_input(cls, data: Any) -> Any:
         if isinstance(data, MappingProxyType):
-            # Lazy import: `ph.session.json` is import-safe on its own, but
-            # importing it at module load would run `ph.session.__init__`, which
-            # imports `ph.llm.types`, which imports this module.
-            from .session.json import thaw_json
-
             return thaw_json(data)
         return data
 

@@ -41,9 +41,10 @@ from typing import Any, Literal, TypeAlias
 from pydantic import Field
 
 from ..cordis import Context, plugin
+from ..json import as_bool, as_str
 from ..keys import GOALS
 from ..llm.types import TokenUsage
-from ..session import Session, SessionFoldCache, as_bool, as_str
+from ..session import Session, SessionFoldCache
 from ..wire import WireModel, literal_lookup
 from .invariants import contribute_fold_cache
 

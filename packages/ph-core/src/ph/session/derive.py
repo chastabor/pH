@@ -19,9 +19,9 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
+from ..json import as_obj
 from ..llm.types import Message
 from .events import SessionEvent
-from .json import as_obj
 from .surface import is_append_surface_event
 
 __all__ = ["derive_event_message", "derive_transcript"]

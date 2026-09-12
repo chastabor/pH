@@ -68,6 +68,7 @@ from ph.agent.types import AgentHandle, PreStepDecision, RequestErrorAction, Req
 from ph.agent_loop import AgentCancelled
 from ph.cancel import Cancelled
 from ph.cordis import DEPLOYMENT, Context, plugin
+from ph.json import as_obj, as_seq, as_str, dumps, thaw_json
 from ph.keys import COMPACTION, LLM, SPILL_STORE, TOKEN_METER, TOOLS
 from ph.llm import BlockAssembler
 from ph.llm.types import (
@@ -87,16 +88,8 @@ from ph.llm.types import (
 from ph.seams.compaction import CompactionError, CompactionResult, CompactionTrigger
 from ph.seams.spill import SpillClaim
 from ph.seams.token_meter import TokenBaseline
-from ph.session import (
-    EpochHeader,
-    Session,
-    SessionEvent,
-    SurfaceIntent,
-    derive_event_message,
-    thaw_json,
-)
+from ph.session import EpochHeader, Session, SessionEvent, SurfaceIntent, derive_event_message
 from ph.session.events import SurfaceReplace
-from ph.session.json import as_obj, as_seq, as_str, dumps
 from ph.text import count_of
 from ph.wire import WireModel
 

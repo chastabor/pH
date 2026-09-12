@@ -20,6 +20,7 @@ from test_dimensions import png
 
 from ph.agent.types import AgentOptions
 from ph.cordis import Context
+from ph.json import as_obj, as_seq
 from ph.keys import AGENTS, ATTACHMENTS, LLM_FAKE, SESSIONS
 from ph.llm.adapter import ResolvedModel
 from ph.llm.media import (
@@ -30,7 +31,6 @@ from ph.llm.media import (
 )
 from ph.llm.types import AttachmentRef, MediaBlock, TextBlock, create_user_message
 from ph.seams.attachments import AttachmentStore
-from ph.session.json import as_obj, as_seq
 from ph.testing import MountProfile, as_kind
 
 pytestmark = pytest.mark.anyio

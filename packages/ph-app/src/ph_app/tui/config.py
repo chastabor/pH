@@ -25,8 +25,8 @@ from dataclasses import asdict, dataclass, field, fields, replace
 from pathlib import Path
 from typing import Any, Literal, TypeAlias
 
+from ph.json import as_bool
 from ph.paths import write_text_under
-from ph.session import as_bool
 
 from .themes import DEFAULT_THEME
 

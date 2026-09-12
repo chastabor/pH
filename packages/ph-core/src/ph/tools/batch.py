@@ -33,9 +33,10 @@ import anyio
 from ..agent.types import AgentHandle
 from ..cancel import CancelToken
 from ..cordis import Context
+from ..json import dumps
 from ..keys import TOOLS
 from ..llm.types import Message, ToolCallBlock, new_message_id
-from ..session import Session, SurfaceIntent, dumps
+from ..session import Session, SurfaceIntent
 from .definition import ToolExecutionInput, ToolExecutionResult, aborted_result
 from .json_schema import parse_arguments
 from .registry import PreparedCall, ToolRuntime

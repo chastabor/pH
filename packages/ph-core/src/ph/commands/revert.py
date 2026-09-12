@@ -31,10 +31,11 @@ from itertools import islice
 from typing import Any
 
 from ..cordis import Context, plugin
+from ..json import as_str
 from ..keys import COMMANDS, SUBPROCESS, TOOLS, WORKSPACE
 from ..seams.commands import CommandDefinition
 from ..seams.workspace import checkpoints, workspace_of
-from ..session import Session, as_str
+from ..session import Session
 
 __all__ = ["apply"]
 

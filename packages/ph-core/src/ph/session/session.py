@@ -27,12 +27,13 @@ from typing import Literal, TypeAlias, cast
 
 from pydantic import Field, NonNegativeInt, field_validator
 
+from ..json import JsonValue
 from ..llm.types import Message
 from ..selectors import matches_any, parse_all
 from ..wire import WireModel
 from .derive import derive_event_message, derive_transcript
 from .events import SESSION_FORMAT_VERSION, SessionEvent, SurfaceIntent, now_ms
-from .json import InvalidJsonValueError, JsonValue, freeze_json_value
+from .json import InvalidJsonValueError, freeze_json_value
 from .known_event_types import IGNORABLE_SESSION_EVENT_TYPES, KNOWN_SESSION_EVENT_TYPES
 from .request_header import (
     EpochHeader,

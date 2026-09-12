@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from enum import IntFlag
 from typing import Any, Literal, TypeAlias
 
-from ph.session import as_bool, as_str
+from ph.json import as_bool, as_str
 
 __all__ = [
     "CatalogEntry",

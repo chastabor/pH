@@ -19,9 +19,9 @@ from textual.content import Content
 from textual.css.query import NoMatches
 from textual.widgets import Static
 
+from ph.json import as_str
 from ph.seams.subagents import child_is_live
 from ph.seams.tui_status import StatusReading
-from ph.session import as_str
 from ph.text import thousands
 
 from ..state import CatalogEntry, TuiState

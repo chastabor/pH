@@ -43,6 +43,7 @@ from collections.abc import Iterable, Mapping
 from typing import TYPE_CHECKING
 
 from ph.cordis import DEPLOYMENT
+from ph.json import JsonValue
 from ph.keys import (
     COMMANDS,
     CREDENTIALS,
@@ -58,7 +59,6 @@ from ph.seams.permission_presets import PresetSchema
 from ph.seams.skills import Skill
 from ph.seams.tui_screens import ScreenSchema
 from ph.seams.tui_status import StatusReading
-from ph.session import JsonValue
 
 from ..payloads import ConfigRow
 from ..sessions import SessionSummary, session_summaries

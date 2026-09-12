@@ -119,9 +119,9 @@ async def test_a_protocol_mismatch_is_refused_at_boot(tmp_path: Any) -> None:
     `boot` and not discovered later.
 
     The frame is **built, not typed**: `to_boot` + `encode` is what the host
-    actually sends, so a required field added to `boot` (as `skills` was at
-    protocol 2) reaches this test instead of leaving a stale literal that fails
-    for the wrong reason. `FD_ENV` and `scrub_env` for the same reason — they are
+    actually sends, so a required field added to `boot` (as `skills` was) reaches
+    this test instead of leaving a stale literal that fails for the wrong
+    reason. `FD_ENV` and `scrub_env` for the same reason — they are
     the two things a hand-rolled spawn gets wrong, and `Kernel.start` is the
     thing being imitated.
     """

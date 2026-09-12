@@ -36,7 +36,7 @@ from textual.css.query import NoMatches
 from textual.widgets import Collapsible, Markdown, Static
 from textual.widgets.markdown import MarkdownStream
 
-from ph.session import as_int
+from ph.json import as_int
 from ph.text import count_of
 
 from ...wire import index_at_or_before

@@ -44,10 +44,11 @@ from dataclasses import dataclass
 from typing import Any, Final, Literal, TypeAlias
 
 from ph.cordis import Context, plugin
+from ph.json import as_str
 from ph.keys import AGENTS, COMPACTION, SESSIONS, SPILL_STORE
 from ph.seams.compaction import CompactionNote
 from ph.seams.spill import SpillClaim
-from ph.session import Session, as_str
+from ph.session import Session
 from ph.wire import WireModel
 
 from .keys import KERNEL_SNAPSHOTS, PYTHON_RUNTIME

@@ -40,7 +40,7 @@ from __future__ import annotations
 import json
 from typing import Any, Final, cast
 
-from ph.session.json import JSON_MAX_SAFE_INTEGER
+from ph.json import JSON_MAX_SAFE_INTEGER
 from ph.wire import WireModel
 
 from .protocol import INBOUND, FieldKind, InboundFrame

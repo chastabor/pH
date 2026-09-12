@@ -22,8 +22,9 @@ from typing import Annotated, Any, Literal, TypeAlias
 
 from pydantic import Field, StrictInt, field_validator
 
+from ..json import JsonObject, thaw_json
 from ..wire import WireDataclass, WireModel
-from .json import JsonObject, freeze_json_value, thaw_json
+from .json import freeze_json_value
 
 __all__ = [
     "SESSION_FORMAT_VERSION",

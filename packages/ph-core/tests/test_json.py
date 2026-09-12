@@ -1,4 +1,4 @@
-"""P8-06 — the readers' side of a typed payload.
+"""P8-06 — the readers' side of a typed payload: `ph.json`.
 
 `SessionEvent.data` is a `JsonObject`: a recursive `Mapping[str, JsonValue]`
 over the abstract containers, true of both shapes the log takes — `tuple` and
@@ -22,15 +22,8 @@ from types import MappingProxyType
 
 import pytest
 
-from ph.session.json import (
-    as_bool,
-    as_int,
-    as_obj,
-    as_seq,
-    as_str,
-    freeze_json_value,
-    thaw_json,
-)
+from ph.json import as_bool, as_int, as_obj, as_seq, as_str, thaw_json
+from ph.session.json import freeze_json_value
 
 # ---------------------------------------------------------------- as_int --
 

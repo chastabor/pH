@@ -42,11 +42,10 @@ import pytest
 from daemon_helpers import Daemon, private_runtime, serving
 from typer.testing import CliRunner
 
-from ph.session import JsonObject
+from ph.json import JsonObject, as_obj
 from ph_app.cli import app
 from ph_app.payloads import DaemonStatusReply
 from ph_app.protocol import Cursor
-from ph_app.wire import as_obj
 
 pytestmark = pytest.mark.anyio
 

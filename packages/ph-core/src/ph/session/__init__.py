@@ -14,21 +14,7 @@ from .events import (
     now_ms,
 )
 from .folds import SessionFoldCache
-from .json import (
-    InvalidJsonValueError,
-    JsonObject,
-    JsonValue,
-    PlainJsonValue,
-    as_bool,
-    as_int,
-    as_obj,
-    as_seq,
-    as_str,
-    dumps,
-    freeze_json_value,
-    is_json_value,
-    thaw_json,
-)
+from .json import InvalidJsonValueError, freeze_json_value
 from .known_event_types import IGNORABLE_SESSION_EVENT_TYPES, KNOWN_SESSION_EVENT_TYPES
 from .request_header import (
     EpochHeader,
@@ -67,9 +53,6 @@ __all__ = [
     "SURFACE_EVENT_TYPES",
     "EpochHeader",
     "InvalidJsonValueError",
-    "JsonObject",
-    "JsonValue",
-    "PlainJsonValue",
     "RequestContext",
     "Session",
     "SessionEvent",
@@ -86,15 +69,9 @@ __all__ = [
     "SurfaceManager",
     "SurfaceOp",
     "SurfaceReplace",
-    "as_bool",
-    "as_int",
-    "as_obj",
-    "as_seq",
-    "as_str",
     "canonical_header",
     "derive_event_message",
     "derive_transcript",
-    "dumps",
     "fold_latest",
     "fold_request_context",
     "fold_request_header",
@@ -105,12 +82,10 @@ __all__ = [
     "is_append_surface_event",
     "is_fork_boundary",
     "is_in_place_rewrite",
-    "is_json_value",
     "is_replacement_surface_event",
     "is_surface_eligible_type",
     "is_surface_event",
     "new_session_id",
     "now_ms",
     "open_turn_at",
-    "thaw_json",
 ]

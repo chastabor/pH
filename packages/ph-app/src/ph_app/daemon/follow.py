@@ -32,7 +32,7 @@ from typing import Any
 
 import anyio
 
-from ph.session import JsonObject, JsonValue
+from ph.json import JsonObject, JsonValue, as_int
 
 from .. import verbs
 from ..params import SnapshotParams
@@ -45,7 +45,6 @@ from ..payloads import (
     notice_of,
 )
 from ..protocol import Cursor
-from ..wire import as_int
 from .client import DaemonClient
 
 __all__ = ["EventFrame", "Followed", "first_of"]

@@ -52,16 +52,14 @@ from typing import Any
 
 from pydantic import ValidationError
 
+from ph.json import JsonObject, as_bool, as_int, as_obj, as_seq, as_str, thaw_json
 from ph.seams.subagents import downgrade_text, fold_subagent_event
 from ph.session import (
-    JsonObject,
     Session,
     SessionEvent,
     SurfaceReplace,
-    as_bool,
     is_in_place_rewrite,
     is_replacement_surface_event,
-    thaw_json,
 )
 from ph.session.request_header import parse_request_context
 from ph.text import count_of
@@ -69,16 +67,7 @@ from ph.tools import ToolCallView, ToolResult, ToolResultView
 from ph.tools.presentation import render_call_view, render_result_view
 
 from ..shell import shell_body
-from ..wire import (
-    as_int,
-    as_obj,
-    as_seq,
-    as_str,
-    media_labels,
-    one_line,
-    result_block,
-    text_of_wire,
-)
+from ..wire import media_labels, one_line, result_block, text_of_wire
 from .state import ChatItem, ItemRole, Surface, ToolCard, TuiState
 
 __all__ = [

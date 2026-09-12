@@ -17,6 +17,7 @@ from typing import Any
 
 import pytest
 
+from ph.json import as_obj, as_seq
 from ph.keys import SESSION_PERSISTENCE, SESSIONS
 from ph.persistence.repair import (
     TOOL_NOT_STARTED,
@@ -26,7 +27,6 @@ from ph.persistence.repair import (
 )
 from ph.seams.approval import pending_approvals
 from ph.session import Session, SurfaceIntent
-from ph.session.json import as_obj, as_seq
 from ph.testing import MountProfile, assistant_payload, user_payload
 
 

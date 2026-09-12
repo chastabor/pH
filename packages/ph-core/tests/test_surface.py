@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import pytest
 
+from ph.json import as_obj, as_seq
 from ph.session import (
     Session,
     SurfaceIntent,
@@ -40,7 +41,6 @@ from ph.session import (
     fold_surface,
     is_in_place_rewrite,
 )
-from ph.session.json import as_obj, as_seq
 from ph.session.surface import (
     SurfaceError,
     is_append_surface_event,

@@ -30,9 +30,10 @@ from typing import Any, Literal, TypeAlias
 import anyio
 
 from ..cordis import Context, Disposer, Running, events, maybe_await, plugin, running
+from ..json import as_int, dumps
 from ..keys import SESSION_TELEMETRY, SESSIONS
 from ..paths import default_home_path, write_text_under
-from ..session import Session, SessionEvent, as_int, dumps, now_ms
+from ..session import Session, SessionEvent, now_ms
 from ..wire import WireModel
 from ._registry import claim_entry
 

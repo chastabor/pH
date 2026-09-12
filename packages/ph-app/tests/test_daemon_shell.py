@@ -28,7 +28,7 @@ from daemon_helpers import running, until
 
 from ph.bundles import BASE, HEADLESS
 from ph.cordis import Profile, load_profile_documents
-from ph.session import as_str
+from ph.json import as_str
 from ph.testing import not_none
 from ph_app.daemon.client import DaemonClient
 from ph_app.daemon.supervisor import Root

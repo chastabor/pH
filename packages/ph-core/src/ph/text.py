@@ -49,7 +49,9 @@ def truncation_marker(dropped: int, cap: int) -> str:
     and each invented a wording, which is precisely the fifth-time-wrongly this
     module exists for.
 
-    `ph_runtime.protocol` keeps the one deliberate copy: that package ships into
-    the guest venv with no dependencies at all, so it cannot import this.
+    `ph_runtime.protocol` keeps a deliberate copy: that package ships into the
+    guest venv with no dependencies at all, so it cannot import this. It is one
+    of two — `ph_runtime._json` copies the one narrowing the guest imports out
+    of `ph.json` — and `test_protocol_mirror` pins both.
     """
     return f"\n[ph: output truncated — {dropped} bytes dropped, cap {cap} bytes]\n"

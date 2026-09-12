@@ -13,6 +13,8 @@ process boundary exists so that model-written code cannot reach the harness, and
 importing the harness would put it back inside. Its only dependency is `dill`,
 imported lazily — a venv without it still runs cells and forgoes snapshots.
 
+One module bends that without breaking it. `_json.py` holds the narrowings this package needs out of `ph.json` — one today, `as_str` — copied rather than imported for the reason above: that module ships in the ph-core wheel, and depending on the wheel is what this package exists not to do. `test_protocol_mirror.py` compares each definition against ph-core's character for character — it holds this package's other copy, `truncation_marker`, to `ph.text`'s in the same file — so a copy that drifts fails there rather than in a guest.
+
 ```bash
 python -m ph_runtime          # how the host spawns it; not a command you type
 ```

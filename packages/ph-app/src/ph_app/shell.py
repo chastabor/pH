@@ -30,9 +30,10 @@ from __future__ import annotations
 
 from ph.agent.types import AgentHandle
 from ph.cordis import Context
+from ph.json import JsonObject, as_int, as_str
 from ph.keys import SHELL
 from ph.seams.shell import ShellResult, ShellService
-from ph.session import JsonObject, Session, as_int, as_str
+from ph.session import Session
 from ph.text import truncation_marker
 from ph.tools.builtin.bash_tool import TIMED_OUT
 

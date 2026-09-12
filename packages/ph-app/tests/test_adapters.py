@@ -33,6 +33,7 @@ import anyio
 import pytest
 
 from ph.cordis import Context
+from ph.json import as_obj
 from ph.keys import AGENTS, ATTACHMENTS, SESSIONS
 from ph.llm.adapter import LlmError, MediaRoute
 from ph.llm.assembler import BlockAssembler
@@ -45,7 +46,6 @@ from ph.llm.types import (
     create_user_message,
 )
 from ph.seams.credentials import CredentialService
-from ph.session.json import as_obj
 from ph.testing import as_kind, block_text
 from ph_app.adapters._http import failure_from_status
 from ph_app.adapters.anthropic import (

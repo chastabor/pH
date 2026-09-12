@@ -37,7 +37,7 @@ from typing import Any, Literal, NotRequired, TypeAlias, TypedDict
 
 from pydantic import Field, ValidationError
 
-from ph.session import as_str
+from ph.json import as_str
 from ph.wire import WireModel, validation_errors
 
 __all__ = [

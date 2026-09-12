@@ -17,9 +17,9 @@ import anyio
 import pytest
 
 from ph.cancel import CancelToken
+from ph.json import as_obj, as_seq
 from ph.llm.types import ToolCallBlock, create_user_message
 from ph.session import Session
-from ph.session.json import as_obj, as_seq
 from ph.testing import StubAgent, parked_gate, raising, session_of, simple_tool, tool_runtime
 from ph.tools import TOOL_ABORTED_BEFORE_DISPATCH, Deny, ToolRuntime
 from ph.tools.batch import execute_tool_calls, parse_arguments

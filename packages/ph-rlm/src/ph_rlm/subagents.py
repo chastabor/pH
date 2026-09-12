@@ -51,6 +51,7 @@ from pydantic import Field
 
 from ph.agent.types import AgentCancelCause, AgentDriver, AgentHandle, AgentOptions
 from ph.cordis import Context, Disposer, plugin
+from ph.json import as_str, thaw_json
 from ph.keys import AGENTS, FS, JOBS, LLM, SESSION_PERSISTENCE, SESSIONS, SUBAGENTS, WORKSPACE
 from ph.llm.adapter import LlmError
 from ph.llm.types import CONTEXT_SUMMARY_MAX_CHARS, PluginSource, create_user_message, text_of
@@ -73,7 +74,6 @@ from ph.seams.subagents import (
 )
 from ph.seams.workspace import discards_writes, project_access, workspace_survivors
 from ph.session import Session, SessionEvent, derive_event_message
-from ph.session.json import as_str, thaw_json
 from ph.wire import WireModel
 
 from .keys import RLM_CHILDREN

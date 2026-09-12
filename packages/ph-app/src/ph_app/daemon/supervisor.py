@@ -38,6 +38,7 @@ from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStre
 
 from ph.agent.types import AgentDriver, AgentOptions
 from ph.cordis import Context, Profile
+from ph.json import as_obj, as_str
 from ph.keys import (
     AGENTS,
     SCHEDULE,
@@ -74,7 +75,6 @@ from ..protocol import Refusal, cursor_of
 from ..runtime import mounted, open_session
 from ..sessions import recorded_cwd
 from ..shell import run_shell
-from ..wire import as_obj, as_str
 from .cards import CARD_EVENTS, presentation_of
 from .frontend import AskDesk
 from .projections import commands_of, readings_of, screens_of

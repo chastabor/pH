@@ -18,6 +18,7 @@ from typing import Any, cast
 
 import pytest
 
+from ph.json import JsonValue, as_obj, as_seq
 from ph.session import (
     KNOWN_SESSION_EVENT_TYPES,
     Session,
@@ -25,7 +26,7 @@ from ph.session import (
     SessionFoldCache,
     SurfaceIntent,
 )
-from ph.session.json import InvalidJsonValueError, JsonValue, as_obj, as_seq
+from ph.session.json import InvalidJsonValueError
 from ph.testing import prefix_of, user_payload
 
 

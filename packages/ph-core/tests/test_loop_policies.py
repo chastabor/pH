@@ -19,6 +19,7 @@ from typing import Any
 import pytest
 
 from ph.agent.types import AgentOptions
+from ph.json import as_obj
 from ph.keys import AGENTS, LLM, SESSIONS
 from ph.llm.retry import is_transient
 from ph.llm.types import (
@@ -36,7 +37,6 @@ from ph.llm.types import (
 )
 from ph.seams.token_meter import TokenMeter
 from ph.session import Session, SurfaceIntent
-from ph.session.json import as_obj
 from ph.testing import MountProfile, assistant_payload, user_payload
 
 pytestmark = pytest.mark.anyio

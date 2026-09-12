@@ -56,9 +56,10 @@ import anyio
 from pydantic import Field
 
 from ph.cordis import Context, plugin
+from ph.json import as_str
 from ph.keys import FS, SYSTEM_PROMPT, TOOLS
 from ph.llm.types import ContentBlock
-from ph.session import Session, as_str
+from ph.session import Session
 from ph.system_prompt.assembly import ORDER_TOOL_GUIDANCE, PromptSection
 from ph.tools import ToolModel, define_tool, text_content
 from ph.wire import WireModel

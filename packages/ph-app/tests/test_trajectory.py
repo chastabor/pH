@@ -29,11 +29,11 @@ from pathlib import Path
 import pytest
 
 from ph.cordis import Context
+from ph.json import thaw_json
 from ph.keys import SESSIONS
 from ph.llm.types import PluginSource
 from ph.persistence import read_session
 from ph.session import Session, SurfaceIntent, SurfaceReplace, is_fork_boundary
-from ph.session.json import thaw_json
 from ph.session.known_event_types import KNOWN_SESSION_EVENT_TYPES
 from ph.testing import MountProfile, assistant_payload, store_root, stored_log, user_payload
 from ph_app.tui.adapter import RECORDLESS as TRANSCRIPT_RECORDLESS

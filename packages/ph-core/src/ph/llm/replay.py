@@ -27,8 +27,9 @@ from typing import Annotated, Any
 from pydantic import Field
 
 from ..cordis import Context, plugin
+from ..json import as_int, as_obj
 from ..keys import LLM, LLM_REPLAY
-from ..session import SessionEvent, as_int, as_obj
+from ..session import SessionEvent
 from ..wire import WireModel
 from .adapter import LlmError, ResolvedModel
 from .types import (

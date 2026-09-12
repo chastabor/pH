@@ -22,8 +22,9 @@ import anyio
 
 from ph.agent.types import AgentOptions
 from ph.cordis import DEPLOYMENT, Profile
+from ph.json import dumps
 from ph.keys import AGENTS, SESSIONS, TOOLS
-from ph.session import Session, SessionEvent, dumps
+from ph.session import Session, SessionEvent
 from ph.wire import WireModel
 
 from .. import verbs

@@ -10,10 +10,10 @@ resume and silently see nothing live.
 Absence is normal too. The log is JSON, every field is optional to a reader, and a
 missing one must cost a row rather than the transcript.
 
-`as_obj` and `as_seq` were born here as `obj`/`seq` and now live in
-`ph.session.json`, re-exported:
-the frozen-or-plain question they answer is about the tree, not the app, and
-core readers chaining `data.get(...).get(...)` needed the same narrowing (P8-06).
+`as_obj` and `as_seq` were born here as `obj`/`seq` and now live in `ph.json`,
+which every reader imports directly. This module re-exported them for a while
+so its own importers held; that shim is retired, because two doors to one
+function is what it cost.
 
 **In `ph_app`, not `ph_app.tui`.** `ph_app.tui.__init__` imports the Textual app,
 so a module under it cannot be read from without paying for the terminal framework
@@ -30,16 +30,11 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from ph.session import JsonValue, as_bool, as_int, as_obj, as_seq, as_str
+from ph.json import JsonValue, as_obj, as_seq, as_str
 from ph.tools import ToolCallView, ToolResultView
 from ph.tools.presentation import CARD_VIEWS
 
 __all__ = [
-    "as_bool",
-    "as_int",
-    "as_obj",
-    "as_seq",
-    "as_str",
     "describe",
     "first",
     "index_at_or_before",

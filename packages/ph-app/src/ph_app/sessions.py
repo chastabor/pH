@@ -33,12 +33,13 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
+from ph.json import as_obj
 from ph.persistence import MAX_DEPTH
 from ph.persistence.jsonl import HEADER_LINE_TYPE, family_log, locate_session, session_logs
 from ph.session import SessionHeader
 from ph.wire import WireModel
 
-from .wire import as_obj, text_of_wire
+from .wire import text_of_wire
 
 __all__ = ["SessionSummary", "recorded_cwd", "session_summaries"]
 

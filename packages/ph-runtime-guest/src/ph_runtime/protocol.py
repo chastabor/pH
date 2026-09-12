@@ -29,6 +29,8 @@ from __future__ import annotations
 
 from typing import Final
 
+from ._json import as_str
+
 __all__ = [
     "FD_ENV",
     "FRAME_FIELDS",
@@ -42,10 +44,25 @@ __all__ = [
     "truncation_marker",
 ]
 
-PROTOCOL_VERSION: Final = 2
-# 2: `boot` gained the required `skills` field (P3-18).
-"""Bumped when a frame's field set changes. A `boot` the guest cannot serve is
-refused at `boot-ack` rather than misread one frame at a time."""
+PROTOCOL_VERSION: Final = 1
+"""One, and it stays there until there is something to be compatible with.
+
+A version gate exists for two builds that have to understand each other, and
+before a first release there are not two: the host and the guest ship together
+out of this repo, and a frame set that changed changed on both sides in the same
+commit. `boot` gaining a required `skills` field (P3-18) and `reply` gaining an
+optional `name` were both recorded here as bumps, and neither ever gated
+anything.
+
+What it is for when that day comes: a `boot` the guest cannot serve is refused
+at `boot-ack` rather than misread one frame at a time. Move it for a change that
+would make a mismatched pairing *misread* — a required field added or removed, a
+frame's meaning changed — not for one it can simply ignore, since an unknown key
+is dropped and a missing one takes its default.
+
+**Not a cache key**, though `venv._marker` digests it and a bump does force a
+warm guest venv to rebuild. Reaching for it to ship an edit is how a number that
+means "compatibility" ends up meaning "some byte changed"."""
 
 PROTOCOL_FD: Final = 3
 """Where the channel is by default. fd 0/1/2 stay the program's own, so a cell's
@@ -100,7 +117,7 @@ FRAME_FIELDS: Final[dict[str, tuple[frozenset[str], frozenset[str]]]] = {
     # `fatal` is C3 on the wire: the dispatch settled the whole run (a denial or
     # a budget), so the proxy raises what the program is not offered a chance to
     # catch — and the host aborts the run regardless of whether it tries.
-    "reply": (frozenset({"type", "id", "ok"}), frozenset({"value", "message", "fatal"})),
+    "reply": (frozenset({"type", "id", "ok"}), frozenset({"value", "message", "name", "fatal"})),
     "restore": (frozenset({"type", "id", "variables"}), frozenset()),
     "cancel": (frozenset({"type"}), frozenset({"id"})),
     "shutdown": (frozenset({"type"}), frozenset()),
@@ -117,23 +134,6 @@ FRAME_FIELDS: Final[dict[str, tuple[frozenset[str], frozenset[str]]]] = {
 Data rather than docstrings, because this is what the mirror test compares. A
 field added on one side and not the other is a failing assertion instead of a
 frame the other half silently ignores."""
-
-
-def as_str(value: object, default: str = "") -> str:
-    """A JSON string, or `default` — the guest's copy of `ph.session.as_str`.
-
-    **Copied rather than imported, for `truncation_marker`'s reason one line
-    down**: this package ships into the guest venv with `dill` as its only
-    dependency, so it cannot reach `ph.session` and a gate that demanded the
-    import would demand the dependency this package exists to not have.
-
-    Unlike `truncation_marker` this needs no mirror test: it has no wire
-    contract to keep byte-identical with the host, only a policy — a value that
-    is not a string is not a string — and a copy that drifts from that would be
-    visibly wrong on its own. `runner.py` was already narrowing frames by hand
-    (`isinstance(run_id, int)`) with no name for what it was doing.
-    """
-    return value if isinstance(value, str) else default
 
 
 def truncation_marker(dropped: int, cap: int) -> str:

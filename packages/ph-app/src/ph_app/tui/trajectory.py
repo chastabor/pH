@@ -31,20 +31,11 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal, TypeAlias
 
+from ph.json import as_int, as_obj, as_str
 from ph.session import Session, SessionEvent, fork_boundaries, is_replacement_surface_event
 from ph.session.request_header import parse_request_header
 
-from ..wire import (
-    as_int,
-    as_obj,
-    as_str,
-    describe,
-    message_of,
-    one_line,
-    result_block,
-    source_of,
-    text_of_wire,
-)
+from ..wire import describe, message_of, one_line, result_block, source_of, text_of_wire
 
 __all__ = [
     "HANDLERS",

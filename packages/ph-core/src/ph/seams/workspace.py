@@ -46,9 +46,10 @@ from pydantic import Field
 
 from ..agent.types import AgentHandle
 from ..cordis import Context, Disposer, Running, maybe_await, plugin, running, safe_yaml_load
+from ..json import as_str
 from ..keys import AGENTS, CONTAINMENT, FS, SESSION_PERSISTENCE, SESSIONS, TOOLS, WORKSPACE
 from ..paths import canonical, default_home_path
-from ..session import Session, SessionEvent, as_str
+from ..session import Session, SessionEvent
 from ..tools.definition import ToolExecution
 from ..tools.errors import HarnessError
 from ..wire import WireModel, literal_lookup

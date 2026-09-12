@@ -31,6 +31,7 @@ from typing import Any
 from pydantic import Field
 
 from ...cordis import Context, plugin
+from ...json import as_str
 from ...keys import SUBAGENTS, TOOLS
 from ...llm.types import ContentBlock
 from ...seams.subagents import (
@@ -40,7 +41,6 @@ from ...seams.subagents import (
     SubagentStatus,
     downgrade_text,
 )
-from ...session import as_str
 from ...wire import WireModel
 from ..definition import ToolModel, ToolOutput, ToolRunContext, define_tool, text_content
 from ..presentation import ToolCallView, ToolResultView

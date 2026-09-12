@@ -30,9 +30,9 @@ from typing import Any
 from pydantic import Field
 
 from ...cordis import Context, plugin
+from ...json import as_str
 from ...keys import TOOLS, USER_QUESTIONS
 from ...seams.user_questions import UserQuestion
-from ...session import as_str
 from ..definition import ToolModel, ToolOutput, ToolRunContext, define_tool, text_content
 from ..presentation import ToolCallView, ToolResultView
 

@@ -60,6 +60,7 @@ from ..agent.types import (
 )
 from ..cancel import Cancelled, CancelToken
 from ..cordis import Context
+from ..json import as_int
 from ..keys import LLM, SYSTEM_PROMPT
 from ..llm.adapter import LlmError
 from ..llm.assembler import BlockAssembler
@@ -75,7 +76,7 @@ from ..llm.types import (
     create_assistant_message,
     create_user_message,
 )
-from ..session import Session, SurfaceIntent, as_int
+from ..session import Session, SurfaceIntent
 from ..session.request_header import EpochHeader, RequestContext, canonical_header, header_equals
 from ..system_prompt.assembly import (
     PromptAssembly,

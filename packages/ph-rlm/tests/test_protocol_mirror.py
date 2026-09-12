@@ -29,6 +29,9 @@ optional fields would come out required and the mirror would break here.
 
 from __future__ import annotations
 
+import ast
+from pathlib import Path
+
 import pytest
 
 from ph_rlm.kernel import protocol as host
@@ -69,27 +72,55 @@ def test_the_truncation_marker_is_byte_identical(dropped: int, cap: int) -> None
     assert host.truncation_marker(dropped, cap) == guest.truncation_marker(dropped, cap)
 
 
-@pytest.mark.parametrize(
-    "value",
-    ["text", "", None, 3, True, ["text"], {"k": "v"}],
-    ids=["a-string", "empty", "missing", "a-number", "a-bool", "a-list", "an-object"],
-)
-def test_the_guest_narrows_a_string_the_way_the_host_does(value: object) -> None:
-    """The guest's `as_str` copy, held against `ph.session`'s.
+def test_the_vendored_json_is_byte_identical_to_ph_core_s() -> None:
+    """Every definition in `ph_runtime/_json.py` against `ph/json.py`, character
+    for character.
 
-    The guest cannot import `ph.session` — `dill` is its only dependency — so it
-    carries a copy, exactly as it carries `truncation_marker`. This file's own
-    docstring is why that copy is pinned rather than trusted: *"A third copy that
-    no test compared had already drifted, which is the argument against keeping
-    one as documentation."*
+    The guest cannot import ph-core — `dill` is its only dependency and that
+    module ships in the ph-core wheel — so it carries a copy. Identity rather
+    than behaviour, which is the stronger assertion and no more work: a
+    behavioural test pins the cases somebody thought to parametrize, and this
+    pins every line, including the ones a future edit adds to `as_str` and
+    forgets to bring across.
 
-    Compared by behaviour rather than by source, because what has to agree is the
-    policy — not a string, so nothing — and not the spelling.
+    That matters for the reason this file opens with: *"a third copy that no test
+    compared had already drifted."*
+
+    **Definition by definition, not file against file.** The copy holds only the
+    narrowings the guest imports, so there is no whole-file comparison to make.
+    Which names those are is read off the copy itself rather than declared here
+    — paste a second one in and this picks it up — and one `ph.json` does not
+    define is caught by the `<=` below.
     """
-    from ph.session import as_str as host_as_str
+    from ph import json as host
 
-    assert guest.as_str(value) == host_as_str(value)
-    assert guest.as_str(value, "fallback") == host_as_str(value, "fallback")
+    guest_path = Path(guest.__file__).with_name("_json.py")
+    host_defs = _definitions(Path(host.__file__).read_text(encoding="utf-8"))
+    guest_defs = _definitions(guest_path.read_text(encoding="utf-8"))
+    fix = "copy it across from `ph.json` again"
+
+    assert guest_defs, f"the vendored copy defines nothing — {fix}"
+    assert guest_defs.keys() <= host_defs.keys(), (
+        f"the vendored copy defines {sorted(guest_defs.keys() - host_defs.keys())}, "
+        f"which `ph.json` does not — delete it, or {fix}"
+    )
+    for name, body in guest_defs.items():
+        assert body == host_defs[name], f"the vendored `{name}` has drifted — {fix}"
+
+
+def _definitions(source: str) -> dict[str, str]:
+    """Each top-level function, by name, as the exact text that defines it.
+
+    Parsed rather than split on a marker, because the copy is a subset: there is
+    no line in `ph.json` that says "everything below here was taken", and a
+    parser knows where one definition ends without being told.
+    """
+    tree = ast.parse(source)
+    return {
+        node.name: ast.get_source_segment(source, node) or ""
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+    }
 
 
 def test_the_host_models_carry_every_declared_outbound_field() -> None:

@@ -42,6 +42,7 @@ from typing import Any, ClassVar
 
 from pydantic import Field
 
+from ph.json import JsonObject
 from ph.llm.types import AttachmentRef, ToolSchema
 from ph.seams.approval import ApprovalRequest
 from ph.seams.commands import CommandSchema
@@ -50,7 +51,6 @@ from ph.seams.skills import Skill
 from ph.seams.tui_screens import ScreenSchema
 from ph.seams.tui_status import StatusReading
 from ph.seams.user_questions import UserQuestion
-from ph.session import JsonObject
 from ph.wire import WireModel, wire_alias
 
 from .protocol import CapabilityBlock, Cursor

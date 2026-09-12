@@ -32,10 +32,10 @@ import anyio
 from pydantic import ValidationError
 
 from ..cordis import Context, plugin
+from ..json import dumps
 from ..keys import SESSION_PERSISTENCE, SESSIONS
 from ..paths import resolve_roots
 from ..session import Session, SessionEvent, SessionHeader
-from ..session.json import dumps
 from ..wire import WireModel
 from .families import locate_under, logs_under, path_under
 from .lease import claim_file

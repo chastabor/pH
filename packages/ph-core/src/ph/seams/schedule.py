@@ -36,9 +36,10 @@ from datetime import datetime
 from typing import Any, Literal, TypeAlias
 
 from ..cordis import Context, plugin
+from ..json import as_int, as_str
 from ..keys import SCHEDULE
 from ..paths import resolve_roots
-from ..session import Session, SessionFoldCache, as_int, as_str, now_ms
+from ..session import Session, SessionFoldCache, now_ms
 from ..wire import WireModel
 from .invariants import contribute_fold_cache
 from .schedule_index import ScheduleIndex

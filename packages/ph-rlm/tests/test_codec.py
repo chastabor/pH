@@ -24,7 +24,7 @@ import random
 
 import pytest
 
-from ph.session.json import JSON_MAX_SAFE_INTEGER
+from ph.json import JSON_MAX_SAFE_INTEGER
 from ph_rlm.kernel.codec import decode, encode
 from ph_rlm.kernel.protocol import ReplyFrame
 

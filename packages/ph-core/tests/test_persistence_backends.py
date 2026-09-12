@@ -94,6 +94,7 @@ import anyio
 import pytest
 
 from ph.cordis import Context
+from ph.json import as_obj
 from ph.keys import SESSION_PERSISTENCE, SESSIONS
 from ph.persistence import (
     MAX_DEPTH,
@@ -106,7 +107,6 @@ from ph.persistence import (
 from ph.persistence.jsonl import JsonlSessionStore
 from ph.persistence.protocol import SessionPersistence, StoredSession
 from ph.session import Session, SessionEvent, SessionHeader, SurfaceIntent
-from ph.session.json import as_obj
 from ph.testing import MountProfile, reference_fork, user_payload
 
 pytestmark = pytest.mark.anyio

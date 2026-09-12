@@ -40,8 +40,9 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..cordis import Context, Disposer, events, plugin
+from ..json import as_str
 from ..keys import USER_QUESTIONS
-from ..session import Session, as_str
+from ..session import Session
 from ..wire import WireModel
 from ._registry import claim_entry
 

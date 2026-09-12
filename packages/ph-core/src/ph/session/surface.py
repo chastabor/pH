@@ -20,13 +20,13 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any
 
+from ..json import thaw_json
 from .events import (
     SessionEvent,
     SurfaceOp,
     SurfaceReplace,
     is_surface_eligible_type,
 )
-from .json import thaw_json
 
 __all__ = [
     "SurfaceError",

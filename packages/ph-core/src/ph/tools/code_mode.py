@@ -45,10 +45,11 @@ from pydantic import Field
 
 from ..cancel import CancelToken
 from ..cordis import Context, events, maybe_await, plugin
+from ..json import thaw_json
 from ..keys import CODE_RUNTIME, SYSTEM_PROMPT, TOOLS
 from ..seams.code_runtime import CodeBinding, CodeBindingNamespace, CodeRunRequest
 from ..session import Session
-from ..session.json import freeze_json_value, thaw_json
+from ..session.json import freeze_json_value
 from ..system_prompt.assembly import ORDER_TOOL_GUIDANCE, PromptSection
 from ..wire import WireModel
 from .definition import (

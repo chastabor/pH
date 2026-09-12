@@ -36,11 +36,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from ph.session import Session, SessionEvent, as_bool
+from ph.json import as_bool, as_obj, as_str
+from ph.session import Session, SessionEvent
 from ph.tools import ToolResult
 from ph.tools.presentation import CARD_VIEWS, render_call_view, render_result_view
 
-from ..wire import as_obj, as_str, result_block
+from ..wire import result_block
 
 __all__ = ["CARD_EVENTS", "presentation_of"]
 

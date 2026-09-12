@@ -40,10 +40,10 @@ from stabilize_helpers import (
     run_tool_calls,
 )
 
+from ph.json import as_obj, as_seq
 from ph.keys import SESSIONS, TOOLS
 from ph.llm.types import ToolCallBlock
 from ph.seams.approval import Edited, Responded
-from ph.session.json import as_obj, as_seq
 from ph.testing import MountProfile, simple_tool
 from ph_stabilize.destructive import findings
 from ph_stabilize.hitl import set_mode

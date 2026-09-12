@@ -74,8 +74,7 @@ __all__ = [
     "truncation_marker",
 ]
 
-PROTOCOL_VERSION: Final = 2
-# 2: `boot` gained the required `skills` field (P3-18).
+PROTOCOL_VERSION: Final = 1
 PROTOCOL_FD: Final = 3
 FD_ENV: Final = "PH_RUNTIME_FD"
 NAMESPACE_ENV: Final = "PH_NAMESPACE_ID"
@@ -129,6 +128,14 @@ class ReplyFrame(WireModel):
     ok: bool
     value: Any = None
     message: str | None = None
+    name: str | None = None
+    """The call's own `name`, echoed back so a failure can say what failed.
+
+    The guest raises `ToolFailed(name, message)`, and read it off a field the
+    host never sent: every tool failure inside a cell reported the tool as the
+    literal string `"the call"`, from the day the RLM landed. Optional because
+    only a failure needs it — a successful reply is the hot path and carries the
+    value instead."""
     fatal: bool | None = None
 
 

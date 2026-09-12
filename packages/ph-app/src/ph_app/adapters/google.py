@@ -43,6 +43,7 @@ from typing import Any
 import anyio
 
 from ph.cordis import Context, plugin
+from ph.json import as_int, as_str
 from ph.keys import ATTACHMENTS, CREDENTIALS, LLM, UPLOADS
 from ph.llm.adapter import LlmError, ResolvedModel, resolved
 from ph.llm.types import (
@@ -65,7 +66,7 @@ from ph.llm.types import (
     attachment_of,
 )
 from ph.seams.uploads import FileHandle
-from ph.session import as_int, as_str, now_ms
+from ph.session import now_ms
 from ph.wire import WireModel
 
 from ._http import HttpClient, resolve_secret

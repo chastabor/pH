@@ -25,9 +25,9 @@ from typing import Any
 import pytest
 
 from ph.agent.types import AgentOptions
+from ph.json import as_obj
 from ph.keys import AGENTS, LLM_FAKE, LLM_REPLAY, SESSIONS, SYSTEM_PROMPT, TOOLS
 from ph.llm.types import GenerateOptions, Message, ModelSource
-from ph.session.json import as_obj
 from ph.system_prompt.assembly import PromptContext, PromptSection
 from ph.testing import FAKE_OPTIONS as FAKE
 from ph.testing import (

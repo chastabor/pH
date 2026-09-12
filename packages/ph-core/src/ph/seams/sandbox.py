@@ -51,9 +51,10 @@ from typing import Any, Literal, Protocol, TypeAlias, runtime_checkable
 from pydantic import Field
 
 from ..cordis import Context, Disposer, Running, plugin, running
+from ..json import as_str
 from ..keys import AGENTS, SANDBOX, TUI_STATUS
 from ..paths import canonical
-from ..session import Session, as_str
+from ..session import Session
 from ..tools.errors import FailureKind, HarnessError
 from ..wire import WireModel, literal_lookup
 from ._registry import claim_slot, contribute_item

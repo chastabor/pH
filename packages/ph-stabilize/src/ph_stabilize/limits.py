@@ -43,20 +43,14 @@ from pydantic import Field
 
 from ph.agent.types import PreStepDecision
 from ph.cordis import Context, plugin
+from ph.json import as_bool, as_str
 from ph.keys import SESSIONS, SUBAGENTS, TUI_STATUS
 from ph.llm.types import ToolResultBlock
 from ph.seams._registry import contribute_via
 from ph.seams.invariants import contribute_fold_cache
 from ph.seams.subagents import ADMITTED, SubagentRequest
 from ph.seams.tui_status import StatusField, StatusReading
-from ph.session import (
-    Session,
-    SessionEvent,
-    SessionFoldCache,
-    as_bool,
-    as_str,
-    derive_event_message,
-)
+from ph.session import Session, SessionEvent, SessionFoldCache, derive_event_message
 from ph.tools.definition import Deny, ToolExecution
 from ph.wire import WireModel
 

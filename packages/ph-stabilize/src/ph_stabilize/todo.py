@@ -49,9 +49,10 @@ from typing import Any, Literal
 from pydantic import Field
 
 from ph.cordis import Context, plugin
+from ph.json import as_int, as_seq, as_str, thaw_json
 from ph.keys import SYSTEM_PROMPT, TOOLS
 from ph.llm.types import ToolCallBlock
-from ph.session import Session, as_int, as_seq, as_str, derive_event_message, thaw_json
+from ph.session import Session, derive_event_message
 from ph.system_prompt.assembly import (
     ORDER_TOOL_GUIDANCE,
     AssembleContext,

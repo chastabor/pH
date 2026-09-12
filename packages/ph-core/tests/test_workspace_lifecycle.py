@@ -22,9 +22,9 @@ from typing import Any
 
 import pytest
 
+from ph.json import as_obj
 from ph.keys import AGENTS, FS, SESSIONS, WORKSPACE
 from ph.seams.workspace import PROJECT_PROVISION_FILE, discover_provisioning
-from ph.session.json import as_obj
 from ph.testing import FAKE_OPTIONS, MountProfile, StubWorkspaceProvider, not_none, run_tool
 
 pytestmark = pytest.mark.anyio

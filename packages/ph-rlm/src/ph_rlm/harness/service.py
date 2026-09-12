@@ -42,10 +42,10 @@ from filelock import FileLock
 
 from ph.agent.types import AgentHandle
 from ph.cordis import Context
+from ph.json import dumps
 from ph.keys import APPROVAL, CODE_RUNTIME, SESSIONS, TOOLS
 from ph.paths import write_text_under
 from ph.session import Session, SessionFoldCache
-from ph.session.json import dumps
 
 from .state import (
     GLOBAL_LOG_NAME,

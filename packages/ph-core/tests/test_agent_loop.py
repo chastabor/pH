@@ -26,6 +26,7 @@ from ph.agent.types import (
     RequestProposal,
 )
 from ph.agent_loop.invariant import ModelVisibleNotLoggedError
+from ph.json import as_obj
 from ph.keys import AGENTS, LLM, LLM_FAKE, SESSIONS, SYSTEM_PROMPT
 from ph.llm.types import (
     BlockEnd,
@@ -40,7 +41,6 @@ from ph.llm.types import (
     create_user_message,
 )
 from ph.session import SurfaceIntent
-from ph.session.json import as_obj
 from ph.system_prompt.assembly import PromptContext, PromptSection
 from ph.testing import FAKE_OPTIONS as FAKE
 from ph.testing import MountProfile, block_text, user_payload

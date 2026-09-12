@@ -32,9 +32,9 @@ import pytest
 
 from ph.agent.types import AgentOptions
 from ph.bundles import BASE, HEADLESS
+from ph.json import as_int, as_obj
 from ph.keys import AGENTS, COMMANDS, SESSIONS
 from ph.session import Session
-from ph.session.json import as_int, as_obj
 from ph.testing import MountProfile, anthropic_reply
 from ph_app.adapters._http import HttpClient
 from ph_app.adapters.anthropic import MIN_CACHEABLE_TOKENS

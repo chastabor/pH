@@ -26,10 +26,10 @@ from test_dimensions import png
 from ph.agent.types import AgentOptions
 from ph.cancel import CancelToken
 from ph.cordis import Context
+from ph.json import dumps
 from ph.keys import AGENTS, ATTACHMENTS, LLM_FAKE, SESSIONS, TOOLS
 from ph.llm.adapter import ResolvedModel
 from ph.llm.types import ToolCallBlock, attachment_of
-from ph.session.json import dumps
 from ph.testing import MountProfile, run_tool
 from ph.tools.batch import execute_tool_calls
 from ph.tools.builtin.attach_tool import MAX_ATTACH_BYTES

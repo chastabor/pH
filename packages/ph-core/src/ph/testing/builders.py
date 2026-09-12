@@ -19,6 +19,7 @@ import anyio
 
 from ..agent.types import AgentHandle, AgentOptions
 from ..cordis import DEPLOYMENT, Boundary, Context
+from ..json import dumps
 from ..keys import SESSION_PERSISTENCE, SKILLS, TOOLS
 from ..llm.types import ContextForm, PluginSource, ReasoningBlock, TextBlock
 from ..persistence.jsonl import HEADER_LINE_TYPE, locate_session, session_path
@@ -31,7 +32,6 @@ from ..seams.workspace import (
     WorkspaceSeam,
 )
 from ..session import Session, SessionEvent, SessionHeader, SessionKind
-from ..session.json import dumps
 from ..tools.definition import ToolDefinition, ToolOutput, define_tool, text_content
 from ..tools.registry import ToolRuntime
 

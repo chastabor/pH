@@ -33,8 +33,9 @@ from dataclasses import replace
 from typing import Any
 
 from ..cordis import Context, plugin
+from ..json import as_seq
 from ..keys import ATTACHMENTS, LLM, SESSIONS
-from ..session import Session, as_seq
+from ..session import Session
 from .adapter import ResolvedModel
 from .types import AttachmentRef, GenerateOptions, Message, TextBlock, attachment_of
 

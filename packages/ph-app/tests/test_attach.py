@@ -20,10 +20,10 @@ from typing import Any
 
 import pytest
 
+from ph.json import as_seq, thaw_json
 from ph.keys import AGENTS, ATTACHMENTS, LLM_FAKE, SESSIONS
 from ph.llm.types import attachment_of, text_of
-from ph.session import Session, thaw_json
-from ph.session.json import as_seq
+from ph.session import Session
 from ph_app.attach import AttachmentUnavailable, ingest, prompt_message
 from ph_app.modes import run_print
 from ph_app.profiles import compose_profile

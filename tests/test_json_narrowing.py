@@ -10,7 +10,7 @@ logs, and the wrong value is a plausible one — a card titled `None`, a dict ke
 
 The narrowing family says the true thing instead: not a string, so nothing.
 `as_str` is one of five — `as_bool`, `as_int`, `as_obj`, `as_seq` — whose shared
-policy `ph.session.json` documents: **a mis-shaped field costs a row, not a
+policy `ph.json` documents: **a mis-shaped field costs a row, not a
 raise, and never a fabricated value.** `str()` is the example above because it is
 the loudest; `COERCIONS` below has what each of the others gets wrong.
 

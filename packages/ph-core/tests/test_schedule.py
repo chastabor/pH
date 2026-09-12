@@ -66,6 +66,7 @@ from pathlib import Path
 
 import pytest
 
+from ph.json import as_int
 from ph.seams.schedule import (
     CANCELLED,
     TICK,
@@ -78,7 +79,6 @@ from ph.seams.schedule import (
 )
 from ph.seams.schedule_index import INDEX_NAME, ScheduleIndex
 from ph.session import Session, now_ms
-from ph.session.json import as_int
 
 MINUTE = 60_000
 HOUR = 60 * MINUTE

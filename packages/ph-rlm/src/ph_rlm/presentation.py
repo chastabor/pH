@@ -38,8 +38,8 @@ from collections.abc import Mapping
 from typing import Any
 
 from ph.cordis import Context, plugin
+from ph.json import as_bool, as_int, as_str
 from ph.keys import TOOLS
-from ph.session import as_bool, as_int, as_str
 from ph.text import count_of
 from ph.tools.code_mode import CodeCellValue
 from ph.tools.definition import ToolOutput, ToolResult, TransportPresentation, text_content
