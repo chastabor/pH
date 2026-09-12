@@ -20,6 +20,7 @@ act in the session than an un-submitted sentence is.
 from __future__ import annotations
 
 from base64 import b64encode
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -27,6 +28,7 @@ from daemon_helpers import running, until
 
 from ph.keys import ATTACHMENTS
 from ph.llm.types import AttachmentRef
+from ph.session import as_seq
 from ph_app.daemon.framing import MAX_ATTACHMENT_BYTES, MAX_LINE
 from ph_app.protocol import DaemonError
 
@@ -56,7 +58,7 @@ async def _put(client: Any, session_id: str, *, name: str = "diagram.png") -> di
 # ------------------------------------------------------------------ storing --
 
 
-async def test_the_client_sends_content_and_gets_back_a_reference(tmp_path: Any) -> None:
+async def test_the_client_sends_content_and_gets_back_a_reference(tmp_path: Path) -> None:
     """The daemon never learns a path, and answers with what a message carries.
 
     The reference is the whole point of the round trip: the client holds bytes,
@@ -77,7 +79,7 @@ async def test_the_client_sends_content_and_gets_back_a_reference(tmp_path: Any)
         assert root.ctx.require(ATTACHMENTS).exists(ref)
 
 
-async def test_the_same_file_twice_is_one_blob(tmp_path: Any) -> None:
+async def test_the_same_file_twice_is_one_blob(tmp_path: Path) -> None:
     """Content-addressed, so a second put is a cheap way to learn the reference.
 
     Which is what makes two people dropping the same screenshot into one session
@@ -95,7 +97,7 @@ async def test_the_same_file_twice_is_one_blob(tmp_path: Any) -> None:
         assert len(stored) == 1, f"one blob expected, found {stored}"
 
 
-async def test_a_file_too_large_for_a_frame_is_refused_by_name(tmp_path: Any) -> None:
+async def test_a_file_too_large_for_a_frame_is_refused_by_name(tmp_path: Path) -> None:
     """Named, because the caller's next move is specific.
 
     Not "too big to attach" but "too big to attach *in one frame*" — and the
@@ -138,7 +140,7 @@ async def test_a_file_too_large_for_a_frame_is_refused_by_name(tmp_path: Any) ->
 # ------------------------------------------------------------- the prompting --
 
 
-async def test_a_prompt_over_the_socket_carries_its_attachment(tmp_path: Any) -> None:
+async def test_a_prompt_over_the_socket_carries_its_attachment(tmp_path: Path) -> None:
     """The gate this increment exists for: the model actually receives the file.
 
     Asserted on the `user/message` the log kept, because that is what
@@ -159,12 +161,13 @@ async def test_a_prompt_over_the_socket_carries_its_attachment(tmp_path: Any) ->
         )
         message = root.session.latest("user/message")
         assert message is not None
-        content = message.data["content"]
-        assert [one["type"] for one in content] == ["text", "media"]
-        assert content[1]["attachment"]["attachmentId"] == wire["attachmentId"]
+        assert list(as_seq(message.data["content"])) == [
+            {"type": "text", "text": "look"},
+            {"type": "media", "attachment": wire},
+        ]
 
 
-async def test_an_attachment_this_deployment_never_stored_is_refused(tmp_path: Any) -> None:
+async def test_an_attachment_this_deployment_never_stored_is_refused(tmp_path: Path) -> None:
     """Refused, not dropped — the silent failure P7-01 exists to end.
 
     A reference from another machine, or to a blob a `gc` took, would otherwise
@@ -196,7 +199,7 @@ async def test_an_attachment_this_deployment_never_stored_is_refused(tmp_path: A
 
 
 async def test_a_staged_attachment_rides_the_next_prompt_from_any_client(
-    tmp_path: Any,
+    tmp_path: Path,
 ) -> None:
     """One tray, one conversation — the multiplex rule applied to the composer.
 
@@ -219,11 +222,13 @@ async def test_a_staged_attachment_rides_the_next_prompt_from_any_client(
         )
         message = root.session.latest("user/message")
         assert message is not None
-        content = message.data["content"]
-        assert content[1]["attachment"]["attachmentId"] == wire["attachmentId"]
+        assert list(as_seq(message.data["content"])) == [
+            {"type": "text", "text": "what is this"},
+            {"type": "media", "attachment": wire},
+        ]
 
 
-async def test_staging_reaches_every_attached_front_end(tmp_path: Any) -> None:
+async def test_staging_reaches_every_attached_front_end(tmp_path: Path) -> None:
     """A chip only the uploader can see is a composer nobody else can reason about.
 
     Sabotage: return the staged list without publishing it, and a second UI shows
@@ -248,7 +253,7 @@ async def test_staging_reaches_every_attached_front_end(tmp_path: Any) -> None:
 
 
 async def test_a_staged_attachment_rides_one_prompt_and_not_the_next(
-    tmp_path: Any,
+    tmp_path: Path,
 ) -> None:
     """Drained, not copied.
 
@@ -278,7 +283,7 @@ async def test_a_staged_attachment_rides_one_prompt_and_not_the_next(
         assert not root.staged, "the tray is empty after the prompt that took it"
 
 
-async def test_the_tray_is_not_in_the_log(tmp_path: Any) -> None:
+async def test_the_tray_is_not_in_the_log(tmp_path: Path) -> None:
     """Un-submitted intent is not an act in the session (§5 rule 6).
 
     The same rule that keeps a half-typed prompt off the log. What it costs is
@@ -297,7 +302,7 @@ async def test_the_tray_is_not_in_the_log(tmp_path: Any) -> None:
         assert [one.type for one in root.session.events] == [], "and the log says nothing"
 
 
-async def test_staging_the_same_file_twice_is_one_chip(tmp_path: Any) -> None:
+async def test_staging_the_same_file_twice_is_one_chip(tmp_path: Path) -> None:
     """Idempotent by construction, for the same reason `attachment/put` is.
 
     `session/stage` takes no idempotence key, and a client that reconnects

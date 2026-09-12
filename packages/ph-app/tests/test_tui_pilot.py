@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from daemon_helpers import Daemon
 from daemon_helpers import until as settled
 from textual.binding import Binding
 from textual.widgets import Input
@@ -59,7 +60,7 @@ def _command(name: str = "tidy") -> CommandDefinition:
 # ------------------------------------------------------------------- prompt --
 
 
-async def test_typing_and_submitting_runs_a_turn(make_tui_app: MakeApp, tui_daemon: Any) -> None:
+async def test_typing_and_submitting_runs_a_turn(make_tui_app: MakeApp, tui_daemon: Daemon) -> None:
     async with running(make_tui_app()) as (app, pilot):
         root = root_of(tui_daemon)
         assert app.front is not None
@@ -164,7 +165,9 @@ async def _decide(app: Any, pilot: Any, root: Any, *, arguments: Any = None) -> 
     return answers
 
 
-async def test_the_modal_answers_in_the_tools_voice(make_tui_app: MakeApp, tui_daemon: Any) -> None:
+async def test_the_modal_answers_in_the_tools_voice(
+    make_tui_app: MakeApp, tui_daemon: Daemon
+) -> None:
     """`respond` (P4-05): the body never runs and the model reads an answer.
 
     A person who knows the answer should not have to reject a call and then
@@ -191,7 +194,7 @@ async def test_the_modal_answers_in_the_tools_voice(make_tui_app: MakeApp, tui_d
 
 async def test_the_modal_corrects_the_call_rather_than_refusing_it(
     make_tui_app: MakeApp,
-    tui_daemon: Any,
+    tui_daemon: Daemon,
 ) -> None:
     """`edit` (P4-05), opening on the call as it stands.
 
@@ -215,14 +218,16 @@ async def test_the_modal_corrects_the_call_rather_than_refusing_it(
         assert isinstance(answers[0], Edited)
         assert answers[0].arguments == {"path": "notes.md"}
         decided = next(e for e in root.session.events if e.type == "approval/decided")
-        assert decided.data["arguments"]["path"] == "notes.md"
+        assert decided.data["arguments"] == {"path": "notes.md"}
         # The ask itself does not carry them: `tool/call` already did, and two
         # copies of one fact in the log are two that can disagree.
         asked = next(e for e in root.session.events if e.type == "approval/asked")
         assert "arguments" not in asked.data
 
 
-async def test_a_mistyped_edit_keeps_the_box_open(make_tui_app: MakeApp, tui_daemon: Any) -> None:
+async def test_a_mistyped_edit_keeps_the_box_open(
+    make_tui_app: MakeApp, tui_daemon: Daemon
+) -> None:
     """Not a refusal: the person meant to edit and mistyped, and rejecting the
     call on a stray comma would be the harness deciding for them."""
     async with running(make_tui_app()) as (app, pilot):
@@ -240,7 +245,9 @@ async def test_a_mistyped_edit_keeps_the_box_open(make_tui_app: MakeApp, tui_dae
         assert isinstance(app.screen, ApprovalModal)
 
 
-async def test_approval_round_trips_through_the_log(make_tui_app: MakeApp, tui_daemon: Any) -> None:
+async def test_approval_round_trips_through_the_log(
+    make_tui_app: MakeApp, tui_daemon: Daemon
+) -> None:
     """The P2-04 gate: asked, decided, and both in the log."""
     async with running(make_tui_app()) as (app, pilot):
         root = root_of(tui_daemon)
@@ -354,7 +361,7 @@ async def test_ask_user_without_options_takes_free_text(make_tui_app: MakeApp) -
 
 
 async def test_the_command_palette_inserts_a_command(
-    make_tui_app: MakeApp, tui_daemon: Any
+    make_tui_app: MakeApp, tui_daemon: Daemon
 ) -> None:
     async with running(make_tui_app()) as (app, pilot):
         root = root_of(tui_daemon)
@@ -417,7 +424,7 @@ async def test_dismissing_the_theme_picker_restores_the_setting(make_tui_app: Ma
 
 
 async def test_the_permission_picker_records_the_posture(
-    make_tui_app: MakeApp, tui_daemon: Any
+    make_tui_app: MakeApp, tui_daemon: Daemon
 ) -> None:
     async with running(make_tui_app()) as (app, pilot):
         root = root_of(tui_daemon)
@@ -566,7 +573,7 @@ async def test_a_picker_filters_on_typed_text(make_tui_app: MakeApp) -> None:
 
 
 async def test_typing_a_slash_offers_registered_commands(
-    make_tui_app: MakeApp, tui_daemon: Any
+    make_tui_app: MakeApp, tui_daemon: Daemon
 ) -> None:
     """Completion sources are pH's registries, not a second list (I7)."""
     async with running(make_tui_app()) as (app, pilot):
@@ -584,7 +591,7 @@ async def test_typing_a_slash_offers_registered_commands(
 
 
 async def test_a_disposed_command_leaves_the_completion_list(
-    make_tui_app: MakeApp, tui_daemon: Any
+    make_tui_app: MakeApp, tui_daemon: Daemon
 ) -> None:
     async with running(make_tui_app()) as (app, pilot):
         root = root_of(tui_daemon)
@@ -606,7 +613,7 @@ async def test_a_disposed_command_leaves_the_completion_list(
 
 
 async def test_escape_closes_the_completion_list_before_interrupting(
-    make_tui_app: MakeApp, tui_daemon: Any
+    make_tui_app: MakeApp, tui_daemon: Daemon
 ) -> None:
     async with running(make_tui_app()) as (app, pilot):
         root = root_of(tui_daemon)
@@ -626,7 +633,7 @@ async def test_escape_closes_the_completion_list_before_interrupting(
 
 
 async def test_a_slash_line_dispatches_instead_of_prompting(
-    make_tui_app: MakeApp, tui_daemon: Any
+    make_tui_app: MakeApp, tui_daemon: Daemon
 ) -> None:
     """A command spends no model turn, and the log says who decided.
 
@@ -656,7 +663,7 @@ async def test_a_slash_line_dispatches_instead_of_prompting(
 
 
 async def test_an_unknown_command_is_reported_not_prompted(
-    make_tui_app: MakeApp, tui_daemon: Any
+    make_tui_app: MakeApp, tui_daemon: Daemon
 ) -> None:
     async with running(make_tui_app()) as (app, pilot):
         root = root_of(tui_daemon)
@@ -762,7 +769,7 @@ async def test_view_keeps_the_keys_the_old_toggles_had(make_tui_app: MakeApp) ->
 
 
 async def test_login_stores_a_secret_without_logging_it(
-    make_tui_app: MakeApp, tui_daemon: Any
+    make_tui_app: MakeApp, tui_daemon: Daemon
 ) -> None:
     from ph_app.tui.modals.login import LoginModal
 
@@ -824,7 +831,7 @@ async def test_the_context_gauge_warns_from_the_compaction_threshold(
 
 
 async def test_resuming_rebuilds_the_transcript_from_the_log(
-    make_tui_app: MakeApp, tui_daemon: Any
+    make_tui_app: MakeApp, tui_daemon: Daemon
 ) -> None:
     """The P2-01 gate at the app level: a stored session comes back readable.
 
@@ -897,7 +904,7 @@ async def test_a_typed_attach_reaches_the_verb_with_its_argument(
 
 
 async def test_a_turn_started_in_the_tui_finishes_after_the_tui_is_gone(
-    make_tui_app: MakeApp, tui_daemon: Any
+    make_tui_app: MakeApp, tui_daemon: Daemon
 ) -> None:
     """**The gate this whole plan is named for** (P5-01, P5-14).
 
@@ -938,7 +945,7 @@ async def test_a_turn_started_in_the_tui_finishes_after_the_tui_is_gone(
 
 
 async def test_two_terminals_on_one_session_share_the_log_and_not_the_composer(
-    make_tui_app: MakeApp, tui_daemon: Any
+    make_tui_app: MakeApp, tui_daemon: Daemon
 ) -> None:
     """The multiplex rule, through two real apps on one root.
 

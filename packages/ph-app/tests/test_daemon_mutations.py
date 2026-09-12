@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from base64 import b64encode
 from collections.abc import Awaitable, Callable
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -106,7 +107,7 @@ def test_every_mutation_has_a_case_here_and_no_projection_is_one() -> None:
 
 
 @pytest.mark.parametrize("method", sorted(MUTATIONS))
-async def test_the_same_key_twice_acts_once_and_says_so(method: str, tmp_path: Any) -> None:
+async def test_the_same_key_twice_acts_once_and_says_so(method: str, tmp_path: Path) -> None:
     """One key, one effect, one reply shape — for every row, not two of them.
 
     Sabotage: drop `once` from the wrapper, and the second call acts again; give
@@ -131,7 +132,7 @@ async def test_the_same_key_twice_acts_once_and_says_so(method: str, tmp_path: A
             assert effects(root) == 1
 
 
-async def test_a_refusal_does_not_consume_the_key(tmp_path: Any) -> None:
+async def test_a_refusal_does_not_consume_the_key(tmp_path: Path) -> None:
     """Validate, then claim, then act — in that order, or a refusal eats a retry.
 
     A prompt naming an attachment this deployment never stored is refused. The
@@ -162,7 +163,7 @@ async def test_a_refusal_does_not_consume_the_key(tmp_path: Any) -> None:
         )
 
 
-async def test_a_mutation_on_a_passivated_root_brings_it_back(tmp_path: Any) -> None:
+async def test_a_mutation_on_a_passivated_root_brings_it_back(tmp_path: Path) -> None:
     """Every mutation resolves its root through `start`, not a lookup.
 
     `session/prompt` always did (P5-05); the others reported a passivated root as

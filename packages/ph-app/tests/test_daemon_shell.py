@@ -19,6 +19,7 @@ is what lets the browser and the terminal share one fold.
 from __future__ import annotations
 
 from functools import partial
+from pathlib import Path
 from typing import Any
 
 import anyio
@@ -27,13 +28,17 @@ from daemon_helpers import running, until
 
 from ph.bundles import BASE, HEADLESS
 from ph.cordis import Profile, load_profile_documents
+from ph.session import as_str
+from ph.testing import not_none
+from ph_app.daemon.client import DaemonClient
+from ph_app.daemon.supervisor import Root
 from ph_app.protocol import DaemonError
 from ph_app.shell import shell_body
 
 pytestmark = pytest.mark.anyio
 
 
-async def _run(client: Any, root: Any, command: str) -> dict[str, Any]:
+async def _run(client: DaemonClient, root: Root, command: str) -> dict[str, Any]:
     reply = await client.call("session/shell", sessionId=root.id, command=command)
     await until(
         lambda: root.session.latest("shell/result") is not None, what="the command to finish"
@@ -41,7 +46,7 @@ async def _run(client: Any, root: Any, command: str) -> dict[str, Any]:
     return dict(reply)
 
 
-async def test_a_shell_command_is_logged_and_never_reaches_the_model(tmp_path: Any) -> None:
+async def test_a_shell_command_is_logged_and_never_reaches_the_model(tmp_path: Path) -> None:
     """The claim the row exists for, asserted against the model's actual view.
 
     `derive_messages` is byte-identical across the command, so no amount of
@@ -62,7 +67,7 @@ async def test_a_shell_command_is_logged_and_never_reaches_the_model(tmp_path: A
         assert types == ["shell/command", "shell/result"], "logged, in full, in order"
 
 
-async def test_the_command_is_logged_before_it_runs(tmp_path: Any) -> None:
+async def test_the_command_is_logged_before_it_runs(tmp_path: Path) -> None:
     """§5 rule 2, and the reason the two events are two.
 
     A `!!` that hangs — or that takes the daemon down with it — must still say in
@@ -97,10 +102,10 @@ async def test_the_command_is_logged_before_it_runs(tmp_path: Any) -> None:
             release.touch()
 
         result = root.session.latest("shell/result")
-        assert result is not None and "released" in result.data["stdout"]
+        assert result is not None and "released" in as_str(result.data["stdout"])
 
 
-async def test_the_output_and_the_exit_code_reach_the_log(tmp_path: Any) -> None:
+async def test_the_output_and_the_exit_code_reach_the_log(tmp_path: Path) -> None:
     """What a person ran it to see. Both streams, one field, as a terminal shows."""
     async with running(tmp_path) as daemon:
         root = await daemon.root("noisy")
@@ -116,15 +121,15 @@ async def test_the_output_and_the_exit_code_reach_the_log(tmp_path: Any) -> None
         # Apart on the log, because joining them is a presentation choice: a
         # front end that wants stderr in red can make one, and `shell_body` is
         # the shared default for one that wants a single column.
-        assert result.data["stdout"].strip() == "out"
-        assert result.data["stderr"].strip() == "err"
+        assert as_str(result.data["stdout"]).strip() == "out"
+        assert as_str(result.data["stderr"]).strip() == "err"
         assert result.data["ok"] is False and result.data["clipped"] is False
         assert result.data["cwd"], "the seam reports where the child actually ran"
         assert "[stderr]" in shell_body(result.data) and "[exit 3]" in shell_body(result.data)
 
 
 async def test_a_shell_command_from_one_ui_appears_in_every_attached_one(
-    tmp_path: Any,
+    tmp_path: Path,
 ) -> None:
     """One act, one rendering path — the multiplex rule applied to `!!`.
 
@@ -153,7 +158,7 @@ async def test_a_shell_command_from_one_ui_appears_in_every_attached_one(
         assert relayed == ["shell/command", "shell/result"]
 
 
-async def test_a_shell_child_never_inherits_a_credential(tmp_path: Any) -> None:
+async def test_a_shell_child_never_inherits_a_credential(tmp_path: Path) -> None:
     """`!!env` prints no harness secret, and the mechanism is one, not two.
 
     `ctx.shell` passes `env=scrub_env(...)`, which drops every name matching
@@ -171,12 +176,12 @@ async def test_a_shell_child_never_inherits_a_credential(tmp_path: Any) -> None:
 
         await _run(client, root, "env")
 
-        output = root.session.latest("shell/result").data["stdout"]
+        output = as_str(not_none(root.session.latest("shell/result")).data["stdout"])
         assert "ANTHROPIC_API_KEY" not in output
         assert "SECRET" not in output and "PASSWORD" not in output
 
 
-async def test_an_empty_command_is_refused_rather_than_run(tmp_path: Any) -> None:
+async def test_an_empty_command_is_refused_rather_than_run(tmp_path: Path) -> None:
     """A bare `!!` is a typo, and running the shell with nothing is not what it meant."""
     async with running(tmp_path) as daemon:
         root = await daemon.root("empty")
@@ -188,7 +193,7 @@ async def test_an_empty_command_is_refused_rather_than_run(tmp_path: Any) -> Non
         assert [one.type for one in root.session.events] == []
 
 
-async def test_a_result_cites_the_command_it_settles(tmp_path: Any) -> None:
+async def test_a_result_cites_the_command_it_settles(tmp_path: Path) -> None:
     """The pair is joined by the log, not by "the one in flight".
 
     Every other pair in the fold correlates through an id in the event data —
@@ -213,7 +218,7 @@ async def test_a_result_cites_the_command_it_settles(tmp_path: Any) -> None:
 
 
 async def test_a_deployment_with_no_shell_refuses_before_claiming_the_key(
-    tmp_path: Any,
+    tmp_path: Path,
 ) -> None:
     """The seam check belongs in `prepare`, which is what orders it before `once`.
 

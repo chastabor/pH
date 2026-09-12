@@ -11,15 +11,22 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Callable, Coroutine
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from textual.binding import Binding
 from textual.pilot import Pilot
 
 from ph.seams.approval import ApprovalAnswer, ApprovalRequest
 from ph.seams.user_questions import UserQuestion
+from ph_app.daemon.supervisor import Root
 from ph_app.tui.app import PHTuiApp
 from ph_app.tui.state import Surface
+
+if TYPE_CHECKING:
+    # Annotation only, and `daemon_helpers` is not free: importing it composes a
+    # profile off disk at module scope. The three modules that use these helpers
+    # without the daemon fixture should not pay for a name the checker reads.
+    from daemon_helpers import Daemon
 
 
 def tui_app(
@@ -58,7 +65,7 @@ def tui_app(
     return app
 
 
-def root_of(daemon: Any, session_id: str = "pilot") -> Any:
+def root_of(daemon: Daemon, session_id: str = "pilot") -> Root:
     """The daemon-side root a pilot app is attached to.
 
     What `app.front.ctx` used to be. It is deliberately not reachable *through*

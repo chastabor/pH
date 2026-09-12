@@ -6,8 +6,8 @@ over the abstract containers, true of both shapes the log takes — `tuple` and
 which is the point, and honesty has a cost at the read site: `int(data.get(
 "turn", 0))` is now an `int()` of a union a `Mapping` belongs to, and a chained
 `data.get("message").get("content")` is a `.get` on something that may be a
-string. `as_int`, `as_obj` and `as_seq` are the three narrowings the ~167 readers
-needed, and this file pins what each promises.
+string. `as_int`, `as_obj`, `as_seq` and `as_str` are the four narrowings the ~167
+readers needed, and this file pins what each promises.
 
 The overloads on `freeze_json_value` and `thaw_json` are claims to the checker
 — an object in is an object out — that `mypy` verifies against every production
@@ -22,7 +22,7 @@ from types import MappingProxyType
 
 import pytest
 
-from ph.session.json import as_int, as_obj, as_seq, freeze_json_value, thaw_json
+from ph.session.json import as_int, as_obj, as_seq, as_str, freeze_json_value, thaw_json
 
 # ---------------------------------------------------------------- as_int --
 
@@ -89,6 +89,49 @@ def test_a_field_that_is_not_a_number_reads_as_the_default(junk: object) -> None
     """
     assert as_int(junk) == 0
     assert as_int(junk, -1) == -1, "and the caller's own default is what it answers with"
+
+
+# ---------------------------------------------------------------- as_str --
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("text", "text"),
+        ("", ""),
+        (None, ""),
+        (3, ""),
+        (True, ""),
+        (["text"], ""),
+        ({"text": "text"}, ""),
+    ],
+    ids=["a-string", "empty", "missing", "a-number", "a-bool", "a-list", "an-object"],
+)
+def test_as_str_answers_the_empty_string_for_anything_that_is_not_one(
+    value: object, expected: str
+) -> None:
+    """One policy with its siblings: a mis-shaped field costs a row, not a raise.
+
+    **The point is what it does *not* do.** `str(value)` — which is what a reader
+    writes without this — turns `None` into `"None"` and `3` into `"3"`, so a
+    field that is absent or of the wrong type comes back looking like an answer.
+    Every row below that expects `""` is a row `str()` would have passed.
+    """
+    assert as_str(value) == expected
+
+
+def test_as_str_returns_the_string_it_was_given_by_identity() -> None:
+    """Not a copy, for `as_obj`'s reason: a narrowing is a claim about a value,
+    not a new value."""
+    value = "the same object"
+    assert as_str(value) is value
+
+
+def test_as_str_takes_a_default_for_a_reader_that_has_a_better_empty() -> None:
+    """`as_int`'s arrangement: the family answers with nothing, and a caller that
+    knows a better nothing says so. A card with no name reads `?`, not blank."""
+    assert as_str(None, "?") == "?"
+    assert as_str("named", "?") == "named"
 
 
 # ------------------------------------------------------------- obj / seq --

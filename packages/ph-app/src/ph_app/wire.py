@@ -30,7 +30,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from ph.session import JsonValue, as_int, as_obj, as_seq
+from ph.session import JsonValue, as_int, as_obj, as_seq, as_str
 from ph.tools import ToolCallView, ToolResultView
 from ph.tools.presentation import CARD_VIEWS
 
@@ -76,7 +76,7 @@ def text_of_wire(
             continue
         block_kind = block.get("type")
         if block_kind == kind:
-            parts.append(str(block.get("text", "")))
+            parts.append(as_str(block.get("text")))
         elif placeholder is not None and isinstance(block_kind, str):
             parts.append(placeholder(block_kind))
     return "\n".join(parts)
@@ -157,9 +157,9 @@ def source_of(message: Any) -> tuple[str, str, str]:
     disagreeing about who produced a record.
     """
     source = as_obj(as_obj(message).get("source"))
-    kind = str(source.get("kind") or "")
-    name = str(source.get("plugin") or source.get("model") or source.get("callId") or "")
-    return kind, name, str(source.get("form") or "")
+    kind = as_str(source.get("kind"))
+    name = as_str(source.get("plugin") or source.get("model") or source.get("callId"))
+    return kind, name, as_str(source.get("form"))
 
 
 def split_terms(query: str, prefix: str) -> tuple[list[str], str]:

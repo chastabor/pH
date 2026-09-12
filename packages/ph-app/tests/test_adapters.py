@@ -685,7 +685,9 @@ def test_anthropic_thinking_and_tool_blocks_map_across() -> None:
 @pytest.mark.skipif(
     not os.environ.get("DEEPSEEK_API_KEY"), reason="no DEEPSEEK_API_KEY; smoke test skipped"
 )
-async def test_real_api_smoke(tmp_path: Any, monkeypatch: Any) -> None:  # pragma: no cover
+async def test_real_api_smoke(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:  # pragma: no cover
     """P1-15's gate: one real round trip, skipped without a key."""
     from ph.agent.types import AgentOptions
     from ph_app.profiles import compose_profile

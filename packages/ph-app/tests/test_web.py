@@ -28,6 +28,7 @@ from aiohttp import FormData, web
 from aiohttp.test_utils import TestClient, TestServer
 from daemon_helpers import serving, until
 
+from ph.session import as_seq
 from ph_app.daemon.framing import MAX_ATTACHMENT_BYTES
 from ph_app.web.serve import CLOSING_BODY, COOKIE, TOKEN_QUERY, WebServer
 
@@ -375,9 +376,10 @@ async def test_a_browser_uploaded_file_reaches_the_model_as_a_media_block(
         )
         message = root.session.latest("user/message")
         assert message is not None
-        content = message.data["content"]
-        assert [one["type"] for one in content] == ["text", "media"]
-        assert content[1]["attachment"]["attachmentId"] == reference["attachmentId"]
+        assert list(as_seq(message.data["content"])) == [
+            {"type": "text", "text": "look at this"},
+            {"type": "media", "attachment": reference},
+        ]
 
 
 async def test_a_browser_that_cannot_name_the_type_still_lands_an_image(

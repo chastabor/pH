@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from daemon_helpers import daemon_socket, running
+from daemon_helpers import Daemon, daemon_socket, running
 
 from ph.paths import resolve_roots
 from ph_app.profiles import compose_profile
@@ -30,7 +30,7 @@ def tui_profile() -> str:
 @pytest.fixture
 async def tui_daemon(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tui_profile: str
-) -> AsyncIterator[Any]:
+) -> AsyncIterator[Daemon]:
     """The daemon the TUI attaches to, in this process and on a real socket.
 
     After P5-14 the terminal is a protocol client, so a pilot test needs a
@@ -49,7 +49,7 @@ async def tui_daemon(
 
 
 @pytest.fixture
-async def make_tui_app(tmp_path: Path, tui_daemon: Any) -> Callable[..., PHTuiApp]:
+async def make_tui_app(tmp_path: Path, tui_daemon: Daemon) -> Callable[..., PHTuiApp]:
     """`make_tui_app(**overrides)` → a TUI attached to `tui_daemon`.
 
     The construction itself is `tui_helpers.tui_app`, shared with the snapshot

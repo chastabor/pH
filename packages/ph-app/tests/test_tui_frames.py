@@ -20,9 +20,9 @@ from __future__ import annotations
 import ast
 import pathlib
 from collections.abc import Callable
-from typing import Any
 
 import pytest
+from daemon_helpers import Daemon
 from tui_helpers import root_of, running, until
 
 import ph_app.tui.app
@@ -144,7 +144,7 @@ async def test_a_turn_that_ends_unannounced_still_stops_the_spinner(
 
 
 async def test_the_footer_is_folded_on_change_and_not_per_frame(
-    make_tui_app: MakeApp, tui_daemon: Any
+    make_tui_app: MakeApp, tui_daemon: Daemon
 ) -> None:
     """A reading is a fold of the log, so a frame must not recompute one.
 

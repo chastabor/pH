@@ -578,10 +578,11 @@ async def attach_session(
     the attach follows them only so `front` can be built whole, and its reply is
     what seeds the status, the route and the footer.
 
-    Credentials are deliberately not among them: which names a deployment *has*
-    comes from `daemon/config`, which is fetched here, so a caller could not name
-    them yet — and whether one is held can change while a session is open. The
-    login screen asks for them when it opens, which is where the answer is read.
+    Credentials are deliberately not among them: whether one is held can change
+    while a session is open, so an answer read at attach would be stale by the
+    time a picker drew it. The login screen asks when it opens, which is where
+    the answer is read — and it asks for *all* of them at once, because the
+    daemon composes the profile and so knows which this deployment names.
     """
     state = TuiState()
     client.handlers[ApprovalAsk.METHOD] = answering(ApprovalAsk, _asking_approval(host))

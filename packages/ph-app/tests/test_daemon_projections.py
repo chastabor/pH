@@ -15,10 +15,11 @@ that has been out of date since somebody added a field to `CommandDefinition`.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
 
 import pytest
-from daemon_helpers import running, until
+from daemon_helpers import Daemon, running, until
 
 from ph.bundles import BASE, HEADLESS
 from ph.cordis import DEPLOYMENT, Profile, load_profile_documents
@@ -39,6 +40,7 @@ from ph.session import SessionEvent
 from ph.testing import RecordedStep, ReplayAdapter, simple_tool, text_chunks, tool_call_chunks
 from ph.tools import ToolCallView, ToolResultView
 from ph_app.daemon.projections import credentials_named
+from ph_app.daemon.supervisor import Root
 from ph_app.payloads import ConfigRow
 from ph_app.protocol import DaemonError
 from ph_app.trust import TrustStore, trust_path
@@ -48,7 +50,7 @@ from ph_app.wire import view_of
 pytestmark = pytest.mark.anyio
 
 
-async def _furnished(daemon: Any, session_id: str = "projected") -> Any:
+async def _furnished(daemon: Daemon, session_id: str = "projected") -> Root:
     """A root with one status field and one command registered into it.
 
     Registered here rather than relied on from the profile, and that is the
@@ -76,7 +78,7 @@ async def _furnished(daemon: Any, session_id: str = "projected") -> Any:
 
 
 async def test_status_readings_over_the_wire_equal_the_seams_readings(
-    tmp_path: Any,
+    tmp_path: Path,
 ) -> None:
     """The gate this increment is named for.
 
@@ -100,7 +102,7 @@ async def test_status_readings_over_the_wire_equal_the_seams_readings(
         ], "the contributed field must survive the projection, id and level included"
 
 
-async def test_readings_ride_the_status_notification(tmp_path: Any) -> None:
+async def test_readings_ride_the_status_notification(tmp_path: Path) -> None:
     """Pushed when the agent moves, because that is when they can have changed.
 
     A reading is a fold of the log, so the moment worth recomputing is an append
@@ -146,7 +148,7 @@ async def test_readings_ride_the_status_notification(tmp_path: Any) -> None:
 # ------------------------------------------------------- the palette et al --
 
 
-async def test_the_command_list_is_the_registrys_own(tmp_path: Any) -> None:
+async def test_the_command_list_is_the_registrys_own(tmp_path: Path) -> None:
     """Every command, and the hint a person needs to type one.
 
     `run` is deliberately absent — it is a callable, and the client's job is to
@@ -170,7 +172,7 @@ async def test_the_command_list_is_the_registrys_own(tmp_path: Any) -> None:
 
 
 async def test_the_screen_list_carries_what_a_palette_needs_and_no_body(
-    tmp_path: Any,
+    tmp_path: Path,
 ) -> None:
     """`build` stays in the client; the rest is what orders and labels an entry.
 
@@ -192,7 +194,7 @@ async def test_the_screen_list_carries_what_a_palette_needs_and_no_body(
         assert all("build" not in one for one in reply["screens"]), "a callable cannot travel"
 
 
-async def test_the_tool_list_matches_what_the_deployment_offers(tmp_path: Any) -> None:
+async def test_the_tool_list_matches_what_the_deployment_offers(tmp_path: Path) -> None:
     """The same answer `--mode rpc` gives, against the same scope.
 
     `DEPLOYMENT` and not an agent's view: a front end is asking what this
@@ -208,7 +210,7 @@ async def test_the_tool_list_matches_what_the_deployment_offers(tmp_path: Any) -
         assert [one["name"] for one in reply["tools"]] == [one.name for one in schemas]
 
 
-async def test_the_skill_list_matches_the_catalog_the_model_is_given(tmp_path: Any) -> None:
+async def test_the_skill_list_matches_the_catalog_the_model_is_given(tmp_path: Path) -> None:
     """The same set the prompt's catalog renders from, against the same scope.
 
     `tools/list`'s argument one gate up, for the other half of what a request is
@@ -237,7 +239,7 @@ async def test_the_skill_list_matches_the_catalog_the_model_is_given(tmp_path: A
         ], "the description travels, because that is what /skills prints"
 
 
-async def test_the_config_rows_are_the_composed_profile(tmp_path: Any) -> None:
+async def test_the_config_rows_are_the_composed_profile(tmp_path: Path) -> None:
     """A property of the daemon, not of any root: every root mounts this."""
     async with running(tmp_path) as daemon:
         client = await daemon.client()
@@ -276,7 +278,7 @@ def test_the_credential_names_come_from_the_composed_rows() -> None:
     assert credentials_named(rows) == ["ANTHROPIC_API_KEY", "DEEPSEEK_API_KEY", "OTHER_KEY"]
 
 
-async def test_a_credential_held_but_named_in_no_row_is_still_listed(tmp_path: Any) -> None:
+async def test_a_credential_held_but_named_in_no_row_is_still_listed(tmp_path: Path) -> None:
     """The login screen takes free text, so held and named are different sets.
 
     Listing only what the profile names would drop a credential from the picker
@@ -302,7 +304,7 @@ async def test_a_credential_held_but_named_in_no_row_is_still_listed(tmp_path: A
 # ------------------------------------------------------------ acting on it --
 
 
-async def test_a_command_runs_in_the_root_and_lands_in_its_log(tmp_path: Any) -> None:
+async def test_a_command_runs_in_the_root_and_lands_in_its_log(tmp_path: Path) -> None:
     """Run by the daemon, because that is where the seams a body reaches are.
 
     And recorded in *this session's* log, so every other attached UI sees that
@@ -319,7 +321,7 @@ async def test_a_command_runs_in_the_root_and_lands_in_its_log(tmp_path: Any) ->
         assert [one.type for one in root.session.events].count("command/run") == 1
 
 
-async def test_running_a_command_twice_with_one_id_runs_it_once(tmp_path: Any) -> None:
+async def test_running_a_command_twice_with_one_id_runs_it_once(tmp_path: Path) -> None:
     """Idempotent through `root.remember`, the way `session/prompt` is.
 
     A client that reconnects and retries cannot tell whether its first call
@@ -341,7 +343,7 @@ async def test_running_a_command_twice_with_one_id_runs_it_once(tmp_path: Any) -
 
 
 async def test_a_credential_is_stored_without_its_value_reaching_the_log_or_the_reply(
-    tmp_path: Any,
+    tmp_path: Path,
 ) -> None:
     """The secret is used and not kept — anywhere a reader could reach it.
 
@@ -365,7 +367,7 @@ async def test_a_credential_is_stored_without_its_value_reaching_the_log_or_the_
         assert secret not in json.dumps(held)
 
 
-async def test_a_new_session_records_the_clients_cwd_in_its_header(tmp_path: Any) -> None:
+async def test_a_new_session_records_the_clients_cwd_in_its_header(tmp_path: Path) -> None:
     """Where the person is, not where the daemon is.
 
     The daemon's own working directory is somewhere neither the person nor their
@@ -384,7 +386,7 @@ async def test_a_new_session_records_the_clients_cwd_in_its_header(tmp_path: Any
         assert root.session.header.cwd == str(tmp_path)
 
 
-async def test_a_relative_cwd_is_refused_rather_than_resolved(tmp_path: Any) -> None:
+async def test_a_relative_cwd_is_refused_rather_than_resolved(tmp_path: Path) -> None:
     """Resolving it would resolve it against the *daemon's* directory.
 
     Which is the one directory that is certainly wrong. `SessionHeader` already
@@ -400,7 +402,7 @@ async def test_a_relative_cwd_is_refused_rather_than_resolved(tmp_path: Any) -> 
 # ----------------------------------------------------------- the card views --
 
 
-async def _with_a_card(daemon: Any, session_id: str) -> Any:
+async def _with_a_card(daemon: Daemon, session_id: str) -> Root:
     """A root that has run one tool call, through the real loop.
 
     Through the loop and not by hand, because the thing under test is the
@@ -436,7 +438,7 @@ async def _with_a_card(daemon: Any, session_id: str) -> Any:
 
 
 async def test_a_relayed_tool_call_carries_the_view_the_tool_would_have_rendered(
-    tmp_path: Any,
+    tmp_path: Path,
 ) -> None:
     """The one thing the adapter needed `ctx.tools` for, sent instead.
 
@@ -477,7 +479,7 @@ async def test_a_relayed_tool_call_carries_the_view_the_tool_would_have_rendered
 
 
 async def test_a_snapshot_page_carries_the_same_views_as_the_live_stream(
-    tmp_path: Any,
+    tmp_path: Path,
 ) -> None:
     """A transcript must not look different on replay than it did live.
 
@@ -504,7 +506,7 @@ async def test_a_snapshot_page_carries_the_same_views_as_the_live_stream(
         assert set(views) == {"tool/call", "tool/result"}, "nothing else carries a view"
 
 
-async def test_an_event_that_is_not_a_card_carries_no_view(tmp_path: Any) -> None:
+async def test_an_event_that_is_not_a_card_carries_no_view(tmp_path: Path) -> None:
     """Most events are not tool calls, and the relay must not pay for them.
 
     Also the honest reading of "derived, never appended": a view renders a call,
@@ -561,7 +563,7 @@ def test_the_adapter_prefers_the_daemons_view_and_falls_back_to_the_tool() -> No
     assert fallback.title == "ping", "an unparseable view renders the plain card, not a wrong one"
 
 
-async def test_a_preset_switch_is_applied_and_recorded(tmp_path: Any) -> None:
+async def test_a_preset_switch_is_applied_and_recorded(tmp_path: Path) -> None:
     """The permission posture, changed from a UI that is not in this process.
 
     Recorded in the log rather than held on the connection, so every other
@@ -579,7 +581,7 @@ async def test_a_preset_switch_is_applied_and_recorded(tmp_path: Any) -> None:
 
 
 async def test_the_posture_reaches_a_front_end_as_readings_not_as_fields(
-    tmp_path: Any,
+    tmp_path: Path,
 ) -> None:
     """The posture, carried by the mechanism that already carries the footer.
 
@@ -616,11 +618,16 @@ async def test_the_posture_reaches_a_front_end_as_readings_not_as_fields(
         after = {one["id"]: one["text"] for one in moved["readings"]}
 
         assert after["posture"] == "workspace-write accepted"
-        assert after["sandbox-mode"] == "sandbox workspace-write" != sandbox.default_mode
+        # Against the reading taken *before* the switch, so the `!=` compares two
+        # of the same thing. It used to compare this text to `sandbox.default_mode`
+        # — a bare mode name against a prefixed reading, never equal, so the clause
+        # was true whatever the preset did. mypy's `--strict-equality` says so, and
+        # only ever got the chance once `daemon.root()` stopped returning `Any`.
+        assert after["sandbox-mode"] == "sandbox workspace-write" != readings["sandbox-mode"]
 
 
 async def test_a_method_whose_seam_is_absent_says_so_and_is_not_unknown(
-    tmp_path: Any,
+    tmp_path: Path,
 ) -> None:
     """ "This deployment does not do that" is not "this daemon is too old".
 
@@ -656,7 +663,7 @@ async def test_a_method_whose_seam_is_absent_says_so_and_is_not_unknown(
         assert refused.value.reason != "unknown_method"
 
 
-async def test_the_daemon_refuses_to_mount_an_untrusted_project(tmp_path: Any) -> None:
+async def test_the_daemon_refuses_to_mount_an_untrusted_project(tmp_path: Path) -> None:
     """The daemon mounts, so the daemon enforces (P5-14) — `ph_app.trust` says why.
 
     Sabotage: enforce it client-side only, and `ph agents send` naming a new
@@ -683,7 +690,7 @@ async def test_the_daemon_refuses_to_mount_an_untrusted_project(tmp_path: Any) -
 # ------------------------------------------------ a root works in its own repo --
 
 
-async def test_a_root_works_in_the_directory_its_session_names(tmp_path: Any) -> None:
+async def test_a_root_works_in_the_directory_its_session_names(tmp_path: Path) -> None:
     """One daemon, many repositories — each root mounted in its own (P5-14).
 
     The daemon is per *user*, not per repository: one socket under `$PH_RUNTIME`,
@@ -714,7 +721,7 @@ async def test_a_root_works_in_the_directory_its_session_names(tmp_path: Any) ->
         assert first.ctx.require(FS).resolve("x.py", agent=first.agent) == one / "x.py"
 
 
-async def test_a_resumed_root_returns_to_its_own_repo(tmp_path: Any) -> None:
+async def test_a_resumed_root_returns_to_its_own_repo(tmp_path: Path) -> None:
     """Read off the *header*, because there is no client to ask on a resume.
 
     A session picked from the list — or woken by its own schedule with nobody

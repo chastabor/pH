@@ -14,7 +14,7 @@ before `serve()` is listening, which is exactly the window a poll would land in.
 from __future__ import annotations
 
 import threading
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import asynccontextmanager, contextmanager, suppress
 from dataclasses import dataclass, field
 from functools import partial
@@ -23,12 +23,15 @@ from typing import Any
 
 import anyio
 import pytest
+from anyio.abc import TaskGroup
 
 from ph.bundles import BASE, HEADLESS
 from ph.cordis import Profile
 from ph.paths import resolve_roots
 from ph_app.daemon.client import DaemonClient
+from ph_app.daemon.duplex import Notification
 from ph_app.daemon.server import DaemonServer, serve
+from ph_app.daemon.supervisor import Root
 
 __all__ = [
     "PROFILE",
@@ -49,7 +52,7 @@ class _Daemon:
     """A running supervisor and the socket it answers on."""
 
     path: Path
-    tasks: Any
+    tasks: TaskGroup
     server: DaemonServer | None = None
     """The `DaemonServer` behind the socket, for the tests whose subject is the
     supervisor itself rather than the wire.
@@ -72,7 +75,9 @@ class _Daemon:
         assert self.server is not None, "the daemon has not started yet"
         return self.server
 
-    async def client(self, *capabilities: str, on_notify: Any = None) -> DaemonClient:
+    async def client(
+        self, *capabilities: str, on_notify: Notification | None = None
+    ) -> DaemonClient:
         """One connected, pumping client. `capabilities` are what it declares.
 
         Passing `"asks"` is what makes it a front end — see `AskDesk`. The
@@ -114,11 +119,11 @@ class _Daemon:
                 await client.closed.wait()
         self.clients.clear()
 
-    async def root(self, session_id: str = "root") -> Any:
+    async def root(self, session_id: str = "root") -> Root:
         """One live root, started the way `session/attach` starts one."""
         return await self.running.supervisor.start(session_id)
 
-    def held(self, session_id: str) -> Any:
+    def held(self, session_id: str) -> Root:
         """The root this daemon is *already* holding, or `KeyError`.
 
         Sync, and raising, which is what makes it a different question from
@@ -140,7 +145,7 @@ class _Daemon:
 Daemon = _Daemon
 
 
-async def until(done: Any, *, what: str, seconds: float = 10.0) -> None:
+async def until(done: Callable[[], bool], *, what: str, seconds: float = 10.0) -> None:
     """Poll until `done()`, or fail saying what was being waited for.
 
     Here rather than in one test file because four of them wrote the loop out —
@@ -290,7 +295,7 @@ def daemon_socket() -> Path:
     return resolve_roots().ensure().daemon_socket()
 
 
-def private_runtime(tmp_path: Path, monkeypatch: Any) -> Path:
+def private_runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Point `$PH_RUNTIME` somewhere this test owns.
 
     Worth doing in every test, including the ones with no daemon: the fallback is
@@ -305,7 +310,9 @@ def private_runtime(tmp_path: Path, monkeypatch: Any) -> Path:
 
 
 @asynccontextmanager
-async def serving(tmp_path: Path, monkeypatch: Any, **options: Any) -> AsyncIterator[Daemon]:
+async def serving(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **options: Any
+) -> AsyncIterator[Daemon]:
     """A daemon listening exactly where a client of this `$PH_RUNTIME` will look.
 
     The pin and the socket in one step, because the *order* is the rule: the

@@ -19,6 +19,7 @@ answer wins, and the rest are told.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import anyio
@@ -64,7 +65,7 @@ def _answering(answer: str, seen: list[dict[str, Any]]) -> Any:
     return handler
 
 
-async def test_a_gated_call_under_the_daemon_reaches_a_person(tmp_path: Any) -> None:
+async def test_a_gated_call_under_the_daemon_reaches_a_person(tmp_path: Path) -> None:
     """The whole point: an approval over the socket is answered, not denied.
 
     Before this, the same call came back `unavailable` — a denial nobody made.
@@ -85,7 +86,7 @@ async def test_a_gated_call_under_the_daemon_reaches_a_person(tmp_path: Any) -> 
 
 
 async def test_every_attached_front_end_is_asked_and_the_first_answer_wins(
-    tmp_path: Any,
+    tmp_path: Path,
 ) -> None:
     """Multiplexed, not leased — and still exactly one decision in the log.
 
@@ -121,7 +122,7 @@ async def test_every_attached_front_end_is_asked_and_the_first_answer_wins(
                 await anyio.sleep(0.01)
 
 
-async def test_a_watcher_that_is_not_a_front_end_is_never_asked(tmp_path: Any) -> None:
+async def test_a_watcher_that_is_not_a_front_end_is_never_asked(tmp_path: Path) -> None:
     """`ph agents attach` follows a log; it cannot answer for anyone.
 
     Answering is opt-in for that reason — the `asks` capability, declared once at
@@ -143,7 +144,7 @@ async def test_a_watcher_that_is_not_a_front_end_is_never_asked(tmp_path: Any) -
 
 
 async def test_an_ask_with_nobody_attached_waits_for_whoever_arrives(
-    tmp_path: Any,
+    tmp_path: Path,
 ) -> None:
     """Nobody attached is a delay, not a denial (P5-13).
 
@@ -172,7 +173,7 @@ async def test_an_ask_with_nobody_attached_waits_for_whoever_arrives(
         assert outcome == ["allowed-once"]
 
 
-async def test_a_root_parked_on_a_person_may_be_released(tmp_path: Any) -> None:
+async def test_a_root_parked_on_a_person_may_be_released(tmp_path: Path) -> None:
     """`waiting` is releasable, and that is the whole reason it exists.
 
     A turn suspended on an approval reports `running` from the agent, because it
@@ -199,7 +200,7 @@ async def test_a_root_parked_on_a_person_may_be_released(tmp_path: Any) -> None:
 
 
 async def test_a_front_end_that_vanishes_mid_ask_is_dropped_not_answered_for(
-    tmp_path: Any,
+    tmp_path: Path,
 ) -> None:
     """A dead socket is not a decision, and this is where that nearly went wrong.
 
@@ -238,7 +239,7 @@ async def test_a_front_end_that_vanishes_mid_ask_is_dropped_not_answered_for(
 
 
 async def test_answering_is_declared_once_for_a_connection_not_per_attach(
-    tmp_path: Any,
+    tmp_path: Path,
 ) -> None:
     """One `initialize` covers every session this client goes on to watch.
 
@@ -279,7 +280,7 @@ async def _ask_question(root: Any) -> Any:
     )
 
 
-async def test_a_question_over_the_socket_reaches_a_front_end(tmp_path: Any) -> None:
+async def test_a_question_over_the_socket_reaches_a_front_end(tmp_path: Path) -> None:
     """The second ask direction, and the one that had no producer until P7-09.
 
     Same desk, same fan-out, different failure mode — so it is worth its own
@@ -303,7 +304,7 @@ async def test_a_question_over_the_socket_reaches_a_front_end(tmp_path: Any) -> 
         assert types.count("question/answered") == 1
 
 
-async def test_the_wire_ask_id_is_the_one_the_log_wrote(tmp_path: Any) -> None:
+async def test_the_wire_ask_id_is_the_one_the_log_wrote(tmp_path: Path) -> None:
     """One identity for one question, not two that happen to agree.
 
     The front end answers a frame keyed by `askId`, and a resume would re-pose
@@ -328,7 +329,7 @@ async def test_the_wire_ask_id_is_the_one_the_log_wrote(tmp_path: Any) -> None:
         assert [one["askId"] for one in posed] == [asked.data["askId"]] == ["call-1"]
 
 
-async def test_a_daemon_with_no_front_end_does_not_log_a_question(tmp_path: Any) -> None:
+async def test_a_daemon_with_no_front_end_does_not_log_a_question(tmp_path: Path) -> None:
     """Attached-but-watching is not attended, and neither is nobody at all.
 
     A root's desk registers its question answerer the moment the root starts, so
@@ -352,7 +353,7 @@ async def test_a_daemon_with_no_front_end_does_not_log_a_question(tmp_path: Any)
 
 
 async def test_re_attaching_while_a_question_is_open_does_not_ask_twice(
-    tmp_path: Any,
+    tmp_path: Path,
 ) -> None:
     """Attaching again is an ordinary call, not a second front end.
 

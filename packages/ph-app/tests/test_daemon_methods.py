@@ -17,7 +17,7 @@ a root is mounted for it.
 
 from __future__ import annotations
 
-from typing import Any
+from pathlib import Path
 
 import pytest
 from daemon_helpers import running
@@ -198,7 +198,7 @@ def test_every_method_about_one_root_requires_its_id() -> None:
     assert all(issubclass(one.verb.params, MutationParams) for one in MUTATIONS.values())
 
 
-async def test_a_missing_session_id_is_refused_by_name(tmp_path: Any) -> None:
+async def test_a_missing_session_id_is_refused_by_name(tmp_path: Path) -> None:
     async with running(tmp_path) as daemon:
         client = await daemon.client()
         with pytest.raises(DaemonError) as refused:
@@ -208,7 +208,7 @@ async def test_a_missing_session_id_is_refused_by_name(tmp_path: Any) -> None:
         assert "session/status" in str(refused.value), "and so is the method it forgot it on"
 
 
-async def test_a_field_the_method_does_not_take_is_refused_not_ignored(tmp_path: Any) -> None:
+async def test_a_field_the_method_does_not_take_is_refused_not_ignored(tmp_path: Path) -> None:
     """The dropped field was a client that believed it had said something."""
     async with running(tmp_path) as daemon:
         client = await daemon.client()
@@ -220,7 +220,7 @@ async def test_a_field_the_method_does_not_take_is_refused_not_ignored(tmp_path:
 
 
 async def test_a_cursor_that_is_not_one_is_refused_where_a_stale_one_is_not(
-    tmp_path: Any,
+    tmp_path: Path,
 ) -> None:
     """Shape is the model's; staleness stays `resume_at`'s. The two answers
     differ on purpose — a wrong shape is a client bug worth a sentence, a wrong
@@ -241,7 +241,7 @@ async def test_a_cursor_that_is_not_one_is_refused_where_a_stale_one_is_not(
         assert stale["from"] == 0, "a stale cursor reads as 'seen nothing of this log'"
 
 
-async def test_attach_refuses_a_cursor_rather_than_ignoring_one(tmp_path: Any) -> None:
+async def test_attach_refuses_a_cursor_rather_than_ignoring_one(tmp_path: Path) -> None:
     """It accepted one for as long as it existed and never read it — attach
     subscribes to what happens next, and catch-up is `session/snapshot` from the
     point the reply names. A client that believed it had asked for replay was
@@ -264,7 +264,7 @@ async def test_attach_refuses_a_cursor_rather_than_ignoring_one(tmp_path: Any) -
         )
 
 
-async def test_a_malformed_mutation_is_refused_before_a_root_is_mounted(tmp_path: Any) -> None:
+async def test_a_malformed_mutation_is_refused_before_a_root_is_mounted(tmp_path: Path) -> None:
     """`_mutate` parses first. The alternative — resolve the root, then find the
     call malformed — mounts a session a mistyped request named and leaves it
     running, which is a side effect of a request the daemon then refused."""
@@ -277,7 +277,7 @@ async def test_a_malformed_mutation_is_refused_before_a_root_is_mounted(tmp_path
         assert "never-mounted" not in daemon.running.supervisor.roots
 
 
-async def test_an_unknown_method_is_still_its_own_refusal(tmp_path: Any) -> None:
+async def test_an_unknown_method_is_still_its_own_refusal(tmp_path: Path) -> None:
     """The table lookup replaced the chain's last `else`; the sentence and the
     code a client branches on must not have moved with it."""
     async with running(tmp_path) as daemon:
@@ -291,7 +291,7 @@ async def test_an_unknown_method_is_still_its_own_refusal(tmp_path: Any) -> None
 
 
 async def test_a_model_and_the_keyword_form_put_the_same_frame_on_the_wire(
-    tmp_path: Any,
+    tmp_path: Path,
 ) -> None:
     """`call` has two doors and they must agree (P8-09, issue 74).
 
@@ -318,7 +318,7 @@ async def test_a_model_and_the_keyword_form_put_the_same_frame_on_the_wire(
 
 
 async def test_a_mutation_is_keyed_by_the_client_without_the_caller_saying_so(
-    tmp_path: Any,
+    tmp_path: Path,
 ) -> None:
     """`mutate` stamps `clientId`/`commandId` onto the model.
 

@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from daemon_helpers import Daemon
 from tui_helpers import root_of, running, turn_done, until
 
 import ph_app.tui
@@ -116,7 +117,7 @@ async def test_a_plugin_screens_key_is_rebindable_like_every_other(
 
 
 async def test_unloading_the_row_takes_the_verb_and_the_key_with_it(
-    make_tui_app: MakeApp, tui_daemon: Any
+    make_tui_app: MakeApp, tui_daemon: Daemon
 ) -> None:
     """I2 across a socket: a screen's routes do not outlive its row.
 
@@ -149,7 +150,7 @@ async def test_unloading_the_row_takes_the_verb_and_the_key_with_it(
 
 
 async def test_a_screen_this_build_cannot_draw_is_not_offered(
-    make_tui_app: MakeApp, tui_daemon: Any
+    make_tui_app: MakeApp, tui_daemon: Daemon
 ) -> None:
     """The limit P5-14 leaves behind, as a gate rather than a paragraph.
 

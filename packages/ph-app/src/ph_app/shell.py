@@ -32,7 +32,7 @@ from ph.agent.types import AgentHandle
 from ph.cordis import Context
 from ph.keys import SHELL
 from ph.seams.shell import ShellResult, ShellService
-from ph.session import JsonObject, Session, as_int
+from ph.session import JsonObject, Session, as_int, as_str
 from ph.text import truncation_marker
 from ph.tools.builtin.bash_tool import TIMED_OUT
 
@@ -69,8 +69,8 @@ def shell_body(data: JsonObject) -> str:
     calling the same functions, after P7-13 added them to one side only.
     """
     parts: list[str] = []
-    stdout = str(data.get("stdout", "")).rstrip()
-    stderr = str(data.get("stderr", "")).rstrip()
+    stdout = as_str(data.get("stdout")).rstrip()
+    stderr = as_str(data.get("stderr")).rstrip()
     if stdout:
         parts.append(stdout)
     if stderr:

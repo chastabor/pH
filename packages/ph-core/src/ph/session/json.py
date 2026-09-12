@@ -82,6 +82,7 @@ __all__ = [
     "as_int",
     "as_obj",
     "as_seq",
+    "as_str",
     "dumps",
     "freeze_json_value",
     "is_json_value",
@@ -341,6 +342,22 @@ def as_int(value: object, default: int = 0) -> int:
         except (ValueError, OverflowError):
             return default
     return default
+
+
+def as_str(value: object, default: str = "") -> str:
+    """A JSON string, or `default` — the fourth of the family, and the last.
+
+    One policy, the one `as_int`'s docstring argues for: a mis-shaped field
+    answers with the empty value rather than raising, because a reader of a log
+    some other build wrote must lose a row and not a session.
+
+    **Not `str(value)`**, which is what a reader writes without this and is worse
+    than useless: `str(None)` is `"None"` and `str(3)` is `"3"`, so a field that
+    is absent or of the wrong type comes back as a plausible-looking answer that
+    no assertion catches. Narrowing says "this was not a string" by giving back
+    nothing, which is the same thing `as_obj` and `as_seq` say.
+    """
+    return value if isinstance(value, str) else default
 
 
 def as_obj(value: object) -> JsonObject:

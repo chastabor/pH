@@ -24,7 +24,7 @@ from without paying **278 ms** of terminal framework import — which a headless
 
 from __future__ import annotations
 
-from typing import Any
+from pathlib import Path
 
 import pytest
 
@@ -346,7 +346,7 @@ def test_a_record_inside_an_open_turn_is_not_a_fork_point() -> None:
 
 
 async def test_a_stored_log_and_a_live_one_project_identically(
-    mount: MountProfile, tmp_path: Any
+    mount: MountProfile, tmp_path: Path
 ) -> None:
     """The P2-01 gate, for the auditor's view.
 
