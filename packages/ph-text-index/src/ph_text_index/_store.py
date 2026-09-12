@@ -54,7 +54,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ph.session import as_str
+from ph.session import as_int, as_str
 
 from ._chunk import Chunk
 
@@ -178,17 +178,17 @@ class TextIndex:
                 f"has {self.model!r}; a vector from one model means nothing to the "
                 "other, so delete the directory and re-index"
             )
-        self._next_id = int(raw.get("next_id", 1))
+        self._next_id = as_int(raw.get("next_id"), 1)
         self._token = as_str(raw.get("vcs"))
         self._vcs_ids = {str(path): str(one) for path, one in (raw.get("vcs_ids") or {}).items()}
         if self.index_path.exists():
             self._index = _turbovec().IdMapIndex.load(str(self.index_path))
         held = {
             record["id"]: Record(
-                id=int(record["id"]),
+                id=as_int(record["id"]),
                 path=as_str(record["path"]),
-                start_line=int(record["start_line"]),
-                end_line=int(record["end_line"]),
+                start_line=as_int(record["start_line"]),
+                end_line=as_int(record["end_line"]),
                 text=as_str(record["text"]),
             )
             for record in raw.get("records", [])

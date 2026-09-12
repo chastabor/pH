@@ -43,7 +43,7 @@ from pydantic import Field
 from ..cordis import Context, plugin
 from ..keys import GOALS
 from ..llm.types import TokenUsage
-from ..session import Session, SessionFoldCache, as_str
+from ..session import Session, SessionFoldCache, as_bool, as_str
 from ..wire import WireModel, literal_lookup
 from .invariants import contribute_fold_cache
 
@@ -219,7 +219,7 @@ def fold_goal_event(found: dict[str, GoalState], event: Any) -> None:
     if event.type == CONTINUED:
         current.spent.continuations += 1
     elif event.type == GATE:
-        current.gates[(as_str(data.get("gate")), as_str(data.get("tree")))] = bool(
+        current.gates[(as_str(data.get("gate")), as_str(data.get("tree")))] = as_bool(
             data.get("passed")
         )
     elif event.type == SETTLED:

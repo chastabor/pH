@@ -422,7 +422,7 @@ class _StreamState:
                 out.append(TextDelta(index=self.text_index, text=content))
 
             for call in delta.get("tool_calls") or ():
-                position = int(call.get("index", 0))
+                position = as_int(call.get("index"))
                 if position not in self.tool_indexes:
                     self.tool_indexes[position] = self._claim()
                     self.tool_calls[position] = {"id": "", "name": "", "arguments": ""}
@@ -501,17 +501,17 @@ def _to_usage(raw: dict[str, Any]) -> TokenUsage:
     reading one as a write would zero the input and call the whole prompt a
     cache write.
     """
-    prompt = int(raw.get("prompt_tokens") or 0)
+    prompt = as_int(raw.get("prompt_tokens"))
     prompt_details = raw.get("prompt_tokens_details") or {}
-    cached = int(raw.get("prompt_cache_hit_tokens") or prompt_details.get("cached_tokens") or 0)
-    written = int(prompt_details.get("created_cache_tokens") or 0)
+    cached = as_int(raw.get("prompt_cache_hit_tokens") or prompt_details.get("cached_tokens"))
+    written = as_int(prompt_details.get("created_cache_tokens"))
     details = raw.get("completion_tokens_details") or {}
     return TokenUsage(
         input_tokens=max(0, prompt - cached - written),
-        output_tokens=int(raw.get("completion_tokens") or 0),
+        output_tokens=as_int(raw.get("completion_tokens")),
         cache_read_tokens=cached or None,
         cache_write_tokens=written or None,
-        reasoning_tokens=int(details.get("reasoning_tokens") or 0) or None,
+        reasoning_tokens=as_int(details.get("reasoning_tokens")) or None,
     )
 
 

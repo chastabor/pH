@@ -1,4 +1,4 @@
-"""`str()` is not a narrowing, and this is the gate that says so.
+"""A builtin is not a narrowing, and this is the gate that says so.
 
 `SessionEvent.data` is a `JsonObject`, so every field a reader takes out of it is
 a `JsonValue` — maybe a string, maybe a number, maybe absent. `str(...)` accepts
@@ -8,15 +8,16 @@ comes back looking exactly like a field that was there. Nothing raises, nothing
 logs, and the wrong value is a plausible one — a card titled `None`, a dict keyed
 `"None"`, a reason line reading `None`.
 
-`as_str` is the narrowing that says the true thing instead: not a string, so
-nothing. It is the fourth of a family — `as_int`, `as_obj`, `as_seq` — whose
-shared policy `ph.session.json` documents: **a mis-shaped field costs a row, not
-a raise, and never a fabricated value.**
+The narrowing family says the true thing instead: not a string, so nothing.
+`as_str` is one of five — `as_bool`, `as_int`, `as_obj`, `as_seq` — whose shared
+policy `ph.session.json` documents: **a mis-shaped field costs a row, not a
+raise, and never a fabricated value.** `str()` is the example above because it is
+the loudest; `COERCIONS` below has what each of the others gets wrong.
 
 **Two spellings, one defect.** The rule is not "no `str()`" — it is "a JSON read
-must not become a fabricated value", and `.get` is only the commoner way to spell
-the read. The subscript form was found by this gate's own first version passing
-while the tree still fabricated:
+must not go through a builtin that guesses", and `.get` is only the commoner way
+to spell the read. The subscript form was found by this gate's own first version
+passing while the tree still fabricated:
 
 * `str(data.get("k"))` — the one everybody thinks of;
 * `str(data["k"])` — the same read through a subscript, and `revert.py` had one
@@ -34,14 +35,8 @@ This is the same shape as `test_layering.py` (ph-core may not import Textual) an
 `FrontSession` declares): a rule that is cheap to state, expensive to discover by
 hand, and silent when broken.
 
-**What this gate does not cover, and why.** Two edges, named so the next reader
-knows them rather than trusting a line this does not hold.
-
-*Other members of the family.* `int(...)`, `bool(...)` and `list(...)` over a
-JSON read are the same defect through the other narrowings — and `bool("false")`
-is `True`. `as_int` exists and 26 readers still do not use it; `as_bool` does not
-exist yet. Adding a row to `COERCIONS` is where that lands, and the walker is
-already general over it.
+**What this gate does not cover, and why.** One edge, named so the next reader
+knows it rather than trusting a line this does not hold.
 
 *f-strings.* `f"{data.get('k')}"` **is** this defect — interpolation calls
 `str()` — and it was gated here for about an hour. It came back out because the
@@ -62,12 +57,20 @@ from functools import cache
 
 from workspace_layout import workspace_modules
 
-COERCIONS = {"str": "as_str"}
+COERCIONS = {"bool": "as_bool", "int": "as_int", "list": "as_seq", "str": "as_str"}
 """Builtin → the narrowing that should have been called instead.
 
-A table because the family has four members and this gate holds one of them. The
-walker below is already general over it; `int`/`bool`/`list` join by adding a row
-and fixing what it finds, which is a row's work rather than a rewrite."""
+A table because the family has five members and each one's builtin fails a JSON
+read differently:
+
+* `str(None)` is `"None"` — a **fabricated** value that looks like an answer;
+* `bool("false")` is `True` — the **opposite** of what the log says;
+* `int(None)` **raises**, which on a resume path turns one unreadable row into a
+  failed session;
+* `list("abc")` is `["a", "b", "c"]` — a string is a `Sequence`, so a field that
+  should have been an array silently becomes its own characters.
+
+One rule, four symptoms. `float` has no member and no sites."""
 
 
 ALLOWED: frozenset[tuple[str, str]] = frozenset(
@@ -104,14 +107,43 @@ ALLOWED: frozenset[tuple[str, str]] = frozenset(
         ("ph_text_index/__init__.py", 'str(stats["calibration"])'),
         # A `sqlite3.Row`, not a payload: the column is whatever SQLite stored.
         ("ph_code_graph/_store.py", 'str(row["value"])'),
+        ("ph_code_graph/_store.py", 'int(row["value"])'),
+        # Truthiness, and that is the question being asked. `as_bool`'s own
+        # docstring keeps these three: a Python `dict[str, bool]` with a missing
+        # key, "is anything queued" over two lists, and "is this environment
+        # variable set and non-empty" — none is reading a JSON boolean.
+        ("ph_app/tui/remote.py", "bool(self.held.get(name))"),
+        ("ph/agent/inbox.py", 'bool(self._state["next-turn"] or self._state["next-step"])'),
+        ("ph/cordis/loader.py", "bool(source.get(target))"),
+        # Not JSON either: a parsed CLI argument, a typed stats mapping, and the
+        # file descriptor the guest is handed in its environment.
+        ("ph_code_graph/__init__.py", "int(args.get('distance') or 1)"),
+        ("ph_text_index/__init__.py", 'int(store.stats()["chunks"])'),
+        ("ph_runtime/channel.py", "int(os.environ.get(FD_ENV, PROTOCOL_FD))"),
+        # **The five boot limits, where a quiet default is the dangerous answer.**
+        # `protocol.py` states the rule these keep: "there is exactly one owner of
+        # every default: the host. `boot` carries every limit as a required field,
+        # so a guest has nothing to guess." `limits.py` reads `0` as *no limit*,
+        # so narrowing a malformed frame to `0` boots the guest unsandboxed —
+        # where `int()` raises and the guest refuses to start, which is what
+        # `_serve` already says it wants: "a guest that misreads one frame at a
+        # time is worse than a guest that will not start."
+        ("ph_runtime/runner.py", 'int(boot["maxLogBytes"])'),
+        ("ph_runtime/runner.py", 'int(boot["maxValueBytes"])'),
+        ("ph_runtime/runner.py", 'int(boot["maxSnapshotBytes"])'),
+        ("ph_runtime/runner.py", 'int(boot["cpuSeconds"])'),
+        ("ph_runtime/runner.py", 'int(boot["addressSpaceBytes"])'),
     }
 )
-"""The sites where a **non-string is stringified on purpose**, each with why.
+"""The sites where the builtin is the right answer, each with why.
 
-Every entry is a value that genuinely may not be a string and whose textual form
-is wanted anyway — an integer seq used as a key, a JSON-RPC id, a YAML scalar, a
-model's tool argument on its way to a card. `as_str` would answer `""` for each
-and lose the value.
+Three kinds, and the reasons differ. **A value that is genuinely not of that type
+and whose coercion is wanted anyway** — an integer seq used as a string key, a
+JSON-RPC id, a YAML scalar, a model's tool argument on its way to a card.
+**A read that is not JSON at all** — a `sqlite3.Row`, a parsed CLI argument, a
+typed stats mapping, an environment variable. And **a read where the quiet
+default is the dangerous answer**, which is the guest's five boot limits: there,
+raising is the policy.
 
 `(module path, source text)` rather than a line number, so an entry survives the
 code around it moving and dies the moment the expression itself changes. Both
@@ -168,8 +200,8 @@ def _sites() -> tuple[tuple[str, int, str], ...]:
 
     Cached because both tests below ask the same question of the same 251
     modules, and parsing them twice was a third of this directory's whole run.
-    The *triples* are held rather than the parsed trees: 43 KB against 80 MB
-    pinned for the rest of the pytest process.
+    The *triples* are held rather than the parsed trees: tens of kilobytes
+    against ~80 MB pinned for the rest of the pytest process.
     """
     found: list[tuple[str, int, str]] = []
     for name, path in workspace_modules():
@@ -180,15 +212,17 @@ def _sites() -> tuple[tuple[str, int, str], ...]:
 
 
 def test_no_reader_fabricates_a_value_from_a_json_field() -> None:
-    """`as_str`, or an entry in `ALLOWED` saying why the value is not a string."""
+    """The narrowing that fits, or an entry in `ALLOWED` saying why it does not."""
     offenders = [
-        f"{name}:{line}: {text}" for name, line, text in _sites() if (name, text) not in ALLOWED
+        f"{name}:{line}: {text} — call {COERCIONS[text.split('(', 1)[0]]}"
+        for name, line, text in _sites()
+        if (name, text) not in ALLOWED
     ]
     assert offenders == [], (
-        "these read a JSON field and coerce it with `str()`, which turns a "
-        "missing or mis-typed field into a plausible wrong value — `str(None)` "
-        "is 'None'. Call `as_str` instead, or add the site to `ALLOWED` with the "
-        "reason the value is legitimately not a string:\n  " + "\n  ".join(offenders)
+        "these read a JSON field and hand it to a builtin that guesses — see "
+        "`COERCIONS` for what each one gets wrong. Call the narrowing named on "
+        "each line, or add the site to `ALLOWED` with the reason the value is "
+        "legitimately not of that type:\n  " + "\n  ".join(offenders)
     )
 
 

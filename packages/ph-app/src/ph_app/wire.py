@@ -30,11 +30,12 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from ph.session import JsonValue, as_int, as_obj, as_seq, as_str
+from ph.session import JsonValue, as_bool, as_int, as_obj, as_seq, as_str
 from ph.tools import ToolCallView, ToolResultView
 from ph.tools.presentation import CARD_VIEWS
 
 __all__ = [
+    "as_bool",
     "as_int",
     "as_obj",
     "as_seq",

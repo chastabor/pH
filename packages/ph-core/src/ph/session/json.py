@@ -79,6 +79,7 @@ __all__ = [
     "JsonObject",
     "JsonValue",
     "PlainJsonValue",
+    "as_bool",
     "as_int",
     "as_obj",
     "as_seq",
@@ -301,8 +302,17 @@ def as_int(value: object, default: int = 0) -> int:
     anything that was not a number. On `persistence.repair`,
     `agent_loop.driver._last_turn_of` and `llm.replay.recorded_steps` that raise
     is not contained: one mistyped numeric field in a log some other build wrote
-    turned a single unreadable row into a **failed resume**. One family, one
-    policy, and this is it.
+    turned a single unreadable row into a **failed resume**. That is the policy
+    the family shares: a mis-shaped field costs a row, not a raise.
+
+    **What this one does *not* share is the strictness.** `as_str` and `as_bool`
+    narrow — not the type, so nothing — while this keeps every coercion `int()`
+    made. The difference is what each builtin got wrong: `str()` fabricates and
+    `bool()` inverts, so their coercions had to go; `int()`'s coercions are
+    fine and only its *raising* was the defect. The visible edge is that
+    `as_int(True)` is `1` while `as_bool(1)` is the default — deliberate, pinned
+    on both sides, and the reason `as_bool` is not simply this function's shape
+    with a different type.
 
     **What the default is for.** `freeze_json_value` is a JSON-*ness* gate, not
     a schema gate: it walks a payload for values JSON can round-trip, and a
@@ -342,6 +352,38 @@ def as_int(value: object, default: int = 0) -> int:
         except (ValueError, OverflowError):
             return default
     return default
+
+
+def as_bool(value: object, default: bool = False) -> bool:
+    """A JSON boolean, or `default` — and pointedly **not** `bool()`.
+
+    The fifth of the family and the one whose builtin is most dangerous, because
+    `bool()` never raises and never looks wrong: it answers *truthiness*, which
+    is defined for every JSON value and is the wrong question for a boolean
+    field. **`bool("false")` is `True`.** A log that spells a flag as a string —
+    a foreign build, a hand-edited file, a producer of ours writing the wrong
+    type, all of which `freeze_json_value` admits because it is a JSON-*ness*
+    gate and not a schema gate — reads as the opposite of what it says. On
+    `isError` that draws an error card for a tool call that succeeded.
+
+    **This is where the family's rule divides, and the division is the point.**
+    `as_int` keeps every coercion `int()` made — a float truncates, a numeric
+    string parses — and only replaces the *raise*, because raising was its
+    defect. `bool()` has no raise to replace; its coercion **is** the defect. So
+    this narrows instead: a `bool` is a `bool`, and everything else is `default`.
+
+    `1` therefore reads as `default`, not `True`. That is deliberate and it is
+    the same judgement: JSON has a boolean type, a producer that wrote `1` into
+    a boolean field did not write a boolean, and guessing which one they meant is
+    the fabrication this family exists to refuse.
+
+    **Where `bool()` is still right**, and why three callers keep it: a
+    *presence* check. `bool(self._state["next-turn"] or self._state["next-step"])`
+    asks "is anything queued" of a Python list, and
+    `bool(os.environ.get(name))` asks "is this variable set and non-empty".
+    Neither is reading a JSON boolean, and truthiness is exactly the question.
+    """
+    return value if isinstance(value, bool) else default
 
 
 def as_str(value: object, default: str = "") -> str:

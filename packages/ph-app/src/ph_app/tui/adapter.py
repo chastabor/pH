@@ -58,6 +58,7 @@ from ph.session import (
     Session,
     SessionEvent,
     SurfaceReplace,
+    as_bool,
     is_in_place_rewrite,
     is_replacement_surface_event,
     thaw_json,
@@ -358,7 +359,7 @@ class TuiEventAdapter:
             self._row("tool", "tool", body, event)
             return
         card.settled = True
-        card.is_error = bool(result.get("isError"))
+        card.is_error = as_bool(result.get("isError"))
         card.failure_kind = as_str(event.data.get("failureKind"))
         card.body = body
         self._present_result(card, event.data.get("meta"), frame.view)
@@ -404,7 +405,7 @@ class TuiEventAdapter:
         if dispatch is None:
             return
         dispatch.settled = True
-        dispatch.is_error = bool(event.data.get("isError"))
+        dispatch.is_error = as_bool(event.data.get("isError"))
         dispatch.body = text_of_wire(event.data.get("content"))
 
     # ------------------------------------------------------------ lifecycle --

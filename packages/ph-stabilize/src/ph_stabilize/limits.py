@@ -53,6 +53,7 @@ from ph.session import (
     Session,
     SessionEvent,
     SessionFoldCache,
+    as_bool,
     as_str,
     derive_event_message,
 )
@@ -377,7 +378,7 @@ def _result_facts(event: SessionEvent) -> tuple[str, bool]:
     start branch unified the same way, on `callId or subCallId`.
     """
     if event.type == "tool/code-dispatch":
-        return as_str(event.data.get("subCallId")), bool(event.data.get("isError"))
+        return as_str(event.data.get("subCallId")), as_bool(event.data.get("isError"))
     message = derive_event_message(event)
     block = next(
         (one for one in (message.content if message else ()) if isinstance(one, ToolResultBlock)),

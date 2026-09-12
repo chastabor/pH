@@ -65,7 +65,7 @@ from ph.llm.types import (
     attachment_of,
 )
 from ph.seams.uploads import FileHandle
-from ph.session import as_str, now_ms
+from ph.session import as_int, as_str, now_ms
 from ph.wire import WireModel
 
 from ._http import HttpClient, resolve_secret
@@ -753,12 +753,12 @@ def _to_usage(raw: dict[str, Any]) -> TokenUsage:
     subset of `output_tokens` — so it is added in, or every thinking turn's output
     is under-reported by the part that did the work.
     """
-    prompt = int(raw.get("promptTokenCount") or 0)
-    cached = int(raw.get("cachedContentTokenCount") or 0)
-    thoughts = int(raw.get("thoughtsTokenCount") or 0)
+    prompt = as_int(raw.get("promptTokenCount"))
+    cached = as_int(raw.get("cachedContentTokenCount"))
+    thoughts = as_int(raw.get("thoughtsTokenCount"))
     return TokenUsage(
         input_tokens=max(0, prompt - cached),
-        output_tokens=int(raw.get("candidatesTokenCount") or 0) + thoughts,
+        output_tokens=as_int(raw.get("candidatesTokenCount")) + thoughts,
         cache_read_tokens=cached or None,
         reasoning_tokens=thoughts or None,
     )

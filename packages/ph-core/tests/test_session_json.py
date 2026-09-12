@@ -6,8 +6,8 @@ over the abstract containers, true of both shapes the log takes — `tuple` and
 which is the point, and honesty has a cost at the read site: `int(data.get(
 "turn", 0))` is now an `int()` of a union a `Mapping` belongs to, and a chained
 `data.get("message").get("content")` is a `.get` on something that may be a
-string. `as_int`, `as_obj`, `as_seq` and `as_str` are the four narrowings the ~167
-readers needed, and this file pins what each promises.
+string. `as_int`, `as_obj`, `as_seq`, `as_str` and `as_bool` are the five narrowings the
+~167 readers needed, and this file pins what each promises.
 
 The overloads on `freeze_json_value` and `thaw_json` are claims to the checker
 — an object in is an object out — that `mypy` verifies against every production
@@ -22,7 +22,15 @@ from types import MappingProxyType
 
 import pytest
 
-from ph.session.json import as_int, as_obj, as_seq, as_str, freeze_json_value, thaw_json
+from ph.session.json import (
+    as_bool,
+    as_int,
+    as_obj,
+    as_seq,
+    as_str,
+    freeze_json_value,
+    thaw_json,
+)
 
 # ---------------------------------------------------------------- as_int --
 
@@ -89,6 +97,65 @@ def test_a_field_that_is_not_a_number_reads_as_the_default(junk: object) -> None
     """
     assert as_int(junk) == 0
     assert as_int(junk, -1) == -1, "and the caller's own default is what it answers with"
+
+
+# ---------------------------------------------------------------- as_bool --
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (True, True),
+        (False, False),
+        (None, False),
+        ("false", False),
+        ("true", False),
+        (1, False),
+        (0, False),
+        ([], False),
+        ([True], False),
+    ],
+    ids=[
+        "true",
+        "false",
+        "missing",
+        "the-string-false",
+        "the-string-true",
+        "one",
+        "zero",
+        "empty-list",
+        "truthy-list",
+    ],
+)
+def test_as_bool_reads_a_boolean_and_never_guesses_at_one(value: object, expected: bool) -> None:
+    """**`bool("false")` is `True`** — the reason this exists.
+
+    A flag spelled as a string reads as the *opposite* of what the log says, and
+    `bool()` never raises or looks wrong while doing it. Every row here that
+    expects `False` against a truthy value is a row `bool()` would have got
+    backwards or invented: `"false"`, `"true"`, `1` and `[True]` are not
+    booleans, and which one the producer meant is not this helper's to guess.
+
+    The `1` row is also where the family's rule divides, and it divides in both
+    directions: `as_int(True)` is `1` (a bool *is* a number), while `as_bool(1)`
+    is the default (a number is *not* a bool). `as_int` keeps what `int()`
+    coerced because *raising* was its defect; `bool()` has no raise, and its
+    coercion is the defect.
+    """
+    assert as_bool(value) is expected
+
+
+def test_as_bool_takes_a_default_for_a_flag_that_is_on_unless_said_otherwise() -> None:
+    """`show_thinking` and its three siblings in `tui.json`, which default on.
+
+    The default is what a *missing* field reads as — and, for this family, what a
+    mis-typed one reads as too. A hand-edited `"show_tools": "no"` therefore
+    leaves the panel shown rather than silently flipping it, which is the
+    conservative direction for a setting a person did not successfully express.
+    """
+    assert as_bool(None, True) is True
+    assert as_bool("no", True) is True
+    assert as_bool(False, True) is False
 
 
 # ---------------------------------------------------------------- as_str --

@@ -36,7 +36,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ph.session import Session, SessionEvent
+from ph.session import Session, SessionEvent, as_bool
 from ph.tools import ToolResult
 from ph.tools.presentation import CARD_VIEWS, render_call_view, render_result_view
 
@@ -73,7 +73,7 @@ def presentation_of(tools: Any, session: Session, event: SessionEvent) -> dict[s
         call.data.get("arguments"),
         ToolResult(
             content=(),
-            is_error=bool(result_block(as_obj(event.data.get("message"))).get("isError")),
+            is_error=as_bool(result_block(as_obj(event.data.get("message"))).get("isError")),
             meta=event.data.get("meta"),
         ),
     )

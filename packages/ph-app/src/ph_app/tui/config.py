@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any, Literal, TypeAlias
 
 from ph.paths import write_text_under
+from ph.session import as_bool
 
 from .themes import DEFAULT_THEME
 
@@ -144,10 +145,10 @@ def tui_settings_from_json(data: Any) -> TuiSettings:
         theme=data["theme"] if isinstance(data.get("theme"), str) else DEFAULT_THEME,
         sidebar=_coerce(data.get("sidebar"), ("left", "right", "off"), "right"),  # type: ignore[arg-type]
         turn_notification=_coerce(data.get("turn_notification"), ("off", "bell"), "bell"),  # type: ignore[arg-type]
-        show_thinking=bool(data.get("show_thinking", True)),
-        show_tools=bool(data.get("show_tools", True)),
-        show_skills=bool(data.get("show_skills", True)),
-        show_tool_results=bool(data.get("show_tool_results", True)),
+        show_thinking=as_bool(data.get("show_thinking"), True),
+        show_tools=as_bool(data.get("show_tools"), True),
+        show_skills=as_bool(data.get("show_skills"), True),
+        show_tool_results=as_bool(data.get("show_tool_results"), True),
     )
 
 

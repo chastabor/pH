@@ -69,6 +69,29 @@ def test_the_truncation_marker_is_byte_identical(dropped: int, cap: int) -> None
     assert host.truncation_marker(dropped, cap) == guest.truncation_marker(dropped, cap)
 
 
+@pytest.mark.parametrize(
+    "value",
+    ["text", "", None, 3, True, ["text"], {"k": "v"}],
+    ids=["a-string", "empty", "missing", "a-number", "a-bool", "a-list", "an-object"],
+)
+def test_the_guest_narrows_a_string_the_way_the_host_does(value: object) -> None:
+    """The guest's `as_str` copy, held against `ph.session`'s.
+
+    The guest cannot import `ph.session` — `dill` is its only dependency — so it
+    carries a copy, exactly as it carries `truncation_marker`. This file's own
+    docstring is why that copy is pinned rather than trusted: *"A third copy that
+    no test compared had already drifted, which is the argument against keeping
+    one as documentation."*
+
+    Compared by behaviour rather than by source, because what has to agree is the
+    policy — not a string, so nothing — and not the spelling.
+    """
+    from ph.session import as_str as host_as_str
+
+    assert guest.as_str(value) == host_as_str(value)
+    assert guest.as_str(value, "fallback") == host_as_str(value, "fallback")
+
+
 def test_the_host_models_carry_every_declared_outbound_field() -> None:
     """The host's outbound field sets are derived from its models, not typed twice.
 

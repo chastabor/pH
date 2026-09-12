@@ -54,7 +54,7 @@ from ph.llm.types import (
     UsageChunk,
 )
 from ph.seams.uploads import FileHandle
-from ph.session import as_str, now_ms
+from ph.session import as_int, as_str, now_ms
 from ph.wire import WireModel
 
 from ._http import HttpClient, resolve_secret
@@ -416,7 +416,7 @@ class _StreamState:
             if isinstance(raw, dict):
                 self.usage = _to_usage(raw)
         elif kind == "content_block_start":
-            index = int(payload.get("index", 0))
+            index = as_int(payload.get("index"))
             block = payload.get("content_block") or {}
             block_type = as_str(block.get("type"), "text")
             if block_type == "thinking":
@@ -433,7 +433,7 @@ class _StreamState:
                 self.blocks[index] = _Open(kind="text")
                 out.append(BlockStart(index=index, block_type="text"))
         elif kind == "content_block_delta":
-            index = int(payload.get("index", 0))
+            index = as_int(payload.get("index"))
             delta = payload.get("delta") or {}
             open_block = self.blocks.get(index)
             if open_block is None:
@@ -458,7 +458,7 @@ class _StreamState:
                 open_block.text += fragment
                 out.append(TextDelta(index=index, text=fragment))
         elif kind == "content_block_stop":
-            index = int(payload.get("index", 0))
+            index = as_int(payload.get("index"))
             open_block = self.blocks.pop(index, None)
             if open_block is not None:
                 out.append(BlockEnd(index=index, block=_close(open_block, index)))
@@ -509,10 +509,10 @@ def _finish_kind(stop_reason: str | None) -> Any:
 def _to_usage(raw: dict[str, Any]) -> TokenUsage:
     return TokenUsage(
         # Already disjoint on this wire, so no subtraction (unlike DeepSeek).
-        input_tokens=int(raw.get("input_tokens") or 0),
-        output_tokens=int(raw.get("output_tokens") or 0),
-        cache_read_tokens=int(raw.get("cache_read_input_tokens") or 0) or None,
-        cache_write_tokens=int(raw.get("cache_creation_input_tokens") or 0) or None,
+        input_tokens=as_int(raw.get("input_tokens")),
+        output_tokens=as_int(raw.get("output_tokens")),
+        cache_read_tokens=as_int(raw.get("cache_read_input_tokens")) or None,
+        cache_write_tokens=as_int(raw.get("cache_creation_input_tokens")) or None,
     )
 
 

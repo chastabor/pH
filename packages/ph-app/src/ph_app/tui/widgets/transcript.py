@@ -36,6 +36,7 @@ from textual.css.query import NoMatches
 from textual.widgets import Collapsible, Markdown, Static
 from textual.widgets.markdown import MarkdownStream
 
+from ph.session import as_int
 from ph.text import count_of
 
 from ...wire import index_at_or_before
@@ -335,7 +336,7 @@ def _cell_facts(details: dict[str, Any]) -> str:
     of one number in one widget can disagree, which is what A11 forbids.
     """
     facts: list[str] = []
-    attachments = int(details.get("attachments") or 0)
+    attachments = as_int(details.get("attachments"))
     if attachments:
         facts.append(count_of(attachments, "attachment"))
     if details.get("truncated"):

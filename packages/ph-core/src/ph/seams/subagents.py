@@ -38,7 +38,7 @@ from pydantic import Field
 from ..agent.types import AgentDriver
 from ..cordis import Context, Disposer, Running, plugin, running
 from ..keys import AGENTS, SESSIONS, SKILLS, SUBAGENT_PRESETS, SUBAGENTS, SYSTEM_PROMPT, TOOLS
-from ..session import Session, SessionFoldCache, as_str
+from ..session import Session, SessionFoldCache, as_int, as_str
 from ..system_prompt.assembly import PromptSection
 from ..tools.registry import ToolRestriction
 from ..wire import WireModel
@@ -914,7 +914,7 @@ class SubagentService:
             # for a slot no one will ever give it — the parent held out of
             # passivation by a child nothing will move, which is the state this
             # whole sweep exists to end.
-            spent = int(row.get("attempts") or 0) >= retry_limit
+            spent = as_int(row.get("attempts")) >= retry_limit
             recoverable = self._readmitter(row) is not None
             resumable = recoverable and not spent
             detail = INTERRUPTED_DETAIL
@@ -1022,7 +1022,7 @@ class SubagentService:
                 # got somewhere and was then stopped again would otherwise be
                 # readmitted as though it had never run, its restart go
                 # unrecorded, and the ladder never count it again.
-                restarts=int(row.get("starts") or 0),
+                restarts=as_int(row.get("starts")),
             )
         if run is None:
             return None
@@ -1273,13 +1273,13 @@ def fold_subagent_event(roster: dict[str, dict[str, Any]], event: Any) -> None:
             # Every drive writes one of these, so counting them *is* the answer
             # to "how many times has this child been started" — a fact the log
             # already carried and nothing had yet read.
-            row["starts"] = int(row.get("starts") or 0) + 1
+            row["starts"] = as_int(row.get("starts")) + 1
         if event.data.get("cause") == "resumed":
             # And how many of those starts were restarts with nothing achieved
             # since. Two counters because they answer different questions: this
             # one is cleared by progress and `starts` never is, so deriving one
             # from the other would lose whichever fact the ladder did not need.
-            row["attempts"] = int(row.get("attempts") or 0) + 1
+            row["attempts"] = as_int(row.get("attempts")) + 1
     else:
         row["deleted"] = True
         row["deletedReason"] = event.data.get("reason")

@@ -39,7 +39,7 @@ from typing import Any
 
 from ph.cordis import Context, plugin
 from ph.keys import TOOLS
-from ph.session import as_str
+from ph.session import as_bool, as_int, as_str
 from ph.text import count_of
 from ph.tools.code_mode import CodeCellValue
 from ph.tools.definition import ToolOutput, ToolResult, TransportPresentation, text_content
@@ -117,10 +117,10 @@ def render_cell(_args: Any, value: Any) -> list[Any]:
 def cell_details(_args: Any, value: Any) -> Any:
     return IpythonToolDetails(
         status="error" if value.get("error") else "ok",
-        dispatches=int(value.get("dispatches") or 0),
-        truncated=bool(value.get("truncated")),
+        dispatches=as_int(value.get("dispatches")),
+        truncated=as_bool(value.get("truncated")),
         attachments=len(value.get("displays") or ()),
-        reset=bool(value.get("reset")),
+        reset=as_bool(value.get("reset")),
     ).to_wire()
 
 

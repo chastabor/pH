@@ -51,7 +51,7 @@ from pydantic import Field
 from ph.cordis import Context, plugin
 from ph.keys import SYSTEM_PROMPT, TOOLS
 from ph.llm.types import ToolCallBlock
-from ph.session import Session, as_seq, as_str, derive_event_message, thaw_json
+from ph.session import Session, as_int, as_seq, as_str, derive_event_message, thaw_json
 from ph.system_prompt.assembly import (
     ORDER_TOOL_GUIDANCE,
     AssembleContext,
@@ -322,8 +322,7 @@ def todos_of(session: Session | None) -> list[dict[str, Any]]:
         return []
     # `thaw_json` because the payload is frozen — a `MappingProxyType` is not a
     # `dict`, the bug this project has now been bitten by three times.
-    thawed = thaw_json(event.data.get("todos"))
-    return [item for item in as_seq(thawed) if isinstance(item, dict)]
+    return _entries(thaw_json(event.data.get("todos")))
 
 
 def steps_of(todos: list[dict[str, Any]]) -> list[str]:
@@ -389,6 +388,19 @@ def blocked_by(todos: list[dict[str, Any]]) -> dict[str, list[str]]:
         if pending:
             waiting[_content(todo)] = pending
     return waiting
+
+
+def _entries(value: object) -> list[dict[str, Any]]:
+    """A tool argument's `todos`, as the list of entries it claims to be.
+
+    `list(value or ())` was the reader here, and it has the failure `as_seq`'s
+    own docstring is about: a `str` is a `Sequence`, so a `todos` field written
+    as a string became a list of its *characters* and every rule downstream read
+    one-letter entries. `as_seq` refuses the string; the shape test then drops
+    anything in the array that is not an entry, which is the same policy one
+    level down — a mis-shaped row costs a row.
+    """
+    return [one for one in as_seq(value) if isinstance(one, dict)]
 
 
 def unevidenced(todos: list[dict[str, Any]]) -> list[str]:
@@ -523,7 +535,7 @@ def _requires(entry: Mapping[str, Any]) -> list[str]:
     fabricated `"3"` against a `done` set built with `as_str`, two narrowings of
     one field five lines apart.
     """
-    return [as_str(name) for name in entry.get("requires") or ()]
+    return [as_str(name) for name in as_seq(entry.get("requires"))]
 
 
 def _recorded(previous: Any) -> list[Mapping[str, Any]]:
@@ -582,7 +594,7 @@ def _carried(
         before = seeded.get(_content(todo))
         if before is not None:
             todo["source"] = SKILL
-            todo["requires"] = list(before.get("requires") or ())
+            todo["requires"] = _requires(before)
     return todos
 
 
@@ -611,7 +623,7 @@ def _witnessed(
         if todo.get("status") != "completed":
             continue
         before = was.get(_content(todo))
-        todo["worked"] = int(before[1] or 0) if before and before[0] == "completed" else worked
+        todo["worked"] = as_int(before[1]) if before and before[0] == "completed" else worked
     return todos
 
 
@@ -692,7 +704,7 @@ async def apply(ctx: Context, config: None) -> None:
                 # another package, from a field whose meaning it would then own
                 # a second copy of.
                 presentation_meta=lambda args, value: {
-                    "unevidenced": unevidenced(list(value.get("todos") or ()))
+                    "unevidenced": unevidenced(_entries(value.get("todos")))
                 },
                 # Upstream's own wording. The evals note a proposed neutral
                 # "Todo list updated."; the pinned release still echoes the
@@ -702,12 +714,12 @@ async def apply(ctx: Context, config: None) -> None:
             ),
             execute=write_todos,
             present_call=lambda args: ToolCallView(
-                title="Plan", input=render_todo_list(list(args.get("todos") or ()))
+                title="Plan", input=render_todo_list(_entries(args.get("todos")))
             ),
             present_result=lambda args, result: ToolResultView(
                 title="Plan",
                 subtitle=_counts(
-                    list(args.get("todos") or ()),
+                    _entries(args.get("todos")),
                     bare=len((result.meta or {}).get("unevidenced") or ()),
                 ),
                 is_error=result.is_error,
@@ -745,7 +757,7 @@ async def apply(ctx: Context, config: None) -> None:
     ctx.require(SYSTEM_PROMPT).context(PromptContext(name="todos", text=current_list))
 
 
-def _counts(todos: list[Any], *, bare: int = 0) -> str:
+def _counts(todos: list[dict[str, Any]], *, bare: int = 0) -> str:
     """`2 done · 1 doing · 3 to do`, in the order work leaves the list.
 
     Plus, when there is one, the thing a person watching a plan most wants to
@@ -753,7 +765,10 @@ def _counts(todos: list[Any], *, bare: int = 0) -> str:
     `unevidenced`'s reader — the card, not the prompt, because it is a fact about
     the model that the model has no use for and cannot act on.
     """
-    tally = Counter(as_str(todo.get("status")) for todo in todos if isinstance(todo, Mapping))
+    # No shape test: the caller narrows with `_entries`, which is what that
+    # helper is for. It was `list(args.get("todos") or ())` and this guard was
+    # load-bearing then.
+    tally = Counter(as_str(todo.get("status")) for todo in todos)
     labelled = (("completed", "done"), ("in_progress", "doing"), ("pending", "to do"))
     line = " · ".join(f"{tally[status]} {label}" for status, label in labelled)
     return f"{line} · {bare} unevidenced" if bare else line

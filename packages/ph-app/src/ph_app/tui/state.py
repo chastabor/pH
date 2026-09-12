@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from enum import IntFlag
 from typing import Any, Literal, TypeAlias
 
-from ph.session import as_str
+from ph.session import as_bool, as_str
 
 __all__ = [
     "CatalogEntry",
@@ -234,7 +234,7 @@ class TuiState:
             row.status = as_str(entry.get("status"), "queued")
             row.model = as_str(entry.get("model"))
             row.cause = as_str(entry.get("cause"))
-            row.deleted = bool(entry.get("deleted"))
+            row.deleted = as_bool(entry.get("deleted"))
 
     # ------------------------------------------------------------------ rows --
 
