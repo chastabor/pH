@@ -54,7 +54,6 @@ from ..params import (
     CancelScheduleParams,
     CommandParams,
     CreateScheduleParams,
-    HeldCredentialsParams,
     InitializeParams,
     MutationParams,
     NewSessionParams,
@@ -513,13 +512,20 @@ class _Connection:
         # of any root: every root mounts the same composition.
         return DaemonConfigReply(rows=list(self.server.supervisor.profile.dump()))
 
-    async def _credentials_held(self, params: HeldCredentialsParams) -> CredentialsHeldReply:
+    async def _credentials_held(self, params: SessionParams) -> CredentialsHeldReply:
         # `credentials/held` and `credentials/store`, not `session/credential`
         # and `session/credentials`: those were two names one letter apart for
         # opposite kinds, and the one that writes a secret is the last method
         # that should be easy to reach by typo.
+        #
+        # No `names`: the daemon composes the profile, so it knows which
+        # credentials this deployment names — see `credentials_of`. Asking the
+        # client to supply them is what made the whole composed configuration
+        # something a front end had to be sent.
         root = self._root(params.session_id)
-        return CredentialsHeldReply(session_id=root.id, held=credentials_of(root, params.names))
+        return CredentialsHeldReply(
+            session_id=root.id, held=credentials_of(root, self.server.supervisor)
+        )
 
     # The schedule seam over the wire (P5-06, P5-10). Create and cancel go
     # through the supervisor rather than the seam directly: both need the

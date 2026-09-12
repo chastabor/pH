@@ -28,6 +28,7 @@ from textual.binding import Binding, BindingType
 from ph.seams.commands import CommandDefinition
 
 from .config import TuiKeybindings, TuiSettings
+from .screens import AppSurface
 
 __all__ = [
     "TUI_VERBS",
@@ -174,7 +175,7 @@ def app_bindings(keys: TuiKeybindings) -> list[BindingType]:
     return bindings
 
 
-def local_commands(app: Any) -> list[CommandDefinition]:
+def local_commands(app: AppSurface) -> list[CommandDefinition]:
     """The table as definitions, each dispatching into `app`.
 
     Handed back rather than registered: after P5-14 there is no in-process
@@ -187,7 +188,7 @@ def local_commands(app: Any) -> list[CommandDefinition]:
 
 
 def action_command(
-    app: Any, name: str, summary: str, action: str, argument_hint: str = ""
+    app: AppSurface, name: str, summary: str, action: str, argument_hint: str = ""
 ) -> CommandDefinition:
     """A slash command whose whole body is one Textual action.
 
@@ -208,7 +209,7 @@ class _RunAction:
     """The body itself. A dataclass because it outlives the call that made it
     and is stored in a registry — the fields it needs are the fields it holds."""
 
-    app: Any
+    app: AppSurface
     action: str
 
     async def __call__(self, argument: str, _context: Any) -> None:

@@ -39,6 +39,7 @@ one layer whose whole job is not to say less than the seam does.
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Mapping
 from typing import TYPE_CHECKING
 
 from ph.cordis import DEPLOYMENT
@@ -57,7 +58,9 @@ from ph.seams.permission_presets import PresetSchema
 from ph.seams.skills import Skill
 from ph.seams.tui_screens import ScreenSchema
 from ph.seams.tui_status import StatusReading
+from ph.session import JsonValue
 
+from ..payloads import ConfigRow
 from ..sessions import SessionSummary, session_summaries
 
 if TYPE_CHECKING:
@@ -66,6 +69,7 @@ if TYPE_CHECKING:
 __all__ = [
     "browse_of",
     "commands_of",
+    "credentials_named",
     "credentials_of",
     "readings_of",
     "screens_of",
@@ -167,21 +171,73 @@ def skills_of(root: Root) -> list[Skill]:
     return list(skills.list(DEPLOYMENT))
 
 
-def credentials_of(root: Root, names: list[str]) -> dict[str, bool]:
-    """Which of these credentials the harness already holds — **never the values.**
+CREDENTIAL_CONFIG_KEY = "apiKeyEnv"
+"""What an adapter row calls the environment variable holding its key."""
+
+
+def credentials_of(root: Root, supervisor: Supervisor) -> dict[str, bool]:
+    """Every credential this deployment names, and whether it is held —
+    **never the values.**
 
     Held-ness rather than the secret, and the shape is what enforces it: there is
     no field here a value could travel in, so a future edit cannot leak one by
     forgetting to strip it. The picker only ever needed the boolean.
 
+    **The names are found here, not sent here.** This took a `names` list, which
+    meant the client had to know them — so `daemon/config` shipped the *entire
+    composed profile* to every attached front end at attach, and a modal module
+    in the terminal re-mined it with a recursive walk. A projection is what that
+    should have been from the start (P5-14): the daemon holds the profile and the
+    credential seam, so it can answer the whole question, and the answer is a
+    `{name: bool}` map with no configuration in it.
+
+    Two arguments because it is two facts: the composed profile is the
+    *supervisor's* — every root mounts the same one — while the store is the
+    root's own. In **row order**, which is the order the picker shows and the
+    reason this is a dict rather than a set.
+
     The service is resolved once for the whole batch. Asking per name walked the
     scope chain per name, which is what the in-process caller did by looping over
     a predicate.
     """
+    names = credentials_named(supervisor.profile.dump())
     service = root.ctx.get(CREDENTIALS)
     if service is None:
         return dict.fromkeys(names, False)
+    # Plus whatever was handed to this process and is named in no row: the login
+    # screen takes free text, so a credential can be *held* without the profile
+    # having heard of it — and dropping it here would make it disappear from the
+    # picker the moment somebody set it.
+    names += [name for name in service.provided() if name not in names]
     return {name: bool(service.has(service.reference(name))) for name in names}
+
+
+def credentials_named(rows: Iterable[ConfigRow]) -> list[str]:
+    """Every credential the composed configuration names, in row order.
+
+    Walks a row's config rather than matching on plugin names: the key is
+    declared, so an adapter pH has never heard of is still covered.
+    """
+    found: list[str] = []
+    for row in rows:
+        for name in _walk(row.get("config")):
+            if name not in found:
+                found.append(name)
+    return found
+
+
+def _walk(value: JsonValue) -> Iterable[str]:
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            if key == CREDENTIAL_CONFIG_KEY and isinstance(item, str) and item:
+                yield item
+            else:
+                yield from _walk(item)
+    elif isinstance(value, (list, tuple)):
+        # `(list, tuple)` and not `Sequence`, which a `str` also satisfies —
+        # every character would recurse forever as a one-character string.
+        for item in value:
+            yield from _walk(item)
 
 
 def browse_of(supervisor: Supervisor) -> list[SessionSummary]:

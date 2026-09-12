@@ -16,8 +16,7 @@ plugin shows up without this module changing (I7).
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Mapping
-from typing import Any
+from collections.abc import Mapping
 
 from textual.app import ComposeResult
 from textual.containers import Vertical
@@ -26,10 +25,7 @@ from textual.widgets import Input, Static
 
 from .base import Choice, PhModal
 
-__all__ = ["LoginModal", "credential_choices", "credential_names"]
-
-CREDENTIAL_CONFIG_KEY = "apiKeyEnv"
-"""What an adapter row calls the environment variable holding its key."""
+__all__ = ["LoginModal", "credential_choices"]
 
 
 class LoginModal(PhModal[str | None]):
@@ -70,43 +66,16 @@ class LoginModal(PhModal[str | None]):
         self.dismiss(event.value.strip() or None)
 
 
-def credential_names(rows: Iterable[Any]) -> list[str]:
-    """Every credential the composed configuration names, in row order.
-
-    Walks a row's config rather than matching on plugin names: the key is
-    declared, so an adapter pH has never heard of is still covered.
-    """
-    found: list[str] = []
-    for row in rows:
-        for name in _walk(row.get("config") if isinstance(row, Mapping) else None):
-            if name not in found:
-                found.append(name)
-    return found
-
-
-def _walk(value: Any) -> Iterable[str]:
-    if isinstance(value, Mapping):
-        for key, item in value.items():
-            if key == CREDENTIAL_CONFIG_KEY and isinstance(item, str) and item:
-                yield item
-            else:
-                yield from _walk(item)
-    elif isinstance(value, (list, tuple)):
-        for item in value:
-            yield from _walk(item)
-
-
-def credential_choices(rows: Iterable[Any], held: Callable[[str], bool]) -> list[Choice]:
+def credential_choices(held: Mapping[str, bool]) -> list[Choice]:
     """The credentials pH could use, marked with the ones it already has.
 
-    A predicate rather than the `CredentialService`: "is this one set" is the
-    only question this asks of it, and a predicate is answerable by a front end
-    that reaches its harness over a socket.
+    A `{name: held}` map, in the daemon's row order, and that is the whole input:
+    `credential_names` used to live here and walk the composed profile for
+    `apiKeyEnv` keys, which meant every attached front end was sent the entire
+    configuration so that a modal could mine it. `credentials_of` answers both
+    halves now — see `ph_app.daemon.projections`.
     """
-    choices: list[Choice] = []
-    for name in credential_names(rows):
-        is_held = held(name)
-        choices.append(
-            Choice(value=name, label=name, detail="set" if is_held else "not set", marked=is_held)
-        )
-    return choices
+    return [
+        Choice(value=name, label=name, detail="set" if is_held else "not set", marked=is_held)
+        for name, is_held in held.items()
+    ]

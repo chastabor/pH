@@ -14,6 +14,7 @@ that has been out of date since somebody added a field to `CommandDefinition`.
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import pytest
@@ -37,6 +38,8 @@ from ph.seams.tui_status import StatusField, StatusReading
 from ph.session import SessionEvent
 from ph.testing import RecordedStep, ReplayAdapter, simple_tool, text_chunks, tool_call_chunks
 from ph.tools import ToolCallView, ToolResultView
+from ph_app.daemon.projections import credentials_named
+from ph_app.payloads import ConfigRow
 from ph_app.protocol import DaemonError
 from ph_app.trust import TrustStore, trust_path
 from ph_app.tui.adapter import Frame, TuiEventAdapter
@@ -245,6 +248,57 @@ async def test_the_config_rows_are_the_composed_profile(tmp_path: Any) -> None:
         assert reply["rows"], "an empty profile would make this vacuous"
 
 
+def test_the_credential_names_come_from_the_composed_rows() -> None:
+    """Read from the configuration, not from a list kept in a front end (I7).
+
+    The key is nested inside a provider profile in the real rows, so the walk
+    has to go all the way down rather than checking the row's top level.
+
+    Daemon-side, which is the point of the move: this ran in a TUI modal, which
+    meant every attached front end was sent the whole composed profile so it
+    could be walked there.
+    """
+    rows: list[ConfigRow] = [
+        {"id": "llm", "config": None},
+        {"id": "llm-anthropic", "config": {"apiKeyEnv": "ANTHROPIC_API_KEY"}},
+        {
+            "id": "llm-openai-compatible",
+            "config": {
+                "profiles": [
+                    {"provider": "deepseek", "apiKeyEnv": "DEEPSEEK_API_KEY"},
+                    {"provider": "other", "apiKeyEnv": "OTHER_KEY"},
+                ]
+            },
+        },
+        {"id": "duplicate", "config": {"apiKeyEnv": "ANTHROPIC_API_KEY"}},
+    ]
+
+    assert credentials_named(rows) == ["ANTHROPIC_API_KEY", "DEEPSEEK_API_KEY", "OTHER_KEY"]
+
+
+async def test_a_credential_held_but_named_in_no_row_is_still_listed(tmp_path: Any) -> None:
+    """The login screen takes free text, so held and named are different sets.
+
+    Listing only what the profile names would drop a credential from the picker
+    at the moment somebody set it — which is the one moment they are looking at
+    it. `CredentialService.provided` is what makes the union askable.
+    """
+    async with running(tmp_path) as daemon:
+        root = await _furnished(daemon)
+        client = await daemon.client()
+
+        before = await client.call("credentials/held", sessionId=root.id)
+        assert "PH_TYPED_BY_HAND" not in before["held"]
+
+        await client.call(
+            "credentials/store", sessionId=root.id, name="PH_TYPED_BY_HAND", value="s3cret"
+        )
+        after = await client.call("credentials/held", sessionId=root.id)
+
+        assert after["held"]["PH_TYPED_BY_HAND"] is True
+        assert "s3cret" not in json.dumps(after), "the value must never cross the socket"
+
+
 # ------------------------------------------------------------ acting on it --
 
 
@@ -306,10 +360,9 @@ async def test_a_credential_is_stored_without_its_value_reaching_the_log_or_the_
 
         assert reply == {"sessionId": root.id, "name": "ANTHROPIC_API_KEY", "stored": True}
         assert secret not in repr([one.to_wire() for one in root.session.events])
-        held = await client.call(
-            "credentials/held", sessionId=root.id, names=["ANTHROPIC_API_KEY", "OTHER"]
-        )
-        assert held["held"] == {"ANTHROPIC_API_KEY": True, "OTHER": False}
+        held = await client.call("credentials/held", sessionId=root.id)
+        assert held["held"]["ANTHROPIC_API_KEY"] is True
+        assert secret not in json.dumps(held)
 
 
 async def test_a_new_session_records_the_clients_cwd_in_its_header(tmp_path: Any) -> None:

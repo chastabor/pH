@@ -25,7 +25,7 @@ from typing import Any
 
 import pytest
 from daemon_helpers import running, until
-from tui_helpers import StubHost
+from tui_helpers import StubApp, StubHost
 
 from ph.bundles import BASE, HEADLESS
 from ph.cordis import DEPLOYMENT, Profile, load_profile_documents
@@ -45,8 +45,16 @@ from ph_app.tui.state import TuiState
 pytestmark = pytest.mark.anyio
 
 
-async def _front(daemon: Any, session_id: str = "remote", **options: Any) -> Any:
-    """One attached `DaemonSession` and the host behind it."""
+async def _front(
+    daemon: Any, session_id: str = "remote", **options: Any
+) -> tuple[DaemonSession, StubHost]:
+    """One attached `DaemonSession` and the host behind it.
+
+    Typed rather than `Any`, which is what makes `StubApp` have to be a real
+    `AppSurface`: while this returned `Any`, `attach_surfaces(object())`
+    type-checked and the double got away with implementing one of three members
+    because the other two happened not to be reached.
+    """
     host = StubHost()
     client = await daemon.client()
     front = await attach_session(client, session_id, host=host, **options)
@@ -390,7 +398,7 @@ async def test_the_command_list_is_both_ends_merged(tmp_path: Path) -> None:
     """
     async with running(tmp_path) as daemon:
         front, _ = await _front(daemon)
-        front.attach_surfaces(object())
+        front.attach_surfaces(StubApp())
 
         names = {definition.name for definition in front.commands()}
 
@@ -429,17 +437,12 @@ async def test_a_local_verb_never_reaches_the_daemon(tmp_path: Path) -> None:
     """
     async with running(tmp_path) as daemon:
         front, _ = await _front(daemon)
-        ran: list[str] = []
-
-        class Recording:
-            async def run_action(self, action: str) -> None:
-                ran.append(action)
-
-        front.attach_surfaces(Recording())
+        app = StubApp()
+        front.attach_surfaces(app)
 
         await front.run_command("/model")
 
-        assert ran == ["open_models"]
+        assert app.ran == ["open_models"]
         root = daemon.running.supervisor.roots["remote"]
         assert not any(one.type == "command/run" for one in root.session.events)
 

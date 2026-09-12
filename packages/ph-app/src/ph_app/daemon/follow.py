@@ -26,11 +26,13 @@ one compensation.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
 import anyio
+
+from ph.session import JsonObject, JsonValue
 
 from .. import verbs
 from ..params import SnapshotParams
@@ -46,12 +48,33 @@ from ..protocol import Cursor
 from ..wire import as_int
 from .client import DaemonClient
 
-__all__ = ["Followed", "first_of"]
+__all__ = ["EventFrame", "Followed", "first_of"]
 
 log = logging.getLogger("ph_app.daemon.follow")
 
-Sink = Callable[[Sequence[tuple[Mapping[str, Any], Any]], bool], None]
-"""Called with `(event, view)` pairs and whether they are arriving **live**.
+type EventFrame = tuple[JsonObject, JsonValue]
+"""One session event as it came off the wire, and the card rendered beside it.
+
+**Neither half is an event or a card yet**, and the asymmetry is the two
+producers disagreeing. The envelope is an object either way —
+`SessionEvent.from_wire` is what proves it is an *event*. The card is bare
+`JsonValue` because only one of its two sources says more: a live frame arrives
+as `SessionEventNotice.presentation: dict[str, Any] | None`, which pydantic has
+already checked is an object, while a rebuilt one is `SnapshotPage.presentations`
+*values* — typed `Any`, so nothing has looked at them. `JsonValue` is what is
+true of both.
+
+Tightening `presentations` to `dict[str, dict[str, Any]]` would make the pair
+`JsonObject | None` and retire `view_of`'s `isinstance`, and was rejected: it
+moves the failure from "this one card renders generic" to "this whole 2048-event
+page fails validation", which is the opposite of what `view_of` is written for.
+
+This pair was `tuple[Mapping[str, Any], Any]`, which said none of that — every
+implementer inherited two `Any`s, and a consumer could not tell "arbitrary JSON"
+from "not typed yet"."""
+
+Sink = Callable[[Sequence[EventFrame], bool], None]
+"""Called with `EventFrame`s and whether they are arriving **live**.
 
 The pairs keep the card the daemon rendered *beside* the event, never merged into
 it: `_EventWire` forbids extras, so an event carrying a `presentation` key fails

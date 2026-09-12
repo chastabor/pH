@@ -64,7 +64,6 @@ __all__ = [
     "CancelScheduleParams",
     "CommandParams",
     "CreateScheduleParams",
-    "HeldCredentialsParams",
     "InitializeParams",
     "MutationParams",
     "NewSessionParams",
@@ -166,12 +165,6 @@ class StoreCredentialParams(MutationParams):
 
     name: str
     value: str
-
-
-class HeldCredentialsParams(SessionParams):
-    """`credentials/held`: which of these names the harness already has."""
-
-    names: list[str] = Field(default_factory=list)
 
 
 class PutAttachmentParams(SessionParams):

@@ -42,6 +42,7 @@ import pytest
 from daemon_helpers import Daemon, private_runtime, serving
 from typer.testing import CliRunner
 
+from ph.session import JsonObject
 from ph_app.cli import app
 from ph_app.payloads import DaemonStatusReply
 from ph_app.protocol import Cursor
@@ -788,7 +789,7 @@ def test_a_followed_line_says_what_the_event_says() -> None:
     """
     from ph_app.agents import _line
 
-    result = {
+    result: JsonObject = {
         "seq": 7,
         "type": "tool/result",
         "data": {
@@ -801,7 +802,11 @@ def test_a_followed_line_says_what_the_event_says() -> None:
     }
     assert "42 files" in _line(result)
 
-    gave_up = {"seq": 9, "type": "supervisor/failed", "data": {"attempts": 3, "reason": "boom"}}
+    gave_up: JsonObject = {
+        "seq": 9,
+        "type": "supervisor/failed",
+        "data": {"attempts": 3, "reason": "boom"},
+    }
     line = _line(gave_up)
     assert "attempts=3" in line and "reason=boom" in line
 

@@ -36,11 +36,13 @@ where it is. All three read `source_seq`/`seq`, which the log already carries.
 
 from __future__ import annotations
 
-from typing import Protocol, runtime_checkable
+from collections.abc import Callable, Coroutine
+from typing import Any, Protocol, runtime_checkable
 
+from textual.binding import Binding
 from textual.message import Message
 
-__all__ = ["RevealHost", "RevealSeq", "Revealing", "open_screen_action"]
+__all__ = ["AppSurface", "RevealHost", "RevealSeq", "Revealing", "open_screen_action"]
 
 
 class RevealSeq(Message):
@@ -56,6 +58,47 @@ class RevealSeq(Message):
         super().__init__()
         self.seq = seq
         self.screen_id = screen_id
+
+
+class AppSurface(Protocol):
+    """The three things a front end asks of the app it is attached to.
+
+    **A Protocol, not `PHTuiApp`.** Naming the class would close a cycle —
+    `app` imports `remote.attach_session` — though `from __future__ import
+    annotations` plus `TYPE_CHECKING` defuses exactly that, and
+    `daemon/projections.py` does it for `Root`. What actually rules the class out
+    is that it would be *wrong*: these three are the app's *surface*, not pH's
+    session machinery, and demanding the concrete class would make the headless
+    doubles illegal for no gain — a front end driven with no terminal is a shape
+    this layer supports on purpose.
+
+    **Here and not in `frontend.py`**, where it started, for the reason that file
+    opens with: P7-07's HTML renderer consumes `FrontSession`, so a Textual
+    `Binding` in its imports is exactly the coupling it is written to avoid.
+    This module is already the Textual-shaped half of the front end and already
+    holds `RevealHost`, the sibling protocol for the same object.
+
+    It replaced `app: Any`, which had spread to `attach_surfaces`,
+    `_wire_screens`, `local_commands`, `action_command` and `_RunAction.app`:
+    six annotations saying nothing, and a double that satisfied all of them by
+    implementing one member and never reaching the other two.
+    """
+
+    def run_worker(self, work: Coroutine[Any, Any, Any]) -> Any:
+        """Own a coroutine started from a sync caller, so it dies with the app.
+
+        Textual's own parameters are not restated: a structural match needs only
+        what is called, and `exclusive=False` — the one this used to carry — is
+        the default it was passing anyway, in three places that had to agree."""
+        ...
+
+    def add_binding(self, binding: Binding) -> Callable[[], Any]:
+        """Bind a key on the live app; the return removes it again."""
+        ...
+
+    async def run_action(self, action: str) -> Any:
+        """Dispatch a Textual action — how every local slash command has a body."""
+        ...
 
 
 @runtime_checkable

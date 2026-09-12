@@ -50,7 +50,7 @@ bodies are what close that.
 from __future__ import annotations
 
 import logging
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Coroutine, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -73,10 +73,9 @@ from .. import verbs
 from ..attach import Tray, stage_bytes
 from ..daemon.client import DaemonClient
 from ..daemon.duplex import answering
-from ..daemon.follow import Followed, first_of
+from ..daemon.follow import EventFrame, Followed, first_of
 from ..params import (
     CommandParams,
-    HeldCredentialsParams,
     NewSessionParams,
     PresetParams,
     ShellParams,
@@ -88,7 +87,6 @@ from ..payloads import (
     ApprovalAsk,
     ApprovalAskReply,
     CommandShown,
-    DaemonConfigReply,
     QuestionAsk,
     QuestionAskReply,
     SessionCommandsNotice,
@@ -105,7 +103,7 @@ from ..wire import view_of
 from .adapter import Frame, TuiEventAdapter
 from .commands import action_command, local_commands
 from .frontend import ModalHost
-from .screens import open_screen_action
+from .screens import AppSurface, open_screen_action
 from .state import CatalogEntry, Surface, TuiState
 from .trajectory_screen import CLIENT_SIDE as TRAJECTORY
 
@@ -126,12 +124,11 @@ class DaemonSession:
     state: TuiState
     adapter: TuiEventAdapter
     host: ModalHost
-    config_rows: tuple[Any, ...] = ()
     remote_commands: list[CommandDefinition] = field(default_factory=list)
     screens: dict[str, ScreenDefinition] = field(default_factory=dict)
     held: dict[str, bool] = field(default_factory=dict)
     feed: Followed = field(init=False)
-    app: Any = None
+    app: AppSurface | None = None
     """The Textual app, once `attach_surfaces` has been given it — so a local verb
     has something to dispatch into and async work has an owner. `None` until then,
     which is the state a headless test drives this in."""
@@ -231,7 +228,7 @@ class DaemonSession:
         )
         self._unreadable += 1
 
-    def _apply(self, events: Sequence[tuple[Mapping[str, Any], Any]], live: bool) -> None:
+    def _apply(self, events: Sequence[EventFrame], live: bool) -> None:
         """Fold a run of wire events into the transcript and this client's log.
 
         `live` is passed through rather than assumed; `Followed.Sink` says why.
@@ -373,12 +370,12 @@ class DaemonSession:
         asks, because it is the only thing that reads this."""
         return bool(self.held.get(name))
 
-    async def refresh_credentials(self, names: Sequence[str]) -> None:
+    async def refresh_credentials(self) -> Mapping[str, bool]:
         reply = await self.client.call(
-            verbs.CREDENTIALS_HELD,
-            HeldCredentialsParams(session_id=self.session_id, names=list(names)),
+            verbs.CREDENTIALS_HELD, SessionParams(session_id=self.session_id)
         )
         self.held = dict(reply.held)
+        return self.held
 
     # ---------------------------------------------------------------- turns --
 
@@ -424,13 +421,13 @@ class DaemonSession:
             self.client.call(verbs.SESSION_CANCEL, SessionParams(session_id=self.session_id))
         )
 
-    def _spawn(self, work: Any) -> None:
+    def _spawn(self, work: Coroutine[Any, Any, Any]) -> None:
         """Run an awaitable from a sync caller, owned by the app's worker pool so
         it is cancelled with the app. The sync members of `FrontSession` exist
         for key handlers, and key handlers exist only once there is an app."""
         if self.app is None:
             raise RuntimeError("attach_surfaces first: nothing owns background work yet")
-        self.app.run_worker(work, exclusive=False)
+        self.app.run_worker(work)
 
     async def run_command(self, line: str) -> str | None:
         """Dispatch a `/name` line — the merge in `commands()`, read back.
@@ -474,7 +471,7 @@ class DaemonSession:
 
     # ------------------------------------------------------------ lifecycle --
 
-    def attach_surfaces(self, app: Any) -> list[Callable[[], Any]]:
+    def attach_surfaces(self, app: AppSurface) -> list[Callable[[], Any]]:
         """Take the app, and build the local verbs that dispatch into it.
 
         Built once here rather than per `commands()` call, which the completion
@@ -496,7 +493,7 @@ class DaemonSession:
 
         return [release]
 
-    def _wire_screens(self, app: Any) -> None:
+    def _wire_screens(self, app: AppSurface) -> None:
         """Build this client's verbs: the table's, plus one per drawable screen.
 
         A screen buys a verb, a palette entry and a key — the three routes it
@@ -617,14 +614,12 @@ async def attach_session(
     async def fetch[P: WireModel, R: WireModel](verb: Verb[P, R], params: P, into: list[R]) -> None:
         into.append(await client.call(verb, params))
 
-    configs: list[DaemonConfigReply] = []
     listed_commands: list[SessionCommandsNotice] = []
     listed_screens: list[SessionScreensNotice] = []
     listed_tools: list[SessionToolsReply] = []
     listed_skills: list[SessionSkillsReply] = []
     asked = SessionParams(session_id=session_id)
     async with anyio.create_task_group() as tasks:
-        tasks.start_soon(fetch, verbs.DAEMON_CONFIG, NoParams(), configs)
         tasks.start_soon(fetch, verbs.COMMANDS_LIST, asked, listed_commands)
         tasks.start_soon(fetch, verbs.SCREENS_LIST, asked, listed_screens)
         # Two more reads in the same group rather than on demand, because both
@@ -635,7 +630,6 @@ async def attach_session(
         tasks.start_soon(fetch, verbs.TOOLS_LIST, asked, listed_tools)
         tasks.start_soon(fetch, verbs.SKILLS_LIST, asked, listed_skills)
 
-    config = configs[0]
     state.tools = _catalog(listed_tools[0].tools)
     state.skills = _catalog(listed_skills[0].skills)
     front = DaemonSession(
@@ -646,7 +640,6 @@ async def attach_session(
         # sends the rendered view beside each event — see `Frame.view`.
         adapter=TuiEventAdapter(state=state),
         host=host,
-        config_rows=tuple(config.rows),
         remote_commands=[
             _remote_command(client, session_id, one) for one in listed_commands[0].commands
         ],

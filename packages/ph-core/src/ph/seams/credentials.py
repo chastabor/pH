@@ -74,6 +74,20 @@ class CredentialService:
         """Register a value in-process, for a test or an interactive login."""
         self._overrides[name] = value
 
+    def provided(self) -> tuple[str, ...]:
+        """The **names** this process was handed, in the order they arrived.
+
+        Names and never values — this class has one accessor that reveals a
+        secret and it is `resolve`, at the adapter edge.
+
+        For the picker, which lists what a deployment *names* in its profile: a
+        credential typed into the login screen's free-text entry is named
+        nowhere, so without this it vanished from the list the moment it was
+        stored. The environment is deliberately not enumerated with it — every
+        variable a shell exports is not a list of pH's credentials.
+        """
+        return tuple(self._overrides)
+
     def has(self, ref: CredentialRef) -> bool:
         return ref.name in self._overrides or ref.name in os.environ
 

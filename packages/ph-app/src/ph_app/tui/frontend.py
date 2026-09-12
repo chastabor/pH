@@ -31,7 +31,7 @@ a rule someone has to remember.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any, Protocol
 
 from ph.llm.types import AttachmentRef
@@ -44,6 +44,7 @@ from ph.seams.user_questions import UserQuestion
 from ph.session import Session
 
 from ..sessions import SessionSummary
+from .screens import AppSurface
 from .state import Surface, TuiState
 
 __all__ = ["FrontSession", "ModalHost"]
@@ -91,7 +92,6 @@ class FrontSession(Protocol):
     """
 
     state: TuiState
-    config_rows: tuple[Any, ...]
 
     @property
     def session(self) -> Session:
@@ -135,7 +135,7 @@ class FrontSession(Protocol):
     async def flush(self) -> None: ...
     async def close(self) -> None: ...
 
-    def attach_surfaces(self, app: Any) -> list[Callable[[], Any]]:
+    def attach_surfaces(self, app: AppSurface) -> list[Callable[[], Any]]:
         """Register this front end's own verbs and screens; return their disposers."""
         ...
 
@@ -173,13 +173,23 @@ class FrontSession(Protocol):
         """
         ...
 
-    async def refresh_credentials(self, names: Sequence[str]) -> None:
-        """Re-read which of these the harness holds.
+    async def refresh_credentials(self) -> Mapping[str, bool]:
+        """Re-read which credentials the harness names, and which it holds.
 
         On the protocol because the login screen has to *await* it before it can
         draw: `credential_held` is synchronous, so somebody has to have asked.
         Left off it, the remote implementation answered `False` for every
         credential and the picker showed a deployment with none set.
+
+        No names to pass, because working out which credentials exist is the
+        harness's job: it composed the profile. The front end used to hold that
+        profile — a `config_rows` member on this protocol — purely so a modal
+        could walk it for `apiKeyEnv` keys, which is a service artifact reaching
+        a screen through a member shaped like a screen's need.
+
+        Answers with the map as well as caching it: the picker draws every row
+        at once, and `credential_held` remains for the single-name question a
+        caller asks *after* storing one.
         """
         ...
 

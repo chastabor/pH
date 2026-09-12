@@ -53,7 +53,7 @@ from ph_app.tui.config import (
     save_tui_settings,
     tui_settings_from_json,
 )
-from ph_app.tui.modals.login import credential_choices, credential_names
+from ph_app.tui.modals.login import credential_choices
 from ph_app.tui.modals.pickers import session_choices
 from ph_app.tui.themes import (
     BUILTIN_THEME_NAMES,
@@ -340,46 +340,16 @@ def test_a_branch_of_a_rolled_session_lands_under_the_surviving_row(tmp_path: Pa
 # ------------------------------------------------------------- credentials --
 
 
-def test_credential_names_come_from_the_composed_rows() -> None:
-    """Read from the configuration, not from a list kept in the front-end (I7).
+def test_credential_choices_mark_what_is_already_set() -> None:
+    """Rows straight off the daemon's answer, in the order it gave them.
 
-    The key is nested inside a provider profile in the real rows, so the walk
-    has to go all the way down rather than checking the row's top level.
+    The walk that used to produce these names is the daemon's now
+    (`credentials_of`), so what is left here is the rendering — and the order,
+    which is the profile's row order and the reason the answer is a mapping
+    rather than a set.
     """
-    rows = [
-        {"id": "llm", "config": None},
-        {"id": "llm-anthropic", "config": {"apiKeyEnv": "ANTHROPIC_API_KEY"}},
-        {
-            "id": "llm-openai-compatible",
-            "config": {
-                "profiles": [
-                    {"provider": "deepseek", "apiKeyEnv": "DEEPSEEK_API_KEY"},
-                    {"provider": "other", "apiKeyEnv": "OTHER_KEY"},
-                ]
-            },
-        },
-        {"id": "duplicate", "config": {"apiKeyEnv": "ANTHROPIC_API_KEY"}},
-    ]
-    assert credential_names(rows) == [
-        "ANTHROPIC_API_KEY",
-        "DEEPSEEK_API_KEY",
-        "OTHER_KEY",
-    ]
+    choices = credential_choices({"PH_PRESENT_KEY": True, "PH_ABSENT_KEY": False})
 
-
-def test_credential_choices_mark_what_is_already_set(monkeypatch: pytest.MonkeyPatch) -> None:
-    from ph.cordis import Context
-    from ph.seams.credentials import CredentialService
-
-    monkeypatch.setenv("PH_PRESENT_KEY", "x")
-    credentials = CredentialService(ctx=Context())
-    rows = [
-        {"id": "a", "config": {"apiKeyEnv": "PH_PRESENT_KEY"}},
-        {"id": "b", "config": {"apiKeyEnv": "PH_ABSENT_KEY"}},
-    ]
-
-    def held(name: str) -> bool:
-        return credentials.has(credentials.reference(name))
-
-    marked = {choice.value: choice.marked for choice in credential_choices(rows, held)}
-    assert marked == {"PH_PRESENT_KEY": True, "PH_ABSENT_KEY": False}
+    assert [one.value for one in choices] == ["PH_PRESENT_KEY", "PH_ABSENT_KEY"]
+    assert [one.marked for one in choices] == [True, False]
+    assert [one.detail for one in choices] == ["set", "not set"]

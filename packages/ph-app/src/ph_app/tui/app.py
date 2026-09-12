@@ -63,7 +63,7 @@ from .frontend import FrontSession
 from .modals.approval import ApprovalModal
 from .modals.ask_user import AskUserModal
 from .modals.base import Choice, ChoicePicker
-from .modals.login import LoginModal, credential_choices, credential_names
+from .modals.login import LoginModal, credential_choices
 from .modals.pickers import (
     command_choices,
     model_choices,
@@ -721,11 +721,10 @@ class PHTuiApp(App[str | None]):
         front = self.front
         if front is None:
             return
-        names = credential_names(front.config_rows)
-        await front.refresh_credentials(names)
+        held = await front.refresh_credentials()
         self._pick(
             "credential",
-            credential_choices(front.config_rows, front.credential_held),
+            credential_choices(held),
             self._ask_for_secret,
             free_text="environment variable",
         )

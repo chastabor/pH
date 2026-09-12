@@ -50,6 +50,7 @@ from ph.seams.skills import Skill
 from ph.seams.tui_screens import ScreenSchema
 from ph.seams.tui_status import StatusReading
 from ph.seams.user_questions import UserQuestion
+from ph.session import JsonObject
 from ph.wire import WireModel, wire_alias
 
 from .protocol import CapabilityBlock, Cursor
@@ -63,6 +64,7 @@ __all__ = [
     "AttachReply",
     "AttachmentStored",
     "CommandShown",
+    "ConfigRow",
     "CredentialStored",
     "CredentialsHeldReply",
     "DaemonConfigReply",
@@ -370,6 +372,18 @@ class DaemonStatusReply(CapabilityBlock):
     sections: list[DiagnosticSection] = Field(default_factory=list)
 
 
+type ConfigRow = JsonObject
+"""One row of the composed profile, as `daemon/config` sends it.
+
+Named here, beside the reply that carries it, rather than in the front end that
+reads it: a second front end — or `ph agents` — should not import a TUI module to
+name a shape the daemon serialises. It began in `tui/frontend.py` and restated
+`DaemonConfigReply.rows`' argument almost verbatim, which was the tell.
+
+`JsonObject` and not a hand-written `Mapping[str, JsonValue]`, which was the
+third spelling of that in the tree."""
+
+
 class DaemonConfigReply(_CarriesJson):
     """`daemon/config` — the composed profile, row by row.
 
@@ -385,11 +399,14 @@ class DaemonConfigReply(_CarriesJson):
 
 
 class CredentialsHeldReply(SessionScoped):
-    """`credentials/held` — which of the named secrets the daemon's store has.
+    """`credentials/held` — every credential this deployment names, and which it has.
 
-    The names are the client's question, so the answer is keyed by them.
-    Booleans and never values: the whole point of asking the daemon rather than
-    reading a store locally is that the value never crosses the socket."""
+    **The names are the daemon's answer, not the client's question.** They were
+    the question once, which meant a front end had to know them, which meant the
+    composed profile was shipped whole to every client that might open a login
+    picker. Booleans and never values: the whole point of asking the daemon
+    rather than reading a store locally is that the value never crosses the
+    socket — and now neither does the configuration."""
 
     held: dict[str, bool] = Field(default_factory=dict)
 

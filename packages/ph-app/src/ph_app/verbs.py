@@ -40,7 +40,6 @@ from .params import (
     CancelScheduleParams,
     CommandParams,
     CreateScheduleParams,
-    HeldCredentialsParams,
     InitializeParams,
     NewSessionParams,
     PresetParams,
@@ -163,7 +162,7 @@ PRESETS_LIST = Verb("presets/list", SessionParams, SessionPresetsReply)
 # --- attachments and credentials -----------------------------------------------
 
 ATTACHMENT_PUT = Verb("attachment/put", PutAttachmentParams, AttachmentStored)
-CREDENTIALS_HELD = Verb("credentials/held", HeldCredentialsParams, CredentialsHeldReply)
+CREDENTIALS_HELD = Verb("credentials/held", SessionParams, CredentialsHeldReply)
 
 # --- the schedule seam over the wire (P5-06, P5-10) ----------------------------
 

@@ -8,11 +8,12 @@ and fails loudly rather than hanging when it never does.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Coroutine
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
+from textual.binding import Binding
 from textual.pilot import Pilot
 
 from ph.seams.approval import ApprovalAnswer, ApprovalRequest
@@ -144,3 +145,35 @@ class StubHost:
         # Unioned so a test can assert what a batch did *not* reach.
         self.redraws += 1
         self.redrawn |= surfaces
+
+
+class StubApp:
+    """An `AppSurface` for a front end driven with no terminal.
+
+    The one `AppSurface` double in the tree, for `StubHost`'s reason and beside
+    it: a member added to that protocol is added here once.
+
+    All three members, not the one a given test reaches — a double that stubs
+    only what today's path calls stops being one the moment the path changes,
+    silently. That is not hypothetical: this replaced `object()` and a four-line
+    class with a single method, both of which passed because `_front` returned
+    `Any`.
+    """
+
+    def __init__(self) -> None:
+        self.ran: list[str] = []
+        self.bound: list[Binding] = []
+
+    def run_worker(self, work: Coroutine[Any, Any, Any]) -> Any:
+        # Closed rather than started: there is no app to own it here, and a
+        # coroutine left unawaited warns.
+        work.close()
+        return None
+
+    def add_binding(self, binding: Binding) -> Callable[[], Any]:
+        self.bound.append(binding)
+        return lambda: self.bound.remove(binding)
+
+    async def run_action(self, action: str) -> Any:
+        self.ran.append(action)
+        return None

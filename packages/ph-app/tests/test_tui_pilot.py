@@ -795,7 +795,7 @@ async def test_login_stores_a_secret_without_logging_it(
         # credential and a deployment with all of them set looked like one with
         # none: no test noticed, because nothing asserted the marker.
         assert app.front is not None
-        await app.front.refresh_credentials(["PH_TEST_KEY"])
+        await app.front.refresh_credentials()
         assert app.front.credential_held("PH_TEST_KEY"), "the front end cannot see its own store"
 
 

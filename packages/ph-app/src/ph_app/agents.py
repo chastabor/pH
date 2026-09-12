@@ -26,7 +26,7 @@ fails and there is no daemon to ask (P5-11).
 from __future__ import annotations
 
 import secrets
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from functools import partial
@@ -42,11 +42,12 @@ from ph.paths import RuntimeDirError, resolve_roots
 from ph.resources import GRACE_SECONDS
 from ph.seams.schedule import ScheduleKind
 from ph.selectors import Selector, matches_any
+from ph.session import JsonObject
 
 from . import verbs
 from .console import TypeOption, console, fail, section, selectors_or_exit
 from .daemon.client import DaemonClient, Exchange, connected
-from .daemon.follow import Followed, first_of
+from .daemon.follow import EventFrame, Followed, first_of
 from .params import CancelScheduleParams, CreateScheduleParams
 from .payloads import DaemonStatusReply, StatusFacts
 from .protocol import (
@@ -178,7 +179,7 @@ def _duration(milliseconds: Any) -> str:
     return " ".join(parts[:2]) or "0s"
 
 
-def _summary(kind: str, event: Mapping[str, Any]) -> str:
+def _summary(kind: str, event: JsonObject) -> str:
     """One line of what an event says.
 
     Deliberately a *follower*, not the transcript: `ph agents attach` shows the
@@ -224,7 +225,7 @@ def _reachability(facts: DaemonStatusReply) -> list[tuple[str, str]]:
     ]
 
 
-def _line(event: Mapping[str, Any]) -> str:
+def _line(event: JsonObject) -> str:
     kind = str(event.get("type", ""))
     body = _summary(kind, event)
     seq = f"{event.get('seq', '')!s:>5}"
@@ -305,7 +306,7 @@ class _Follow:
             session_id=self.session_id, on_events=self._events, on_status=self._status
         )
 
-    def _events(self, pairs: Sequence[tuple[Mapping[str, Any], Any]], _live: bool) -> None:
+    def _events(self, pairs: Sequence[EventFrame], _live: bool) -> None:
         # The phase is not a distinction a follower draws: it prints records, and
         # a record read from a page reads the same as one that just arrived.
         self.write(event for event, _view in pairs)
@@ -320,7 +321,7 @@ class _Follow:
             self.last_turn = last
             self.done.set()
 
-    def write(self, events: Iterable[Mapping[str, Any]]) -> None:
+    def write(self, events: Iterable[JsonObject]) -> None:
         """Render a run of events as one write.
 
         One `console.print` per event costs multiples of the same events joined,
@@ -334,7 +335,7 @@ class _Follow:
             # console itself is `soft_wrap` (see `ph_app.console`).
             console.print("\n".join(lines))
 
-    def _shows(self, event: Mapping[str, Any]) -> bool:
+    def _shows(self, event: JsonObject) -> bool:
         """Whether this follower prints one event.
 
         **A `--type` selector replaces the per-delta hush rather than stacking on

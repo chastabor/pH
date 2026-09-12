@@ -30,7 +30,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from ph.session import as_int, as_obj, as_seq
+from ph.session import JsonValue, as_int, as_obj, as_seq
 from ph.tools import ToolCallView, ToolResultView
 from ph.tools.presentation import CARD_VIEWS
 
@@ -94,7 +94,7 @@ def message_of(event: Any) -> Mapping[str, Any]:
     return as_obj(payload.get("message")) if "message" in payload else payload
 
 
-def view_of(event_type: str, sidecar: Any) -> ToolCallView | ToolResultView | None:
+def view_of(event_type: str, sidecar: JsonValue) -> ToolCallView | ToolResultView | None:
     """The card view a daemon sent beside an event, validated **here** (P7-12).
 
     Here because this is the wire edge: every other frame a client reads is
@@ -104,6 +104,11 @@ def view_of(event_type: str, sidecar: Any) -> ToolCallView | ToolResultView | No
     `ToolResultView` — and anything else, or anything that does not parse,
     is `None`: the adapter then draws the generic card it draws with no daemon at
     all, which is a plain card and not a wrong one.
+
+    `JsonValue` rather than `Any`, and the `isinstance` below stays: the card is
+    *unvalidated* JSON, not an untyped object, and those are different promises.
+    `Any` let a caller hand this anything at all; `JsonValue` says a daemon sent
+    it and nothing has looked at it yet, which is exactly what this narrows.
     """
     model = CARD_VIEWS.get(event_type)
     if model is None or not isinstance(sidecar, Mapping):
