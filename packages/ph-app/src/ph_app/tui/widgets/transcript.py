@@ -41,6 +41,7 @@ from ph.text import count_of
 
 from ...wire import index_at_or_before
 from ..state import ChatItem, ToolCard
+from .selection import SOURCE_BLOCKS
 
 __all__ = [
     "CodeCellWidget",
@@ -139,7 +140,14 @@ class TranscriptRow(Vertical):
 
 
 class StreamingMessage(Markdown):
-    """An assistant or thinking row that grows a fragment at a time."""
+    """An assistant or thinking row that grows a fragment at a time.
+
+    **Copies as Markdown, not as what was drawn.** `SOURCE_BLOCKS` is the whole
+    of it from this side: every block answers a selection with its own span of
+    `item.text` rather than with its rendering, which is what `ph_app.tui.widgets.
+    selection` exists to explain. The other transcript rows need nothing — they
+    are `Static`s holding the text already.
+    """
 
     DEFAULT_CSS = """
     StreamingMessage { height: auto; margin: 0 1 1 1; }
@@ -152,6 +160,8 @@ class StreamingMessage(Markdown):
     StreamingMessage.-streaming MarkdownFence { overflow-x: hidden; scrollbar-size-horizontal: 0; }
     StreamingMessage.-finalized MarkdownFence { overflow-x: auto; scrollbar-size-horizontal: 1; }
     """
+
+    BLOCKS = SOURCE_BLOCKS
 
     def __init__(self, item: ChatItem) -> None:
         super().__init__("", id=f"row-{_slug(item.key)}")
