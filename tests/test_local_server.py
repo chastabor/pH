@@ -50,7 +50,7 @@ import httpx
 import pytest
 
 from ph.agent.types import AgentOptions
-from ph.json import as_obj
+from ph.json import as_int, as_obj
 from ph.keys import AGENTS, LLM, SESSIONS
 from ph.llm.types import text_of
 from ph.session import Session
@@ -348,12 +348,100 @@ async def test_the_configured_window_fits_one_slot(mount: MountProfile, route: s
         "no llama route published a context window; the profile sets none, or "
         "`llm-llama` did not register"
     )
-    assert model.context_window <= per_slot, (
+    # Exactly, not merely within: `/props` answered this test, so it answered the
+    # probe too, and `measures` puts that above every ceiling in the list. A
+    # window that is *under* the slot now means discovery failed and the YAML
+    # fallback stood — which used to pass here and is the quieter half of the
+    # same bug.
+    assert model.context_window == per_slot, (
         f"the profile budgets against {model.context_window} tokens but each of this "
-        f"server's {props.get('total_slots')} slots holds {per_slot} — "
-        "llama.cpp divides --ctx-size by --parallel, and pH compacts against what it "
-        "was told here"
+        f"server's {props.get('total_slots')} slots holds {per_slot} — either discovery "
+        "did not reach `/props` and the fallback stands, or a `model` measurement won"
     )
+
+
+async def test_the_two_llama_endpoints_answer_different_questions(
+    mount: MountProfile, route: str
+) -> None:
+    """What `WindowProbe.measures` is for, priced by a server rather than a stub.
+
+    llama.cpp publishes a window in two places and they are not two spellings of
+    one number. `/props` reports the slot — the same figure each `/slots` entry
+    carries, which is what makes it the server's live allocation — while
+    `/v1/models` hands back `meta`, and the company that block keeps gives it
+    away: `n_ctx_train`, `n_vocab`, `n_embd`, `n_params`, `ftype`. That is the
+    GGUF's header, so a server run below its model's ceiling publishes the
+    ceiling there unchanged.
+
+    **The assertion is the shape, not the numbers.** On a server whose
+    `--ctx-size` reaches the model's own they are equal, and a test that pinned
+    equality would pass for the wrong reason on that machine and fail on the next
+    one. What must hold everywhere is that `/props` speaks for the slot and
+    `meta` speaks for the weights — and if llama.cpp ever moves either, the
+    profile's third probe is mismarked and this says so.
+
+    A first design had `measures` say `slot | server` and *divide* the second
+    number by `total_slots`. Measured against Qwen3.8-27B at `--parallel 2`,
+    that arithmetic turned a correct 262 144 into 131 072: `/v1/models` never
+    reported a total to divide.
+    """
+    props = _props()
+    if props is None:
+        pytest.skip(f"{_server_root()} publishes no /props; not a llama.cpp server")
+
+    per_slot = (props.get("default_generation_settings") or {}).get("n_ctx")
+    if not isinstance(per_slot, int):
+        pytest.skip(f"{_server_root()} publishes no per-slot n_ctx; not a llama.cpp server")
+
+    meta = as_obj(_get(f"{_server_root()}/v1/models")["data"][0].get("meta") or {})
+    assert "n_ctx" in meta, "`/v1/models` stopped carrying `meta.n_ctx`; the third probe is dead"
+    assert {"n_ctx_train", "n_vocab", "n_embd"} <= meta.keys(), (
+        f"`meta` no longer looks like the GGUF header ({sorted(meta)}) — it may now "
+        "describe the running server, which would make the `model` measurement wrong"
+    )
+
+    # Only where the server can show it. `-c $((262144 * NUM_PARALLEL))` puts each
+    # slot at exactly `n_ctx_train`, which is the sensible way to run this model and
+    # makes the two numbers agree — so on that machine there is nothing here to
+    # tell apart, and the assertions above are what carry the measurement.
+    if as_int(meta["n_ctx"]) != per_slot:
+        ctx = await mount(profile=resolve_profile("llama"))
+        discovered = ctx.require(LLM).resolve_model("llama", route).context_window
+        assert discovered == per_slot, (
+            f"`/props` says {per_slot} and `meta.n_ctx` says {meta['n_ctx']}; discovery "
+            f"took {discovered}, so a model ceiling outranked a live slot"
+        )
+
+    slots = _slots()
+    if slots is None:
+        pytest.skip(f"{_server_root()} does not publish /slots; cannot confirm the allocation")
+    assert slots, "/slots answered with no slots"
+    held = {as_int(slot.get("n_ctx")) for slot in slots}
+    assert held == {per_slot}, (
+        f"`/props` says {per_slot} but the slots hold {sorted(held)} — `/props` is not "
+        "the slot's own figure on this build, and the `request` measurement rests on it "
+        "being so"
+    )
+
+
+def _slots() -> list[dict[str, Any]] | None:
+    """llama.cpp's `/slots`, or `None` when the server keeps it to itself.
+
+    Inconclusive rather than fatal for the same reason `/props` is: `--no-slots`
+    turns it off, and a server that declines to describe its own scheduling is
+    not a defect in pH.
+    """
+    url = f"{_server_root()}/slots"
+    try:
+        reply = httpx.get(url, timeout=PROBE_TIMEOUT)
+        if reply.status_code in (httpx.codes.NOT_FOUND, httpx.codes.NOT_IMPLEMENTED):
+            return None
+        reply.raise_for_status()
+    except httpx.HTTPError as error:
+        pytest.fail(f"{url} did not answer: {error}")
+    answer = reply.json()
+    rows = answer.get("slots", answer) if isinstance(answer, dict) else answer
+    return [dict(as_obj(row)) for row in rows] if isinstance(rows, list) else None
 
 
 def _answer(session: Session) -> str:

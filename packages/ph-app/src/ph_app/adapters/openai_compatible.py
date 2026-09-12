@@ -27,7 +27,7 @@ from __future__ import annotations
 import logging
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 import anyio
 
@@ -108,10 +108,9 @@ class WindowProbe(WireModel):
     **A step is a key or an index.** `["data", 0, "meta", "n_ctx"]` reads
     llama.cpp's `/v1/models`, and the same shape reaches vLLM's
     `data[0].max_model_len`; `["default_generation_settings", "n_ctx"]` reads
-    llama.cpp's `/props`, which is already divided by `--parallel` and is the
-    reason asking beats writing the number down. An `int` step indexes a list
-    and a `str` step reads an object, so the two kinds of JSON a server answers
-    with need no second field to tell them apart.
+    llama.cpp's `/props`. An `int` step indexes a list and a `str` step reads an
+    object, so the two kinds of JSON a server answers with need no second field
+    to tell them apart.
 
     Defined above `ProviderProfile` because that model annotates it: pydantic
     leaves `__pydantic_complete__` false for a forward reference it cannot
@@ -122,6 +121,34 @@ class WindowProbe(WireModel):
 
     path: str
     field: tuple[str | int, ...]
+    measures: Literal["request", "model"] = "request"
+    """Whether the number is what one request may use, or what the model allows.
+
+    **The distinction the path alone cannot make**, and the reason the adapter
+    does not simply take the first probe that answers. A `request` measurement
+    is what this server will actually serve one caller — llama.cpp's `/props`
+    reports its slot's `n_ctx`, vLLM's `max_model_len` its own `--max-model-len`
+    — and is the number pH budgets and compacts against. A `model` measurement
+    is the ceiling the weights were built with, which a server is free to run
+    far below: a llama.cpp started `-c 32768` still publishes `n_ctx_train`
+    262 144 at `/v1/models`, and believing it overflows every slot on the box.
+
+    Measured against a llama.cpp serving Qwen3.8-27B, started `-c 524288
+    --parallel 2`: `/props` and both `/slots` entries report 262 144 — the total
+    divided, as llama.cpp documents — while `/v1/models` reports `meta.n_ctx`
+    262 144 beside `meta.n_ctx_train` 262 144, its neighbours there being
+    `n_vocab`, `n_embd`, `n_params` and `ftype`.
+
+    **That server is what settles it.** Its total was 524 288, and the number at
+    `/v1/models` was 262 144 — so `meta` is not the undivided total this file
+    once called it. It is the GGUF's own header, which is why it matches
+    `n_ctx_train` exactly and why a server run below its model's ceiling keeps
+    publishing the ceiling.
+
+    **So it is not a divisor.** A first design had this say `slot | server` and
+    divide a server-wide number by `/props`'s `total_slots`; on that machine the
+    arithmetic turns a correct 262 144 into 131 072. What the two probes
+    disagree about is *authority*, not scale."""
 
 
 class ProviderProfile(WireModel):
@@ -152,10 +179,14 @@ class ProviderProfile(WireModel):
     vLLM this afternoon, and with a single probe the second one silently keeps
     the fallback — which is the 32 768-against-262 144 mistake this field exists
     to end, arriving through the door left open by assuming which server answers.
-    The first probe that yields a positive number wins, so **order is the trust
-    ordering, not a fallback chain**: llama.cpp publishes its per-slot window at
-    `/props` and its *undivided* total at `/v1/models`, so a profile that asked
-    the general endpoint first would read the number `/props` exists to correct.
+
+    **`measures` decides, and order only breaks a tie.** Every `request` probe
+    outranks every `model` one wherever each sits in the list, because what
+    separates llama.cpp's `/props` from its `/v1/models` is which question the
+    number answers, and a reader of this file cannot see that in a path. Order
+    was load-bearing and invisible before: appending a probe was safe and
+    prepending one silently believed a model ceiling over a live slot, which is
+    the same 32 768-against-262 144 failure coming back through a second door.
 
     Two fields rather than a keyword on the one above, because the case that
     matters is discovery *with* a fallback: "ask, and here is what to do when
@@ -654,15 +685,16 @@ async def discover_window(adapter: OpenAiCompatibleAdapter) -> tuple[int, str] |
     longer be asked after the fact — re-deriving it would name the first probe
     whatever answered.
 
-    **Asked at once, chosen by declared position.** The order means something
-    (see `context_window_probes`), which is why the winner is picked by *index*
-    rather than by arrival — a first-past-the-post race would let the less
-    trustworthy endpoint win by being quicker. Given that, there is no reason to
-    wait between them: sequentially the cost was `PROBE_TIMEOUT` per probe, and a
-    mount is a person waiting for a TUI to open, so two probes against a server
-    that accepts a connection and then hangs cost four seconds of that. The
-    price is one extra localhost GET against a server that would have answered
-    the first probe anyway.
+    **Asked at once, chosen by what each measures.** A `request` measurement
+    beats a `model` one wherever the two sit in the list (see `WindowProbe`), and
+    position decides only among equals — so the winner is picked from the
+    collected answers rather than by arrival, since a first-past-the-post race
+    would let a model ceiling win by being quicker. Given that, there is no
+    reason to wait between them: sequentially the cost was `PROBE_TIMEOUT` per
+    probe, and a mount is a person waiting for a TUI to open, so two probes
+    against a server that accepts a connection and then hangs cost four seconds
+    of that. The price is one extra localhost GET against a server that would
+    have answered the first probe anyway.
     """
     probes = adapter.profile.context_window_probes
     if not probes:
@@ -677,8 +709,9 @@ async def discover_window(adapter: OpenAiCompatibleAdapter) -> tuple[int, str] |
     async with anyio.create_task_group() as tasks:
         for index, probe in enumerate(probes):
             tasks.start_soon(ask, index, probe)
-    answers = zip(found, probes, strict=True)
-    return next(((window, probe.path) for window, probe in answers if window is not None), None)
+    answers = [(window, probe) for window, probe in zip(found, probes, strict=True) if window]
+    best = min(answers, key=lambda answer: answer[1].measures != "request", default=None)
+    return (best[0], best[1].path) if best else None
 
 
 def _probe_headers(adapter: OpenAiCompatibleAdapter) -> dict[str, str]:

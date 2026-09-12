@@ -22,11 +22,12 @@
 # each believe they have the whole KV cache.
 #
 # **So it is asked rather than written down.** `contextWindowProbes` reads
-# `default_generation_settings.n_ctx` from `/props` at mount, which llama.cpp
-# has already divided, and the line below is only the fallback for a server
-# that answers none of them — deliberately small, since guessing high overflows
-# a slot and guessing low only compacts sooner than necessary. `ph doctor`
-# prints which of the two is in force.
+# `default_generation_settings.n_ctx` from `/props` at mount — the figure
+# llama.cpp also reports for each entry of `/slots`, which is what makes it the
+# slot's own — and the line below is only the fallback for a server that answers
+# none of them, deliberately small since guessing high overflows a slot and
+# guessing low only compacts sooner than necessary. `ph doctor` prints which of
+# the two is in force.
 #
 # **This port is not only llama.cpp.** `LLAMA_BASE_URL` names a port, and the
 # thing listening on it is llama.cpp one day and vLLM the next — so the probes
@@ -46,16 +47,27 @@
             # these two servers' own — belong in this profile. Another server is
             # another two lines, here, and no edit to `ph_app.adapters`.
             #
-            # **`/props` first because llama.cpp answers both**, and its
-            # `/v1/models` reports `meta.n_ctx` *undivided* — the server's total,
-            # which is the number `/props` exists to correct. Why order decides
-            # rather than arrival is on `context_window_probes`.
+            # **`measures` decides, not the order.** llama.cpp answers both of
+            # its endpoints, and they do not answer the same question: `/props`
+            # reports the slot, while `/v1/models` hands back the GGUF's own
+            # header — `meta.n_ctx` beside `n_ctx_train`, `n_vocab` and `n_embd`
+            # — which a server run below its model's ceiling reports unchanged.
+            # `WindowProbe.measures` carries the argument and the measurement.
+            # Both were priced against a real server; `-c` is the server's total
+            # and llama.cpp divides it, so `/props` is the only one of the two
+            # that moves when `--parallel` does.
             contextWindowProbes:
               - path: /props
                 field: [default_generation_settings, n_ctx]
-              # vLLM: one entry per model, `maxModelLen` on the entry itself.
+              # vLLM: one entry per model, `maxModelLen` on the entry itself,
+              # and that one *is* what a request may use — its `--max-model-len`.
               - path: /v1/models
                 field: [data, 0, max_model_len]
+              # llama.cpp's same endpoint, kept last and marked for what it is:
+              # a ceiling, worth having only when `/props` is unreachable.
+              - path: /v1/models
+                field: [data, 0, meta, n_ctx]
+                measures: model
             contextWindow: ${env:LLAMA_CONTEXT_WINDOW:-32768}
             defaultMaxTokens: 4096
             # **Images, no audio, no uploads** — and each third of that is a

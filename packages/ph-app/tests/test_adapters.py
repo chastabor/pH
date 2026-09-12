@@ -91,6 +91,12 @@ _VLLM_PROBE = WindowProbe(path="/v1/models", field=("data", 0, "max_model_len"))
 """vLLM's, the second entry the shipped profile now carries."""
 
 
+_CEILING_PROBE = WindowProbe(
+    path="/v1/models", field=("data", 0, "meta", "n_ctx"), measures="model"
+)
+"""llama.cpp's model metadata — the GGUF's own header, not the running server's."""
+
+
 class _ServerStub:
     """A server that publishes some endpoints, 404s the rest, and can be slow.
 
@@ -200,6 +206,58 @@ async def test_the_preferred_probe_wins_even_when_it_answers_last() -> None:
     )
 
     assert await discover_window(adapter) == (262_144, "/props")
+
+
+async def test_a_request_measurement_outranks_a_model_one_listed_before_it() -> None:
+    """`measures`, not position — the whole reason the field exists.
+
+    Ordered worst-first here on purpose. llama.cpp answers both endpoints, and
+    `/v1/models` hands back the GGUF header: a server run below its model's
+    ceiling (`-c 32768` against 262144 weights) publishes the ceiling there
+    unchanged, so believing it overflows every slot on the box. Before this
+    field the list was searched in order, which made appending a probe safe and
+    prepending one a silent overestimate that nothing could see.
+    """
+    adapter = OpenAiCompatibleAdapter(
+        ctx=None,  # type: ignore[arg-type]
+        profile=ProviderProfile(
+            provider="llama",
+            base_url="http://server/v1",
+            context_window_probes=(_CEILING_PROBE, _PROBE),
+        ),
+    )
+    adapter.http = _ServerStub(  # type: ignore[assignment]
+        {
+            "http://server/v1/models": {"data": [{"meta": {"n_ctx": 262_144}}]},
+            "http://server/props": {"default_generation_settings": {"n_ctx": 32_768}},
+        }
+    )
+
+    assert await discover_window(adapter) == (32_768, "/props")
+
+
+async def test_a_model_measurement_answers_when_nothing_measures_a_request() -> None:
+    """A ceiling beats the profile's written-down fallback, which is why it is kept.
+
+    `/props` is llama.cpp's and a gateway in front of one may not pass it
+    through. The ceiling is then the only thing on offer, and it is still an
+    observation of the server rather than a number somebody typed into YAML
+    months ago — so it wins, and `ph doctor` names the path it came from.
+    """
+    adapter = OpenAiCompatibleAdapter(
+        ctx=None,  # type: ignore[arg-type]
+        profile=ProviderProfile(
+            provider="llama",
+            base_url="http://server/v1",
+            context_window=32_768,
+            context_window_probes=(_PROBE, _CEILING_PROBE),
+        ),
+    )
+    adapter.http = _ServerStub(  # type: ignore[assignment]
+        {"http://server/v1/models": {"data": [{"meta": {"n_ctx": 262_144}}]}}
+    )
+
+    assert await discover_window(adapter) == (262_144, "/v1/models")
 
 
 async def test_a_probe_the_server_does_not_publish_falls_through_to_the_next() -> None:
