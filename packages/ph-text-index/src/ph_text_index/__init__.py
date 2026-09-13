@@ -519,7 +519,7 @@ async def apply(ctx: Context, config: Config) -> None:
     seam = TextIndexSeam(ctx=ctx, config=config)
     ctx.provide(TEXT_INDEX, seam)
 
-    async def index_tool(args: IndexArgs, run: ToolRunContext) -> Any:  # noqa: ANN401
+    async def index_tool(args: IndexArgs, run: ToolRunContext) -> dict[str, Any]:
         store = await seam.index()
         documents = await ctx.require(FS).collect(
             args.paths,
@@ -585,7 +585,7 @@ async def apply(ctx: Context, config: Config) -> None:
             "total_chunks": stats["chunks"],
         }
 
-    async def search_tool(args: SearchArgs, run: ToolRunContext) -> Any:  # noqa: ANN401
+    async def search_tool(args: SearchArgs, run: ToolRunContext) -> dict[str, Any]:
         store = await seam.index()
         vector = await seam.embed([args.query], query=True)
         run.raise_if_cancelled()

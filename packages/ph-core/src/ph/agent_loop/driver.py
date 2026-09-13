@@ -278,7 +278,9 @@ class ReactLoopAgent:
         async def inner(request: PreStepRequest) -> PreStepDecision:
             return PreStepDecision(kind="enter", messages=request.messages)
 
-        request = PreStepRequest(agent=self, messages=messages, turn=turn, step=step)
+        request = PreStepRequest(
+            agent=self, session=self.session, messages=messages, turn=turn, step=step
+        )
         decision = await self.ctx.waterfall("agent/pre-step", request, inner=inner)
         self._throw_if_cancelled()
         if not isinstance(decision, PreStepDecision):

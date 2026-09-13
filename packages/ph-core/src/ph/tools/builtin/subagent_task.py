@@ -132,7 +132,7 @@ def _render(_args: JsonObject, value: Any) -> list[ContentBlock]:  # noqa: ANN40
 async def apply(ctx: Context, config: Config) -> None:
     """Register the blocking delegation tool, once a provider exists to run it."""
 
-    async def delegate(provider: str, args: TaskArgs, run: ToolRunContext) -> Any:  # noqa: ANN401
+    async def delegate(provider: str, args: TaskArgs, run: ToolRunContext) -> dict[str, Any]:
         try:
             handle = await ctx.require(SUBAGENTS).start(
                 provider,

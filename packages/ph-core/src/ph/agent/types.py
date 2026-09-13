@@ -119,9 +119,18 @@ class TurnEndReason(WireDataclass):
 
 @dataclass(frozen=True, slots=True)
 class PreStepRequest:
-    """`agent/pre-step`: the batch about to enter a step, before the decision."""
+    """`agent/pre-step`: the batch about to enter a step, before the decision.
+
+    **`session` is not optional here**, though `AgentHandle.session` is. A
+    pre-step is a step about to happen, so there is a turn, so there is a
+    session — and the one production constructor is the driver, whose own
+    `session` is a `Session`. The handle keeps its `| None` for the callers that
+    hold one outside a turn, and for `StubAgent`. Three listeners on this chain
+    each re-derived it from the handle and each guarded the `None` differently.
+    """
 
     agent: AgentHandle
+    session: Session
     messages: tuple[Message, ...]
     turn: int
     step: int

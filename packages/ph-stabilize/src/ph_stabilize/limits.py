@@ -435,11 +435,11 @@ async def apply(ctx: Context, config: Config) -> None:
 
     async def on_pre_step(
         request: PreStepRequest,
-        next_: Callable[..., Awaitable[Any]],
-    ) -> Any:  # noqa: ANN401
+        next_: Callable[..., Awaitable[PreStepDecision]],
+    ) -> PreStepDecision:
         settings = config.model_calls
-        session = request.agent.session
-        if session is None or settings.unlimited:
+        session = request.session
+        if settings.unlimited:
             return await next_(request)
         current = counts.read(session)
         exceeded = _breaches(settings, current.turn_steps, current.session_steps)

@@ -890,7 +890,7 @@ async def progressive(ctx: Context, config: Config) -> None:
         PromptSection(name="skills", order=ORDER_SKILLS, text=catalog), scope=ctx
     )
 
-    async def read_body(args: SkillArgs, run: ToolRunContext) -> Any:  # noqa: ANN401
+    async def read_body(args: SkillArgs, run: ToolRunContext) -> dict[str, Any]:
         # The *stated* boundary, so a narrowed child is refused a skill it can
         # see named nowhere — the catalog and the gate answer the same question,
         # and until P6-24 they answered it in two: the catalog above reads

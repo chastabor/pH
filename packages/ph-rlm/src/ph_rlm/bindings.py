@@ -137,7 +137,7 @@ async def apply(ctx: Context, config: Config) -> None:
 
     tools = ctx.require(TOOLS)
 
-    async def run_child(args: RunArgs, run: ToolRunContext) -> Any:  # noqa: ANN401
+    async def run_child(args: RunArgs, run: ToolRunContext) -> dict[str, Any]:
         try:
             handle = await ctx.require(SUBAGENTS).start(
                 config.provider,
@@ -171,13 +171,13 @@ async def apply(ctx: Context, config: Config) -> None:
             note=downgrade_text(reason) if reason is not None else None,
         ).to_wire()
 
-    def list_children(_args: object, run: ToolRunContext) -> Any:  # noqa: ANN401
+    def list_children(_args: object, run: ToolRunContext) -> dict[str, Any]:
         """The roster, folded from the parent's own log — never a side table."""
         session = run.session
         rows = list(ctx.require(SUBAGENTS).roster(session).values()) if session is not None else []
         return {"children": rows}
 
-    async def delete_child(args: DeleteArgs, run: ToolRunContext) -> Any:  # noqa: ANN401
+    async def delete_child(args: DeleteArgs, run: ToolRunContext) -> dict[str, Any]:
         session = run.session
         removed = (
             await ctx.require(RLM_CHILDREN).delete(session, args.child_id, reason=args.reason)

@@ -1301,13 +1301,13 @@ async def apply(ctx: Context, config: Config) -> None:
 
     async def on_pre_step(
         request: PreStepRequest,
-        next_: Callable[..., Awaitable[Any]],
-    ) -> Any:  # noqa: ANN401
+        next_: Callable[..., Awaitable[PreStepDecision]],
+    ) -> PreStepDecision:
         decision = await next_(request)
         # After the rest of the chain, so a step another row rejected is not
         # compacted for: the cheapest compaction is the one a limit made
         # unnecessary.
-        if isinstance(decision, PreStepDecision) and decision.kind == "enter":
+        if decision.kind == "enter":
             await engine.compact_if_needed(request.agent, "pressure")
         return decision
 

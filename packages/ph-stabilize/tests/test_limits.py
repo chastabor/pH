@@ -36,6 +36,7 @@ from ph.testing import (
     MountProfile,
     StubSubagentProvider,
     assert_fold_laws,
+    session_of,
     tool_result_payload,
 )
 from ph.tools.code_mode import CodeDispatchLog
@@ -57,7 +58,7 @@ async def _pre_step(ctx: Context, agent: AgentDriver, *, turn: int, step: int) -
 
     return await ctx.waterfall(
         "agent/pre-step",
-        PreStepRequest(agent=agent, messages=(), turn=turn, step=step),
+        PreStepRequest(agent=agent, session=session_of(agent), messages=(), turn=turn, step=step),
         inner=lambda request: PreStepDecision(kind="enter", messages=request.messages),
     )
 

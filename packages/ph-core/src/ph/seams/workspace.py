@@ -44,7 +44,7 @@ from typing import Any, Literal, Protocol, TypeAlias, runtime_checkable
 import anyio
 from pydantic import Field
 
-from ..agent.types import AgentHandle
+from ..agent.types import AgentHandle, PreStepDecision, PreStepRequest
 from ..cordis import Context, Disposer, Running, maybe_await, plugin, running, safe_yaml_load
 from ..json import as_str
 from ..keys import AGENTS, CONTAINMENT, FS, SESSION_PERSISTENCE, SESSIONS, TOOLS, WORKSPACE
@@ -1990,10 +1990,13 @@ async def lifecycle(ctx: Context, config: LifecycleConfig) -> None:
     if entries:
         ctx.require(WORKSPACE).provision(entries, scope=ctx)
 
-    async def ensure(request: Any, next_: Callable[..., Awaitable[Any]]) -> Any:  # noqa: ANN401
+    async def ensure(
+        request: PreStepRequest,
+        next_: Callable[..., Awaitable[PreStepDecision]],
+    ) -> PreStepDecision:
         agent = request.agent
         if ctx.require(WORKSPACE).of(agent.id) is None:
-            if agent.session.header.origin == "subagent":
+            if request.session.header.origin == "subagent":
                 # Refused rather than answered: see `ChildWorkspaceMissing`. The
                 # test is the seam's own — `_chosen_tier` reads the same field to
                 # decide which rung a child gets, so "is this a child" has one
@@ -2004,14 +2007,14 @@ async def lifecycle(ctx: Context, config: LifecycleConfig) -> None:
                     "here would grant it more than its admission recorded"
                 )
             await ctx.require(WORKSPACE).acquire(
-                session_id=agent.session.id,
+                session_id=request.session.id,
                 agent_id=agent.id,
                 # The process's directory, never `fs.root_for(agent)`: that is
                 # the workspace we are about to take, and branching a worktree
                 # from the previous one would nest a checkout per turn.
                 base=ctx.require(FS).root,
                 access=config.access,
-                session=agent.session,
+                session=request.session,
                 # The agent's own scope, so the worktree is released when the
                 # agent is — the in-process half of cleanup (I2), with the event
                 # pair covering the crash the scope cannot (§4.9).

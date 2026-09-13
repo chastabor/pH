@@ -520,7 +520,7 @@ async def apply(ctx: Context, config: Config) -> None:
     service = ContextService(corpus=corpus)
     ctx.provide(CONTEXT_CORPUS, service)
 
-    def search(args: SearchArgs, _run: object) -> Any:  # noqa: ANN401
+    def search(args: SearchArgs, _run: object) -> dict[str, Any]:
         return corpus.search(
             args.query,
             limit=min(max(1, args.limit), config.max_matches),
@@ -528,10 +528,10 @@ async def apply(ctx: Context, config: Config) -> None:
             regex=args.regex,
         ).to_wire()
 
-    def chunks(args: ChunkArgs, _run: object) -> Any:  # noqa: ANN401
+    def chunks(args: ChunkArgs, _run: object) -> dict[str, Any]:
         return corpus.chunk(by=args.by, size=max(1, args.size), index=args.index).to_wire()
 
-    def head(args: HeadArgs, _run: object) -> Any:  # noqa: ANN401
+    def head(args: HeadArgs, _run: object) -> dict[str, Any]:
         if args.document is None:
             return HeadValue(
                 manifest=[

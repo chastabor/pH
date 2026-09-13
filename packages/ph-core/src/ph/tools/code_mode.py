@@ -323,7 +323,7 @@ async def apply(ctx: Context, config: Config) -> None:
     ctx.require(CODE_RUNTIME).register_sdk_renderer("python", render_python_sdk)
     ctx.require(CODE_RUNTIME).register_sdk_renderer("typescript", render_typescript_sdk)
 
-    async def run_code(args: object, run: ToolRunContext) -> Any:  # noqa: ANN401
+    async def run_code(args: object, run: ToolRunContext) -> dict[str, Any]:
         # `Mapping`, not `dict`: accepted arguments are frozen into a
         # `MappingProxyType`, which is a Mapping but not a dict instance.
         program = args.get("program") if isinstance(args, Mapping) else None

@@ -31,7 +31,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from ..agent.types import PreStepRequest
+from ..agent.types import PreStepDecision, PreStepRequest
 from ..cancel import is_cancelled
 from ..cordis import Context, plugin
 from ..keys import SESSIONS
@@ -71,14 +71,12 @@ async def apply(ctx: Context, config: None) -> None:
 
     async def after_pre_step(
         request: PreStepRequest,
-        next_: Callable[..., Awaitable[Any]],
-    ) -> Any:  # noqa: ANN401
+        next_: Callable[..., Awaitable[PreStepDecision]],
+    ) -> PreStepDecision:
         decision = await next_()
-        if getattr(decision, "kind", None) == "reject":
+        if decision.kind == "reject":
             # No request will follow to flush the previous step's results.
-            session = request.agent.session
-            if session is not None:
-                await ctx.require(SESSIONS).flush(session)
+            await ctx.require(SESSIONS).flush(request.session)
         return decision
 
     ctx.on("llm/stream", before_request)

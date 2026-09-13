@@ -83,7 +83,7 @@ class AskUserValue(ToolModel):
 async def apply(ctx: Context, config: None) -> None:
     """Register the question tool."""
 
-    async def ask_user(args: AskUserArgs, run: ToolRunContext) -> Any:  # noqa: ANN401
+    async def ask_user(args: AskUserArgs, run: ToolRunContext) -> dict[str, Any]:
         answer = await ctx.require(USER_QUESTIONS).ask(
             UserQuestion(
                 question=args.question,

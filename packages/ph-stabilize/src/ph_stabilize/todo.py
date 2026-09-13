@@ -665,7 +665,7 @@ def _parallel_write_todos(session: Session | None) -> bool:
 async def apply(ctx: Context, config: None) -> None:
     """Register the tool, its prompt section, its context and its one rule."""
 
-    async def write_todos(args: WriteTodosArgs, run: ToolRunContext) -> Any:  # noqa: ANN401
+    async def write_todos(args: WriteTodosArgs, run: ToolRunContext) -> dict[str, Any]:
         todos = [item.model_dump(mode="json") for item in args.todos]
         session = run.session
         # One `latest`, one frozen read: both rules below want a few scalars off

@@ -134,7 +134,7 @@ async def apply(ctx: Context, config: Config) -> None:
     """
     store = ctx.require(ATTACHMENTS)
 
-    async def attach(args: AttachArgs, run: ToolRunContext) -> Any:  # noqa: ANN401
+    async def attach(args: AttachArgs, run: ToolRunContext) -> dict[str, Any]:
         fs = ctx.require(FS)
         target = fs.resolve(args.path, agent=run.agent)
         mime = mime_of(target.name)

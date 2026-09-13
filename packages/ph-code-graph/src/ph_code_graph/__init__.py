@@ -535,7 +535,7 @@ async def apply(ctx: Context, config: Config) -> None:
     def store(run: ToolRunContext) -> CodeGraphStore:
         return seam.store_for(ctx.require(FS).root_for(run.agent))
 
-    async def index_tool(args: IndexArgs, run: ToolRunContext) -> Any:  # noqa: ANN401
+    async def index_tool(args: IndexArgs, run: ToolRunContext) -> dict[str, Any]:
         fs = ctx.require(FS)
         book = store(run)
         paths = await fs.collect(
@@ -661,7 +661,7 @@ async def apply(ctx: Context, config: Config) -> None:
             "languages": stats["languages"],
         }
 
-    async def graph_tool(args: GraphArgs, run: ToolRunContext) -> Any:  # noqa: ANN401
+    async def graph_tool(args: GraphArgs, run: ToolRunContext) -> dict[str, Any]:
         book = store(run)
         if not await anyio.to_thread.run_sync(book.exists):
             raise HarnessError(

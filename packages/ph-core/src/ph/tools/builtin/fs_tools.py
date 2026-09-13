@@ -147,7 +147,7 @@ async def apply(ctx: Context, config: None) -> None:
     """Register the filesystem tools."""
     fs = ctx.require(FS)
 
-    async def read(args: ReadArgs, run: ToolRunContext) -> Any:  # noqa: ANN401
+    async def read(args: ReadArgs, run: ToolRunContext) -> dict[str, Any]:
         window = await fs.read(
             args.path,
             offset=args.offset,
@@ -158,7 +158,7 @@ async def apply(ctx: Context, config: None) -> None:
         )
         return window.model_dump()
 
-    async def write(args: WriteArgs, run: ToolRunContext) -> Any:  # noqa: ANN401
+    async def write(args: WriteArgs, run: ToolRunContext) -> dict[str, Any]:
         target = fs.resolve(args.path, agent=run.agent)
         existed = target.exists()
         await fs.write(
@@ -172,7 +172,7 @@ async def apply(ctx: Context, config: None) -> None:
             "created": not existed,
         }
 
-    async def edit(args: EditArgs, run: ToolRunContext) -> Any:  # noqa: ANN401
+    async def edit(args: EditArgs, run: ToolRunContext) -> dict[str, Any]:
         count = await fs.edit(
             args.path,
             args.old_text,
@@ -184,13 +184,13 @@ async def apply(ctx: Context, config: None) -> None:
         )
         return {"path": fs.named(args.path, agent=run.agent), "replacements": count}
 
-    async def glob_tool(args: GlobArgs, run: ToolRunContext) -> Any:  # noqa: ANN401
+    async def glob_tool(args: GlobArgs, run: ToolRunContext) -> dict[str, Any]:
         paths = await fs.glob(
             args.pattern, root=args.path, limit=GLOB_LIMIT, agent=run.agent, scope=run.scope
         )
         return {"paths": paths, "truncated": len(paths) >= GLOB_LIMIT}
 
-    async def grep_tool(args: GrepArgs, run: ToolRunContext) -> Any:  # noqa: ANN401
+    async def grep_tool(args: GrepArgs, run: ToolRunContext) -> dict[str, Any]:
         matches = await fs.grep(
             args.pattern,
             root=args.path,

@@ -251,7 +251,7 @@ async def apply(ctx: Context, config: Config) -> None:
 
     # ------------------------------------------------------------- the tools --
 
-    async def send(args: SendArgs, run: ToolRunContext) -> Any:  # noqa: ANN401
+    async def send(args: SendArgs, run: ToolRunContext) -> dict[str, Any]:
         sender = run.agent
         sender_id = sender.id
         body = args.message.strip()
@@ -333,7 +333,7 @@ async def apply(ctx: Context, config: Config) -> None:
             pending=pending + 1,
         ).to_wire()
 
-    def list_agents(_args: object, run: ToolRunContext) -> Any:  # noqa: ANN401
+    def list_agents(_args: object, run: ToolRunContext) -> dict[str, Any]:
         """Who this agent may address, and how each is related."""
         sender_id = run.agent.id
         rows = [
@@ -348,10 +348,10 @@ async def apply(ctx: Context, config: Config) -> None:
         ]
         return {"agents": rows}
 
-    def observe_list(_args: object, run: ToolRunContext) -> Any:  # noqa: ANN401
+    def observe_list(_args: object, run: ToolRunContext) -> dict[str, Any]:
         return list_agents(_args, run)
 
-    def observe_get(args: ObserveArgs, run: ToolRunContext) -> Any:  # noqa: ANN401
+    def observe_get(args: ObserveArgs, run: ToolRunContext) -> dict[str, Any]:
         """A bounded read of another family member's transcript.
 
         Reach-limited by the same rule as a send: an agent that may not talk to
