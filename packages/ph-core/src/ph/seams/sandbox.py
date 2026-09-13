@@ -46,12 +46,12 @@ import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Literal, Protocol, TypeAlias, runtime_checkable
+from typing import Literal, Protocol, TypeAlias, runtime_checkable
 
 from pydantic import Field
 
 from ..cordis import Context, Disposer, Running, plugin, running
-from ..json import as_str
+from ..json import JsonValue, as_str
 from ..keys import AGENTS, SANDBOX, TUI_STATUS
 from ..paths import canonical
 from ..session import Session
@@ -380,10 +380,14 @@ class Denial:
             "are refused; allow a directory with /sandbox allow path <dir>."
         )
 
-    def record(self, agent: str | None) -> dict[str, Any]:
+    def record(self, agent: str | None) -> dict[str, JsonValue]:
         """The `sandbox/denied` payload. Carries the sentence, so every reader —
         the TUI, the trajectory, `ph agents attach` — prints one account."""
-        data: dict[str, Any] = {"kind": self.kind, "via": self.via, "message": self.message()}
+        data: dict[str, JsonValue] = {
+            "kind": self.kind,
+            "via": self.via,
+            "message": self.message(),
+        }
         if self.host is not None:
             data["host"] = self.host
         if self.port is not None:

@@ -21,6 +21,7 @@ from typer.testing import CliRunner
 
 from ph import bundles
 from ph.bundles import BASE, HEADLESS, resolve_bundle
+from ph.json import as_obj
 from ph.paths import resolve_roots
 from ph.testing import ReapedHost, not_none, stored_log
 from ph_app import profiles
@@ -624,7 +625,7 @@ def test_the_rlm_bundle_caps_the_kind_it_produces() -> None:
     """
     rows = profile_or_exit("rlm").dump()
     jobs = next(row for row in rows if row.get("id") == "jobs")
-    assert jobs["config"]["concurrency"] == {"subagent": 8}
+    assert as_obj(as_obj(jobs["config"])["concurrency"]) == {"subagent": 8}
 
 
 def test_the_children_cap_refuses_a_number_that_bounds_nothing() -> None:

@@ -34,7 +34,7 @@ import anyio
 import yaml
 
 from ..cordis import Context, Row, plugin
-from ..json import PlainJsonValue
+from ..json import JsonObject, thaw_json
 from ..keys import COMMANDS, MOUNT, SANDBOX, TUI_STATUS
 from ..paths import resolve_roots, write_text_under
 from ..seams._registry import contribute_item
@@ -206,8 +206,13 @@ class _Sandbox:
             )
         return rows[0]
 
-    async def _persist(self, row_id: str, config: dict[str, PlainJsonValue]) -> str:
-        """Write the drop-in, or say why the change lives only in this process."""
+    async def _persist(self, row_id: str, config: JsonObject) -> str:
+        """Write the drop-in, or say why the change lives only in this process.
+
+        Thaws because `yaml.safe_dump` refuses a `MappingProxyType` or a tuple, and
+        `to_wire` may hand back either — `_CarriesJson` re-attaches log-frozen
+        fields by reference. A `PlainJsonValue` parameter only asserted otherwise.
+        """
         name = self.ctx.require(MOUNT).profile.name
         if not name:
             return (
@@ -215,7 +220,8 @@ class _Sandbox:
                 "add the row to that file to keep the change."
             )
         path = resolve_roots().profile_dropins(name) / DROPIN
-        text = HEADER + yaml.safe_dump([{"id": row_id, "config": config}], sort_keys=False)
+        row = {"id": row_id, "config": thaw_json(config)}
+        text = HEADER + yaml.safe_dump([row], sort_keys=False)
         await anyio.to_thread.run_sync(write_text_under, path, text)
         return f"Saved to {path}; it applies now and on the next start."
 

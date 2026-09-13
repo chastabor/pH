@@ -15,13 +15,17 @@ rather than in front of a person.
 
 from __future__ import annotations
 
+import importlib
+import pkgutil
+from typing import Any, Final, get_args, get_origin
+
 import pytest
 from pydantic import BaseModel
 
 from ph.seams.commands import CommandDefinition, CommandSchema
 from ph.seams.tui_screens import ScreenDefinition, ScreenSchema
 from ph.seams.tui_status import StatusReading
-from ph.wire import declarable_fields, wire_alias
+from ph.wire import WireModel, declarable_fields, wire_alias
 
 
 @pytest.mark.parametrize(
@@ -95,3 +99,80 @@ def test_the_schema_is_what_the_definition_says_it_is() -> None:
         "order": 100,
         "key": "t",
     }
+
+
+# ------------------------------------------------- what may ride the wire --
+
+_JSON_SCALARS: Final = (str, int, float, bool, type(None))
+
+
+def _json_safe(annotation: object) -> bool:
+    """Whether a declared field type is something `model_dump` leaves JSON-shaped.
+
+    `Any` passes: it is the declared escape for a field holding somebody else's
+    wire JSON (`_CarriesJson` documents why those exist and are dumped by
+    reference). This gate is for a *concrete* type that cannot serialize, which
+    is the failure nothing else catches — an `Any` field was already unchecked
+    and says so.
+    """
+    if annotation is Any or annotation in _JSON_SCALARS or annotation is None:
+        return True
+    origin = get_origin(annotation)
+    if origin is not None:
+        return all(_json_safe(arg) for arg in get_args(annotation) if arg is not Ellipsis)
+    if isinstance(annotation, type):
+        # A nested wire model dumps to a dict of its own checked fields.
+        if issubclass(annotation, BaseModel):
+            return True
+        return annotation in _JSON_SCALARS
+    # A `Literal[...]` member, a `TypeVar`, a forward ref that resolved to a value.
+    return not isinstance(annotation, type)
+
+
+def _wire_models() -> set[type[WireModel]]:
+    """Every `WireModel` reachable from the shipped packages, read off each module.
+
+    Off the modules rather than `WireModel.__subclasses__()`, for the reason
+    `test_payloads._notice_classes` gives: the global registry makes the assertion
+    depend on what else the run imported.
+    """
+    found: set[type[WireModel]] = set()
+    for package in ("ph", "ph_app", "ph_rlm", "ph_stabilize", "ph_text_index", "ph_code_graph"):
+        try:
+            root = importlib.import_module(package)
+        except ImportError:  # pragma: no cover - a package this deployment lacks
+            continue
+        for info in pkgutil.walk_packages(root.__path__, f"{package}."):
+            try:
+                module = importlib.import_module(info.name)
+            except Exception:  # pragma: no cover - optional extras
+                continue
+            found |= {
+                one
+                for one in vars(module).values()
+                if isinstance(one, type) and issubclass(one, WireModel) and one is not WireModel
+            }
+    return found
+
+
+def test_no_wire_model_declares_a_field_model_dump_cannot_serialize() -> None:
+    """`WireModel.to_wire()` claims `dict[str, JsonValue]`, and this is what makes it true.
+
+    `model_dump()` without `mode="json"` hands back whatever the fields hold, so a
+    `datetime`, `Path` or enum field would land in a `dict[str, JsonValue]` with
+    nothing static firing — and then raise from `dumps` at the daemon framing edge,
+    once per watcher per frame, naming the encoder rather than the field.
+    `mode="json"` would make it true by construction but rebuilds the tree, which
+    is the cost `_CarriesJson` exists to avoid.
+
+    Sabotage: add `created_at: datetime` to any `WireModel` — this names it.
+    """
+    offenders = [
+        f"{model.__module__}.{model.__qualname__}.{name}: {field.annotation}"
+        for model in _wire_models()
+        for name, field in model.model_fields.items()
+        if not _json_safe(field.annotation)
+    ]
+    assert not offenders, "fields `model_dump` would not leave JSON-shaped:\n" + "\n".join(
+        sorted(offenders)
+    )

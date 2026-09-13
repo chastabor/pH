@@ -42,7 +42,7 @@ from typing import Any, ClassVar
 
 from pydantic import Field
 
-from ph.json import JsonObject
+from ph.json import JsonObject, JsonValue
 from ph.llm.types import AttachmentRef, ToolSchema
 from ph.seams.approval import ApprovalRequest
 from ph.seams.commands import CommandSchema
@@ -122,7 +122,7 @@ class _CarriesJson(WireModel):
 
     BY_REFERENCE: ClassVar[frozenset[str]] = frozenset()
 
-    def to_wire(self) -> dict[str, Any]:
+    def to_wire(self) -> dict[str, JsonValue]:
         wire = self.model_dump(by_alias=True, exclude_none=True, exclude=set(self.BY_REFERENCE))
         for name in self.BY_REFERENCE:
             value = getattr(self, name)

@@ -20,6 +20,7 @@ from typing import Any
 
 from typer.testing import CliRunner
 
+from ph.json import JsonObject
 from ph.persistence import session_path
 from ph.seams.attachments import digest_of
 from ph.session import Session, SessionHeader, SurfaceIntent
@@ -67,7 +68,7 @@ def _log(sessions: Path, session_id: str, *events: tuple[str, Any]) -> Path:
     session = Session(session_id, header=header)
     for kind, data in events:
         session.append(kind, data, SurfaceIntent("append") if kind == "user/message" else None)
-    lines = [{"type": "session/header", "header": session.header.to_wire()}]
+    lines: list[JsonObject] = [{"type": "session/header", "header": session.header.to_wire()}]
     lines += [event.to_wire() for event in session.events]
     path.write_text("".join(f"{json.dumps(line)}\n" for line in lines), encoding="utf-8")
     return path

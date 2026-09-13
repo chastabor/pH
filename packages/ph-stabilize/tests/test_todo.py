@@ -21,7 +21,7 @@ import pytest
 from stabilize_helpers import PROFILE, bash_call, result_text, run_tool_calls, todo_call
 
 from ph.cordis import DEPLOYMENT, Context, Profile, load_profile_documents
-from ph.json import as_obj, as_seq
+from ph.json import as_obj, as_seq, as_str
 from ph.keys import SESSIONS, SYSTEM_PROMPT, TOOLS
 from ph.llm.types import ToolCallBlock
 from ph.session import Session
@@ -99,7 +99,8 @@ def test_every_row_in_the_bundle_names_a_resolvable_plugin() -> None:
     rows = Profile.from_paths([BUNDLE]).dump()
     assert rows, "the bundle declares no rows"
     for row in rows:
-        assert resolve_plugin(row["name"]) is not None, row["name"]
+        name = as_str(row["name"])
+        assert resolve_plugin(name) is not None, name
 
 
 async def test_every_enabled_row_in_the_profile_activates(

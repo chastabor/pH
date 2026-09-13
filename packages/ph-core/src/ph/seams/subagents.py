@@ -37,12 +37,12 @@ from pydantic import Field
 
 from ..agent.types import AgentDriver, AgentHandle
 from ..cordis import Context, Disposer, Running, plugin, running
-from ..json import as_int, as_str
+from ..json import JsonValue, as_int, as_str
 from ..keys import AGENTS, SESSIONS, SKILLS, SUBAGENT_PRESETS, SUBAGENTS, SYSTEM_PROMPT, TOOLS
 from ..session import Session, SessionEvent, SessionFoldCache
 from ..system_prompt.assembly import PromptSection
 from ..tools.registry import ToolRestriction
-from ..wire import WireModel
+from ..wire import WireForm, WireModel
 from ._registry import claim_entry, claim_key
 from .invariants import contribute_fold_cache
 from .skills import ORDER_SKILLS, SkillRestriction, SkillService
@@ -316,8 +316,14 @@ so that the two copies had nothing linking them.
 
 
 @dataclass(slots=True)
-class SubagentRun:
+class SubagentRun(WireForm):
     """A live delegation. Returned at admission, before the child answers.
+
+    `WireForm`, not `WireDataclass`: it serializes itself, but it cannot take the
+    alias-derived body. That body emits every non-`None` field, and five of these
+    do not travel — `owner` (which defaults to `""`, so it would always ride),
+    plus `result`, `dispose`, `grant` and `scope`, the last two a `Grant` and a
+    `Context`. Only `id` → `runId` is a spelling the alias function would miss.
 
     The fields are the admission facts a parent can act on immediately: what to
     call it, where its log is, and which guarantees it actually got. `granted`
@@ -374,13 +380,13 @@ class SubagentRun:
     paths, rather than a rule a provider is trusted to remember.
     """
 
-    def to_wire(self) -> dict[str, Any]:
+    def to_wire(self) -> dict[str, JsonValue]:
         """The admission facts, for an event or a roster row.
 
         No `status`: a child's state is the fold over `subagent/status`, and a
         second copy on the handle would be a value frozen at whatever the last
         in-process update left."""
-        wire: dict[str, Any] = {
+        wire: dict[str, JsonValue] = {
             "runId": self.id,
             "name": self.name,
             "sessionId": self.session_id,
@@ -395,7 +401,7 @@ class SubagentRun:
         return wire
 
 
-def admission_payload(run: SubagentRun, request: SubagentRequest) -> dict[str, Any]:
+def admission_payload(run: SubagentRun, request: SubagentRequest) -> dict[str, JsonValue]:
     """The `subagent/admitted` record: the run, the task, and **the narrowing**.
 
     One function because there are now two readers of these keys and they must not
@@ -413,7 +419,7 @@ def admission_payload(run: SubagentRun, request: SubagentRequest) -> dict[str, A
     already means on the request, so a log written before this stays readable and
     a child admitted then is refused a readmit rather than widened.
     """
-    payload: dict[str, Any] = {**run.to_wire(), "prompt": request.prompt.strip()}
+    payload: dict[str, JsonValue] = {**run.to_wire(), "prompt": request.prompt.strip()}
     if request.preset is not None:
         payload["preset"] = request.preset
     if request.skills is not None:

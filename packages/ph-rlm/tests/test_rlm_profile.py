@@ -21,6 +21,7 @@ from runtime_helpers import dispatch_names, run_ipython_cell
 
 from ph.bundles import BASE, HEADLESS, installed_bundles, resolve_bundle
 from ph.cordis import Profile
+from ph.json import as_obj
 from ph.keys import AGENTS, COMMANDS, SESSIONS, TOOLS
 from ph.session.json import freeze_json_value
 from ph.testing import FAKE_OPTIONS, MountProfile
@@ -75,11 +76,11 @@ def test_the_composed_profile_is_code_mode_on_the_shipped_runtime() -> None:
     to know which pH they are running."""
     rows = {row.id: row for row in Profile.from_paths(resolve_profile("rlm")).rows}
 
-    assert rows["tools"].config["mode"] == "code"
+    assert as_obj(rows["tools"].config)["mode"] == "code"
     assert rows["code-runtime-python"].name == "code-runtime-python"
     assert rows["rlm-presentation"].name == "rlm-presentation"
     # The interactive posture survived the bundle layering on top of it.
-    assert rows["sandbox"].config["defaultMode"] == "workspace-write"
+    assert as_obj(rows["sandbox"].config)["defaultMode"] == "workspace-write"
     # Off by default, and still in the profile so a deployment can turn it on
     # by id rather than by forking the bundle.
     assert rows["rlm-context-loader"].disabled is True

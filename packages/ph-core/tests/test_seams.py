@@ -28,6 +28,7 @@ import pytest
 
 from ph.agent.types import AgentHandle
 from ph.cordis import DEPLOYMENT, Context, InactiveScopeError
+from ph.json import as_str
 from ph.seams._names import SLUG_CHARACTERS
 from ph.seams.approval import ApprovalRequest, ApprovalService, Edited, pending_approvals
 from ph.seams.code_runtime import (
@@ -454,7 +455,7 @@ async def test_identical_content_spills_once(tmp_path: Path) -> None:
 async def test_a_credential_reference_carries_no_value() -> None:
     service = CredentialService(ctx=Context())
     ref = service.reference("PH_TEST_KEY")
-    assert "PH_TEST_KEY" in ref.to_wire()["name"]
+    assert "PH_TEST_KEY" in as_str(ref.to_wire()["name"])
     assert "value" not in ref.to_wire()
 
     service.provide_value("PH_TEST_KEY", "sk-secret")
@@ -1125,6 +1126,16 @@ async def test_a_corrupt_settings_file_does_not_stop_startup(tmp_path: Path) -> 
     path.write_text("{not json", encoding="utf-8")
     # Defaults are always a valid answer for a preference.
     assert SettingsService(ctx=Context(), path=path).get("anything", "default") == "default"
+
+
+async def test_a_settings_file_that_is_not_an_object_reads_as_empty(tmp_path: Path) -> None:
+    # Valid JSON, wrong shape: the tree `set` walks must still be a mapping.
+    path = tmp_path / "settings.json"
+    path.write_text("[1, 2, 3]", encoding="utf-8")
+    service = SettingsService(ctx=Context(), path=path)
+    assert service.get("anything", "default") == "default"
+    await service.set("theme", "dark")
+    assert service.get("theme") == "dark"
 
 
 async def test_skill_bounds_are_enforced() -> None:

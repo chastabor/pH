@@ -33,10 +33,10 @@ import logging
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Literal, TypeAlias
+from typing import Literal, TypeAlias
 
 from ..cordis import Context, plugin
-from ..json import as_int, as_str
+from ..json import JsonValue, as_int, as_str
 from ..keys import SCHEDULE
 from ..paths import resolve_roots
 from ..session import Session, SessionFoldCache, now_ms
@@ -191,7 +191,7 @@ def due_at(state: ScheduleState, *, now: int) -> int | None:
     return _last_cron_before(schedule.spec, after=anchor, now=now)
 
 
-def state_to_wire(state: ScheduleState, *, now: int) -> dict[str, Any]:
+def state_to_wire(state: ScheduleState, *, now: int) -> dict[str, JsonValue]:
     """One schedule as a client is told about it — the fold's own projection.
 
     Here rather than in the daemon that first needed it: this is a fact about a

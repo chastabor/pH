@@ -46,7 +46,7 @@ from pydantic import Field
 
 from ..agent.types import AgentHandle, PreStepDecision, PreStepRequest
 from ..cordis import Context, Disposer, Next, Running, maybe_await, plugin, running, safe_yaml_load
-from ..json import as_str
+from ..json import JsonValue, as_str
 from ..keys import AGENTS, CONTAINMENT, FS, SESSION_PERSISTENCE, SESSIONS, TOOLS, WORKSPACE
 from ..paths import canonical, default_home_path
 from ..session import Session, SessionEvent
@@ -1229,8 +1229,8 @@ class WorkspaceSeam:
         self,
         workspace: Workspace,
         agent_id: str,
-        **extra: object,
-    ) -> dict[str, Any]:
+        **extra: JsonValue,
+    ) -> dict[str, JsonValue]:
         payload = pair_payload(agent_id, workspace.ref, **extra)
         # The reason rides the closing half, because that is the half a fold
         # reads to tell a deliberate keep from a dirty-tree keep (P6-28).
@@ -1885,7 +1885,7 @@ def family_survivors(sessions: Sequence[Session], agent_id: str) -> list[Workspa
     ]
 
 
-def pair_payload(agent_id: str, ref: str | None, **extra: object) -> dict[str, Any]:
+def pair_payload(agent_id: str, ref: str | None, **extra: JsonValue) -> dict[str, JsonValue]:
     """The keys both halves of the durable pair share, spelled once.
 
     `ref` rides both so a reader can say which branch a turn ran against without
@@ -1893,7 +1893,7 @@ def pair_payload(agent_id: str, ref: str | None, **extra: object) -> dict[str, A
     that have none. A module function because the pair has two writers — an orderly
     release and a reconciliation — and the second is the half nobody watches.
     """
-    data: dict[str, Any] = {"agentId": agent_id, **extra}
+    data: dict[str, JsonValue] = {"agentId": agent_id, **extra}
     if ref is not None:
         data["ref"] = ref
     return data

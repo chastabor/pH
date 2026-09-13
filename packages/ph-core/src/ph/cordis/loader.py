@@ -28,7 +28,7 @@ from functools import cache
 from importlib.metadata import entry_points
 from pathlib import Path
 from types import ModuleType
-from typing import Any, NoReturn
+from typing import NoReturn
 
 import yaml
 
@@ -142,11 +142,11 @@ class Row:
 
     id: str
     name: str
-    config: Any = None
+    config: JsonValue = None
     disabled: bool = False
     layer: str = ""
     """Which profile document contributed this row's current config."""
-    isolate: dict[str, Any] | None = None
+    isolate: dict[str, JsonValue] | None = None
     """Row ids this row wants private copies of, each with a config override or `None`.
 
     dsh's `isolate.fs`: an isolated realm for one service. Here it is spelled
@@ -159,8 +159,8 @@ class Row:
     and not a service key, which is also the half that can be checked at compose
     time."""
 
-    def to_dump(self) -> dict[str, Any]:
-        dump: dict[str, Any] = {"id": self.id, "name": self.name}
+    def to_dump(self) -> dict[str, JsonValue]:
+        dump: dict[str, JsonValue] = {"id": self.id, "name": self.name}
         if self.config is not None:
             dump["config"] = self.config
         if self.disabled:
@@ -260,7 +260,7 @@ def _as_rows(entries: Iterable[JsonValue], layer: str) -> list[Row]:
     return rows
 
 
-def _as_isolate(value: object, layer: str) -> dict[str, Any] | None:
+def _as_isolate(value: object, layer: str) -> dict[str, JsonValue] | None:
     """`isolate:` as a list of row ids, or a mapping of row id to config override.
 
     Two spellings for one fact, and both normalise to the mapping: `[fs]` is
@@ -534,7 +534,7 @@ class Profile:
     def enabled_rows(self) -> Iterator[Row]:
         return (row for row in self.rows if not row.disabled)
 
-    def dump(self) -> list[dict[str, Any]]:
+    def dump(self) -> list[dict[str, JsonValue]]:
         """The composed row list, for `--dump-config`."""
         return [row.to_dump() for row in self.rows]
 

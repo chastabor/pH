@@ -22,7 +22,7 @@ from typing import Annotated, Any, Literal, TypeAlias
 
 from pydantic import Field, StrictInt, field_validator
 
-from ..json import JsonObject, thaw_json
+from ..json import JsonObject, JsonValue, thaw_json
 from ..wire import WireDataclass, WireModel
 from .json import freeze_json_value
 
@@ -182,7 +182,7 @@ class SessionEvent(WireDataclass):
     surface_op: SurfaceOp | None = None
     """How this event entered the surface; `None` for a non-surface event."""
 
-    def to_wire(self, *, thaw: bool = True) -> dict[str, Any]:
+    def to_wire(self, *, thaw: bool = True) -> dict[str, JsonValue]:
         """The camelCase JSON object, with absent optional fields omitted.
 
         `thaw=False` shares the frozen payload instead of copying it into plain

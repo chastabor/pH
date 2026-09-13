@@ -41,6 +41,7 @@ from typing import Any
 import pytest
 
 from ph.cordis import Context
+from ph.json import as_str
 from ph.keys import AGENTS, COMMANDS, FS, SESSIONS, SKILLS, SYSTEM_PROMPT, TOOLS
 from ph.llm.types import text_of
 from ph.testing import FAKE_OPTIONS, MountProfile, report_section, run_tool
@@ -778,7 +779,8 @@ def test_every_row_in_the_bundle_names_a_resolvable_plugin() -> None:
     rows = Profile.from_paths([BUNDLE]).dump()
     assert rows, "the bundle declares no rows"
     for row in rows:
-        assert resolve_plugin(row["name"]) is not None, row["name"]
+        name = as_str(row["name"])
+        assert resolve_plugin(name) is not None, name
 
 
 def test_the_bundles_row_is_enabled() -> None:

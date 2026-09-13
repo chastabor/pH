@@ -14,11 +14,11 @@ import json
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
 
 import anyio
 
 from ..cordis import Context, plugin
+from ..json import PlainJsonValue, as_obj, loads, thaw_json
 from ..keys import SETTINGS
 from ..paths import default_home_path, write_text_under
 from ..wire import WireModel
@@ -34,13 +34,21 @@ class SettingsService:
 
     ctx: Context
     path: Path
-    _values: dict[str, Any] = field(default_factory=dict)
+    _values: dict[str, PlainJsonValue] = field(default_factory=dict)
     _loaded: bool = False
 
-    def load(self) -> dict[str, Any]:
+    def load(self) -> dict[str, PlainJsonValue]:
+        """The whole settings tree, read once.
+
+        `as_obj` is not decoration: a settings file whose top level is an array
+        parses fine, and the object this returns is the one `set` walks with
+        `.get`. Typed as the mapping it has to be, a non-object file is the empty
+        tree — the same answer the unreadable case already gives — rather than a
+        list that reads as defaults and raises on the first write.
+        """
         if not self._loaded:
             try:
-                self._values = json.loads(self.path.read_text(encoding="utf-8"))
+                self._values = thaw_json(as_obj(loads(self.path.read_text(encoding="utf-8"))))
             except FileNotFoundError:
                 self._values = {}
             except (json.JSONDecodeError, OSError):
@@ -51,17 +59,17 @@ class SettingsService:
             self._loaded = True
         return self._values
 
-    def get(self, key: str, default: object = None) -> Any:  # noqa: ANN401
+    def get(self, key: str, default: PlainJsonValue = None) -> PlainJsonValue:
         """Read a dotted key."""
-        node: Any = self.load()
+        node: PlainJsonValue = self.load()
         for part in key.split("."):
             if not isinstance(node, dict) or part not in node:
                 return default
             node = node[part]
         return node
 
-    async def set(self, key: str, value: object) -> None:
-        """Write a dotted key and persist."""
+    async def set(self, key: str, value: PlainJsonValue) -> None:
+        """Write a dotted key and persist. Not `object`: the tree is dumped below."""
         values = self.load()
         node = values
         parts = key.split(".")

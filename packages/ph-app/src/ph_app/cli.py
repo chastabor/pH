@@ -25,7 +25,7 @@ from __future__ import annotations
 import json
 import shlex
 import sys
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from functools import partial
 from pathlib import Path
 from typing import Annotated, Any, Literal, TypeAlias
@@ -38,6 +38,7 @@ from rich.table import Table
 from ph.cordis import LoaderError, MountRefusal, Profile, import_plugin_modules
 from ph.cordis.catalog import config_catalog
 from ph.cordis.events import events as event_registry
+from ph.json import JsonObject, as_obj
 from ph.keys import DIAGNOSTICS
 from ph.lingering import lifetime
 from ph.paths import RuntimeDirError, resolve_roots
@@ -803,11 +804,12 @@ def config(
     # "mounted, the default stands" — which is the third state this command
     # promises to tell apart, got wrong. `enabled_rows` is the predicate
     # `Profile.mount` itself uses.
-    # `or {}` is load-bearing: a mounted row that configures nothing has
+    # `as_obj` is load-bearing: a mounted row that configures nothing has
     # `config is None`, which is a *different* answer from "not in this profile"
-    # and must not share its sentinel — absence is what carries that one.
+    # and must not share its sentinel — absence is what carries that one. It also
+    # settles the shape here, so the renderer below reads presence alone.
     composed = {
-        row.name: row.config or {} for row in profile_or_exit(profile, patch).enabled_rows()
+        row.name: as_obj(row.config) for row in profile_or_exit(profile, patch).enabled_rows()
     }
     shown = [entry for entry in catalog if all_ or entry["config"] or entry.get("error")]
     if not shown:
@@ -845,7 +847,7 @@ def config(
     console.print(table)
 
 
-def _in_profile(name: str, set_here: Mapping[str, Any] | None, *, first: bool) -> str:
+def _in_profile(name: str, set_here: JsonObject | None, *, first: bool) -> str:
     """What the composed profile says about one option.
 
     Three answers, and they are genuinely different: the row is not in this

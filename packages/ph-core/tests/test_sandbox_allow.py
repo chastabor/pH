@@ -18,6 +18,7 @@ import pytest
 
 from ph.agent.types import AgentOptions
 from ph.cordis import Context
+from ph.json import as_str
 from ph.keys import AGENTS, MOUNT, SANDBOX, SESSIONS, SHELL, WORKSPACE
 from ph.paths import canonical
 from ph.seams.sandbox import (
@@ -248,7 +249,8 @@ def test_a_denial_carries_the_sentence_with_the_way_out() -> None:
     )
     assert proxy["agent"] == "a1"
     written = Denial(kind="filesystem", via="output", evidence="e").record(None)
-    assert "reported" in written["message"] and "/sandbox allow path" in written["message"]
+    message = as_str(written["message"])
+    assert "reported" in message and "/sandbox allow path" in message
     assert "agent" not in written
 
 
