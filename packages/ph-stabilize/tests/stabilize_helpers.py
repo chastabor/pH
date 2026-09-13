@@ -14,7 +14,7 @@ from __future__ import annotations
 import inspect
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 import pytest
 
@@ -64,7 +64,7 @@ def break_spill(monkeypatch: pytest.MonkeyPatch) -> None:
     no room for an override.
     """
 
-    async def refuse(_self: object, **_kwargs: object) -> Any:  # noqa: ANN401
+    async def refuse(_self: object, **_kwargs: object) -> NoReturn:
         raise OSError("no space left on device")
 
     monkeypatch.setattr(SpillStore, "save_text", refuse)

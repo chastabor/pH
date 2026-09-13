@@ -27,6 +27,7 @@ from anyio.abc import TaskGroup
 
 from ph.bundles import BASE, HEADLESS
 from ph.cordis import Profile
+from ph.llm.types import StreamChunk
 from ph.paths import resolve_roots
 from ph_app.daemon.client import DaemonClient
 from ph_app.daemon.duplex import Notification
@@ -36,6 +37,7 @@ from ph_app.daemon.supervisor import Root
 __all__ = [
     "PROFILE",
     "Daemon",
+    "break_the_provider",
     "daemon_in_thread",
     "private_runtime",
     "running",
@@ -326,3 +328,20 @@ async def serving(
     private_runtime(tmp_path, monkeypatch)
     async with running(tmp_path, path=daemon_socket(), **options) as daemon:
         yield daemon
+
+
+def break_the_provider(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make every model call raise, the way a provider being down looks.
+
+    Here rather than in each suite because `FakeAdapter.stream` is an async
+    generator: a stand-in has to carry an unreachable `yield` to stay one, which
+    is the detail two copies of this got right by being copied and would get
+    wrong by being written twice.
+    """
+    from ph.llm.fake import FakeAdapter
+
+    async def exploding(self: object, options: object) -> AsyncIterator[StreamChunk]:
+        raise RuntimeError("provider is down")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(FakeAdapter, "stream", exploding)

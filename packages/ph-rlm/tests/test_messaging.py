@@ -15,6 +15,7 @@ from typing import Any
 import pytest
 from rlm_fixtures import MESSAGING_ROW, PROVIDER_ROW, MountedRuntime
 
+from ph.agent.types import AgentDriver
 from ph.cordis import Context
 from ph.keys import AGENTS, JOBS, SESSIONS, SUBAGENTS
 from ph.seams.subagents import SubagentRequest, family_reach, reachable_family
@@ -72,7 +73,7 @@ async def _siblings(
     return ctx, first_session, first, ctx.require(AGENTS).create(second_session, FAKE_OPTIONS)
 
 
-def _agent(ctx: Context, run: Any) -> Any:  # noqa: ANN401
+def _agent(ctx: Context, run: Any) -> AgentDriver:  # noqa: ANN401
     agent = ctx.require(AGENTS).get(run.session_id)
     assert agent is not None, "the child agent is not running"
     return agent

@@ -151,7 +151,7 @@ def _tree(root: Path) -> None:
     (root / "pkg" / "helpers.py").write_text(OTHER, encoding="utf-8")
 
 
-async def _indexed(mount: MountProfile, tmp_path: Path, **config: object) -> Any:  # noqa: ANN401
+async def _indexed(mount: MountProfile, tmp_path: Path, **config: object) -> Context:
     settings = {"path": str(tmp_path / "graph.db"), **config}
     ctx = await mount({**ROW, "config": settings})
     return ctx

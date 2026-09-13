@@ -27,7 +27,7 @@ from typing import Any
 import pytest
 
 from ph.keys import TOOLS
-from ph.llm.types import create_user_message
+from ph.llm.types import Message, create_user_message
 from ph.testing import (
     MountProfile,
     StubAgent,
@@ -49,6 +49,7 @@ from ph.tools import (
     ToolExecution,
     ToolExecutionInput,
     ToolNotFoundError,
+    ToolRunContext,
     text_content,
 )
 from ph.tools.definition import ToolExecutionResult
@@ -393,7 +394,7 @@ async def test_finalize_content_runs_even_for_a_failure() -> None:
     assert block_text(result.content[0]) == "finalized"
 
 
-def _notice() -> Any:  # noqa: ANN401
+def _notice() -> Message:
     return create_user_message(
         content=[{"type": "text", "text": "a notice"}], source={"kind": "plugin", "plugin": "test"}
     )
@@ -402,7 +403,7 @@ def _notice() -> Any:  # noqa: ANN401
 async def test_deferred_context_rides_the_result() -> None:
     _root, tools = tool_runtime()
 
-    def body(_args: Any, run: Any) -> Any:  # noqa: ANN401
+    def body(_args: object, run: ToolRunContext) -> str:
         run.defer_context(_notice())
         run.conclude_turn()
         return "done"
@@ -416,7 +417,7 @@ async def test_deferred_context_rides_the_result() -> None:
 async def test_a_block_discards_context_the_body_deferred() -> None:
     root, tools = tool_runtime()
 
-    def body(_args: Any, run: Any) -> Any:  # noqa: ANN401
+    def body(_args: object, run: ToolRunContext) -> str:
         run.defer_context(_notice())
         return "done"
 

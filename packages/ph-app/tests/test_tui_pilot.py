@@ -30,6 +30,7 @@ from ph.seams.approval import ApprovalRequest, Edited, Responded
 from ph.seams.commands import CommandDefinition
 from ph.seams.user_questions import UserQuestion
 from ph.testing import StubAgent, not_none, simple_tool
+from ph_app.daemon.supervisor import Root
 from ph_app.trust import TrustStore
 from ph_app.tui.modals.approval import ApprovalModal
 from ph_app.tui.modals.ask_user import AskUserModal
@@ -139,7 +140,7 @@ async def test_a_global_key_does_not_also_edit_the_prompt(make_tui_app: MakeApp)
 async def _decide(
     app: Any,  # noqa: ANN401
     pilot: Any,  # noqa: ANN401
-    root: Any,  # noqa: ANN401
+    root: Root,
     *,
     arguments: Any = None,  # noqa: ANN401
 ) -> list[Any]:

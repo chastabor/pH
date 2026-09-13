@@ -158,7 +158,7 @@ async def apply(ctx: Context, config: None) -> None:
         return DELEGATION if ctx.require(TOOLS).view(request.scope).visible.get(RUN_TOOL) else ""
 
     def child_doctrine(request: AssembleContext) -> str:
-        session = getattr(request.agent, "session", None)
+        session = request.agent.session if request.agent is not None else None
         return CHILD_DOCTRINE if session is not None and delegation_depth(session) else ""
 
     def facts(request: AssembleContext) -> str:
@@ -168,7 +168,7 @@ async def apply(ctx: Context, config: None) -> None:
         answers from it, and folding once per name turned prompt assembly into
         N+1 scans of the parent's whole log per model step.
         """
-        session = getattr(request.agent, "session", None)
+        session = request.agent.session if request.agent is not None else None
         if session is None:
             return ""
         depth = delegation_depth(session)

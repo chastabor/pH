@@ -110,7 +110,7 @@ async def apply(ctx: Context, config: Config) -> None:
             delay_ms = max(delay_ms, failure.provider_retry_after_ms)
 
         agent = getattr(failure_payload, "agent", None)
-        session = getattr(agent, "session", None)
+        session = agent.session if agent is not None else None
         if session is not None:
             session.append(
                 "llm/retry",

@@ -18,10 +18,10 @@ purpose, and only the `sandbox` tier refuses them (E13).
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
 import pytest
 
+from ph.agent.types import AgentDriver
 from ph.cordis import Context
 from ph.json import as_obj
 from ph.keys import AGENTS, FS, SESSIONS, WORKSPACE
@@ -39,7 +39,7 @@ def _tier(tmp_path: Path) -> StubWorkspaceProvider:
     )
 
 
-async def _run(ctx: Context, session_id: str = "s") -> Any:  # noqa: ANN401
+async def _run(ctx: Context, session_id: str = "s") -> AgentDriver:
     """One agent, one prompt — the least that reaches `agent/pre-step`."""
     session = ctx.require(SESSIONS).create(session_id)
     agent = ctx.require(AGENTS).create(session, FAKE_OPTIONS)

@@ -166,8 +166,7 @@ class KernelSnapshotPolicy:
         available either.
         """
         agent = self.ctx.require(AGENTS).get(namespace)
-        session = getattr(agent, "session", None)
-        return session if isinstance(session, Session) else None
+        return agent.session if agent is not None else None
 
     # ------------------------------------------------------------- recording --
 

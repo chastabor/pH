@@ -140,20 +140,20 @@ from typing import Any
 
 import anyio
 import pytest
-from daemon_helpers import PROFILE, running
+from daemon_helpers import PROFILE, break_the_provider, running
 
 from ph.agent.inbox import InboxTarget
 from ph.agent_loop.driver import ReactLoopAgent
 from ph.keys import SCHEDULE, SESSIONS, WORKSPACE
 from ph.seams.schedule import Schedule
-from ph.session import Session
+from ph.session import Session, SessionEvent
 from ph.testing import ReapedHost, stored_log
 from ph_app.daemon import recovery, server
 from ph_app.daemon import supervisor as supervisor_module
 from ph_app.daemon.client import DaemonClient
 from ph_app.daemon.recovery import CHILD_RETRY_LIMIT
 from ph_app.daemon.server import DaemonUnavailable, serve
-from ph_app.daemon.supervisor import Supervisor
+from ph_app.daemon.supervisor import Root, Supervisor
 from ph_app.protocol import DaemonError
 
 pytestmark = pytest.mark.anyio
@@ -274,13 +274,7 @@ async def test_a_failed_turn_is_named_beside_an_idle_status(
     rides beside it, so a client polling the list can tell "answered" from "the
     last answer was an error", which `--until-idle` could not.
     """
-    from ph.llm.fake import FakeAdapter
-
-    async def exploding(self: object, options: object) -> Any:  # noqa: ANN401
-        raise RuntimeError("provider is down")
-        yield  # pragma: no cover
-
-    monkeypatch.setattr(FakeAdapter, "stream", exploding)
+    break_the_provider(monkeypatch)
     async with running(tmp_path) as daemon:
         client = await daemon.client()
         await client.call("session/new", sessionId="sour")
@@ -1519,7 +1513,7 @@ async def test_one_root_with_a_broken_schedule_does_not_stop_the_others(
 # left is whoever opens a transcript afterwards.
 
 
-def _notices(root: Any) -> list[Any]:  # noqa: ANN401
+def _notices(root: Root) -> list[SessionEvent]:
     return [event for event in root.session.events_from(0) if event.type == recovery.UNREACHABLE]
 
 

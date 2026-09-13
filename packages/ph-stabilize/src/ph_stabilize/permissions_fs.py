@@ -67,11 +67,9 @@ from ph.paths import canonical, is_under
 from ph.seams.approval import denial_reason
 from ph.seams.diagnostics import Diagnostic, contribute
 from ph.seams.fs import (
-    EditIntent,
+    FsIntent,
     FsService,
-    ReadIntent,
     WalkDecision,
-    WriteIntent,
     matches_glob,
 )
 from ph.seams.sandbox import allowed_paths_of, enforcement_of
@@ -651,7 +649,7 @@ def _gate(ctx: Context, permissions: FsPermissions, operation: Operation) -> Any
     """
 
     async def gate(
-        intent: ReadIntent | WriteIntent | EditIntent,
+        intent: FsIntent,
         next_: Callable[[], Any],
     ) -> Any:  # noqa: ANN401
         rule = permissions.objection(operation, intent.path, intent.agent)

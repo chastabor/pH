@@ -34,11 +34,11 @@ from ph.testing import (
 # ------------------------------------------------------------------ the laws --
 
 
-def _turns(log: Any) -> int:  # noqa: ANN401
+def _turns(log: Session) -> int:
     return sum(1 for event in log.events if event.type == "turn/start")
 
 
-def _more_turns(previous: int, log: Any, from_seq: int) -> int:  # noqa: ANN401
+def _more_turns(previous: int, log: Session, from_seq: int) -> int:
     return previous + sum(1 for event in log.events_from(from_seq) if event.type == "turn/start")
 
 
@@ -80,7 +80,7 @@ def test_a_second_implementation_that_drifts_is_caught_at_the_event_that_breaks_
     """The finding names the event, because that is the lesson: which type the two
     paths handle differently."""
 
-    def counts_ends_too(previous: int, log: Any, from_seq: int) -> int:  # noqa: ANN401
+    def counts_ends_too(previous: int, log: Session, from_seq: int) -> int:
         return previous + sum(
             1 for event in log.events_from(from_seq) if event.type in {"turn/start", "turn/end"}
         )
@@ -104,7 +104,7 @@ def test_a_fold_that_reads_outside_the_log_is_caught(read: Any, named: str) -> N
     """Deterministic in its answer, impure in how it got there — which is exactly
     the fold the cache's invalidation key cannot see."""
 
-    def peeks(log: Any) -> int:  # noqa: ANN401
+    def peeks(log: Session) -> int:
         read()
         return _turns(log)
 
@@ -115,7 +115,7 @@ def test_a_fold_that_reads_outside_the_log_is_caught(read: Any, named: str) -> N
 def test_a_fold_with_hidden_state_is_caught() -> None:
     calls = [0]
 
-    def remembers(log: object) -> int:
+    def remembers(log: Session) -> int:
         calls[0] += 1
         return calls[0]
 
@@ -124,7 +124,7 @@ def test_a_fold_with_hidden_state_is_caught() -> None:
 
 
 def test_a_fold_that_writes_to_the_log_is_refused_before_anything_else() -> None:
-    def appends(log: Any) -> int:  # noqa: ANN401
+    def appends(log: Session) -> int:
         log.append("turn/start", {"turn": 99})
         return _turns(log)
 
@@ -133,7 +133,7 @@ def test_a_fold_that_writes_to_the_log_is_refused_before_anything_else() -> None
 
 
 def test_extending_over_nothing_must_change_nothing() -> None:
-    def always_one_more(previous: int, log: object, from_seq: int) -> int:
+    def always_one_more(previous: int, log: Session, from_seq: int) -> int:
         return _more_turns(previous, log, from_seq) + 1
 
     findings = check_fold_laws(_turn_log(), _turns, always_one_more)
@@ -162,7 +162,7 @@ def test_prefixes_begin_where_the_cache_could_first_have_read() -> None:
     child = _fork(_turn_log(2))
     child.append("turn/start", {"turn": 3})
 
-    def own_turns(log: Any) -> int:  # noqa: ANN401
+    def own_turns(log: Session) -> int:
         since = log.header.seed_length or 0
         return sum(1 for event in log.events_from(since) if event.type == "turn/start")
 
@@ -177,7 +177,7 @@ def test_a_fold_that_reads_process_state_is_caught_as_reading_more_than_the_log(
     child = Session("child", seed=list(parent.events))
     child.append("turn/start", {"turn": 3})
 
-    def live_turns(log: Any) -> int:  # noqa: ANN401
+    def live_turns(log: Session) -> int:
         return sum(1 for event in log.events_from(log.first_live_seq) if event.type == "turn/start")
 
     findings = check_fold_laws(child, live_turns)

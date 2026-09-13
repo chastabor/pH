@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from daemon_helpers import running, until
+from daemon_helpers import Daemon, running, until
 from tui_helpers import StubApp, StubHost
 
 from ph.bundles import BASE, HEADLESS
@@ -46,7 +46,7 @@ pytestmark = pytest.mark.anyio
 
 
 async def _front(
-    daemon: Any,  # noqa: ANN401
+    daemon: Daemon,
     session_id: str = "remote",
     **options: Any,  # noqa: ANN401
 ) -> tuple[DaemonSession, StubHost]:

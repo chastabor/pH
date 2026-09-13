@@ -29,6 +29,8 @@ import anyio
 import pytest
 
 from ph.agent.types import AgentOptions
+from ph.cordis import Context
+from ph.json import as_str
 from ph.keys import AGENTS, SANDBOX, SESSIONS, SHELL, WORKSPACE
 from ph.seams.sandbox import DENIED, Allowances, NetworkAllowance
 from ph.seams.sandbox_egress import PROBE_HOST, EgressProxy, origin_form, parse_head
@@ -295,7 +297,7 @@ async def test_the_allowlist_is_asked_live() -> None:
 # ------------------------------------------------------------- end to end --
 
 
-async def _bridged(mount: MountProfile, *rows: dict[str, Any]) -> Any:  # noqa: ANN401
+async def _bridged(mount: MountProfile, *rows: dict[str, Any]) -> Context:
     """A mount with the backend and a live bridge, or a skip that says why not."""
     ctx = await mount(ROW, *rows)
     if ctx.require(SANDBOX).provider is None:
@@ -347,7 +349,9 @@ async def test_a_confined_command_reaches_an_allowed_host_and_only_that(
         )
         assert reached.exit_code == 0, reached.stderr
         assert reached.stdout.strip() == "hello from host"
-        assert reached.confined_by == ctx.require(SANDBOX).provider.backend
+        provider = ctx.require(SANDBOX).provider
+        assert provider is not None
+        assert reached.confined_by == provider.backend
 
         refused = await ctx.require(SHELL).run(_fetch("http://example.invalid/"), agent=agent)
         assert refused.exit_code != 0
@@ -357,7 +361,7 @@ async def test_a_confined_command_reaches_an_allowed_host_and_only_that(
     assert [event.data.get("host") for event in denials] == ["example.invalid"]
     assert denials[0].data["via"] == "proxy"
     assert denials[0].data["agent"] == agent.id
-    assert "/sandbox allow host example.invalid" in denials[0].data["message"]
+    assert "/sandbox allow host example.invalid" in as_str(denials[0].data["message"])
 
 
 async def test_a_command_that_ignores_the_proxy_reaches_nothing_and_says_so(

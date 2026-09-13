@@ -206,7 +206,7 @@ async def apply(ctx: Context, config: None) -> None:
         # it in belong to the call that read the skill — which this listener,
         # firing after the fact, does not have.
         steps = [str(one) for one in payload.get("steps") or ()]
-        if not steps or not isinstance(session, Session):
+        if not steps or session is None:
             return
         grown = seeded(todos_of(session), steps)
         if grown is None:
@@ -217,8 +217,8 @@ async def apply(ctx: Context, config: None) -> None:
         session.append("todo/write", {"todos": grown})
 
     async def keep_going(agent: AgentDriver, turn: int) -> None:
-        session = getattr(agent, "session", None)
-        if not isinstance(session, Session):
+        session = agent.session
+        if session is None:
             return
         # Frozen, and before anything else: this fires once per turn for every
         # session in the deployment, and a session that never read a skill must

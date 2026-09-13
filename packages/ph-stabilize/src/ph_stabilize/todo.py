@@ -749,7 +749,7 @@ async def apply(ctx: Context, config: None) -> None:
     )
 
     def current_list(assemble: AssembleContext) -> str:
-        todos = todos_of(getattr(assemble.agent, "session", None))
+        todos = todos_of(assemble.agent.session if assemble.agent is not None else None)
         return render_todo_list(todos) if todos else ""
 
     # A `context`, not a `section`: it changes every time the model writes, and

@@ -566,7 +566,7 @@ class RlmChildProvider:
         """Attribute the child's usage to the parent as it is produced."""
         parent_session, run_id = child.parent_session, child.run.id
 
-        def observer(_source: Session, event: Any) -> None:  # noqa: ANN401
+        def observer(_source: Session, event: SessionEvent) -> None:
             if event.type != "assistant/message":
                 return
             usage = event.data.get("usage")

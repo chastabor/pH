@@ -31,7 +31,7 @@ from ph.agent.types import AgentOptions
 from ph.bundles import BASE, HEADLESS
 from ph.cordis import Context
 from ph.keys import AGENTS, ATTACHMENTS, SESSIONS, UPLOADS
-from ph.llm.types import FILE_EXPIRED, MediaBlock, create_user_message
+from ph.llm.types import FILE_EXPIRED, MediaBlock, Message, create_user_message
 from ph.seams.attachments import digest_of
 from ph.testing import MountProfile
 from ph_app.adapters._http import HttpClient, failure_from_status
@@ -148,7 +148,7 @@ async def _attached(
     ctx: Context,
     mime: str = "application/pdf",
     name: str = "paper.pdf",
-) -> Any:  # noqa: ANN401
+) -> Message:
     ref = await ctx.require(ATTACHMENTS).save_bytes(content=PDF, mime=mime, name=name)
     return create_user_message(
         content=[{"type": "text", "text": "what happens here?"}, MediaBlock(attachment=ref)],

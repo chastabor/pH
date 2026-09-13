@@ -28,7 +28,7 @@ from functools import cache
 from importlib.metadata import entry_points
 from pathlib import Path
 from types import ModuleType
-from typing import Any
+from typing import Any, NoReturn
 
 import yaml
 
@@ -106,7 +106,7 @@ for _tag in ("tag:yaml.org,2002:timestamp",):
         ]
 
 
-def _reject_unknown_tag(loader: yaml.Loader, suffix: str, node: yaml.Node) -> Any:  # noqa: ANN401
+def _reject_unknown_tag(loader: yaml.Loader, suffix: str, node: yaml.Node) -> NoReturn:
     raise LoaderError(
         f"pH config is data, not code: tag '!{suffix}' at line "
         f"{node.start_mark.line + 1} is not allowed"

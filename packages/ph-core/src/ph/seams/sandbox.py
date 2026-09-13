@@ -807,8 +807,7 @@ class SandboxSeam:
         if agents is None or not agent:
             return None
         found = agents.get(agent)
-        session = getattr(found, "session", None)
-        return session if isinstance(session, Session) else None
+        return found.session if found is not None else None
 
 
 def enforcement_of(ctx: Context) -> Enforcement | None:

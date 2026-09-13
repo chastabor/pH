@@ -110,7 +110,7 @@ async def apply(ctx: Context, config: Config) -> None:
 
     async def keep_going(agent: AgentDriver, turn: int) -> None:
         """The driver: decide whether this turn is allowed to be the last one."""
-        session = getattr(agent, "session", None)
+        session = agent.session
         if session is None:
             return
         goals: GoalService = ctx.require(GOALS)

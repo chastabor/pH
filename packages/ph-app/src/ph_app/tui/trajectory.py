@@ -229,7 +229,7 @@ class _Builder:
 
     def on_message(self, event: SessionEvent, kind: RecordKind) -> None:
         outer = event.data
-        message = message_of(event)
+        message = message_of(outer)
         source = _source_ref(message)
         text = _text(message.get("content"))
         # A compaction summary shadows the range it stands for; the record says

@@ -30,7 +30,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from ph.json import JsonValue, as_obj, as_seq, as_str
+from ph.json import JsonObject, JsonValue, as_obj, as_seq, as_str
 from ph.tools import ToolCallView, ToolResultView
 from ph.tools.presentation import CARD_VIEWS
 
@@ -82,15 +82,19 @@ def text_of_wire(
     return "\n".join(parts)
 
 
-def message_of(event: object) -> Mapping[str, Any]:
+def message_of(payload: JsonObject) -> Mapping[str, Any]:
     """The message inside an event's payload, whichever shape it takes.
 
     `user/message`'s payload *is* the message; `assistant/message` wraps one
     beside `turn`, `step` and `usage`. Both projections need to know that, and
     getting it wrong is silent — a message with no content rather than an error
     — so the knowledge lives here instead of in each reader.
+
+    The payload, never the event: both callers already hold `event.data` where
+    they ask — `agents.py` narrowed it a line above, and `trajectory.py` binds it
+    as `outer` for its own reads. Taking either meant a `getattr` shape-sniff
+    standing in for the one type both sides actually have.
     """
-    payload = as_obj(getattr(event, "data", event))
     return as_obj(payload.get("message")) if "message" in payload else payload
 
 

@@ -38,6 +38,7 @@ from ph.persistence.jsonl import JsonlSessionStore, read_session
 from ph.session import Session, SessionEvent, SurfaceIntent
 from ph.testing import FAKE_OPTIONS as FAKE
 from ph.testing import MountProfile, stored_log, user_payload, write_reference_fork
+from ph.tools import ToolRunContext
 
 pytestmark = pytest.mark.anyio
 
@@ -240,12 +241,13 @@ async def test_a_top_level_tool_body_is_preceded_by_a_barrier(
     ctx = await mount(_root(tmp_path))
     flushed_before_body: list[bool] = []
 
-    def body(_args: Any, run: Any) -> str:  # noqa: ANN401
+    def body(_args: object, run: ToolRunContext) -> str:
         # The buffer table is the jsonl store's own, not part of the
         # `SessionPersistence` Protocol — this test mounts that backend and now
         # says so instead of reading through an `Any`.
         store = ctx.require(SESSION_PERSISTENCE)
         assert isinstance(store, JsonlSessionStore)
+        assert run.session is not None
         durable = store._buffers[run.session.id].pending
         flushed_before_body.append(not durable)
         return "ok"

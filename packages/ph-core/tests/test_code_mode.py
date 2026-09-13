@@ -13,6 +13,7 @@ evaluation. So:
 
 from __future__ import annotations
 
+from collections.abc import Callable, Mapping
 from functools import partial
 from types import SimpleNamespace
 from typing import Any
@@ -21,8 +22,10 @@ import anyio
 import pytest
 
 from ph.cordis import DEPLOYMENT, Context
+from ph.json import as_obj, as_seq
 from ph.keys import AGENTS, CODE_RUNTIME_STUB, SESSIONS, SYSTEM_PROMPT, TOOLS
 from ph.seams.code_runtime import CodeBindingNamespace
+from ph.session import Session
 from ph.system_prompt.assembly import render_prompt
 from ph.testing import (
     FAKE_OPTIONS,
@@ -34,7 +37,7 @@ from ph.testing import (
     run_tool,
     simple_tool,
 )
-from ph.tools import Deny, ToolExecutionInput, text_content
+from ph.tools import Deny, ToolExecutionInput, ToolExecutionResult, text_content
 from ph.tools.code_mode import CodeDispatchRef, ToolCallError, governed_binding
 from ph.tools.definition import ToolOutput, TransportPresentation
 from ph.tools.registry import RUN_CODE
@@ -64,7 +67,9 @@ def _recorder(name: str, calls: list[str], *, safe: bool = True) -> Any:  # noqa
     return simple_tool(name, body, safe=safe)
 
 
-async def _run(ctx: Context, program_name: str, program: Any) -> Any:  # noqa: ANN401
+async def _run(
+    ctx: Context, program_name: str, program: Callable[..., Any]
+) -> tuple[ToolExecutionResult, Session]:
     ctx.require(CODE_RUNTIME_STUB).register_program(program_name, program)
     session = ctx.require(SESSIONS).create(f"s-{program_name}")
     agent = ctx.require(AGENTS).create(session, FAKE_OPTIONS)
@@ -88,7 +93,7 @@ async def test_a_binding_call_re_enters_the_whole_pipeline(mount: MountProfile) 
     seen: list[str] = []
     ctx.on("tools/pre-execute", lambda execution, next_: noting(seen, execution.name, next_))
 
-    async def program(ns: Any, emit: Any) -> str:  # noqa: ANN401
+    async def program(ns: Mapping[str, Any], emit: Callable[[str], None]) -> str:
         await ns["tools"].touch(n=1)
         return "done"
 
@@ -107,7 +112,7 @@ async def test_three_binding_calls_produce_three_durable_dispatch_pairs(
     calls: list[str] = []
     ctx.require(TOOLS).register(_recorder("touch", calls))
 
-    async def program(ns: Any, emit: Any) -> str:  # noqa: ANN401
+    async def program(ns: Mapping[str, Any], emit: Callable[[str], None]) -> str:
         for index in range(3):
             await ns["tools"].touch(n=index)
         return "done"
@@ -129,7 +134,7 @@ async def test_dispatch_records_stay_out_of_model_context(mount: MountProfile) -
     ctx = await _code_ctx(mount)
     ctx.require(TOOLS).register(_recorder("touch", []))
 
-    async def program(ns: Any, emit: Any) -> str:  # noqa: ANN401
+    async def program(ns: Mapping[str, Any], emit: Callable[[str], None]) -> str:
         await ns["tools"].touch(n=1)
         return "done"
 
@@ -150,7 +155,7 @@ async def test_a_denied_binding_call_fails_the_whole_run(mount: MountProfile) ->
     )
     reached: list[str] = []
 
-    async def program(ns: Any, emit: Any) -> str:  # noqa: ANN401
+    async def program(ns: Mapping[str, Any], emit: Callable[[str], None]) -> str:
         await ns["tools"].touch(n=1)
         try:
             await ns["tools"].forbidden(n=2)
@@ -164,6 +169,7 @@ async def test_a_denied_binding_call_fails_the_whole_run(mount: MountProfile) ->
 
     result, _session = await _run(ctx, "denied", program)
     assert result.is_error
+    assert result.error is not None
     assert "was refused" in result.error.message
     # Everything after the refusal is abandoned, so partial state is bounded to
     # this one cell (C3).
@@ -175,7 +181,7 @@ async def test_a_failed_binding_call_is_the_programs_to_handle(mount: MountProfi
     ctx.require(TOOLS).register(simple_tool("flaky", raising(RuntimeError("transient"))))
     handled: list[str] = []
 
-    async def program(ns: Any, emit: Any) -> str:  # noqa: ANN401
+    async def program(ns: Mapping[str, Any], emit: Callable[[str], None]) -> str:
         try:
             await ns["tools"].flaky()
         except ToolCallError as error:
@@ -194,7 +200,7 @@ async def test_a_runaway_program_fails_at_its_budget(mount: MountProfile) -> Non
     calls: list[str] = []
     ctx.require(TOOLS).register(_recorder("touch", calls))
 
-    async def program(ns: Any, emit: Any) -> str:  # noqa: ANN401
+    async def program(ns: Mapping[str, Any], emit: Callable[[str], None]) -> str:
         for index in range(100):
             await ns["tools"].touch(n=index)
         return "done"
@@ -202,6 +208,7 @@ async def test_a_runaway_program_fails_at_its_budget(mount: MountProfile) -> Non
     result, _session = await _run(ctx, "runaway", program)
     assert result.is_error
     # The budget is named, so the model can split the work rather than guess.
+    assert result.error is not None
     assert "max_dispatches_per_run=4" in result.error.message
     assert len(calls) == 4
 
@@ -262,7 +269,7 @@ async def test_an_oversized_dispatch_can_be_reshaped_before_it_is_logged(
 
     ctx.on("tools/code-dispatch-log", shrink)
 
-    async def program(ns: Any, emit: Any) -> str:  # noqa: ANN401
+    async def program(ns: Mapping[str, Any], emit: Callable[[str], None]) -> str:
         await ns["tools"].touch(n=1)
         return "done"
 
@@ -270,7 +277,7 @@ async def test_an_oversized_dispatch_can_be_reshaped_before_it_is_logged(
     (settle,) = [e for e in session.events if e.type == "tool/code-dispatch"]
     # Each dispatch is offloadable individually (C5), so one large read does not
     # melt its siblings.
-    assert settle.data["content"][0]["text"] == "[spilled]"
+    assert as_obj(as_seq(settle.data["content"])[0])["text"] == "[spilled]"
 
 
 async def test_a_spawning_binding_is_held_to_the_spawn_budget(mount: MountProfile) -> None:
@@ -314,12 +321,13 @@ async def test_a_pre_execute_denial_of_a_sub_call_also_fails_the_run(mount: Moun
         ),
     )
 
-    async def program(ns: Any, emit: Any) -> str:  # noqa: ANN401
+    async def program(ns: Mapping[str, Any], emit: Callable[[str], None]) -> str:
         await ns["tools"].touch(n=1)
         return "done"
 
     result, _session = await _run(ctx, "pre-denied", program)
     assert result.is_error
+    assert result.error is not None
     assert "not now" in result.error.message
 
 
@@ -509,7 +517,7 @@ async def test_a_row_can_contribute_a_binding_namespace(mount: MountProfile) -> 
     ctx.require(TOOLS).register(_recorder("spawn_child", calls))
     ctx.require(TOOLS).register_code_namespace("rlm", _extra_namespace)
 
-    async def program(bindings: Any, _emit: Any) -> Any:  # noqa: ANN401
+    async def program(bindings: Mapping[str, Any], _emit: Callable[[str], None]) -> Any:  # noqa: ANN401
         return await bindings["rlm"].run(n="research")
 
     result, session = await _run(ctx, "spawn", program)
@@ -556,7 +564,7 @@ async def test_a_contributed_binding_counts_against_the_spawn_budget(mount: Moun
     ctx.require(TOOLS).register(_recorder("spawn_child", []))
     ctx.require(TOOLS).register_code_namespace("rlm", _extra_namespace)
 
-    async def program(bindings: Any, _emit: Any) -> Any:  # noqa: ANN401
+    async def program(bindings: Mapping[str, Any], _emit: Callable[[str], None]) -> str:
         await bindings["rlm"].run(n="one")
         await bindings["rlm"].run(n="two")
         return "unreached"
@@ -591,7 +599,7 @@ async def test_a_namespace_owns_the_tools_it_presents(mount: MountProfile) -> No
     assert "tools.touch" in text
     assert ctx.require(TOOLS).get("spawn_child", scope=agent.ctx) is not None
 
-    async def program(bindings: Any, _emit: Any) -> Any:  # noqa: ANN401
+    async def program(bindings: Mapping[str, Any], _emit: Callable[[str], None]) -> Any:  # noqa: ANN401
         return await bindings["rlm"].run(n="still works")
 
     result, _session = await _run(ctx, "owned", program)
@@ -620,7 +628,7 @@ async def test_a_dispatch_and_its_settle_are_paired_by_one_declaration(mount: Mo
     calls: list[str] = []
     ctx.require(TOOLS).register(_recorder("touch", calls))
 
-    async def program(ns: Any, emit: Any) -> str:  # noqa: ANN401
+    async def program(ns: Mapping[str, Any], emit: Callable[[str], None]) -> str:
         await ns["tools"].touch(n=1)
         return "done"
 
@@ -648,7 +656,7 @@ async def test_a_dispatch_parked_on_its_gate_has_no_start_record(mount: MountPro
     ctx.require(TOOLS).register(_recorder("touch", calls))
     reached, release = parked_gate(ctx, only="touch")
 
-    async def program(ns: Any, emit: Any) -> str:  # noqa: ANN401
+    async def program(ns: Mapping[str, Any], emit: Callable[[str], None]) -> str:
         await ns["tools"].touch(n=1)
         return "done"
 

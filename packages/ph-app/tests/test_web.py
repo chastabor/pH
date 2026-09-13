@@ -21,7 +21,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeAlias
 
 import pytest
 from aiohttp import FormData, web
@@ -32,6 +32,9 @@ from ph.json import as_seq
 from ph_app.daemon.client import DaemonClient
 from ph_app.daemon.framing import MAX_ATTACHMENT_BYTES
 from ph_app.web.serve import CLOSING_BODY, COOKIE, TOKEN_QUERY, WebServer
+
+Client: TypeAlias = TestClient[web.Request, web.Application]
+"""aiohttp's client, with the two parameters every use here fills in the same way."""
 
 pytestmark = pytest.mark.anyio
 
@@ -61,7 +64,7 @@ async def browser_on(server: WebServer) -> AsyncIterator[Any]:
 
 
 @pytest.fixture
-async def client(server: WebServer) -> AsyncIterator[TestClient[web.Request, web.Application]]:
+async def client(server: WebServer) -> AsyncIterator[Client]:
     """The common case as a fixture: a server nobody named, and a client on it."""
     async with browser_on(server) as opened:
         yield opened
@@ -115,7 +118,7 @@ def test_textual_serve_still_exposes_what_we_compose() -> None:
 # --------------------------------------------------------------- the token --
 
 
-async def test_the_shell_is_refused_without_the_token(client: Any) -> None:  # noqa: ANN401
+async def test_the_shell_is_refused_without_the_token(client: Client) -> None:
     """A 403, not a redirect and not a login page.
 
     There is nothing to log in to: one secret per launch is the whole scheme
@@ -128,7 +131,7 @@ async def test_the_shell_is_refused_without_the_token(client: Any) -> None:  # n
     assert "token" in await refused.text()
 
 
-async def test_the_websocket_is_refused_without_the_token(client: Any) -> None:  # noqa: ANN401
+async def test_the_websocket_is_refused_without_the_token(client: Client) -> None:
     """The socket is the interesting door, and it is the one a gate can miss.
 
     `/` is obvious; `/ws` is where the terminal's keystrokes go, and its URL is
@@ -143,7 +146,7 @@ async def test_the_websocket_is_refused_without_the_token(client: Any) -> None: 
 
 async def test_the_token_is_exchanged_for_a_cookie(
     server: WebServer,
-    client: Any,  # noqa: ANN401
+    client: Client,
 ) -> None:
     """One paste authorises the page *and* everything the page then fetches.
 
@@ -170,7 +173,7 @@ async def test_the_token_is_exchanged_for_a_cookie(
 
 async def test_a_wrong_token_is_refused_like_none_at_all(
     server: WebServer,
-    client: Any,  # noqa: ANN401
+    client: Client,
 ) -> None:
     """No hint, and no timing signal.
 
@@ -225,7 +228,7 @@ def test_a_non_loopback_bind_says_what_it_costs() -> None:
 
 async def test_the_page_offers_somewhere_to_drop_a_file(
     server: WebServer,
-    client: Any,  # noqa: ANN401
+    client: Client,
 ) -> None:
     """The drop zone is inserted into a page this module does not own.
 
@@ -243,7 +246,7 @@ async def test_the_page_offers_somewhere_to_drop_a_file(
     assert "/api/attachments" in body, "and the zone knows where to post"
 
 
-async def test_an_upload_needs_the_token_like_everything_else(client: Any) -> None:  # noqa: ANN401
+async def test_an_upload_needs_the_token_like_everything_else(client: Client) -> None:
     """The interesting door, again: this one *writes*.
 
     A route that took bytes from anyone would be worse than a readable shell —
@@ -255,7 +258,7 @@ async def test_an_upload_needs_the_token_like_everything_else(client: Any) -> No
 
 async def test_a_post_that_is_not_a_dropped_file_is_refused_not_traced(
     server: WebServer,
-    client: Any,  # noqa: ANN401
+    client: Client,
 ) -> None:
     """One multipart part named `file` — anything else gets a sentence.
 

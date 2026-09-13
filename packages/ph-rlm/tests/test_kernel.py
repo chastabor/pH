@@ -45,7 +45,7 @@ from __future__ import annotations
 import sys
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 import pytest
 from runtime_helpers import namespace
@@ -324,7 +324,7 @@ async def test_a_refusal_ends_the_run_and_the_program_cannot_catch_it(
     the refusal in it.
     """
 
-    async def refused(**_arguments: object) -> Any:  # noqa: ANN401
+    async def refused(**_arguments: object) -> NoReturn:
         raise CodeRunFailure("denied", "tools.edit was refused: outside the workspace")
 
     namespace = tools(edit=refused)
@@ -360,7 +360,7 @@ async def test_a_refused_cell_is_stopped_before_it_can_write_anyway(
     """
     target = tmp_path / "written-after-the-refusal.txt"
 
-    async def refused(**_arguments: object) -> Any:  # noqa: ANN401
+    async def refused(**_arguments: object) -> NoReturn:
         raise CodeRunFailure("denied", "tools.edit was refused: outside the workspace")
 
     namespace = tools(edit=refused)
@@ -387,7 +387,7 @@ async def test_a_refused_cell_is_stopped_before_it_can_write_anyway(
 async def test_a_failed_call_is_the_programs_to_handle(make_kernel: MakeKernel) -> None:
     """C3's other half: a *failure* keeps dsh's semantics and stays catchable."""
 
-    async def failing(**_arguments: object) -> Any:  # noqa: ANN401
+    async def failing(**_arguments: object) -> NoReturn:
         raise ToolCallError("read", "no such file")
 
     namespace = tools(read=failing)
@@ -474,7 +474,7 @@ async def test_close_is_idempotent(make_kernel: MakeKernel) -> None:
     await kernel.aclose()
 
 
-async def _ok(**_arguments: object) -> Any:  # noqa: ANN401
+async def _ok(**_arguments: object) -> None:
     return None
 
 

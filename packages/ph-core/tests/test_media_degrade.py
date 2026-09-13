@@ -30,7 +30,7 @@ from ph.llm.media import (
     oversized_notices,
     unusable_reason,
 )
-from ph.llm.types import AttachmentRef, MediaBlock, TextBlock, create_user_message
+from ph.llm.types import AttachmentRef, MediaBlock, Message, TextBlock, create_user_message
 from ph.seams.attachments import AttachmentStore
 from ph.testing import MountProfile, as_kind
 
@@ -50,7 +50,7 @@ def _ref(mime: str = "image/png", **facts: Any) -> AttachmentRef:  # noqa: ANN40
     return AttachmentRef(attachment_id="sha256:x", mime=mime, bytes=1024, name="shot.png", **facts)
 
 
-def _message(*blocks: object) -> Any:  # noqa: ANN401
+def _message(*blocks: object) -> Message:
     return create_user_message(content=list(blocks), source={"kind": "user"})
 
 

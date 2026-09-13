@@ -13,11 +13,9 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NoReturn
 
 import anyio
-
-from ph.tools import ToolExecution
 
 from ..agent.types import AgentHandle, AgentOptions
 from ..cordis import DEPLOYMENT, Boundary, Context
@@ -34,6 +32,7 @@ from ..seams.workspace import (
     WorkspaceSeam,
 )
 from ..session import Session, SessionEvent, SessionHeader, SessionKind
+from ..tools import ToolExecution
 from ..tools.definition import ToolDefinition, ToolOutput, define_tool, text_content
 from ..tools.registry import ToolRuntime
 
@@ -184,10 +183,10 @@ async def run_tool(
     )
 
 
-def raising(error: BaseException) -> Callable[..., Any]:
+def raising(error: BaseException) -> Callable[..., NoReturn]:
     """A body that raises `error` — readable where a generator trick was not."""
 
-    def body(*_args: object, **_kwargs: object) -> Any:  # noqa: ANN401
+    def body(*_args: object, **_kwargs: object) -> NoReturn:
         raise error
 
     return body

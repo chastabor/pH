@@ -66,17 +66,15 @@ import os
 from collections.abc import Container, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Protocol
 
 import anyio
-
-from ph.session import Session
 
 from ..cordis import Context, Disposer, Running, plugin, running
 from ..keys import ATTACHMENTS, SESSIONS, UPLOADS
 from ..llm.types import AttachmentRef
 from ..paths import resolve_roots
-from ..session import now_ms
+from ..session import Session, now_ms
 from ..wire import WireModel
 from ._registry import claim_key
 
@@ -273,7 +271,7 @@ class UploadRegistry:
             record_uploaded(session, handle, ref)
         return handle
 
-    def _session(self, session_id: str | None) -> Any:  # noqa: ANN401
+    def _session(self, session_id: str | None) -> Session | None:
         sessions = self.ctx.get(SESSIONS)
         return None if sessions is None or session_id is None else sessions.get(session_id)
 

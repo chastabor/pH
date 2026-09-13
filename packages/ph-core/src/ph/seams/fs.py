@@ -39,7 +39,7 @@ from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, TypeAlias
 
 import anyio
 
@@ -55,6 +55,7 @@ __all__ = [
     "EditIntent",
     "FileSlice",
     "FileTooLarge",
+    "FsIntent",
     "FsService",
     "GrepMatch",
     "ReadIntent",
@@ -201,6 +202,14 @@ class WriteIntent:
     creating: bool
     scope: Context
     agent: AgentHandle | None = None
+
+
+FsIntent: TypeAlias = "ReadIntent | WriteIntent | EditIntent"
+"""The three things a policy row is asked about.
+
+Spelled once because the union is the gate's argument in two packages —
+`FsService._gate` here and `ph_stabilize.permissions_fs`'s row — and a fourth
+intent should be a one-line edit, not a search."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -629,7 +638,7 @@ class FsService:
         self.ctx.emit("fs/changed", target, contained=True)
         return count if replace_all else 1
 
-    async def _gate(self, event: str, intent: Any) -> None:  # noqa: ANN401
+    async def _gate(self, event: str, intent: FsIntent) -> None:
         """Ask the policy rows about one intent, in the scope that owns it (P6-18).
 
         `scope=` is the fix and it is one argument: the waterfall defaulted to

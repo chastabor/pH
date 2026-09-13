@@ -33,7 +33,7 @@ from typing import Any
 from ..cordis import Context, plugin
 from ..json import JsonValue, as_str
 from ..keys import COMMANDS, SUBPROCESS, TOOLS, WORKSPACE
-from ..seams.commands import CommandDefinition
+from ..seams.commands import CommandContext, CommandDefinition
 from ..seams.workspace import checkpoints, workspace_of
 from ..session import Session
 
@@ -48,7 +48,7 @@ USAGE = "usage: /revert <seq>   (/revert with no argument lists the restore poin
 async def apply(ctx: Context, config: None) -> None:
     """Register `/revert`."""
 
-    async def revert(argument: str, invocation: Any) -> str:  # noqa: ANN401
+    async def revert(argument: str, invocation: CommandContext) -> str:
         session: Session | None = invocation.session
         if session is None:
             return "refusing: /revert needs a session to read restore points from"

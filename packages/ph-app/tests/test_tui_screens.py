@@ -26,6 +26,7 @@ from tui_helpers import MakeApp, root_of, running, turn_done, until
 import ph_app.tui
 from ph.keys import TUI_SCREENS
 from ph.seams.tui_screens import ScreenDefinition
+from ph_app.daemon.supervisor import Root
 from ph_app.tui.app import PHTuiApp
 from ph_app.tui.frontend import FrontSession
 from ph_app.tui.modals.pickers import command_choices
@@ -348,7 +349,7 @@ def test_the_terminal_never_reaches_past_the_front_session() -> None:
     assert offenders == [], offenders
 
 
-async def _unload(root: Any, screen_id: str) -> None:  # noqa: ANN401
+async def _unload(root: Root, screen_id: str) -> None:
     """Dispose whatever scope owns this screen's registration.
 
     A row's removal is the disposal of the scope its `apply` was handed, so this

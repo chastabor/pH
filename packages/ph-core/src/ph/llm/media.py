@@ -30,7 +30,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import replace
-from typing import Any
+from typing import Any, Protocol
 
 from ..cordis import Context, plugin
 from ..json import as_seq
@@ -41,6 +41,7 @@ from .types import AttachmentRef, GenerateOptions, Message, TextBlock, attachmen
 
 __all__ = [
     "ATTACHABLE",
+    "MediaPresence",
     "apply",
     "degrade_media",
     "is_attachable",
@@ -130,9 +131,23 @@ def oversized_notices(messages: Sequence[Message], route: ResolvedModel) -> list
     return notices
 
 
+class MediaPresence(Protocol):
+    """What degradation asks of an attachment store: are the bytes still there.
+
+    A Protocol rather than `AttachmentStore` because `exists` is the whole of
+    what the two readers below use, and narrowing to it is what makes the
+    stand-ins in `test_media_degrade` fair doubles rather than a shortcut past a
+    type. Naming the class would not have cost an import edge — `ph.keys` already
+    carries it under `TYPE_CHECKING` and this module imports `ATTACHMENTS` from
+    there — so the reason is the contract, not the layering.
+    """
+
+    def exists(self, ref: AttachmentRef) -> bool: ...
+
+
 def unusable_reason(
     attachment: AttachmentRef,
-    store: Any,  # noqa: ANN401
+    store: MediaPresence | None,
     route: ResolvedModel,
 ) -> str | None:
     """Why this attachment cannot be sent, or `None` if it can.
@@ -172,7 +187,7 @@ def media_pointer_text(attachment: AttachmentRef) -> str:
 
 def degrade_media(
     messages: Sequence[Message],
-    store: object,
+    store: MediaPresence | None,
     route: ResolvedModel,
 ) -> tuple[tuple[Message, ...], list[dict[str, Any]]]:
     """The messages an adapter should see, and an account of what was replaced.
@@ -265,8 +280,7 @@ async def apply(ctx: Context, config: None) -> None:
         oversized = oversized_notices(messages, route)
         if not degraded and not oversized:
             return await next_()
-        raw = ctx.require(SESSIONS).get(options.session_id) if options.session_id else None
-        session = raw if isinstance(raw, Session) else None
+        session = ctx.require(SESSIONS).get(options.session_id) if options.session_id else None
         # Logged only when the notice was *new*, which is the same condition the
         # append is under: a warning repeated on every step for the life of the
         # session is the flood the fold exists to prevent, moved into the

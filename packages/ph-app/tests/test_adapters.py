@@ -40,6 +40,7 @@ from ph.llm.assembler import BlockAssembler
 from ph.llm.types import (
     GenerateOptions,
     MediaBlock,
+    Message,
     ToolCallBlock,
     ToolSchema,
     create_tool_result_message,
@@ -782,7 +783,7 @@ async def _with_attachment(root: Context, tmp_path: Path, mime: str) -> Any:  # 
     return await store.save_bytes(content=PNG_BYTES, mime=mime, name="shot.png")
 
 
-def _media_message(ref: Any) -> Any:  # noqa: ANN401
+def _media_message(ref: Any) -> Message:  # noqa: ANN401
     return create_user_message(
         content=[{"type": "text", "text": "what is this?"}, MediaBlock(attachment=ref)],
         source={"kind": "user"},

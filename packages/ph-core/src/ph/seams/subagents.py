@@ -39,7 +39,7 @@ from ..agent.types import AgentDriver
 from ..cordis import Context, Disposer, Running, plugin, running
 from ..json import as_int, as_str
 from ..keys import AGENTS, SESSIONS, SKILLS, SUBAGENT_PRESETS, SUBAGENTS, SYSTEM_PROMPT, TOOLS
-from ..session import Session, SessionFoldCache
+from ..session import Session, SessionEvent, SessionFoldCache
 from ..system_prompt.assembly import PromptSection
 from ..tools.registry import ToolRestriction
 from ..wire import WireModel
@@ -1238,7 +1238,7 @@ def subagent_roster(session: Session) -> dict[str, dict[str, Any]]:
     return roster
 
 
-def fold_subagent_event(roster: dict[str, dict[str, Any]], event: Any) -> None:  # noqa: ANN401
+def fold_subagent_event(roster: dict[str, dict[str, Any]], event: SessionEvent) -> None:
     """Fold one event into a roster, in place. The rules, in one place.
 
     Exported because there is a second consumer with a different *shape* — the

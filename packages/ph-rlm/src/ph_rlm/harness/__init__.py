@@ -39,7 +39,8 @@ from ph.cordis import Context, plugin
 from ph.keys import AGENTS, COMMANDS, JOBS, LLM, SESSIONS, SYSTEM_PROMPT, TOOLS
 from ph.paths import resolve_roots
 from ph.seams.commands import CommandDefinition
-from ph.session import Session
+from ph.seams.jobs import Job
+from ph.session import Session, SessionEvent
 from ph.system_prompt.assembly import AssembleContext, PromptContext
 from ph.wire import WireModel
 
@@ -173,7 +174,7 @@ async def apply(ctx: Context, config: Config) -> None:
         A `context()`, not a `section`: a refinement changes this text mid-session,
         and in the cached prefix every apply would re-bill the whole prompt.
         """
-        session = getattr(request.agent, "session", None)
+        session = request.agent.session if request.agent is not None else None
         return render_state(
             service.state(session),
             per_kind=config.max_per_kind,
@@ -244,7 +245,7 @@ async def apply(ctx: Context, config: Config) -> None:
     async def start(request: RefineRequest) -> Any:  # noqa: ANN401
         """Run one pass as a job owned by the agent's scope."""
 
-        async def body(job: Any) -> str:  # noqa: ANN401
+        async def body(job: Job) -> str:
             try:
                 return await refine(request)
             finally:
@@ -324,7 +325,7 @@ async def apply(ctx: Context, config: Config) -> None:
 
     # ------------------------------------------------------- auto-refine --
 
-    async def on_session_event(session: Session, event: Any) -> None:  # noqa: ANN401
+    async def on_session_event(session: Session, event: SessionEvent) -> None:
         """H7: consider refining at the end of a turn.
 
         On `turn/end` rather than on a timer, because that is the one moment the

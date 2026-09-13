@@ -497,10 +497,10 @@ async def test_only_one_engine_may_hold_the_seam() -> None:
     seam = CompactionSeam(ctx=Context())
 
     class Engine:
-        async def compact_if_needed(self, agent: AgentHandle, trigger: object) -> Any:  # noqa: ANN401
+        async def compact_if_needed(self, agent: AgentHandle, trigger: object) -> None:
             return None
 
-        async def compact_now(self, agent: AgentHandle, *, instructions: str = "") -> Any:  # noqa: ANN401
+        async def compact_now(self, agent: AgentHandle, *, instructions: str = "") -> None:
             return None
 
     release = seam.register(Engine())
@@ -772,7 +772,7 @@ async def test_a_job_is_an_effect_of_the_scope_that_owns_it() -> None:
     owner = root.scope("owner")
     release = anyio.Event()
 
-    async def body(job: Any) -> str:  # noqa: ANN401
+    async def body(job: Job) -> str:
         await release.wait()
         return "unreached" if not job.token.cancelled else "noticed"
 
@@ -828,7 +828,7 @@ async def test_a_slot_queues_the_overflow_rather_than_refusing_it() -> None:
     service = JobService(ctx=root)
     gate, ran = anyio.Event(), []
 
-    async def body(job: Any) -> None:  # noqa: ANN401
+    async def body(job: Job) -> None:
         ran.append(job.id)
         await gate.wait()
 
@@ -882,7 +882,7 @@ async def test_cancelling_a_queued_job_stops_the_wait_and_takes_no_slot() -> Non
     service = JobService(ctx=root)
     gate, ran = anyio.Event(), []
 
-    async def body(job: Any) -> None:  # noqa: ANN401
+    async def body(job: Job) -> None:
         ran.append(job.id)
         await gate.wait()
 
@@ -913,7 +913,7 @@ async def test_on_queued_fires_only_when_there_is_a_wait() -> None:
     service = JobService(ctx=root)
     gate, ran, waited = anyio.Event(), [], []
 
-    async def body(job: Any) -> None:  # noqa: ANN401
+    async def body(job: Job) -> None:
         ran.append(job.id)
         await gate.wait()
 
@@ -961,7 +961,7 @@ async def test_a_deployment_cap_bounds_a_kind_across_every_producer() -> None:
     service = JobService(ctx=root, caps={"child": 1})
     gate, ran = anyio.Event(), []
 
-    async def body(job: Any) -> None:  # noqa: ANN401
+    async def body(job: Job) -> None:
         ran.append(job.id)
         await gate.wait()
 
@@ -990,7 +990,7 @@ async def test_a_producers_slot_is_taken_before_the_deployments() -> None:
     service = JobService(ctx=root, caps={"child": 2})
     gate, ran = anyio.Event(), []
 
-    async def body(job: Any) -> None:  # noqa: ANN401
+    async def body(job: Job) -> None:
         ran.append(job.label)
         await gate.wait()
 
@@ -1019,7 +1019,7 @@ async def test_disposing_an_owner_stops_a_job_that_is_still_queued() -> None:
     owner = root.scope("owner")
     gate, ran = anyio.Event(), []
 
-    async def body(job: Any) -> None:  # noqa: ANN401
+    async def body(job: Job) -> None:
         ran.append(job.id)
         await gate.wait()
 
@@ -1069,7 +1069,7 @@ async def test_one_producers_slot_key_cannot_collide_with_anothers() -> None:
     service = JobService(ctx=root)
     gate, ran = anyio.Event(), []
 
-    async def body(job: Any) -> None:  # noqa: ANN401
+    async def body(job: Job) -> None:
         ran.append(job.kind)
         await gate.wait()
 
@@ -1098,7 +1098,7 @@ async def test_a_cancelled_job_reports_cancelled() -> None:
     root = Context()
     service = JobService(ctx=root)
 
-    def body(job: Any) -> str:  # noqa: ANN401
+    def body(job: Job) -> str:
         job.cancel()
         return "partial"
 

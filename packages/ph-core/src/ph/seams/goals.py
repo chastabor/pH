@@ -36,7 +36,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
-from typing import Any, Literal, TypeAlias
+from typing import Literal, TypeAlias
 
 from pydantic import Field
 
@@ -44,7 +44,7 @@ from ..cordis import Context, plugin
 from ..json import as_bool, as_str
 from ..keys import GOALS
 from ..llm.types import TokenUsage
-from ..session import Session, SessionFoldCache
+from ..session import Session, SessionEvent, SessionFoldCache
 from ..wire import WireModel, literal_lookup
 from .invariants import contribute_fold_cache
 
@@ -195,7 +195,7 @@ A real log is mostly `assistant/chunk`, and without this every one of them pays 
 """
 
 
-def fold_goal_event(found: dict[str, GoalState], event: Any) -> None:  # noqa: ANN401
+def fold_goal_event(found: dict[str, GoalState], event: SessionEvent) -> None:
     """Fold one event into the goal table, in place. The rules, in one place.
 
     Exported as a step rather than only as a loop, for `fold_subagent_event`'s

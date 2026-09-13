@@ -76,7 +76,7 @@ async def test_a_record_a_redactor_drops_reaches_no_sink(mount: MountProfile) ->
     ctx = await mount()
     seen: list[SessionTelemetryRecord] = []
 
-    async def drop(record: SessionTelemetryRecord, next_: object) -> Any:  # noqa: ANN401
+    async def drop(record: SessionTelemetryRecord, next_: object) -> None:
         return None
 
     ctx.on("session-telemetry/record", drop)

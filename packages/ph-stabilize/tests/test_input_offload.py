@@ -12,11 +12,11 @@ to the human.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
 import pytest
 from stabilize_helpers import PROFILE, blob, break_spill
 
+from ph.agent.types import AgentDriver
 from ph.cordis import Context
 from ph.json import as_obj
 from ph.keys import AGENTS, SESSIONS
@@ -44,7 +44,7 @@ TOO_LARGE = TOO_LARGE_HUMAN_MSG.partition(" and")[0]
 """The replacement's opening words, from the constant rather than retyped."""
 
 
-async def _prompt(ctx: Context, session: Session, text: str) -> Any:  # noqa: ANN401
+async def _prompt(ctx: Context, session: Session, text: str) -> AgentDriver:
     """Run one real turn on the fake adapter with `text` as the human message."""
     agent = ctx.require(AGENTS).create(session, FAKE_OPTIONS)
     await agent.prompt(text)

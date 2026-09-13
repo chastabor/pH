@@ -39,7 +39,7 @@ async def _mounted(
     mount: MountProfile,
     *providers: tuple[str, StubSubagentProvider],
     **config: object,
-) -> Any:  # noqa: ANN401
+) -> Context:
     """A profile with these providers, composed the way a real one is.
 
     The providers land *after* the row's `apply` and before the composed

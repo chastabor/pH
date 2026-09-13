@@ -184,7 +184,7 @@ class StubApp:
         self.ran: list[str] = []
         self.bound: list[Binding] = []
 
-    def run_worker(self, work: Coroutine[Any, Any, Any]) -> Any:  # noqa: ANN401
+    def run_worker(self, work: Coroutine[Any, Any, Any]) -> None:
         # Closed rather than started: there is no app to own it here, and a
         # coroutine left unawaited warns.
         work.close()
@@ -194,6 +194,6 @@ class StubApp:
         self.bound.append(binding)
         return lambda: self.bound.remove(binding)
 
-    async def run_action(self, action: str) -> Any:  # noqa: ANN401
+    async def run_action(self, action: str) -> None:
         self.ran.append(action)
         return None

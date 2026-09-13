@@ -111,7 +111,7 @@ async def apply(ctx: Context, config: Config) -> None:
     )
 
     async def offload(proposal: Any, next_: Callable[..., Awaitable[Any]]) -> Any:  # noqa: ANN401
-        session: Session | None = getattr(proposal.agent, "session", None)
+        session: Session | None = proposal.agent.session
         pending = _pending(session, config) if session is not None else None
         if session is None or pending is None:
             return await next_(proposal)

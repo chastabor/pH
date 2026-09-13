@@ -22,15 +22,16 @@ from __future__ import annotations
 import json
 from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 import pytest
 from stabilize_helpers import PROFILE, break_spill
 
-from ph.agent.types import AgentOptions
+from ph.agent.types import AgentDriver, AgentHandle, AgentOptions
+from ph.agent_loop.driver import ReactLoopAgent
 from ph.cancel import Cancelled
 from ph.cordis import DEPLOYMENT, Context
-from ph.json import thaw_json
+from ph.json import as_obj, thaw_json
 from ph.keys import AGENTS, COMMANDS, COMPACTION, LLM_FAKE, SESSIONS, TOKEN_METER, TOOLS
 from ph.llm.types import (
     CONTEXT_WINDOW_EXCEEDED,
@@ -148,7 +149,19 @@ pressure trigger, which is what keeps these tests about the *manual* path.
 """
 
 
-async def _conversation(ctx: Context, session_id: str, turns: int = 8) -> Any:  # noqa: ANN401
+def _session_of(agent: AgentHandle) -> Session:
+    """The session an agent this suite built is certain to have.
+
+    `AgentHandle.session` is `Session | None` because a handle need not be in a
+    session at all; every agent here came from `_conversation`, which creates one
+    and hands it to `AGENTS.create`. Said once rather than asserted at each of the
+    twenty-seven reads.
+    """
+    assert agent.session is not None
+    return agent.session
+
+
+async def _conversation(ctx: Context, session_id: str, turns: int = 8) -> AgentDriver:
     """A session with `turns` question/answer pairs, long enough to compact."""
     session = ctx.require(SESSIONS).create(session_id)
     agent = ctx.require(AGENTS).create(session, FAKE_OPTIONS)
@@ -325,7 +338,7 @@ async def test_the_model_reads_the_summary_and_the_log_keeps_the_conversation(
     ctx = await mount(profile=PROFILE)
     _route(ctx)
     agent = await _conversation(ctx, "split")
-    session = agent.session
+    session = _session_of(agent)
     before = len(session.events)
 
     result = await ctx.require(COMMANDS).dispatch("/compact", session=session, agent=agent)
@@ -348,7 +361,7 @@ async def test_the_replaced_conversation_is_written_to_conversation_history(
     ctx = await mount(profile=PROFILE)
     _route(ctx)
     agent = await _conversation(ctx, "history")
-    session = agent.session
+    session = _session_of(agent)
 
     await ctx.require(COMMANDS).dispatch("/compact", session=session, agent=agent)
 
@@ -372,7 +385,7 @@ async def test_the_summary_is_the_plugins_text_and_says_it_is_a_compaction(
     ctx = await mount(profile=PROFILE)
     _route(ctx)
     agent = await _conversation(ctx, "attribution")
-    session = agent.session
+    session = _session_of(agent)
 
     await ctx.require(COMMANDS).dispatch("/compact", session=session, agent=agent)
 
@@ -381,7 +394,7 @@ async def test_the_summary_is_the_plugins_text_and_says_it_is_a_compaction(
         for event in session.events
         if event.type == "user/message" and event.surface_op != "append"
     )
-    source = replacement.data["source"]
+    source = as_obj(replacement.data["source"])
     assert source["kind"] == "plugin"
     assert source["plugin"] == "compaction-summarize"
     assert source["form"] == "compaction"
@@ -397,7 +410,7 @@ async def test_the_replacement_cites_every_node_it_shadows(mount: MountProfile) 
     ctx = await mount(profile=PROFILE)
     _route(ctx)
     agent = await _conversation(ctx, "provenance")
-    session = agent.session
+    session = _session_of(agent)
 
     await ctx.require(COMMANDS).dispatch("/compact", session=session, agent=agent)
 
@@ -861,7 +874,7 @@ async def test_the_summarize_request_is_a_prefix_of_the_conversations(
     _route(ctx)
     agent = await _conversation(ctx, "prefix")
 
-    await ctx.require(COMMANDS).dispatch("/compact", session=agent.session, agent=agent)
+    await ctx.require(COMMANDS).dispatch("/compact", session=_session_of(agent), agent=agent)
 
     conversation = _loop_requests(ctx)[-1]
     (summary,) = _summary_requests(ctx)
@@ -884,9 +897,9 @@ async def test_the_summarizer_is_shown_the_whole_range(mount: MountProfile) -> N
     _route(ctx)
     agent = await _conversation(ctx, "whole-range")
 
-    await ctx.require(COMMANDS).dispatch("/compact", session=agent.session, agent=agent)
+    await ctx.require(COMMANDS).dispatch("/compact", session=_session_of(agent), agent=agent)
 
-    (record,) = _events(agent.session, "compaction/summarized")
+    (record,) = _events(_session_of(agent), "compaction/summarized")
     (summary,) = _summary_requests(ctx)
     assert record.data["shape"] == "replay"
     # Every shadowed node, plus the one instruction appended after it.
@@ -943,15 +956,15 @@ async def test_a_reply_of_only_tool_calls_falls_back_without_them(mount: MountPr
         return await next_(options)
 
     ctx.on("llm/stream", call_a_tool_first)
-    await ctx.require(COMMANDS).dispatch("/compact", session=agent.session, agent=agent)
+    await ctx.require(COMMANDS).dispatch("/compact", session=_session_of(agent), agent=agent)
 
     first, second = _summary_requests(ctx)
     assert first.tools, "the first attempt did not carry the conversation's tools"
     assert not second.tools, "the retry carried the tools that caused the problem"
     assert len(second.messages) == 1, "the retry did not fall back to the self-contained shape"
-    (record,) = _events(agent.session, "compaction/summarized")
+    (record,) = _events(_session_of(agent), "compaction/summarized")
     assert record.data["shape"] == "direct-after-replay"
-    assert SUMMARY in _model_text(agent.session), "the fallback did not produce a summary"
+    assert SUMMARY in _model_text(_session_of(agent)), "the fallback did not produce a summary"
 
 
 async def test_a_session_with_no_logged_request_still_compacts(mount: MountProfile) -> None:
@@ -985,7 +998,7 @@ async def test_a_context_overflow_compacts_and_retries_the_request(mount: MountP
     ctx = await mount(profile=PROFILE)
     _route(ctx)
     agent = await _conversation(ctx, "overflow")
-    session = agent.session
+    session = _session_of(agent)
     refused = {"once": False}
 
     async def refuse_the_first_request(
@@ -1027,7 +1040,7 @@ async def test_a_summarizer_that_fails_leaves_the_conversation_untouched(
     ctx = await mount(profile=PROFILE)
     _route(ctx)
     agent = await _conversation(ctx, "broken-summarizer")
-    session = agent.session
+    session = _session_of(agent)
     before = _model_text(session)
     ctx.require(LLM_FAKE).respond = lambda request: (
         "" if request.purpose == "compaction" else "answer"
@@ -1052,7 +1065,7 @@ async def test_an_automatic_decline_is_recorded_and_not_retried_at_once(
     ctx = await mount(profile=PROFILE)
     _route(ctx)
     agent = await _conversation(ctx, "declined")
-    session = agent.session
+    session = _session_of(agent)
     engine = ctx.require(COMPACTION).engine
     assert isinstance(engine, SummarizeEngine)
     ctx.require(LLM_FAKE).respond = lambda request: (
@@ -1085,10 +1098,12 @@ async def test_a_manual_failure_is_recorded_in_the_log(mount: MountProfile) -> N
         "" if request.purpose == "compaction" else "answer"
     )
 
-    reply = await ctx.require(COMMANDS).dispatch("/compact", session=agent.session, agent=agent)
+    reply = await ctx.require(COMMANDS).dispatch(
+        "/compact", session=_session_of(agent), agent=agent
+    )
 
     assert "recorded in the session log" in (reply or ""), "the claim under test moved"
-    (declined,) = _events(agent.session, "compaction/declined")
+    (declined,) = _events(_session_of(agent), "compaction/declined")
     assert declined.data["trigger"] == "manual"
     assert declined.data["code"] == "summary"
 
@@ -1100,11 +1115,12 @@ async def test_a_refusal_before_any_attempt_is_not_recorded(mount: MountProfile)
     ctx = await mount(profile=PROFILE)
     _route(ctx)
     agent = await _conversation(ctx, "busy-unrecorded")
+    assert isinstance(agent, ReactLoopAgent)
     agent._set_phase("running")
 
-    await ctx.require(COMMANDS).dispatch("/compact", session=agent.session, agent=agent)
+    await ctx.require(COMMANDS).dispatch("/compact", session=_session_of(agent), agent=agent)
 
-    assert not _events(agent.session, "compaction/declined")
+    assert not _events(_session_of(agent), "compaction/declined")
 
 
 async def test_an_unexpected_failure_neither_escapes_nor_goes_unrecorded(
@@ -1122,13 +1138,13 @@ async def test_an_unexpected_failure_neither_escapes_nor_goes_unrecorded(
     agent = await _conversation(ctx, "buggy")
     engine = _engine(ctx)
 
-    async def explode(*_args: object, **_kwargs: object) -> Any:  # noqa: ANN401
+    async def explode(*_args: object, **_kwargs: object) -> NoReturn:
         raise OSError("the disk went away")
 
     monkeypatch.setattr(type(engine), "_land", explode)
 
     assert await engine.compact_if_needed(agent, "overflow") is None
-    (declined,) = _events(agent.session, "compaction/declined")
+    (declined,) = _events(_session_of(agent), "compaction/declined")
     assert declined.data["code"] == "error"
     assert "the disk went away" in declined.data["reason"]
 
@@ -1147,7 +1163,7 @@ async def test_cancellation_is_not_swallowed(
     agent = await _conversation(ctx, "cancelled")
     engine = _engine(ctx)
 
-    async def stop(*_args: object, **_kwargs: object) -> Any:  # noqa: ANN401
+    async def stop(*_args: object, **_kwargs: object) -> NoReturn:
         raise Cancelled("the user pressed stop")
 
     monkeypatch.setattr(type(engine), "_land", stop)
@@ -1185,7 +1201,7 @@ async def test_a_history_that_cannot_be_written_still_compacts_and_claims_no_pat
     ctx = await mount(profile=PROFILE)
     _route(ctx)
     agent = await _conversation(ctx, "no-disk")
-    session = agent.session
+    session = _session_of(agent)
     break_spill(monkeypatch)
 
     await ctx.require(COMMANDS).dispatch("/compact", session=session, agent=agent)
@@ -1206,11 +1222,14 @@ async def test_compact_refuses_while_the_agent_is_working(mount: MountProfile) -
     _route(ctx)
     agent = await _conversation(ctx, "busy")
 
+    assert isinstance(agent, ReactLoopAgent)
     agent._set_phase("running")
-    reply = await ctx.require(COMMANDS).dispatch("/compact", session=agent.session, agent=agent)
+    reply = await ctx.require(COMMANDS).dispatch(
+        "/compact", session=_session_of(agent), agent=agent
+    )
 
     assert "idle session" in (reply or "")
-    assert not _events(agent.session, "compaction/summarized")
+    assert not _events(_session_of(agent), "compaction/summarized")
 
 
 async def test_compact_carries_what_the_user_is_about_to_work_on(mount: MountProfile) -> None:
@@ -1229,12 +1248,12 @@ async def test_compact_carries_what_the_user_is_about_to_work_on(mount: MountPro
     agent = await _conversation(ctx, "focus")
 
     await ctx.require(COMMANDS).dispatch(
-        "/compact next I am rewriting the retry policy", session=agent.session, agent=agent
+        "/compact next I am rewriting the retry policy", session=_session_of(agent), agent=agent
     )
 
     (request,) = _summary_requests(ctx)
     assert "rewriting the retry policy" in _instruction(request)
-    (record,) = _events(agent.session, "compaction/summarized")
+    (record,) = _events(_session_of(agent), "compaction/summarized")
     assert record.data["instructions"] == "next I am rewriting the retry policy"
 
 
@@ -1245,11 +1264,11 @@ async def test_a_bare_compact_asks_the_summarizer_to_focus_on_nothing(mount: Mou
     _route(ctx)
     agent = await _conversation(ctx, "no-focus")
 
-    await ctx.require(COMMANDS).dispatch("/compact", session=agent.session, agent=agent)
+    await ctx.require(COMMANDS).dispatch("/compact", session=_session_of(agent), agent=agent)
 
     (request,) = _summary_requests(ctx)
     assert "what_the_user_asked_you_to_focus_on" not in _instruction(request)
-    (record,) = _events(agent.session, "compaction/summarized")
+    (record,) = _events(_session_of(agent), "compaction/summarized")
     assert record.data["instructions"] is None
 
 
@@ -1286,7 +1305,7 @@ async def test_a_note_tells_the_summarizer_what_survives_the_cut(mount: MountPro
     )
     agent = await _conversation(ctx, "notes")
 
-    await ctx.require(COMMANDS).dispatch("/compact", session=agent.session, agent=agent)
+    await ctx.require(COMMANDS).dispatch("/compact", session=_session_of(agent), agent=agent)
 
     (request,) = _summary_requests(ctx)
     assert "`df` is still loaded" in _instruction(request)
@@ -1300,7 +1319,7 @@ async def test_a_note_that_renders_nothing_costs_no_prompt(mount: MountProfile) 
     ctx.require(COMPACTION).note(CompactionNote(name="test:empty", text=lambda _s: ""))
     agent = await _conversation(ctx, "empty-note")
 
-    await ctx.require(COMMANDS).dispatch("/compact", session=agent.session, agent=agent)
+    await ctx.require(COMMANDS).dispatch("/compact", session=_session_of(agent), agent=agent)
 
     (request,) = _summary_requests(ctx)
     assert "state_that_survives_this_summary" not in _instruction(request)

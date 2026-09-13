@@ -29,7 +29,7 @@ from ph.cancel import CancelToken
 from ph.cordis import DEPLOYMENT, Context
 from ph.keys import SESSIONS, SPILL_STORE, TOOLS
 from ph.llm.types import ToolCallBlock, ToolResultBlock, ToolSource, text_of
-from ph.session import Session, derive_event_message
+from ph.session import Session, SessionEvent, derive_event_message
 from ph.session.known_event_types import (
     IGNORABLE_SESSION_EVENT_TYPES,
     KNOWN_SESSION_EVENT_TYPES,
@@ -84,13 +84,13 @@ async def _run(
     return next(event for event in session.events if event.type == "tool/result")
 
 
-def _call_id(event: Any) -> str:  # noqa: ANN401
+def _call_id(event: SessionEvent) -> str:
     message = derive_event_message(event)
     assert message is not None
     return str(as_kind(message.source, ToolSource).call_id)
 
 
-def model_text(event: Any) -> str:  # noqa: ANN401
+def model_text(event: SessionEvent) -> str:
     """What the model actually read for one call.
 
     Through `derive_event_message`, which owns the `tool/result` payload shape —

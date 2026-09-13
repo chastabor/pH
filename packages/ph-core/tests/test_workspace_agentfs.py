@@ -68,6 +68,7 @@ from ph.keys import AGENTS, COMMANDS, CONTAINMENT, SESSIONS, WORKSPACE
 from ph.seams.containment import TIERS
 from ph.seams.workspace import (
     CheckpointingProvider,
+    ReclaimingProvider,
     Workspace,
     WorkspaceKind,
     WorkspaceRecord,
@@ -339,7 +340,7 @@ async def test_the_probe_says_why_when_it_declines(mount: MountProfile, tmp_path
 # ------------------------------------------------- the real thing, or skipped --
 
 
-async def _overlaid(mount: MountProfile, tmp_path: Path) -> Any:  # noqa: ANN401
+async def _overlaid(mount: MountProfile, tmp_path: Path) -> Context:
     """A mounted row over a host where the overlay actually isolates, or a skip."""
     ctx = await mount(ROW)
     if ctx.require(WORKSPACE).provider is None:
@@ -600,7 +601,9 @@ async def test_a_crashed_agents_overlay_is_reclaimed(mount: MountProfile, tmp_pa
     assert workspace is not None and await is_mount(workspace.root)
 
     # No release runs: this is the state a killed process leaves behind.
-    kept = await ctx.require(WORKSPACE).provider.reclaim(_record(ctx, "c1"))
+    provider = ctx.require(WORKSPACE).provider
+    assert isinstance(provider, ReclaimingProvider)
+    kept = await provider.reclaim(_record(ctx, "c1"))
 
     assert kept is False, "an ephemeral overlay is discarded exactly as its release would"
     assert not await is_mount(workspace.root), "and the mount is gone, not merely forgotten"

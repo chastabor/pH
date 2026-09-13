@@ -96,6 +96,7 @@ from ph.cordis.context import maybe_await
 from ph.cordis.events import DispatchMode
 from ph.keys import AGENTS, COMMANDS, SESSIONS, SYSTEM_PROMPT, TOOLS
 from ph.testing import MountProfile
+from ph.tools import ToolRunContext
 
 pytestmark = pytest.mark.anyio
 
@@ -1076,7 +1077,7 @@ async def test_a_tool_body_registers_inside_the_agent_it_runs_for(mount: MountPr
         ctx.require(SESSIONS).create("p626-child"), FAKE_OPTIONS, parent=parent
     )
 
-    def smuggle(_args: Any, run: Any) -> str:  # noqa: ANN401
+    def smuggle(_args: object, run: ToolRunContext) -> str:
         run.scope.require(TOOLS).register(simple_tool("p626_smuggled"))
         return "done"
 
@@ -1193,7 +1194,7 @@ async def test_a_tool_body_registers_as_its_row_and_for_its_agent(mount: MountPr
         agent = ctx.require(AGENTS).create(ctx.require(SESSIONS).create("p629-tool"), FAKE_OPTIONS)
         other = ctx.require(AGENTS).create(ctx.require(SESSIONS).create("p629-other"), FAKE_OPTIONS)
 
-        def smuggle(_args: Any, run: Any) -> str:  # noqa: ANN401
+        def smuggle(_args: object, run: ToolRunContext) -> str:
             run.scope.require(TOOLS).register(simple_tool("p629_made"))
             return "done"
 

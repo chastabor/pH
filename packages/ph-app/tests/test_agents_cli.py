@@ -37,7 +37,7 @@ from typing import Any
 
 import anyio
 import pytest
-from daemon_helpers import private_runtime, serving
+from daemon_helpers import break_the_provider, private_runtime, serving
 from typer.testing import CliRunner
 
 from ph.json import JsonObject, as_obj
@@ -118,13 +118,7 @@ async def test_until_idle_exits_non_zero_when_the_last_turn_errored(
     made to fail at the provider, so the loop records `turn/end{error}` the way it
     would for a real outage rather than the test asserting on a synthetic record.
     """
-    from ph.llm.fake import FakeAdapter
-
-    async def exploding(self: object, options: object) -> Any:  # noqa: ANN401
-        raise RuntimeError("provider is down")
-        yield  # pragma: no cover
-
-    monkeypatch.setattr(FakeAdapter, "stream", exploding)
+    break_the_provider(monkeypatch)
     async with serving(tmp_path, monkeypatch):
         assert (await _ph("agents", "send", "sour", "answer me")).exit_code == 0
 

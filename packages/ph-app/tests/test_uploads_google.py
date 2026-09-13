@@ -31,6 +31,7 @@ from ph.keys import AGENTS, ATTACHMENTS, LLM, SESSIONS, UPLOADS
 from ph.llm.types import (
     FILE_EXPIRED,
     MediaBlock,
+    Message,
     ReasoningBlock,
     TextBlock,
     ToolCallBlock,
@@ -185,7 +186,7 @@ async def _attached(
     ctx: Context,
     mime: str = "video/mp4",
     name: str = "clip.mp4",
-) -> Any:  # noqa: ANN401
+) -> Message:
     ref = await ctx.require(ATTACHMENTS).save_bytes(content=CLIP, mime=mime, name=name)
     return create_user_message(
         content=[{"type": "text", "text": "what happens in this?"}, MediaBlock(attachment=ref)],

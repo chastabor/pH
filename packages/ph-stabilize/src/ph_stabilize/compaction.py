@@ -646,7 +646,7 @@ class SummarizeEngine:
         from `Exception`, so a bare guard would swallow a person pressing stop
         and let the turn carry on.
         """
-        session: Session | None = getattr(agent, "session", None)
+        session: Session | None = agent.session
         if session is None or not self.config.auto or session.id in self._running:
             return None
         try:
@@ -696,7 +696,7 @@ class SummarizeEngine:
         summarizer labelled as theirs and is recorded on the event, because a
         summary that emphasises one thing over another should say who asked.
         """
-        session: Session | None = getattr(agent, "session", None)
+        session: Session | None = agent.session
         if session is None:
             raise CompactionError("busy", "this agent has no session to compact")
         if session.id in self._running:
@@ -946,7 +946,7 @@ class SummarizeEngine:
         constrains it to changing content alone — the invariant that makes this safe to
         do to history the model has already read.
         """
-        session: Session | None = getattr(agent, "session", None)
+        session: Session | None = agent.session
         if session is None:
             return ()
         events = session.events

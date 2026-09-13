@@ -23,11 +23,9 @@ because this is the only place that has a person to say it to.
 
 from __future__ import annotations
 
-from typing import Any
-
 from ph.cordis import Context, plugin
 from ph.keys import COMMANDS, COMPACTION
-from ph.seams.commands import CommandDefinition
+from ph.seams.commands import CommandContext, CommandDefinition
 from ph.seams.compaction import CompactionError
 from ph.text import count_of
 
@@ -53,7 +51,7 @@ promise nobody can check."""
 async def apply(ctx: Context, config: None) -> None:
     """Register `/compact`."""
 
-    async def compact(argument: str, invocation: Any) -> str:  # noqa: ANN401
+    async def compact(argument: str, invocation: CommandContext) -> str:
         agent = invocation.agent
         if agent is None:
             return "refusing: /compact needs an agent whose session to compact"

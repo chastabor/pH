@@ -32,6 +32,8 @@ from ph.keys import UPLOADS
 from ph.llm.adapter import LlmError
 from ph.llm.media import media_pointer_text
 from ph.llm.types import FILE_EXPIRED, Message, attachment_of
+from ph.seams.attachments import AttachmentStore
+from ph.seams.uploads import UploadRegistry
 
 __all__ = ["forget_named_handle", "load_handles", "load_media", "media_pointer"]
 
@@ -89,7 +91,7 @@ def media_pointer(attachment: Any) -> dict[str, Any]:  # noqa: ANN401
 
 
 async def load_handles(
-    uploads: Any,  # noqa: ANN401
+    uploads: UploadRegistry | None,
     messages: Sequence[Message],
     *,
     provider: str,
@@ -139,7 +141,7 @@ async def load_handles(
 
 
 async def load_media(
-    store: Any,  # noqa: ANN401
+    store: AttachmentStore | None,
     messages: Sequence[Message],
     *,
     skip: Collection[str] = (),

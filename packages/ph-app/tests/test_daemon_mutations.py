@@ -28,6 +28,7 @@ from ph.seams.commands import CommandDefinition
 from ph.session import now_ms
 from ph_app.daemon.client import DaemonClient
 from ph_app.daemon.server import METHODS, MUTATIONS
+from ph_app.daemon.supervisor import Root
 from ph_app.protocol import DaemonError
 
 pytestmark = pytest.mark.anyio
@@ -44,18 +45,18 @@ happened — or `None` where the effect leaves no countable trace and the reply'
 shape is the whole claim."""
 
 
-async def _prompt(client: DaemonClient, root: object) -> dict[str, Any]:
+async def _prompt(client: DaemonClient, root: Root) -> dict[str, Any]:
     return {"prompt": "hello"}
 
 
-async def _command(client: DaemonClient, root: Any) -> dict[str, Any]:  # noqa: ANN401
+async def _command(client: DaemonClient, root: Root) -> dict[str, Any]:
     root.ctx.require(COMMANDS).register(
         CommandDefinition(name="probe", summary="a probe", run=lambda argument, ctx: "ran")
     )
     return {"line": "/probe"}
 
 
-async def _stage(client: DaemonClient, root: Any) -> dict[str, Any]:  # noqa: ANN401
+async def _stage(client: DaemonClient, root: Root) -> dict[str, Any]:
     reply = await client.call(
         "attachment/put",
         sessionId=root.id,
@@ -66,15 +67,15 @@ async def _stage(client: DaemonClient, root: Any) -> dict[str, Any]:  # noqa: AN
     return {"attachment": reply["attachment"]}
 
 
-async def _shell(client: DaemonClient, root: object) -> dict[str, Any]:
+async def _shell(client: DaemonClient, root: Root) -> dict[str, Any]:
     return {"command": "echo hi"}
 
 
-async def _preset(client: DaemonClient, root: object) -> dict[str, Any]:
+async def _preset(client: DaemonClient, root: Root) -> dict[str, Any]:
     return {"preset": "workspace-write"}
 
 
-async def _credential(client: DaemonClient, root: object) -> dict[str, Any]:
+async def _credential(client: DaemonClient, root: Root) -> dict[str, Any]:
     return {"name": "PROBE_KEY", "value": "shh"}
 
 

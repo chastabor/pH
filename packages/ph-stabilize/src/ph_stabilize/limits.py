@@ -438,7 +438,7 @@ async def apply(ctx: Context, config: Config) -> None:
         next_: Callable[..., Awaitable[Any]],
     ) -> Any:  # noqa: ANN401
         settings = config.model_calls
-        session: Session | None = getattr(request.agent, "session", None)
+        session: Session | None = request.agent.session
         if session is None or settings.unlimited:
             return await next_(request)
         current = counts.read(session)
@@ -586,8 +586,8 @@ async def apply(ctx: Context, config: Config) -> None:
     def refuse_child(request: SubagentRequest) -> str | None:
         """The child caps, asked before every admission (P4-04)."""
         settings = config.children
-        session = getattr(request.parent, "session", None)
-        if not isinstance(session, Session):
+        session = request.parent.session
+        if session is None:
             return None
         current = counts.read(session)
         exceeded = _over(settings, current.turn_children, current.session_children, noun="children")

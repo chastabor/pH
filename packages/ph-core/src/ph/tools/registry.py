@@ -24,7 +24,7 @@ import logging
 from collections.abc import Awaitable, Callable, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
-from typing import Any, Literal
+from typing import Any, Literal, NoReturn
 
 from ..cancel import Cancelled, is_cancelled
 from ..cordis import (
@@ -1075,7 +1075,7 @@ def _message_from_content(content: Sequence[Any]) -> str:
 def _unresolved(
     _args: object,
     _run: ToolRunContext,
-) -> Any:  # pragma: no cover - never dispatched  # noqa: ANN401
+) -> NoReturn:  # pragma: no cover - never dispatched
     raise ToolNotFoundError("<unresolved>")
 
 

@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from types import ModuleType
-from typing import Any
+from typing import Any, NoReturn
 
 __all__ = ["UnavailableSkill", "wrap_skill_module"]
 
@@ -49,17 +49,17 @@ class UnavailableSkill:
         self._name = name
         self._reason = reason
 
-    def _fail(self) -> None:
+    def _fail(self) -> NoReturn:
         raise RuntimeError(
             f'the skill "{self._name}" is unavailable: {self._reason}. '
             "It is installed in the runtime venv but did not import; ask for it to be "
             "fixed rather than working around it."
         )
 
-    def __call__(self, *_args: Any, **_kwargs: Any) -> Any:  # noqa: ANN401
+    def __call__(self, *_args: object, **_kwargs: object) -> NoReturn:
         self._fail()
 
-    def __getattr__(self, name: str) -> Any:  # noqa: ANN401
+    def __getattr__(self, name: str) -> NoReturn:
         if name.startswith("_"):
             raise AttributeError(name)
         self._fail()

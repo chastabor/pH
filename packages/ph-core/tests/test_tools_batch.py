@@ -21,7 +21,7 @@ from ph.json import as_obj, as_seq
 from ph.llm.types import ToolCallBlock, create_user_message
 from ph.session import Session
 from ph.testing import StubAgent, parked_gate, raising, session_of, simple_tool, tool_runtime
-from ph.tools import TOOL_ABORTED_BEFORE_DISPATCH, Deny, ToolRuntime
+from ph.tools import TOOL_ABORTED_BEFORE_DISPATCH, Deny, ToolRunContext, ToolRuntime
 from ph.tools.batch import execute_tool_calls, parse_arguments
 
 pytestmark = pytest.mark.anyio
@@ -34,7 +34,7 @@ def _setup() -> tuple[Any, ToolRuntime, StubAgent, list[str]]:
 
 
 def _slow(name: str, trace: list[str], delay: float, *, safe: bool) -> Any:  # noqa: ANN401
-    async def body(_args: Any, _run: Any) -> str:  # noqa: ANN401
+    async def body(_args: object, _run: object) -> str:
         trace.append(f"{name}:start")
         await anyio.sleep(delay)
         trace.append(f"{name}:end")
@@ -242,7 +242,7 @@ async def test_cancellation_records_a_result_for_every_skipped_call() -> None:
 async def test_deferred_context_reaches_the_acceptor_after_the_result() -> None:
     root, tools, agent, _trace = _setup()
 
-    def body(_args: Any, run: Any) -> str:  # noqa: ANN401
+    def body(_args: object, run: ToolRunContext) -> str:
         run.defer_context(
             create_user_message(
                 content=[{"type": "text", "text": "notice"}],

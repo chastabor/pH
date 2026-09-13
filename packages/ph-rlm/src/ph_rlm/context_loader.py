@@ -588,7 +588,7 @@ async def apply(ctx: Context, config: Config) -> None:
         at mount, so this text is fixed for the life of the session and belongs
         in the stable prefix (A12).
         """
-        return service.manifest(getattr(request.agent, "session", None))
+        return service.manifest(request.agent.session if request.agent is not None else None)
 
     ctx.require(SYSTEM_PROMPT).section(
         PromptSection(name="rlm:context", order=ORDER_CONTEXT, text=section)
