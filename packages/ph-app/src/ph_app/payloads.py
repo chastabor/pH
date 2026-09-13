@@ -118,6 +118,11 @@ class _CarriesJson(WireModel):
     So the named fields are excluded from the dump and re-attached **by
     reference**. The output is byte-identical (`test_payloads` pins that); what
     changes is that a tree already in wire form is not rebuilt to prove it.
+
+    **`dict[str, Any]` is the right type here and `JsonObject` is not** — see
+    `ph.json.JsonValue`'s last paragraph. The abstract alias cannot be a pydantic
+    field at all, and `pydantic.JsonValue` reintroduces on the validate side
+    exactly the walk this class removes from the dump side.
     """
 
     BY_REFERENCE: ClassVar[frozenset[str]] = frozenset()

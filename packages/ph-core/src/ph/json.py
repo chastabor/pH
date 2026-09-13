@@ -85,7 +85,21 @@ written so that wrapper can subtype it later without moving a reader.
 
 The wart is `str`: it is a `Sequence[str]`, and `str` is a `JsonValue`, so a
 reader narrowing with `isinstance(x, Sequence)` meets it. `as_seq` below is
-the one place that exclusion is spelled."""
+the one place that exclusion is spelled.
+
+**Not usable as a pydantic field annotation, and the alternative is worse.**
+Pydantic's schema generator expands this alias eagerly rather than as a
+recursive reference, so a `WireModel` field typed `JsonValue`/`JsonObject` never
+finishes building its validator — it recurses until the stack ends, at class
+definition. `pydantic.JsonValue` does build, because pydantic constructs it as a
+self-reference, but it then *validates* recursively: a 200-block
+`assistant/message` notice measured **77.4 µs against 0.7 µs** for
+`dict[str, Any]`, on the frame the daemon sends once per appended event per
+watcher. That is the cost `ph_app.payloads._CarriesJson` was measured into
+existence to avoid, so the fields it names stay `dict[str, Any]` — which is the
+`Any` this type exists to retire, kept deliberately at the one boundary where
+the retirement is unaffordable. Everywhere the tree is *not* a pydantic field,
+this alias is the answer."""
 
 JsonObject: TypeAlias = "Mapping[str, JsonValue]"
 """A JSON object — every event payload, and the shape `Session.append` takes."""
