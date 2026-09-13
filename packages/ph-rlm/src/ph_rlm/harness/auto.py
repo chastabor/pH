@@ -34,7 +34,7 @@ from dataclasses import dataclass
 from typing import Literal, Protocol, TypeAlias
 
 from ph.agent.types import AgentHandle
-from ph.cordis import Context, events
+from ph.cordis import Context, events, settled_or_none
 from ph.session import Session, SessionEvent
 
 from .state import REFINED, HarnessScope
@@ -86,7 +86,7 @@ async def veto_reason(ctx: Context, request: RefineRequest) -> str | None:
         return None
 
     reason = await ctx.waterfall(BEFORE_REFINE, request, inner=inner)
-    return None if reason is None else str(reason)
+    return settled_or_none(BEFORE_REFINE, reason, str)
 
 
 class EventLog(Protocol):

@@ -54,6 +54,7 @@ from ..cordis import (
     events,
     plugin,
     running,
+    settled_or_none,
 )
 from ..keys import FS, PROJECT_ROOT
 from ..session import Session
@@ -672,9 +673,10 @@ class FsService:
         # once, from what the caller stated — so the payload a
         # listener receives says which boundary it is being asked about, and this
         # gate cannot answer a different question than the screen did.
-        reason = await self.ctx.waterfall(event, intent, inner=inner, scope=intent.scope)
+        answered = await self.ctx.waterfall(event, intent, inner=inner, scope=intent.scope)
+        reason = settled_or_none(event, answered, str, refusal=FsDenied)
         if reason is not None:
-            raise FsDenied(str(reason))
+            raise FsDenied(reason)
 
     # ------------------------------------------------------------------ find --
 

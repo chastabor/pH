@@ -39,7 +39,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..cordis import Context, Disposer, events, plugin
+from ..cordis import Context, Disposer, events, plugin, settled_or_none
 from ..json import as_str
 from ..keys import USER_QUESTIONS
 from ..session import Session
@@ -208,10 +208,14 @@ class UserQuestionService:
 
         try:
             raw = await self.ctx.waterfall("user-question/ask", asked, inner=inner)
+            answer = settled_or_none("user-question/ask", raw, str)
         except Exception:
+            # Inside the `try` on purpose: an answerer that raises and one that
+            # answers the wrong shape are the same failure to this seam, and
+            # either way the ask below has to be closed in the log — the
+            # `asked`/`answered` pair is what `pending_questions` folds.
             log.exception("ph.seams.user_questions: an answerer failed")
-            raw = None
-        answer = raw if isinstance(raw, str) else None
+            answer = None
         if session is not None:
             self._record_answered(session, asked, answer)
         return answer

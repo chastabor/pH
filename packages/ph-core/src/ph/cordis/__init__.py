@@ -26,6 +26,8 @@ from .context import (
     is_bailed,
     maybe_await,
     running,
+    settled,
+    settled_or_none,
 )
 from .errors import (
     CordisError,
@@ -99,4 +101,6 @@ __all__ = [
     "running",
     "safe_yaml_load",
     "service_name",
+    "settled",
+    "settled_or_none",
 ]

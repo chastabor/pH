@@ -29,7 +29,16 @@ from typing import Any, Literal, TypeAlias
 
 import anyio
 
-from ..cordis import Context, Disposer, Running, events, maybe_await, plugin, running
+from ..cordis import (
+    Context,
+    Disposer,
+    Running,
+    events,
+    maybe_await,
+    plugin,
+    running,
+    settled_or_none,
+)
 from ..json import as_int, dumps
 from ..keys import SESSION_TELEMETRY, SESSIONS
 from ..paths import default_home_path, write_text_under
@@ -111,7 +120,8 @@ class SessionTelemetry:
         async def inner(candidate: SessionTelemetryRecord) -> SessionTelemetryRecord | None:
             return candidate
 
-        redacted = await self.ctx.waterfall("session-telemetry/record", record, inner=inner)
+        answered = await self.ctx.waterfall("session-telemetry/record", record, inner=inner)
+        redacted = settled_or_none("session-telemetry/record", answered, SessionTelemetryRecord)
         if redacted is None or self._exporting:
             return
         self._exporting = True

@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 
-from ph.cordis import Context, events, plugin
+from ph.cordis import Context, events, plugin, settled
 
 pytestmark = pytest.mark.anyio
 
@@ -75,6 +75,48 @@ async def test_waterfall_listeners_wrap_the_built_in() -> None:
     # Outermost first, and the built-in runs last — the shape every policy
     # listener relies on.
     assert trace == ["outer-in", "inner-in", "built-in", "outer-out"]
+
+
+async def test_a_listener_that_answers_the_wrong_type_names_the_event() -> None:
+    """`waterfall` hands back what it was given; the producer is what checks it.
+
+    The round trip is the assertion: `waterfall` returns the `42` unexamined —
+    its last step is a `cast` — and `settled` is where that becomes a refusal.
+    """
+
+    async def confused(payload: dict[str, Any], next_: Callable[..., Awaitable[str]]) -> str:
+        return 42  # type: ignore[return-value]
+
+    async def built_in(payload: dict[str, Any]) -> str:
+        return "value"
+
+    root = Context()
+    root.on("test/waterfall", confused)
+    answered = await root.waterfall("test/waterfall", {}, inner=built_in)
+    # Declared `str` by the chain, an `int` at runtime — the gap `settled` closes.
+    # The `object` rebind is the assertion: mypy rejects comparing the declared
+    # type to `42`, which is the same blind spot the cast leaves at the producer.
+    returned: object = answered
+    assert returned == 42, "the chain does not check; that is what `settled` is for"
+
+    with pytest.raises(TypeError, match=r"test/waterfall must resolve to a str, not 42"):
+        settled("test/waterfall", answered, str)
+
+
+async def test_a_producer_names_the_refusal_its_seam_owns() -> None:
+    """`ctx.fs` raises `FsDenied`, not `TypeError`, for a listener that misanswers.
+
+    A veto has to reach a consumer as a *denial*: `FsDenied` is a `HarnessError`
+    so a Code Mode program cannot `except` a policy refusal and route around it.
+    A listener answering the wrong shape is still a refusal from that gate, so it
+    must not arrive wearing the other kind.
+    """
+
+    class Refused(Exception):
+        pass
+
+    with pytest.raises(Refused, match=r"must resolve to a str, not 7"):
+        settled("fs/write-intent", 7, str, refusal=Refused)
 
 
 async def test_waterfall_veto_stops_the_built_in() -> None:

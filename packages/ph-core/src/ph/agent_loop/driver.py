@@ -59,7 +59,7 @@ from ..agent.types import (
     TurnEndReason,
 )
 from ..cancel import Cancelled, CancelToken
-from ..cordis import Context
+from ..cordis import Context, settled, settled_or_none
 from ..json import as_int
 from ..keys import LLM, SYSTEM_PROMPT
 from ..llm.adapter import LlmError
@@ -281,10 +281,9 @@ class ReactLoopAgent:
         request = PreStepRequest(
             agent=self, session=self.session, messages=messages, turn=turn, step=step
         )
-        decision = await self.ctx.waterfall("agent/pre-step", request, inner=inner)
+        answered = await self.ctx.waterfall("agent/pre-step", request, inner=inner)
         self._throw_if_cancelled()
-        if not isinstance(decision, PreStepDecision):
-            raise TypeError("agent/pre-step must resolve to a PreStepDecision")
+        decision = settled("agent/pre-step", answered, PreStepDecision)
         if decision.kind == "reject":
             return _PreparedStep(kind="reject")
         return _PreparedStep(kind="enter", messages=decision.messages, assembly=assembly)
@@ -483,7 +482,7 @@ class ReactLoopAgent:
         )
         action = await self.ctx.waterfall("agent/request-error", failure, inner=inner)
         self._throw_if_cancelled()
-        return action if isinstance(action, RequestErrorAction) else None
+        return settled_or_none("agent/request-error", action, RequestErrorAction)
 
     def _append_assistant_message(
         self,
@@ -526,10 +525,9 @@ class ReactLoopAgent:
             return proposal.config
 
         proposal = RequestProposal(agent=self, turn=turn, step=step, config=seed)
-        proposed = await self.ctx.waterfall("agent/request", proposal, inner=inner)
+        answered = await self.ctx.waterfall("agent/request", proposal, inner=inner)
         self._throw_if_cancelled()
-        if not isinstance(proposed, LlmCallConfig):
-            raise TypeError("agent/request must resolve to an LlmCallConfig")
+        proposed = settled("agent/request", answered, LlmCallConfig)
         if not proposed.provider or not proposed.model:
             raise ValueError(
                 f'agent "{self.id}" has no provider/model: set AgentOptions.provider '

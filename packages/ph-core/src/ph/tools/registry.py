@@ -39,6 +39,7 @@ from ..cordis import (
     events,
     plugin,
     running,
+    settled,
 )
 from ..json import JsonValue, thaw_json
 from ..keys import APPROVAL, TOOLS
@@ -967,11 +968,10 @@ class ToolRuntime:
                     concludes_turn=run._concluded,
                 )
 
-            result = await self.ctx.waterfall(
+            answered = await self.ctx.waterfall(
                 "tools/execute", execution, inner=body, scope=execution.scope
             )
-            if not isinstance(result, ToolExecutionResult):
-                raise TypeError("tools/execute must resolve to a ToolExecutionResult")
+            result = settled("tools/execute", answered, ToolExecutionResult)
             return PreparedCall(run=run, result=result)
         except Exception as error:
             return PreparedCall(run=run, result=_failure(error, started=True))

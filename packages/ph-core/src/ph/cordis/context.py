@@ -61,6 +61,8 @@ __all__ = [
     "Next",
     "is_bailed",
     "maybe_await",
+    "settled",
+    "settled_or_none",
 ]
 
 log = logging.getLogger("ph.cordis")
@@ -90,6 +92,45 @@ async def maybe_await(value: object) -> Any:  # noqa: ANN401
     if inspect.isawaitable(value):
         return await value
     return value
+
+
+def settled[T](
+    event: str, value: object, kind: type[T], *, refusal: type[Exception] = TypeError
+) -> T:
+    """What the chain returned, checked — `waterfall`'s last step is a `cast`.
+
+    A listener arrives through an entry point and `on` takes a `Listener`, so no
+    checker between the row and here sees what one returns. `waterfall` states
+    the chain's type; this is where that claim is made good, once per producer.
+
+    Here rather than hand-written at each: of nine producers, three raised a
+    `TypeError`, three quietly substituted a default, two coerced with `str()`
+    and one never looked — so a single broken row ended a turn in one chain and
+    went unnoticed in another. The message names the event because that is what
+    a person goes and looks at.
+
+    **A seam that owns a refusal vocabulary names it.** `refusal=` exists for
+    `ctx.fs`, whose `FsDenied` is a `HarnessError` on purpose: a veto has to
+    reach a consumer as a *denial*, because a Code Mode program can `except` a
+    `failed` and route around it. A wrong answer from a policy listener is still
+    a refusal, so it must not arrive wearing the other kind.
+
+    Two limits, and they are separate. Mechanically this needs a type
+    `isinstance` can test, so the union chains — `tools/pre-execute`,
+    `tools/post-execute` — narrow by arm instead. Separately, `approval/request`
+    keeps its own lookup *and denies rather than raising*, which is a policy
+    choice: on that path refusing is the safe answer and an exception is not.
+    """
+    if not isinstance(value, kind):
+        raise refusal(f"{event} must resolve to a {kind.__name__}, not {value!r}")
+    return value
+
+
+def settled_or_none[T](
+    event: str, value: object, kind: type[T], *, refusal: type[Exception] = TypeError
+) -> T | None:
+    """`settled` for a chain whose `None` is an answer rather than an absence."""
+    return None if value is None else settled(event, value, kind, refusal=refusal)
 
 
 def is_bailed(value: object) -> bool:
@@ -1328,9 +1369,15 @@ class Context:
 
         # The one place the chain's type is unverifiable: `on` takes a
         # `Listener`, rows load through entry points, so a listener's return is
-        # never seen by this repo's checker. The producers narrow what comes back
-        # — `driver` raises `TypeError` on a decision that is not one — and this
-        # cast is what lets them state that once instead of at every listener.
+        # never seen by this repo's checker. `settled` is where each producer
+        # makes the claim good, and this cast is what lets them state it once
+        # instead of at every listener.
+        #
+        # Not a `kind=` parameter here: of the fourteen chains only four could
+        # pass a bare `type[T]` and five more a `T | None`, so it would be
+        # omitted at ten and buy none of the can't-forget property that is its
+        # whole point — while letting `T` be solved from two places, which is
+        # what this signature exists to stop.
         return cast("T", await next_())
 
     def detach(self, coro: Any, *, label: str) -> None:  # noqa: ANN401

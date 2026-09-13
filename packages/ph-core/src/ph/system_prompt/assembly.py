@@ -33,6 +33,7 @@ from ..cordis import (
     maybe_await,
     plugin,
     running,
+    settled,
 )
 from ..keys import SYSTEM_PROMPT
 from ..llm.types import ContextSnapshotSection, ToolSchema
@@ -372,7 +373,7 @@ class SystemPromptService:
             return candidate
 
         result = await self.ctx.waterfall("system-prompt/assemble", assembly, request, inner=inner)
-        return result if isinstance(result, PromptAssembly) else assembly
+        return settled("system-prompt/assemble", result, PromptAssembly)
 
 
 @plugin("system-prompt")
