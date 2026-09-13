@@ -69,8 +69,8 @@ class _Store:
     def read_own(
         self,
         session_id: str,
-        upto: Any = None,  # noqa: ANN401
-        family: Any = None,  # noqa: ANN401
+        upto: object = None,
+        family: object = None,
     ) -> Any:  # noqa: ANN401
         self.asked[session_id] = family
         if session_id == self.broken:

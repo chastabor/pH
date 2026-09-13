@@ -25,6 +25,7 @@ from typing import Any
 import pytest
 
 from ph.agent.types import AgentOptions
+from ph.cordis import Context
 from ph.json import as_obj
 from ph.keys import AGENTS, LLM_FAKE, LLM_REPLAY, SESSIONS, SYSTEM_PROMPT, TOOLS
 from ph.llm.types import GenerateOptions, Message, ModelSource
@@ -82,7 +83,7 @@ def _assert_prefix_stable(requests: list[GenerateOptions]) -> None:
         )
 
 
-async def _record(ctx: Any, prompts: list[str]) -> Any:  # noqa: ANN401
+async def _record(ctx: Context, prompts: list[str]) -> Any:  # noqa: ANN401
     session = ctx.require(SESSIONS).create("recorded")
     agent = ctx.require(AGENTS).create(session, FAKE)
     for prompt in prompts:

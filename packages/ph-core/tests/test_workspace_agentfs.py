@@ -63,6 +63,7 @@ from typing import Any
 
 import pytest
 
+from ph.cordis import Context
 from ph.keys import AGENTS, COMMANDS, CONTAINMENT, SESSIONS, WORKSPACE
 from ph.seams.containment import TIERS
 from ph.seams.workspace import (
@@ -406,7 +407,7 @@ async def test_an_overlay_shows_files_a_checkout_would_not(
 # --------------------------------------------------------------- the export --
 
 
-async def _worked(ctx: Any, base: Path, agent_id: str, edit: str) -> None:  # noqa: ANN401
+async def _worked(ctx: Context, base: Path, agent_id: str, edit: str) -> None:
     """One writer's overlay, edited and released — the state an export starts from."""
     workspace = await ctx.require(WORKSPACE).acquire(
         session_id=SESSION, agent_id=agent_id, base=base, access="write"

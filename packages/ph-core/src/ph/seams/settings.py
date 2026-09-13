@@ -51,7 +51,7 @@ class SettingsService:
             self._loaded = True
         return self._values
 
-    def get(self, key: str, default: Any = None) -> Any:  # noqa: ANN401
+    def get(self, key: str, default: object = None) -> Any:  # noqa: ANN401
         """Read a dotted key."""
         node: Any = self.load()
         for part in key.split("."):
@@ -60,7 +60,7 @@ class SettingsService:
             node = node[part]
         return node
 
-    async def set(self, key: str, value: Any) -> None:  # noqa: ANN401
+    async def set(self, key: str, value: object) -> None:
         """Write a dotted key and persist."""
         values = self.load()
         node = values

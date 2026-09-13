@@ -23,10 +23,11 @@ from typing import Any
 import anyio
 import pytest
 
-from ph.cordis import DEPLOYMENT
+from ph.cordis import DEPLOYMENT, Context
 from ph.keys import AGENTS, SESSIONS, TOOLS, USER_QUESTIONS
 from ph.llm.types import text_of
 from ph.seams.user_questions import UserQuestion, pending_questions
+from ph.session import Session
 from ph.testing import FAKE_OPTIONS, MountProfile, run_tool
 from ph.tools.builtin.ask_user import UNATTENDED
 
@@ -37,12 +38,12 @@ ROW: dict[str, Any] = {"id": "tool-ask-user", "disabled": False}
 rather than inserting one keeps this the same row `tui.yaml` arms."""
 
 
-def _agent(ctx: Any, session: Any) -> Any:  # noqa: ANN401
+def _agent(ctx: Context, session: Session) -> Any:  # noqa: ANN401
     return ctx.require(AGENTS).create(session, FAKE_OPTIONS)
 
 
 def _answering(answer: str | None, seen: list[UserQuestion]) -> Any:  # noqa: ANN401
-    async def answerer(question: UserQuestion, _next: Any = None) -> str | None:  # noqa: ANN401
+    async def answerer(question: UserQuestion, _next: object = None) -> str | None:
         seen.append(question)
         return answer
 
@@ -50,8 +51,8 @@ def _answering(answer: str | None, seen: list[UserQuestion]) -> Any:  # noqa: AN
 
 
 async def _ask(
-    ctx: Any,  # noqa: ANN401
-    session: Any,  # noqa: ANN401
+    ctx: Context,
+    session: Session,
     header: str | None = None,
     options: list[str] | None = None,
 ) -> Any:  # noqa: ANN401
@@ -128,7 +129,7 @@ async def test_the_question_is_logged_before_the_person_answers(mount: MountProf
     session = ctx.require(SESSIONS).create("ordered")
     during: list[str] = []
 
-    async def answerer(question: UserQuestion, _next: Any = None) -> str:  # noqa: ANN401
+    async def answerer(question: UserQuestion, _next: object = None) -> str:
         during.extend(event.type for event in session.events if event.type.startswith("question/"))
         return "yes"
 
@@ -230,7 +231,7 @@ async def test_a_question_cancelled_mid_answer_stays_pending(mount: MountProfile
     session = ctx.require(SESSIONS).create("interrupted")
     posed = anyio.Event()
 
-    async def never(question: UserQuestion, _next: Any = None) -> str:  # noqa: ANN401
+    async def never(question: UserQuestion, _next: object = None) -> str:
         posed.set()
         await anyio.sleep(30)
         return "too late"

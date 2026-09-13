@@ -297,7 +297,7 @@ def _impure_calls(run: Callable[[], object]) -> list[str]:
     """The impure C calls `run` makes, each named once, in the order first seen."""
     found: dict[str, None] = {}
 
-    def hook(frame: FrameType, event: str, arg: Any) -> None:  # noqa: ANN401
+    def hook(frame: FrameType, event: str, arg: object) -> None:
         if event != "c_call":
             return
         module = getattr(arg, "__module__", None)

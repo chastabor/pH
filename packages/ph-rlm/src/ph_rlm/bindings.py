@@ -171,7 +171,7 @@ async def apply(ctx: Context, config: Config) -> None:
             note=downgrade_text(reason) if reason is not None else None,
         ).to_wire()
 
-    def list_children(_args: Any, run: ToolRunContext) -> Any:  # noqa: ANN401
+    def list_children(_args: object, run: ToolRunContext) -> Any:  # noqa: ANN401
         """The roster, folded from the parent's own log — never a side table."""
         session = run.session
         rows = list(ctx.require(SUBAGENTS).roster(session).values()) if session is not None else []

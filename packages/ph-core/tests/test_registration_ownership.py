@@ -178,7 +178,7 @@ def _declared_classes() -> Iterator[type]:
                 yield cls
 
 
-def _declared_methods(cls: Any) -> Iterator[tuple[str, Any]]:  # noqa: ANN401
+def _declared_methods(cls: object) -> Iterator[tuple[str, Any]]:
     """The callables a class defines itself, dunders excluded."""
     for name, member in vars(cls).items():
         if not name.startswith("__") and callable(member):
@@ -1011,13 +1011,13 @@ async def test_every_dispatch_mode_runs_a_listener_as_its_own_scope(
     async def row(ctx: Context, config: None) -> None:
         if shape == "sync":
 
-            def sync_listener(*args: Any) -> None:  # noqa: ANN401
+            def sync_listener(*args: object) -> None:
                 seen.append(Context.current_owner())
 
             ctx.on(event, sync_listener)
         else:
 
-            async def async_listener(*args: Any) -> None:  # noqa: ANN401
+            async def async_listener(*args: object) -> None:
                 seen.append(Context.current_owner())
 
             ctx.on(event, async_listener)

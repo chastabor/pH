@@ -36,11 +36,14 @@ from typing import Any
 import pytest
 from rlm_fixtures import MountedRuntime
 
+from ph.agent.types import AgentDriver
+from ph.cordis import Context
 from ph.keys import AGENTS, CODE_RUNTIME, SANDBOX, WORKSPACE
 from ph.seams.code_runtime import CodeRunRequest
 from ph.seams.sandbox import DENIED, ConfinedArgv, SandboxPolicy
 from ph.seams.sandbox_local import Bubblewrap, Seatbelt, local_backend
 from ph.seams.workspace import workspace_policy
+from ph.session import Session
 from ph.testing import StubSandboxProvider, report_section
 from ph_rlm.kernel.journal import OrphanJournal
 from ph_rlm.kernel.manager import Kernel, KernelLimits, PythonCodeRuntime
@@ -101,9 +104,9 @@ def test_the_framed_channel_survives_the_wrapper(tmp_path: Path) -> None:
 
 
 async def _agent_with_workspace(
-    ctx: Any,  # noqa: ANN401
-    session: Any,  # noqa: ANN401
-    agent: Any,  # noqa: ANN401
+    ctx: Context,
+    session: Session,
+    agent: AgentDriver,
     base: Path,
 ) -> Any:  # noqa: ANN401
     """The lifecycle row acquires at an agent's first step; these tests never take
@@ -234,7 +237,7 @@ async def test_a_confined_kernel_reports_the_backend_that_bounds_it(
     assert confined.startswith(f"{ctx.require(SANDBOX).provider.backend} —"), confined
 
 
-async def _run_cell(ctx: Any, agent_id: str, program: str) -> Any:  # noqa: ANN401
+async def _run_cell(ctx: Context, agent_id: str, program: str) -> Any:  # noqa: ANN401
     """One cell in this agent's own namespace — which *is* the agent id, so the
     kernel it reaches is the one confined against that agent's workspace."""
     return await ctx.require(CODE_RUNTIME).run(CodeRunRequest(program=program, namespace=agent_id))

@@ -8,7 +8,10 @@ from __future__ import annotations
 
 from typing import Any
 
+from ph.agent.types import AgentDriver
+from ph.cordis import Context
 from ph.seams.code_runtime import CodeBindingNamespace
+from ph.session import Session
 from ph.testing import run_tool
 from ph.tools.registry import RUN_CODE
 
@@ -19,11 +22,11 @@ strings in five test modules across two packages."""
 
 
 async def run_cell(
-    ctx: Any,  # noqa: ANN401
+    ctx: Context,
     program: str,
     *,
-    agent: Any,  # noqa: ANN401
-    session: Any = None,  # noqa: ANN401
+    agent: AgentDriver,
+    session: Session | None = None,
     call_id: str = "call-1",
     name: str = RUN_CODE,
 ) -> Any:  # noqa: ANN401
@@ -38,11 +41,11 @@ async def run_cell(
 
 
 async def run_ipython_cell(
-    ctx: Any,  # noqa: ANN401
+    ctx: Context,
     program: str,
     *,
-    agent: Any,  # noqa: ANN401
-    session: Any = None,  # noqa: ANN401
+    agent: AgentDriver,
+    session: Session | None = None,
     call_id: str = "c1",
 ) -> Any:  # noqa: ANN401
     """`run_cell` under the name the RLM profile presents (`ipython`).
@@ -78,6 +81,6 @@ def dispatch_names(session: Any) -> list[str]:  # noqa: ANN401
     return [event.data["name"] for event in session.events if event.type == DISPATCH_START]
 
 
-def settled_dispatches(session: Any) -> list[Any]:  # noqa: ANN401
+def settled_dispatches(session: Session) -> list[Any]:
     """The settled halves of those dispatches, in the order they settled."""
     return [event for event in session.events if event.type == DISPATCH_SETTLED]

@@ -181,7 +181,7 @@ ToolResultBlock.model_rebuild()
 _CONTENT_BLOCKS: TypeAdapter[list[ContentBlock]] = TypeAdapter(list[ContentBlock])
 
 
-def content_from_wire(blocks: Any) -> list[ContentBlock]:  # noqa: ANN401
+def content_from_wire(blocks: object) -> list[ContentBlock]:
     """Validate a list of content blocks read back from the log."""
     return _CONTENT_BLOCKS.validate_python(blocks)
 
@@ -202,7 +202,7 @@ def text_of(blocks: Sequence[Any], *, placeholder: Callable[[str], str] | None =
     return "\n".join(parts)
 
 
-def attachment_of(block: Any) -> AttachmentRef | None:  # noqa: ANN401
+def attachment_of(block: object) -> AttachmentRef | None:
     """The attachment a block carries, or `None` — the one "is this media" test.
 
     Beside `text_of` for the same reason that exists: the pair
@@ -312,7 +312,7 @@ def create_message(
     *,
     role: Literal["system", "user", "assistant"],
     content: list[Any],
-    source: Any,  # noqa: ANN401
+    source: object,
 ) -> Message:
     """Create one identified message."""
     return Message.model_validate(
@@ -320,7 +320,7 @@ def create_message(
     )
 
 
-def create_user_message(*, content: list[Any], source: Any) -> Message:  # noqa: ANN401
+def create_user_message(*, content: list[Any], source: object) -> Message:
     return create_message(role="user", content=content, source=source)
 
 
@@ -341,7 +341,7 @@ def create_assistant_message(
     content: list[Any],
     provider: str,
     model: str,
-    replay_state: Any = None,  # noqa: ANN401
+    replay_state: object = None,
 ) -> Message:
     source: dict[str, Any] = {"kind": "model", "provider": provider, "model": model}
     if replay_state is not None:

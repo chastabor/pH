@@ -621,7 +621,7 @@ def _string_list(front: dict[str, Any], key: str, path: Path, *, cap: int) -> li
     return values
 
 
-def _parameter_schema(declared: Any, path: Path) -> dict[str, Any] | None:  # noqa: ANN401
+def _parameter_schema(declared: object, path: Path) -> dict[str, Any] | None:
     """An author's `parameters:` block as a JSON Schema, or `None` if it is not one.
 
     Playbook's shape on the outside — one entry per input with `type`, `required`,

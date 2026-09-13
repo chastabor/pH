@@ -60,11 +60,13 @@ is matched against directory names, so a file called `dist` stays visible.
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from ph.agent.types import AgentDriver
 from ph.cordis import DEPLOYMENT, Context, Profile
 from ph.keys import AGENTS, FS, SESSIONS
 from ph.seams.fs import (
@@ -121,7 +123,7 @@ async def test_write_intent_fires_before_the_write_and_a_veto_prevents_it(
     target = tmp_path / "guarded.txt"
     observed: list[bool] = []
 
-    async def deny(intent: WriteIntent, next_: Any) -> str:  # noqa: ANN401
+    async def deny(intent: WriteIntent, next_: object) -> str:
         # The file must not exist yet when policy runs.
         observed.append(intent.path.exists())
         return "writes to this path are not allowed"
@@ -216,7 +218,7 @@ async def test_edit_intent_sees_the_replacement_before_it_lands(tmp_path: Path) 
     target.write_text("before")
     seen: list[EditIntent] = []
 
-    async def observe(intent: EditIntent, next_: Any) -> Any:  # noqa: ANN401
+    async def observe(intent: EditIntent, next_: Callable[..., Awaitable[Any]]) -> Any:  # noqa: ANN401
         seen.append(intent)
         assert intent.path.read_text() == "before"
         return await next_()
@@ -362,7 +364,7 @@ async def test_a_screen_can_refuse_a_tree_not_just_the_files_in_it(
     root, fs = _fs(tmp_path)
     asked: list[tuple[str, bool]] = []
 
-    def screen(_path: str, name: str, _agent: Any, is_dir: bool) -> WalkDecision:  # noqa: ANN401
+    def screen(_path: str, name: str, _agent: object, is_dir: bool) -> WalkDecision:
         asked.append((name, is_dir))
         return "prune" if is_dir and name == "secrets" else "yield"
 
@@ -389,7 +391,7 @@ async def test_a_screen_that_raises_refuses_at_the_widest_setting(tmp_path: Path
 
     root, fs = _fs(tmp_path)
 
-    def broken(_path: str, _name: str, _agent: Any, _is_dir: bool) -> WalkDecision:  # noqa: ANN401
+    def broken(_path: str, _name: str, _agent: object, _is_dir: bool) -> WalkDecision:
         raise RuntimeError("this matcher is broken")
 
     fs.screen(broken, scope=root)
@@ -432,7 +434,7 @@ async def test_an_agent_scoped_gate_is_asked_about_that_agents_reads(
     root, fs = _fs(tmp_path)
     mine = root.scope("agent")
 
-    async def deny(_intent: Any, _next: Any) -> str:  # noqa: ANN401
+    async def deny(_intent: object, _next: object) -> str:
         return "this agent may not read"
 
     mine.on("fs/read-intent", deny)
@@ -454,7 +456,7 @@ async def test_a_global_row_still_reaches_every_agent(tmp_path: Path) -> None:
     (tmp_path / "a.txt").write_text("a")
     root, fs = _fs(tmp_path)
 
-    async def deny(_intent: Any, _next: Any) -> str:  # noqa: ANN401
+    async def deny(_intent: object, _next: object) -> str:
         return "nobody may read"
 
     root.on("fs/read-intent", deny)
@@ -522,7 +524,7 @@ async def test_one_call_resolves_one_boundary(tmp_path: Path) -> None:
     stated = root.scope("the-stated-boundary")
     elsewhere = root.scope("the-agents-own-scope")
 
-    def screen(_path: str, name: str, _agent: Any, is_dir: bool) -> WalkDecision:  # noqa: ANN401
+    def screen(_path: str, name: str, _agent: object, is_dir: bool) -> WalkDecision:
         return "yield" if is_dir or name != "secret.txt" else "skip"
 
     fs.screen(screen, scope=stated)
@@ -608,12 +610,12 @@ async def test_a_tool_call_is_judged_in_the_scope_the_caller_states(
         ctx.require(SESSIONS).create("p624-child"), FAKE_OPTIONS, parent=parent
     )
 
-    def screen(_path: str, name: str, _agent: Any, is_dir: bool) -> WalkDecision:  # noqa: ANN401
+    def screen(_path: str, name: str, _agent: object, is_dir: bool) -> WalkDecision:
         return "yield" if is_dir or name != "secret.txt" else "skip"
 
     ctx.require(FS).screen(screen, scope=child.ctx)
 
-    async def shown(scope: Context, agent: Any) -> list[str]:  # noqa: ANN401
+    async def shown(scope: Context, agent: AgentDriver) -> list[str]:
         found = await run_tool(ctx, "glob", {"pattern": "*.txt"}, agent=agent, scope=scope)
         return sorted(Path(one).name for one in found.value["paths"])
 

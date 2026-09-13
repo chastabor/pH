@@ -172,7 +172,7 @@ def media_pointer_text(attachment: AttachmentRef) -> str:
 
 def degrade_media(
     messages: Sequence[Message],
-    store: Any,  # noqa: ANN401
+    store: object,
     route: ResolvedModel,
 ) -> tuple[tuple[Message, ...], list[dict[str, Any]]]:
     """The messages an adapter should see, and an account of what was replaced.

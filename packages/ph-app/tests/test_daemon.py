@@ -146,6 +146,7 @@ from ph.agent.inbox import InboxTarget
 from ph.agent_loop.driver import ReactLoopAgent
 from ph.keys import SCHEDULE, SESSIONS, WORKSPACE
 from ph.seams.schedule import Schedule
+from ph.session import Session
 from ph.testing import ReapedHost, stored_log
 from ph_app.daemon import recovery, server
 from ph_app.daemon import supervisor as supervisor_module
@@ -161,7 +162,7 @@ pytestmark = pytest.mark.anyio
 async def _history(
     client: DaemonClient,
     session_id: str,
-    cursor: Any = None,  # noqa: ANN401
+    cursor: object = None,
 ) -> list[dict[str, Any]]:
     """Everything from `cursor` to now, paged the way a client must page it.
 
@@ -275,7 +276,7 @@ async def test_a_failed_turn_is_named_beside_an_idle_status(
     """
     from ph.llm.fake import FakeAdapter
 
-    async def exploding(self: Any, options: Any) -> Any:  # noqa: ANN401
+    async def exploding(self: object, options: object) -> Any:  # noqa: ANN401
         raise RuntimeError("provider is down")
         yield  # pragma: no cover
 
@@ -799,7 +800,7 @@ def _crash(patch: pytest.MonkeyPatch, root: Any, times: int) -> None:  # noqa: A
     """
     driver, original, remaining = type(root.agent), type(root.agent).run, times
 
-    async def run(self: Any) -> None:  # noqa: ANN401
+    async def run(self: object) -> None:
         nonlocal remaining
         if remaining > 0:
             remaining -= 1
@@ -1020,8 +1021,8 @@ async def test_the_tree_is_restored_from_the_latest_checkpoint_before_a_retry(
         asked: list[str] = []
 
         async def fake_restore(
-            _seam: Any,  # noqa: ANN401
-            workspace: Any,  # noqa: ANN401
+            _seam: object,
+            workspace: object,
             token: str,
         ) -> tuple[str, ...]:
             asked.append(token)
@@ -1041,8 +1042,8 @@ async def test_the_tree_is_restored_from_the_latest_checkpoint_before_a_retry(
         # Best-effort: a restore that fails must not cost the retry, and must
         # not claim a rollback that did not happen.
         async def angry_restore(
-            _seam: Any,  # noqa: ANN401
-            workspace: Any,  # noqa: ANN401
+            _seam: object,
+            workspace: object,
             token: str,
         ) -> tuple[str, ...]:
             raise RuntimeError("the tier said no")
@@ -1088,7 +1089,7 @@ async def test_a_failing_flush_climbs_the_ladder_instead_of_retrying_forever(
         await client.call("session/new", sessionId="unflushable")
         root = daemon.running.supervisor.roots["unflushable"]
 
-        async def broken(self: Any, session: Any) -> None:  # noqa: ANN401
+        async def broken(self: object, session: Session) -> None:
             raise RuntimeError("flush is broken")
 
         monkeypatch.setattr(type(root.ctx.require(SESSIONS)), "flush", broken)
@@ -1495,7 +1496,7 @@ async def test_one_root_with_a_broken_schedule_does_not_stop_the_others(
 
         original = type(broken.ctx.require(SCHEDULE)).claim
 
-        def claim(self: Any, session: Any, *, now: int) -> Any:  # noqa: ANN401
+        def claim(self: Any, session: Session, *, now: int) -> Any:  # noqa: ANN401
             if session.id == "broken":
                 raise RuntimeError("this schedule is unreadable")
             return original(self, session, now=now)

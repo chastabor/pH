@@ -485,7 +485,7 @@ class TranscriptView(VerticalScroll):
             return StreamingMessage(item)
         return TranscriptRow(item)
 
-    async def _update(self, widget: Any, item: ChatItem) -> None:  # noqa: ANN401
+    async def _update(self, widget: object, item: ChatItem) -> None:
         if isinstance(widget, ToolCardWidget):
             await widget.refresh_card()
         elif isinstance(widget, StreamingMessage):

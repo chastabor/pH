@@ -43,7 +43,7 @@ def tui_app(
     home: Path,
     project: Path | None = None,
     trusted: bool = True,
-    **overrides: Any,  # noqa: ANN401
+    **overrides: object,
 ) -> PHTuiApp:
     """One `PHTuiApp` wired for a test, built in the one place.
 

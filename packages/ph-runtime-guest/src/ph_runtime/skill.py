@@ -15,6 +15,7 @@ here is why" is one line of context and no wasted turn.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from types import ModuleType
 from typing import Any
 
@@ -24,7 +25,7 @@ __all__ = ["UnavailableSkill", "wrap_skill_module"]
 class _CallableModule:
     """A module whose `run()` is reachable by calling the module itself."""
 
-    def __init__(self, module: ModuleType, entry: Any) -> None:  # noqa: ANN401
+    def __init__(self, module: ModuleType, entry: Callable[..., Any]) -> None:
         self._module = module
         self._entry = entry
 

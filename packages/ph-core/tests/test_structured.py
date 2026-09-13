@@ -50,7 +50,7 @@ class Verdict(BaseModel):
 SHAPE: dict[str, Any] = Verdict.model_json_schema()
 
 
-def _options(**over: Any) -> GenerateOptions:  # noqa: ANN401
+def _options(**over: object) -> GenerateOptions:
     base: dict[str, Any] = {
         "provider": "fake",
         "model": "fake-1",

@@ -90,7 +90,7 @@ is the caller's, since a tool call, a path and a refinement are named differentl
 and only the caller knows which it is holding."""
 
 
-def denial_reason(outcome: Any, subject: str) -> str:  # noqa: ANN401
+def denial_reason(outcome: object, subject: str) -> str:
     """The sentence for one non-grant outcome. Unknown answers read as absence,
     which is the fail-closed direction and the honest one."""
     template = DENIAL_REASONS.get(str(outcome), DENIAL_REASONS["unavailable"])
@@ -160,7 +160,7 @@ every existing answerer keeps working; the two that carry data are objects
 because they have data to carry."""
 
 
-def answer_from_wire(raw: Any) -> ApprovalAnswer:  # noqa: ANN401
+def answer_from_wire(raw: object) -> ApprovalAnswer:
     """One answer as it arrives from a front end that is not in this process.
 
     `answer_kind`'s inverse, and here rather than in whatever transport happens
@@ -305,7 +305,7 @@ class ApprovalService:
         reason: str | None = None,
         cancel: CancelToken | None = None,
         allowed_decisions: tuple[ApprovalDecisionName, ...] = (),
-        arguments: Any = None,  # noqa: ANN401
+        arguments: object = None,
     ) -> ApprovalAnswer:
         """Ask, record both halves, and return the outcome. Never raises."""
         session: Session | None = getattr(agent, "session", None)

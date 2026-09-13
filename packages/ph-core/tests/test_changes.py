@@ -29,7 +29,6 @@ renamed path, a file dirty in the working tree.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
 import pytest
 
@@ -114,7 +113,7 @@ class _Seam:
     two answers `backend_for` prefers.
     """
 
-    def __init__(self, provider: Any = None) -> None:  # noqa: ANN401
+    def __init__(self, provider: object = None) -> None:
         self.provider = provider
 
 

@@ -16,16 +16,18 @@ import pytest
 import yaml
 
 from ph.agent.types import AgentOptions
+from ph.cordis import Context
 from ph.keys import AGENTS, COMMANDS, MOUNT, SANDBOX, SESSIONS, TUI_STATUS
 from ph.paths import resolve_roots
 from ph.seams.sandbox import DEFAULT_HOSTS, Denial
 from ph.seams.tui_status import StatusReading
+from ph.session import Session
 from ph.testing import MountProfile, not_none
 
 pytestmark = pytest.mark.anyio
 
 
-async def _run(ctx: Any, line: str, session: Any = None) -> str:  # noqa: ANN401
+async def _run(ctx: Context, line: str, session: Session | None = None) -> str:
     shown = await ctx.require(COMMANDS).dispatch(line, session=session)
     assert isinstance(shown, str)
     return shown
@@ -150,7 +152,7 @@ async def test_a_profile_without_the_row_is_told_so(mount: MountProfile) -> None
     assert "mounts no sandbox-allow row" in shown
 
 
-def _refusals(ctx: Any, session: Any) -> Any:  # noqa: ANN401
+def _refusals(ctx: Context, session: Session) -> Any:  # noqa: ANN401
     """This row's reading, by id — `sandbox` is the refusal count.
 
     The mode is `sandbox-mode`, contributed by the seam's own row: two facts

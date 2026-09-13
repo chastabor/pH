@@ -29,6 +29,7 @@ from typing import Any
 
 import pytest
 
+from ph.cordis import Context
 from ph.keys import SANDBOX, SUBPROCESS, WORKSPACE
 from ph.seams.sandbox import Enforcement, writable_paths
 from ph.seams.subprocess import SubprocessSpawnSpec, scrub_env
@@ -43,7 +44,7 @@ SANDBOX_ROW = {"id": "sandbox-local", "disabled": False}
 SECTION = "Read-only scratch workspaces"
 
 
-async def _with_backend(ctx: Any, enforcement: Enforcement) -> None:  # noqa: ANN401
+async def _with_backend(ctx: Context, enforcement: Enforcement) -> None:
     """Register a backend the way a profile that layers one *after* this row does."""
     ctx.require(SANDBOX).register_provider(StubSandboxProvider(enforcement=enforcement))
     await ctx.serial("profile/mounted")
@@ -79,7 +80,7 @@ async def _enforcing(mount: MountProfile, tmp_path: Path) -> tuple[Any, Any]:
 
 
 async def _confined_write(
-    ctx: Any,  # noqa: ANN401
+    ctx: Context,
     workspace: Any,  # noqa: ANN401
     target: Path,
 ) -> tuple[int, str]:

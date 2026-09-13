@@ -21,7 +21,6 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, replace
-from typing import Any
 
 from textual.binding import Binding, BindingType
 
@@ -212,7 +211,7 @@ class _RunAction:
     app: AppSurface
     action: str
 
-    async def __call__(self, argument: str, _context: Any) -> None:  # noqa: ANN401
+    async def __call__(self, argument: str, _context: object) -> None:
         # Forwarded as a Python literal, which is what Textual's action parser
         # reads (`ast.literal_eval`), so a path with spaces round-trips. An
         # action that takes no argument is called bare, as before.

@@ -27,6 +27,7 @@ cannot change while the row is mounted.
 from __future__ import annotations
 
 import sys
+from collections.abc import Awaitable, Callable
 from typing import Any, get_args
 
 import pytest
@@ -41,7 +42,7 @@ pytestmark = pytest.mark.anyio
 OTEL_ROW = {"insert": [{"id": "session-telemetry-otel", "name": "session-telemetry-otel"}]}
 
 
-def _record(body: str, **attributes: Any) -> SessionTelemetryRecord:  # noqa: ANN401
+def _record(body: str, **attributes: object) -> SessionTelemetryRecord:
     return SessionTelemetryRecord(
         channel="ledger", time=1_000, severity="info", attributes=attributes, body=body
     )
@@ -73,7 +74,7 @@ async def test_the_shipped_sink_exports_post_redaction_records(
 
     ctx = await mount(OTEL_ROW)
 
-    async def redact(record: SessionTelemetryRecord, next_: Any) -> Any:  # noqa: ANN401
+    async def redact(record: SessionTelemetryRecord, next_: Callable[..., Awaitable[Any]]) -> Any:  # noqa: ANN401
         return await next_(
             record.model_copy(update={"body": record.body.replace("hunter2", "«x»")})
         )

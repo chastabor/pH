@@ -75,7 +75,7 @@ def _prompt(turn: int) -> str:
     return f"question {turn} " + "detail " * 200
 
 
-def _strip(value: Any) -> Any:  # noqa: ANN401
+def _strip(value: object) -> Any:  # noqa: ANN401
     """The same value without its markers.
 
     A cache key is the *content* of a prefix; Anthropic does not make a message

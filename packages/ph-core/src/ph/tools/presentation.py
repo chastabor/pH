@@ -67,7 +67,7 @@ class ToolResultView(WireModel):
     meta: dict[str, Any] | None = None
 
 
-def render_call_view(tools: Any, name: str, arguments: str) -> ToolCallView | None:  # noqa: ANN401
+def render_call_view(tools: object, name: str, arguments: str) -> ToolCallView | None:
     """Ask the tool how its pending call looks. `None` when it cannot say.
 
     `arguments` is a `str` because that is what the writer records — the model's
@@ -99,10 +99,10 @@ def render_call_view(tools: Any, name: str, arguments: str) -> ToolCallView | No
 
 
 def render_result_view(
-    tools: Any,  # noqa: ANN401
+    tools: object,
     name: str,
     arguments: str,
-    result: Any,  # noqa: ANN401
+    result: object,
 ) -> ToolResultView | None:
     """Ask the tool how its settled call looks. `None` when it cannot say.
 

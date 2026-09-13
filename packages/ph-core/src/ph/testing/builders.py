@@ -17,6 +17,8 @@ from typing import TYPE_CHECKING, Any
 
 import anyio
 
+from ph.tools import ToolExecution
+
 from ..agent.types import AgentHandle, AgentOptions
 from ..cordis import DEPLOYMENT, Boundary, Context
 from ..json import dumps
@@ -132,7 +134,7 @@ def parked_gate(ctx: Context, *, only: str | None = None) -> tuple[anyio.Event, 
     """
     reached, release = anyio.Event(), anyio.Event()
 
-    async def parked(execution: Any, next_: Callable[..., Awaitable[Any]]) -> Any:  # noqa: ANN401
+    async def parked(execution: ToolExecution, next_: Callable[..., Awaitable[Any]]) -> Any:  # noqa: ANN401
         if only is None or execution.name == only:
             reached.set()
             await release.wait()
@@ -149,7 +151,7 @@ async def run_tool(
     *,
     agent: AgentHandle,
     scope: Boundary | None = None,
-    session: Any = None,  # noqa: ANN401
+    session: Session | None = None,
     call_id: str = "call-1",
 ) -> Any:  # noqa: ANN401
     """Execute one tool the way the loop does, for a test that is not the loop.
@@ -185,7 +187,7 @@ async def run_tool(
 def raising(error: BaseException) -> Callable[..., Any]:
     """A body that raises `error` — readable where a generator trick was not."""
 
-    def body(*_args: Any, **_kwargs: Any) -> Any:  # noqa: ANN401
+    def body(*_args: object, **_kwargs: object) -> Any:  # noqa: ANN401
         raise error
 
     return body
@@ -356,7 +358,7 @@ def workspace_retained(agent_id: str, reason: str) -> tuple[str, dict[str, Any]]
     return (RETAINED, {"agentId": agent_id, "retained": reason})
 
 
-def workspace_disposed(agent_id: str, **extra: Any) -> tuple[str, dict[str, Any]]:  # noqa: ANN401
+def workspace_disposed(agent_id: str, **extra: object) -> tuple[str, dict[str, Any]]:
     """The closing half — `kept=`, `retained=`, `reconciled=` as the test needs."""
     return (DISPOSED, {"agentId": agent_id, **extra})
 

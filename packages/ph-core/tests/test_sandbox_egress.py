@@ -111,7 +111,7 @@ class _Hello(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def log_message(self, *_args: Any) -> None:  # noqa: ANN401
+    def log_message(self, *_args: object) -> None:
         return
 
 
@@ -125,7 +125,7 @@ class _HostServer:
         self.thread.start()
         return self
 
-    def __exit__(self, *_exc: Any) -> None:  # noqa: ANN401
+    def __exit__(self, *_exc: object) -> None:
         self.server.shutdown()
         self.server.server_close()
 

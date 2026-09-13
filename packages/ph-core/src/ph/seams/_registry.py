@@ -27,7 +27,7 @@ one re-export away.
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
     from ..cordis import Context
@@ -100,9 +100,9 @@ def claim_entry[T](owner: Context | Running, entries: list[T], value: T, *, labe
 
 def claim_slot(
     by: Running,
-    holder: Any,  # noqa: ANN401
+    holder: object,
     attribute: str,
-    value: Any,  # noqa: ANN401
+    value: object,
     *,
     label: str,
 ) -> Disposer:

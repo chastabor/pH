@@ -32,6 +32,7 @@ stop it is ending the process's turn.
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
@@ -42,7 +43,7 @@ from runtime_helpers import dispatch_names, run_ipython_cell, settled_dispatches
 from ph.keys import AGENTS, SESSIONS, SUBAGENTS
 from ph.seams.subagents import SubagentRequest
 from ph.testing import run_tool
-from ph.tools import Accept, Allow, Deny
+from ph.tools import Accept, Allow, Deny, ToolExecution
 from ph_rlm.messaging import OUT_OF_REACH
 from ph_rlm.subagents import PROVIDER_NAME
 
@@ -111,7 +112,7 @@ async def test_a_a_denied_dispatch_ends_the_run_uncatchably(
     )
     target, routed = tmp_path / "gate-denied.txt", tmp_path / "gate-routed-around.txt"
 
-    async def refuse(execution: Any, next_: Any) -> Any:  # noqa: ANN401
+    async def refuse(execution: ToolExecution, next_: Callable[..., Awaitable[Any]]) -> Any:  # noqa: ANN401
         if execution.name == "write":
             return Deny(reason="this deployment does not allow writes")
         return await next_()
@@ -209,7 +210,11 @@ async def test_c_one_oversized_dispatch_is_offloaded_without_its_siblings(
 
     seen: list[str] = []
 
-    async def offload(execution: Any, result: Any, next_: Any) -> Any:  # noqa: ANN401
+    async def offload(
+        execution: ToolExecution,
+        result: Any,  # noqa: ANN401
+        next_: Callable[..., Awaitable[Any]],
+    ) -> Any:  # noqa: ANN401
         seen.append(execution.name)
         text = str((result.value or {}).get("text", ""))
         if len(text) <= 1024:

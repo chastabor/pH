@@ -20,7 +20,7 @@ quietly broken.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import ClassVar
 
 from textual.app import App
 from textual.binding import Binding, BindingType
@@ -133,7 +133,7 @@ class TrajectoryApp(App[None]):
         records: list[TrajectoryRecord],
         *,
         session_id: str = "",
-        sessions: Any = None,  # noqa: ANN401
+        sessions: object = None,
         home: Path | None = None,
     ) -> None:
         super().__init__()

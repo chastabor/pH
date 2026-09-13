@@ -518,7 +518,7 @@ def _file_record(payload: dict[str, Any]) -> dict[str, Any]:
     return inner if isinstance(inner, dict) else payload
 
 
-def _expiry(stated: Any) -> int | None:  # noqa: ANN401
+def _expiry(stated: object) -> int | None:
     """`expirationTime` as epoch milliseconds, or `None` if it was not stated.
 
     RFC 3339 with a `Z`, which `fromisoformat` learned to read in 3.11 — and an

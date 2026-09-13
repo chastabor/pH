@@ -205,7 +205,7 @@ class DispatchBridge:
         self._failure = CodeRunFailure(kind, message)
         return self._failure
 
-    async def call(self, binding: CodeBinding, arguments: Any) -> Any:  # noqa: ANN401
+    async def call(self, binding: CodeBinding, arguments: object) -> Any:  # noqa: ANN401
         """Dispatch one binding call through the full pipeline.
 
         :raises ToolCallError: the call failed; the program may handle it.
@@ -323,7 +323,7 @@ async def apply(ctx: Context, config: Config) -> None:
     ctx.require(CODE_RUNTIME).register_sdk_renderer("python", render_python_sdk)
     ctx.require(CODE_RUNTIME).register_sdk_renderer("typescript", render_typescript_sdk)
 
-    async def run_code(args: Any, run: ToolRunContext) -> Any:  # noqa: ANN401
+    async def run_code(args: object, run: ToolRunContext) -> Any:  # noqa: ANN401
         # `Mapping`, not `dict`: accepted arguments are frozen into a
         # `MappingProxyType`, which is a Mapping but not a dict instance.
         program = args.get("program") if isinstance(args, Mapping) else None
@@ -498,7 +498,7 @@ def _tools_namespace(
 async def _dispatch(
     bridge: DispatchBridge,
     binding: CodeBinding,
-    **arguments: Any,  # noqa: ANN401
+    **arguments: object,
 ) -> Any:  # noqa: ANN401
     return await bridge.call(binding, arguments)
 

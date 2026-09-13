@@ -39,6 +39,7 @@ from ph.cordis import Context, plugin
 from ph.keys import AGENTS, COMMANDS, JOBS, LLM, SESSIONS, SYSTEM_PROMPT, TOOLS
 from ph.paths import resolve_roots
 from ph.seams.commands import CommandDefinition
+from ph.session import Session
 from ph.system_prompt.assembly import AssembleContext, PromptContext
 from ph.wire import WireModel
 
@@ -323,7 +324,7 @@ async def apply(ctx: Context, config: Config) -> None:
 
     # ------------------------------------------------------- auto-refine --
 
-    async def on_session_event(session: Any, event: Any) -> None:  # noqa: ANN401
+    async def on_session_event(session: Session, event: Any) -> None:  # noqa: ANN401
         """H7: consider refining at the end of a turn.
 
         On `turn/end` rather than on a timer, because that is the one moment the

@@ -160,10 +160,10 @@ class DaemonClient:
     async def call[P: WireModel, R: WireModel](self, verb: Verb[P, R], params: P, /) -> R: ...
 
     @overload
-    async def call(self, method: str, /, **fields: Any) -> dict[str, Any]: ...  # noqa: ANN401
+    async def call(self, method: str, /, **fields: object) -> dict[str, Any]: ...
 
     async def call(
-        self, verb: str | Verb[Any, Any], params: WireModel | None = None, /, **fields: Any
+        self, verb: str | Verb[Any, Any], params: WireModel | None = None, /, **fields: object
     ) -> Any:
         """One request, awaited to its reply. Raises what the server refused.
 
@@ -215,10 +215,10 @@ class DaemonClient:
     async def notify[P: WireModel](self, verb: Notify[P], params: P, /) -> None: ...
 
     @overload
-    async def notify(self, method: str, /, **fields: Any) -> None: ...  # noqa: ANN401
+    async def notify(self, method: str, /, **fields: object) -> None: ...
 
     async def notify(
-        self, verb: str | Notify[Any], params: WireModel | None = None, /, **fields: Any
+        self, verb: str | Notify[Any], params: WireModel | None = None, /, **fields: object
     ) -> None:
         """Send a request that expects no reply.
 

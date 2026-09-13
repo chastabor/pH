@@ -19,10 +19,11 @@ from typing import Any
 import pytest
 
 from ph.bundles import BASE, HEADLESS
+from ph.cordis import Context
 from ph.keys import AGENTS, APPROVAL, SESSIONS, WORKSPACE
 from ph.llm.types import ToolCallBlock, ToolResultBlock, text_of
 from ph.seams.spill import SpillStore
-from ph.session import derive_event_message
+from ph.session import Session, derive_event_message
 from ph.testing import FAKE_OPTIONS, StubWorkspaceProvider
 from ph_stabilize import BUNDLE
 
@@ -63,18 +64,18 @@ def break_spill(monkeypatch: pytest.MonkeyPatch) -> None:
     no room for an override.
     """
 
-    async def refuse(_self: Any, **_kwargs: Any) -> Any:  # noqa: ANN401
+    async def refuse(_self: object, **_kwargs: object) -> Any:  # noqa: ANN401
         raise OSError("no space left on device")
 
     monkeypatch.setattr(SpillStore, "save_text", refuse)
 
 
-def events_of(session: Any, event_type: str) -> list[Any]:  # noqa: ANN401
+def events_of(session: Session, event_type: str) -> list[Any]:
     """Every event of one type. Written out in three test modules before this."""
     return [event for event in session.events if event.type == event_type]
 
 
-async def run_tool_calls(ctx: Any, session: Any, *calls: Any, step: int = 1) -> Any:  # noqa: ANN401
+async def run_tool_calls(ctx: Context, session: Session, *calls: Any, step: int = 1) -> Any:  # noqa: ANN401
     """Commit the assistant message that asked, then run the batch for real.
 
     The commit is load-bearing and is why this is shared: the loop appends the
@@ -102,7 +103,7 @@ async def run_tool_calls(ctx: Any, session: Any, *calls: Any, step: int = 1) -> 
     )
 
 
-def row(plugin_id: str, **config: Any) -> dict[str, Any]:  # noqa: ANN401
+def row(plugin_id: str, **config: object) -> dict[str, Any]:
     """One row, with its ceilings or its rules spelled out in the test."""
     return {"id": plugin_id, "config": config}
 
@@ -125,7 +126,7 @@ def todo_call(call_id: str, todos: list[dict[str, Any]]) -> ToolCallBlock:
     return ToolCallBlock(id=call_id, name=TOOL_NAME, arguments=json.dumps({"todos": todos}))
 
 
-def result_text(session: Any, call_id: str) -> str:  # noqa: ANN401
+def result_text(session: Session, call_id: str) -> str:
     """What the model reads back from one call.
 
     Through `derive_event_message` — THE projection — rather than by indexing
@@ -138,7 +139,7 @@ def result_text(session: Any, call_id: str) -> str:  # noqa: ANN401
     return "" if block is None else text_of(block.content)
 
 
-def answer_approvals(ctx: Any, answer: Any) -> list[Any]:  # noqa: ANN401
+def answer_approvals(ctx: Context, answer: Any) -> list[Any]:  # noqa: ANN401
     """Register the answerer a front end would, and return what it was asked.
 
     `answer` may be a value or a zero-argument callable, so a test that changes
@@ -153,7 +154,7 @@ def answer_approvals(ctx: Any, answer: Any) -> list[Any]:  # noqa: ANN401
     """
     asked: list[Any] = []
 
-    async def respond(request: Any, _next: Any = None) -> Any:  # noqa: ANN401
+    async def respond(request: object, _next: object = None) -> Any:  # noqa: ANN401
         asked.append(request)
         chosen = answer() if callable(answer) else answer
         # An awaitable answer is one that waits — for an event a test sets once
@@ -165,7 +166,7 @@ def answer_approvals(ctx: Any, answer: Any) -> list[Any]:  # noqa: ANN401
 
 
 async def scoped_agent(
-    ctx: Any,  # noqa: ANN401
+    ctx: Context,
     tmp_path: Path,
     *,
     session_id: str = "s1",
@@ -188,7 +189,7 @@ async def scoped_agent(
     return agent, workspace
 
 
-def result_block(session: Any, call_id: str) -> Any:  # noqa: ANN401
+def result_block(session: Session, call_id: str) -> Any:  # noqa: ANN401
     """The `ToolResultBlock` one call produced, or `None`.
 
     Split out of `result_text` so a test asserting `is_error` reaches it through

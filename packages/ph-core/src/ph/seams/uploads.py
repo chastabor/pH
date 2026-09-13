@@ -70,6 +70,8 @@ from typing import Any, Protocol
 
 import anyio
 
+from ph.session import Session
+
 from ..cordis import Context, Disposer, Running, plugin, running
 from ..keys import ATTACHMENTS, SESSIONS, UPLOADS
 from ..llm.types import AttachmentRef
@@ -120,7 +122,7 @@ class _Registered:
     by: Running
 
 
-def record_uploaded(session: Any, handle: FileHandle, ref: AttachmentRef) -> None:  # noqa: ANN401
+def record_uploaded(session: Session, handle: FileHandle, ref: AttachmentRef) -> None:
     """Append the fact that bytes left this machine.
 
     The half of this row that *is* the log's business: not the handle, which

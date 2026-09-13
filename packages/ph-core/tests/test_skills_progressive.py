@@ -463,7 +463,7 @@ async def test_a_listener_that_fails_does_not_fail_the_read(
     Sabotage: drop `contained=True` and the tool call below is an error.
     """
 
-    def unhappy(_payload: Any) -> None:  # noqa: ANN401
+    def unhappy(_payload: object) -> None:
         raise RuntimeError("this row is having a bad day")
 
     ctx, agent = await _release(mount, tmp_path)

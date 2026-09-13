@@ -75,7 +75,7 @@ def field_docs(model: type[BaseModel]) -> dict[str, str]:
     return docs
 
 
-def render_annotation(annotation: Any) -> str:  # noqa: ANN401
+def render_annotation(annotation: object) -> str:
     """A type as a person would write it, not as `repr` prints it.
 
     `typing.get_type_hints`-shaped output — `str | None`, `list[str]` — because
@@ -99,7 +99,7 @@ def render_annotation(annotation: Any) -> str:  # noqa: ANN401
     return f"{name}[{rendered}]" if rendered else name
 
 
-def _nested_doc(annotation: Any) -> str:  # noqa: ANN401
+def _nested_doc(annotation: object) -> str:
     """A nested config model's own docstring, for a field that adds nothing.
 
     `_fields` does not descend, so an option whose type is another model is one

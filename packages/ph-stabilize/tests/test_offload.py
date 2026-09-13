@@ -18,6 +18,7 @@ The byte count is only asked when a deployment set `max_inline_bytes`: encoding 
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
@@ -25,7 +26,7 @@ import pytest
 from stabilize_helpers import PROFILE, blob, break_spill, events_of
 
 from ph.cancel import CancelToken
-from ph.cordis import DEPLOYMENT
+from ph.cordis import DEPLOYMENT, Context
 from ph.keys import SESSIONS, SPILL_STORE, TOOLS
 from ph.llm.types import ToolCallBlock, ToolResultBlock, ToolSource, text_of
 from ph.session import Session, derive_event_message
@@ -34,6 +35,7 @@ from ph.session.known_event_types import (
     KNOWN_SESSION_EVENT_TYPES,
 )
 from ph.testing import MountProfile, StubAgent, as_kind, not_none, simple_tool
+from ph.tools import ToolExecution
 from ph.tools.batch import execute_tool_calls
 from ph.tools.definition import Accept, text_content
 from ph_stabilize.offload import (
@@ -57,7 +59,7 @@ message moves the assertions with it rather than leaving them green."""
 
 
 async def _run(
-    ctx: Any,  # noqa: ANN401
+    ctx: Context,
     session: Session,
     name: str,
     text: str,
@@ -325,7 +327,11 @@ async def test_it_measures_the_projection_another_listener_produced(mount: Mount
     ctx = await mount(profile=PROFILE)
     session = ctx.require(SESSIONS).create("composed")
 
-    async def inflate(execution: Any, result: Any, next_: Any) -> Any:  # noqa: ANN401
+    async def inflate(
+        execution: ToolExecution,
+        result: Any,  # noqa: ANN401
+        next_: Callable[..., Awaitable[Any]],
+    ) -> Any:  # noqa: ANN401
         decision = await next_(execution, result)
         if execution.name != "small":
             return decision

@@ -55,7 +55,7 @@ __all__ = [
 ]
 
 
-def resumption_of(session: Any) -> dict[str, Any] | None:  # noqa: ANN401
+def resumption_of(session: Session) -> dict[str, Any] | None:
     """What this session's last resume recorded, or `None` if it never was.
 
     Read from the log rather than returned from `resume_session`, so a front end

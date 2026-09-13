@@ -29,6 +29,7 @@ from daemon_helpers import running, until
 from ph.json import as_seq
 from ph.keys import ATTACHMENTS
 from ph.llm.types import AttachmentRef
+from ph_app.daemon.client import DaemonClient
 from ph_app.daemon.framing import MAX_ATTACHMENT_BYTES, MAX_LINE
 from ph_app.protocol import DaemonError
 
@@ -45,7 +46,7 @@ file, and the store measures dimensions out of these bytes."""
 
 
 async def _put(
-    client: Any,  # noqa: ANN401
+    client: DaemonClient,
     session_id: str,
     *,
     name: str = "diagram.png",

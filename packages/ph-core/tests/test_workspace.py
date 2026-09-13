@@ -67,7 +67,7 @@ class _Provider:
         self.raises = raises
         self.calls: list[dict[str, Any]] = []
 
-    async def acquire(self, **kwargs: Any) -> Workspace | None:  # noqa: ANN401
+    async def acquire(self, **kwargs: object) -> Workspace | None:
         self.calls.append(kwargs)
         if self.raises:
             raise RuntimeError("git is not installed")

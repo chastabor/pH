@@ -47,13 +47,15 @@ from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
 
 import pytest
 
+from ph.agent.types import AgentDriver
+from ph.cordis import Context
 from ph.keys import CODE_RUNTIME_STUB, COMMANDS, SESSIONS, WORKSPACE
 from ph.seams.workspace import CHECKPOINT, checkpoints
 from ph.seams.workspace_git import pre_run_ref
+from ph.session import Session
 from ph.testing import MountProfile, run_tool
 from ph.testing.git import git, git_repo, worktree_agent
 from ph.tools.registry import RUN_CODE
@@ -62,20 +64,21 @@ pytestmark = [pytest.mark.anyio, pytest.mark.needs_git]
 
 
 async def _checkpointed(
-    ctx: Any,  # noqa: ANN401
-    session: Any,  # noqa: ANN401
-    agent: Any,  # noqa: ANN401
+    ctx: Context,
+    session: Session,
+    agent: AgentDriver,
     call_id: str = "c1",
 ) -> int:
     """Take a restore point and hand back the seq a person would type."""
     workspace = ctx.require(WORKSPACE).of(agent.id)
+    assert workspace is not None
     await ctx.require(WORKSPACE).checkpoint(
         workspace, session=session, agent_id=agent.id, call_id=call_id
     )
     return int(next(item.seq for item in reversed(session.events) if item.type == CHECKPOINT))
 
 
-async def _run(ctx: Any, session: Any, agent: Any, argument: str = "") -> str:  # noqa: ANN401
+async def _run(ctx: Context, session: Session, agent: AgentDriver, argument: str = "") -> str:
     shown = await ctx.require(COMMANDS).dispatch(
         f"/revert {argument}".strip(), session=session, agent=agent
     )

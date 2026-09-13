@@ -150,7 +150,7 @@ def wire(monkeypatch: pytest.MonkeyPatch) -> _FileApi:
         name = url.rsplit("/upload.example/", 1)[-1]
         return {"file": api.record(name)}, {}
 
-    async def get_json(self: HttpClient, url: str, **kwargs: Any) -> dict[str, Any]:  # noqa: ANN401
+    async def get_json(self: HttpClient, url: str, **kwargs: object) -> dict[str, Any]:
         api.polls += 1
         name = "files/" + url.rsplit("/files/", 1)[-1]
         if name in api.deleted:
@@ -271,7 +271,7 @@ async def test_a_file_that_never_becomes_ready_falls_back_to_the_bytes(
     assert not [one for one in session.events if one.type == "attachment/uploaded"]
 
 
-def _impatient(**config: Any) -> dict[str, Any]:  # noqa: ANN401
+def _impatient(**config: object) -> dict[str, Any]:
     """The shipped route with a budget of one poll.
 
     What is under test around the budget is what happens when it runs out, and

@@ -15,7 +15,6 @@ It confines nothing: every test that has wanted one so far is asking what the
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
 
 from ..seams.sandbox import ConfinedArgv, Enforcement
 
@@ -35,5 +34,5 @@ class StubSandboxProvider:
     enforcement: Enforcement = "full"
     backend: str = "stub"
 
-    def confine(self, argv: tuple[str, ...], policy: Any) -> ConfinedArgv:  # noqa: ANN401
+    def confine(self, argv: tuple[str, ...], policy: object) -> ConfinedArgv:
         return ConfinedArgv(argv=argv, enforcement=self.enforcement, backend=self.backend)

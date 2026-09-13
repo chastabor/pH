@@ -28,7 +28,7 @@ from rlm_fixtures import HARNESS_ROW
 from ph.cordis import Context
 from ph.keys import AGENTS, COMMANDS, JOBS, LLM_FAKE, SESSIONS
 from ph.llm.types import GenerateOptions
-from ph.session import SurfaceIntent
+from ph.session import Session, SurfaceIntent
 from ph.session.events import SessionEvent, SurfaceReplace
 from ph.testing import FAKE_OPTIONS, MountProfile, block_text, user_payload
 from ph_rlm.harness import (
@@ -68,7 +68,7 @@ NO = json.dumps({"shouldRefine": False, "rationale": "routine work"})
 def refining(mount: MountProfile) -> Refining:
     """`await refining(**config)` → `(ctx, session, agent)` with a scripted model."""
 
-    async def build(**config: Any) -> tuple[Any, Any, Any]:  # noqa: ANN401
+    async def build(**config: object) -> tuple[Any, Any, Any]:
         row = {**HARNESS_ROW, "config": config} if config else HARNESS_ROW
         ctx = await mount(row)
         session = ctx.require(SESSIONS).create("planning")
@@ -87,11 +87,11 @@ def script(ctx: Context, *, review: str = NO, planner: str = "{}") -> list[Gener
     return ctx.require(LLM_FAKE).requests
 
 
-def turn(session: Any, index: int = 1) -> None:  # noqa: ANN401
+def turn(session: Session, index: int = 1) -> None:
     session.append("turn/end", {"turn": index, "reason": {"kind": "completed"}})
 
 
-def say(session: Any, text: str, message_id: str = "m1") -> Any:  # noqa: ANN401
+def say(session: Session, text: str, message_id: str = "m1") -> Any:  # noqa: ANN401
     return session.append("user/message", user_payload(text, message_id), SurfaceIntent("append"))
 
 

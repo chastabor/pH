@@ -33,6 +33,7 @@ from typing import Any
 
 import pytest
 
+from ph.cordis import Context
 from ph.keys import AGENTS, SESSIONS, SKILLS, SUBAGENTS, SYSTEM_PROMPT, TOOLS
 from ph.seams._restriction import NameFilter
 from ph.seams.skills import SkillRestriction
@@ -51,13 +52,13 @@ from ph.testing import (
 pytestmark = pytest.mark.anyio
 
 
-def _agent(ctx: Any, name: str = "parent", *, parent: Any = None) -> Any:  # noqa: ANN401
+def _agent(ctx: Context, name: str = "parent", *, parent: Any = None) -> Any:  # noqa: ANN401
     return ctx.require(AGENTS).create(
         ctx.require(SESSIONS).create(name), FAKE_OPTIONS, parent=parent
     )
 
 
-async def _spawn(ctx: Any, parent: Any, **request: Any) -> Any:  # noqa: ANN401
+async def _spawn(ctx: Context, parent: Any, **request: Any) -> Any:  # noqa: ANN401
     """One delegation through the seam, which is where the ceiling lives.
 
     Through `start` rather than by applying a grant by hand: the refusal, the
@@ -412,7 +413,7 @@ async def test_a_child_without_the_tool_is_not_told_to_use_it(
 # `parent=` nests the scope; these hold what that buys.
 
 
-def _agents(ctx: Any) -> tuple[Any, Any]:  # noqa: ANN401
+def _agents(ctx: Context) -> tuple[Any, Any]:
     """A parent and a child agent, created the way a spawn creates them.
 
     Through `_agent`, so these carry `FAKE_OPTIONS` like every other agent in the

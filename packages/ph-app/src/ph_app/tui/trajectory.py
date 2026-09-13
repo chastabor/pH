@@ -173,7 +173,7 @@ def _source_ref(message: Mapping[str, Any]) -> SourceRef:
     return SourceRef(kind=kind, name=name, form=form)
 
 
-def _text(blocks: Any) -> str:  # noqa: ANN401
+def _text(blocks: object) -> str:
     """The visible text of wire content, with other blocks named rather than
     dropped — an auditor wants to see that an image was there."""
     return text_of_wire(blocks, placeholder=lambda kind: f"[{kind}]")

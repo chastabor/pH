@@ -26,6 +26,7 @@ from typing import Any, ClassVar, Literal
 import anyio
 import pytest
 
+from ph.agent.types import AgentHandle
 from ph.cordis import DEPLOYMENT, Context, InactiveScopeError
 from ph.seams._names import SLUG_CHARACTERS
 from ph.seams.approval import ApprovalRequest, ApprovalService, Edited, pending_approvals
@@ -74,7 +75,7 @@ async def test_approval_records_both_halves_and_returns_the_outcome() -> None:
     service = ApprovalService(ctx=root)
     session = Session("s")
 
-    async def answerer(request: ApprovalRequest, next_: Any) -> str:  # noqa: ANN401
+    async def answerer(request: ApprovalRequest, next_: object) -> str:
         return "allowed-once"
 
     root.on("approval/request", answerer)
@@ -88,7 +89,7 @@ async def test_register_answerer_is_the_waterfall_by_another_name() -> None:
     service = ApprovalService(ctx=root)
     session = Session("s")
 
-    async def answerer(request: ApprovalRequest, next_: Any) -> str:  # noqa: ANN401
+    async def answerer(request: ApprovalRequest, next_: object) -> str:
         return "rejected"
 
     # One routing mechanism. A front-end reaching for the discoverable method
@@ -111,7 +112,7 @@ async def test_an_answerer_that_raises_denies() -> None:
     session = Session("s")
     service = ApprovalService(ctx=root)
 
-    async def broken(request: ApprovalRequest, next_: Any) -> str:  # noqa: ANN401
+    async def broken(request: ApprovalRequest, next_: object) -> str:
         raise RuntimeError("the UI fell over")
 
     root.on("approval/request", broken)
@@ -134,7 +135,7 @@ async def test_an_answerer_cannot_decide_what_the_asking_row_withheld() -> None:
     service = ApprovalService(ctx=root)
     session = Session("s")
 
-    async def answerer(request: ApprovalRequest, next_: Any) -> Any:  # noqa: ANN401
+    async def answerer(request: ApprovalRequest, next_: object) -> Any:  # noqa: ANN401
         return Edited(arguments={"path": "elsewhere"})
 
     root.on("approval/request", answerer)
@@ -496,10 +497,10 @@ async def test_only_one_engine_may_hold_the_seam() -> None:
     seam = CompactionSeam(ctx=Context())
 
     class Engine:
-        async def compact_if_needed(self, agent: Any, trigger: Any) -> Any:  # noqa: ANN401
+        async def compact_if_needed(self, agent: AgentHandle, trigger: object) -> Any:  # noqa: ANN401
             return None
 
-        async def compact_now(self, agent: Any, *, instructions: str = "") -> Any:  # noqa: ANN401
+        async def compact_now(self, agent: AgentHandle, *, instructions: str = "") -> Any:  # noqa: ANN401
             return None
 
     release = seam.register(Engine())
@@ -607,7 +608,7 @@ async def test_a_persistent_runtime_must_promise_to_snapshot() -> None:
         isolation: ClassVar[Literal["process"]] = "process"
         persistence: ClassVar[Literal["namespace"]] = "namespace"
 
-        async def run(self, request: Any) -> Any: ...  # noqa: ANN401
+        async def run(self, request: object) -> Any: ...  # noqa: ANN401
 
     with pytest.raises(PersistenceObligationError) as caught:
         seam.register(Forgetful())
@@ -630,7 +631,7 @@ async def test_a_stateless_runtime_registers_freely() -> None:
         isolation: ClassVar[Literal["process"]] = "process"
         persistence: ClassVar[Literal["none"]] = "none"
 
-        async def run(self, request: Any) -> Any: ...  # noqa: ANN401
+        async def run(self, request: object) -> Any: ...  # noqa: ANN401
 
     seam.register(Fresh())
     assert seam.provider is not None
@@ -710,7 +711,7 @@ async def test_a_failing_command_still_records_its_outcome() -> None:
     registry = CommandRegistry(ctx=root)
     session = Session("s")
 
-    def broken(_arg: str, _ctx: Any) -> str:  # noqa: ANN401
+    def broken(_arg: str, _ctx: object) -> str:
         raise ValueError("bad argument")
 
     registry.register(CommandDefinition(name="oops", summary="fails", run=broken))
@@ -848,7 +849,7 @@ async def test_a_failed_job_frees_its_slot() -> None:
     root = Context()
     service = JobService(ctx=root)
 
-    def explode(_job: Any) -> None:  # noqa: ANN401
+    def explode(_job: object) -> None:
         raise RuntimeError("fell over")
 
     first = await service.start(kind="test", label="boom", run=explode, slot=("k", 1))

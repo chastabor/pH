@@ -24,6 +24,7 @@ from typing import Any
 
 import pytest
 
+from ph.cordis import Context
 from ph.keys import AGENTS, COMMANDS, FS, SESSIONS, WORKSPACE
 from ph.seams.workspace import WorkspaceRecord
 from ph.testing import FAKE_OPTIONS, MountProfile
@@ -52,7 +53,7 @@ async def _tiered(
     return ctx, base
 
 
-async def _left_behind(ctx: Any, base: Path, agent_id: str, *, work: bool) -> Path:  # noqa: ANN401
+async def _left_behind(ctx: Context, base: Path, agent_id: str, *, work: bool) -> Path:
     """One disposed agent, left behind by the policy itself.
 
     Returns the (now removed) checkout path, because a few tests need to say that
@@ -71,7 +72,7 @@ async def _left_behind(ctx: Any, base: Path, agent_id: str, *, work: bool) -> Pa
     return root
 
 
-async def _run(ctx: Any, argument: str = "") -> str:  # noqa: ANN401
+async def _run(ctx: Context, argument: str = "") -> str:
     shown = await ctx.require(COMMANDS).dispatch(f"/workspaces {argument}".strip())
     assert shown is not None
     return str(shown)

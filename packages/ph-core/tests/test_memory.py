@@ -35,7 +35,8 @@ from unittest.mock import patch
 
 import pytest
 
-from ph.cordis import DEPLOYMENT
+from ph.agent.types import AgentDriver
+from ph.cordis import DEPLOYMENT, Context
 from ph.keys import AGENTS, SESSIONS, SYSTEM_PROMPT, WORKSPACE
 from ph.paths import write_text_under
 from ph.system_prompt.assembly import AssembleContext
@@ -58,7 +59,7 @@ def _write(path: Path, text: str) -> Path:
     return path
 
 
-async def _assembled(ctx: Any, agent: Any = None) -> str:  # noqa: ANN401
+async def _assembled(ctx: Context, agent: AgentDriver | None = None) -> str:
     """The memory snapshot as this profile would render it, or `""`.
 
     Filtered by name rather than using `join_context_sections`, because what is

@@ -15,8 +15,10 @@ from typing import Any
 import pytest
 from rlm_fixtures import MESSAGING_ROW, PROVIDER_ROW, MountedRuntime
 
+from ph.cordis import Context
 from ph.keys import AGENTS, JOBS, SESSIONS, SUBAGENTS
 from ph.seams.subagents import SubagentRequest, family_reach, reachable_family
+from ph.session import Session
 from ph.testing import FAKE_OPTIONS, MountProfile, run_tool
 from ph.tools import Allow
 from ph_rlm.keys import RLM_CHILDREN
@@ -38,7 +40,7 @@ ROWS: list[dict[str, Any]] = [PROVIDER_ROW, MESSAGING_ROW]
 def family_ctx(mount: MountProfile) -> Callable[..., Any]:
     """`await family_ctx()` → `(ctx, parent_session, parent)` with messaging on."""
 
-    async def build(**config: Any) -> tuple[Any, Any, Any]:  # noqa: ANN401
+    async def build(**config: object) -> tuple[Any, Any, Any]:
         rows = [dict(ROWS[0]), dict(ROWS[1])]
         if config:
             rows[1]["config"] = config
@@ -49,7 +51,7 @@ def family_ctx(mount: MountProfile) -> Callable[..., Any]:
     return build
 
 
-async def _spawn(ctx: Any, parent: Any, name: str) -> Any:  # noqa: ANN401
+async def _spawn(ctx: Context, parent: Any, name: str) -> Any:  # noqa: ANN401
     return await ctx.require(SUBAGENTS).start(
         PROVIDER_NAME, SubagentRequest(prompt=f"work on {name}", parent=parent, name=name)
     )
@@ -57,7 +59,7 @@ async def _spawn(ctx: Any, parent: Any, name: str) -> Any:  # noqa: ANN401
 
 async def _siblings(
     family_ctx: MountedRuntime,
-    **config: Any,  # noqa: ANN401
+    **config: object,
 ) -> tuple[Any, Any, Any, Any]:
     """Two root agents, which the reach rule makes siblings of each other.
 
@@ -70,13 +72,13 @@ async def _siblings(
     return ctx, first_session, first, ctx.require(AGENTS).create(second_session, FAKE_OPTIONS)
 
 
-def _agent(ctx: Any, run: Any) -> Any:  # noqa: ANN401
+def _agent(ctx: Context, run: Any) -> Any:  # noqa: ANN401
     agent = ctx.require(AGENTS).get(run.session_id)
     assert agent is not None, "the child agent is not running"
     return agent
 
 
-async def _send(ctx: Any, sender: Any, session: Any, **arguments: Any) -> Any:  # noqa: ANN401
+async def _send(ctx: Context, sender: Any, session: Session, **arguments: Any) -> Any:  # noqa: ANN401
     return await run_tool(ctx, SEND_TOOL, arguments, agent=sender, session=session)
 
 
@@ -128,10 +130,12 @@ async def test_a_child_reaches_its_parent(family_ctx: MountedRuntime) -> None:
     run = await _spawn(ctx, parent, "scout")
     child = _agent(ctx, run)
 
+    child_session = ctx.require(SESSIONS).get(run.session_id)
+    assert child_session is not None
     result = await _send(
         ctx,
         child,
-        ctx.require(SESSIONS).get(run.session_id),
+        child_session,
         message="found it",
         receiver_role="parent",
     )
@@ -149,9 +153,9 @@ async def test_the_message_reaches_the_target_verbatim(family_ctx: MountedRuntim
     child = _agent(ctx, run)
 
     body = "the bug is in parser.py line 40"
-    await _send(
-        ctx, child, ctx.require(SESSIONS).get(run.session_id), message=body, receiver_role="parent"
-    )
+    child_session = ctx.require(SESSIONS).get(run.session_id)
+    assert child_session is not None
+    await _send(ctx, child, child_session, message=body, receiver_role="parent")
     delivered = [
         repr(event.data)
         for event in session.events
@@ -385,10 +389,12 @@ async def test_a_childs_send_records_that_it_replied(family_ctx: MountedRuntime)
     run = await _spawn(ctx, parent, "scout")
     child = _agent(ctx, run)
 
+    child_session = ctx.require(SESSIONS).get(run.session_id)
+    assert child_session is not None
     sent = await _send(
         ctx,
         child,
-        ctx.require(SESSIONS).get(run.session_id),
+        child_session,
         message="here it is",
         receiver_role="parent",
     )

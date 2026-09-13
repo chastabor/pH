@@ -27,6 +27,7 @@ from tui_helpers import MakeApp, root_of, running, until
 import ph_app.tui.app
 from ph.keys import TUI_STATUS
 from ph.seams.tui_status import StatusField, StatusReading
+from ph.session import Session
 
 pytestmark = pytest.mark.anyio
 
@@ -157,7 +158,7 @@ async def test_the_footer_is_folded_on_change_and_not_per_frame(
         assert front is not None
         folds = 0
 
-        def counted(session: object) -> StatusReading:
+        def counted(session: Session) -> StatusReading:
             nonlocal folds
             folds += 1
             return StatusReading(text="probe")

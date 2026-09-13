@@ -54,6 +54,7 @@ from stabilize_helpers import (
     scoped_agent,
 )
 
+from ph.agent.types import AgentDriver
 from ph.cordis import DEPLOYMENT
 from ph.keys import AGENTS, FS, SANDBOX, SESSIONS, WORKSPACE
 from ph.llm.types import ToolCallBlock
@@ -82,7 +83,7 @@ pytestmark = pytest.mark.anyio
 def _policy(*rules: Rule, root: str = "/w") -> FsPermissions:
     """The decision half on its own, for the questions no tool can ask yet."""
 
-    def roots(agent: Any = None) -> Path:  # noqa: ANN401
+    def roots(agent: AgentDriver | None = None) -> Path:
         return getattr(agent, "root", None) or Path(root)
 
     return FsPermissions(rules=rules, roots=roots)
@@ -375,7 +376,8 @@ async def test_interrupt_asks_and_the_answer_decides(mount: MountProfile, tmp_pa
     """
     (tmp_path / "notes.md").write_text("hello\n", encoding="utf-8")
     ctx = await _mounted(mount, tmp_path, {"paths": ["notes.md"], "mode": "interrupt"})
-    agent = StubAgent(ctx, ctx.require(SESSIONS).create("asked"))
+    session = ctx.require(SESSIONS).create("asked")
+    agent = StubAgent(ctx, session)
     answers: list[str] = ["allowed-once"]
     answer_approvals(ctx, lambda: answers[0])
 
@@ -386,7 +388,7 @@ async def test_interrupt_asks_and_the_answer_decides(mount: MountProfile, tmp_pa
     # The seam's own sentence, so a model can tell a human's "no" from a missing
     # channel — only one of the two is worth re-planning around.
     assert "the user rejected" in str(refused.value)
-    assert events_of(agent.session, "approval/decided")
+    assert events_of(session, "approval/decided")
 
 
 async def test_interrupt_without_an_answerer_denies(mount: MountProfile, tmp_path: Path) -> None:
@@ -434,12 +436,13 @@ async def test_a_rule_may_carry_its_own_words_for_the_prompt(
         tmp_path,
         {"paths": ["notes.md"], "mode": "interrupt", "description": "shared team notes"},
     )
-    agent = StubAgent(ctx, ctx.require(SESSIONS).create("described"))
+    session = ctx.require(SESSIONS).create("described")
+    agent = StubAgent(ctx, session)
     answer_approvals(ctx, lambda: "rejected")
 
     with pytest.raises(FsDenied):
         await ctx.require(FS).read("notes.md", agent=agent, scope=DEPLOYMENT)
-    (asked,) = events_of(agent.session, "approval/asked")
+    (asked,) = events_of(session, "approval/asked")
     assert asked.data["reason"] == "shared team notes"
 
 

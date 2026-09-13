@@ -110,7 +110,7 @@ def wire(monkeypatch: pytest.MonkeyPatch) -> _FileApi:
     async def post_multipart(
         self: HttpClient,
         url: str,
-        **kwargs: Any,  # noqa: ANN401
+        **kwargs: object,
     ) -> dict[str, Any]:
         return {"id": api.issue()}
 

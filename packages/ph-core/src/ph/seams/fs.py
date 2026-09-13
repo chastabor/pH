@@ -645,7 +645,7 @@ class FsService:
         reaches everything, so the same listeners run in the same order.
         """
 
-        async def inner(_intent: Any) -> str | None:  # noqa: ANN401
+        async def inner(_intent: object) -> str | None:
             return None
 
         # The boundary the intent was *judged in*, carried on the intent itself
@@ -1004,7 +1004,7 @@ async def apply(ctx: Context, config: Config) -> None:
     if not ignored:
         return
 
-    def ignore(_path: str, name: str, _agent: Any, is_dir: bool) -> WalkDecision:  # noqa: ANN401
+    def ignore(_path: str, name: str, _agent: object, is_dir: bool) -> WalkDecision:
         """The ignore list as an ordinary screen, not as a branch inside the walk.
 
         **Directories only**: the constant is matched against directory names, so a file

@@ -115,7 +115,7 @@ def test_a_fold_that_reads_outside_the_log_is_caught(read: Any, named: str) -> N
 def test_a_fold_with_hidden_state_is_caught() -> None:
     calls = [0]
 
-    def remembers(log: Any) -> int:  # noqa: ANN401
+    def remembers(log: object) -> int:
         calls[0] += 1
         return calls[0]
 
@@ -133,7 +133,7 @@ def test_a_fold_that_writes_to_the_log_is_refused_before_anything_else() -> None
 
 
 def test_extending_over_nothing_must_change_nothing() -> None:
-    def always_one_more(previous: int, log: Any, from_seq: int) -> int:  # noqa: ANN401
+    def always_one_more(previous: int, log: object, from_seq: int) -> int:
         return _more_turns(previous, log, from_seq) + 1
 
     findings = check_fold_laws(_turn_log(), _turns, always_one_more)

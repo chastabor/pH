@@ -60,7 +60,7 @@ class Namespace:
                 f"{', '.join(sorted(self._bindings)) or '(none)'}"
             )
 
-        async def call(**arguments: Any) -> Any:  # noqa: ANN401
+        async def call(**arguments: object) -> Any:  # noqa: ANN401
             return await self._dispatch(self._name, name, arguments)
 
         call.__name__ = name
@@ -73,7 +73,7 @@ class RlmNamespace(Namespace):
 
     RUN = "run"
 
-    async def __call__(self, prompt: str, **kwargs: Any) -> Any:  # noqa: ANN401
+    async def __call__(self, prompt: str, **kwargs: object) -> Any:  # noqa: ANN401
         unknown = sorted(set(kwargs) - set(RLM_KWARGS))
         if unknown:
             raise TypeError(

@@ -655,7 +655,7 @@ async def apply(ctx: Context, config: Config) -> None:
             scope=scope,
         )
 
-    async def install(argument: str, command: Any) -> str:  # noqa: ANN401
+    async def install(argument: str, command: object) -> str:
         """`/text-index install` — fetch and load the model, now, on purpose.
 
         A **command** and not a tool, per the seam's own rule: this is a thing

@@ -356,7 +356,7 @@ class TuiEventAdapter:
     def _present_result(
         self,
         card: ToolCard,
-        meta: Any,  # noqa: ANN401
+        meta: object,
         arrived: ToolCallView | ToolResultView | None,
     ) -> None:
         view = (

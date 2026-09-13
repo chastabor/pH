@@ -39,7 +39,7 @@ class PluginSpec:
     inject: tuple[str, ...] = ()
     config_model: type[BaseModel] | None = None
 
-    def resolve_config(self, raw: Any) -> BaseModel | None:  # noqa: ANN401
+    def resolve_config(self, raw: object) -> BaseModel | None:
         """Validate a row's raw config against the plugin's model.
 
         **A plugin without a model takes no config, and is handed `None`.** It
@@ -115,7 +115,7 @@ def plugin(
     return decorate
 
 
-def normalize_plugin(source: Any) -> PluginSpec:  # noqa: ANN401
+def normalize_plugin(source: object) -> PluginSpec:
     """Coerce a decorated function, a module, or a plugin object into a spec."""
     if isinstance(source, PluginSpec):
         return source

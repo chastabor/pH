@@ -199,7 +199,7 @@ class SessionEvent(WireDataclass):
         return wire
 
     @classmethod
-    def from_wire(cls, wire: Any) -> SessionEvent:  # noqa: ANN401
+    def from_wire(cls, wire: object) -> SessionEvent:
         """Rebuild an event from its JSON form, validating the envelope."""
         parsed = _EventWire.model_validate(wire)
         return cls(

@@ -1223,7 +1223,7 @@ class WorkspaceSeam:
         self,
         workspace: Workspace,
         agent_id: str,
-        **extra: Any,  # noqa: ANN401
+        **extra: object,
     ) -> dict[str, Any]:
         payload = pair_payload(agent_id, workspace.ref, **extra)
         # The reason rides the closing half, because that is the half a fold
@@ -1879,7 +1879,7 @@ def family_survivors(sessions: Sequence[Session], agent_id: str) -> list[Workspa
     ]
 
 
-def pair_payload(agent_id: str, ref: str | None, **extra: Any) -> dict[str, Any]:  # noqa: ANN401
+def pair_payload(agent_id: str, ref: str | None, **extra: object) -> dict[str, Any]:
     """The keys both halves of the durable pair share, spelled once.
 
     `ref` rides both so a reader can say which branch a turn ran against without

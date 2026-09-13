@@ -1047,7 +1047,7 @@ class ToolRuntime:
         return result
 
 
-def _discard(items: list[Any], target: Any) -> None:  # noqa: ANN401
+def _discard(items: list[Any], target: object) -> None:
     with suppress(ValueError):  # already released
         items.remove(target)
 
@@ -1073,7 +1073,7 @@ def _message_from_content(content: Sequence[Any]) -> str:
 
 
 def _unresolved(
-    _args: Any,  # noqa: ANN401
+    _args: object,
     _run: ToolRunContext,
 ) -> Any:  # pragma: no cover - never dispatched  # noqa: ANN401
     raise ToolNotFoundError("<unresolved>")

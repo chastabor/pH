@@ -279,7 +279,7 @@ async def test_a_binding_call_round_trips_through_the_host(make_kernel: MakeKern
     """C1 at the runtime layer: one `call` frame out, one `reply` back."""
     seen: list[dict[str, Any]] = []
 
-    async def read(**arguments: Any) -> Any:  # noqa: ANN401
+    async def read(**arguments: object) -> Any:  # noqa: ANN401
         seen.append(arguments)
         return {"text": "file contents"}
 
@@ -297,7 +297,7 @@ async def test_concurrent_binding_calls_overlap(make_kernel: MakeKernel) -> None
     """`asyncio.gather` in a cell is what makes fan-out cheaper than N native calls."""
     import anyio
 
-    async def slow(**arguments: Any) -> Any:  # noqa: ANN401
+    async def slow(**arguments: object) -> Any:  # noqa: ANN401
         await anyio.sleep(0.1)
         return arguments["n"]
 
@@ -324,7 +324,7 @@ async def test_a_refusal_ends_the_run_and_the_program_cannot_catch_it(
     the refusal in it.
     """
 
-    async def refused(**_arguments: Any) -> Any:  # noqa: ANN401
+    async def refused(**_arguments: object) -> Any:  # noqa: ANN401
         raise CodeRunFailure("denied", "tools.edit was refused: outside the workspace")
 
     namespace = tools(edit=refused)
@@ -360,7 +360,7 @@ async def test_a_refused_cell_is_stopped_before_it_can_write_anyway(
     """
     target = tmp_path / "written-after-the-refusal.txt"
 
-    async def refused(**_arguments: Any) -> Any:  # noqa: ANN401
+    async def refused(**_arguments: object) -> Any:  # noqa: ANN401
         raise CodeRunFailure("denied", "tools.edit was refused: outside the workspace")
 
     namespace = tools(edit=refused)
@@ -387,7 +387,7 @@ async def test_a_refused_cell_is_stopped_before_it_can_write_anyway(
 async def test_a_failed_call_is_the_programs_to_handle(make_kernel: MakeKernel) -> None:
     """C3's other half: a *failure* keeps dsh's semantics and stays catchable."""
 
-    async def failing(**_arguments: Any) -> Any:  # noqa: ANN401
+    async def failing(**_arguments: object) -> Any:  # noqa: ANN401
         raise ToolCallError("read", "no such file")
 
     namespace = tools(read=failing)
@@ -474,7 +474,7 @@ async def test_close_is_idempotent(make_kernel: MakeKernel) -> None:
     await kernel.aclose()
 
 
-async def _ok(**_arguments: Any) -> Any:  # noqa: ANN401
+async def _ok(**_arguments: object) -> Any:  # noqa: ANN401
     return None
 
 

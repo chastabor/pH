@@ -69,7 +69,7 @@ def _plan(session: Session) -> list[tuple[str, str]]:
 
 
 async def _run(
-    ctx: Any,  # noqa: ANN401
+    ctx: Context,
     session: Session,
     *calls: ToolCallBlock,
     step: int = 1,

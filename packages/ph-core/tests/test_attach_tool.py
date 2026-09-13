@@ -17,13 +17,14 @@ result: what matters is that the model was shown the file.
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
 import pytest
 from test_dimensions import png
 
-from ph.agent.types import AgentOptions
+from ph.agent.types import AgentDriver, AgentOptions
 from ph.cancel import CancelToken
 from ph.cordis import Context
 from ph.json import dumps
@@ -50,7 +51,7 @@ async def _agent(ctx: Context, name: str) -> Any:  # noqa: ANN401
 
 async def _dispatch(
     ctx: Context,
-    agent: Any,  # noqa: ANN401
+    agent: AgentDriver,
     name: str,
     arguments: Any,  # noqa: ANN401
 ) -> list[Any]:
@@ -60,7 +61,7 @@ async def _dispatch(
     def accept(context: Any) -> None:  # noqa: ANN401
         agent.inbox.append("next-step", context)
 
-    def keep(_execution: Any, result: Any) -> None:  # noqa: ANN401
+    def keep(_execution: object, result: object) -> None:
         results.append(result)
 
     ctx.on("tools/result", keep)
@@ -157,7 +158,7 @@ async def test_the_read_gate_bounds_what_a_model_may_attach(
     secret.write_bytes(PNG)
     agent = await _agent(ctx, "denied")
 
-    async def refuse(intent: Any, next_: Any) -> Any:  # noqa: ANN401
+    async def refuse(intent: Any, next_: Callable[..., Awaitable[Any]]) -> Any:  # noqa: ANN401
         return "keys are not readable" if intent.path.name.startswith("id_rsa") else await next_()
 
     ctx.on("fs/read-intent", refuse)

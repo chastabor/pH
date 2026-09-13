@@ -98,7 +98,7 @@ def _model_schema(model: type[BaseModel]) -> dict[str, Any]:
     return model.model_json_schema()
 
 
-def unsupported_keywords(schema: Any) -> set[str]:  # noqa: ANN401
+def unsupported_keywords(schema: object) -> set[str]:
     """Every keyword in `schema` that this validator does not enforce.
 
     Reported rather than assumed: a schema pH cannot fully check should be
@@ -201,7 +201,7 @@ def _check_bounds(
 
 
 def _validate(
-    schema: Any,  # noqa: ANN401
+    schema: object,
     value: object,
     path: str,
     root: dict[str, Any],

@@ -41,7 +41,7 @@ from typing import Any
 import numpy as np
 import pytest
 
-from ph.cordis import DEPLOYMENT
+from ph.cordis import DEPLOYMENT, Context
 from ph.keys import AGENTS, COMMANDS, FS, SESSIONS, SKILLS, SYSTEM_PROMPT, TOOLS
 from ph.llm.types import text_of
 from ph.testing import FAKE_OPTIONS, MountProfile, report_section, run_tool
@@ -97,7 +97,7 @@ class HashingEmbedder:
 _SEQ = itertools.count()
 
 
-def _agent(ctx: Any) -> Any:  # noqa: ANN401
+def _agent(ctx: Context) -> Any:  # noqa: ANN401
     """A fresh agent, on a session id nothing else has taken.
 
     Counted rather than fixed: a test needing two agents would otherwise collide
@@ -112,7 +112,7 @@ def _agent(ctx: Any) -> Any:  # noqa: ANN401
 async def _mounted(
     mount: MountProfile,
     tmp_path: Path,
-    **config: Any,  # noqa: ANN401
+    **config: object,
 ) -> tuple[Any, HashingEmbedder]:
     """The seam, plus a stub embedder claimed the way a provider row claims one.
 
@@ -824,7 +824,7 @@ async def test_preload_refuses_the_mount_rather_than_failing_mid_turn(
     from ph.cordis import MountRefusal
     from ph_text_index._embed import SentenceTransformerEmbedder
 
-    def explode(self: Any) -> int:  # noqa: ANN401
+    def explode(self: object) -> int:
         raise RuntimeError("requires the following packages ...: einops")
 
     monkeypatch.setattr(SentenceTransformerEmbedder, "load", explode)
@@ -851,7 +851,7 @@ async def test_without_preload_the_mount_survives_a_model_that_cannot_load(
     """
     from ph_text_index._embed import SentenceTransformerEmbedder
 
-    def explode(self: Any) -> int:  # noqa: ANN401
+    def explode(self: object) -> int:
         raise RuntimeError("no network")
 
     monkeypatch.setattr(SentenceTransformerEmbedder, "load", explode)

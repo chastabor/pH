@@ -40,6 +40,7 @@ from typing import Any
 
 import pytest
 
+from ph.cordis import Context
 from ph.keys import AGENTS, COMMANDS, FS, SESSIONS, SKILLS, SYSTEM_PROMPT, TOOLS
 from ph.llm.types import text_of
 from ph.testing import FAKE_OPTIONS, MountProfile, report_section, run_tool
@@ -132,7 +133,7 @@ def _grammar_cache(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Path]:
 _SEQ = itertools.count()
 
 
-def _agent(ctx: Any) -> Any:  # noqa: ANN401
+def _agent(ctx: Context) -> Any:  # noqa: ANN401
     """A fresh agent, on a session id nothing else has taken.
 
     Counted rather than fixed: a test that needs two agents (an index call and a
@@ -150,7 +151,7 @@ def _tree(root: Path) -> None:
     (root / "pkg" / "helpers.py").write_text(OTHER, encoding="utf-8")
 
 
-async def _indexed(mount: MountProfile, tmp_path: Path, **config: Any) -> Any:  # noqa: ANN401
+async def _indexed(mount: MountProfile, tmp_path: Path, **config: object) -> Any:  # noqa: ANN401
     settings = {"path": str(tmp_path / "graph.db"), **config}
     ctx = await mount({**ROW, "config": settings})
     return ctx

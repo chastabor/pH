@@ -39,7 +39,7 @@ from ph.testing import MountProfile, StubSandboxProvider, not_none, report_secti
 pytestmark = pytest.mark.anyio
 
 
-def _allow(**config: Any) -> dict[str, Any]:  # noqa: ANN401
+def _allow(**config: object) -> dict[str, Any]:
     return {"id": "sandbox-allow", "config": config}
 
 

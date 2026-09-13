@@ -559,7 +559,7 @@ def survey_attachments(
     )
 
 
-def _stale_uploads(uploads: Any, referenced: set[str]) -> tuple[Path, ...]:  # noqa: ANN401
+def _stale_uploads(uploads: object, referenced: set[str]) -> tuple[Path, ...]:
     """Handle-cache entries for blobs nothing points at any more (P7-03).
 
     The other half of the same question, and the reason `ctx.uploads` says a sweep

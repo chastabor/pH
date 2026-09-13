@@ -51,7 +51,7 @@ from ph_stabilize.hitl import set_mode
 pytestmark = pytest.mark.anyio
 
 
-def _gated(mode: str = "auto", **rules: Any) -> dict[str, Any]:  # noqa: ANN401
+def _gated(mode: str = "auto", **rules: object) -> dict[str, Any]:
     """The row with one rule per named tool, spelled the way a profile spells it."""
     return row("hitl", mode=mode, interruptOn=rules)
 

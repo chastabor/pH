@@ -40,6 +40,7 @@ import anyio
 import pytest
 from rlm_fixtures import PROVIDER_ROW, MountedRuntime
 
+from ph.cordis import Context
 from ph.json import as_obj
 from ph.keys import AGENTS, SESSIONS, SKILLS, SUBAGENTS, TOOLS, WORKSPACE
 from ph.llm.types import text_of
@@ -57,7 +58,7 @@ from ph.seams.subagents import (
     subagent_roster,
 )
 from ph.seams.workspace import workspace_survivors
-from ph.session import derive_event_message
+from ph.session import Session, derive_event_message
 from ph.testing import FAKE_OPTIONS, MountProfile, StubWorkspaceProvider, not_none, skill
 from ph.testing.git import WORKTREE_ROWS, git_repo
 from ph_rlm.keys import RLM_CHILDREN
@@ -70,7 +71,7 @@ pytestmark = pytest.mark.anyio
 def delegating(mount: MountProfile) -> Callable[..., Any]:
     """`await delegating()` → `(ctx, parent_session, parent)` with the provider on."""
 
-    async def build(**config: Any) -> tuple[Any, Any, Any]:  # noqa: ANN401
+    async def build(**config: object) -> tuple[Any, Any, Any]:
         rows = [dict(PROVIDER_ROW)]
         if config:
             rows[0]["config"] = config
@@ -82,7 +83,7 @@ def delegating(mount: MountProfile) -> Callable[..., Any]:
 
 
 async def _spawn(
-    ctx: Any,  # noqa: ANN401
+    ctx: Context,
     parent: Any,  # noqa: ANN401
     prompt: str = "research the thing",
     **kwargs: Any,  # noqa: ANN401
@@ -309,7 +310,7 @@ def gate(monkeypatch: pytest.MonkeyPatch) -> Iterator[_Gate]:
     held.release_all()
 
 
-def _statuses(session: Any, run_id: str) -> list[str]:  # noqa: ANN401
+def _statuses(session: Session, run_id: str) -> list[str]:
     """Every status this child reached, in order. One spelling, three readers."""
     return [
         str(event.data["status"])
@@ -318,7 +319,7 @@ def _statuses(session: Any, run_id: str) -> list[str]:  # noqa: ANN401
     ]
 
 
-def _notices(session: Any) -> list[str]:  # noqa: ANN401
+def _notices(session: Session) -> list[str]:
     """Notices delivered to the parent's inbox but not yet claimed by a step.
 
     `inject` is deliberately non-waking, so the notice lands as a splice and
@@ -602,7 +603,7 @@ async def test_a_rehydrated_child_is_narrowed_again(delegating: MountedRuntime) 
 
 
 async def _tiered_child(
-    ctx: Any,  # noqa: ANN401
+    ctx: Context,
     parent: Any,  # noqa: ANN401
     tmp_path: Path,
     prompt: str,
@@ -923,7 +924,7 @@ async def test_deleting_a_queued_child_stops_its_wait_and_takes_no_slot(
 # ------------------------------------------------------------ across a restart --
 
 
-async def _persisted(ctx: Any, session: Any) -> None:  # noqa: ANN401
+async def _persisted(ctx: Context, session: Session) -> None:
     """Put on disk what a restart will read, with the harness holding still.
 
     A flush and nothing else. The first harness is parked at the model for the
@@ -1048,7 +1049,7 @@ async def test_a_child_caught_mid_turn_climbs_the_ladder_with_its_task_re_presen
     assert "this is attempt 2" in tasks[-1]
 
 
-def _resumed(session: Any, run_id: str, times: int) -> None:  # noqa: ANN401
+def _resumed(session: Session, run_id: str, times: int) -> None:
     """Record `times` restarts, the way a restart actually records one.
 
     The real facts rather than a seeded count: the ladder folds `running` records
@@ -1060,9 +1061,9 @@ def _resumed(session: Any, run_id: str, times: int) -> None:  # noqa: ANN401
 
 
 async def _stalled(
-    ctx: Any,  # noqa: ANN401
-    session: Any,  # noqa: ANN401
-    parent: Any,  # noqa: ANN401
+    ctx: Context,
+    session: Session,
+    parent: object,
     gate: _Gate,
     *,
     restarts: int,

@@ -191,5 +191,5 @@ async def test_concurrency_classification_defaults_to_exclusive() -> None:
     assert mode("absent") == "exclusive"
 
 
-def _unused(value: Any) -> Any:  # pragma: no cover  # noqa: ANN401
+def _unused(value: object) -> Any:  # pragma: no cover  # noqa: ANN401
     return value

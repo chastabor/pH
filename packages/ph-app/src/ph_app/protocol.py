@@ -38,6 +38,7 @@ from typing import Any, Literal, NotRequired, TypeAlias, TypedDict
 from pydantic import Field, ValidationError
 
 from ph.json import as_str
+from ph.session import Session
 from ph.wire import WireModel, validation_errors
 
 __all__ = [
@@ -362,7 +363,7 @@ class Cursor(WireModel):
     sequence: int
 
 
-def cursor_of(session: Any, sequence: int | None = None) -> Cursor:  # noqa: ANN401
+def cursor_of(session: Session, sequence: int | None = None) -> Cursor:
     """A session's position as a `Cursor`; `to_wire()` puts it in a reply.
 
     Here rather than on the daemon's `Root`, because it is a fact about a
@@ -395,7 +396,7 @@ def cursor_text(cursor: Cursor) -> str:
     return f"{cursor.generation}:{cursor.sequence}"
 
 
-def parse_cursor(text: str, current: Any) -> Cursor | None:  # noqa: ANN401
+def parse_cursor(text: str, current: object) -> Cursor | None:
     """`GENERATION:SEQ` or a bare `SEQ`, as a cursor — or `None` if it is neither.
 
     Two spellings, and only one of them can be checked. The full form is a cursor
@@ -421,7 +422,7 @@ def parse_cursor(text: str, current: Any) -> Cursor | None:  # noqa: ANN401
     return Cursor(generation=generation, sequence=int(sequence))
 
 
-def resume_at(session: Any, cursor: Cursor | None) -> int:  # noqa: ANN401
+def resume_at(session: Session, cursor: Cursor | None) -> int:
     """The index a cursor asks to resume from, or 0 when it cannot say.
 
     A cursor from another incarnation of the log is neither honoured nor

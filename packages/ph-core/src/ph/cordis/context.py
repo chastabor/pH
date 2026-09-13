@@ -73,14 +73,14 @@ _MAX_RECONCILE_ROUNDS = 64
 _MISSING: Any = object()
 
 
-async def maybe_await(value: Any) -> Any:  # noqa: ANN401
+async def maybe_await(value: object) -> Any:  # noqa: ANN401
     """Await `value` when it is awaitable, otherwise return it unchanged."""
     if inspect.isawaitable(value):
         return await value
     return value
 
 
-def is_bailed(value: Any) -> bool:  # noqa: ANN401
+def is_bailed(value: object) -> bool:
     """Whether a listener's return value stops a `serial` dispatch.
 
     Ported verbatim from cordis: anything but `None` and `False` bails. `0` and
@@ -100,7 +100,7 @@ class Hook:
     global_: bool = False
 
 
-def _invoke(hook: Hook, *args: Any) -> Any:  # noqa: ANN401
+def _invoke(hook: Hook, *args: object) -> Any:  # noqa: ANN401
     """Call one listener as an effect of the scope that registered it (P6-25).
 
     **The one place ownership is established for a dispatch.** A function rather
@@ -224,7 +224,7 @@ class ForkScope:
 
     __slots__ = ("_config", "_dependent", "_parent", "_spec", "_unmount")
 
-    def __init__(self, parent: Context, spec: PluginSpec, config: Any) -> None:  # noqa: ANN401
+    def __init__(self, parent: Context, spec: PluginSpec, config: object) -> None:
         self._parent = parent
         self._spec = spec
         self._config = config
@@ -512,7 +512,7 @@ class running:
         if self._pair is not None:
             self._token = _ACTIVATING.set(self._pair)
 
-    def __exit__(self, *_exc: Any) -> None:  # noqa: ANN401
+    def __exit__(self, *_exc: object) -> None:
         if self._token is not None:
             _ACTIVATING.reset(self._token)
             self._token = None
@@ -885,8 +885,8 @@ class Context:
     @overload
     def get[T](self, key: ServiceKey[T], default: T | None = None) -> T | None: ...
     @overload
-    def get(self, key: str, default: Any = None) -> Any: ...  # noqa: ANN401
-    def get(self, key: str | ServiceKey[Any], default: Any = None) -> Any:
+    def get(self, key: str, default: object = None) -> Any: ...  # noqa: ANN401
+    def get(self, key: str | ServiceKey[Any], default: object = None) -> Any:
         """The service under `key`, or `default` — the optional read.
 
         Typed through the key: `ctx.get(ATTACHMENTS)` is an `AttachmentStore |
@@ -969,7 +969,7 @@ class Context:
         child = Context(self, label=label, module=module or self._module, isolated=True)
         return child
 
-    def plugin(self, plugin: Any, config: Any = None) -> ForkScope:  # noqa: ANN401
+    def plugin(self, plugin: object, config: object = None) -> ForkScope:
         """Mount `plugin` as a child fork of this context.
 
         The fork's `apply` runs only once every key in its `inject` list
@@ -1184,7 +1184,7 @@ class Context:
     def emit(
         self,
         event: str,
-        *args: Any,  # noqa: ANN401
+        *args: object,
         scope: Context | None = None,
         contained: bool = False,
     ) -> None:
@@ -1215,7 +1215,7 @@ class Context:
     async def serial(
         self,
         event: str,
-        *args: Any,  # noqa: ANN401
+        *args: object,
         scope: Context | None = None,
     ) -> Any:  # noqa: ANN401
         """Await listeners in registration order until one bails."""
@@ -1229,7 +1229,7 @@ class Context:
     async def parallel(
         self,
         event: str,
-        *args: Any,  # noqa: ANN401
+        *args: object,
         scope: Context | None = None,
     ) -> None:
         """Run every listener concurrently and await all of them.
@@ -1258,7 +1258,7 @@ class Context:
     async def waterfall(
         self,
         event: str,
-        *args: Any,  # noqa: ANN401
+        *args: object,
         inner: Callable[..., Any],
         scope: Context | None = None,
     ) -> Any:  # noqa: ANN401
@@ -1279,7 +1279,7 @@ class Context:
         state: list[Any] = list(args)
         index = 0
 
-        async def next_(*replacement: Any) -> Any:  # noqa: ANN401
+        async def next_(*replacement: object) -> Any:  # noqa: ANN401
             nonlocal index
             if replacement:
                 state[:] = replacement
@@ -1327,7 +1327,7 @@ class Context:
 
         task.add_done_callback(done)
 
-    def _spawn(self, coro: Any, event: str) -> None:  # noqa: ANN401
+    def _spawn(self, coro: object, event: str) -> None:
         """Track a fire-and-forget coroutine returned by an `emit` listener."""
         self.detach(coro, label=f"listener for {event}")
 

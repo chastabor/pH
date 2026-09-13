@@ -55,7 +55,7 @@ service lookup per chunk to reach a `return None`."""
 
 
 def presentation_of(
-    tools: Any,  # noqa: ANN401
+    tools: object,
     session: Session,
     event: SessionEvent,
 ) -> dict[str, Any] | None:

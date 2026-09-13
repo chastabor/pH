@@ -44,7 +44,7 @@ pytestmark = pytest.mark.anyio
 INFINITY = resource.RLIM_INFINITY
 
 
-def _refuse(*_args: Any) -> None:  # noqa: ANN401
+def _refuse(*_args: object) -> None:
     raise ValueError("current limit exceeds maximum limit")
 
 

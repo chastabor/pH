@@ -470,7 +470,7 @@ def truncated_arguments(arguments: str, max_length: int) -> str | None:
 
 
 def _elided_arguments(
-    block: Any,  # noqa: ANN401
+    block: object,
     elides: Callable[[str], bool],
     max_length: int,
 ) -> tuple[str, int] | None:
@@ -547,7 +547,7 @@ def truncated_assistant_payload(
 # ------------------------------------------------------------------ reading --
 
 
-def _block_text(block: Any) -> str:  # noqa: ANN401
+def _block_text(block: object) -> str:
     if isinstance(block, TextBlock):
         return block.text
     if isinstance(block, ToolCallBlock):

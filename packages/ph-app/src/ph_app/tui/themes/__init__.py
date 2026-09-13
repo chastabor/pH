@@ -112,7 +112,7 @@ class TuiTheme:
 _REQUIRED = frozenset(field.name for field in fields(TuiTheme)) - {"name"}
 
 
-def parse_theme(name: str, data: Any, origin: str = "theme") -> TuiTheme:  # noqa: ANN401
+def parse_theme(name: str, data: object, origin: str = "theme") -> TuiTheme:
     """Build a theme from decoded JSON, refusing anything it cannot render.
 
     `origin` names the file in the error, because the message a user sees when

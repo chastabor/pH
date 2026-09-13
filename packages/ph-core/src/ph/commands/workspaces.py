@@ -50,7 +50,6 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
 
 from ..cordis import Context, plugin
 from ..keys import COMMANDS, FS, SESSION_PERSISTENCE, WORKSPACE
@@ -112,7 +111,7 @@ async def apply(ctx: Context, config: None) -> None:
     its checkouts. The tier answers now, and it knows where it puts them.
     """
 
-    async def workspaces(argument: str, invocation: Any) -> str:  # noqa: ANN401
+    async def workspaces(argument: str, invocation: object) -> str:
         verb, _, rest = argument.strip().partition(" ")
         view = _Workspaces(ctx=ctx, base=ctx.require(FS).root)
         try:

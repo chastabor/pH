@@ -110,11 +110,11 @@ def tui_settings_path(home: Path) -> Path:
     return home / "tui.json"
 
 
-def _coerce(value: Any, allowed: tuple[str, ...], fallback: str) -> str:  # noqa: ANN401
+def _coerce(value: object, allowed: tuple[str, ...], fallback: str) -> str:
     return value if isinstance(value, str) and value in allowed else fallback
 
 
-def tui_settings_from_json(data: Any) -> TuiSettings:  # noqa: ANN401
+def tui_settings_from_json(data: object) -> TuiSettings:
     """Build settings from parsed JSON, ignoring anything unrecognized.
 
     Tolerant on purpose: an older pH wrote fewer keys, a newer one writes more,

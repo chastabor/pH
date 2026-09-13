@@ -58,6 +58,7 @@ from typing import Any
 
 import pytest
 
+from ph.cordis import Context
 from ph.keys import SANDBOX, SUBPROCESS
 from ph.seams.sandbox import Egress, SandboxError, SandboxPolicy, writable_paths
 from ph.seams.sandbox_egress import PROBE_HOST
@@ -296,7 +297,7 @@ async def test_the_verdict_reaches_ph_doctor_either_way(mount: MountProfile) -> 
 # ------------------------------------------------ the kernel, where it does --
 
 
-async def _run(ctx: Any, argv: tuple[str, ...], cwd: Path) -> tuple[int, str]:  # noqa: ANN401
+async def _run(ctx: Context, argv: tuple[str, ...], cwd: Path) -> tuple[int, str]:
     """One confined argv, run. Code plus output, so a failure says why."""
     outcome = await ctx.require(SUBPROCESS).run(
         SubprocessSpawnSpec(argv=argv, cwd=cwd, env=scrub_env())
@@ -377,7 +378,7 @@ LINKS = "print(len(open('/proc/net/dev').read().splitlines()) - 2)"
 PIDS = "import os;print(len([p for p in os.listdir('/proc') if p.isdigit()]))"
 
 
-async def _said(ctx: Any, workspace: Path, script: str, **extra: Any) -> str:  # noqa: ANN401
+async def _said(ctx: Context, workspace: Path, script: str, **extra: Any) -> str:  # noqa: ANN401
     """What one confined `python -c` printed, run through the **seam** so the
     deployment's allowances are merged in — which is what makes `refuse_network=` a
     request rather than the resolved fact a backend reads.
@@ -391,12 +392,12 @@ async def _said(ctx: Any, workspace: Path, script: str, **extra: Any) -> str:  #
     return out
 
 
-async def _count(ctx: Any, workspace: Path, script: str, **extra: Any) -> int:  # noqa: ANN401
+async def _count(ctx: Context, workspace: Path, script: str, **extra: object) -> int:
     """A confined command's printed number — the Linux namespace counts."""
     return int((await _said(ctx, workspace, script, **extra)).strip())
 
 
-async def _isolated(ctx: Any, workspace: Path, **extra: Any) -> bool:  # noqa: ANN401
+async def _isolated(ctx: Context, workspace: Path, **extra: object) -> bool:
     """Whether a confined command is cut off from the network, asked the one way that
     is the same on every backend: can it reach a listener *this process* opened on
     the host's loopback?

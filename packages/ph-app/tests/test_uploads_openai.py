@@ -44,7 +44,7 @@ PDF = b"%PDF-1.7\n" + b"pages" * 64
 OPTIONS = AgentOptions(provider="openai", model="gpt-test")
 
 
-def _route(**config: Any) -> dict[str, Any]:  # noqa: ANN401
+def _route(**config: object) -> dict[str, Any]:
     profile = {
         "provider": "openai",
         "apiKeyEnv": "OPENAI_API_KEY",
@@ -122,7 +122,7 @@ def wire(monkeypatch: pytest.MonkeyPatch) -> _FileApi:
     async def post_multipart(
         self: HttpClient,
         url: str,
-        **kwargs: Any,  # noqa: ANN401
+        **kwargs: object,
     ) -> dict[str, Any]:
         api.forms.append({"url": url, **kwargs})
         reply: dict[str, Any] = {"id": api.issue()}
@@ -318,7 +318,7 @@ async def test_a_failed_upload_falls_back_to_the_bytes(
     bad minute would degrade a document the route can send perfectly well.
     """
 
-    async def failing(self: HttpClient, url: str, **kwargs: Any) -> dict[str, Any]:  # noqa: ANN401
+    async def failing(self: HttpClient, url: str, **kwargs: object) -> dict[str, Any]:
         raise OSError("the file API is down")
 
     monkeypatch.setattr(HttpClient, "post_multipart", failing)

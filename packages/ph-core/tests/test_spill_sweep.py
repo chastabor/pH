@@ -30,7 +30,6 @@ dispatches by type in a single pass and runs the whole sweep on a worker thread:
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
 import pytest
 
@@ -116,7 +115,7 @@ async def test_a_claim_that_raises_stops_the_sweep_rather_than_narrowing_it(
     _named(session, SPILLED, kept.locator)
     _named(session, INPUT, "irrelevant")
 
-    def explode(_data: Any) -> str | None:  # noqa: ANN401
+    def explode(_data: object) -> str | None:
         raise RuntimeError("this producer cannot answer")
 
     store.claim(_claim("healthy", session.id, SPILLED))

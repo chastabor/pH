@@ -1041,7 +1041,7 @@ async def test_a_failed_write_is_retried_rather_than_lost(
 
     broken = True
 
-    def refuse(*_args: Any, **_kwargs: Any) -> None:  # noqa: ANN401
+    def refuse(*_args: object, **_kwargs: object) -> None:
         if broken:
             raise OSError("no space left on device")
 

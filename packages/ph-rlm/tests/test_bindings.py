@@ -8,19 +8,19 @@ spawn budget counts it.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 import pytest
 from rlm_fixtures import BINDINGS_ROW, PROVIDER_ROW, MountedRuntime
 from runtime_helpers import run_cell
 
-from ph.agent.types import AgentHandle
+from ph.agent.types import AgentDriver, AgentHandle
 from ph.cordis import Context
 from ph.keys import SYSTEM_PROMPT, TOOLS
 from ph.session import Session
 from ph.system_prompt.assembly import render_prompt
-from ph.tools import Deny
+from ph.tools import Deny, ToolExecution
 from ph.tools.registry import ToolRestriction
 from ph_rlm.bindings import DELETE_TOOL, LIST_TOOL, NAMESPACE, RUN_TOOL
 from ph_rlm.presentation import IPYTHON
@@ -45,11 +45,11 @@ def delegating_runtime(mounted_runtime: MountedRuntime) -> Callable[..., Any]:
 
 
 async def _cell(
-    ctx: Any,  # noqa: ANN401
+    ctx: Context,
     program: str,
     *,
-    agent: Any,  # noqa: ANN401
-    session: Any,  # noqa: ANN401
+    agent: AgentDriver,
+    session: Session,
     call_id: str = "c1",
 ) -> Any:  # noqa: ANN401
     return await run_cell(ctx, program, agent=agent, session=session, call_id=call_id, name=IPYTHON)
@@ -186,7 +186,7 @@ async def test_a_policy_row_can_deny_spawning(delegating_runtime: MountedRuntime
     """
     ctx, session, agent = await delegating_runtime()
 
-    async def refuse(execution: Any, next_: Any) -> Any:  # noqa: ANN401
+    async def refuse(execution: ToolExecution, next_: Callable[..., Awaitable[Any]]) -> Any:  # noqa: ANN401
         if execution.name == RUN_TOOL:
             return Deny(reason="this deployment does not allow subagents")
         return await next_()

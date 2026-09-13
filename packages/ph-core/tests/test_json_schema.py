@@ -34,7 +34,7 @@ from ph.tools.json_schema import (
 )
 
 
-def _violations(schema: dict[str, Any], value: Any) -> list[str]:  # noqa: ANN401
+def _violations(schema: dict[str, Any], value: object) -> list[str]:
     return validate_json_schema_value(schema, value)
 
 

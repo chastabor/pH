@@ -50,14 +50,14 @@ __all__ = [
 ]
 
 
-def first(value: Any) -> Mapping[str, Any]:  # noqa: ANN401
+def first(value: object) -> Mapping[str, Any]:
     """The first object of a wire list, or an empty one."""
     items = as_seq(value)
     return as_obj(items[0]) if items else {}
 
 
 def text_of_wire(
-    blocks: Any,  # noqa: ANN401
+    blocks: object,
     *,
     kind: str = "text",
     placeholder: Callable[[str], str] | None = None,
@@ -82,7 +82,7 @@ def text_of_wire(
     return "\n".join(parts)
 
 
-def message_of(event: Any) -> Mapping[str, Any]:  # noqa: ANN401
+def message_of(event: object) -> Mapping[str, Any]:
     """The message inside an event's payload, whichever shape it takes.
 
     `user/message`'s payload *is* the message; `assistant/message` wraps one
@@ -119,7 +119,7 @@ def view_of(event_type: str, sidecar: JsonValue) -> ToolCallView | ToolResultVie
         return None
 
 
-def result_block(message: Any) -> Mapping[str, Any]:  # noqa: ANN401
+def result_block(message: object) -> Mapping[str, Any]:
     """The `tool_result` block inside a tool-result message, or an empty one.
 
     One block carries both the visible text and the error flag, and it sits one
@@ -133,7 +133,7 @@ def result_block(message: Any) -> Mapping[str, Any]:  # noqa: ANN401
     return first(as_obj(message).get("content"))
 
 
-def describe(data: Any) -> str:  # noqa: ANN401
+def describe(data: object) -> str:
     """A one-line `key=value` account of a payload, or `""` when it has none.
 
     Deliberately generic, which is the whole point: a type this build has no
@@ -149,7 +149,7 @@ def describe(data: Any) -> str:  # noqa: ANN401
     return one_line(", ".join(f"{key}={value}" for key, value in payload.items() if value != ""))
 
 
-def source_of(message: Any) -> tuple[str, str, str]:  # noqa: ANN401
+def source_of(message: object) -> tuple[str, str, str]:
     """`(kind, name, form)` for a message's producer.
 
     The wire keys `plugin`/`model`/`callId` are the discriminated members of
@@ -220,7 +220,7 @@ def index_at_or_before(seqs: Iterable[int], target: int) -> int:
     return found
 
 
-def media_labels(blocks: Any) -> list[str]:  # noqa: ANN401
+def media_labels(blocks: object) -> list[str]:
     """One human label per media block: `image/png · diagram.png`.
 
     A separate read rather than a `placeholder` on `text_of_wire`, because that

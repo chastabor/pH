@@ -22,6 +22,7 @@ import anyio
 import pytest
 from rlm_fixtures import Harnessed, note_edit
 
+from ph.cordis import Context
 from ph.keys import APPROVAL, COMMANDS, SESSIONS, SYSTEM_PROMPT
 from ph.system_prompt import (
     join_context_sections,
@@ -50,7 +51,7 @@ from ph_rlm.keys import HARNESS
 pytestmark = pytest.mark.anyio
 
 
-def _allow(ctx: Any) -> list[str]:  # noqa: ANN401
+def _allow(ctx: Context) -> list[str]:
     """Answer approval prompts, and record what was asked."""
     asked: list[str] = []
 
@@ -349,7 +350,7 @@ async def test_h3_a_global_edit_prompts_and_a_local_one_does_not(harnessed: Harn
 async def test_h3_a_declined_global_edit_writes_nothing(harnessed: Harnessed) -> None:
     ctx, session, agent = await harnessed()
 
-    async def refuse(_request: Any, _next: Any) -> str:  # noqa: ANN401
+    async def refuse(_request: object, _next: object) -> str:
         return "rejected"
 
     ctx.require(APPROVAL).register_answerer(refuse)

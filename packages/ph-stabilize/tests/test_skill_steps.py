@@ -28,7 +28,7 @@ from stabilize_helpers import PROFILE, result_text, run_tool_calls, todo_call
 from ph.keys import AGENTS, SESSIONS
 from ph.llm.types import text_of
 from ph.seams.skills import discover_skills, rendered_skill
-from ph.session import SurfaceIntent
+from ph.session import Session, SurfaceIntent
 from ph.testing import FAKE_OPTIONS, MountProfile, run_tool, write_skill
 from ph_stabilize.skill_steps import MAX_NAMED, MAX_NUDGES, seeded, steer_text
 from ph_stabilize.todo import (
@@ -322,7 +322,7 @@ class _Stopping:
     stand-down untestable and would model the boundary wrongly.
     """
 
-    def __init__(self, session: Any) -> None:  # noqa: ANN401
+    def __init__(self, session: Session) -> None:
         self.session = session
         self.steers: list[Any] = []
 

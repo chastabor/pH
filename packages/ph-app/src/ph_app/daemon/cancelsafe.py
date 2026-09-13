@@ -73,7 +73,7 @@ from typing import Any
 __all__ = ["apply_cancel_safe_socket_waits", "guarded", "resolves_a_future"]
 
 
-def resolves_a_future(callback: Any) -> bool:  # noqa: ANN401
+def resolves_a_future(callback: object) -> bool:
     """Whether this I/O callback is a bound `Future.set_result`.
 
     The one shape that fails, named as a predicate so the test suite can assert
@@ -92,7 +92,7 @@ def resolves_a_future(callback: Any) -> bool:  # noqa: ANN401
     )
 
 
-def guarded(method: Any) -> bool:  # noqa: ANN401
+def guarded(method: object) -> bool:
     """Whether this loop method is ours rather than asyncio's.
 
     Read off `__module__`, which the replacement carries for free, rather than

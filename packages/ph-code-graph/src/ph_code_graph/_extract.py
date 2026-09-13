@@ -434,7 +434,7 @@ def extract(path: str, text: str, language: str) -> Extraction:
 
 def _documented(
     definitions: list[Definition],
-    result: Any,  # noqa: ANN401
+    result: object,
 ) -> tuple[Definition, ...]:
     """Attach each definition's prose, from the two channels that carry it.
 
@@ -487,7 +487,7 @@ def _documented(
     )
 
 
-def _comment_blocks(result: Any) -> list[tuple[int, int, str]]:  # noqa: ANN401
+def _comment_blocks(result: object) -> list[tuple[int, int, str]]:
     """Doc comments as `(first line, last line, text)`, contiguous runs merged.
 
     Both 1-based. Merged because Rust and Go write a paragraph as a *run* of
@@ -539,7 +539,7 @@ def clean_prose(text: str) -> str:
     return "\n".join(lines).strip()
 
 
-def _kind_of(raw: Any) -> str:  # noqa: ANN401
+def _kind_of(raw: object) -> str:
     """`SymbolKind.Function` / `"function"` / `"Function"` → `function`.
 
     The pack's `kind` is an enum whose `str()` is the variant name, while the

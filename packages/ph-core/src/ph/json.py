@@ -319,7 +319,7 @@ class JsonEncoder(json.JSONEncoder):
         kwargs.setdefault("ensure_ascii", False)
         super().__init__(**kwargs)
 
-    def default(self, o: Any) -> Any:  # noqa: ANN401
+    def default(self, o: object) -> Any:  # noqa: ANN401
         if isinstance(o, MappingProxyType):
             return dict(o)
         return super().default(o)

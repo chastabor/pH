@@ -184,7 +184,7 @@ def shipped_profile(mount: MountProfile) -> ShippedProfile:
         config: dict[str, dict[str, Any]] | None = None,
         *,
         session_id: str = "profile",
-        profile: Any = BUNDLE,  # noqa: ANN401
+        profile: object = BUNDLE,
     ) -> tuple[Context, Session, AgentDriver]:
         merged: dict[str, dict[str, Any]] = {"code-runtime-python": dict(HOST_INTERPRETER)}
         for row_id, overrides in (config or {}).items():

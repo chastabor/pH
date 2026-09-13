@@ -29,6 +29,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from daemon_helpers import serving, until
 
 from ph.json import as_seq
+from ph_app.daemon.client import DaemonClient
 from ph_app.daemon.framing import MAX_ATTACHMENT_BYTES
 from ph_app.web.serve import CLOSING_BODY, COOKIE, TOKEN_QUERY, WebServer
 
@@ -288,7 +289,7 @@ async def test_a_post_that_is_not_a_dropped_file_is_refused_not_traced(
 
 async def test_an_upload_with_no_daemon_says_so(
     server: WebServer,
-    client: Any,  # noqa: ANN401
+    client: DaemonClient,
 ) -> None:
     """No daemon means no session to stage onto, and that is a sentence.
 
@@ -330,7 +331,7 @@ async def test_an_upload_before_any_tab_exists_says_what_to_do(
 
 async def test_an_oversized_upload_is_refused_before_it_is_buffered(
     server: WebServer,
-    client: Any,  # noqa: ANN401
+    client: DaemonClient,
 ) -> None:
     """The same ceiling the daemon enforces, applied where the bytes arrive.
 

@@ -98,7 +98,7 @@ async def test_the_invariant_fires_on_a_bypassed_request(mount: MountProfile) ->
     # A plugin that smuggles content past the log — the failure I3 exists to
     # make impossible. It must not reach the adapter. Note it does not have to
     # do anything to stay a loop request: session-bound and no other purpose.
-    async def bypass(request: GenerateOptions, next_: Any) -> Any:  # noqa: ANN401
+    async def bypass(request: GenerateOptions, next_: Callable[..., Awaitable[Any]]) -> Any:  # noqa: ANN401
         forged = create_user_message(
             content=[{"type": "text", "text": "never logged"}],
             source={"kind": "plugin", "plugin": "smuggler"},
@@ -129,7 +129,7 @@ async def test_pre_step_reject_blocks_the_turn(mount: MountProfile) -> None:
     ctx = await mount()
     session = ctx.require(SESSIONS).create("s")
 
-    async def deny(request: PreStepRequest, next_: Any) -> PreStepDecision:  # noqa: ANN401
+    async def deny(request: PreStepRequest, next_: object) -> PreStepDecision:
         return PreStepDecision(kind="reject", reason="over budget")
 
     ctx.on("agent/pre-step", deny)
@@ -143,7 +143,9 @@ async def test_agent_request_waterfall_can_reroute(mount: MountProfile) -> None:
     ctx = await mount()
     session = ctx.require(SESSIONS).create("s")
 
-    async def reroute(proposal: RequestProposal, next_: Any) -> LlmCallConfig:  # noqa: ANN401
+    async def reroute(
+        proposal: RequestProposal, next_: Callable[..., Awaitable[Any]]
+    ) -> LlmCallConfig:
         config = await next_()
         return LlmCallConfig(provider=config.provider, model="rerouted", temperature=0.1)
 
@@ -280,7 +282,7 @@ async def test_request_error_waterfall_can_retry(mount: MountProfile) -> None:
 
     ctx.require(LLM).register_adapter(["flaky"], Flaky())
 
-    async def retry_once(failure: RequestFailure, next_: Any) -> Any:  # noqa: ANN401
+    async def retry_once(failure: RequestFailure, next_: Callable[..., Awaitable[Any]]) -> Any:  # noqa: ANN401
         if failure.failure.code == "TRANSIENT":
             return RequestErrorAction(kind="retry")
         return await next_()
@@ -328,7 +330,9 @@ async def test_cancelling_ends_the_turn_as_aborted(mount: MountProfile) -> None:
     session = ctx.require(SESSIONS).create("s")
     agent = ctx.require(AGENTS).create(session, FAKE)
 
-    async def cancel_at_pre_step(request: PreStepRequest, next_: Any) -> Any:  # noqa: ANN401
+    async def cancel_at_pre_step(
+        request: PreStepRequest, next_: Callable[..., Awaitable[Any]]
+    ) -> Any:  # noqa: ANN401
         agent.cancel(AgentCancelCause(kind="user"), keep_inbox=True)
         return await next_()
 

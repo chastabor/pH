@@ -16,9 +16,12 @@ import pytest
 from rlm_fixtures import MountedRuntime
 from runtime_helpers import run_cell
 
+from ph.agent.types import AgentDriver
 from ph.cancel import CancelToken
+from ph.cordis import Context
 from ph.keys import TOOLS
 from ph.llm.types import ToolCallBlock
+from ph.session import Session
 from ph.testing import simple_tool
 from ph.tools.batch import execute_tool_calls
 from ph.tools.registry import RUN_CODE
@@ -28,11 +31,11 @@ pytestmark = pytest.mark.anyio
 
 
 async def _cell(
-    ctx: Any,  # noqa: ANN401
+    ctx: Context,
     program: str,
     *,
-    agent: Any,  # noqa: ANN401
-    session: Any,  # noqa: ANN401
+    agent: AgentDriver,
+    session: Session,
     call_id: str = "c1",
 ) -> Any:  # noqa: ANN401
     return await run_cell(ctx, program, agent=agent, session=session, call_id=call_id, name=IPYTHON)

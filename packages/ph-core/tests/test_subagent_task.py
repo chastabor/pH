@@ -23,7 +23,7 @@ from typing import Any
 
 import pytest
 
-from ph.cordis import DEPLOYMENT
+from ph.cordis import DEPLOYMENT, Context
 from ph.keys import AGENTS, SESSIONS, SUBAGENTS, TOOLS
 from ph.llm.types import text_of
 from ph.testing import FAKE_OPTIONS, MountProfile, StubSubagentProvider, run_tool
@@ -38,7 +38,7 @@ addressing an existing id by name would mount the plugin twice."""
 async def _mounted(
     mount: MountProfile,
     *providers: tuple[str, StubSubagentProvider],
-    **config: Any,  # noqa: ANN401
+    **config: object,
 ) -> Any:  # noqa: ANN401
     """A profile with these providers, composed the way a real one is.
 
@@ -55,7 +55,7 @@ async def _mounted(
     return ctx
 
 
-def _agent(ctx: Any) -> Any:  # noqa: ANN401
+def _agent(ctx: Context) -> Any:  # noqa: ANN401
     return ctx.require(AGENTS).create(ctx.require(SESSIONS).create("s"), FAKE_OPTIONS)
 
 

@@ -43,6 +43,7 @@ from typer.testing import CliRunner
 from ph.json import JsonObject, as_obj
 from ph.testing import ReapedHost
 from ph_app.cli import app
+from ph_app.daemon.client import DaemonClient
 from ph_app.payloads import DaemonStatusReply
 from ph_app.protocol import Cursor
 
@@ -51,7 +52,7 @@ pytestmark = pytest.mark.anyio
 runner = CliRunner()
 
 
-async def _watchers(client: Any, session_id: str) -> int:  # noqa: ANN401
+async def _watchers(client: DaemonClient, session_id: str) -> int:
     """How many clients the daemon says are attached to this root."""
     listed = await client.call("sessions/list")
     row = next((one for one in listed["sessions"] if one["sessionId"] == session_id), None)
@@ -119,7 +120,7 @@ async def test_until_idle_exits_non_zero_when_the_last_turn_errored(
     """
     from ph.llm.fake import FakeAdapter
 
-    async def exploding(self: Any, options: Any) -> Any:  # noqa: ANN401
+    async def exploding(self: object, options: object) -> Any:  # noqa: ANN401
         raise RuntimeError("provider is down")
         yield  # pragma: no cover
 
@@ -886,7 +887,7 @@ async def test_an_unnamed_failure_surfaces_as_itself_not_as_a_group(
     """
     from ph_app.agents import _ask
 
-    async def boom(client: Any) -> None:  # noqa: ANN401
+    async def boom(client: DaemonClient) -> None:
         raise ValueError("nothing to do with the daemon")
 
     def invoke() -> None:

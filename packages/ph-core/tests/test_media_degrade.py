@@ -42,7 +42,7 @@ PNG = b"\x89PNG\r\n\x1a\n" + b"pixels" * 32
 class _Store:
     """A store that says everything it is asked about is present."""
 
-    def exists(self, _ref: Any) -> bool:  # noqa: ANN401
+    def exists(self, _ref: object) -> bool:
         return True
 
 
@@ -50,7 +50,7 @@ def _ref(mime: str = "image/png", **facts: Any) -> AttachmentRef:  # noqa: ANN40
     return AttachmentRef(attachment_id="sha256:x", mime=mime, bytes=1024, name="shot.png", **facts)
 
 
-def _message(*blocks: Any) -> Any:  # noqa: ANN401
+def _message(*blocks: object) -> Any:  # noqa: ANN401
     return create_user_message(content=list(blocks), source={"kind": "user"})
 
 
@@ -74,7 +74,7 @@ def test_a_missing_blob_is_a_reason_not_a_crash() -> None:
     """A session copied without its attachments still opens and still runs."""
 
     class Gone:
-        def exists(self, _ref: Any) -> bool:  # noqa: ANN401
+        def exists(self, _ref: object) -> bool:
             return False
 
     assert "bytes are gone" in (unusable_reason(_ref(), Gone(), _takes("image/png")) or "")

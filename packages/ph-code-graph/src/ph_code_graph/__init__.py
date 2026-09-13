@@ -763,7 +763,7 @@ async def apply(ctx: Context, config: Config) -> None:
         )
     )
 
-    async def install(argument: str, command: Any) -> str:  # noqa: ANN401
+    async def install(argument: str, command: object) -> str:
         """`/code-graph install|status` — make the grammars ready, on purpose.
 
         A **command** rather than a tool, per the seam's own rule: a person asks

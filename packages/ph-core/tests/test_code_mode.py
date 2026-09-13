@@ -47,7 +47,7 @@ CODE_ROWS: tuple[dict[str, Any], ...] = (
 )
 
 
-async def _code_ctx(mount: MountProfile, **overrides: Any) -> Context:  # noqa: ANN401
+async def _code_ctx(mount: MountProfile, **overrides: object) -> Context:
     rows: list[dict[str, Any]] = [
         {"insert": [dict(row) for row in CODE_ROWS]},
     ]
@@ -257,7 +257,7 @@ async def test_an_oversized_dispatch_can_be_reshaped_before_it_is_logged(
     ctx = await _code_ctx(mount)
     ctx.require(TOOLS).register(_recorder("touch", []))
 
-    async def shrink(record: Any, content: Any, next_: Any) -> Any:  # noqa: ANN401
+    async def shrink(record: object, content: object, next_: object) -> Any:  # noqa: ANN401
         return text_content("[spilled]")
 
     ctx.on("tools/code-dispatch-log", shrink)

@@ -22,7 +22,7 @@ from typing import Any
 
 import pytest
 
-from ph.cordis import MountRefusal
+from ph.cordis import Context, MountRefusal
 from ph.keys import CONTAINMENT, SANDBOX
 from ph.seams.containment import ContainmentUnavailableError
 from ph.testing import MountProfile, StubSandboxProvider, acquire_for_role
@@ -30,7 +30,7 @@ from ph.testing import MountProfile, StubSandboxProvider, acquire_for_role
 pytestmark = pytest.mark.anyio
 
 
-def _row(**config: Any) -> dict[str, Any]:  # noqa: ANN401
+def _row(**config: object) -> dict[str, Any]:
     return {"id": "containment", "config": config}
 
 
@@ -126,7 +126,7 @@ async def test_strict_refuses_a_tier_that_enforces_nothing(mount: MountProfile) 
     assert "enforces nothing" in str(refused.value)
 
 
-async def _strict_with(ctx: Any, backend: StubSandboxProvider | None) -> None:  # noqa: ANN401
+async def _strict_with(ctx: Context, backend: StubSandboxProvider | None) -> None:
     """Ask the question a backend mounted *after* this row would pose.
 
     Set on the live service rather than in config because that is the ordering

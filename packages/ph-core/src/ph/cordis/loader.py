@@ -168,7 +168,7 @@ class Row:
 # ------------------------------------------------------------ interpolation --
 
 
-def interpolate(value: Any, env: Mapping[str, str] | None = None) -> Any:  # noqa: ANN401
+def interpolate(value: object, env: Mapping[str, str] | None = None) -> Any:  # noqa: ANN401
     """Expand `${env:VAR:-default}` through a value tree.
 
     A whole-string match keeps the environment value's own type only insofar as
@@ -200,7 +200,7 @@ def interpolate(value: Any, env: Mapping[str, str] | None = None) -> Any:  # noq
     return value
 
 
-def evaluate_predicate(value: Any, env: Mapping[str, str] | None = None) -> bool:  # noqa: ANN401
+def evaluate_predicate(value: object, env: Mapping[str, str] | None = None) -> bool:
     """Resolve a row's `disabled:` field.
 
     Accepts a literal boolean or one of two closed predicates:
@@ -252,7 +252,7 @@ def _as_rows(entries: Iterable[Any], layer: str) -> list[Row]:
     return rows
 
 
-def _as_isolate(value: Any, layer: str) -> dict[str, Any] | None:  # noqa: ANN401
+def _as_isolate(value: object, layer: str) -> dict[str, Any] | None:
     """`isolate:` as a list of row ids, or a mapping of row id to config override.
 
     Two spellings for one fact, and both normalise to the mapping: `[fs]` is
@@ -661,7 +661,7 @@ class Mount:
     Keeping a parallel dict was a second statement of one fact, and it retained
     every superseded config for the life of the mount."""
 
-    async def reconfigure(self, row_id: str, config: Any) -> ForkScope:  # noqa: ANN401
+    async def reconfigure(self, row_id: str, config: object) -> ForkScope:
         """Re-apply one row with a new config, on this mount, and touch nothing else.
 
         **Cordis's own shape, used for what it is for.** A row's `apply` registers

@@ -351,7 +351,7 @@ class Runner:
     def _settle(
         self,
         run_id: int,
-        value: Any,  # noqa: ANN401
+        value: object,
         error: dict[str, Any] | None,
         out: _CappedStream,
         err: _CappedStream,

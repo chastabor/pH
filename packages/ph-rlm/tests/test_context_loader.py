@@ -19,7 +19,7 @@ corpus is arithmetic per call. The first version rebuilt — and, for lines, re-
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
@@ -27,10 +27,12 @@ import pytest
 from rlm_fixtures import MountedRuntime
 from runtime_helpers import dispatch_names, run_ipython_cell, settled_dispatches
 
+from ph.agent.types import AgentDriver
+from ph.cordis import Context
 from ph.json import as_seq
 from ph.keys import SYSTEM_PROMPT, TOOLS
 from ph.system_prompt import render_prompt
-from ph.tools import Accept
+from ph.tools import Accept, ToolExecution
 from ph_rlm.context_loader import LOADED, Corpus, Document, render_manifest
 from ph_rlm.keys import CONTEXT_CORPUS
 
@@ -39,7 +41,7 @@ pytestmark = pytest.mark.anyio
 Loaded = Callable[..., Any]
 
 
-def row(sources: list[dict[str, Any]], **config: Any) -> dict[str, Any]:  # noqa: ANN401
+def row(sources: list[dict[str, Any]], **config: object) -> dict[str, Any]:
     return {
         "id": "rlm-context-loader",
         "name": "rlm-context-loader",
@@ -59,7 +61,7 @@ def loaded(mounted_runtime: MountedRuntime, tmp_path: Path) -> Loaded:
         sources: list[dict[str, Any]] | None = None,
         *,
         session_id: str = "context",
-        **config: Any,  # noqa: ANN401
+        **config: object,
     ) -> tuple[Any, Any, Any]:
         if sources is None:
             (tmp_path / "notes.md").write_text(
@@ -192,7 +194,11 @@ async def test_one_oversized_query_is_offloaded_without_its_siblings(loaded: Loa
     """
     ctx, session, agent = await loaded()
 
-    async def offload(execution: Any, result: Any, next_: Any) -> Any:  # noqa: ANN401
+    async def offload(
+        execution: ToolExecution,
+        result: Any,  # noqa: ANN401
+        next_: Callable[..., Awaitable[Any]],
+    ) -> Any:  # noqa: ANN401
         matches = (result.value or {}).get("matches") or []
         if execution.name != "context_search" or len(matches) <= 1:
             return await next_(execution, result)
@@ -278,7 +284,7 @@ async def test_an_unreadable_source_is_reported_not_hidden(
 # ------------------------------------------------------------- the prompt --
 
 
-async def _assemble(ctx: Any, agent: Any) -> str:  # noqa: ANN401
+async def _assemble(ctx: Context, agent: AgentDriver) -> str:
     assembly = await ctx.require(SYSTEM_PROMPT).assemble(agent.ctx, agent=agent)
     return render_prompt(assembly)
 

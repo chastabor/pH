@@ -181,7 +181,7 @@ async def test_results_keep_model_order_when_the_gate_settles_out_of_order() -> 
     tools.register(_slow("slow", trace, 0.0, safe=True))
     _reached, release = parked_gate(root, only="slow")
 
-    async def fast_body(_args: Any, _run: Any) -> str:  # noqa: ANN401
+    async def fast_body(_args: object, _run: object) -> str:
         release.set()  # slot 1 has run before slot 0 was even allowed to
         return "fast"
 
@@ -220,7 +220,7 @@ async def test_cancellation_records_a_result_for_every_skipped_call() -> None:
     root, tools, agent, trace = _setup()
     token = CancelToken()
 
-    async def cancelling(_args: Any, _run: Any) -> str:  # noqa: ANN401
+    async def cancelling(_args: object, _run: object) -> str:
         token.cancel("user")
         return "first"
 

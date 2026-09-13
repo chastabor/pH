@@ -159,7 +159,7 @@ class AskDesk:
     async def answer_approval(
         self,
         request: ApprovalRequest,
-        _next: Any = None,  # noqa: ANN401
+        _next: object = None,
     ) -> ApprovalAnswer:
         """`ctx.approval`'s answerer, over the socket.
 
@@ -183,7 +183,7 @@ class AskDesk:
     async def answer_question(
         self,
         question: UserQuestion,
-        _next: Any = None,  # noqa: ANN401
+        _next: object = None,
     ) -> str | None:
         """`ctx.user_questions`' answerer, over the socket.
 

@@ -159,7 +159,7 @@ class SessionTelemetry:
         body: str,
         *,
         severity: Severity = "info",
-        **attributes: Any,  # noqa: ANN401
+        **attributes: object,
     ) -> None:
         """Record something about the harness rather than the conversation."""
         await self.record(
@@ -178,7 +178,7 @@ async def ops_record(
     body: str,
     *,
     severity: Severity = "info",
-    **attributes: Any,  # noqa: ANN401
+    **attributes: object,
 ) -> None:
     """Record something about the harness, if this deployment has the seam (P5-09).
 

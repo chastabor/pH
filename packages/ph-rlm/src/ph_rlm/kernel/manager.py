@@ -175,7 +175,7 @@ class _ActiveRun:
     `_serve_call` starts the abort from its own task, and the escalation clock
     the pump runs has to be the same clock."""
 
-    def settle(self, *, error: str | None = None, value: Any = None) -> bool:  # noqa: ANN401
+    def settle(self, *, error: str | None = None, value: object = None) -> bool:
         """Record how this run ended. **The first writer wins**; returns whether
         this call was it.
 
@@ -814,7 +814,7 @@ class Kernel:
         call_id: int,
         *,
         ok: bool,
-        value: Any = None,  # noqa: ANN401
+        value: object = None,
         message: str | None = None,
         name: str | None = None,
         fatal: bool | None = None,
@@ -1257,7 +1257,7 @@ def _declare(namespace: CodeBindingNamespace) -> dict[str, Any]:
     }
 
 
-def _json_safe(value: Any) -> Any:  # noqa: ANN401
+def _json_safe(value: object) -> Any:  # noqa: ANN401
     """A tool's result in a form the reply frame can carry.
 
     `thaw_json` is the whole job: a value that came back through the log is frozen —

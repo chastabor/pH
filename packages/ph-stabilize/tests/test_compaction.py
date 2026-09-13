@@ -20,6 +20,7 @@ one.
 from __future__ import annotations
 
 import json
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
@@ -932,7 +933,9 @@ async def test_a_reply_of_only_tool_calls_falls_back_without_them(mount: MountPr
     agent = await _conversation(ctx, "tool-happy")
     answered = {"once": False}
 
-    async def call_a_tool_first(options: GenerateOptions, next_: Any) -> Any:  # noqa: ANN401
+    async def call_a_tool_first(
+        options: GenerateOptions, next_: Callable[..., Awaitable[Any]]
+    ) -> Any:  # noqa: ANN401
         if options.purpose == "compaction" and not answered["once"]:
             answered["once"] = True
             ctx.require(LLM_FAKE).requests.append(options)
@@ -985,7 +988,9 @@ async def test_a_context_overflow_compacts_and_retries_the_request(mount: MountP
     session = agent.session
     refused = {"once": False}
 
-    async def refuse_the_first_request(options: GenerateOptions, next_: Any) -> Any:  # noqa: ANN401
+    async def refuse_the_first_request(
+        options: GenerateOptions, next_: Callable[..., Awaitable[Any]]
+    ) -> Any:  # noqa: ANN401
         # On `llm/stream`, which is the seam retry and replay already attach to,
         # rather than by swapping the adapter's method — `FakeAdapter` has slots,
         # and the waterfall is where a provider failure is *supposed* to come
@@ -1117,7 +1122,7 @@ async def test_an_unexpected_failure_neither_escapes_nor_goes_unrecorded(
     agent = await _conversation(ctx, "buggy")
     engine = _engine(ctx)
 
-    async def explode(*_args: Any, **_kwargs: Any) -> Any:  # noqa: ANN401
+    async def explode(*_args: object, **_kwargs: object) -> Any:  # noqa: ANN401
         raise OSError("the disk went away")
 
     monkeypatch.setattr(type(engine), "_land", explode)
@@ -1142,7 +1147,7 @@ async def test_cancellation_is_not_swallowed(
     agent = await _conversation(ctx, "cancelled")
     engine = _engine(ctx)
 
-    async def stop(*_args: Any, **_kwargs: Any) -> Any:  # noqa: ANN401
+    async def stop(*_args: object, **_kwargs: object) -> Any:  # noqa: ANN401
         raise Cancelled("the user pressed stop")
 
     monkeypatch.setattr(type(engine), "_land", stop)
