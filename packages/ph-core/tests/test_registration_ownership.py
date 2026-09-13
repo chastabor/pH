@@ -1501,14 +1501,6 @@ UNBOUND: dict[str, str] = {
     "InboxNotifications.discarded": "a callback back into the caller that supplied it",
     "InboxNotifications.inserted": "a callback back into the caller that supplied it",
     "_Entry.unobserve": "teardown; runs as its scope unwinds",
-    # A steerable handle the *caller* supplied, not a body this seam registered.
-    # `AgentDriver` declares verbs, so the walk asks about it — correctly, since
-    # the filter above cannot tell a registration from an object passed in — and
-    # the answer is that `parent.inject(...)` is the parent agent's own method,
-    # running in the parent's own scope. There is no registering row to bind and
-    # no lifetime of ours to offer: binding one would name this seam as the owner
-    # of a turn belonging to the agent that asked for the child.
-    "SubagentRequest.parent": "the asking agent's own handle; its verbs run in its own scope",
     # The roster. The one thing the registry calls on an entry is `dispose`, which
     # is teardown (below); `run` is the loop itself — the body that *establishes*
     # bindings for everything else — and it is driven by the front end that owns

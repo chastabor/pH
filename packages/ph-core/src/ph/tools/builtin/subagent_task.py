@@ -42,7 +42,14 @@ from ...seams.subagents import (
     downgrade_text,
 )
 from ...wire import WireModel
-from ..definition import ToolModel, ToolOutput, ToolRunContext, define_tool, text_content
+from ..definition import (
+    ToolDefinition,
+    ToolModel,
+    ToolOutput,
+    ToolRunContext,
+    define_tool,
+    text_content,
+)
 from ..presentation import ToolCallView, ToolResultView
 from ..registry import register_when_composed
 
@@ -133,6 +140,10 @@ async def apply(ctx: Context, config: Config) -> None:
     """Register the blocking delegation tool, once a provider exists to run it."""
 
     async def delegate(provider: str, args: TaskArgs, run: ToolRunContext) -> dict[str, Any]:
+        if run.agent is None:
+            # A spawn is made *by* somebody: the provider reads the parent's
+            # session to log the admission and its options to build the child.
+            raise ValueError(f"the {TOOL!r} tool has to be called by an agent")
         try:
             handle = await ctx.require(SUBAGENTS).start(
                 provider,
@@ -178,7 +189,7 @@ async def apply(ctx: Context, config: Config) -> None:
             note=downgrade_text(reason) if reason is not None else None,
         ).model_dump()
 
-    def build_tool() -> Any:  # noqa: ANN401
+    def build_tool() -> ToolDefinition | None:
         """The tool, bound to the provider that will run it.
 
         Resolved here rather than per call, so the deployment's answer to "which

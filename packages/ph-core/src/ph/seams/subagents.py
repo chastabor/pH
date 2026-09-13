@@ -35,7 +35,7 @@ from typing import Any, Literal, Protocol, TypeAlias, cast, runtime_checkable
 
 from pydantic import Field
 
-from ..agent.types import AgentDriver
+from ..agent.types import AgentDriver, AgentHandle
 from ..cordis import Context, Disposer, Running, plugin, running
 from ..json import as_int, as_str
 from ..keys import AGENTS, SESSIONS, SKILLS, SUBAGENT_PRESETS, SUBAGENTS, SYSTEM_PROMPT, TOOLS
@@ -223,17 +223,23 @@ class SubagentRequest:
     """
 
     prompt: str
-    parent: AgentDriver
+    parent: AgentHandle
     """Who is delegating. **Required for a spawn, and tolerated as `None` by
     `held_by` alone.**
 
     `_boundary_for` has an explicit `if request.parent is None` branch — a
     grant computed with no parent inherits the mount's own ceiling — but every
-    provider that goes on to *spawn* reads the parent's session, inbox and
-    model, so declaring it optional here made eight reads in
+    provider that goes on to *spawn* reads the parent's session, scope and
+    options, so declaring it optional here made eight reads in
     `ph_rlm.subagents` type errors for a case they never receive. The
     declaration is the spawn contract; the one caller that asks only for a
     grant passes `None` past it deliberately.
+
+    The handle, not the driver: a provider reads this parent and never steers
+    it. The one notice that does reach a parent's inbox (`_inject`) looks the
+    driver up by session id instead, because a parent disposed while its child
+    ran has no inbox to deliver to — so the wider type bought nothing and let a
+    provider reach `cancel` on the agent that asked it for a child.
     """
     scope: Context | None = None
     """The boundary this delegation is made **from** (P6-31).

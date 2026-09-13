@@ -46,7 +46,14 @@ from ..cordis import (
 from ..json import as_str
 from ..keys import SKILLS, SYSTEM_PROMPT, TOOLS
 from ..system_prompt.assembly import ORDER_TOOL_GUIDANCE, AssembleContext, PromptSection
-from ..tools.definition import ToolModel, ToolOutput, ToolRunContext, define_tool, text_content
+from ..tools.definition import (
+    ToolDefinition,
+    ToolModel,
+    ToolOutput,
+    ToolRunContext,
+    define_tool,
+    text_content,
+)
 from ..tools.presentation import simple_views
 from ..tools.registry import register_when_composed
 from ..wire import WireModel
@@ -942,7 +949,7 @@ async def progressive(ctx: Context, config: Config) -> None:
             ],
         }
 
-    def build_tool() -> Any:  # noqa: ANN401
+    def build_tool() -> ToolDefinition | None:
         """The tool, or `None` where there is nothing to read.
 
         See `register_when_composed`: a `skill` tool in a deployment that

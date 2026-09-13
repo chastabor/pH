@@ -138,6 +138,8 @@ async def apply(ctx: Context, config: Config) -> None:
     tools = ctx.require(TOOLS)
 
     async def run_child(args: RunArgs, run: ToolRunContext) -> dict[str, Any]:
+        if run.agent is None:
+            raise ToolCallError(RUN_TOOL, "this tool has to be called by an agent")
         try:
             handle = await ctx.require(SUBAGENTS).start(
                 config.provider,

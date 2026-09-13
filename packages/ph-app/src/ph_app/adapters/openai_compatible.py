@@ -40,6 +40,7 @@ from ph.llm.types import (
     BlockEnd,
     BlockStart,
     Finish,
+    FinishKind,
     FinishReason,
     GenerateOptions,
     ReasoningBlock,
@@ -426,8 +427,8 @@ class _StreamState:
         self.next_index += 1
         return index
 
-    def consume(self, payload: dict[str, Any]) -> list[Any]:
-        out: list[Any] = []
+    def consume(self, payload: dict[str, Any]) -> list[StreamChunk]:
+        out: list[StreamChunk] = []
         raw_usage = payload.get("usage")
         if isinstance(raw_usage, dict):
             self.usage = _to_usage(raw_usage)
@@ -479,8 +480,8 @@ class _StreamState:
                 )
         return out
 
-    def finish(self) -> list[Any]:
-        out: list[Any] = []
+    def finish(self) -> list[StreamChunk]:
+        out: list[StreamChunk] = []
         if self.reasoning_index is not None:
             out.append(
                 BlockEnd(index=self.reasoning_index, block=ReasoningBlock(text=self.reasoning))
@@ -506,7 +507,7 @@ class _StreamState:
         return out
 
 
-def _finish_kind(reason: str | None) -> Any:  # noqa: ANN401
+def _finish_kind(reason: str | None) -> FinishKind:
     if reason == "tool_calls":
         return "tool-calls"
     if reason == "length":

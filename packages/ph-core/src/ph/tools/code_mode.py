@@ -332,6 +332,10 @@ async def apply(ctx: Context, config: Config) -> None:
         program = args.get("program") if isinstance(args, Mapping) else None
         if not isinstance(program, str) or not program.strip():
             raise ToolCallError(run.name, "program must be a non-empty string")
+        # The run's namespace is the calling agent's id, so a call with no agent
+        # has nowhere to put its bindings.
+        if run.agent is None:
+            raise ToolCallError(run.name, "this tool has to be called by an agent")
         runtime = ctx.require(CODE_RUNTIME).require()
         bridge = DispatchBridge(
             tools=tools,

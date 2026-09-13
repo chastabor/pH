@@ -30,6 +30,8 @@ from ph.cordis import Context
 from ph.keys import AGENTS, ATTACHMENTS, LLM, SESSIONS, UPLOADS
 from ph.llm.types import (
     FILE_EXPIRED,
+    BlockEnd,
+    Finish,
     MediaBlock,
     Message,
     ReasoningBlock,
@@ -40,7 +42,7 @@ from ph.llm.types import (
     create_user_message,
 )
 from ph.seams.attachments import digest_of
-from ph.testing import MountProfile
+from ph.testing import MountProfile, as_kind, block_text
 from ph_app.adapters._http import HttpClient, failure_from_status
 from ph_app.adapters.google import (
     MAX_TRANSFERS,
@@ -513,9 +515,9 @@ def test_a_thought_and_an_answer_are_two_blocks() -> None:
         *state.finish(),
     ]
 
-    ends = [chunk for chunk in chunks if chunk.type == "block-end"]
+    ends = [chunk for chunk in chunks if isinstance(chunk, BlockEnd)]
     assert [end.block.type for end in ends] == ["reasoning", "text"]
-    assert ends[0].block.text == "hmm" and ends[1].block.text == "the answer"
+    assert [block_text(end.block) for end in ends] == ["hmm", "the answer"]
 
 
 def test_a_function_call_is_given_the_id_this_wire_does_not_have() -> None:
@@ -542,10 +544,11 @@ def test_a_function_call_is_given_the_id_this_wire_does_not_have() -> None:
         *state.finish(),
     ]
 
-    (end,) = [chunk for chunk in chunks if chunk.type == "block-end"]
-    assert end.block.name == "read" and end.block.id == "call-1"
-    assert end.block.arguments == '{"p": 1}'
-    assert chunks[-1].reason.kind == "tool-calls"
+    (end,) = [chunk for chunk in chunks if isinstance(chunk, BlockEnd)]
+    call = as_kind(end.block, ToolCallBlock)
+    assert call.name == "read" and call.id == "call-1"
+    assert call.arguments == '{"p": 1}'
+    assert as_kind(chunks[-1], Finish).reason.kind == "tool-calls"
 
 
 def test_a_tool_result_goes_back_addressed_by_name() -> None:

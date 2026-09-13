@@ -659,8 +659,8 @@ class _StreamState:
         self.next_index += 1
         return index
 
-    def consume(self, payload: dict[str, Any]) -> list[Any]:
-        out: list[Any] = []
+    def consume(self, payload: dict[str, Any]) -> list[StreamChunk]:
+        out: list[StreamChunk] = []
         raw_usage = payload.get("usageMetadata")
         if isinstance(raw_usage, dict):
             self.usage = _to_usage(raw_usage)
@@ -673,8 +673,8 @@ class _StreamState:
                 out.extend(self._part(part))
         return out
 
-    def _part(self, part: dict[str, Any]) -> list[Any]:
-        out: list[Any] = []
+    def _part(self, part: dict[str, Any]) -> list[StreamChunk]:
+        out: list[StreamChunk] = []
         call = part.get("functionCall")
         if isinstance(call, dict):
             # An id is minted here because this wire has none. `call-<n>` per
@@ -720,8 +720,8 @@ class _StreamState:
             return "tool-calls"
         return _FINISH_KINDS.get(self.finish_reason or "", "stop")
 
-    def finish(self) -> list[Any]:
-        out: list[Any] = []
+    def finish(self) -> list[StreamChunk]:
+        out: list[StreamChunk] = []
         if self.reasoning_index is not None:
             out.append(
                 BlockEnd(index=self.reasoning_index, block=ReasoningBlock(text=self.reasoning))

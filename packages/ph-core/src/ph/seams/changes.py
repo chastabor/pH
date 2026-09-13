@@ -106,15 +106,14 @@ subtracts.
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
 
 from ..cordis import Context
 from ..keys import WORKSPACE
-from .workspace import Backend, SnapshottingProvider, VersionedProvider
+from .workspace import Backend, SnapshottingProvider, VersionedProvider, WorkspaceProvider
 
 __all__ = [
     "Backend",
@@ -203,7 +202,7 @@ def backend_for(ctx: Context, root: Path) -> Backend:
     return _probed(str(root))
 
 
-def _tier(ctx: Context) -> Any:  # noqa: ANN401
+def _tier(ctx: Context) -> WorkspaceProvider | None:
     """The mounted workspace provider, or `None` — the one place that asks.
 
     `ctx.get`, not `getattr(ctx, "workspace", None)`: the seam may not be mounted
@@ -371,7 +370,7 @@ async def _jj_state(ctx: Context, root: Path, *, since: str) -> TreeState:
     return TreeState(backend="jj", token=token, diffed=True, suspect=changed)
 
 
-def _snapshotting(ctx: Context, root: Path) -> Any:  # noqa: ANN401
+def _snapshotting(ctx: Context, root: Path) -> Callable[..., Awaitable[tuple[int, str, str]]]:
     """How to run a jj call that is allowed to commit the tree it reads.
 
     **The snapshot is this backend's whole advantage and its one hazard.** jj
@@ -393,7 +392,9 @@ def _snapshotting(ctx: Context, root: Path) -> Any:  # noqa: ANN401
     return lambda *args: jj(ctx, root, *args)
 
 
-async def _gathered(**calls: Any) -> dict[str, tuple[int, str, str]]:  # noqa: ANN401
+async def _gathered(
+    **calls: Awaitable[tuple[int, str, str]],
+) -> dict[str, tuple[int, str, str]]:
     """Await independent VCS calls concurrently, keyed by name.
 
     They do not depend on each other, and each is a process spawn — the git
@@ -408,7 +409,7 @@ async def _gathered(**calls: Any) -> dict[str, tuple[int, str, str]]:  # noqa: A
 
     results: dict[str, tuple[int, str, str]] = {}
 
-    async def run(name: str, awaitable: Any) -> None:  # noqa: ANN401
+    async def run(name: str, awaitable: Awaitable[tuple[int, str, str]]) -> None:
         results[name] = await awaitable
 
     async with anyio.create_task_group() as group:

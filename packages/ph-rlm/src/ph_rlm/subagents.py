@@ -448,7 +448,7 @@ class RlmChildProvider:
     # ------------------------------------------------------------- lifecycle --
 
     async def _attach(
-        self, child: _Child, parent: AgentDriver, *, cause: StatusCause | None = None
+        self, child: _Child, parent: AgentHandle, *, cause: StatusCause | None = None
     ) -> None:
         """Wire a live child to its parent and start driving it.
 

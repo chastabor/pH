@@ -324,7 +324,7 @@ class ToolRunContext:
         return self.execution.name
 
     @property
-    def agent(self) -> Any:  # noqa: ANN401
+    def agent(self) -> AgentHandle | None:
         return self.execution.agent
 
     @property

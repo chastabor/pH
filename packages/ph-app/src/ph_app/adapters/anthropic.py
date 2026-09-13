@@ -40,7 +40,9 @@ from ph.llm.adapter import LlmError, ResolvedModel, resolved
 from ph.llm.types import (
     BlockEnd,
     BlockStart,
+    ContentBlock,
     Finish,
+    FinishKind,
     FinishReason,
     GenerateOptions,
     LlmFailure,
@@ -409,8 +411,8 @@ class _StreamState:
     usage: TokenUsage | None = None
     stop_reason: str | None = None
 
-    def consume(self, event: str, payload: dict[str, Any]) -> list[Any]:
-        out: list[Any] = []
+    def consume(self, event: str, payload: dict[str, Any]) -> list[StreamChunk]:
+        out: list[StreamChunk] = []
         kind = payload.get("type") or event
         if kind == "message_start":
             raw = (payload.get("message") or {}).get("usage")
@@ -476,8 +478,8 @@ class _StreamState:
             out.append(Finish(reason=FinishReason(kind="error", failure=failure)))
         return out
 
-    def finish(self) -> list[Any]:
-        out: list[Any] = []
+    def finish(self) -> list[StreamChunk]:
+        out: list[StreamChunk] = []
         for index, open_block in list(self.blocks.items()):
             out.append(BlockEnd(index=index, block=_close(open_block, index)))
         self.blocks.clear()
@@ -487,7 +489,7 @@ class _StreamState:
         return out
 
 
-def _close(open_block: _Open, index: int) -> Any:  # noqa: ANN401
+def _close(open_block: _Open, index: int) -> ContentBlock:
     if open_block.kind == "reasoning":
         return ReasoningBlock(text=open_block.text)
     if open_block.kind == "tool-call":
@@ -499,7 +501,7 @@ def _close(open_block: _Open, index: int) -> Any:  # noqa: ANN401
     return TextBlock(text=open_block.text)
 
 
-def _finish_kind(stop_reason: str | None) -> Any:  # noqa: ANN401
+def _finish_kind(stop_reason: str | None) -> FinishKind:
     if stop_reason == "tool_use":
         return "tool-calls"
     if stop_reason == "max_tokens":

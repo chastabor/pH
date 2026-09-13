@@ -251,9 +251,23 @@ async def apply(ctx: Context, config: Config) -> None:
 
     # ------------------------------------------------------------- the tools --
 
-    async def send(args: SendArgs, run: ToolRunContext) -> dict[str, Any]:
+    def sender_of(tool: str, run: ToolRunContext) -> str:
+        """Who is calling, refusing rather than guessing when nobody is.
+
+        Every tool here answers *relative to the caller* — reach is computed from
+        the sender's place in the family — so a call arriving without an agent
+        has no question to answer, not a default one. While `run.agent` was
+        untyped each tool read `.id` off it directly, which made the caller-less
+        call an `AttributeError` raised from inside a body rather than a refusal
+        the program can handle.
+        """
         sender = run.agent
-        sender_id = sender.id
+        if sender is None:
+            raise ToolCallError(tool, "this tool has to be called by an agent")
+        return sender.id
+
+    async def send(args: SendArgs, run: ToolRunContext) -> dict[str, Any]:
+        sender_id = sender_of(SEND_TOOL, run)
         body = args.message.strip()
         if not body:
             raise ToolCallError(SEND_TOOL, "an agent message needs a body")
@@ -335,7 +349,7 @@ async def apply(ctx: Context, config: Config) -> None:
 
     def list_agents(_args: object, run: ToolRunContext) -> dict[str, Any]:
         """Who this agent may address, and how each is related."""
-        sender_id = run.agent.id
+        sender_id = sender_of(LIST_TOOL, run)
         rows = [
             {
                 "agentId": agent_id,
@@ -358,7 +372,7 @@ async def apply(ctx: Context, config: Config) -> None:
         another may not read it either, and a bounded read is offloadable like
         any other large result rather than arriving as cell output (C5).
         """
-        sender_id = run.agent.id
+        sender_id = sender_of(OBSERVE_GET_TOOL, run)
         role = family(sender_id).get(args.agent_id)
         if role is None or role == "self":
             raise ToolCallError(OBSERVE_GET_TOOL, OUT_OF_REACH)

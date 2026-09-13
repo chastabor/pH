@@ -38,10 +38,12 @@ from ph.keys import AGENTS, ATTACHMENTS, SESSIONS
 from ph.llm.adapter import LlmError, MediaRoute
 from ph.llm.assembler import BlockAssembler
 from ph.llm.types import (
+    Finish,
     GenerateOptions,
     MediaBlock,
     Message,
     ToolCallBlock,
+    ToolCallDelta,
     ToolSchema,
     create_tool_result_message,
     create_user_message,
@@ -420,7 +422,7 @@ def test_openai_tool_arguments_stream_as_deltas() -> None:
         *state.consume({"choices": [{"finish_reason": "tool_calls"}]}),
         *state.finish(),
     ]
-    deltas = [chunk for chunk in chunks if getattr(chunk, "type", "") == "tool-call-delta"]
+    deltas = [chunk for chunk in chunks if isinstance(chunk, ToolCallDelta)]
     # Incremental, not one completed call: replay fidelity depends on it.
     assert [delta.arguments_delta for delta in deltas] == ['{"pa', 'th": "a"}']
 
@@ -503,7 +505,7 @@ def test_a_deepseek_cache_miss_is_not_read_as_a_write() -> None:
 def test_a_length_finish_becomes_max_tokens() -> None:
     state = _StreamState()
     state.consume({"choices": [{"delta": {"content": "cut off"}, "finish_reason": "length"}]})
-    finish = state.finish()[-1]
+    finish = as_kind(state.finish()[-1], Finish)
     assert finish.reason.kind == "max-tokens"
 
 
