@@ -83,6 +83,26 @@ tree take different ones — but the return is `object` for `Disposer`'s reason:
 `_invoke` hands it to `is_bailed` and `maybe_await`, both of which take `object`,
 and every chain's answer is made good by `settled`."""
 
+type MaybeAwaitable[T] = T | Awaitable[T]
+"""A `T`, or a `T` that has to be awaited first — what `maybe_await` takes.
+
+The seam between a row's ordinary code and this runtime's. A body, a listener or
+a prompt section is written by whoever mounted the row; requiring `async def` of
+all of them would make every synchronous one spell a coroutine it has no use for,
+so the runtime accepts either and `maybe_await` settles it. `Disposer` above is
+the deliberate exception — it is return-agnostic rather than maybe-awaited, and
+`object` already subsumes an awaitable.
+
+Use it where the mixture is real. It is an *inference* trap in a parameter that
+has to solve `T` from a body's declared return, which is why the tool pipeline
+overloads on the body kind instead of spelling this union.
+
+Named because every declaration that takes a body spelled it by hand, and read
+differently at each: `T | Awaitable[T]`, `Awaitable[T] | T`, and
+`str | Awaitable[str | None] | None` are one type wearing three faces. The last
+is what `RUF036` leaves you with once `T` is itself optional, which is the point
+at which the hand-spelling stops being readable at all."""
+
 type Next[T] = Callable[..., Awaitable[T]]
 """The rest of a `waterfall` chain, as the listener wrapping it sees.
 
@@ -98,7 +118,7 @@ _MAX_RECONCILE_ROUNDS = 64
 _MISSING: Any = object()
 
 
-async def maybe_await[T](value: T | Awaitable[T]) -> T:
+async def maybe_await[T](value: MaybeAwaitable[T]) -> T:
     """Await `value` when it is awaitable, otherwise return it unchanged.
 
     Generic for the reason `waterfall` is: the caller knows what it handed in,
@@ -263,13 +283,13 @@ class _Dependent:
         scopes."""
         return [key for key in self.keys if not self.ctx.has(key)]
 
-    def deactivate(self) -> Awaitable[None] | None:
+    def deactivate(self) -> MaybeAwaitable[None]:
         """Drop the activation scope, unwinding everything it registered."""
         scope, self.scope, self.active = self.scope, None, False
         self.ctx._runtime.dirty = True
         return scope.dispose() if scope is not None else None
 
-    def retire(self) -> Awaitable[None] | None:
+    def retire(self) -> MaybeAwaitable[None]:
         """Deactivate and leave the tree for good."""
         self.disposed = True
         return self.deactivate()
@@ -346,7 +366,7 @@ class ForkScope:
         return self._dependent.scope
 
     @property
-    def config(self) -> Any:  # noqa: ANN401
+    def config(self) -> object:
         return self._config
 
     async def _apply(self, ctx: Context) -> None:
@@ -1007,7 +1027,7 @@ class Context:
         return release
 
     async def effect(
-        self, enter: Callable[[], Disposer | Awaitable[Disposer]], *, label: str = ""
+        self, enter: Callable[[], MaybeAwaitable[Disposer]], *, label: str = ""
     ) -> Disposer:
         """Acquire an artifact and register its release as an effect.
 

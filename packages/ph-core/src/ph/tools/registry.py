@@ -21,7 +21,7 @@ round; that is a transcription slip, not a second design.)
 from __future__ import annotations
 
 import logging
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Callable, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from typing import Any, Literal, NoReturn
@@ -32,6 +32,7 @@ from ..cordis import (
     Boundary,
     Context,
     Disposer,
+    MaybeAwaitable,
     Running,
     boundary_of,
     chain_label,
@@ -98,19 +99,17 @@ reach something else (P1-04). Only `register_transport` may claim it."""
 PresentationMode = Literal["native", "code", "both"]
 
 ToolGuard = Callable[[ToolExecution], str | None]
-"""A monotonic guard: a reason denies, `None` abstains."""
+"""A monotonic guard: a reason denies, `None` abstains.
 
-CodeNamespaceFactory = Callable[[Any], "CodeBindingNamespace | Awaitable[CodeBindingNamespace]"]
+There is no allow result *by construction*, which is what makes listener order
+unable to turn a denial back into permission (B2)."""
+
+CodeNamespaceFactory = Callable[[Any], "MaybeAwaitable[CodeBindingNamespace]"]
 """Builds one binding namespace for one question — a live run, or the SDK block.
 
 The argument is a `CodeBindingsRequest` (`ph.tools.code_mode`), typed `Any` here
 because the registry must not import the module that consumes it."""
 
-
-"""A monotonic guard: a reason denies, `None` abstains.
-
-There is no allow result *by construction*, which is what makes listener order
-unable to turn a denial back into permission (B2)."""
 
 events.declare(
     "tools/pre-execute",

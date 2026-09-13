@@ -18,7 +18,7 @@ find that out from an invoice.
 from __future__ import annotations
 
 import re
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TypeAlias
 
@@ -27,6 +27,7 @@ from ..cordis import (
     Boundary,
     Context,
     Disposer,
+    MaybeAwaitable,
     Running,
     boundary_of,
     events,
@@ -57,7 +58,7 @@ __all__ = [
 
 _VARIABLE = re.compile(r"\{\{\s*([A-Za-z_][A-Za-z0-9_.-]*)\s*\}\}")
 
-PromptText: TypeAlias = "str | Callable[[AssembleContext], str | Awaitable[str]]"
+PromptText: TypeAlias = "str | Callable[[AssembleContext], MaybeAwaitable[str]]"
 """A section's body: literal text, or a provider given the whole request.
 
 The **request**, not just the scope: a section that needs the agent — the RLM

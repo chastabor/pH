@@ -43,7 +43,7 @@ since the point of answering from the listing is not to walk a store
 without limit.
 """
 
-__all__ = ["ClaimingStore", "SessionPersistence", "StoredSession", "attach"]
+__all__ = ["ClaimingStore", "SessionArchive", "SessionPersistence", "StoredSession", "attach"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,7 +112,44 @@ def stored_row(session_id: str, header: SessionHeader | None, modified: float) -
 
 
 @runtime_checkable
-class SessionPersistence(Protocol):
+class SessionArchive(Protocol):
+    """A session store's listing and its unchained read — the read-only half.
+
+    Split out the way `AgentHandle` is split from `AgentDriver`, and for the same
+    reason: a fold that only *reads* the store has no business holding `track`,
+    `flush` or `forget`, and a test standing in for it should not have to
+    implement eight methods it never calls. `SessionPersistence` extends this, so
+    the two signatures are written once and a real backend satisfies both.
+    """
+
+    def read_own(
+        self, session_id: str, upto: int | None = None, family: str | None = None
+    ) -> tuple[SessionHeader, list[SessionEvent]]:
+        """This one stored log, unchained — the primitive `read` composes.
+
+        `upto` is a hint: events at or above it are not wanted, and returning them anyway
+        is slower but not wrong.
+
+        `family` is **not** a hint. Every member of a lineage shares one family directory,
+        so the walk knows where an ancestor lives and passing it turns a directory search
+        into a path — without it a chained read paid one scan per generation, which scales
+        with the size of the store rather than the length of the log.
+
+        Declared here rather than left to convention because it is the half a backend
+        actually implements. Without it a third backend can satisfy this Protocol with a
+        `read` that returns one file's events, pass mypy, pass `runtime_checkable`, mount
+        through `attach` and serve *segments* as whole sessions — surfacing as
+        `_readmit`'s "contiguous from 0" refusal three layers from the cause.
+        """
+        ...
+
+    def stored(self, *, limit: int = 50) -> list[StoredSession]:
+        """What is on record, most recently touched first."""
+        ...
+
+
+@runtime_checkable
+class SessionPersistence(SessionArchive, Protocol):
     """A place session logs go, and come back from.
 
     Typed rather than duck-typed, for the reason the seams give for their
@@ -157,31 +194,6 @@ class SessionPersistence(Protocol):
         to assemble the rest — `materialise(self.read_own, session_id)` is that
         walk, and both backends' `read` is exactly that one line.
         """
-        ...
-
-    def read_own(
-        self, session_id: str, upto: int | None = None, family: str | None = None
-    ) -> tuple[SessionHeader, list[SessionEvent]]:
-        """This one stored log, unchained — the primitive `read` composes.
-
-        `upto` is a hint: events at or above it are not wanted, and returning them anyway
-        is slower but not wrong.
-
-        `family` is **not** a hint. Every member of a lineage shares one family directory,
-        so the walk knows where an ancestor lives and passing it turns a directory search
-        into a path — without it a chained read paid one scan per generation, which scales
-        with the size of the store rather than the length of the log.
-
-        Declared here rather than left to convention because it is the half a backend
-        actually implements. Without it a third backend can satisfy this Protocol with a
-        `read` that returns one file's events, pass mypy, pass `runtime_checkable`, mount
-        through `attach` and serve *segments* as whole sessions — surfacing as
-        `_readmit`'s "contiguous from 0" refusal three layers from the cause.
-        """
-        ...
-
-    def stored(self, *, limit: int = 50) -> list[StoredSession]:
-        """What is on record, most recently touched first."""
         ...
 
     def locate(self, session_id: str) -> Path | None:

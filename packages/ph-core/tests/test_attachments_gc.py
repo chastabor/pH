@@ -34,7 +34,13 @@ from ph.seams.attachments import (
     survey_attachments,
 )
 from ph.seams.uploads import FileHandle, UploadRegistry
-from ph.session import Session, SessionHeader, SurfaceIntent, is_surface_eligible_type
+from ph.session import (
+    Session,
+    SessionEvent,
+    SessionHeader,
+    SurfaceIntent,
+    is_surface_eligible_type,
+)
 
 pytestmark = pytest.mark.anyio
 
@@ -45,20 +51,20 @@ OTHER = PNG + b"different"
 class _Store:
     """A persistence stub: logs in memory, one of them optionally unreadable.
 
-    Duck-typed against the two methods the fold uses, which is the whole reason
-    the fold takes `Any` — a test that had to stand up a JSONL backend to assert a
-    reference rule would be testing the backend.
+    The two methods `SessionArchive` declares, and no more — a test that had to
+    stand up a JSONL backend to assert a reference rule would be testing the
+    backend. That the fold names the read-only half is what keeps this legal.
     """
 
     def __init__(self, *sessions: Session, broken: str = "", truncate: bool = False) -> None:
         self.sessions = {one.id: one for one in sessions}
         self.broken = broken
         self.truncate = truncate
-        self.asked: dict[str, Any] = {}
+        self.asked: dict[str, str | None] = {}
         """What `family` each read was given — the fold's half of "an id plus a
         family is a path", which nothing else would notice going missing."""
 
-    def stored(self, *, limit: int = 50) -> list[Any]:
+    def stored(self, *, limit: int = 50) -> list[StoredSession]:
         # Real `StoredSession` rows, not a stand-in with the two fields this test
         # happened to read: a hand-rolled row went stale the moment the listing
         # grew `family`, and the fold read the resulting `AttributeError` as an
@@ -69,14 +75,14 @@ class _Store:
     def read_own(
         self,
         session_id: str,
-        upto: object = None,
-        family: object = None,
-    ) -> Any:  # noqa: ANN401
+        upto: int | None = None,
+        family: str | None = None,
+    ) -> tuple[SessionHeader, list[SessionEvent]]:
         self.asked[session_id] = family
         if session_id == self.broken:
             raise ValueError("torn log")
         session = self.sessions[session_id]
-        return session.header, session.events
+        return session.header, list(session.events)
 
 
 def _session(session_id: str, *events: tuple[str, Any]) -> Session:
@@ -93,7 +99,7 @@ def _session(session_id: str, *events: tuple[str, Any]) -> Session:
     return session
 
 
-async def _stored(tmp_path: Path, *payloads: bytes) -> tuple[AttachmentStore, list[Any]]:
+async def _stored(tmp_path: Path, *payloads: bytes) -> tuple[AttachmentStore, list[AttachmentRef]]:
     store = AttachmentStore(ctx=None, root=tmp_path / "attachments")  # type: ignore[arg-type]
     refs = [await store.save_bytes(content=one, mime="image/png", name="a.png") for one in payloads]
     return store, refs
@@ -224,8 +230,11 @@ async def test_a_store_that_cannot_be_listed_collects_nothing(tmp_path: Path) ->
     """ "No sessions" and "could not ask" are indistinguishable from here, and only
     one of them makes collection safe."""
 
-    class _Broken:
-        def stored(self, *, limit: int = 50) -> list[Any]:
+    class _Broken(_Store):
+        """A store whose listing fails. The reader is inherited and holds no logs,
+        so there is nothing for the fold to find if it wrongly got that far."""
+
+        def stored(self, *, limit: int = 50) -> list[StoredSession]:
             raise OSError("no store")
 
     store, _refs = await _stored(tmp_path, PNG)

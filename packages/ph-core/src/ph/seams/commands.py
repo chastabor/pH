@@ -12,7 +12,7 @@ decided. So a command dispatches directly, records `command/run` and
 from __future__ import annotations
 
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from functools import partial
 from typing import TypeAlias
@@ -21,6 +21,7 @@ from ..agent.types import AgentHandle
 from ..cordis import (
     Context,
     Disposer,
+    MaybeAwaitable,
     Running,
     events,
     maybe_await,
@@ -68,7 +69,7 @@ class CommandSchema(WireModel):
     argument_hint: str = ""
 
 
-CommandBody: TypeAlias = Callable[[str, "CommandContext"], "str | Awaitable[str | None] | None"]
+CommandBody: TypeAlias = Callable[[str, "CommandContext"], "MaybeAwaitable[str | None]"]
 """What a slash command *is*: the line the human typed, and what to show them.
 
 Sync or async, because a body arrives through a plugin row's entry point and no

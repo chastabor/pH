@@ -42,7 +42,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from time import time
-from typing import Any
+from typing import TYPE_CHECKING
 
 import anyio
 
@@ -53,6 +53,15 @@ from ..llm.dimensions import IMAGE_MIMES, image_dimensions
 from ..llm.types import AttachmentRef
 from ..paths import default_home_path
 from ..wire import WireModel
+
+if TYPE_CHECKING:
+    # Annotation-only, all three — and this seam is a plugin entry point, so an
+    # unguarded import put `ph.persistence` into every process that touches an
+    # attachment. `ph/persistence/__init__.py` imports the JSONL *backend*, so
+    # the fold that exists in order not to import one was importing one.
+    from ..persistence.protocol import SessionArchive
+    from ..session import SessionEvent
+    from .uploads import UploadRegistry
 
 __all__ = [
     "ENCODED_CACHE_BYTES",
@@ -427,7 +436,7 @@ class AttachmentSurvey:
         return sum(blob.bytes for blob in self.collect)
 
 
-def referenced_digests(events: Iterable[Any]) -> set[str]:
+def referenced_digests(events: Iterable[SessionEvent]) -> set[str]:
     """Every attachment id mentioned anywhere in these events' payloads.
 
     Over the *payloads* rather than over a set of event types, for `DIGEST_TEXT`'s
@@ -487,18 +496,20 @@ def _blobs(root: Path, now: float) -> list[Blob]:
 
 
 def survey_attachments(
-    store: Any,  # noqa: ANN401
-    persistence: Any,  # noqa: ANN401
+    store: AttachmentStore,
+    persistence: SessionArchive,
     *,
-    uploads: Any = None,  # noqa: ANN401
+    uploads: UploadRegistry | None = None,
     min_age: float = MIN_AGE,
     limit: int = LISTING_LIMIT,
     now: float | None = None,
 ) -> AttachmentSurvey:
     """Fold every stored session for the digests it still points at.
 
-    Duck-typed on both stores like `stored_survivors`, so the fold has no reason
-    to import a backend and a test can hand it a stub.
+    Named rather than duck-typed, which keeps what the duck-typing was for — no
+    backend reaches this module at runtime, and a test may still hand it a stub —
+    while what the fold asks of each is checked. `SessionArchive` is the read-only
+    half of `SessionPersistence`, so a store satisfies it by being one.
 
     **Unchained reads, one log at a time.** `read_own` rather than `read` is not
     an optimisation, it is the correct primitive for this question twice over: the
@@ -559,33 +570,9 @@ def survey_attachments(
     )
 
 
-def _stale_uploads(uploads: object, referenced: set[str]) -> tuple[Path, ...]:
-    """Handle-cache entries for blobs nothing points at any more (P7-03).
-
-    The other half of the same question, and the reason `ctx.uploads` says a sweep
-    belongs here: an entry is written per `(provider, digest)` ever uploaded and
-    stays after the provider has forgotten the file, so that directory grows with
-    every distinct attachment a deployment has ever sent.
-
-    Swept under the same reference set but **not for the same reason** — losing an
-    entry costs one upload, losing a blob costs the conversation. That is why
-    these are not aged: an unreferenced digest's cache entry is dead the moment
-    the blob is, and there is no staged-file window to wait out because nothing
-    uploads a file before a session mentions it.
-    """
-    root = getattr(uploads, "root", None)
-    if not isinstance(root, Path) or not root.is_dir():
-        return ()
-    return tuple(
-        path
-        for path in sorted(root.rglob("*.json"))
-        if f"sha256:{path.stem}" not in referenced and DIGEST_TEXT.fullmatch(f"sha256:{path.stem}")
-    )
-
-
 def collect_attachments(
     survey: AttachmentSurvey,
-    uploads: Any = None,  # noqa: ANN401
+    uploads: UploadRegistry | None = None,
 ) -> tuple[int, int]:
     """Remove what the survey cleared, and report `(blobs, upload entries)`.
 

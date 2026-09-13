@@ -477,7 +477,11 @@ class ToolDefinition:
     definition lives in a registry beside every other tool, so the type is erased
     at the table and the checking happens at the constructor, where the body and
     its declared `parameters` meet. The same shape as `PluginSpec.apply`."""
-    execute: Callable[[Any, ToolRunContext], Any]
+    execute: Callable[[Any, ToolRunContext], Awaitable[Any]]
+    """Always awaited. `define_tool` wraps every body in an `async def` that runs
+    it through `maybe_await`, so by the time one reaches this field the sync-or-
+    async question is already settled — and `registry.py`'s `await` on it is a
+    checked await rather than one that passes because `Any` awaits."""
     finalize_content: (
         Callable[[ToolExecution, ToolExecutionResult], Sequence[ContentBlock] | None] | None
     ) = None
@@ -639,7 +643,7 @@ def define_tool[A: BaseModel](
     *,
     parameters: type[A] | dict[str, Any],
     output: ToolOutput | SchemaDeclaration,
-    execute: Callable[[A, ToolRunContext], Awaitable[Any] | Any],
+    execute: Callable[[A, ToolRunContext], Any],
     render: Callable[[JsonObject, Any], Sequence[ContentBlock]] | None = None,
     presentation_meta: Callable[[JsonObject, Any], Any] | None = None,
     finalize_content: Callable[..., Sequence[ContentBlock] | None] | None = None,
@@ -667,6 +671,9 @@ def define_tool[A: BaseModel](
     as it was declared.
 
     The value side is deliberately not parameterised; `ToolOutput` argues that.
+    Which is also why `execute` cannot say "sync or async" the way `CommandBody`
+    does: `MaybeAwaitable[Any]` *is* `Any`, so the `Awaitable[Any] | Any` that
+    stood here was prose wearing a type. `run` awaits through `maybe_await`.
     """
     resolved_output = (
         output

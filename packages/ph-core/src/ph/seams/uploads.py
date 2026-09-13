@@ -284,6 +284,12 @@ class UploadRegistry:
         reporting zero — silently, and with nothing failing — the day the scheme
         changed. The *reference set* is still the attachment store's to compute;
         what belongs here is which files answer to it.
+
+        **Not aged, where the blobs are.** An unreferenced digest's cache entry is
+        dead the moment its blob is, and there is no staged-file window to wait
+        out because nothing uploads a file before a session mentions it. The two
+        halves are swept under one reference set but not for the same reason:
+        losing an entry costs one upload, losing a blob costs the conversation.
         """
         if not self.root.is_dir():
             return ()
