@@ -276,7 +276,12 @@ class Runner:
 
     # ------------------------------------------------------------ dispatch --
 
-    async def _dispatch(self, namespace: str, name: str, arguments: dict[str, Any]) -> Any:
+    async def _dispatch(
+        self,
+        namespace: str,
+        name: str,
+        arguments: dict[str, Any],
+    ) -> Any:  # noqa: ANN401
         """Marshal one binding call and wait for the host's answer."""
         self._next_call_id += 1
         call_id = self._next_call_id
@@ -346,7 +351,7 @@ class Runner:
     def _settle(
         self,
         run_id: int,
-        value: Any,
+        value: Any,  # noqa: ANN401
         error: dict[str, Any] | None,
         out: _CappedStream,
         err: _CappedStream,
@@ -376,7 +381,7 @@ class Runner:
             self.channel.send({"type": "snapshot", "id": run_id, "variables": records})
 
 
-def _plain(value: Any) -> Any:
+def _plain(value: object) -> object:
     """Round-trip through JSON so a proxy object cannot ride along in `args`."""
     try:
         return json.loads(json.dumps(value, default=repr))
@@ -384,7 +389,7 @@ def _plain(value: Any) -> Any:
         return {}
 
 
-def _encode_value(value: Any, cap: int) -> tuple[Any, bool]:
+def _encode_value(value: object, cap: int) -> tuple[object, bool]:
     """The cell's value as JSON if it fits, else a bounded `repr`.
 
     **Both halves stop at the cap rather than building the whole thing to measure
@@ -405,7 +410,7 @@ def _encode_value(value: Any, cap: int) -> tuple[Any, bool]:
     return value, False
 
 
-def _bounded_repr(value: Any, cap: int) -> str:
+def _bounded_repr(value: object, cap: int) -> str:
     """`repr(value)` without building a repr larger than `cap`."""
     printer = reprlib.Repr()
     printer.maxstring = printer.maxother = cap

@@ -39,11 +39,11 @@ from ph.testing import MountProfile, StubSandboxProvider, not_none, report_secti
 pytestmark = pytest.mark.anyio
 
 
-def _allow(**config: Any) -> dict[str, Any]:
+def _allow(**config: Any) -> dict[str, Any]:  # noqa: ANN401
     return {"id": "sandbox-allow", "config": config}
 
 
-def _seam(**kwargs: Any) -> SandboxSeam:
+def _seam(**kwargs: Any) -> SandboxSeam:  # noqa: ANN401
     seam = SandboxSeam(ctx=Context())
     seam.register_provider(StubSandboxProvider())
     if kwargs:

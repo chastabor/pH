@@ -270,7 +270,7 @@ class OpenAiCompatibleAdapter:
         secret = resolve_secret(self.ctx, self.profile.api_key_env, self.profile.provider)
         return {"Authorization": f"Bearer {secret}", "Content-Type": "application/json"}
 
-    async def upload(self, ref: Any, content: bytes) -> FileHandle:
+    async def upload(self, ref: Any, content: bytes) -> FileHandle:  # noqa: ANN401
         """Hand the bytes to the Files API and keep the id it returns (P7-03).
 
         The `Uploader` half of `ctx.uploads` for this wire. `purpose` is the one
@@ -506,7 +506,7 @@ class _StreamState:
         return out
 
 
-def _finish_kind(reason: str | None) -> Any:
+def _finish_kind(reason: str | None) -> Any:  # noqa: ANN401
     if reason == "tool_calls":
         return "tool-calls"
     if reason == "length":
@@ -598,7 +598,9 @@ def _media_part(
 
 
 def _to_openai(
-    message: Any, media: dict[str, str], handles: dict[str, str]
+    message: Any,  # noqa: ANN401
+    media: dict[str, str],
+    handles: dict[str, str],
 ) -> list[dict[str, Any]]:
     """One pH message as the wire's (sometimes several) messages.
 

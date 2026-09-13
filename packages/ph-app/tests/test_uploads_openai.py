@@ -44,7 +44,7 @@ PDF = b"%PDF-1.7\n" + b"pages" * 64
 OPTIONS = AgentOptions(provider="openai", model="gpt-test")
 
 
-def _route(**config: Any) -> dict[str, Any]:
+def _route(**config: Any) -> dict[str, Any]:  # noqa: ANN401
     profile = {
         "provider": "openai",
         "apiKeyEnv": "OPENAI_API_KEY",
@@ -119,7 +119,11 @@ class _FileApi:
 def wire(monkeypatch: pytest.MonkeyPatch) -> _FileApi:
     api = _FileApi()
 
-    async def post_multipart(self: HttpClient, url: str, **kwargs: Any) -> dict[str, Any]:
+    async def post_multipart(
+        self: HttpClient,
+        url: str,
+        **kwargs: Any,  # noqa: ANN401
+    ) -> dict[str, Any]:
         api.forms.append({"url": url, **kwargs})
         reply: dict[str, Any] = {"id": api.issue()}
         if api.expires_at is not None:
@@ -127,7 +131,9 @@ def wire(monkeypatch: pytest.MonkeyPatch) -> _FileApi:
         return reply
 
     async def stream_sse(
-        self: HttpClient, url: str, **kwargs: Any
+        self: HttpClient,
+        url: str,
+        **kwargs: Any,  # noqa: ANN401
     ) -> AsyncIterator[tuple[str, dict[str, Any]]]:
         for event in api.events(kwargs["json"]):
             yield event
@@ -138,7 +144,11 @@ def wire(monkeypatch: pytest.MonkeyPatch) -> _FileApi:
     return api
 
 
-async def _attached(ctx: Context, mime: str = "application/pdf", name: str = "paper.pdf") -> Any:
+async def _attached(
+    ctx: Context,
+    mime: str = "application/pdf",
+    name: str = "paper.pdf",
+) -> Any:  # noqa: ANN401
     ref = await ctx.require(ATTACHMENTS).save_bytes(content=PDF, mime=mime, name=name)
     return create_user_message(
         content=[{"type": "text", "text": "what happens here?"}, MediaBlock(attachment=ref)],
@@ -308,7 +318,7 @@ async def test_a_failed_upload_falls_back_to_the_bytes(
     bad minute would degrade a document the route can send perfectly well.
     """
 
-    async def failing(self: HttpClient, url: str, **kwargs: Any) -> dict[str, Any]:
+    async def failing(self: HttpClient, url: str, **kwargs: Any) -> dict[str, Any]:  # noqa: ANN401
         raise OSError("the file API is down")
 
     monkeypatch.setattr(HttpClient, "post_multipart", failing)

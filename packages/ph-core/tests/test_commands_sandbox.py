@@ -25,7 +25,7 @@ from ph.testing import MountProfile, not_none
 pytestmark = pytest.mark.anyio
 
 
-async def _run(ctx: Any, line: str, session: Any = None) -> str:
+async def _run(ctx: Any, line: str, session: Any = None) -> str:  # noqa: ANN401
     shown = await ctx.require(COMMANDS).dispatch(line, session=session)
     assert isinstance(shown, str)
     return shown
@@ -150,7 +150,7 @@ async def test_a_profile_without_the_row_is_told_so(mount: MountProfile) -> None
     assert "mounts no sandbox-allow row" in shown
 
 
-def _refusals(ctx: Any, session: Any) -> Any:
+def _refusals(ctx: Any, session: Any) -> Any:  # noqa: ANN401
     """This row's reading, by id — `sandbox` is the refusal count.
 
     The mode is `sandbox-mode`, contributed by the seam's own row: two facts

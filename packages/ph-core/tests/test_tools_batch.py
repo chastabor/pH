@@ -33,8 +33,8 @@ def _setup() -> tuple[Any, ToolRuntime, StubAgent, list[str]]:
     return root, tools, agent, []
 
 
-def _slow(name: str, trace: list[str], delay: float, *, safe: bool) -> Any:
-    async def body(_args: Any, _run: Any) -> str:
+def _slow(name: str, trace: list[str], delay: float, *, safe: bool) -> Any:  # noqa: ANN401
+    async def body(_args: Any, _run: Any) -> str:  # noqa: ANN401
         trace.append(f"{name}:start")
         await anyio.sleep(delay)
         trace.append(f"{name}:end")
@@ -49,7 +49,7 @@ def _blocks(*names: str) -> list[ToolCallBlock]:
     ]
 
 
-async def _run(root: Any, agent: StubAgent, *names: str, **kwargs: Any) -> Any:
+async def _run(root: Any, agent: StubAgent, *names: str, **kwargs: Any) -> Any:  # noqa: ANN401
     token = kwargs.pop("token", CancelToken())
     accept = kwargs.pop("accept", lambda _c: None)
     return await execute_tool_calls(root, agent, 1, 1, _blocks(*names), token, accept, **kwargs)
@@ -181,7 +181,7 @@ async def test_results_keep_model_order_when_the_gate_settles_out_of_order() -> 
     tools.register(_slow("slow", trace, 0.0, safe=True))
     _reached, release = parked_gate(root, only="slow")
 
-    async def fast_body(_args: Any, _run: Any) -> str:
+    async def fast_body(_args: Any, _run: Any) -> str:  # noqa: ANN401
         release.set()  # slot 1 has run before slot 0 was even allowed to
         return "fast"
 
@@ -220,7 +220,7 @@ async def test_cancellation_records_a_result_for_every_skipped_call() -> None:
     root, tools, agent, trace = _setup()
     token = CancelToken()
 
-    async def cancelling(_args: Any, _run: Any) -> str:
+    async def cancelling(_args: Any, _run: Any) -> str:  # noqa: ANN401
         token.cancel("user")
         return "first"
 
@@ -242,7 +242,7 @@ async def test_cancellation_records_a_result_for_every_skipped_call() -> None:
 async def test_deferred_context_reaches_the_acceptor_after_the_result() -> None:
     root, tools, agent, _trace = _setup()
 
-    def body(_args: Any, run: Any) -> str:
+    def body(_args: Any, run: Any) -> str:  # noqa: ANN401
         run.defer_context(
             create_user_message(
                 content=[{"type": "text", "text": "notice"}],

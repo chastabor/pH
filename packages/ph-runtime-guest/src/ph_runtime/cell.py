@@ -142,7 +142,7 @@ def bound_names(body: list[ast.stmt]) -> set[str]:
     return found
 
 
-def compile_cell(program: str, filename: str = CELL_FILENAME) -> Any:
+def compile_cell(program: str, filename: str = CELL_FILENAME) -> Any:  # noqa: ANN401
     """Compile `program` into a module that defines `CELL_FUNCTION`.
 
     :raises SyntaxError: the program does not parse. A magic gets `MAGIC_HINT`

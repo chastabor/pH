@@ -154,7 +154,13 @@ class SessionTelemetry:
             )
         )
 
-    async def ops(self, body: str, *, severity: Severity = "info", **attributes: Any) -> None:
+    async def ops(
+        self,
+        body: str,
+        *,
+        severity: Severity = "info",
+        **attributes: Any,  # noqa: ANN401
+    ) -> None:
         """Record something about the harness rather than the conversation."""
         await self.record(
             SessionTelemetryRecord(
@@ -168,7 +174,11 @@ class SessionTelemetry:
 
 
 async def ops_record(
-    ctx: Context, body: str, *, severity: Severity = "info", **attributes: Any
+    ctx: Context,
+    body: str,
+    *,
+    severity: Severity = "info",
+    **attributes: Any,  # noqa: ANN401
 ) -> None:
     """Record something about the harness, if this deployment has the seam (P5-09).
 
@@ -216,7 +226,7 @@ async def apply(ctx: Context, config: Config) -> None:
 
         telemetry.add_sink(write)
 
-    def on_event(session: Session, event: SessionEvent) -> Any:
+    def on_event(session: Session, event: SessionEvent) -> Any:  # noqa: ANN401
         # The returned coroutine is scheduled by `emit`, never awaited on the
         # append path; a chunk that will not ship returns nothing and costs no
         # task at all.

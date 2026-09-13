@@ -142,7 +142,7 @@ async def apply(ctx: Context, config: Config) -> None:
     )
 
 
-def _pipeline(config: Config) -> Any:
+def _pipeline(config: Config) -> Any:  # noqa: ANN401
     """The OTLP exporter behind a batching processor — the row's one test seam.
 
     Batching is right in production, where a record per turn must not be a

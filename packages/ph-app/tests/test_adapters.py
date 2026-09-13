@@ -78,7 +78,7 @@ class _Response:
         self._chunks = chunks
         self.status_code = 200
 
-    async def aiter_text(self) -> Any:
+    async def aiter_text(self) -> Any:  # noqa: ANN401
         for chunk in self._chunks:
             yield chunk
 
@@ -117,7 +117,7 @@ class _ServerStub:
         self._slow = slow
         self.asked: list[str] = []
 
-    async def get_json(self, url: str, **_: Any) -> dict[str, Any]:
+    async def get_json(self, url: str, **_: Any) -> dict[str, Any]:  # noqa: ANN401
         self.asked.append(url)
         if url in self._slow:
             await anyio.sleep(0.05)
@@ -298,7 +298,9 @@ async def test_a_probe_the_server_does_not_publish_falls_through_to_the_next() -
     ],
     ids=["no-settings", "no-n_ctx", "not-a-number", "zero", "wrong-shape"],
 )
-async def test_a_server_that_will_not_say_leaves_the_configured_window(props: Any) -> None:
+async def test_a_server_that_will_not_say_leaves_the_configured_window(
+    props: Any,  # noqa: ANN401
+) -> None:
     """Every way of not answering is one answer, because the caller does one
     thing with all of them: keep what the profile said.
 
@@ -771,7 +773,7 @@ async def test_real_api_smoke(
 PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"pixels" * 32
 
 
-async def _with_attachment(root: Context, tmp_path: Path, mime: str) -> Any:
+async def _with_attachment(root: Context, tmp_path: Path, mime: str) -> Any:  # noqa: ANN401
     """Mount a store on `root`, save one blob, and hand back its reference."""
     from ph.seams.attachments import AttachmentStore
 
@@ -780,7 +782,7 @@ async def _with_attachment(root: Context, tmp_path: Path, mime: str) -> Any:
     return await store.save_bytes(content=PNG_BYTES, mime=mime, name="shot.png")
 
 
-def _media_message(ref: Any) -> Any:
+def _media_message(ref: Any) -> Any:  # noqa: ANN401
     return create_user_message(
         content=[{"type": "text", "text": "what is this?"}, MediaBlock(attachment=ref)],
         source={"kind": "user"},

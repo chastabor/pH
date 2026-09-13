@@ -70,7 +70,7 @@ pytestmark = pytest.mark.anyio
 def delegating(mount: MountProfile) -> Callable[..., Any]:
     """`await delegating()` → `(ctx, parent_session, parent)` with the provider on."""
 
-    async def build(**config: Any) -> tuple[Any, Any, Any]:
+    async def build(**config: Any) -> tuple[Any, Any, Any]:  # noqa: ANN401
         rows = [dict(PROVIDER_ROW)]
         if config:
             rows[0]["config"] = config
@@ -81,7 +81,12 @@ def delegating(mount: MountProfile) -> Callable[..., Any]:
     return build
 
 
-async def _spawn(ctx: Any, parent: Any, prompt: str = "research the thing", **kwargs: Any) -> Any:
+async def _spawn(
+    ctx: Any,  # noqa: ANN401
+    parent: Any,  # noqa: ANN401
+    prompt: str = "research the thing",
+    **kwargs: Any,  # noqa: ANN401
+) -> Any:  # noqa: ANN401
     return await ctx.require(SUBAGENTS).start(
         PROVIDER_NAME, SubagentRequest(prompt=prompt, parent=parent, **kwargs)
     )
@@ -304,7 +309,7 @@ def gate(monkeypatch: pytest.MonkeyPatch) -> Iterator[_Gate]:
     held.release_all()
 
 
-def _statuses(session: Any, run_id: str) -> list[str]:
+def _statuses(session: Any, run_id: str) -> list[str]:  # noqa: ANN401
     """Every status this child reached, in order. One spelling, three readers."""
     return [
         str(event.data["status"])
@@ -313,7 +318,7 @@ def _statuses(session: Any, run_id: str) -> list[str]:
     ]
 
 
-def _notices(session: Any) -> list[str]:
+def _notices(session: Any) -> list[str]:  # noqa: ANN401
     """Notices delivered to the parent's inbox but not yet claimed by a step.
 
     `inject` is deliberately non-waking, so the notice lands as a splice and
@@ -597,8 +602,13 @@ async def test_a_rehydrated_child_is_narrowed_again(delegating: MountedRuntime) 
 
 
 async def _tiered_child(
-    ctx: Any, parent: Any, tmp_path: Path, prompt: str, *, access: str = "read"
-) -> Any:
+    ctx: Any,  # noqa: ANN401
+    parent: Any,  # noqa: ANN401
+    tmp_path: Path,
+    prompt: str,
+    *,
+    access: str = "read",
+) -> Any:  # noqa: ANN401
     """A child under a tier that hands out worktrees, `read` by default.
 
     `access` is a parameter rather than a second copy of the setup: the write
@@ -613,7 +623,7 @@ async def _tiered_child(
     return await _spawn(ctx, parent, prompt, access=access)
 
 
-def _marks(ctx: Any, run: Any) -> list[str]:
+def _marks(ctx: Any, run: Any) -> list[str]:  # noqa: ANN401
     session = ctx.require(SESSIONS).get(run.session_id)
     return [
         str(event.data.get("retained", ""))
@@ -729,7 +739,7 @@ async def test_a_failed_child_tells_its_parent_where_the_tree_is(
     assert str(root) in told, "the parent was left to find the evidence itself"
 
 
-def _breaks(agent: Any) -> None:
+def _breaks(agent: Any) -> None:  # noqa: ANN401
     """Make this agent's next run raise, which is what `_drive` catches."""
 
     async def broken() -> None:
@@ -797,7 +807,7 @@ class _Gate:
         original = FakeAdapter.stream
         gate = self
 
-        async def gated(self: Any, options: Any) -> Any:
+        async def gated(self: Any, options: Any) -> Any:  # noqa: ANN401
             gate.arrived += 1
             if not gate.open:
                 event = anyio.Event()
@@ -865,7 +875,7 @@ async def test_a_child_that_failed_frees_its_slot(
     original_run = ReactLoopAgent.run
     failed: list[str] = []
 
-    async def run(self: Any) -> None:
+    async def run(self: Any) -> None:  # noqa: ANN401
         # The parent is never run in this test, so the first `run()` is the first
         # child's; every later one is genuine.
         if not failed:
@@ -913,7 +923,7 @@ async def test_deleting_a_queued_child_stops_its_wait_and_takes_no_slot(
 # ------------------------------------------------------------ across a restart --
 
 
-async def _persisted(ctx: Any, session: Any) -> None:
+async def _persisted(ctx: Any, session: Any) -> None:  # noqa: ANN401
     """Put on disk what a restart will read, with the harness holding still.
 
     A flush and nothing else. The first harness is parked at the model for the
@@ -937,7 +947,7 @@ number would be asserting against a value it does not control — and coupling
 
 async def _restart(
     mount: MountProfile, session_id: str, *, skills: tuple[str, ...] = (), concurrent: int = 1
-) -> Any:
+) -> Any:  # noqa: ANN401
     """A second harness over the same `$PH_HOME`, resuming one root from its log.
 
     What a daemon restart *is* from the seam's side: a fresh mount, nothing in
@@ -1038,7 +1048,7 @@ async def test_a_child_caught_mid_turn_climbs_the_ladder_with_its_task_re_presen
     assert "this is attempt 2" in tasks[-1]
 
 
-def _resumed(session: Any, run_id: str, times: int) -> None:
+def _resumed(session: Any, run_id: str, times: int) -> None:  # noqa: ANN401
     """Record `times` restarts, the way a restart actually records one.
 
     The real facts rather than a seeded count: the ladder folds `running` records
@@ -1049,7 +1059,14 @@ def _resumed(session: Any, run_id: str, times: int) -> None:
         session.append(STATUS, {"runId": run_id, "status": "running", "cause": "resumed"})
 
 
-async def _stalled(ctx: Any, session: Any, parent: Any, gate: _Gate, *, restarts: int) -> Any:
+async def _stalled(
+    ctx: Any,  # noqa: ANN401
+    session: Any,  # noqa: ANN401
+    parent: Any,  # noqa: ANN401
+    gate: _Gate,
+    *,
+    restarts: int,
+) -> Any:  # noqa: ANN401
     """A child at the model that has already been restarted `restarts` times."""
     child = await _spawn(ctx, parent, "only")
     await _until(lambda: gate.arrived == 1, "the child to reach the model")

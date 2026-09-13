@@ -70,7 +70,7 @@ def _acquired(
     return workspace_acquired(agent, root, kind=kind)
 
 
-def _record(root: Path, *, session_id: str = "s", **extra: Any) -> WorkspaceRecord:
+def _record(root: Path, *, session_id: str = "s", **extra: Any) -> WorkspaceRecord:  # noqa: ANN401
     """A closed record with a reason — which is what `outcome == "retained"` is.
 
     Stated as the two facts rather than as the outcome, because the outcome is

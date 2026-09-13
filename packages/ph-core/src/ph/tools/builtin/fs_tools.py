@@ -101,7 +101,7 @@ class GrepValue(ToolModel):
     truncated: bool
 
 
-def _render_read(_args: JsonObject, value: Any) -> list[ContentBlock]:
+def _render_read(_args: JsonObject, value: Any) -> list[ContentBlock]:  # noqa: ANN401
     first = value["offset"] + 1
     last = value["offset"] + value["lines"]
     body = value["text"]
@@ -110,18 +110,18 @@ def _render_read(_args: JsonObject, value: Any) -> list[ContentBlock]:
     return text_content(f"{value['path']} (lines {first}-{last} of {value['total_lines']})\n{body}")
 
 
-def _render_write(_args: JsonObject, value: Any) -> list[ContentBlock]:
+def _render_write(_args: JsonObject, value: Any) -> list[ContentBlock]:  # noqa: ANN401
     verb = "Created" if value["created"] else "Wrote"
     return text_content(f"{verb} {value['path']} ({value['bytes']} bytes)")
 
 
-def _render_edit(_args: JsonObject, value: Any) -> list[ContentBlock]:
+def _render_edit(_args: JsonObject, value: Any) -> list[ContentBlock]:  # noqa: ANN401
     return text_content(
         f"Edited {value['path']} ({count_of(value['replacements'], 'replacement')})"
     )
 
 
-def _render_glob(_args: JsonObject, value: Any) -> list[ContentBlock]:
+def _render_glob(_args: JsonObject, value: Any) -> list[ContentBlock]:  # noqa: ANN401
     paths = value["paths"]
     if not paths:
         return text_content("No files matched.")
@@ -129,7 +129,7 @@ def _render_glob(_args: JsonObject, value: Any) -> list[ContentBlock]:
     return text_content(f"{len(paths)} match(es):\n" + "\n".join(paths) + suffix)
 
 
-def _render_grep(_args: JsonObject, value: Any) -> list[ContentBlock]:
+def _render_grep(_args: JsonObject, value: Any) -> list[ContentBlock]:  # noqa: ANN401
     matches = value["matches"]
     if not matches:
         return text_content("No matches.")
@@ -147,7 +147,7 @@ async def apply(ctx: Context, config: None) -> None:
     """Register the filesystem tools."""
     fs = ctx.require(FS)
 
-    async def read(args: ReadArgs, run: ToolRunContext) -> Any:
+    async def read(args: ReadArgs, run: ToolRunContext) -> Any:  # noqa: ANN401
         window = await fs.read(
             args.path,
             offset=args.offset,
@@ -158,7 +158,7 @@ async def apply(ctx: Context, config: None) -> None:
         )
         return window.model_dump()
 
-    async def write(args: WriteArgs, run: ToolRunContext) -> Any:
+    async def write(args: WriteArgs, run: ToolRunContext) -> Any:  # noqa: ANN401
         target = fs.resolve(args.path, agent=run.agent)
         existed = target.exists()
         await fs.write(
@@ -172,7 +172,7 @@ async def apply(ctx: Context, config: None) -> None:
             "created": not existed,
         }
 
-    async def edit(args: EditArgs, run: ToolRunContext) -> Any:
+    async def edit(args: EditArgs, run: ToolRunContext) -> Any:  # noqa: ANN401
         count = await fs.edit(
             args.path,
             args.old_text,
@@ -184,13 +184,13 @@ async def apply(ctx: Context, config: None) -> None:
         )
         return {"path": fs.named(args.path, agent=run.agent), "replacements": count}
 
-    async def glob_tool(args: GlobArgs, run: ToolRunContext) -> Any:
+    async def glob_tool(args: GlobArgs, run: ToolRunContext) -> Any:  # noqa: ANN401
         paths = await fs.glob(
             args.pattern, root=args.path, limit=GLOB_LIMIT, agent=run.agent, scope=run.scope
         )
         return {"paths": paths, "truncated": len(paths) >= GLOB_LIMIT}
 
-    async def grep_tool(args: GrepArgs, run: ToolRunContext) -> Any:
+    async def grep_tool(args: GrepArgs, run: ToolRunContext) -> Any:  # noqa: ANN401
         matches = await fs.grep(
             args.pattern,
             root=args.path,

@@ -191,7 +191,7 @@ class Sidebar(Vertical):
     Sidebar > .section-body { color: $ph-muted; }
     """
 
-    def __init__(self, **kwargs: Any) -> None:
+    def __init__(self, **kwargs: Any) -> None:  # noqa: ANN401
         super().__init__(**kwargs)
         self.styles.width = self.WIDTH
         self._shown: tuple[object, ...] | None = None

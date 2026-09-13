@@ -43,7 +43,7 @@ calls, so the ambiguity it guards against cannot arise there (see
 from __future__ import annotations
 
 from collections import Counter
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, Literal
 
 from pydantic import Field
@@ -539,7 +539,7 @@ def _requires(entry: Mapping[str, Any]) -> list[str]:
     return [as_str(name) for name in as_seq(entry.get("requires"))]
 
 
-def _recorded(previous: Any) -> list[Mapping[str, Any]]:
+def _recorded(previous: Any) -> list[Mapping[str, Any]]:  # noqa: ANN401
     """The entries the last `todo/write` holds, read **frozen**.
 
     The one read both rules take. `todos_of` would deep-copy the whole previous
@@ -601,7 +601,7 @@ def _carried(
 
 def _witnessed(
     session: Session,
-    previous: Any,
+    previous: Any,  # noqa: ANN401
     recorded: list[Mapping[str, Any]],
     todos: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
@@ -665,7 +665,7 @@ def _parallel_write_todos(session: Session | None) -> bool:
 async def apply(ctx: Context, config: None) -> None:
     """Register the tool, its prompt section, its context and its one rule."""
 
-    async def write_todos(args: WriteTodosArgs, run: ToolRunContext) -> Any:
+    async def write_todos(args: WriteTodosArgs, run: ToolRunContext) -> Any:  # noqa: ANN401
         todos = [item.model_dump(mode="json") for item in args.todos]
         session = run.session
         # One `latest`, one frozen read: both rules below want a few scalars off
@@ -728,7 +728,9 @@ async def apply(ctx: Context, config: None) -> None:
         )
     )
 
-    async def refuse_parallel_calls(execution: ToolExecution, next_: Any) -> Any:
+    async def refuse_parallel_calls(
+        execution: ToolExecution, next_: Callable[..., Awaitable[Any]]
+    ) -> Any:  # noqa: ANN401
         if execution.name == TOOL_NAME and _parallel_write_todos(execution.session):
             return Deny(reason=PARALLEL_CALL_ERROR)
         return await next_(execution)

@@ -138,7 +138,7 @@ class Inbox:
             self._notify.inserted(message)
         return list(removed)
 
-    def _apply(self, splice: Any) -> None:
+    def _apply(self, splice: Any) -> None:  # noqa: ANN401
         self._validate(splice)
         pending = self._state[splice["target"]]
         start = splice["start"]
@@ -147,7 +147,7 @@ class Inbox:
             Message.model_validate(item) for item in splice["inserted"]
         ]
 
-    def _validate(self, splice: Any) -> None:
+    def _validate(self, splice: Any) -> None:  # noqa: ANN401
         target = splice.get("target")
         if target not in ("next-turn", "next-step"):
             raise ValueError("invalid inbox splice target")

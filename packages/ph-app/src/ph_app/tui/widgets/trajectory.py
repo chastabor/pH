@@ -135,7 +135,7 @@ class TrajectoryPanel(Vertical):
     TrajectoryPanel .details-body { color: $ph-foreground; height: auto; }
     """
 
-    def __init__(self, records: list[TrajectoryRecord], **kwargs: Any) -> None:
+    def __init__(self, records: list[TrajectoryRecord], **kwargs: Any) -> None:  # noqa: ANN401
         super().__init__(**kwargs)
         self.records = records
         self._index = [search_index(record) for record in records]

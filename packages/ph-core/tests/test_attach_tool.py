@@ -44,18 +44,23 @@ def _takes_images() -> ResolvedModel:
     return ResolvedModel(accepts=frozenset({"image/png"}), context_window=8192)
 
 
-async def _agent(ctx: Context, name: str) -> Any:
+async def _agent(ctx: Context, name: str) -> Any:  # noqa: ANN401
     return ctx.require(AGENTS).create(ctx.require(SESSIONS).create(name), OPTIONS)
 
 
-async def _dispatch(ctx: Context, agent: Any, name: str, arguments: Any) -> list[Any]:
+async def _dispatch(
+    ctx: Context,
+    agent: Any,  # noqa: ANN401
+    name: str,
+    arguments: Any,  # noqa: ANN401
+) -> list[Any]:
     """One tool call through the batch, wired the way the driver wires it."""
     results: list[Any] = []
 
-    def accept(context: Any) -> None:
+    def accept(context: Any) -> None:  # noqa: ANN401
         agent.inbox.append("next-step", context)
 
-    def keep(_execution: Any, result: Any) -> None:
+    def keep(_execution: Any, result: Any) -> None:  # noqa: ANN401
         results.append(result)
 
     ctx.on("tools/result", keep)
@@ -71,7 +76,7 @@ async def _dispatch(ctx: Context, agent: Any, name: str, arguments: Any) -> list
     return results
 
 
-def _media(request: Any) -> list[Any]:
+def _media(request: Any) -> list[Any]:  # noqa: ANN401
     return [
         attachment
         for message in request.messages
@@ -152,7 +157,7 @@ async def test_the_read_gate_bounds_what_a_model_may_attach(
     secret.write_bytes(PNG)
     agent = await _agent(ctx, "denied")
 
-    async def refuse(intent: Any, next_: Any) -> Any:
+    async def refuse(intent: Any, next_: Any) -> Any:  # noqa: ANN401
         return "keys are not readable" if intent.path.name.startswith("id_rsa") else await next_()
 
     ctx.on("fs/read-intent", refuse)

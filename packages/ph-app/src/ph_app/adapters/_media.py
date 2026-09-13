@@ -27,6 +27,7 @@ import logging
 from collections.abc import Collection, Sequence
 from typing import Any
 
+from ph.cordis import Context
 from ph.keys import UPLOADS
 from ph.llm.adapter import LlmError
 from ph.llm.media import media_pointer_text
@@ -38,7 +39,7 @@ log = logging.getLogger("ph_app.adapters.media")
 
 
 def forget_named_handle(
-    ctx: Any, error: LlmError, referenced: Sequence[str], *, provider: str
+    ctx: Context, error: LlmError, referenced: Sequence[str], *, provider: str
 ) -> LlmError:
     """Drop the one handle this failure named, or leave the failure alone (P7-03).
 
@@ -76,7 +77,7 @@ def forget_named_handle(
     return error
 
 
-def media_pointer(attachment: Any) -> dict[str, Any]:
+def media_pointer(attachment: Any) -> dict[str, Any]:  # noqa: ANN401
     """The text block that stands in for media that could not be loaded.
 
     Reached only on a race — `media-degrade` already checked the blob was there,
@@ -88,7 +89,7 @@ def media_pointer(attachment: Any) -> dict[str, Any]:
 
 
 async def load_handles(
-    uploads: Any,
+    uploads: Any,  # noqa: ANN401
     messages: Sequence[Message],
     *,
     provider: str,
@@ -138,7 +139,10 @@ async def load_handles(
 
 
 async def load_media(
-    store: Any, messages: Sequence[Message], *, skip: Collection[str] = ()
+    store: Any,  # noqa: ANN401
+    messages: Sequence[Message],
+    *,
+    skip: Collection[str] = (),
 ) -> dict[str, str]:
     """Base64 for every attachment still on the request, keyed by id.
 

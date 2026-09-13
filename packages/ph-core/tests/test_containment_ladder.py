@@ -45,7 +45,7 @@ from ph.testing.git import WORKTREE_ROWS, worktree_agent
 pytestmark = pytest.mark.anyio
 
 
-async def _write(ctx: Any, workspace: Any, target: str) -> tuple[int, str]:
+async def _write(ctx: Any, workspace: Any, target: str) -> tuple[int, str]:  # noqa: ANN401
     """A raw `open()` from a process whose cwd is the agent's tree.
 
     No `agent=`, so nothing resolves the path on its behalf and no policy is

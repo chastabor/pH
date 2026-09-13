@@ -435,7 +435,7 @@ contradiction `claim_slot` exists to refuse.
 """
 
 
-async def _repo_with_materials(ctx: Any, path: Path) -> Path:
+async def _repo_with_materials(ctx: Any, path: Path) -> Path:  # noqa: ANN401
     base = await git_repo(ctx, path)
     (base / ".gitignore").write_text(".env\ndeps/\n", encoding="utf-8")
     (base / ".env").write_text("TOKEN=shhh\n", encoding="utf-8")

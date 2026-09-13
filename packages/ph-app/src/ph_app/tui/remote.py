@@ -205,7 +205,7 @@ class DaemonSession:
         """
         return self._unreadable > 0
 
-    def _unread(self, message: str, *args: Any) -> None:
+    def _unread(self, message: str, *args: Any) -> None:  # noqa: ANN401
         """Record a frame this client could not take, loudly once.
 
         **Loud once, then quiet.** A frame that will not rebuild is a protocol
@@ -697,7 +697,7 @@ def _remote_command(
     executes a verb is the definition's business, not the caller's.
     """
 
-    async def elsewhere(argument: str, _context: Any) -> str | None:
+    async def elsewhere(argument: str, _context: Any) -> str | None:  # noqa: ANN401
         line = f"/{schema.name} {argument}".rstrip()
         reply = await client.mutate(
             verbs.SESSION_COMMAND, CommandParams(session_id=session_id, line=line)

@@ -191,7 +191,7 @@ class Peer:
 
     # ------------------------------------------------------------- outbound --
 
-    def _queue(self) -> Any:
+    def _queue(self) -> Any:  # noqa: ANN401
         """The outbound stream, built on first use.
 
         **Not in `serve()`**, which is the obvious place and is a race: a caller
@@ -287,7 +287,7 @@ class Peer:
             with suppress(anyio.ClosedResourceError):
                 await send.aclose()
 
-    async def _write(self, receive: Any) -> None:
+    async def _write(self, receive: Any) -> None:  # noqa: ANN401
         async with receive:
             async for frame in receive:
                 try:
@@ -295,7 +295,7 @@ class Peer:
                 except (anyio.BrokenResourceError, anyio.ClosedResourceError):
                     return
 
-    async def _read(self, tasks: Any, limit: anyio.Semaphore) -> None:
+    async def _read(self, tasks: Any, limit: anyio.Semaphore) -> None:  # noqa: ANN401
         """Route each frame by direction, and never handle one inline.
 
         `method` is the discriminator, not `id` — see `protocol.request`. Both

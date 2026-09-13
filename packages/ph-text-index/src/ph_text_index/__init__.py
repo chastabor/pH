@@ -345,7 +345,7 @@ class TextIndexSeam:
             self._index = store
         return self._index
 
-    async def embed(self, texts: list[str], *, query: bool) -> Any:
+    async def embed(self, texts: list[str], *, query: bool) -> Any:  # noqa: ANN401
         embedder = self.embedder
         return await anyio.to_thread.run_sync(
             lambda: embedder.encode(texts, query=query), abandon_on_cancel=True
@@ -439,7 +439,7 @@ class SearchValue(ToolModel):
 # ------------------------------------------------------------------- render ----
 
 
-def _render_index(args: JsonObject, value: Any) -> list[ContentBlock]:
+def _render_index(args: JsonObject, value: Any) -> list[ContentBlock]:  # noqa: ANN401
     verb = "Removed" if args.get("forget") else "Indexed"
     lines = [
         f"{verb} {count_of(len(value['documents']), 'document')}: "
@@ -466,7 +466,7 @@ def _render_index(args: JsonObject, value: Any) -> list[ContentBlock]:
     return text_content("\n".join(lines))
 
 
-def _render_search(_args: JsonObject, value: Any) -> list[ContentBlock]:
+def _render_search(_args: JsonObject, value: Any) -> list[ContentBlock]:  # noqa: ANN401
     if not value["hits"]:
         return text_content(
             f"Nothing matched {value['query']!r} among "
@@ -519,7 +519,7 @@ async def apply(ctx: Context, config: Config) -> None:
     seam = TextIndexSeam(ctx=ctx, config=config)
     ctx.provide(TEXT_INDEX, seam)
 
-    async def index_tool(args: IndexArgs, run: ToolRunContext) -> Any:
+    async def index_tool(args: IndexArgs, run: ToolRunContext) -> Any:  # noqa: ANN401
         store = await seam.index()
         documents = await ctx.require(FS).collect(
             args.paths,
@@ -585,7 +585,7 @@ async def apply(ctx: Context, config: Config) -> None:
             "total_chunks": stats["chunks"],
         }
 
-    async def search_tool(args: SearchArgs, run: ToolRunContext) -> Any:
+    async def search_tool(args: SearchArgs, run: ToolRunContext) -> Any:  # noqa: ANN401
         store = await seam.index()
         vector = await seam.embed([args.query], query=True)
         run.raise_if_cancelled()
@@ -655,7 +655,7 @@ async def apply(ctx: Context, config: Config) -> None:
             scope=scope,
         )
 
-    async def install(argument: str, command: Any) -> str:
+    async def install(argument: str, command: Any) -> str:  # noqa: ANN401
         """`/text-index install` — fetch and load the model, now, on purpose.
 
         A **command** and not a tool, per the seam's own rule: this is a thing

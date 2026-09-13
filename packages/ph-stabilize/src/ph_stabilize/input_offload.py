@@ -31,6 +31,7 @@ a `user/message`, so the next request finds it, sees a replacement, and stops.
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
@@ -109,7 +110,7 @@ async def apply(ctx: Context, config: Config) -> None:
         SpillClaim.under_session("input-offload", "offload/input-spilled")
     )
 
-    async def offload(proposal: Any, next_: Any) -> Any:
+    async def offload(proposal: Any, next_: Callable[..., Awaitable[Any]]) -> Any:  # noqa: ANN401
         session: Session | None = getattr(proposal.agent, "session", None)
         pending = _pending(session, config) if session is not None else None
         if session is None or pending is None:

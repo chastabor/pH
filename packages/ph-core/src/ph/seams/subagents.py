@@ -1188,7 +1188,7 @@ class Grant:
             )
 
 
-def _brief_text(skills: Any, named: Sequence[str], scope: Context) -> str:
+def _brief_text(skills: Any, named: Sequence[str], scope: Context) -> str:  # noqa: ANN401
     """The named skills' instructions, read once.
 
     **A named skill is direction, not a lookup.** G9 keeps bodies out of the
@@ -1238,7 +1238,7 @@ def subagent_roster(session: Session) -> dict[str, dict[str, Any]]:
     return roster
 
 
-def fold_subagent_event(roster: dict[str, dict[str, Any]], event: Any) -> None:
+def fold_subagent_event(roster: dict[str, dict[str, Any]], event: Any) -> None:  # noqa: ANN401
     """Fold one event into a roster, in place. The rules, in one place.
 
     Exported because there is a second consumer with a different *shape* — the

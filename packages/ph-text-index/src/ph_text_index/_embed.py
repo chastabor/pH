@@ -47,7 +47,7 @@ class Embedder(Protocol):
         the space does — the model, and anything else that moves a vector.
         """
 
-    def encode(self, texts: Sequence[str], *, query: bool) -> Any:
+    def encode(self, texts: Sequence[str], *, query: bool) -> Any:  # noqa: ANN401
         """`(len(texts), dim)` float32, L2-normalised.
 
         **Blocking**; the seam calls it in a worker thread. Normalised because
@@ -143,7 +143,7 @@ class SentenceTransformerEmbedder:
         """
         return f"sentence-transformers:{self.model_name}:{self.query_prefix}|{self.document_prefix}"
 
-    def _load(self) -> Any:
+    def _load(self) -> Any:  # noqa: ANN401
         if self._model is None:
             from sentence_transformers import SentenceTransformer
 
@@ -190,7 +190,7 @@ class SentenceTransformerEmbedder:
         """
         return self._model is not None
 
-    def encode(self, texts: Sequence[str], *, query: bool) -> Any:
+    def encode(self, texts: Sequence[str], *, query: bool) -> Any:  # noqa: ANN401
         import numpy as np
 
         prefix = self.query_prefix if query else self.document_prefix

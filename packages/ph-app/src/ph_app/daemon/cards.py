@@ -54,7 +54,11 @@ before the function that would reject it, so gating inside would still pay a
 service lookup per chunk to reach a `return None`."""
 
 
-def presentation_of(tools: Any, session: Session, event: SessionEvent) -> dict[str, Any] | None:
+def presentation_of(
+    tools: Any,  # noqa: ANN401
+    session: Session,
+    event: SessionEvent,
+) -> dict[str, Any] | None:
     """The rendered view for one event, or `None` when there is nothing to say.
 
     `None` covers every ordinary absence — a tool this deployment no longer

@@ -60,11 +60,17 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, cast
 
-from ph.agent.types import AgentHandle, PreStepDecision, RequestErrorAction, RequestFailure
+from ph.agent.types import (
+    AgentHandle,
+    PreStepDecision,
+    PreStepRequest,
+    RequestErrorAction,
+    RequestFailure,
+)
 from ph.agent_loop import AgentCancelled
 from ph.cancel import Cancelled
 from ph.cordis import DEPLOYMENT, Context, plugin
@@ -464,7 +470,9 @@ def truncated_arguments(arguments: str, max_length: int) -> str | None:
 
 
 def _elided_arguments(
-    block: Any, elides: Callable[[str], bool], max_length: int
+    block: Any,  # noqa: ANN401
+    elides: Callable[[str], bool],
+    max_length: int,
 ) -> tuple[str, int] | None:
     """One block's replacement arguments and the length they replace, read from
     the *frozen* payload.
@@ -539,7 +547,7 @@ def truncated_assistant_payload(
 # ------------------------------------------------------------------ reading --
 
 
-def _block_text(block: Any) -> str:
+def _block_text(block: Any) -> str:  # noqa: ANN401
     if isinstance(block, TextBlock):
         return block.text
     if isinstance(block, ToolCallBlock):
@@ -1294,7 +1302,10 @@ async def apply(ctx: Context, config: Config) -> None:
     engine = SummarizeEngine(ctx=ctx, config=config)
     ctx.require(COMPACTION).register(engine)
 
-    async def on_pre_step(request: Any, next_: Any) -> Any:
+    async def on_pre_step(
+        request: PreStepRequest,
+        next_: Callable[..., Awaitable[Any]],
+    ) -> Any:  # noqa: ANN401
         decision = await next_(request)
         # After the rest of the chain, so a step another row rejected is not
         # compacted for: the cheapest compaction is the one a limit made
@@ -1303,7 +1314,9 @@ async def apply(ctx: Context, config: Config) -> None:
             await engine.compact_if_needed(request.agent, "pressure")
         return decision
 
-    async def on_request_error(failure: RequestFailure, next_: Any) -> Any:
+    async def on_request_error(
+        failure: RequestFailure, next_: Callable[..., Awaitable[Any]]
+    ) -> Any:  # noqa: ANN401
         if failure.failure.code != CONTEXT_WINDOW_EXCEEDED:
             return await next_(failure)
         # Clip first, summarize second — upstream's order, and the order that

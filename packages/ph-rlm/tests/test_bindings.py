@@ -32,7 +32,7 @@ pytestmark = pytest.mark.anyio
 def delegating_runtime(mounted_runtime: MountedRuntime) -> Callable[..., Any]:
     """The real kernel plus the delegation rows, so a cell can spawn for real."""
 
-    async def build(**kwargs: Any) -> tuple[Context, Session, AgentHandle]:
+    async def build(**kwargs: Any) -> tuple[Context, Session, AgentHandle]:  # noqa: ANN401
         built: tuple[Context, Session, AgentHandle] = await mounted_runtime(
             session_id="parent",
             presentation=True,
@@ -44,7 +44,14 @@ def delegating_runtime(mounted_runtime: MountedRuntime) -> Callable[..., Any]:
     return build
 
 
-async def _cell(ctx: Any, program: str, *, agent: Any, session: Any, call_id: str = "c1") -> Any:
+async def _cell(
+    ctx: Any,  # noqa: ANN401
+    program: str,
+    *,
+    agent: Any,  # noqa: ANN401
+    session: Any,  # noqa: ANN401
+    call_id: str = "c1",
+) -> Any:  # noqa: ANN401
     return await run_cell(ctx, program, agent=agent, session=session, call_id=call_id, name=IPYTHON)
 
 
@@ -179,7 +186,7 @@ async def test_a_policy_row_can_deny_spawning(delegating_runtime: MountedRuntime
     """
     ctx, session, agent = await delegating_runtime()
 
-    async def refuse(execution: Any, next_: Any) -> Any:
+    async def refuse(execution: Any, next_: Any) -> Any:  # noqa: ANN401
         if execution.name == RUN_TOOL:
             return Deny(reason="this deployment does not allow subagents")
         return await next_()

@@ -10,14 +10,13 @@ renamed section fails with the list in the message.
 
 from __future__ import annotations
 
-from typing import Any
-
+from ..cordis import Context
 from ..keys import DIAGNOSTICS
 
 __all__ = ["report_section"]
 
 
-def report_section(ctx: Any, title: str) -> dict[str, str]:
+def report_section(ctx: Context, title: str) -> dict[str, str]:
     """One section of `ctx.diagnostics.report()`, as label → value."""
     sections = dict(ctx.require(DIAGNOSTICS).report())
     assert title in sections, f"no {title!r} section in {list(sections)}"

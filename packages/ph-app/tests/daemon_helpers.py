@@ -169,7 +169,7 @@ async def running(
     name: str = "",
     path: Path | None = None,
     profile: Profile | None = None,
-    **options: Any,
+    **options: Any,  # noqa: ANN401
 ) -> AsyncIterator[_Daemon]:
     """A daemon, started and accepting, torn down when the block ends.
 
@@ -311,7 +311,9 @@ def private_runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 @asynccontextmanager
 async def serving(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **options: Any
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    **options: Any,  # noqa: ANN401
 ) -> AsyncIterator[Daemon]:
     """A daemon listening exactly where a client of this `$PH_RUNTIME` will look.
 

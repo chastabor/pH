@@ -132,7 +132,11 @@ def store(request: pytest.FixtureRequest, tmp_path: Path) -> SessionPersistence:
     return TursoSessionStore(ctx=None, root=tmp_path)  # type: ignore[arg-type]
 
 
-def _session(store: SessionPersistence, session_id: str = "s1", **header: Any) -> Session:
+def _session(
+    store: SessionPersistence,
+    session_id: str = "s1",
+    **header: Any,  # noqa: ANN401
+) -> Session:
     """A tracked session. `track` is what the row does on `session/created`."""
     session = Session(session_id, header=SessionHeader(id=session_id, created_at=1, **header))
     store.track(session)
@@ -143,7 +147,7 @@ def _append(
     store: SessionPersistence,
     session: Session,
     kind: str,
-    data: Any,
+    data: Any,  # noqa: ANN401
     intent: SurfaceIntent | None = None,
 ) -> None:
     """Append and record, which is the pair the row wires to the firehose.
@@ -1037,7 +1041,7 @@ async def test_a_failed_write_is_retried_rather_than_lost(
 
     broken = True
 
-    def refuse(*_args: Any, **_kwargs: Any) -> None:
+    def refuse(*_args: Any, **_kwargs: Any) -> None:  # noqa: ANN401
         if broken:
             raise OSError("no space left on device")
 

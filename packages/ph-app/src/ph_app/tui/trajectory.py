@@ -173,7 +173,7 @@ def _source_ref(message: Mapping[str, Any]) -> SourceRef:
     return SourceRef(kind=kind, name=name, form=form)
 
 
-def _text(blocks: Any) -> str:
+def _text(blocks: Any) -> str:  # noqa: ANN401
     """The visible text of wire content, with other blocks named rather than
     dropped — an auditor wants to see that an image was there."""
     return text_of_wire(blocks, placeholder=lambda kind: f"[{kind}]")
@@ -189,7 +189,7 @@ class _Builder:
     _first_chunk: int | None = None
     _system: str = ""
 
-    def add(self, **fields: Any) -> TrajectoryRecord:
+    def add(self, **fields: Any) -> TrajectoryRecord:  # noqa: ANN401
         record = TrajectoryRecord(index=len(self.records) + 1, **fields)
         self.records.append(record)
         return record

@@ -258,7 +258,7 @@ RELEASE = """parameters:
 
 async def _release(
     mount: MountProfile, root: Path, body: str = "Bump {{parameters.version-type}}."
-) -> Any:
+) -> Any:  # noqa: ANN401
     write_skill(root, "release", description="cut a release", extra=RELEASE, body=body)
     ctx = await mount(row(root))
     return ctx, ctx.require(AGENTS).create(ctx.require(SESSIONS).create("s"), FAKE_OPTIONS)
@@ -463,7 +463,7 @@ async def test_a_listener_that_fails_does_not_fail_the_read(
     Sabotage: drop `contained=True` and the tool call below is an error.
     """
 
-    def unhappy(_payload: Any) -> None:
+    def unhappy(_payload: Any) -> None:  # noqa: ANN401
         raise RuntimeError("this row is having a bad day")
 
     ctx, agent = await _release(mount, tmp_path)

@@ -179,7 +179,7 @@ async def test_the_encoding_is_paid_once_per_process(tmp_path: Path) -> None:
 # ------------------------------------------------------------ the estimate --
 
 
-def _ref(mime: str, **facts: Any) -> AttachmentRef:
+def _ref(mime: str, **facts: Any) -> AttachmentRef:  # noqa: ANN401
     """A placeholder reference, so each estimate test shows only what varies."""
     return AttachmentRef(attachment_id="sha256:x", mime=mime, bytes=1024, **facts)
 

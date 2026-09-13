@@ -156,7 +156,11 @@ class AskDesk:
 
     # ---------------------------------------------------------- answerers --
 
-    async def answer_approval(self, request: ApprovalRequest, _next: Any = None) -> ApprovalAnswer:
+    async def answer_approval(
+        self,
+        request: ApprovalRequest,
+        _next: Any = None,  # noqa: ANN401
+    ) -> ApprovalAnswer:
         """`ctx.approval`'s answerer, over the socket.
 
         The ask is keyed by the same string `pending_approvals` uses — the call
@@ -176,7 +180,11 @@ class AskDesk:
             self.root.agent.steer(user_text(reason))
         return answer_from_wire(result.answer)
 
-    async def answer_question(self, question: UserQuestion, _next: Any = None) -> str | None:
+    async def answer_question(
+        self,
+        question: UserQuestion,
+        _next: Any = None,  # noqa: ANN401
+    ) -> str | None:
         """`ctx.user_questions`' answerer, over the socket.
 
         Keyed by the question's own `ask_id`, which `UserQuestionService.ask`

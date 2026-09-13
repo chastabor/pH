@@ -50,7 +50,7 @@ class Verdict(BaseModel):
 SHAPE: dict[str, Any] = Verdict.model_json_schema()
 
 
-def _options(**over: Any) -> GenerateOptions:
+def _options(**over: Any) -> GenerateOptions:  # noqa: ANN401
     base: dict[str, Any] = {
         "provider": "fake",
         "model": "fake-1",
@@ -63,7 +63,7 @@ def _options(**over: Any) -> GenerateOptions:
     return GenerateOptions(**{**base, **over})
 
 
-def _replies(*texts: str) -> Any:
+def _replies(*texts: str) -> Any:  # noqa: ANN401
     """A stream answering each call with the next text. Returns `(stream, seen)`.
 
     `text_chunks` is the shared quartet a text reply emits — spelling it out here
@@ -73,10 +73,10 @@ def _replies(*texts: str) -> Any:
     remaining = list(texts)
     seen: list[GenerateOptions] = []
 
-    async def stream(options: GenerateOptions) -> Any:
+    async def stream(options: GenerateOptions) -> Any:  # noqa: ANN401
         seen.append(options)
 
-        async def chunks() -> Any:
+        async def chunks() -> Any:  # noqa: ANN401
             for chunk in text_chunks(remaining.pop(0) if remaining else ""):
                 yield chunk
 

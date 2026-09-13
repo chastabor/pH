@@ -35,13 +35,13 @@ loop already has. Nothing has to be un-dispatched.
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from pydantic import Field
 
-from ph.agent.types import PreStepDecision
+from ph.agent.types import PreStepDecision, PreStepRequest
 from ph.cordis import Context, plugin
 from ph.json import as_bool, as_str
 from ph.keys import SESSIONS, SUBAGENTS, TUI_STATUS
@@ -433,7 +433,10 @@ async def apply(ctx: Context, config: Config) -> None:
 
     # ------------------------------------------------------- model calls --
 
-    async def on_pre_step(request: Any, next_: Any) -> Any:
+    async def on_pre_step(
+        request: PreStepRequest,
+        next_: Callable[..., Awaitable[Any]],
+    ) -> Any:  # noqa: ANN401
         settings = config.model_calls
         session: Session | None = getattr(request.agent, "session", None)
         if session is None or settings.unlimited:
@@ -457,7 +460,10 @@ async def apply(ctx: Context, config: Config) -> None:
 
     # -------------------------------------------------------- tool calls --
 
-    async def on_pre_execute(execution: ToolExecution, next_: Any) -> Any:
+    async def on_pre_execute(
+        execution: ToolExecution,
+        next_: Callable[..., Awaitable[Any]],
+    ) -> Any:  # noqa: ANN401
         session = execution.session
         settings = config.tool_calls
         breaker = config.breaker.consecutive_failures

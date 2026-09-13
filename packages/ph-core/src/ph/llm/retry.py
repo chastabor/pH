@@ -25,7 +25,7 @@ So the classification is explicit:
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 import anyio
@@ -85,7 +85,10 @@ async def apply(ctx: Context, config: Config) -> None:
     settings = config
     attempts: dict[str, int] = {}
 
-    async def on_error(failure_payload: Any, next_: Callable[..., Any]) -> Any:
+    async def on_error(
+        failure_payload: Any,  # noqa: ANN401
+        next_: Callable[..., Awaitable[Any]],
+    ) -> Any:  # noqa: ANN401
         from ..agent.types import RequestErrorAction
 
         failure: LlmFailure = failure_payload.failure

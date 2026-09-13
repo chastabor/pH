@@ -106,7 +106,7 @@ for _tag in ("tag:yaml.org,2002:timestamp",):
         ]
 
 
-def _reject_unknown_tag(loader: yaml.Loader, suffix: str, node: yaml.Node) -> Any:
+def _reject_unknown_tag(loader: yaml.Loader, suffix: str, node: yaml.Node) -> Any:  # noqa: ANN401
     raise LoaderError(
         f"pH config is data, not code: tag '!{suffix}' at line "
         f"{node.start_mark.line + 1} is not allowed"
@@ -117,7 +117,7 @@ SafeRowLoader.add_multi_constructor("!", _reject_unknown_tag)
 SafeRowLoader.add_multi_constructor("tag:", _reject_unknown_tag)
 
 
-def safe_yaml_load(text: str, *, origin: str = "<string>") -> Any:
+def safe_yaml_load(text: str, *, origin: str = "<string>") -> Any:  # noqa: ANN401
     """Parse YAML with no code evaluation and no implicit date coercion."""
     try:
         return yaml.load(text, Loader=SafeRowLoader)
@@ -168,7 +168,7 @@ class Row:
 # ------------------------------------------------------------ interpolation --
 
 
-def interpolate(value: Any, env: Mapping[str, str] | None = None) -> Any:
+def interpolate(value: Any, env: Mapping[str, str] | None = None) -> Any:  # noqa: ANN401
     """Expand `${env:VAR:-default}` through a value tree.
 
     A whole-string match keeps the environment value's own type only insofar as
@@ -200,7 +200,7 @@ def interpolate(value: Any, env: Mapping[str, str] | None = None) -> Any:
     return value
 
 
-def evaluate_predicate(value: Any, env: Mapping[str, str] | None = None) -> bool:
+def evaluate_predicate(value: Any, env: Mapping[str, str] | None = None) -> bool:  # noqa: ANN401
     """Resolve a row's `disabled:` field.
 
     Accepts a literal boolean or one of two closed predicates:
@@ -252,7 +252,7 @@ def _as_rows(entries: Iterable[Any], layer: str) -> list[Row]:
     return rows
 
 
-def _as_isolate(value: Any, layer: str) -> dict[str, Any] | None:
+def _as_isolate(value: Any, layer: str) -> dict[str, Any] | None:  # noqa: ANN401
     """`isolate:` as a list of row ids, or a mapping of row id to config override.
 
     Two spellings for one fact, and both normalise to the mapping: `[fs]` is
@@ -395,7 +395,12 @@ def entry_point_targets(group: str) -> dict[str, str]:
     return {entry.name: entry.value for entry in entry_points(group=group)}
 
 
-def resolve_entry_point(group: str, name: str, *, default_attribute: str = "") -> Any:
+def resolve_entry_point(
+    group: str,
+    name: str,
+    *,
+    default_attribute: str = "",
+) -> Any:  # noqa: ANN401
     """Import what `name` registers in `group`, or `None` if nothing does.
 
     The mechanical half of resolution — look up, import, `getattr` — with no
@@ -456,7 +461,7 @@ def import_plugin_modules() -> list[ModuleType]:
     return modules
 
 
-def resolve_plugin(name: str) -> Any:
+def resolve_plugin(name: str) -> Any:  # noqa: ANN401
     """Resolve a row's `name:` to a plugin object.
 
     Looked up first in the `ph.plugins` entry-point group — the compatibility
@@ -656,7 +661,7 @@ class Mount:
     Keeping a parallel dict was a second statement of one fact, and it retained
     every superseded config for the life of the mount."""
 
-    async def reconfigure(self, row_id: str, config: Any) -> ForkScope:
+    async def reconfigure(self, row_id: str, config: Any) -> ForkScope:  # noqa: ANN401
         """Re-apply one row with a new config, on this mount, and touch nothing else.
 
         **Cordis's own shape, used for what it is for.** A row's `apply` registers

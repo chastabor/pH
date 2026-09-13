@@ -418,7 +418,7 @@ class TranscriptView(VerticalScroll):
     TranscriptView { height: 1fr; background: $ph-background; padding: 1 0 0 0; }
     """
 
-    def __init__(self, **kwargs: Any) -> None:
+    def __init__(self, **kwargs: Any) -> None:  # noqa: ANN401
         super().__init__(**kwargs)
         self._rows: dict[str, Any] = {}
         self._followed = False
@@ -477,7 +477,7 @@ class TranscriptView(VerticalScroll):
             self._followed = True
             self.anchor()
 
-    def _build(self, item: ChatItem) -> Any:
+    def _build(self, item: ChatItem) -> Any:  # noqa: ANN401
         if item.role == "tool":
             kind = item.tool.card if item.tool is not None else "generic"
             return CodeCellWidget(item) if kind == "terminal" else ToolCardWidget(item)
@@ -485,7 +485,7 @@ class TranscriptView(VerticalScroll):
             return StreamingMessage(item)
         return TranscriptRow(item)
 
-    async def _update(self, widget: Any, item: ChatItem) -> None:
+    async def _update(self, widget: Any, item: ChatItem) -> None:  # noqa: ANN401
         if isinstance(widget, ToolCardWidget):
             await widget.refresh_card()
         elif isinstance(widget, StreamingMessage):
@@ -536,7 +536,7 @@ class TranscriptView(VerticalScroll):
                 return int(widget.item.seq)
         return -1
 
-    def _row_for_seq(self, seq: int) -> Any:
+    def _row_for_seq(self, seq: int) -> Any:  # noqa: ANN401
         """The row for `seq`, or the nearest one before it.
 
         `index_at_or_before` owns the "nearest" rule and why it is nearest, so

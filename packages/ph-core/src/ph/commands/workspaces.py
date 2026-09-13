@@ -112,7 +112,7 @@ async def apply(ctx: Context, config: None) -> None:
     its checkouts. The tier answers now, and it knows where it puts them.
     """
 
-    async def workspaces(argument: str, invocation: Any) -> str:
+    async def workspaces(argument: str, invocation: Any) -> str:  # noqa: ANN401
         verb, _, rest = argument.strip().partition(" ")
         view = _Workspaces(ctx=ctx, base=ctx.require(FS).root)
         try:

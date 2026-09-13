@@ -37,12 +37,12 @@ ROW: dict[str, Any] = {"id": "tool-ask-user", "disabled": False}
 rather than inserting one keeps this the same row `tui.yaml` arms."""
 
 
-def _agent(ctx: Any, session: Any) -> Any:
+def _agent(ctx: Any, session: Any) -> Any:  # noqa: ANN401
     return ctx.require(AGENTS).create(session, FAKE_OPTIONS)
 
 
-def _answering(answer: str | None, seen: list[UserQuestion]) -> Any:
-    async def answerer(question: UserQuestion, _next: Any = None) -> str | None:
+def _answering(answer: str | None, seen: list[UserQuestion]) -> Any:  # noqa: ANN401
+    async def answerer(question: UserQuestion, _next: Any = None) -> str | None:  # noqa: ANN401
         seen.append(question)
         return answer
 
@@ -50,8 +50,11 @@ def _answering(answer: str | None, seen: list[UserQuestion]) -> Any:
 
 
 async def _ask(
-    ctx: Any, session: Any, header: str | None = None, options: list[str] | None = None
-) -> Any:
+    ctx: Any,  # noqa: ANN401
+    session: Any,  # noqa: ANN401
+    header: str | None = None,
+    options: list[str] | None = None,
+) -> Any:  # noqa: ANN401
     """One `ask_user` call through the real pipeline.
 
     Positional, because `start_soon` takes no keywords and the cancellation gate
@@ -125,7 +128,7 @@ async def test_the_question_is_logged_before_the_person_answers(mount: MountProf
     session = ctx.require(SESSIONS).create("ordered")
     during: list[str] = []
 
-    async def answerer(question: UserQuestion, _next: Any = None) -> str:
+    async def answerer(question: UserQuestion, _next: Any = None) -> str:  # noqa: ANN401
         during.extend(event.type for event in session.events if event.type.startswith("question/"))
         return "yes"
 
@@ -227,7 +230,7 @@ async def test_a_question_cancelled_mid_answer_stays_pending(mount: MountProfile
     session = ctx.require(SESSIONS).create("interrupted")
     posed = anyio.Event()
 
-    async def never(question: UserQuestion, _next: Any = None) -> str:
+    async def never(question: UserQuestion, _next: Any = None) -> str:  # noqa: ANN401
         posed.set()
         await anyio.sleep(30)
         return "too late"

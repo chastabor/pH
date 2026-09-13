@@ -23,7 +23,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from ..keys import SESSION_PERSISTENCE, SESSIONS
 from ..seams.diagnostics import Diagnostic, contribute
@@ -245,7 +245,7 @@ def lineage_faults_of(
     return lineage_faults(((one.session_id, one.parent) for one in listed), store.exists)
 
 
-def attach(ctx: Any, store: SessionPersistence) -> None:
+def attach(ctx: Context, store: SessionPersistence) -> None:
     """Wire a store to the session firehose. One subscription list, not two.
 
     Both backends' `apply` had their own copy of this — the `provide`, the

@@ -34,7 +34,7 @@ from ph.testing import MountProfile
 pytestmark = pytest.mark.anyio
 
 
-def _record(body: str, **attributes: Any) -> SessionTelemetryRecord:
+def _record(body: str, **attributes: Any) -> SessionTelemetryRecord:  # noqa: ANN401
     return SessionTelemetryRecord(
         channel="ledger", time=1_000, severity="info", attributes=attributes, body=body
     )
@@ -53,7 +53,7 @@ async def test_a_sink_sees_only_what_redaction_left(mount: MountProfile) -> None
 
     # A waterfall listener takes the value and `next_`; rewriting means passing
     # a changed value onward rather than returning one.
-    async def redact(record: SessionTelemetryRecord, next_: Any) -> Any:
+    async def redact(record: SessionTelemetryRecord, next_: Any) -> Any:  # noqa: ANN401
         return await next_(
             record.model_copy(update={"body": record.body.replace("hunter2", "«redacted»")})
         )
@@ -75,7 +75,7 @@ async def test_a_record_a_redactor_drops_reaches_no_sink(mount: MountProfile) ->
     ctx = await mount()
     seen: list[SessionTelemetryRecord] = []
 
-    async def drop(record: SessionTelemetryRecord, next_: Any) -> Any:
+    async def drop(record: SessionTelemetryRecord, next_: Any) -> Any:  # noqa: ANN401
         return None
 
     ctx.on("session-telemetry/record", drop)

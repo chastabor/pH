@@ -28,7 +28,7 @@ appending per request would bury the conversation in one repeated sentence.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import replace
 from typing import Any
 
@@ -130,7 +130,11 @@ def oversized_notices(messages: Sequence[Message], route: ResolvedModel) -> list
     return notices
 
 
-def unusable_reason(attachment: AttachmentRef, store: Any, route: ResolvedModel) -> str | None:
+def unusable_reason(
+    attachment: AttachmentRef,
+    store: Any,  # noqa: ANN401
+    route: ResolvedModel,
+) -> str | None:
     """Why this attachment cannot be sent, or `None` if it can.
 
     Four unrelated situations answered with one branch on purpose — no store, a
@@ -167,7 +171,9 @@ def media_pointer_text(attachment: AttachmentRef) -> str:
 
 
 def degrade_media(
-    messages: Sequence[Message], store: Any, route: ResolvedModel
+    messages: Sequence[Message],
+    store: Any,  # noqa: ANN401
+    route: ResolvedModel,
 ) -> tuple[tuple[Message, ...], list[dict[str, Any]]]:
     """The messages an adapter should see, and an account of what was replaced.
 
@@ -249,7 +255,10 @@ def record_oversized(session: Session, provider: str, notices: list[dict[str, An
 async def apply(ctx: Context, config: None) -> None:
     """Replace media the routed model cannot read, before any adapter sees it."""
 
-    async def degrade(options: GenerateOptions, next_: Callable[..., Any]) -> Any:
+    async def degrade(
+        options: GenerateOptions,
+        next_: Callable[..., Awaitable[Any]],
+    ) -> Any:  # noqa: ANN401
         store = ctx.get(ATTACHMENTS)
         route = ctx.require(LLM).resolve_model(options.provider, options.model)
         messages, degraded = degrade_media(options.messages, store, route)

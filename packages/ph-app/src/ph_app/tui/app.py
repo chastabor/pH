@@ -551,7 +551,7 @@ class PHTuiApp(App[str | None]):
         title: str,
         choices: list[Choice],
         then: Callable[[str | None], None],
-        **options: Any,
+        **options: Any,  # noqa: ANN401
     ) -> None:
         self.push_screen(ChoicePicker(title=title, choices=choices, **options), then)
 
@@ -616,7 +616,7 @@ class PHTuiApp(App[str | None]):
                 markup=False,
             )
 
-    def _screen(self, screen_id: str) -> Any:
+    def _screen(self, screen_id: str) -> Any:  # noqa: ANN401
         """The registered screen with this id, or `None`."""
         front = self.front
         return front.screen(screen_id) if front is not None else None

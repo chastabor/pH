@@ -46,7 +46,9 @@ pytestmark = pytest.mark.anyio
 
 
 async def _front(
-    daemon: Any, session_id: str = "remote", **options: Any
+    daemon: Any,  # noqa: ANN401
+    session_id: str = "remote",
+    **options: Any,  # noqa: ANN401
 ) -> tuple[DaemonSession, StubHost]:
     """One attached `DaemonSession` and the host behind it.
 

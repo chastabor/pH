@@ -58,7 +58,7 @@ def _write(path: Path, text: str) -> Path:
     return path
 
 
-async def _assembled(ctx: Any, agent: Any = None) -> str:
+async def _assembled(ctx: Any, agent: Any = None) -> str:  # noqa: ANN401
     """The memory snapshot as this profile would render it, or `""`.
 
     Filtered by name rather than using `join_context_sections`, because what is
@@ -159,7 +159,7 @@ async def test_an_unchanged_file_is_not_re_read(mount: MountProfile, tmp_path: P
     opens = 0
     original = Path.open
 
-    def counted(self: Path, *args: Any, **kwargs: Any) -> Any:
+    def counted(self: Path, *args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
         nonlocal opens
         if self.name == FILENAME:
             opens += 1

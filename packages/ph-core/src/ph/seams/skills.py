@@ -621,7 +621,7 @@ def _string_list(front: dict[str, Any], key: str, path: Path, *, cap: int) -> li
     return values
 
 
-def _parameter_schema(declared: Any, path: Path) -> dict[str, Any] | None:
+def _parameter_schema(declared: Any, path: Path) -> dict[str, Any] | None:  # noqa: ANN401
     """An author's `parameters:` block as a JSON Schema, or `None` if it is not one.
 
     Playbook's shape on the outside — one entry per input with `type`, `required`,
@@ -890,7 +890,7 @@ async def progressive(ctx: Context, config: Config) -> None:
         PromptSection(name="skills", order=ORDER_SKILLS, text=catalog), scope=ctx
     )
 
-    async def read_body(args: SkillArgs, run: ToolRunContext) -> Any:
+    async def read_body(args: SkillArgs, run: ToolRunContext) -> Any:  # noqa: ANN401
         # The *stated* boundary, so a narrowed child is refused a skill it can
         # see named nowhere — the catalog and the gate answer the same question,
         # and until P6-24 they answered it in two: the catalog above reads
@@ -942,7 +942,7 @@ async def progressive(ctx: Context, config: Config) -> None:
             ],
         }
 
-    def build_tool() -> Any:
+    def build_tool() -> Any:  # noqa: ANN401
         """The tool, or `None` where there is nothing to read.
 
         See `register_when_composed`: a `skill` tool in a deployment that

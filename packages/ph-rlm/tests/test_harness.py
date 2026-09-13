@@ -50,11 +50,11 @@ from ph_rlm.keys import HARNESS
 pytestmark = pytest.mark.anyio
 
 
-def _allow(ctx: Any) -> list[str]:
+def _allow(ctx: Any) -> list[str]:  # noqa: ANN401
     """Answer approval prompts, and record what was asked."""
     asked: list[str] = []
 
-    async def answerer(request: Any, _next: Any) -> str:
+    async def answerer(request: Any, _next: Any) -> str:  # noqa: ANN401
         asked.append(request.tool_name)
         return "allowed-once"
 
@@ -349,7 +349,7 @@ async def test_h3_a_global_edit_prompts_and_a_local_one_does_not(harnessed: Harn
 async def test_h3_a_declined_global_edit_writes_nothing(harnessed: Harnessed) -> None:
     ctx, session, agent = await harnessed()
 
-    async def refuse(_request: Any, _next: Any) -> str:
+    async def refuse(_request: Any, _next: Any) -> str:  # noqa: ANN401
         return "rejected"
 
     ctx.require(APPROVAL).register_answerer(refuse)

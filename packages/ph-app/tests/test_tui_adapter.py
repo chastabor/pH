@@ -56,7 +56,7 @@ class _CallsThenAnswers:
     def __init__(self) -> None:
         self.requests = 0
 
-    async def stream(self, options: GenerateOptions) -> Any:
+    async def stream(self, options: GenerateOptions) -> Any:  # noqa: ANN401
         self.requests += 1
         if self.requests == 1:
             yield BlockStart(index=0, block_type="tool-call")

@@ -211,7 +211,7 @@ class HarnessService:
             accepted.append(edit.model_copy(update={"id": entry_id}))
         return accepted, rejected
 
-    async def _probe(self, reference: Any) -> str | None:
+    async def _probe(self, reference: Any) -> str | None:  # noqa: ANN401
         """H1: resolve a reference in the runtime, or say why it does not.
 
         A silent cell — no bindings, no dispatch records — because this is the

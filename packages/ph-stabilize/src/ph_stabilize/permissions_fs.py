@@ -641,7 +641,7 @@ async def apply(ctx: Context, config: Config) -> None:
     fs.screen(permissions.screen, scope=ctx)
 
 
-def _gate(ctx: Context, permissions: FsPermissions, operation: Operation) -> Any:
+def _gate(ctx: Context, permissions: FsPermissions, operation: Operation) -> Any:  # noqa: ANN401
     """One intent listener, holding only what it reads.
 
     A closure over three small values rather than a class, and `ctx` rather than
@@ -650,7 +650,10 @@ def _gate(ctx: Context, permissions: FsPermissions, operation: Operation) -> Any
     `interrupt` for the life of the process.
     """
 
-    async def gate(intent: ReadIntent | WriteIntent | EditIntent, next_: Any) -> Any:
+    async def gate(
+        intent: ReadIntent | WriteIntent | EditIntent,
+        next_: Callable[[], Any],
+    ) -> Any:  # noqa: ANN401
         rule = permissions.objection(operation, intent.path, intent.agent)
         if rule is None:
             return await next_()
@@ -665,7 +668,11 @@ def _gate(ctx: Context, permissions: FsPermissions, operation: Operation) -> Any
 
 
 async def _ask(
-    ctx: Context, permissions: FsPermissions, intent: Any, rule: Rule, operation: Operation
+    ctx: Context,
+    permissions: FsPermissions,
+    intent: Any,  # noqa: ANN401
+    rule: Rule,
+    operation: Operation,
 ) -> str | None:
     """Route an `interrupt` to whoever answers approvals. `None` means granted.
 

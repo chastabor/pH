@@ -59,7 +59,7 @@ def _state(*items: ChatItem) -> list[ChatItem]:
 # ------------------------------------------------------------------------------
 
 
-def test_streaming_assistant_text(snap_compare: Any) -> None:
+def test_streaming_assistant_text(snap_compare: Any) -> None:  # noqa: ANN401
     items = _state(
         ChatItem(key="u1", role="user", text="explain the pipeline", seq=1),
         ChatItem(
@@ -73,7 +73,7 @@ def test_streaming_assistant_text(snap_compare: Any) -> None:
     assert snap_compare(_Snapshot(items), terminal_size=(80, 14))
 
 
-def test_a_settled_tool_card(snap_compare: Any) -> None:
+def test_a_settled_tool_card(snap_compare: Any) -> None:  # noqa: ANN401
     card = ToolCard(
         call_id="c1",
         name="read",
@@ -90,7 +90,7 @@ def test_a_settled_tool_card(snap_compare: Any) -> None:
     assert snap_compare(_Snapshot(items), terminal_size=(80, 14))
 
 
-def test_a_failed_tool_card_and_an_error_row(snap_compare: Any) -> None:
+def test_a_failed_tool_card_and_an_error_row(snap_compare: Any) -> None:  # noqa: ANN401
     card = ToolCard(
         call_id="c1",
         name="bash",
@@ -109,7 +109,7 @@ def test_a_failed_tool_card_and_an_error_row(snap_compare: Any) -> None:
     assert snap_compare(_Snapshot(items), terminal_size=(80, 14))
 
 
-def test_a_code_mode_card_lists_its_dispatches(snap_compare: Any) -> None:
+def test_a_code_mode_card_lists_its_dispatches(snap_compare: Any) -> None:  # noqa: ANN401
     """Forty writes are forty rows (C2) — here, two."""
     card = ToolCard(
         call_id="c1",
@@ -134,7 +134,7 @@ def test_a_code_mode_card_lists_its_dispatches(snap_compare: Any) -> None:
     assert snap_compare(_Snapshot(items), terminal_size=(80, 14))
 
 
-def test_a_code_cell_shows_its_program_and_what_it_cost(snap_compare: Any) -> None:
+def test_a_code_cell_shows_its_program_and_what_it_cost(snap_compare: Any) -> None:  # noqa: ANN401
     """P3-19: the program is the interesting half of a cell.
 
     Every other card is a header and a body, because its input fits on the header
@@ -166,7 +166,7 @@ def test_a_code_cell_shows_its_program_and_what_it_cost(snap_compare: Any) -> No
     assert snap_compare(_Snapshot(items), terminal_size=(80, 18))
 
 
-def test_a_compaction_marker_keeps_what_it_replaced(snap_compare: Any) -> None:
+def test_a_compaction_marker_keeps_what_it_replaced(snap_compare: Any) -> None:  # noqa: ANN401
     items = _state(
         ChatItem(key="u1", role="user", text="the original question", seq=1, shadowed=True),
         ChatItem(key="a1", role="assistant", text="the original answer", seq=2, shadowed=True),
@@ -176,7 +176,7 @@ def test_a_compaction_marker_keeps_what_it_replaced(snap_compare: Any) -> None:
     assert snap_compare(_Snapshot(items), terminal_size=(80, 18))
 
 
-def test_markup_in_user_text_renders_literally(snap_compare: Any) -> None:
+def test_markup_in_user_text_renders_literally(snap_compare: Any) -> None:  # noqa: ANN401
     """The P2-06 gate, as a picture. `[bold]` must appear, not take effect."""
     items = _state(
         ChatItem(key="u1", role="user", text="check foo[0] and [bold]this[/bold]", seq=1),
@@ -186,7 +186,7 @@ def test_markup_in_user_text_renders_literally(snap_compare: Any) -> None:
 
 
 @pytest.mark.parametrize("theme", ["ph-light", "high-contrast"])
-def test_every_theme_renders(snap_compare: Any, theme: str) -> None:
+def test_every_theme_renders(snap_compare: Any, theme: str) -> None:  # noqa: ANN401
     items = _state(
         ChatItem(key="u1", role="user", text="hello", seq=1),
         ChatItem(key="a1", role="assistant", text="Hello back.", seq=2),
@@ -195,7 +195,9 @@ def test_every_theme_renders(snap_compare: Any, theme: str) -> None:
 
 
 def test_the_full_app_shell(
-    snap_compare: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    snap_compare: Any,  # noqa: ANN401
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Prompt, status bar and sidebar together — the chrome, once.
 
@@ -214,7 +216,7 @@ def test_the_full_app_shell(
         monkeypatch.setenv("PH_RUNTIME", str(socket.parent))
         app = tui_app(home=tmp_path, project=Path("/w/project"), session_id="snapshot")
 
-        async def attached(pilot: Any) -> None:
+        async def attached(pilot: Any) -> None:  # noqa: ANN401
             # The attach happens in a worker so the shell paints first; the
             # frame under test is the one after it has.
             await until(pilot, lambda: app.front is not None)

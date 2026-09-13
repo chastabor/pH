@@ -22,7 +22,12 @@ from __future__ import annotations
 
 import pathlib
 
-__all__ = ["REPO", "workspace_modules", "workspace_packages", "workspace_tests"]
+__all__ = [
+    "REPO",
+    "workspace_modules",
+    "workspace_packages",
+    "workspace_tests",
+]
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 """The checkout root — the directory `packages/` sits in."""

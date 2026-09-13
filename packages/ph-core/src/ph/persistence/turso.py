@@ -369,7 +369,7 @@ class TursoSessionStore:
             if session_id not in self._buffers:
                 self._release(session_id)
 
-    def _connect(self, session_id: str, path: Path | None = None) -> Any:
+    def _connect(self, session_id: str, path: Path | None = None) -> Any:  # noqa: ANN401
         connection = self._connections.get(session_id)
         if connection is None:
             import turso

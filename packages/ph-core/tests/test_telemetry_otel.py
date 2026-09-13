@@ -41,7 +41,7 @@ pytestmark = pytest.mark.anyio
 OTEL_ROW = {"insert": [{"id": "session-telemetry-otel", "name": "session-telemetry-otel"}]}
 
 
-def _record(body: str, **attributes: Any) -> SessionTelemetryRecord:
+def _record(body: str, **attributes: Any) -> SessionTelemetryRecord:  # noqa: ANN401
     return SessionTelemetryRecord(
         channel="ledger", time=1_000, severity="info", attributes=attributes, body=body
     )
@@ -73,7 +73,7 @@ async def test_the_shipped_sink_exports_post_redaction_records(
 
     ctx = await mount(OTEL_ROW)
 
-    async def redact(record: SessionTelemetryRecord, next_: Any) -> Any:
+    async def redact(record: SessionTelemetryRecord, next_: Any) -> Any:  # noqa: ANN401
         return await next_(
             record.model_copy(update={"body": record.body.replace("hunter2", "«x»")})
         )

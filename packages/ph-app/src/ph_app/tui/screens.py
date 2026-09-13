@@ -84,7 +84,7 @@ class AppSurface(Protocol):
     implementing one member and never reaching the other two.
     """
 
-    def run_worker(self, work: Coroutine[Any, Any, Any]) -> Any:
+    def run_worker(self, work: Coroutine[Any, Any, Any]) -> Any:  # noqa: ANN401
         """Own a coroutine started from a sync caller, so it dies with the app.
 
         Textual's own parameters are not restated: a structural match needs only
@@ -96,7 +96,7 @@ class AppSurface(Protocol):
         """Bind a key on the live app; the return removes it again."""
         ...
 
-    async def run_action(self, action: str) -> Any:
+    async def run_action(self, action: str) -> Any:  # noqa: ANN401
         """Dispatch a Textual action — how every local slash command has a body."""
         ...
 

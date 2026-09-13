@@ -68,7 +68,12 @@ def _plan(session: Session) -> list[tuple[str, str]]:
     return [(str(one["content"]), str(one["status"])) for one in todos_of(session)]
 
 
-async def _run(ctx: Any, session: Session, *calls: ToolCallBlock, step: int = 1) -> None:
+async def _run(
+    ctx: Any,  # noqa: ANN401
+    session: Session,
+    *calls: ToolCallBlock,
+    step: int = 1,
+) -> None:
     """One batch, through the shared driver.
 
     The assistant message it commits first is load-bearing: the loop does that
@@ -526,7 +531,7 @@ async def test_the_list_rides_the_context_and_not_the_cached_prefix(mount: Mount
     session = ctx.require(SESSIONS).create("cache")
     agent = StubAgent(ctx, session)
 
-    async def assembled() -> Any:
+    async def assembled() -> Any:  # noqa: ANN401
         return await ctx.require(SYSTEM_PROMPT).assemble(agent.ctx, agent=agent)
 
     before = await assembled()

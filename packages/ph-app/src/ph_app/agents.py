@@ -154,14 +154,14 @@ def _ask[T](work: Exchange[T]) -> T:
 # ------------------------------------------------------------------ rendering --
 
 
-def _when(moment: Any) -> str:
+def _when(moment: Any) -> str:  # noqa: ANN401
     """An epoch-ms instant as local time, or a dash when there is none."""
     if not isinstance(moment, int) or moment <= 0:
         return "—"
     return datetime.fromtimestamp(moment / 1000).strftime("%Y-%m-%d %H:%M:%S")
 
 
-def _duration(milliseconds: Any) -> str:
+def _duration(milliseconds: Any) -> str:  # noqa: ANN401
     """`3d 4h`, `1h 30m`, `12m`, `8s` — the two largest units that are not zero.
 
     Zeros are dropped rather than kept for shape: a sweep every sixty seconds

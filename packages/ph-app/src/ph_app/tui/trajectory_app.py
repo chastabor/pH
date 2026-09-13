@@ -133,7 +133,7 @@ class TrajectoryApp(App[None]):
         records: list[TrajectoryRecord],
         *,
         session_id: str = "",
-        sessions: Any = None,
+        sessions: Any = None,  # noqa: ANN401
         home: Path | None = None,
     ) -> None:
         super().__init__()

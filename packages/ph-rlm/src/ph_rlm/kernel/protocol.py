@@ -250,7 +250,7 @@ would be `decode` returning `None` for every instance of the new frame: the
 codec's "junk becomes `None`" rule firing on a frame that is not junk."""
 
 
-def _kind_of(annotation: Any) -> FieldKind:
+def _kind_of(annotation: Any) -> FieldKind:  # noqa: ANN401
     """The codec's `FieldKind` for one declared field type — the whole mapping."""
     if annotation is Any:
         return "any"

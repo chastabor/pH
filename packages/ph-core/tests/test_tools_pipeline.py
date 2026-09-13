@@ -54,11 +54,16 @@ from ph.tools.definition import ToolExecutionResult
 pytestmark = pytest.mark.anyio
 
 
-def _echo(**kwargs: Any) -> Any:
+def _echo(**kwargs: Any) -> Any:  # noqa: ANN401
     return simple_tool("echo", lambda args, _run: (args or {}).get("text", ""), **kwargs)
 
 
-def _call(name: str = "echo", *, agent: Any = None, **arguments: Any) -> ToolExecutionInput:
+def _call(
+    name: str = "echo",
+    *,
+    agent: Any = None,  # noqa: ANN401
+    **arguments: Any,  # noqa: ANN401
+) -> ToolExecutionInput:
     return ToolExecutionInput(
         call_id="call-1",
         name=name,
@@ -84,21 +89,21 @@ async def test_stages_run_in_the_documented_order() -> None:
     tools.register(_echo())
     order: list[str] = []
 
-    async def pre(execution: Any, next_: Any) -> Any:
+    async def pre(execution: Any, next_: Any) -> Any:  # noqa: ANN401
         order.append("pre")
         return await next_()
 
-    def guard(execution: Any) -> None:
+    def guard(execution: Any) -> None:  # noqa: ANN401
         order.append("guard")
         return None
 
-    async def around(execution: Any, next_: Any) -> Any:
+    async def around(execution: Any, next_: Any) -> Any:  # noqa: ANN401
         order.append("execute:before")
         result = await next_()
         order.append("execute:after")
         return result
 
-    async def post(execution: Any, result: Any, next_: Any) -> Any:
+    async def post(execution: Any, result: Any, next_: Any) -> Any:  # noqa: ANN401
         order.append("post")
         return await next_()
 
@@ -118,7 +123,7 @@ async def test_a_guard_denial_cannot_be_re_permitted() -> None:
     tools.register(_echo())
     tools.guard(lambda execution: "policy forbids this")
 
-    async def permissive(execution: Any, next_: Any) -> Any:
+    async def permissive(execution: Any, next_: Any) -> Any:  # noqa: ANN401
         # Registered after the guard and returning `allow` anyway.
         ran.append("listener")
         return Allow()
@@ -158,7 +163,7 @@ async def test_guards_run_after_approval_so_they_have_the_last_word() -> None:
     seen: list[str] = []
 
     class Approver:
-        async def request(self, **kwargs: Any) -> str:
+        async def request(self, **kwargs: Any) -> str:  # noqa: ANN401
             seen.append("approved")
             return "allowed-once"
 
@@ -246,7 +251,10 @@ async def test_ask_with_no_agent_denies_for_lack_of_anywhere_to_ask() -> None:
     tools.register(_echo())
 
     class Approver:
-        async def request(self, **kwargs: Any) -> str:  # pragma: no cover - never reached
+        async def request(
+            self,
+            **kwargs: Any,  # noqa: ANN401
+        ) -> str:  # pragma: no cover - never reached
             return "allowed-once"
 
     root.provide("approval", Approver())
@@ -271,7 +279,7 @@ async def test_every_non_grant_denies_with_its_own_reason(outcome: str, fragment
     tools.register(_echo())
 
     class Approver:
-        async def request(self, **kwargs: Any) -> str:
+        async def request(self, **kwargs: Any) -> str:  # noqa: ANN401
             return outcome
 
     root.provide("approval", Approver())
@@ -334,7 +342,7 @@ async def test_post_execute_can_replace_content_or_block() -> None:
     root, tools = tool_runtime()
     tools.register(_echo())
 
-    async def replace(execution: Any, result: Any, next_: Any) -> Any:
+    async def replace(execution: Any, result: Any, next_: Any) -> Any:  # noqa: ANN401
         return Accept(content=text_content("rewritten"))
 
     disposer = root.on("tools/post-execute", replace)
@@ -367,7 +375,7 @@ async def test_finalize_content_runs_even_for_a_failure() -> None:
     _root, tools = tool_runtime()
     seen: list[bool] = []
 
-    def finalize(execution: Any, result: ToolExecutionResult) -> Any:
+    def finalize(execution: Any, result: ToolExecutionResult) -> Any:  # noqa: ANN401
         seen.append(result.is_error)
         return text_content("finalized")
 
@@ -379,7 +387,7 @@ async def test_finalize_content_runs_even_for_a_failure() -> None:
     assert block_text(result.content[0]) == "finalized"
 
 
-def _notice() -> Any:
+def _notice() -> Any:  # noqa: ANN401
     return create_user_message(
         content=[{"type": "text", "text": "a notice"}], source={"kind": "plugin", "plugin": "test"}
     )
@@ -388,7 +396,7 @@ def _notice() -> Any:
 async def test_deferred_context_rides_the_result() -> None:
     _root, tools = tool_runtime()
 
-    def body(_args: Any, run: Any) -> Any:
+    def body(_args: Any, run: Any) -> Any:  # noqa: ANN401
         run.defer_context(_notice())
         run.conclude_turn()
         return "done"
@@ -402,7 +410,7 @@ async def test_deferred_context_rides_the_result() -> None:
 async def test_a_block_discards_context_the_body_deferred() -> None:
     root, tools = tool_runtime()
 
-    def body(_args: Any, run: Any) -> Any:
+    def body(_args: Any, run: Any) -> Any:  # noqa: ANN401
         run.defer_context(_notice())
         return "done"
 
@@ -432,7 +440,7 @@ async def test_a_timeout_budget_is_enforced_by_its_row(mount: MountProfile) -> N
 
     ctx = await mount()
 
-    async def slow(_args: Any, _run: Any) -> str:
+    async def slow(_args: Any, _run: Any) -> str:  # noqa: ANN401
         await anyio.sleep(1.0)
         return "late"
 

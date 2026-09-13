@@ -116,7 +116,7 @@ async def test_a_claim_that_raises_stops_the_sweep_rather_than_narrowing_it(
     _named(session, SPILLED, kept.locator)
     _named(session, INPUT, "irrelevant")
 
-    def explode(_data: Any) -> str | None:
+    def explode(_data: Any) -> str | None:  # noqa: ANN401
         raise RuntimeError("this producer cannot answer")
 
     store.claim(_claim("healthy", session.id, SPILLED))

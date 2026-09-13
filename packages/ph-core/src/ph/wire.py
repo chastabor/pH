@@ -124,7 +124,7 @@ class WireModel(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def _thaw_frozen_input(cls, data: Any) -> Any:
+    def _thaw_frozen_input(cls, data: Any) -> Any:  # noqa: ANN401
         if isinstance(data, MappingProxyType):
             return thaw_json(data)
         return data
@@ -174,7 +174,7 @@ def declarable_fields(dataclass_type: type) -> tuple[str, ...]:
     )
 
 
-def declarable(instance: Any) -> dict[str, Any]:
+def declarable(instance: Any) -> dict[str, Any]:  # noqa: ANN401
     """The travelling half of a definition, as the kwargs of its schema.
 
     A `schema()` built as `Schema.model_validate(declarable(self))` names no
@@ -186,7 +186,7 @@ def declarable(instance: Any) -> dict[str, Any]:
     return {name: getattr(instance, name) for name in declarable_fields(type(instance))}
 
 
-def _wire_value(value: Any) -> Any:
+def _wire_value(value: Any) -> Any:  # noqa: ANN401
     to_wire = getattr(value, "to_wire", None)
     if callable(to_wire):
         return to_wire()

@@ -101,7 +101,7 @@ class RpcServer:
         if reply is not None:
             self._write(reply)
 
-    async def _dispatch(self, method: str, params: dict[str, Any]) -> Any:
+    async def _dispatch(self, method: str, params: dict[str, Any]) -> Any:  # noqa: ANN401
         if method in ("initialize", "daemon/hello"):
             # The same block the daemon answers with, minus what stdio cannot
             # do: one process, one peer, no supervision. The params are parsed

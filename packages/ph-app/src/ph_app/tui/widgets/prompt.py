@@ -49,7 +49,7 @@ class PromptArea(TextArea):
     claim is edited as usual.
     """
 
-    def __init__(self, owner: PromptInput, **kwargs: Any) -> None:
+    def __init__(self, owner: PromptInput, **kwargs: Any) -> None:  # noqa: ANN401
         super().__init__(**kwargs)
         self.owner = owner
         # `tab` accepts a completion, so it must not insert indentation. With a
@@ -89,7 +89,12 @@ class PromptInput(Vertical):
     class Cancelled(Message):
         """The user asked to interrupt the running turn."""
 
-    def __init__(self, keybindings: TuiKeybindings, *, completion_source: Any = None) -> None:
+    def __init__(
+        self,
+        keybindings: TuiKeybindings,
+        *,
+        completion_source: Any = None,  # noqa: ANN401
+    ) -> None:
         super().__init__(id="prompt")
         self.keys = keybindings
         self.completion_source = completion_source

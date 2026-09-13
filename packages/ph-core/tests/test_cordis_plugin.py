@@ -33,7 +33,7 @@ class _Other(BaseModel):
     depth: int = 9
 
 
-async def _apply(ctx: Any, config: Any) -> None: ...
+async def _apply(ctx: Any, config: Any) -> None: ...  # noqa: ANN401
 
 
 # ------------------------------------------------------------- the shapes --
@@ -44,7 +44,7 @@ def test_a_decorated_function_carries_its_own_spec() -> None:
     row's name lives beside the body rather than in a registry somewhere else."""
 
     @plugin("tool-fs", inject=["tools", "fs"], config=_Config)
-    async def apply(ctx: Any, config: _Config) -> None: ...
+    async def apply(ctx: Any, config: _Config) -> None: ...  # noqa: ANN401
 
     spec = normalize_plugin(apply)
 
@@ -72,7 +72,7 @@ def test_a_module_with_a_decorated_apply_is_read_through_it() -> None:
     class _Module:
         @staticmethod
         @plugin("session", inject=["llm"], config=_Config)
-        async def apply(ctx: Any, config: _Config) -> None: ...
+        async def apply(ctx: Any, config: _Config) -> None: ...  # noqa: ANN401
 
     spec = normalize_plugin(_Module)
 
@@ -95,7 +95,7 @@ def test_an_object_with_the_four_attributes_needs_no_import_from_ph() -> None:
         Config = _Config
 
         @staticmethod
-        async def apply(ctx: Any, config: _Config) -> None: ...
+        async def apply(ctx: Any, config: _Config) -> None: ...  # noqa: ANN401
 
     spec = normalize_plugin(_Plugin)
 
@@ -109,7 +109,7 @@ def test_a_bare_callable_is_a_plugin_named_after_itself() -> None:
     function that takes `(ctx, config)` is enough, and its `__name__` is the
     identity it gets."""
 
-    async def scratch(ctx: Any, config: Any) -> None: ...
+    async def scratch(ctx: Any, config: Any) -> None: ...  # noqa: ANN401
 
     spec = normalize_plugin(scratch)
 
@@ -126,7 +126,7 @@ def test_an_object_that_names_itself_beats_its_type_name() -> None:
         name = "chosen"
 
         @staticmethod
-        async def apply(ctx: Any, config: Any) -> None: ...
+        async def apply(ctx: Any, config: Any) -> None: ...  # noqa: ANN401
 
     assert normalize_plugin(_Plugin).name == "chosen"
 
@@ -153,7 +153,7 @@ def test_a_config_that_is_not_a_model_is_refused_at_the_door() -> None:
         Config: ClassVar[dict[str, int]] = {"depth": 1}
 
         @staticmethod
-        async def apply(ctx: Any, config: Any) -> None: ...
+        async def apply(ctx: Any, config: Any) -> None: ...  # noqa: ANN401
 
     with pytest.raises(LoaderError, match="Config that is not a pydantic model"):
         normalize_plugin(_Plugin)

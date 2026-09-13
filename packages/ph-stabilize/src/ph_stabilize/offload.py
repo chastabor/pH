@@ -37,6 +37,7 @@ caps are per stream, so one cell can still emit twice the threshold.
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from ph.cordis import Context, plugin
@@ -209,7 +210,9 @@ async def apply(ctx: Context, config: Config) -> None:
         SpillClaim.under_session("tool-result-offload", "offload/spilled")
     )
 
-    async def offload(execution: ToolExecution, result: ToolExecutionResult, next_: Any) -> Any:
+    async def offload(
+        execution: ToolExecution, result: ToolExecutionResult, next_: Callable[..., Awaitable[Any]]
+    ) -> Any:  # noqa: ANN401
         decision = await next_(execution, result)
         session = execution.session
         if session is None or _self_limiting(execution):

@@ -43,7 +43,7 @@ TOO_LARGE = TOO_LARGE_HUMAN_MSG.partition(" and")[0]
 """The replacement's opening words, from the constant rather than retyped."""
 
 
-async def _prompt(ctx: Any, session: Session, text: str) -> Any:
+async def _prompt(ctx: Any, session: Session, text: str) -> Any:  # noqa: ANN401
     """Run one real turn on the fake adapter with `text` as the human message."""
     agent = ctx.require(AGENTS).create(session, FAKE_OPTIONS)
     await agent.prompt(text)

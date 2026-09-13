@@ -48,7 +48,7 @@ USAGE = "usage: /revert <seq>   (/revert with no argument lists the restore poin
 async def apply(ctx: Context, config: None) -> None:
     """Register `/revert`."""
 
-    async def revert(argument: str, invocation: Any) -> str:
+    async def revert(argument: str, invocation: Any) -> str:  # noqa: ANN401
         session: Session | None = invocation.session
         if session is None:
             return "refusing: /revert needs a session to read restore points from"
@@ -155,7 +155,7 @@ def _not_undone(ctx: Context, scope: Context, session: Session, call_id: str) ->
     ]
 
 
-def _covered(ctx: Context, name: str, scope: Any) -> bool:
+def _covered(ctx: Context, name: str, scope: Any) -> bool:  # noqa: ANN401
     """Scope-aware, because a shadowed registration is a different tool.
 
     `offload`'s reader of `self_limits` makes the same point: an agent-scoped or

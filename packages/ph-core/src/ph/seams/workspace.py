@@ -1219,7 +1219,12 @@ class WorkspaceSeam:
             )
         return True
 
-    def _payload(self, workspace: Workspace, agent_id: str, **extra: Any) -> dict[str, Any]:
+    def _payload(
+        self,
+        workspace: Workspace,
+        agent_id: str,
+        **extra: Any,  # noqa: ANN401
+    ) -> dict[str, Any]:
         payload = pair_payload(agent_id, workspace.ref, **extra)
         # The reason rides the closing half, because that is the half a fold
         # reads to tell a deliberate keep from a dirty-tree keep (P6-28).
@@ -1783,7 +1788,10 @@ def latest_checkpoint(session: Session, agent_id: str) -> str:
 
 
 def stored_survivors(
-    store: Any, *, limit: int = 50, family: str = ""
+    store: Any,  # noqa: ANN401
+    *,
+    limit: int = 50,
+    family: str = "",
 ) -> tuple[list[WorkspaceRecord], dict[str, float]]:
     """Every tree the *store* can still account for, and when each log was written.
 
@@ -1871,7 +1879,7 @@ def family_survivors(sessions: Sequence[Session], agent_id: str) -> list[Workspa
     ]
 
 
-def pair_payload(agent_id: str, ref: str | None, **extra: Any) -> dict[str, Any]:
+def pair_payload(agent_id: str, ref: str | None, **extra: Any) -> dict[str, Any]:  # noqa: ANN401
     """The keys both halves of the durable pair share, spelled once.
 
     `ref` rides both so a reader can say which branch a turn ran against without
@@ -1983,7 +1991,7 @@ async def lifecycle(ctx: Context, config: LifecycleConfig) -> None:
     if entries:
         ctx.require(WORKSPACE).provision(entries, scope=ctx)
 
-    async def ensure(request: Any, next_: Callable[..., Any]) -> Any:
+    async def ensure(request: Any, next_: Callable[..., Awaitable[Any]]) -> Any:  # noqa: ANN401
         agent = request.agent
         if ctx.require(WORKSPACE).of(agent.id) is None:
             if agent.session.header.origin == "subagent":
@@ -2114,7 +2122,10 @@ async def checkpoint_policy(ctx: Context, config: None) -> None:
     anything any more.
     """
 
-    async def around(execution: ToolExecution, next_: Callable[..., Any]) -> Any:
+    async def around(
+        execution: ToolExecution,
+        next_: Callable[..., Awaitable[Any]],
+    ) -> Any:  # noqa: ANN401
         # A failure here never blocks the run: a missing restore point is worse than
         # no restore point only if it is believed in, and the log records which runs
         # have one. The guard is inside the `try` on purpose — reading the tool view

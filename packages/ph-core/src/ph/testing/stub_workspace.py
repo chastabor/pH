@@ -23,6 +23,7 @@ from hashlib import blake2b
 from pathlib import Path
 from typing import Any
 
+from ..cordis import Context
 from ..keys import SESSIONS, WORKSPACE
 from ..seams.workspace import ContainmentTier, Workspace, WorkspaceAccess, WorkspaceKind
 
@@ -127,7 +128,7 @@ class StubCheckpointingProvider(StubWorkspaceProvider):
         return tuple(sorted(added))
 
 
-async def acquire_for_role(ctx: Any, base: Path, *, child: bool = False) -> Any:
+async def acquire_for_role(ctx: Context, base: Path, *, child: bool = False) -> Any:  # noqa: ANN401
     """One agent's workspace, acquired the way a real spawn asks for it.
 
     **A child is a session stamped `origin: "subagent"`, and nothing else.**

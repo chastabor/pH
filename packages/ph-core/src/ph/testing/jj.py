@@ -18,6 +18,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from ..cordis import Context
 from ..keys import AGENTS, FS, SESSIONS
 from ..seams.workspace_jj import jj
 
@@ -31,7 +32,7 @@ JJ_ROWS: tuple[dict[str, Any], ...] = (
 deployment pays for is P4-11's decision — so a test that wants it says so."""
 
 
-async def jj_repo(ctx: Any, path: Path) -> Path:
+async def jj_repo(ctx: Context, path: Path) -> Path:
     """A colocated jj repository with one git commit — the least a fork can start from.
 
     **Colocated, because that is the shape this tier is for**: the bookmarks it
@@ -54,7 +55,10 @@ async def jj_repo(ctx: Any, path: Path) -> Path:
     return path
 
 
-async def jj_agent(mount: Any, *extra_rows: dict[str, Any]) -> tuple[Any, Any, Any, Any]:
+async def jj_agent(
+    mount: Any,  # noqa: ANN401
+    *extra_rows: dict[str, Any],
+) -> tuple[Any, Any, Any, Any]:
     """`(ctx, base, session, agent)` — a mounted jj tier and somebody to ask it things.
 
     `worktree_agent`'s counterpart, and it exists for that helper's reason: six tests

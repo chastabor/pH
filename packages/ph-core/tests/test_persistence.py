@@ -240,7 +240,7 @@ async def test_a_top_level_tool_body_is_preceded_by_a_barrier(
     ctx = await mount(_root(tmp_path))
     flushed_before_body: list[bool] = []
 
-    def body(_args: Any, run: Any) -> str:
+    def body(_args: Any, run: Any) -> str:  # noqa: ANN401
         # The buffer table is the jsonl store's own, not part of the
         # `SessionPersistence` Protocol — this test mounts that backend and now
         # says so instead of reading through an `Any`.

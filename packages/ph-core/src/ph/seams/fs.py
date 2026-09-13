@@ -629,7 +629,7 @@ class FsService:
         self.ctx.emit("fs/changed", target, contained=True)
         return count if replace_all else 1
 
-    async def _gate(self, event: str, intent: Any) -> None:
+    async def _gate(self, event: str, intent: Any) -> None:  # noqa: ANN401
         """Ask the policy rows about one intent, in the scope that owns it (P6-18).
 
         `scope=` is the fix and it is one argument: the waterfall defaulted to
@@ -645,7 +645,7 @@ class FsService:
         reaches everything, so the same listeners run in the same order.
         """
 
-        async def inner(_intent: Any) -> str | None:
+        async def inner(_intent: Any) -> str | None:  # noqa: ANN401
             return None
 
         # The boundary the intent was *judged in*, carried on the intent itself
@@ -1004,7 +1004,7 @@ async def apply(ctx: Context, config: Config) -> None:
     if not ignored:
         return
 
-    def ignore(_path: str, name: str, _agent: Any, is_dir: bool) -> WalkDecision:
+    def ignore(_path: str, name: str, _agent: Any, is_dir: bool) -> WalkDecision:  # noqa: ANN401
         """The ignore list as an ordinary screen, not as a branch inside the walk.
 
         **Directories only**: the constant is matched against directory names, so a file
@@ -1030,7 +1030,7 @@ async def read_before_edit(ctx: Context, config: None) -> None:
     """
     fs: FsService = ctx.require(FS)
 
-    async def gate(intent: EditIntent, next_: Callable[[], Any]) -> Any:
+    async def gate(intent: EditIntent, next_: Callable[[], Any]) -> Any:  # noqa: ANN401
         observed = fs.observed_mtime(intent.path)
         if observed is None:
             return (

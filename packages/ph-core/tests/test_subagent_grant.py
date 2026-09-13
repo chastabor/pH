@@ -51,13 +51,13 @@ from ph.testing import (
 pytestmark = pytest.mark.anyio
 
 
-def _agent(ctx: Any, name: str = "parent", *, parent: Any = None) -> Any:
+def _agent(ctx: Any, name: str = "parent", *, parent: Any = None) -> Any:  # noqa: ANN401
     return ctx.require(AGENTS).create(
         ctx.require(SESSIONS).create(name), FAKE_OPTIONS, parent=parent
     )
 
 
-async def _spawn(ctx: Any, parent: Any, **request: Any) -> Any:
+async def _spawn(ctx: Any, parent: Any, **request: Any) -> Any:  # noqa: ANN401
     """One delegation through the seam, which is where the ceiling lives.
 
     Through `start` rather than by applying a grant by hand: the refusal, the
@@ -71,7 +71,11 @@ async def _spawn(ctx: Any, parent: Any, **request: Any) -> Any:
     )
 
 
-async def _granted(mount: MountProfile, *names: str, rows: Any = None) -> tuple[Any, Any]:
+async def _granted(
+    mount: MountProfile,
+    *names: str,
+    rows: Any = None,  # noqa: ANN401
+) -> tuple[Any, Any]:
     """`(ctx, parent)` with these skills installed and a provider mounted."""
     ctx = await mount(*(rows or []))
     for name in names:
@@ -266,7 +270,7 @@ async def test_the_brief_is_read_once_not_per_assembly(mount: MountProfile, tmp_
     opens = 0
     original = Path.open
 
-    def counted(self: Path, *args: Any, **kwargs: Any) -> Any:
+    def counted(self: Path, *args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
         nonlocal opens
         if self.name == "SKILL.md":
             opens += 1
@@ -408,7 +412,7 @@ async def test_a_child_without_the_tool_is_not_told_to_use_it(
 # `parent=` nests the scope; these hold what that buys.
 
 
-def _agents(ctx: Any) -> tuple[Any, Any]:
+def _agents(ctx: Any) -> tuple[Any, Any]:  # noqa: ANN401
     """A parent and a child agent, created the way a spawn creates them.
 
     Through `_agent`, so these carry `FAKE_OPTIONS` like every other agent in the

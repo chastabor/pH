@@ -26,7 +26,7 @@ from ph.seams.code_runtime import CodeBinding, CodeBindingNamespace
 from ph.tools.sdk import code_only_rule, render_python_sdk, render_typescript_sdk
 
 
-def _binding(name: str, description: str = "", **properties: Any) -> CodeBinding:
+def _binding(name: str, description: str = "", **properties: Any) -> CodeBinding:  # noqa: ANN401
     """One binding whose parameters are spelled the way a tool schema spells them."""
     required = [key for key, definition in properties.items() if definition.pop("required", False)]
     return CodeBinding(
@@ -36,7 +36,11 @@ def _binding(name: str, description: str = "", **properties: Any) -> CodeBinding
     )
 
 
-def _namespace(*bindings: CodeBinding, name: str = "tools", description: str = "") -> Any:
+def _namespace(
+    *bindings: CodeBinding,
+    name: str = "tools",
+    description: str = "",
+) -> Any:  # noqa: ANN401
     return CodeBindingNamespace(name=name, bindings=bindings, description=description)
 
 

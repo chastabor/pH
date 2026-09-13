@@ -555,18 +555,18 @@ class RlmChildProvider:
         # being asked a second question may widen what the first was allowed.
         await self._workspace(parent, agent, session, child.run.requested_access)
 
-    def _awaiter(self, child: _Child) -> Any:
+    def _awaiter(self, child: _Child) -> Any:  # noqa: ANN401
         async def wait() -> SubagentResult:
             await child.finished.wait()
             return child.result or SubagentResult(status="error", error="the child never settled")
 
         return wait
 
-    def _mirror(self, child: _Child) -> Any:
+    def _mirror(self, child: _Child) -> Any:  # noqa: ANN401
         """Attribute the child's usage to the parent as it is produced."""
         parent_session, run_id = child.parent_session, child.run.id
 
-        def observer(_source: Session, event: Any) -> None:
+        def observer(_source: Session, event: Any) -> None:  # noqa: ANN401
             if event.type != "assistant/message":
                 return
             usage = event.data.get("usage")
@@ -588,7 +588,7 @@ class RlmChildProvider:
 
         return observer
 
-    def _status(self, child: _Child, status: SubagentStatus, **extra: Any) -> None:
+    def _status(self, child: _Child, status: SubagentStatus, **extra: Any) -> None:  # noqa: ANN401
         # Only the event, and only from the child's own parent log. A copy on the
         # handle would be a second source of truth for a fact the roster folds,
         # frozen at the last in-process update.

@@ -30,7 +30,7 @@ from ph.testing import MountProfile, StubSandboxProvider, acquire_for_role
 pytestmark = pytest.mark.anyio
 
 
-def _row(**config: Any) -> dict[str, Any]:
+def _row(**config: Any) -> dict[str, Any]:  # noqa: ANN401
     return {"id": "containment", "config": config}
 
 
@@ -126,7 +126,7 @@ async def test_strict_refuses_a_tier_that_enforces_nothing(mount: MountProfile) 
     assert "enforces nothing" in str(refused.value)
 
 
-async def _strict_with(ctx: Any, backend: StubSandboxProvider | None) -> None:
+async def _strict_with(ctx: Any, backend: StubSandboxProvider | None) -> None:  # noqa: ANN401
     """Ask the question a backend mounted *after* this row would pose.
 
     Set on the live service rather than in config because that is the ordering

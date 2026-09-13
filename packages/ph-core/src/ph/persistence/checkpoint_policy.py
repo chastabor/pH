@@ -28,7 +28,7 @@ worse than a side effect that did not happen.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from ..agent.types import PreStepRequest
@@ -45,7 +45,10 @@ __all__ = ["apply"]
 async def apply(ctx: Context, config: None) -> None:
     """Install the semantic checkpoints."""
 
-    async def before_request(request: GenerateOptions, next_: Callable[..., Any]) -> Any:
+    async def before_request(
+        request: GenerateOptions,
+        next_: Callable[..., Awaitable[Any]],
+    ) -> Any:  # noqa: ANN401
         if request.session_id is not None:
             session = ctx.require(SESSIONS).get(request.session_id)
             if session is not None:
@@ -55,7 +58,9 @@ async def apply(ctx: Context, config: None) -> None:
                 await ctx.require(SESSIONS).flush(session)
         return await next_()
 
-    async def before_tool_body(execution: ToolExecution, next_: Callable[..., Any]) -> Any:
+    async def before_tool_body(
+        execution: ToolExecution, next_: Callable[..., Awaitable[Any]]
+    ) -> Any:  # noqa: ANN401
         if execution.session is None or execution.parent is not None:
             # A nested dispatch is already covered by its outer call's barrier.
             return await next_()
@@ -64,7 +69,10 @@ async def apply(ctx: Context, config: None) -> None:
             return aborted_result(started=False)
         return await next_()
 
-    async def after_pre_step(request: PreStepRequest, next_: Callable[..., Any]) -> Any:
+    async def after_pre_step(
+        request: PreStepRequest,
+        next_: Callable[..., Awaitable[Any]],
+    ) -> Any:  # noqa: ANN401
         decision = await next_()
         if getattr(decision, "kind", None) == "reject":
             # No request will follow to flush the previous step's results.

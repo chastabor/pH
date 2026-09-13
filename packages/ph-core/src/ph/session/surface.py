@@ -221,7 +221,7 @@ def _assert_tool_result_rewrite(
         raise SurfaceError("tool/result surface replacement may change only content")
 
 
-def _blank_result_content(data: Any) -> Any:
+def _blank_result_content(data: Any) -> Any:  # noqa: ANN401
     """A `tool/result` payload with the result block's content blanked out."""
     plain = thaw_json(data)
     message = plain.get("message") if isinstance(plain, dict) else None

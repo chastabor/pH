@@ -11,7 +11,7 @@ the fake-provider options. Each was being re-declared per test module.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -67,7 +67,7 @@ def simple_tool(
     *,
     description: str | None = None,
     safe: bool | Callable[[Any], bool] = False,
-    **kwargs: Any,
+    **kwargs: Any,  # noqa: ANN401
 ) -> ToolDefinition:
     """A tool taking a free-form object and returning a string.
 
@@ -118,7 +118,7 @@ def boundary_for(scope: Boundary | None, agent: AgentHandle) -> Boundary:
     return own
 
 
-def parked_gate(ctx: Any, *, only: str | None = None) -> tuple[anyio.Event, anyio.Event]:
+def parked_gate(ctx: Context, *, only: str | None = None) -> tuple[anyio.Event, anyio.Event]:
     """A `tools/pre-execute` gate that stops and waits to be let go.
 
     Returns `(reached, release)`: the listener sets the first when a call arrives
@@ -132,7 +132,7 @@ def parked_gate(ctx: Any, *, only: str | None = None) -> tuple[anyio.Event, anyi
     """
     reached, release = anyio.Event(), anyio.Event()
 
-    async def parked(execution: Any, next_: Any) -> Any:
+    async def parked(execution: Any, next_: Callable[..., Awaitable[Any]]) -> Any:  # noqa: ANN401
         if only is None or execution.name == only:
             reached.set()
             await release.wait()
@@ -143,15 +143,15 @@ def parked_gate(ctx: Any, *, only: str | None = None) -> tuple[anyio.Event, anyi
 
 
 async def run_tool(
-    ctx: Any,
+    ctx: Context,
     name: str,
-    arguments: Any = None,
+    arguments: Any = None,  # noqa: ANN401
     *,
     agent: AgentHandle,
     scope: Boundary | None = None,
-    session: Any = None,
+    session: Any = None,  # noqa: ANN401
     call_id: str = "call-1",
-) -> Any:
+) -> Any:  # noqa: ANN401
     """Execute one tool the way the loop does, for a test that is not the loop.
 
     The `ToolExecutionInput(...)` incantation — `scope=agent.ctx`, `session=`,
@@ -185,7 +185,7 @@ async def run_tool(
 def raising(error: BaseException) -> Callable[..., Any]:
     """A body that raises `error` — readable where a generator trick was not."""
 
-    def body(*_args: Any, **_kwargs: Any) -> Any:
+    def body(*_args: Any, **_kwargs: Any) -> Any:  # noqa: ANN401
         raise error
 
     return body
@@ -356,7 +356,7 @@ def workspace_retained(agent_id: str, reason: str) -> tuple[str, dict[str, Any]]
     return (RETAINED, {"agentId": agent_id, "retained": reason})
 
 
-def workspace_disposed(agent_id: str, **extra: Any) -> tuple[str, dict[str, Any]]:
+def workspace_disposed(agent_id: str, **extra: Any) -> tuple[str, dict[str, Any]]:  # noqa: ANN401
     """The closing half — `kept=`, `retained=`, `reconciled=` as the test needs."""
     return (DISPOSED, {"agentId": agent_id, **extra})
 

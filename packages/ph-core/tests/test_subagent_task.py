@@ -36,8 +36,10 @@ addressing an existing id by name would mount the plugin twice."""
 
 
 async def _mounted(
-    mount: MountProfile, *providers: tuple[str, StubSubagentProvider], **config: Any
-) -> Any:
+    mount: MountProfile,
+    *providers: tuple[str, StubSubagentProvider],
+    **config: Any,  # noqa: ANN401
+) -> Any:  # noqa: ANN401
     """A profile with these providers, composed the way a real one is.
 
     The providers land *after* the row's `apply` and before the composed
@@ -53,7 +55,7 @@ async def _mounted(
     return ctx
 
 
-def _agent(ctx: Any) -> Any:
+def _agent(ctx: Any) -> Any:  # noqa: ANN401
     return ctx.require(AGENTS).create(ctx.require(SESSIONS).create("s"), FAKE_OPTIONS)
 
 

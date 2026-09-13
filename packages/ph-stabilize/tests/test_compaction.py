@@ -147,7 +147,7 @@ pressure trigger, which is what keeps these tests about the *manual* path.
 """
 
 
-async def _conversation(ctx: Context, session_id: str, turns: int = 8) -> Any:
+async def _conversation(ctx: Context, session_id: str, turns: int = 8) -> Any:  # noqa: ANN401
     """A session with `turns` question/answer pairs, long enough to compact."""
     session = ctx.require(SESSIONS).create(session_id)
     agent = ctx.require(AGENTS).create(session, FAKE_OPTIONS)
@@ -156,7 +156,7 @@ async def _conversation(ctx: Context, session_id: str, turns: int = 8) -> Any:
     return agent
 
 
-async def _reaching_for_a_tool() -> Any:
+async def _reaching_for_a_tool() -> Any:  # noqa: ANN401
     """A reply that is one tool call and no prose — what a model under the
     session's own system prompt, holding the session's own tools, may well do
     when asked to summarize."""
@@ -167,7 +167,7 @@ async def _reaching_for_a_tool() -> Any:
     yield Finish(reason=FinishReason(kind="tool-calls"))
 
 
-async def _overflowing() -> Any:
+async def _overflowing() -> Any:  # noqa: ANN401
     """A stream that ends the way a provider ends one it cannot accept."""
     yield Finish(
         reason=FinishReason(
@@ -475,7 +475,7 @@ def _engine(ctx: Context) -> SummarizeEngine:
     return engine
 
 
-def _truncate(ctx: Context, session: Session, agent: Any = None) -> tuple[int, ...]:
+def _truncate(ctx: Context, session: Session, agent: Any = None) -> tuple[int, ...]:  # noqa: ANN401
     """The truncation pass with the baseline its caller now computes once.
 
     `agent` may be `None`: the tool lookup falls back to the root scope, which
@@ -932,7 +932,7 @@ async def test_a_reply_of_only_tool_calls_falls_back_without_them(mount: MountPr
     agent = await _conversation(ctx, "tool-happy")
     answered = {"once": False}
 
-    async def call_a_tool_first(options: GenerateOptions, next_: Any) -> Any:
+    async def call_a_tool_first(options: GenerateOptions, next_: Any) -> Any:  # noqa: ANN401
         if options.purpose == "compaction" and not answered["once"]:
             answered["once"] = True
             ctx.require(LLM_FAKE).requests.append(options)
@@ -985,7 +985,7 @@ async def test_a_context_overflow_compacts_and_retries_the_request(mount: MountP
     session = agent.session
     refused = {"once": False}
 
-    async def refuse_the_first_request(options: GenerateOptions, next_: Any) -> Any:
+    async def refuse_the_first_request(options: GenerateOptions, next_: Any) -> Any:  # noqa: ANN401
         # On `llm/stream`, which is the seam retry and replay already attach to,
         # rather than by swapping the adapter's method — `FakeAdapter` has slots,
         # and the waterfall is where a provider failure is *supposed* to come
@@ -1117,7 +1117,7 @@ async def test_an_unexpected_failure_neither_escapes_nor_goes_unrecorded(
     agent = await _conversation(ctx, "buggy")
     engine = _engine(ctx)
 
-    async def explode(*_args: Any, **_kwargs: Any) -> Any:
+    async def explode(*_args: Any, **_kwargs: Any) -> Any:  # noqa: ANN401
         raise OSError("the disk went away")
 
     monkeypatch.setattr(type(engine), "_land", explode)
@@ -1142,7 +1142,7 @@ async def test_cancellation_is_not_swallowed(
     agent = await _conversation(ctx, "cancelled")
     engine = _engine(ctx)
 
-    async def stop(*_args: Any, **_kwargs: Any) -> Any:
+    async def stop(*_args: Any, **_kwargs: Any) -> Any:  # noqa: ANN401
         raise Cancelled("the user pressed stop")
 
     monkeypatch.setattr(type(engine), "_land", stop)

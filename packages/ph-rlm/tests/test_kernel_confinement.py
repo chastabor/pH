@@ -100,7 +100,12 @@ def test_the_framed_channel_survives_the_wrapper(tmp_path: Path) -> None:
 # ------------------------------------------------------- what it resolves --
 
 
-async def _agent_with_workspace(ctx: Any, session: Any, agent: Any, base: Path) -> Any:
+async def _agent_with_workspace(
+    ctx: Any,  # noqa: ANN401
+    session: Any,  # noqa: ANN401
+    agent: Any,  # noqa: ANN401
+    base: Path,
+) -> Any:  # noqa: ANN401
     """The lifecycle row acquires at an agent's first step; these tests never take
     one, so the workspace is acquired the way the ladder tests do.
 
@@ -229,7 +234,7 @@ async def test_a_confined_kernel_reports_the_backend_that_bounds_it(
     assert confined.startswith(f"{ctx.require(SANDBOX).provider.backend} —"), confined
 
 
-async def _run_cell(ctx: Any, agent_id: str, program: str) -> Any:
+async def _run_cell(ctx: Any, agent_id: str, program: str) -> Any:  # noqa: ANN401
     """One cell in this agent's own namespace — which *is* the agent id, so the
     kernel it reaches is the one confined against that agent's workspace."""
     return await ctx.require(CODE_RUNTIME).run(CodeRunRequest(program=program, namespace=agent_id))

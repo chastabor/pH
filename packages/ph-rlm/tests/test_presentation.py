@@ -27,7 +27,14 @@ from ph_rlm.presentation import IPYTHON, IPYTHON_DESCRIPTION, cell_details, rend
 pytestmark = pytest.mark.anyio
 
 
-async def _cell(ctx: Any, program: str, *, agent: Any, session: Any, call_id: str = "c1") -> Any:
+async def _cell(
+    ctx: Any,  # noqa: ANN401
+    program: str,
+    *,
+    agent: Any,  # noqa: ANN401
+    session: Any,  # noqa: ANN401
+    call_id: str = "c1",
+) -> Any:  # noqa: ANN401
     return await run_cell(ctx, program, agent=agent, session=session, call_id=call_id, name=IPYTHON)
 
 

@@ -19,6 +19,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from ..cordis import Context
 from ..keys import AGENTS, SESSIONS, WORKSPACE
 from ..seams.workspace_git import git
 
@@ -37,7 +38,9 @@ P4-11's decision — so a test that wants the tier says so explicitly."""
 
 
 async def worktree_agent(
-    mount: Any, tmp_path: Path, *extra_rows: dict[str, Any]
+    mount: Any,  # noqa: ANN401
+    tmp_path: Path,
+    *extra_rows: dict[str, Any],
 ) -> tuple[Any, Any, Any, Any]:
     """`(ctx, session, agent, workspace)` — one agent holding a real worktree.
 
@@ -64,7 +67,7 @@ async def worktree_agent(
     return ctx, session, agent, workspace
 
 
-async def git_repo(ctx: Any, path: Path) -> Path:
+async def git_repo(ctx: Context, path: Path) -> Path:
     """A repository with one commit — the least a worktree can branch from.
 
     Identity is set on the repository rather than inherited, so a machine with

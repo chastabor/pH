@@ -493,7 +493,7 @@ def test_the_config_catalog_is_generated_from_each_row_s_own_model() -> None:
     assert by_name["diagnostics"]["config"] == []
 
 
-def _config(*args: str) -> Any:
+def _config(*args: str) -> Any:  # noqa: ANN401
     """`ph config …` rendered wide enough to assert on.
 
     Rich wraps to 80 columns off a terminal, and a wrapped cell is a substring
@@ -593,7 +593,7 @@ def test_the_catalog_refuses_an_unknown_row_rather_than_printing_nothing() -> No
     assert "nope" in result.output and "workspace-git-worktree" not in result.output
 
 
-def resolve_profile_config(patches: list[str]) -> Any:
+def resolve_profile_config(patches: list[str]) -> Any:  # noqa: ANN401
     """The `jobs` row's config as the headless profile composes it, patches and all."""
     rows = profile_or_exit("headless", patches).dump()
     return next(row for row in rows if row.get("id") == "jobs").get("config")

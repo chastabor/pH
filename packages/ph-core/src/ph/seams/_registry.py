@@ -98,7 +98,14 @@ def claim_entry[T](owner: Context | Running, entries: list[T], value: T, *, labe
     return owner.add_disposer(release, label=label)
 
 
-def claim_slot(by: Running, holder: Any, attribute: str, value: Any, *, label: str) -> Disposer:
+def claim_slot(
+    by: Running,
+    holder: Any,  # noqa: ANN401
+    attribute: str,
+    value: Any,  # noqa: ANN401
+    *,
+    label: str,
+) -> Disposer:
     """Set `holder.<attribute>`; the disposer clears it only while it still holds `value`.
 
     **Takes the pair rather than the owner** (P6-29), and holds it in

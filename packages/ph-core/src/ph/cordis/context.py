@@ -73,14 +73,14 @@ _MAX_RECONCILE_ROUNDS = 64
 _MISSING: Any = object()
 
 
-async def maybe_await(value: Any) -> Any:
+async def maybe_await(value: Any) -> Any:  # noqa: ANN401
     """Await `value` when it is awaitable, otherwise return it unchanged."""
     if inspect.isawaitable(value):
         return await value
     return value
 
 
-def is_bailed(value: Any) -> bool:
+def is_bailed(value: Any) -> bool:  # noqa: ANN401
     """Whether a listener's return value stops a `serial` dispatch.
 
     Ported verbatim from cordis: anything but `None` and `False` bails. `0` and
@@ -100,7 +100,7 @@ class Hook:
     global_: bool = False
 
 
-def _invoke(hook: Hook, *args: Any) -> Any:
+def _invoke(hook: Hook, *args: Any) -> Any:  # noqa: ANN401
     """Call one listener as an effect of the scope that registered it (P6-25).
 
     **The one place ownership is established for a dispatch.** A function rather
@@ -224,7 +224,7 @@ class ForkScope:
 
     __slots__ = ("_config", "_dependent", "_parent", "_spec", "_unmount")
 
-    def __init__(self, parent: Context, spec: PluginSpec, config: Any) -> None:
+    def __init__(self, parent: Context, spec: PluginSpec, config: Any) -> None:  # noqa: ANN401
         self._parent = parent
         self._spec = spec
         self._config = config
@@ -275,7 +275,7 @@ class ForkScope:
         return self._dependent.scope
 
     @property
-    def config(self) -> Any:
+    def config(self) -> Any:  # noqa: ANN401
         return self._config
 
     async def _apply(self, ctx: Context) -> None:
@@ -512,13 +512,13 @@ class running:
         if self._pair is not None:
             self._token = _ACTIVATING.set(self._pair)
 
-    def __exit__(self, *_exc: Any) -> None:
+    def __exit__(self, *_exc: Any) -> None:  # noqa: ANN401
         if self._token is not None:
             _ACTIVATING.reset(self._token)
             self._token = None
 
 
-async def _as_owner(scope: Context, awaitable: Any) -> Any:
+async def _as_owner(scope: Context, awaitable: Any) -> Any:  # noqa: ANN401
     """Await something as an effect of `scope`, binding when the body *runs*.
 
     An `async def` listener called by `emit` only *builds* a coroutine — the body
@@ -874,7 +874,7 @@ class Context:
 
         return self.add_disposer(unprovide, label=f"provide({name})")
 
-    def _provision(self, key: str) -> Any:
+    def _provision(self, key: str) -> Any:  # noqa: ANN401
         """Resolve `key` most-specific-first up the scope chain."""
         for node in self._chain():
             provision = node._services.get(key)
@@ -885,7 +885,7 @@ class Context:
     @overload
     def get[T](self, key: ServiceKey[T], default: T | None = None) -> T | None: ...
     @overload
-    def get(self, key: str, default: Any = None) -> Any: ...
+    def get(self, key: str, default: Any = None) -> Any: ...  # noqa: ANN401
     def get(self, key: str | ServiceKey[Any], default: Any = None) -> Any:
         """The service under `key`, or `default` — the optional read.
 
@@ -902,7 +902,7 @@ class Context:
     @overload
     def require[T](self, key: ServiceKey[T]) -> T: ...
     @overload
-    def require(self, key: str) -> Any: ...
+    def require(self, key: str) -> Any: ...  # noqa: ANN401
     def require(self, key: str | ServiceKey[Any]) -> Any:
         """The service under `key`, or `ServiceNotFoundError` — the required read.
 
@@ -925,7 +925,7 @@ class Context:
         effect = _Effect(dispose=dispose, label=label)
         self._effects.append(effect)
 
-        def release() -> Any:
+        def release() -> Any:  # noqa: ANN401
             if effect.done:
                 return None
             effect.done = True
@@ -969,7 +969,7 @@ class Context:
         child = Context(self, label=label, module=module or self._module, isolated=True)
         return child
 
-    def plugin(self, plugin: Any, config: Any = None) -> ForkScope:
+    def plugin(self, plugin: Any, config: Any = None) -> ForkScope:  # noqa: ANN401
         """Mount `plugin` as a child fork of this context.
 
         The fork's `apply` runs only once every key in its `inject` list
@@ -1182,7 +1182,11 @@ class Context:
         return [hook for hook in hooks if hook.global_ or hook.ctx.reaches(target)]
 
     def emit(
-        self, event: str, *args: Any, scope: Context | None = None, contained: bool = False
+        self,
+        event: str,
+        *args: Any,  # noqa: ANN401
+        scope: Context | None = None,
+        contained: bool = False,
     ) -> None:
         """Dispatch synchronously, ignoring listener return values.
 
@@ -1208,7 +1212,12 @@ class Context:
                 # runs rather than inheriting whatever was current at `_spawn`.
                 self._spawn(result, event)
 
-    async def serial(self, event: str, *args: Any, scope: Context | None = None) -> Any:
+    async def serial(
+        self,
+        event: str,
+        *args: Any,  # noqa: ANN401
+        scope: Context | None = None,
+    ) -> Any:  # noqa: ANN401
         """Await listeners in registration order until one bails."""
         event_registry.check(event, "serial")
         for hook in self._hooks(event, scope=scope):
@@ -1217,7 +1226,12 @@ class Context:
                 return result
         return None
 
-    async def parallel(self, event: str, *args: Any, scope: Context | None = None) -> None:
+    async def parallel(
+        self,
+        event: str,
+        *args: Any,  # noqa: ANN401
+        scope: Context | None = None,
+    ) -> None:
         """Run every listener concurrently and await all of them.
 
         Every listener runs even if one fails; the failures are collected and
@@ -1242,8 +1256,12 @@ class Context:
             raise ExceptionGroup(f'listeners failed for "{event}"', failures)
 
     async def waterfall(
-        self, event: str, *args: Any, inner: Callable[..., Any], scope: Context | None = None
-    ) -> Any:
+        self,
+        event: str,
+        *args: Any,  # noqa: ANN401
+        inner: Callable[..., Any],
+        scope: Context | None = None,
+    ) -> Any:  # noqa: ANN401
         """Around-middleware: each listener wraps the rest of the chain.
 
         Listeners run outermost-first and receive `(*args, next)`. Calling
@@ -1261,7 +1279,7 @@ class Context:
         state: list[Any] = list(args)
         index = 0
 
-        async def next_(*replacement: Any) -> Any:
+        async def next_(*replacement: Any) -> Any:  # noqa: ANN401
             nonlocal index
             if replacement:
                 state[:] = replacement
@@ -1280,7 +1298,7 @@ class Context:
 
         return await next_()
 
-    def detach(self, coro: Any, *, label: str) -> None:
+    def detach(self, coro: Any, *, label: str) -> None:  # noqa: ANN401
         """Run `coro` outside the caller's lifetime, tracked and drained.
 
         For work that must outlive the call that started it and must not be
@@ -1309,7 +1327,7 @@ class Context:
 
         task.add_done_callback(done)
 
-    def _spawn(self, coro: Any, event: str) -> None:
+    def _spawn(self, coro: Any, event: str) -> None:  # noqa: ANN401
         """Track a fire-and-forget coroutine returned by an `emit` listener."""
         self.detach(coro, label=f"listener for {event}")
 

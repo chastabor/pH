@@ -32,7 +32,7 @@ def violations(ctx: Context) -> list[str]:
     return [] if harness is None else list(harness.stale_projections())
 
 
-def stale_folds(ctx: Context, sessions: Any) -> list[str]:
+def stale_folds(ctx: Context, sessions: Any) -> list[str]:  # noqa: ANN401
     """Every cached local state that no longer equals the fold behind it.
 
     The layer under `violations`: that one compares the *file* to the fold, this

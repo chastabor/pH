@@ -195,7 +195,7 @@ A real log is mostly `assistant/chunk`, and without this every one of them pays 
 """
 
 
-def fold_goal_event(found: dict[str, GoalState], event: Any) -> None:
+def fold_goal_event(found: dict[str, GoalState], event: Any) -> None:  # noqa: ANN401
     """Fold one event into the goal table, in place. The rules, in one place.
 
     Exported as a step rather than only as a loop, for `fold_subagent_event`'s

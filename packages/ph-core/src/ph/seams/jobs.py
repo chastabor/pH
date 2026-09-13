@@ -170,7 +170,7 @@ class JobService:
     _queues: dict[_Key, _Queue] = field(default_factory=dict)
     _scope: Any = None
 
-    def bind(self, task_group: Any) -> None:
+    def bind(self, task_group: Any) -> None:  # noqa: ANN401
         """Adopt the task group jobs run in.
 
         Optional. Without one, a job runs on `ctx.detach` — the pool

@@ -21,13 +21,16 @@ history, and only when the text changed.
 
 from __future__ import annotations
 
-from typing import Any
-
 from ph.cordis import Context, plugin
 from ph.keys import SESSIONS, SUBAGENTS, SYSTEM_PROMPT, TOOLS
 from ph.seams.subagents import reachable_family
 from ph.seams.workspace import workspace_of
-from ph.system_prompt.assembly import ORDER_TOOL_GUIDANCE, PromptContext, PromptSection
+from ph.system_prompt.assembly import (
+    ORDER_TOOL_GUIDANCE,
+    AssembleContext,
+    PromptContext,
+    PromptSection,
+)
 from ph_runtime.cell import MAGIC_PREFIXES
 
 from .bindings import RUN_TOOL
@@ -144,7 +147,7 @@ async def apply(ctx: Context, config: None) -> None:
 
     prompt = ctx.require(SYSTEM_PROMPT)
 
-    def delegation(request: Any) -> str:
+    def delegation(request: AssembleContext) -> str:
         """The delegation rules, and only when the agent can actually delegate.
 
         Keyed on `rlm_run`'s *visibility* — the same question the SDK block asks
@@ -154,11 +157,11 @@ async def apply(ctx: Context, config: None) -> None:
         """
         return DELEGATION if ctx.require(TOOLS).view(request.scope).visible.get(RUN_TOOL) else ""
 
-    def child_doctrine(request: Any) -> str:
+    def child_doctrine(request: AssembleContext) -> str:
         session = getattr(request.agent, "session", None)
         return CHILD_DOCTRINE if session is not None and delegation_depth(session) else ""
 
-    def facts(request: Any) -> str:
+    def facts(request: AssembleContext) -> str:
         """The turn-to-turn state, as a cache-safe snapshot (A12).
 
         One roster fold, reused: the family names and the children line are both

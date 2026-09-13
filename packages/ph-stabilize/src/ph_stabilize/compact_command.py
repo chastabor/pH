@@ -53,7 +53,7 @@ promise nobody can check."""
 async def apply(ctx: Context, config: None) -> None:
     """Register `/compact`."""
 
-    async def compact(argument: str, invocation: Any) -> str:
+    async def compact(argument: str, invocation: Any) -> str:  # noqa: ANN401
         agent = invocation.agent
         if agent is None:
             return "refusing: /compact needs an agent whose session to compact"

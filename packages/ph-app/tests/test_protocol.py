@@ -55,7 +55,7 @@ class _Named(Refusal):
 async def test_respond_shapes_a_result_an_error_and_nothing_for_an_id_less_frame() -> None:
     ran: list[str] = []
 
-    async def dispatch(method: str, params: dict[str, Any]) -> Any:
+    async def dispatch(method: str, params: dict[str, Any]) -> Any:  # noqa: ANN401
         ran.append(method)
         if method == "refuse":
             raise _Named("no")

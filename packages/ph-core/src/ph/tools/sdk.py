@@ -53,12 +53,12 @@ _TS_TYPES = {
 }
 
 
-def _summary(binding: Any) -> str:
+def _summary(binding: Any) -> str:  # noqa: ANN401
     description = str(getattr(binding, "description", "") or "").strip()
     return description.splitlines()[0] if description else ""
 
 
-def _properties(binding: Any) -> list[tuple[str, dict[str, Any], bool]]:
+def _properties(binding: Any) -> list[tuple[str, dict[str, Any], bool]]:  # noqa: ANN401
     parameters = getattr(binding, "parameters", None) or {}
     properties = parameters.get("properties") or {}
     required = set(parameters.get("required") or ())

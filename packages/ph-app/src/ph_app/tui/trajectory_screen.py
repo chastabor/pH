@@ -75,8 +75,8 @@ class TrajectoryScreen(Screen[None]):
         records: list[TrajectoryRecord],
         *,
         session_id: str = "",
-        sessions: Any = None,
-        **kwargs: Any,
+        sessions: Any = None,  # noqa: ANN401
+        **kwargs: Any,  # noqa: ANN401
     ) -> None:
         super().__init__(**kwargs)
         self.records = records

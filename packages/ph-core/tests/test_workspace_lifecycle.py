@@ -38,7 +38,7 @@ def _tier(tmp_path: Path) -> StubWorkspaceProvider:
     )
 
 
-async def _run(ctx: Any, session_id: str = "s") -> Any:
+async def _run(ctx: Any, session_id: str = "s") -> Any:  # noqa: ANN401
     """One agent, one prompt — the least that reaches `agent/pre-step`."""
     session = ctx.require(SESSIONS).create(session_id)
     agent = ctx.require(AGENTS).create(session, FAKE_OPTIONS)
@@ -250,7 +250,7 @@ async def test_a_resolver_that_breaks_falls_back_rather_than_failing_the_read(
     assert ctx.require(FS).root_for(_Exploding()) == ctx.require(FS).root  # type: ignore[arg-type]
 
 
-def _raise(_agent: Any) -> Path:
+def _raise(_agent: Any) -> Path:  # noqa: ANN401
     raise RuntimeError("the workspace seam is gone")
 
 

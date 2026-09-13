@@ -518,7 +518,7 @@ def _file_record(payload: dict[str, Any]) -> dict[str, Any]:
     return inner if isinstance(inner, dict) else payload
 
 
-def _expiry(stated: Any) -> int | None:
+def _expiry(stated: Any) -> int | None:  # noqa: ANN401
     """`expirationTime` as epoch milliseconds, or `None` if it was not stated.
 
     RFC 3339 with a `Z`, which `fromisoformat` learned to read in 3.11 — and an
@@ -534,7 +534,7 @@ def _expiry(stated: Any) -> int | None:
         return None
 
 
-def _call_names(messages: Any) -> dict[str, str]:
+def _call_names(messages: Any) -> dict[str, str]:  # noqa: ANN401
     """`tool_call_id → name`, so a result can be addressed the way this wire does.
 
     A `functionResponse` carries the function's **name**; pH's `ToolResultBlock`
@@ -553,7 +553,10 @@ def _call_names(messages: Any) -> dict[str, str]:
 
 
 def _to_google(
-    message: Any, media: dict[str, str], handles: dict[str, str], names: dict[str, str]
+    message: Any,  # noqa: ANN401
+    media: dict[str, str],
+    handles: dict[str, str],
+    names: dict[str, str],
 ) -> dict[str, Any] | None:
     """One pH message as one `contents` entry, or `None` if it says nothing here.
 
@@ -593,7 +596,7 @@ def _to_google(
     return {"role": "model" if message.role == "assistant" else "user", "parts": parts}
 
 
-def _result_text(block: Any) -> str:
+def _result_text(block: Any) -> str:  # noqa: ANN401
     return "\n".join(inner.text for inner in block.content if getattr(inner, "type", "") == "text")
 
 

@@ -55,7 +55,7 @@ __all__ = [
 ]
 
 
-def resumption_of(session: Any) -> dict[str, Any] | None:
+def resumption_of(session: Any) -> dict[str, Any] | None:  # noqa: ANN401
     """What this session's last resume recorded, or `None` if it never was.
 
     Read from the log rather than returned from `resume_session`, so a front end
@@ -390,7 +390,7 @@ def read_session(
     return header, events
 
 
-async def resume_session(ctx: Any, session_id: str) -> Any:
+async def resume_session(ctx: Context, session_id: str) -> Any:  # noqa: ANN401
     """Read a stored session, repair a crashed tail, and publish it.
 
     The repair runs on the seed rather than after publication, so a resumed

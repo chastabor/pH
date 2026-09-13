@@ -80,7 +80,7 @@ class HashingEmbedder:
     def name(self) -> str:
         return f"stub-hashing:{self.dim}"
 
-    def encode(self, texts: Any, *, query: bool) -> Any:
+    def encode(self, texts: Any, *, query: bool) -> Any:  # noqa: ANN401
         self.calls += 1
         rows = np.zeros((len(texts), self.dim), dtype=np.float32)
         for index, text in enumerate(texts):
@@ -97,7 +97,7 @@ class HashingEmbedder:
 _SEQ = itertools.count()
 
 
-def _agent(ctx: Any) -> Any:
+def _agent(ctx: Any) -> Any:  # noqa: ANN401
     """A fresh agent, on a session id nothing else has taken.
 
     Counted rather than fixed: a test needing two agents would otherwise collide
@@ -110,7 +110,9 @@ def _agent(ctx: Any) -> Any:
 
 
 async def _mounted(
-    mount: MountProfile, tmp_path: Path, **config: Any
+    mount: MountProfile,
+    tmp_path: Path,
+    **config: Any,  # noqa: ANN401
 ) -> tuple[Any, HashingEmbedder]:
     """The seam, plus a stub embedder claimed the way a provider row claims one.
 
@@ -198,7 +200,7 @@ def test_an_empty_document_yields_nothing() -> None:
 # -------------------------------------------------------------------- store ----
 
 
-def _store(root: Path, **kwargs: Any) -> TextIndex:
+def _store(root: Path, **kwargs: Any) -> TextIndex:  # noqa: ANN401
     store = TextIndex(root=root, model="stub-hashing:96", **kwargs)
     store.open()
     return store
@@ -822,7 +824,7 @@ async def test_preload_refuses_the_mount_rather_than_failing_mid_turn(
     from ph.cordis import MountRefusal
     from ph_text_index._embed import SentenceTransformerEmbedder
 
-    def explode(self: Any) -> int:
+    def explode(self: Any) -> int:  # noqa: ANN401
         raise RuntimeError("requires the following packages ...: einops")
 
     monkeypatch.setattr(SentenceTransformerEmbedder, "load", explode)
@@ -849,7 +851,7 @@ async def test_without_preload_the_mount_survives_a_model_that_cannot_load(
     """
     from ph_text_index._embed import SentenceTransformerEmbedder
 
-    def explode(self: Any) -> int:
+    def explode(self: Any) -> int:  # noqa: ANN401
         raise RuntimeError("no network")
 
     monkeypatch.setattr(SentenceTransformerEmbedder, "load", explode)

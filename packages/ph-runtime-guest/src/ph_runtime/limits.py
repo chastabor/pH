@@ -82,7 +82,7 @@ def apply_limits(*, address_space_bytes: int) -> dict[str, Any]:
     return applied
 
 
-def _on_sigxcpu(_signum: int, _frame: Any) -> None:
+def _on_sigxcpu(_signum: int, _frame: Any) -> None:  # noqa: ANN401
     raise CpuBudgetExceeded("this cell used its CPU budget")
 
 

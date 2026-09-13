@@ -212,7 +212,7 @@ class _RunAction:
     app: AppSurface
     action: str
 
-    async def __call__(self, argument: str, _context: Any) -> None:
+    async def __call__(self, argument: str, _context: Any) -> None:  # noqa: ANN401
         # Forwarded as a Python literal, which is what Textual's action parser
         # reads (`ast.literal_eval`), so a path with spaces round-trips. An
         # action that takes no argument is called bare, as before.

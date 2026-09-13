@@ -119,7 +119,7 @@ def install_lifecycle(
         except Exception:
             log.exception("ph.resources: orderly disposal failed")
 
-    def handle(signum: int, _frame: Any) -> None:
+    def handle(signum: int, _frame: Any) -> None:  # noqa: ANN401
         if on_signal is not None:
             on_signal(signum)
         if finished.is_set():  # pragma: no cover - a second signal

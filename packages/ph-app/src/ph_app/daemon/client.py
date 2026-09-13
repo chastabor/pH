@@ -78,7 +78,7 @@ class DaemonClient:
         """Set when the pump stops, whichever end ended it."""
         return self.peer.closed
 
-    async def _answer(self, method: str, params: dict[str, Any]) -> Any:
+    async def _answer(self, method: str, params: dict[str, Any]) -> Any:  # noqa: ANN401
         handler = self.handlers.get(method)
         if handler is None:
             raise LookupError(f'this client cannot answer "{method}"')
@@ -160,7 +160,7 @@ class DaemonClient:
     async def call[P: WireModel, R: WireModel](self, verb: Verb[P, R], params: P, /) -> R: ...
 
     @overload
-    async def call(self, method: str, /, **fields: Any) -> dict[str, Any]: ...
+    async def call(self, method: str, /, **fields: Any) -> dict[str, Any]: ...  # noqa: ANN401
 
     async def call(
         self, verb: str | Verb[Any, Any], params: WireModel | None = None, /, **fields: Any
@@ -215,7 +215,7 @@ class DaemonClient:
     async def notify[P: WireModel](self, verb: Notify[P], params: P, /) -> None: ...
 
     @overload
-    async def notify(self, method: str, /, **fields: Any) -> None: ...
+    async def notify(self, method: str, /, **fields: Any) -> None: ...  # noqa: ANN401
 
     async def notify(
         self, verb: str | Notify[Any], params: WireModel | None = None, /, **fields: Any

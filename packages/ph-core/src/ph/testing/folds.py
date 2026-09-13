@@ -267,7 +267,7 @@ class VerifyingFoldCache[T](SessionFoldCache[T]):
     cost the cache exists to avoid, which is why this is a test double.
     """
 
-    def read(self, session: Any) -> T:
+    def read(self, session: Any) -> T:  # noqa: ANN401
         value = super().read(session)
         cold = self._compute(session)
         if value != cold:
@@ -297,7 +297,7 @@ def _impure_calls(run: Callable[[], object]) -> list[str]:
     """The impure C calls `run` makes, each named once, in the order first seen."""
     found: dict[str, None] = {}
 
-    def hook(frame: FrameType, event: str, arg: Any) -> None:
+    def hook(frame: FrameType, event: str, arg: Any) -> None:  # noqa: ANN401
         if event != "c_call":
             return
         module = getattr(arg, "__module__", None)

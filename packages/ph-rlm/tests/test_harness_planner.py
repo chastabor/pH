@@ -68,7 +68,7 @@ NO = json.dumps({"shouldRefine": False, "rationale": "routine work"})
 def refining(mount: MountProfile) -> Refining:
     """`await refining(**config)` → `(ctx, session, agent)` with a scripted model."""
 
-    async def build(**config: Any) -> tuple[Any, Any, Any]:
+    async def build(**config: Any) -> tuple[Any, Any, Any]:  # noqa: ANN401
         row = {**HARNESS_ROW, "config": config} if config else HARNESS_ROW
         ctx = await mount(row)
         session = ctx.require(SESSIONS).create("planning")
@@ -80,18 +80,18 @@ def refining(mount: MountProfile) -> Refining:
 def script(ctx: Context, *, review: str = NO, planner: str = "{}") -> list[GenerateOptions]:
     """Answer the review gate and the planner differently, and keep the requests."""
 
-    def respond(request: Any) -> str:
+    def respond(request: Any) -> str:  # noqa: ANN401
         return review if request.system == REVIEW_SYSTEM_PROMPT else planner
 
     ctx.require(LLM_FAKE).respond = respond
     return ctx.require(LLM_FAKE).requests
 
 
-def turn(session: Any, index: int = 1) -> None:
+def turn(session: Any, index: int = 1) -> None:  # noqa: ANN401
     session.append("turn/end", {"turn": index, "reason": {"kind": "completed"}})
 
 
-def say(session: Any, text: str, message_id: str = "m1") -> Any:
+def say(session: Any, text: str, message_id: str = "m1") -> Any:  # noqa: ANN401
     return session.append("user/message", user_payload(text, message_id), SurfaceIntent("append"))
 
 
@@ -329,7 +329,7 @@ async def test_a_reply_wrapped_in_prose_is_corrected_rather_than_declined(
     ctx, session, agent = await refining()
     replies = iter(["Certainly! Here you go.", json.dumps(PROPOSAL)])
 
-    def respond(request: Any) -> str:
+    def respond(request: Any) -> str:  # noqa: ANN401
         return NO if request.system == REVIEW_SYSTEM_PROMPT else next(replies)
 
     ctx.require(LLM_FAKE).respond = respond
@@ -471,7 +471,7 @@ async def test_a_veto_stops_it_before_any_model_call(refining: Refining) -> None
     ctx, session, agent = await refining(turnsBetweenRefinements=1, cooldownMinutes=0)
     script(ctx, review=YES, planner=json.dumps(PROPOSAL))
 
-    async def refuse(request: Any, _next: Any) -> str:
+    async def refuse(request: Any, _next: Any) -> str:  # noqa: ANN401
         return f"this deployment does not refine (trigger: {request.trigger})"
 
     ctx.on("harness/before-refine", refuse)

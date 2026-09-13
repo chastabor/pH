@@ -60,7 +60,7 @@ from ph.json import JsonObject, as_str
 from ph.keys import FS, SYSTEM_PROMPT, TOOLS
 from ph.llm.types import ContentBlock
 from ph.session import Session
-from ph.system_prompt.assembly import ORDER_TOOL_GUIDANCE, PromptSection
+from ph.system_prompt.assembly import ORDER_TOOL_GUIDANCE, AssembleContext, PromptSection
 from ph.tools import ToolModel, define_tool, text_content
 from ph.wire import WireModel
 
@@ -468,7 +468,7 @@ class HeadArgs(ToolModel):
     lines: int = 40
 
 
-def _render_matches(_args: JsonObject, value: Any) -> list[ContentBlock]:
+def _render_matches(_args: JsonObject, value: Any) -> list[ContentBlock]:  # noqa: ANN401
     matches = value.get("matches") or []
     if not matches:
         return text_content("no matches")
@@ -478,11 +478,11 @@ def _render_matches(_args: JsonObject, value: Any) -> list[ContentBlock]:
     return text_content(body)
 
 
-def _render_chunk(_args: JsonObject, value: Any) -> list[ContentBlock]:
+def _render_chunk(_args: JsonObject, value: Any) -> list[ContentBlock]:  # noqa: ANN401
     return text_content(f"chunk {value['index'] + 1} of {value['chunks']}\n\n{value['text']}")
 
 
-def _render_head(_args: JsonObject, value: Any) -> list[ContentBlock]:
+def _render_head(_args: JsonObject, value: Any) -> list[ContentBlock]:  # noqa: ANN401
     if value.get("document"):
         return text_content(f"{value['document']}\n\n{value['text']}")
     manifest = value.get("manifest") or []
@@ -520,7 +520,7 @@ async def apply(ctx: Context, config: Config) -> None:
     service = ContextService(corpus=corpus)
     ctx.provide(CONTEXT_CORPUS, service)
 
-    def search(args: SearchArgs, _run: Any) -> Any:
+    def search(args: SearchArgs, _run: Any) -> Any:  # noqa: ANN401
         return corpus.search(
             args.query,
             limit=min(max(1, args.limit), config.max_matches),
@@ -528,10 +528,10 @@ async def apply(ctx: Context, config: Config) -> None:
             regex=args.regex,
         ).to_wire()
 
-    def chunks(args: ChunkArgs, _run: Any) -> Any:
+    def chunks(args: ChunkArgs, _run: Any) -> Any:  # noqa: ANN401
         return corpus.chunk(by=args.by, size=max(1, args.size), index=args.index).to_wire()
 
-    def head(args: HeadArgs, _run: Any) -> Any:
+    def head(args: HeadArgs, _run: Any) -> Any:  # noqa: ANN401
         if args.document is None:
             return HeadValue(
                 manifest=[
@@ -581,7 +581,7 @@ async def apply(ctx: Context, config: Config) -> None:
         )
     )
 
-    def section(request: Any) -> str:
+    def section(request: AssembleContext) -> str:
         """Metadata only, and the recipe recorded on first sight (I3).
 
         A cached `section` rather than a `context()`: the corpus is resolved once

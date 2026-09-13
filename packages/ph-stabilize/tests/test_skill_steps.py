@@ -64,7 +64,7 @@ def _entry(
     return entry
 
 
-async def _reading(mount: MountProfile, tmp_path: Path) -> Any:
+async def _reading(mount: MountProfile, tmp_path: Path) -> Any:  # noqa: ANN401
     """A mounted deployment that has just read a three-step skill."""
     write_skill(tmp_path, "port", description="port a row", extra=STEPS, body="Do it.")
     ctx = await mount(
@@ -322,11 +322,11 @@ class _Stopping:
     stand-down untestable and would model the boundary wrongly.
     """
 
-    def __init__(self, session: Any) -> None:
+    def __init__(self, session: Any) -> None:  # noqa: ANN401
         self.session = session
         self.steers: list[Any] = []
 
-    def steer(self, message: Any) -> None:
+    def steer(self, message: Any) -> None:  # noqa: ANN401
         self.steers.append(message)
         self.session.append("user/message", message.to_wire(), SurfaceIntent("append"))
 

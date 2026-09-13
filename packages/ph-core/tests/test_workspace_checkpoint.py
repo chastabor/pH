@@ -61,7 +61,12 @@ from ph.tools.registry import RUN_CODE
 pytestmark = [pytest.mark.anyio, pytest.mark.needs_git]
 
 
-async def _checkpointed(ctx: Any, session: Any, agent: Any, call_id: str = "c1") -> int:
+async def _checkpointed(
+    ctx: Any,  # noqa: ANN401
+    session: Any,  # noqa: ANN401
+    agent: Any,  # noqa: ANN401
+    call_id: str = "c1",
+) -> int:
     """Take a restore point and hand back the seq a person would type."""
     workspace = ctx.require(WORKSPACE).of(agent.id)
     await ctx.require(WORKSPACE).checkpoint(
@@ -70,7 +75,7 @@ async def _checkpointed(ctx: Any, session: Any, agent: Any, call_id: str = "c1")
     return int(next(item.seq for item in reversed(session.events) if item.type == CHECKPOINT))
 
 
-async def _run(ctx: Any, session: Any, agent: Any, argument: str = "") -> str:
+async def _run(ctx: Any, session: Any, agent: Any, argument: str = "") -> str:  # noqa: ANN401
     shown = await ctx.require(COMMANDS).dispatch(
         f"/revert {argument}".strip(), session=session, agent=agent
     )

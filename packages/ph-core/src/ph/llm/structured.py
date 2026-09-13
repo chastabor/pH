@@ -100,7 +100,7 @@ def structural_warning(schema: dict[str, Any]) -> str | None:
     )
 
 
-def _object_in(text: str) -> Any:
+def _object_in(text: str) -> Any:  # noqa: ANN401
     """The JSON value in a reply, tolerating a fence or a sentence around it.
 
     Kept even where the wire enforces the schema, because "enforced" is a
@@ -120,7 +120,7 @@ def _braced(text: str) -> list[str]:
     return [text[start : end + 1]] if start != -1 and end > start else []
 
 
-def validated_shape(text: str, shape: type[BaseModel] | dict[str, Any]) -> Any:
+def validated_shape(text: str, shape: type[BaseModel] | dict[str, Any]) -> Any:  # noqa: ANN401
     """The reply as a validated value, or `SchemaViolation` naming what is wrong.
 
     `shape` is the same union `ToolOutput.schema` takes, and for the same reason:

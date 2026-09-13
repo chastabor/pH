@@ -199,7 +199,7 @@ async def apply(ctx: Context, config: None) -> None:
     row's life to something it never calls.
     """
 
-    def on_skill_read(payload: Any) -> None:
+    def on_skill_read(payload: Any) -> None:  # noqa: ANN401
         session = payload.get("session")
         # The *rendered* steps off the payload, not `skill.steps`: an author may
         # write `Run {{parameters.gate}}` in a step, and the arguments that fill

@@ -59,7 +59,7 @@ from ph_rlm.snapshot import (
 pytestmark = pytest.mark.anyio
 
 
-def _snapshots(session: Any) -> list[dict[str, Any]]:
+def _snapshots(session: Any) -> list[dict[str, Any]]:  # noqa: ANN401
     return [
         dict(event.data["record"]) for event in session.events if event.type == "kernel/snapshot"
     ]
@@ -214,7 +214,7 @@ async def test_a_spilled_variable_still_restores(mounted_runtime: MountedRuntime
     assert result.value["value"] == 20_000
 
 
-def _kernel_locators(session: Any) -> set[str]:
+def _kernel_locators(session: Any) -> set[str]:  # noqa: ANN401
     """The spill locators this log's `kernel/snapshot` events still name.
 
     `Mapping`, not `dict`: a frozen payload is a `MappingProxyType`, and a `dict`

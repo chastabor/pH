@@ -50,7 +50,7 @@ from ..keys import CODE_RUNTIME, SYSTEM_PROMPT, TOOLS
 from ..seams.code_runtime import CodeBinding, CodeBindingNamespace, CodeRunRequest
 from ..session import Session
 from ..session.json import freeze_json_value
-from ..system_prompt.assembly import ORDER_TOOL_GUIDANCE, PromptSection
+from ..system_prompt.assembly import ORDER_TOOL_GUIDANCE, AssembleContext, PromptSection
 from ..wire import WireModel
 from .definition import (
     ToolExecutionInput,
@@ -205,7 +205,7 @@ class DispatchBridge:
         self._failure = CodeRunFailure(kind, message)
         return self._failure
 
-    async def call(self, binding: CodeBinding, arguments: Any) -> Any:
+    async def call(self, binding: CodeBinding, arguments: Any) -> Any:  # noqa: ANN401
         """Dispatch one binding call through the full pipeline.
 
         :raises ToolCallError: the call failed; the program may handle it.
@@ -323,7 +323,7 @@ async def apply(ctx: Context, config: Config) -> None:
     ctx.require(CODE_RUNTIME).register_sdk_renderer("python", render_python_sdk)
     ctx.require(CODE_RUNTIME).register_sdk_renderer("typescript", render_typescript_sdk)
 
-    async def run_code(args: Any, run: ToolRunContext) -> Any:
+    async def run_code(args: Any, run: ToolRunContext) -> Any:  # noqa: ANN401
         # `Mapping`, not `dict`: accepted arguments are frozen into a
         # `MappingProxyType`, which is a Mapping but not a dict instance.
         program = args.get("program") if isinstance(args, Mapping) else None
@@ -379,7 +379,7 @@ async def apply(ctx: Context, config: Config) -> None:
         )
     )
 
-    async def sdk_section(request: Any) -> str:
+    async def sdk_section(request: AssembleContext) -> str:
         scope: Context = request.scope
         runtime = ctx.require(CODE_RUNTIME).provider
         if runtime is None:
@@ -495,14 +495,18 @@ def _tools_namespace(
     )
 
 
-async def _dispatch(bridge: DispatchBridge, binding: CodeBinding, **arguments: Any) -> Any:
+async def _dispatch(
+    bridge: DispatchBridge,
+    binding: CodeBinding,
+    **arguments: Any,  # noqa: ANN401
+) -> Any:  # noqa: ANN401
     return await bridge.call(binding, arguments)
 
 
 def governed_binding(
     request: CodeBindingsRequest,
     public_name: str,
-    definition: Any,
+    definition: Any,  # noqa: ANN401
     *,
     counts_as_spawn: bool = False,
 ) -> CodeBinding:
@@ -526,7 +530,7 @@ def governed_binding(
     return replace(governed, name=public_name, dispatch=dispatch, presents=definition.name)
 
 
-def _render_run(value: Any) -> str:
+def _render_run(value: Any) -> str:  # noqa: ANN401
     parts: list[str] = []
     logs = value.get("logs") or ""
     if logs:

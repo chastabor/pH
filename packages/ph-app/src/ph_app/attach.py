@@ -27,6 +27,8 @@ from ph.keys import ATTACHMENTS
 from ph.llm.types import AttachmentRef, MediaBlock, Message, create_user_message
 
 if TYPE_CHECKING:  # pragma: no cover - a type, not a dependency
+    from ph.cordis import Context
+
     from .daemon.client import DaemonClient
 from . import verbs
 from .params import PutAttachmentParams, StageParams
@@ -43,7 +45,7 @@ class AttachmentUnavailable(RuntimeError):
     """
 
 
-async def ingest(ctx: Any, paths: Sequence[Path | str]) -> tuple[AttachmentRef, ...]:
+async def ingest(ctx: Context, paths: Sequence[Path | str]) -> tuple[AttachmentRef, ...]:
     """Store each named file and return the references a message will carry.
 
     Order is the order the person gave, because that is the order they will

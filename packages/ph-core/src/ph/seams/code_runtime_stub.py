@@ -74,7 +74,7 @@ class _Namespace:
 
     namespace: Any
 
-    def __getattr__(self, name: str) -> Any:
+    def __getattr__(self, name: str) -> Any:  # noqa: ANN401
         for binding in self.namespace.bindings:
             if binding.name == name:
                 return binding.dispatch

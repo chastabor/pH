@@ -16,7 +16,7 @@ from typing import Any
 __all__ = ["iter_sse"]
 
 
-async def iter_sse(response: Any) -> AsyncIterator[tuple[str, Any]]:
+async def iter_sse(response: Any) -> AsyncIterator[tuple[str, Any]]:  # noqa: ANN401
     """Yield `(event, data)` pairs from an SSE response.
 
     `data` is parsed JSON, or the raw string when it is not JSON (`[DONE]`).

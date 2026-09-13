@@ -128,7 +128,7 @@ class Extraction:
     lines: int
 
 
-def _pack() -> Any:
+def _pack() -> Any:  # noqa: ANN401
     import tree_sitter_language_pack
 
     return tree_sitter_language_pack
@@ -330,7 +330,7 @@ def ensure(languages: Sequence[str]) -> tuple[list[str], list[str]]:
 
 
 @cache
-def _tags_query(language: str) -> Any:
+def _tags_query(language: str) -> Any:  # noqa: ANN401
     """The compiled tags query for one language. **Cached, and measurably so.**
 
     Compiling is per-language work that was being paid per *file*: 2.8 ms for
@@ -432,7 +432,10 @@ def extract(path: str, text: str, language: str) -> Extraction:
     )
 
 
-def _documented(definitions: list[Definition], result: Any) -> tuple[Definition, ...]:
+def _documented(
+    definitions: list[Definition],
+    result: Any,  # noqa: ANN401
+) -> tuple[Definition, ...]:
     """Attach each definition's prose, from the two channels that carry it.
 
     **`SymbolInfo.doc` is always `None`** in this pack — measured against a file
@@ -484,7 +487,7 @@ def _documented(definitions: list[Definition], result: Any) -> tuple[Definition,
     )
 
 
-def _comment_blocks(result: Any) -> list[tuple[int, int, str]]:
+def _comment_blocks(result: Any) -> list[tuple[int, int, str]]:  # noqa: ANN401
     """Doc comments as `(first line, last line, text)`, contiguous runs merged.
 
     Both 1-based. Merged because Rust and Go write a paragraph as a *run* of
@@ -536,7 +539,7 @@ def clean_prose(text: str) -> str:
     return "\n".join(lines).strip()
 
 
-def _kind_of(raw: Any) -> str:
+def _kind_of(raw: Any) -> str:  # noqa: ANN401
     """`SymbolKind.Function` / `"function"` / `"Function"` → `function`.
 
     The pack's `kind` is an enum whose `str()` is the variant name, while the

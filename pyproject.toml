@@ -116,7 +116,10 @@ src = [
 ]
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+# ANN401 only, not all of ANN: mypy's strict mode already requires the
+# annotations the rest of the group asks for. The `Any` parameters that predate
+# the rule carry `# noqa: ANN401`, which RUF100 deletes as each one is retired.
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF", "ANN401"]
 # B008: Typer expresses CLI options as call-valued defaults.
 # UP040: PEP 695 `type` aliases are lazily evaluated, and pydantic resolves the
 #   discriminated-union aliases in this codebase at class-definition time.

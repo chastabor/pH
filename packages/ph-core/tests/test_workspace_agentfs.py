@@ -338,7 +338,7 @@ async def test_the_probe_says_why_when_it_declines(mount: MountProfile, tmp_path
 # ------------------------------------------------- the real thing, or skipped --
 
 
-async def _overlaid(mount: MountProfile, tmp_path: Path) -> Any:
+async def _overlaid(mount: MountProfile, tmp_path: Path) -> Any:  # noqa: ANN401
     """A mounted row over a host where the overlay actually isolates, or a skip."""
     ctx = await mount(ROW)
     if ctx.require(WORKSPACE).provider is None:
@@ -406,7 +406,7 @@ async def test_an_overlay_shows_files_a_checkout_would_not(
 # --------------------------------------------------------------- the export --
 
 
-async def _worked(ctx: Any, base: Path, agent_id: str, edit: str) -> None:
+async def _worked(ctx: Any, base: Path, agent_id: str, edit: str) -> None:  # noqa: ANN401
     """One writer's overlay, edited and released — the state an export starts from."""
     workspace = await ctx.require(WORKSPACE).acquire(
         session_id=SESSION, agent_id=agent_id, base=base, access="write"
@@ -418,7 +418,7 @@ async def _worked(ctx: Any, base: Path, agent_id: str, edit: str) -> None:
     await workspace.release(workspace)
 
 
-async def _export(ctx: Any, agent_id: str) -> str:
+async def _export(ctx: Any, agent_id: str) -> str:  # noqa: ANN401
     """Export one agent's overlay onto its branch, deriving what the row derives.
 
     The session name, the store layout, the AgentFS id and the branch name were
@@ -570,7 +570,11 @@ async def test_an_export_refuses_when_there_was_no_commit_to_root_at(
     assert caught.value.reason == "no-base-commit"
 
 
-def _record(ctx: Any, agent_id: str, kind: WorkspaceKind = "overlay-ephemeral") -> WorkspaceRecord:
+def _record(
+    ctx: Any,  # noqa: ANN401
+    agent_id: str,
+    kind: WorkspaceKind = "overlay-ephemeral",
+) -> WorkspaceRecord:
     """The durable pair as reconciliation would find it, with no live object."""
     store = store_for(ctx.require(WORKSPACE).provider.root, SESSION, agent_id)
     return WorkspaceRecord(session_id=SESSION, agent_id=agent_id, kind=kind, root=store / "mnt")

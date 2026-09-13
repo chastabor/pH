@@ -263,7 +263,7 @@ class AnthropicAdapter:
             headers["anthropic-beta"] = self.config.files_beta
         return headers
 
-    async def upload(self, ref: Any, content: bytes) -> FileHandle:
+    async def upload(self, ref: Any, content: bytes) -> FileHandle:  # noqa: ANN401
         """Hand the bytes to the Files API and keep the id it returns.
 
         The `Uploader` half of `ctx.uploads`. No expiry is recorded: this
@@ -487,7 +487,7 @@ class _StreamState:
         return out
 
 
-def _close(open_block: _Open, index: int) -> Any:
+def _close(open_block: _Open, index: int) -> Any:  # noqa: ANN401
     if open_block.kind == "reasoning":
         return ReasoningBlock(text=open_block.text)
     if open_block.kind == "tool-call":
@@ -499,7 +499,7 @@ def _close(open_block: _Open, index: int) -> Any:
     return TextBlock(text=open_block.text)
 
 
-def _finish_kind(stop_reason: str | None) -> Any:
+def _finish_kind(stop_reason: str | None) -> Any:  # noqa: ANN401
     if stop_reason == "tool_use":
         return "tool-calls"
     if stop_reason == "max_tokens":
@@ -530,7 +530,9 @@ def _merge_usage(current: TokenUsage | None, raw: dict[str, Any]) -> TokenUsage:
 
 
 def _to_anthropic(
-    message: Any, media: dict[str, str], handles: dict[str, str] | None = None
+    message: Any,  # noqa: ANN401
+    media: dict[str, str],
+    handles: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """One pH message as an Anthropic message.
 

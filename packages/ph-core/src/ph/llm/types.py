@@ -181,7 +181,7 @@ ToolResultBlock.model_rebuild()
 _CONTENT_BLOCKS: TypeAdapter[list[ContentBlock]] = TypeAdapter(list[ContentBlock])
 
 
-def content_from_wire(blocks: Any) -> list[ContentBlock]:
+def content_from_wire(blocks: Any) -> list[ContentBlock]:  # noqa: ANN401
     """Validate a list of content blocks read back from the log."""
     return _CONTENT_BLOCKS.validate_python(blocks)
 
@@ -202,7 +202,7 @@ def text_of(blocks: Sequence[Any], *, placeholder: Callable[[str], str] | None =
     return "\n".join(parts)
 
 
-def attachment_of(block: Any) -> AttachmentRef | None:
+def attachment_of(block: Any) -> AttachmentRef | None:  # noqa: ANN401
     """The attachment a block carries, or `None` — the one "is this media" test.
 
     Beside `text_of` for the same reason that exists: the pair
@@ -309,7 +309,10 @@ ToolResultMessage: TypeAlias = Message
 
 
 def create_message(
-    *, role: Literal["system", "user", "assistant"], content: list[Any], source: Any
+    *,
+    role: Literal["system", "user", "assistant"],
+    content: list[Any],
+    source: Any,  # noqa: ANN401
 ) -> Message:
     """Create one identified message."""
     return Message.model_validate(
@@ -317,7 +320,7 @@ def create_message(
     )
 
 
-def create_user_message(*, content: list[Any], source: Any) -> Message:
+def create_user_message(*, content: list[Any], source: Any) -> Message:  # noqa: ANN401
     return create_message(role="user", content=content, source=source)
 
 
@@ -334,7 +337,11 @@ def user_text(text: str) -> Message:
 
 
 def create_assistant_message(
-    *, content: list[Any], provider: str, model: str, replay_state: Any = None
+    *,
+    content: list[Any],
+    provider: str,
+    model: str,
+    replay_state: Any = None,  # noqa: ANN401
 ) -> Message:
     source: dict[str, Any] = {"kind": "model", "provider": provider, "model": model}
     if replay_state is not None:
@@ -477,7 +484,7 @@ class FinishReason(WireDataclass):
     failure: LlmFailure | None = None
 
     @classmethod
-    def from_wire(cls, wire: Any) -> FinishReason:
+    def from_wire(cls, wire: Any) -> FinishReason:  # noqa: ANN401
         failure = wire.get("failure")
         return cls(
             kind=wire["kind"],
@@ -548,7 +555,7 @@ consumer sees it — so a consumer never has to handle both shapes.
 """
 
 
-def chunk_from_wire(wire: Any) -> StreamChunk:
+def chunk_from_wire(wire: Any) -> StreamChunk:  # noqa: ANN401
     """Rebuild one stream chunk from its logged JSON form (replay fidelity).
 
     A malformed chunk is reported as `ValueError` naming its kind, so a replay

@@ -82,7 +82,7 @@ pytestmark = pytest.mark.anyio
 def _policy(*rules: Rule, root: str = "/w") -> FsPermissions:
     """The decision half on its own, for the questions no tool can ask yet."""
 
-    def roots(agent: Any = None) -> Path:
+    def roots(agent: Any = None) -> Path:  # noqa: ANN401
         return getattr(agent, "root", None) or Path(root)
 
     return FsPermissions(rules=rules, roots=roots)
@@ -103,7 +103,11 @@ about visible in the test.
 """
 
 
-async def _scoped(mount: MountProfile, tmp_path: Path, *rules: dict[str, Any]) -> Any:
+async def _scoped(
+    mount: MountProfile,
+    tmp_path: Path,
+    *rules: dict[str, Any],
+) -> Any:  # noqa: ANN401
     """The bundle's default write scope, with any explicit rules *above* it.
 
     Above, because first-match-wins is the whole precedence mechanism: an
@@ -114,7 +118,11 @@ async def _scoped(mount: MountProfile, tmp_path: Path, *rules: dict[str, Any]) -
     return await _mounted(mount, tmp_path, *rules, DEFAULT_WRITE_SCOPE)
 
 
-async def _mounted(mount: MountProfile, tmp_path: Path, *rules: dict[str, Any]) -> Any:
+async def _mounted(
+    mount: MountProfile,
+    tmp_path: Path,
+    *rules: dict[str, Any],
+) -> Any:  # noqa: ANN401
     """The row with its ACL spelled the way a profile spells it, over a temp root."""
     return await mount(
         row("permissions-fs", rules=list(rules)), row("fs", root=str(tmp_path)), profile=PROFILE

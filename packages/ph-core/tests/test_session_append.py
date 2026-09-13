@@ -242,7 +242,7 @@ def test_a_fold_cache_leaves_the_fold_callable_on_a_slice() -> None:
     boundary = session.seq
     session.append("turn/start", {"turn": 2})
 
-    def count_turns(log: Any) -> int:
+    def count_turns(log: Any) -> int:  # noqa: ANN401
         return sum(1 for event in log.events if event.type == "turn/start")
 
     assert count_turns(session) == 2

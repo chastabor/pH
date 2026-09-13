@@ -50,14 +50,17 @@ __all__ = [
 ]
 
 
-def first(value: Any) -> Mapping[str, Any]:
+def first(value: Any) -> Mapping[str, Any]:  # noqa: ANN401
     """The first object of a wire list, or an empty one."""
     items = as_seq(value)
     return as_obj(items[0]) if items else {}
 
 
 def text_of_wire(
-    blocks: Any, *, kind: str = "text", placeholder: Callable[[str], str] | None = None
+    blocks: Any,  # noqa: ANN401
+    *,
+    kind: str = "text",
+    placeholder: Callable[[str], str] | None = None,
 ) -> str:
     """Join the text of wire-form content blocks of one kind.
 
@@ -79,7 +82,7 @@ def text_of_wire(
     return "\n".join(parts)
 
 
-def message_of(event: Any) -> Mapping[str, Any]:
+def message_of(event: Any) -> Mapping[str, Any]:  # noqa: ANN401
     """The message inside an event's payload, whichever shape it takes.
 
     `user/message`'s payload *is* the message; `assistant/message` wraps one
@@ -116,7 +119,7 @@ def view_of(event_type: str, sidecar: JsonValue) -> ToolCallView | ToolResultVie
         return None
 
 
-def result_block(message: Any) -> Mapping[str, Any]:
+def result_block(message: Any) -> Mapping[str, Any]:  # noqa: ANN401
     """The `tool_result` block inside a tool-result message, or an empty one.
 
     One block carries both the visible text and the error flag, and it sits one
@@ -130,7 +133,7 @@ def result_block(message: Any) -> Mapping[str, Any]:
     return first(as_obj(message).get("content"))
 
 
-def describe(data: Any) -> str:
+def describe(data: Any) -> str:  # noqa: ANN401
     """A one-line `key=value` account of a payload, or `""` when it has none.
 
     Deliberately generic, which is the whole point: a type this build has no
@@ -146,7 +149,7 @@ def describe(data: Any) -> str:
     return one_line(", ".join(f"{key}={value}" for key, value in payload.items() if value != ""))
 
 
-def source_of(message: Any) -> tuple[str, str, str]:
+def source_of(message: Any) -> tuple[str, str, str]:  # noqa: ANN401
     """`(kind, name, form)` for a message's producer.
 
     The wire keys `plugin`/`model`/`callId` are the discriminated members of
@@ -217,7 +220,7 @@ def index_at_or_before(seqs: Iterable[int], target: int) -> int:
     return found
 
 
-def media_labels(blocks: Any) -> list[str]:
+def media_labels(blocks: Any) -> list[str]:  # noqa: ANN401
     """One human label per media block: `image/png · diagram.png`.
 
     A separate read rather than a `placeholder` on `text_of_wire`, because that

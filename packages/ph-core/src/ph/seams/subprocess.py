@@ -426,7 +426,7 @@ class SubprocessService:
         cap = self.max_output if spec.max_output is None else spec.max_output
         handle: dict[str, SubprocessHandle] = {}
 
-        async def enter() -> Any:
+        async def enter() -> Any:  # noqa: ANN401
             process = await anyio.open_process(
                 list(spec.argv),
                 cwd=str(spec.cwd),
@@ -438,7 +438,7 @@ class SubprocessService:
             child = SubprocessHandle(spec=spec, process=process, cap=cap)
             handle["child"] = child
 
-            def release() -> Any:
+            def release() -> Any:  # noqa: ANN401
                 return child.terminate()
 
             return release
@@ -481,7 +481,7 @@ class SubprocessService:
         )
 
 
-def _stdio(mode: Stdio) -> Any:
+def _stdio(mode: Stdio) -> Any:  # noqa: ANN401
     import subprocess as _sp
 
     if mode == "pipe":

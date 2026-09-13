@@ -95,7 +95,7 @@ class IpythonToolDetails(WireModel):
     """The kernel had died and this cell got a fresh, empty namespace."""
 
 
-def render_cell(_args: JsonObject, value: Any) -> list[Any]:
+def render_cell(_args: JsonObject, value: Any) -> list[Any]:  # noqa: ANN401
     """Prime Agent's four sections, in its order, minus its stream split.
 
     Absent sections are dropped rather than left as blank lines: a model reading
@@ -114,7 +114,7 @@ def render_cell(_args: JsonObject, value: Any) -> list[Any]:
     return text_content("\n".join(parts) if parts else "(no output)")
 
 
-def cell_details(_args: JsonObject, value: Any) -> Any:
+def cell_details(_args: JsonObject, value: Any) -> Any:  # noqa: ANN401
     return IpythonToolDetails(
         status="error" if value.get("error") else "ok",
         dispatches=as_int(value.get("dispatches")),

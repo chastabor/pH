@@ -75,7 +75,7 @@ def _prompt(turn: int) -> str:
     return f"question {turn} " + "detail " * 200
 
 
-def _strip(value: Any) -> Any:
+def _strip(value: Any) -> Any:  # noqa: ANN401
     """The same value without its markers.
 
     A cache key is the *content* of a prefix; Anthropic does not make a message
@@ -165,7 +165,9 @@ def wire(monkeypatch: pytest.MonkeyPatch) -> _PromptCache:
     cache = _PromptCache()
 
     async def stream_sse(
-        self: HttpClient, url: str, **kwargs: Any
+        self: HttpClient,
+        url: str,
+        **kwargs: Any,  # noqa: ANN401
     ) -> AsyncIterator[tuple[str, dict[str, Any]]]:
         for event in cache.events(kwargs["json"]):
             yield event

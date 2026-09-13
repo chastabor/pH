@@ -58,7 +58,7 @@ async def _tiered(mount: MountProfile, tmp_path: Path, *extra: dict[str, Any]) -
     return ctx, await jj_repo(ctx, tmp_path / "repo")
 
 
-async def _bookmarks(ctx: Any, base: Path) -> str:
+async def _bookmarks(ctx: Any, base: Path) -> str:  # noqa: ANN401
     _, out, _ = await jj(ctx, base, "bookmark", "list")
     return out
 
@@ -979,7 +979,7 @@ async def test_removing_a_bookmark_refuses_work_nothing_else_has(
     assert "ph/s1/a1" not in await ctx.require(WORKSPACE).refs(base)
 
 
-async def _at(ctx: Any, cwd: Path, template: str = "commit_id") -> str:
+async def _at(ctx: Any, cwd: Path, template: str = "commit_id") -> str:  # noqa: ANN401
     """`@` rendered by `template`, asked *without* committing the working copy.
 
     A plain `jj log` would commit the tree on the way to answering, which is the very

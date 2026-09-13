@@ -487,10 +487,10 @@ def _blobs(root: Path, now: float) -> list[Blob]:
 
 
 def survey_attachments(
-    store: Any,
-    persistence: Any,
+    store: Any,  # noqa: ANN401
+    persistence: Any,  # noqa: ANN401
     *,
-    uploads: Any = None,
+    uploads: Any = None,  # noqa: ANN401
     min_age: float = MIN_AGE,
     limit: int = LISTING_LIMIT,
     now: float | None = None,
@@ -559,7 +559,7 @@ def survey_attachments(
     )
 
 
-def _stale_uploads(uploads: Any, referenced: set[str]) -> tuple[Path, ...]:
+def _stale_uploads(uploads: Any, referenced: set[str]) -> tuple[Path, ...]:  # noqa: ANN401
     """Handle-cache entries for blobs nothing points at any more (P7-03).
 
     The other half of the same question, and the reason `ctx.uploads` says a sweep
@@ -583,7 +583,10 @@ def _stale_uploads(uploads: Any, referenced: set[str]) -> tuple[Path, ...]:
     )
 
 
-def collect_attachments(survey: AttachmentSurvey, uploads: Any = None) -> tuple[int, int]:
+def collect_attachments(
+    survey: AttachmentSurvey,
+    uploads: Any = None,  # noqa: ANN401
+) -> tuple[int, int]:
     """Remove what the survey cleared, and report `(blobs, upload entries)`.
 
     Refuses everything unless the survey is `safe`, rather than leaving that check

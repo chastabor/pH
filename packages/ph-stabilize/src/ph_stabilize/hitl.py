@@ -45,6 +45,7 @@ reader, and asks about *that cell* rather than about the transport.
 from __future__ import annotations
 
 import re
+from collections.abc import Awaitable, Callable
 from functools import lru_cache
 from typing import Any, Final, Literal
 
@@ -225,7 +226,10 @@ async def apply(ctx: Context, config: Config) -> None:
             return config.declared
         return None
 
-    async def gate(execution: ToolExecution, next_: Any) -> Any:
+    async def gate(
+        execution: ToolExecution,
+        next_: Callable[..., Awaitable[Any]],
+    ) -> Any:  # noqa: ANN401
         rule = rule_for(execution)
         if rule is None:
             return await next_(execution)

@@ -45,7 +45,7 @@ def tui_profile() -> str:
     return "tui"
 
 
-def _binding(app: PHTuiApp, binding_id: str) -> Any:
+def _binding(app: PHTuiApp, binding_id: str) -> Any:  # noqa: ANN401
     """The live binding carrying `binding_id`, or `None`.
 
     Looked up by id rather than by key, because the id is what a keymap remaps
@@ -187,7 +187,7 @@ async def test_a_screen_this_build_cannot_draw_is_not_offered(
 # --------------------------------------------------- over the chat, and back --
 
 
-async def _three_turns(app: PHTuiApp, pilot: Any) -> None:
+async def _three_turns(app: PHTuiApp, pilot: Any) -> None:  # noqa: ANN401
     """Enough transcript that the view scrolls, so a jump is observable."""
     assert app.front is not None
     await pilot.press(*"first")
@@ -348,7 +348,7 @@ def test_the_terminal_never_reaches_past_the_front_session() -> None:
     assert offenders == [], offenders
 
 
-async def _unload(root: Any, screen_id: str) -> None:
+async def _unload(root: Any, screen_id: str) -> None:  # noqa: ANN401
     """Dispose whatever scope owns this screen's registration.
 
     A row's removal is the disposal of the scope its `apply` was handed, so this

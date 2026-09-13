@@ -114,7 +114,7 @@ class _Seam:
     two answers `backend_for` prefers.
     """
 
-    def __init__(self, provider: Any = None) -> None:
+    def __init__(self, provider: Any = None) -> None:  # noqa: ANN401
         self.provider = provider
 
 

@@ -57,8 +57,13 @@ message moves the assertions with it rather than leaving them green."""
 
 
 async def _run(
-    ctx: Any, session: Session, name: str, text: str, *, self_limits: bool = False
-) -> Any:
+    ctx: Any,  # noqa: ANN401
+    session: Session,
+    name: str,
+    text: str,
+    *,
+    self_limits: bool = False,
+) -> Any:  # noqa: ANN401
     """Drive one real call through the whole pipeline, returning its event.
 
     The stub is registered on an *agent scope*, which shadows a global tool of
@@ -77,13 +82,13 @@ async def _run(
     return next(event for event in session.events if event.type == "tool/result")
 
 
-def _call_id(event: Any) -> str:
+def _call_id(event: Any) -> str:  # noqa: ANN401
     message = derive_event_message(event)
     assert message is not None
     return str(as_kind(message.source, ToolSource).call_id)
 
 
-def model_text(event: Any) -> str:
+def model_text(event: Any) -> str:  # noqa: ANN401
     """What the model actually read for one call.
 
     Through `derive_event_message`, which owns the `tool/result` payload shape —
@@ -320,7 +325,7 @@ async def test_it_measures_the_projection_another_listener_produced(mount: Mount
     ctx = await mount(profile=PROFILE)
     session = ctx.require(SESSIONS).create("composed")
 
-    async def inflate(execution: Any, result: Any, next_: Any) -> Any:
+    async def inflate(execution: Any, result: Any, next_: Any) -> Any:  # noqa: ANN401
         decision = await next_(execution, result)
         if execution.name != "small":
             return decision

@@ -19,14 +19,14 @@ strings in five test modules across two packages."""
 
 
 async def run_cell(
-    ctx: Any,
+    ctx: Any,  # noqa: ANN401
     program: str,
     *,
-    agent: Any,
-    session: Any = None,
+    agent: Any,  # noqa: ANN401
+    session: Any = None,  # noqa: ANN401
     call_id: str = "call-1",
     name: str = RUN_CODE,
-) -> Any:
+) -> Any:  # noqa: ANN401
     """Execute one cell through the real transport and pipeline.
 
     `name` is for the profile that presents the transport as `ipython` —
@@ -38,8 +38,13 @@ async def run_cell(
 
 
 async def run_ipython_cell(
-    ctx: Any, program: str, *, agent: Any, session: Any = None, call_id: str = "c1"
-) -> Any:
+    ctx: Any,  # noqa: ANN401
+    program: str,
+    *,
+    agent: Any,  # noqa: ANN401
+    session: Any = None,  # noqa: ANN401
+    call_id: str = "c1",
+) -> Any:  # noqa: ANN401
     """`run_cell` under the name the RLM profile presents (`ipython`).
 
     Three modules wanted this two-liner; the reserved `run_code` stops resolving
@@ -51,7 +56,7 @@ async def run_ipython_cell(
     return await run_cell(ctx, program, agent=agent, session=session, call_id=call_id, name=IPYTHON)
 
 
-def namespace(name: str, **handlers: Any) -> CodeBindingNamespace:
+def namespace(name: str, **handlers: Any) -> CodeBindingNamespace:  # noqa: ANN401
     """A `CodeBindingNamespace` whose bindings are the handlers given.
 
     Here rather than in one test module because two wanted it and the second
@@ -68,11 +73,11 @@ def namespace(name: str, **handlers: Any) -> CodeBindingNamespace:
     )
 
 
-def dispatch_names(session: Any) -> list[str]:
+def dispatch_names(session: Any) -> list[str]:  # noqa: ANN401
     """The governed tools a session's cells dispatched, in submission order."""
     return [event.data["name"] for event in session.events if event.type == DISPATCH_START]
 
 
-def settled_dispatches(session: Any) -> list[Any]:
+def settled_dispatches(session: Any) -> list[Any]:  # noqa: ANN401
     """The settled halves of those dispatches, in the order they settled."""
     return [event for event in session.events if event.type == DISPATCH_SETTLED]

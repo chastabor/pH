@@ -66,7 +66,12 @@ class _Store:
         rows = [StoredSession(session_id=one, modified=0.0, family=one) for one in self.sessions]
         return rows * limit if self.truncate else rows
 
-    def read_own(self, session_id: str, upto: Any = None, family: Any = None) -> Any:
+    def read_own(
+        self,
+        session_id: str,
+        upto: Any = None,  # noqa: ANN401
+        family: Any = None,  # noqa: ANN401
+    ) -> Any:  # noqa: ANN401
         self.asked[session_id] = family
         if session_id == self.broken:
             raise ValueError("torn log")

@@ -39,7 +39,7 @@ pytestmark = pytest.mark.anyio
 Loaded = Callable[..., Any]
 
 
-def row(sources: list[dict[str, Any]], **config: Any) -> dict[str, Any]:
+def row(sources: list[dict[str, Any]], **config: Any) -> dict[str, Any]:  # noqa: ANN401
     return {
         "id": "rlm-context-loader",
         "name": "rlm-context-loader",
@@ -59,7 +59,7 @@ def loaded(mounted_runtime: MountedRuntime, tmp_path: Path) -> Loaded:
         sources: list[dict[str, Any]] | None = None,
         *,
         session_id: str = "context",
-        **config: Any,
+        **config: Any,  # noqa: ANN401
     ) -> tuple[Any, Any, Any]:
         if sources is None:
             (tmp_path / "notes.md").write_text(
@@ -192,7 +192,7 @@ async def test_one_oversized_query_is_offloaded_without_its_siblings(loaded: Loa
     """
     ctx, session, agent = await loaded()
 
-    async def offload(execution: Any, result: Any, next_: Any) -> Any:
+    async def offload(execution: Any, result: Any, next_: Any) -> Any:  # noqa: ANN401
         matches = (result.value or {}).get("matches") or []
         if execution.name != "context_search" or len(matches) <= 1:
             return await next_(execution, result)
@@ -278,7 +278,7 @@ async def test_an_unreadable_source_is_reported_not_hidden(
 # ------------------------------------------------------------- the prompt --
 
 
-async def _assemble(ctx: Any, agent: Any) -> str:
+async def _assemble(ctx: Any, agent: Any) -> str:  # noqa: ANN401
     assembly = await ctx.require(SYSTEM_PROMPT).assemble(agent.ctx, agent=agent)
     return render_prompt(assembly)
 

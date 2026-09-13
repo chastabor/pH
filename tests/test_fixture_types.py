@@ -23,17 +23,12 @@ right answer, so asserting it costs nothing. Compared on the last dotted
 segment, so `Path` and `pathlib.Path` are the same answer and a direct
 `from pytest import MonkeyPatch` is not a violation.
 
-**Why a gate rather than the lint that already exists.** Ruff's ANN401 is the
-rule for this and it is not selected here, because it cannot be scoped to the
-part that is settled. Measured: `--select ANN401` reports **1165** sites (478
-src, 687 tests) across 98 of the 167 test modules, and the most permissive
-`flake8-annotations` settings only bring the test tree to 596 — none of the five
-options can key on a parameter name. Per-file ignores fail worse: **11 of the 16
-files this gate's own sweep cleaned still carry other ANN401 sites**, so scoping
-by file would un-enforce the fixture invariant in two-thirds of the files it
-exists for. The deferred seams and the settled fixtures are interleaved inside
-the same modules. That is the whole argument — the gate is not a workaround for
-an unconfigured lint, it is the only granularity that states this invariant.
+**Why this gate outlives the lint that now exists.** `pyproject.toml` does now
+select ruff's ANN401, and the sites that predate it carry `# noqa: ANN401` until
+someone types the real type. That is a different assertion from this one: it
+rejects `Any` and accepts everything else, so `tmp_path: str` satisfies it and
+still loses every check the paragraph above is about. The two are not layers of
+one rule, and this is the half that says *which* type.
 
 **`request` is deliberately absent.** Of its `Any` annotations, one was the
 fixture and nine are an LLM or middleware request — `on_pre_step(request,

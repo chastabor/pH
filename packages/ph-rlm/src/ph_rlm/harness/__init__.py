@@ -39,7 +39,7 @@ from ph.cordis import Context, plugin
 from ph.keys import AGENTS, COMMANDS, JOBS, LLM, SESSIONS, SYSTEM_PROMPT, TOOLS
 from ph.paths import resolve_roots
 from ph.seams.commands import CommandDefinition
-from ph.system_prompt.assembly import PromptContext
+from ph.system_prompt.assembly import AssembleContext, PromptContext
 from ph.wire import WireModel
 
 from ..keys import HARNESS
@@ -166,7 +166,7 @@ async def apply(ctx: Context, config: Config) -> None:
     this runner's concurrency, not about the session, and a resumed session with
     no pass running is correct to start one."""
 
-    def section(request: Any) -> str:
+    def section(request: AssembleContext) -> str:
         """The harness as a cache-safe snapshot (A12).
 
         A `context()`, not a `section`: a refinement changes this text mid-session,
@@ -240,10 +240,10 @@ async def apply(ctx: Context, config: Config) -> None:
         )
         return f"no refinement: {reason}"
 
-    async def start(request: RefineRequest) -> Any:
+    async def start(request: RefineRequest) -> Any:  # noqa: ANN401
         """Run one pass as a job owned by the agent's scope."""
 
-        async def body(job: Any) -> str:
+        async def body(job: Any) -> str:  # noqa: ANN401
             try:
                 return await refine(request)
             finally:
@@ -270,7 +270,7 @@ async def apply(ctx: Context, config: Config) -> None:
 
     # -------------------------------------------------------- the command --
 
-    async def command(argument: str, invocation: Any) -> str:
+    async def command(argument: str, invocation: Any) -> str:  # noqa: ANN401
         """`/refine [--global] [--show] [--rollback <id>] [instructions]`."""
         words = argument.split()
         scope: HarnessScope = "global" if "--global" in words else "local"
@@ -323,7 +323,7 @@ async def apply(ctx: Context, config: Config) -> None:
 
     # ------------------------------------------------------- auto-refine --
 
-    async def on_session_event(session: Any, event: Any) -> None:
+    async def on_session_event(session: Any, event: Any) -> None:  # noqa: ANN401
         """H7: consider refining at the end of a turn.
 
         On `turn/end` rather than on a timer, because that is the one moment the

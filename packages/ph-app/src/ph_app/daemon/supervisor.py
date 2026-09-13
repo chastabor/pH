@@ -722,7 +722,7 @@ class Supervisor:
                 if root.subscribers:
                     root.publish(SessionScreensNotice(session_id=root.id, screens=screens_of(root)))
 
-            def announce(agent_: Any, status: str) -> None:
+            def announce(agent_: Any, status: str) -> None:  # noqa: ANN401
                 # Guarded like `relay` above, and for the same reason: reading
                 # the footer folds every registered status field over the log,
                 # and doing that for nobody is the work this check exists to
@@ -865,7 +865,7 @@ class Supervisor:
                 await self._flush(root)
                 await anyio.sleep(state.delay)
 
-    def _schedule_seam(self, root: Root) -> Any:
+    def _schedule_seam(self, root: Root) -> Any:  # noqa: ANN401
         """This root's schedule seam, or a refusal naming why there is none.
 
         The read `_live_schedules` does quietly — a `None` seam means "no

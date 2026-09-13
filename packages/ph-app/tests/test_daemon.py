@@ -159,7 +159,9 @@ pytestmark = pytest.mark.anyio
 
 
 async def _history(
-    client: DaemonClient, session_id: str, cursor: Any = None
+    client: DaemonClient,
+    session_id: str,
+    cursor: Any = None,  # noqa: ANN401
 ) -> list[dict[str, Any]]:
     """Everything from `cursor` to now, paged the way a client must page it.
 
@@ -208,7 +210,7 @@ async def test_a_resumed_root_hands_the_child_ladder_its_own_bound(
     seen: list[int] = []
     original = SubagentService.resume_children
 
-    async def spy(self: Any, parent: Any, *, retry_limit: int) -> Any:
+    async def spy(self: Any, parent: Any, *, retry_limit: int) -> Any:  # noqa: ANN401
         seen.append(retry_limit)
         return await original(self, parent, retry_limit=retry_limit)
 
@@ -235,7 +237,7 @@ async def test_a_person_reaches_a_busy_root_at_its_next_step(
     targets: list[str] = []
     original = ReactLoopAgent.send
 
-    def spy(self: Any, message: Any, target: InboxTarget, wakeup: bool) -> None:
+    def spy(self: Any, message: Any, target: InboxTarget, wakeup: bool) -> None:  # noqa: ANN401
         targets.append(target)
         original(self, message, target, wakeup)
 
@@ -273,7 +275,7 @@ async def test_a_failed_turn_is_named_beside_an_idle_status(
     """
     from ph.llm.fake import FakeAdapter
 
-    async def exploding(self: Any, options: Any) -> Any:
+    async def exploding(self: Any, options: Any) -> Any:  # noqa: ANN401
         raise RuntimeError("provider is down")
         yield  # pragma: no cover
 
@@ -707,7 +709,7 @@ async def test_two_clients_naming_one_new_root_share_it(
 
         # On the class: `Supervisor` is a `slots=True` dataclass, so an instance
         # attribute cannot be shadowed.
-        async def hold(self: Supervisor, *args: Any, **kwargs: Any) -> Any:
+        async def hold(self: Supervisor, *args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
             if not parked.is_set():
                 parked.set()
                 await release.wait()
@@ -779,7 +781,7 @@ def short_ladder(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(recovery, "RETRY_DELAYS", (0.01, 0.01, 0.01))
 
 
-def _crash(patch: pytest.MonkeyPatch, root: Any, times: int) -> None:
+def _crash(patch: pytest.MonkeyPatch, root: Any, times: int) -> None:  # noqa: ANN401
     """Make this root's task raise for its first `times` wakes.
 
     At `run()`'s own boundary, which is where a *task* crash actually appears:
@@ -797,7 +799,7 @@ def _crash(patch: pytest.MonkeyPatch, root: Any, times: int) -> None:
     """
     driver, original, remaining = type(root.agent), type(root.agent).run, times
 
-    async def run(self: Any) -> None:
+    async def run(self: Any) -> None:  # noqa: ANN401
         nonlocal remaining
         if remaining > 0:
             remaining -= 1
@@ -1017,7 +1019,11 @@ async def test_the_tree_is_restored_from_the_latest_checkpoint_before_a_retry(
 
         asked: list[str] = []
 
-        async def fake_restore(_seam: Any, workspace: Any, token: str) -> tuple[str, ...]:
+        async def fake_restore(
+            _seam: Any,  # noqa: ANN401
+            workspace: Any,  # noqa: ANN401
+            token: str,
+        ) -> tuple[str, ...]:
             asked.append(token)
             return ()
 
@@ -1034,7 +1040,11 @@ async def test_the_tree_is_restored_from_the_latest_checkpoint_before_a_retry(
 
         # Best-effort: a restore that fails must not cost the retry, and must
         # not claim a rollback that did not happen.
-        async def angry_restore(_seam: Any, workspace: Any, token: str) -> tuple[str, ...]:
+        async def angry_restore(
+            _seam: Any,  # noqa: ANN401
+            workspace: Any,  # noqa: ANN401
+            token: str,
+        ) -> tuple[str, ...]:
             raise RuntimeError("the tier said no")
 
         monkeypatch.setattr(type(root.ctx.require(WORKSPACE)), "restore", angry_restore)
@@ -1078,7 +1088,7 @@ async def test_a_failing_flush_climbs_the_ladder_instead_of_retrying_forever(
         await client.call("session/new", sessionId="unflushable")
         root = daemon.running.supervisor.roots["unflushable"]
 
-        async def broken(self: Any, session: Any) -> None:
+        async def broken(self: Any, session: Any) -> None:  # noqa: ANN401
             raise RuntimeError("flush is broken")
 
         monkeypatch.setattr(type(root.ctx.require(SESSIONS)), "flush", broken)
@@ -1404,7 +1414,7 @@ async def test_a_due_schedule_starts_its_own_turn_even_mid_turn(
     targets: list[str] = []
     original = ReactLoopAgent.send
 
-    def spy(self: Any, message: Any, target: InboxTarget, wakeup: bool) -> None:
+    def spy(self: Any, message: Any, target: InboxTarget, wakeup: bool) -> None:  # noqa: ANN401
         targets.append(target)
         original(self, message, target, wakeup)
 
@@ -1485,7 +1495,7 @@ async def test_one_root_with_a_broken_schedule_does_not_stop_the_others(
 
         original = type(broken.ctx.require(SCHEDULE)).claim
 
-        def claim(self: Any, session: Any, *, now: int) -> Any:
+        def claim(self: Any, session: Any, *, now: int) -> Any:  # noqa: ANN401
             if session.id == "broken":
                 raise RuntimeError("this schedule is unreadable")
             return original(self, session, now=now)
@@ -1508,7 +1518,7 @@ async def test_one_root_with_a_broken_schedule_does_not_stop_the_others(
 # left is whoever opens a transcript afterwards.
 
 
-def _notices(root: Any) -> list[Any]:
+def _notices(root: Any) -> list[Any]:  # noqa: ANN401
     return [event for event in root.session.events_from(0) if event.type == recovery.UNREACHABLE]
 
 

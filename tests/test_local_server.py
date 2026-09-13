@@ -81,7 +81,7 @@ fixture step, and skipped rather than failed when absent, since a clone that
 omitted it is not a defect in pH."""
 
 
-def _get(url: str) -> Any:
+def _get(url: str) -> Any:  # noqa: ANN401
     """One metadata read, or a failure that names the URL.
 
     A failure and not a skip: the person who set `LLAMA_BASE_URL` asked whether
@@ -110,7 +110,7 @@ def _server_root() -> str:
     return base.removesuffix("/v1").rstrip("/")
 
 
-def _props() -> Any | None:
+def _props() -> Any | None:  # noqa: ANN401
     """llama.cpp's `/props`, or `None` when this server does not publish it.
 
     The one inconclusive answer in the file: a 404 here means "not llama.cpp, or

@@ -111,7 +111,7 @@ class _Hello(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def log_message(self, *_args: Any) -> None:
+    def log_message(self, *_args: Any) -> None:  # noqa: ANN401
         return
 
 
@@ -125,7 +125,7 @@ class _HostServer:
         self.thread.start()
         return self
 
-    def __exit__(self, *_exc: Any) -> None:
+    def __exit__(self, *_exc: Any) -> None:  # noqa: ANN401
         self.server.shutdown()
         self.server.server_close()
 
@@ -148,7 +148,7 @@ async def _through(proxy: EgressProxy, request: bytes) -> bytes:
         return bytes(received)
 
 
-async def _proxy(permits: Any, *, loopback: bool = False) -> EgressProxy:
+async def _proxy(permits: Any, *, loopback: bool = False) -> EgressProxy:  # noqa: ANN401
     """A started proxy on a socket path short enough to bind.
 
     Not under `tmp_path`: `sun_path` is 108 bytes and pytest's tree on macOS —
@@ -295,7 +295,7 @@ async def test_the_allowlist_is_asked_live() -> None:
 # ------------------------------------------------------------- end to end --
 
 
-async def _bridged(mount: MountProfile, *rows: dict[str, Any]) -> Any:
+async def _bridged(mount: MountProfile, *rows: dict[str, Any]) -> Any:  # noqa: ANN401
     """A mount with the backend and a live bridge, or a skip that says why not."""
     ctx = await mount(ROW, *rows)
     if ctx.require(SANDBOX).provider is None:

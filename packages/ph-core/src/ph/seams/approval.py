@@ -90,7 +90,7 @@ is the caller's, since a tool call, a path and a refinement are named differentl
 and only the caller knows which it is holding."""
 
 
-def denial_reason(outcome: Any, subject: str) -> str:
+def denial_reason(outcome: Any, subject: str) -> str:  # noqa: ANN401
     """The sentence for one non-grant outcome. Unknown answers read as absence,
     which is the fail-closed direction and the honest one."""
     template = DENIAL_REASONS.get(str(outcome), DENIAL_REASONS["unavailable"])
@@ -160,7 +160,7 @@ every existing answerer keeps working; the two that carry data are objects
 because they have data to carry."""
 
 
-def answer_from_wire(raw: Any) -> ApprovalAnswer:
+def answer_from_wire(raw: Any) -> ApprovalAnswer:  # noqa: ANN401
     """One answer as it arrives from a front end that is not in this process.
 
     `answer_kind`'s inverse, and here rather than in whatever transport happens
@@ -184,7 +184,7 @@ def answer_from_wire(raw: Any) -> ApprovalAnswer:
     return "unavailable"
 
 
-def answer_to_wire(answer: ApprovalAnswer) -> Any:
+def answer_to_wire(answer: ApprovalAnswer) -> Any:  # noqa: ANN401
     """One answer on its way *out* of the process that decided it.
 
     `answer_from_wire`'s inverse, and the pair has to be a pair: four of the six
@@ -305,7 +305,7 @@ class ApprovalService:
         reason: str | None = None,
         cancel: CancelToken | None = None,
         allowed_decisions: tuple[ApprovalDecisionName, ...] = (),
-        arguments: Any = None,
+        arguments: Any = None,  # noqa: ANN401
     ) -> ApprovalAnswer:
         """Ask, record both halves, and return the outcome. Never raises."""
         session: Session | None = getattr(agent, "session", None)

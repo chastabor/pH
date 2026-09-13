@@ -193,7 +193,7 @@ class _Sandbox:
         kept = await self._persist(row.id, config)
         return f"{said}; {self.ctx.require(SANDBOX).network_posture()}. {kept}"
 
-    def _row(self) -> Any:
+    def _row(self) -> Any:  # noqa: ANN401
         rows = [
             row
             for row in self.ctx.require(MOUNT).profile.rows
@@ -318,7 +318,7 @@ class _Denials:
 async def apply(ctx: Context, config: None) -> None:
     """Register `/sandbox`, and the footer reading that says refusals happened."""
 
-    async def sandbox(argument: str, invocation: Any) -> str:
+    async def sandbox(argument: str, invocation: Any) -> str:  # noqa: ANN401
         verb, _, rest = argument.strip().partition(" ")
         view = _Sandbox(ctx=ctx, session=invocation.session)
         try:

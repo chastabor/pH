@@ -43,13 +43,13 @@ SANDBOX_ROW = {"id": "sandbox-local", "disabled": False}
 SECTION = "Read-only scratch workspaces"
 
 
-async def _with_backend(ctx: Any, enforcement: Enforcement) -> None:
+async def _with_backend(ctx: Any, enforcement: Enforcement) -> None:  # noqa: ANN401
     """Register a backend the way a profile that layers one *after* this row does."""
     ctx.require(SANDBOX).register_provider(StubSandboxProvider(enforcement=enforcement))
     await ctx.serial("profile/mounted")
 
 
-async def _acquire(tmp_path: Path, access: WorkspaceAccess = "write") -> Any:
+async def _acquire(tmp_path: Path, access: WorkspaceAccess = "write") -> Any:  # noqa: ANN401
     """One workspace straight from the provider, for the vocabulary half."""
     scratch = tmp_path / "scratch"
     scratch.mkdir(parents=True, exist_ok=True)
@@ -78,7 +78,11 @@ async def _enforcing(mount: MountProfile, tmp_path: Path) -> tuple[Any, Any]:
     return ctx, workspace
 
 
-async def _confined_write(ctx: Any, workspace: Any, target: Path) -> tuple[int, str]:
+async def _confined_write(
+    ctx: Any,  # noqa: ANN401
+    workspace: Any,  # noqa: ANN401
+    target: Path,
+) -> tuple[int, str]:
     """A raw `open()` under the workspace's own confinement.
 
     `scrub_env(extra=workspace.env)` matches `test_containment_ladder.py` — the

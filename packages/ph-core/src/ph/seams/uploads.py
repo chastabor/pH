@@ -120,7 +120,7 @@ class _Registered:
     by: Running
 
 
-def record_uploaded(session: Any, handle: FileHandle, ref: AttachmentRef) -> None:
+def record_uploaded(session: Any, handle: FileHandle, ref: AttachmentRef) -> None:  # noqa: ANN401
     """Append the fact that bytes left this machine.
 
     The half of this row that *is* the log's business: not the handle, which
@@ -271,7 +271,7 @@ class UploadRegistry:
             record_uploaded(session, handle, ref)
         return handle
 
-    def _session(self, session_id: str | None) -> Any:
+    def _session(self, session_id: str | None) -> Any:  # noqa: ANN401
         sessions = self.ctx.get(SESSIONS)
         return None if sessions is None or session_id is None else sessions.get(session_id)
 

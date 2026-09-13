@@ -35,5 +35,5 @@ class StubSandboxProvider:
     enforcement: Enforcement = "full"
     backend: str = "stub"
 
-    def confine(self, argv: tuple[str, ...], policy: Any) -> ConfinedArgv:
+    def confine(self, argv: tuple[str, ...], policy: Any) -> ConfinedArgv:  # noqa: ANN401
         return ConfinedArgv(argv=argv, enforcement=self.enforcement, backend=self.backend)

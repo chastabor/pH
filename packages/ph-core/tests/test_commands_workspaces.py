@@ -52,7 +52,7 @@ async def _tiered(
     return ctx, base
 
 
-async def _left_behind(ctx: Any, base: Path, agent_id: str, *, work: bool) -> Path:
+async def _left_behind(ctx: Any, base: Path, agent_id: str, *, work: bool) -> Path:  # noqa: ANN401
     """One disposed agent, left behind by the policy itself.
 
     Returns the (now removed) checkout path, because a few tests need to say that
@@ -71,7 +71,7 @@ async def _left_behind(ctx: Any, base: Path, agent_id: str, *, work: bool) -> Pa
     return root
 
 
-async def _run(ctx: Any, argument: str = "") -> str:
+async def _run(ctx: Any, argument: str = "") -> str:  # noqa: ANN401
     shown = await ctx.require(COMMANDS).dispatch(f"/workspaces {argument}".strip())
     assert shown is not None
     return str(shown)

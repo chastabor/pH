@@ -121,7 +121,7 @@ class Config(WireModel):
     """
 
 
-def _render(_args: JsonObject, value: Any) -> list[ContentBlock]:
+def _render(_args: JsonObject, value: Any) -> list[ContentBlock]:  # noqa: ANN401
     parts = [as_str(value.get("answer"), "(the child produced no answer)")]
     if value.get("note"):
         parts.append(as_str(value["note"]))
@@ -132,7 +132,7 @@ def _render(_args: JsonObject, value: Any) -> list[ContentBlock]:
 async def apply(ctx: Context, config: Config) -> None:
     """Register the blocking delegation tool, once a provider exists to run it."""
 
-    async def delegate(provider: str, args: TaskArgs, run: ToolRunContext) -> Any:
+    async def delegate(provider: str, args: TaskArgs, run: ToolRunContext) -> Any:  # noqa: ANN401
         try:
             handle = await ctx.require(SUBAGENTS).start(
                 provider,
@@ -178,7 +178,7 @@ async def apply(ctx: Context, config: Config) -> None:
             note=downgrade_text(reason) if reason is not None else None,
         ).model_dump()
 
-    def build_tool() -> Any:
+    def build_tool() -> Any:  # noqa: ANN401
         """The tool, bound to the provider that will run it.
 
         Resolved here rather than per call, so the deployment's answer to "which

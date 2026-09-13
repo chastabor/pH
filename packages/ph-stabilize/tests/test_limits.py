@@ -49,7 +49,7 @@ from ph_stabilize.limits import (
 pytestmark = pytest.mark.anyio
 
 
-async def _pre_step(ctx: Any, agent: Any, *, turn: int, step: int) -> Any:
+async def _pre_step(ctx: Any, agent: Any, *, turn: int, step: int) -> Any:  # noqa: ANN401
     """The decision `agent/pre-step` reaches, with the loop's own `inner`."""
     from ph.agent.types import PreStepDecision, PreStepRequest
 
@@ -367,7 +367,7 @@ def test_the_denial_text_is_upstreams() -> None:
 # --------------------------------------------------------------- the footer --
 
 
-def _limits_reading(ctx: Any, session: Any) -> Any:
+def _limits_reading(ctx: Any, session: Any) -> Any:  # noqa: ANN401
     """This row's reading, by id.
 
     By id and not "the only one", which is what these asserted before
@@ -449,7 +449,7 @@ async def test_a_code_mode_dispatch_counts_as_a_tool_call(mount: MountProfile) -
 # ------------------------------------------------------------------ children --
 
 
-async def _parent(ctx: Any, session_id: str = "parent") -> tuple[Any, Any, Any]:
+async def _parent(ctx: Any, session_id: str = "parent") -> tuple[Any, Any, Any]:  # noqa: ANN401
     """A parent agent and a stub provider. The stub does not log admission —
     the real provider does, as obligation 1 — so tests say what it would have."""
     session = ctx.require(SESSIONS).create(session_id)

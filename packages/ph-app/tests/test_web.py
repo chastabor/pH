@@ -38,7 +38,7 @@ PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
 """Enough of a header that the store recognises it; the bytes do not matter."""
 
 
-def a_server(session: str = "served", **options: Any) -> WebServer:
+def a_server(session: str = "served", **options: Any) -> WebServer:  # noqa: ANN401
     """A composed server whose tabs would run a command that never runs."""
     return WebServer(command="/bin/true", session=session, **options)
 
@@ -68,11 +68,11 @@ async def client(server: WebServer) -> AsyncIterator[TestClient[web.Request, web
 
 async def drop(
     server: WebServer,
-    browser: Any,
+    browser: Any,  # noqa: ANN401
     content: bytes = PNG,
     name: str = "diagram.png",
     mime: str = "image/png",
-) -> Any:
+) -> Any:  # noqa: ANN401
     """One file, dropped on the page. What every upload test does."""
     body = FormData()
     body.add_field("file", content, filename=name, content_type=mime)
@@ -114,7 +114,7 @@ def test_textual_serve_still_exposes_what_we_compose() -> None:
 # --------------------------------------------------------------- the token --
 
 
-async def test_the_shell_is_refused_without_the_token(client: Any) -> None:
+async def test_the_shell_is_refused_without_the_token(client: Any) -> None:  # noqa: ANN401
     """A 403, not a redirect and not a login page.
 
     There is nothing to log in to: one secret per launch is the whole scheme
@@ -127,7 +127,7 @@ async def test_the_shell_is_refused_without_the_token(client: Any) -> None:
     assert "token" in await refused.text()
 
 
-async def test_the_websocket_is_refused_without_the_token(client: Any) -> None:
+async def test_the_websocket_is_refused_without_the_token(client: Any) -> None:  # noqa: ANN401
     """The socket is the interesting door, and it is the one a gate can miss.
 
     `/` is obvious; `/ws` is where the terminal's keystrokes go, and its URL is
@@ -140,7 +140,10 @@ async def test_the_websocket_is_refused_without_the_token(client: Any) -> None:
     assert (await client.get("/nothing-here")).status == 403
 
 
-async def test_the_token_is_exchanged_for_a_cookie(server: WebServer, client: Any) -> None:
+async def test_the_token_is_exchanged_for_a_cookie(
+    server: WebServer,
+    client: Any,  # noqa: ANN401
+) -> None:
     """One paste authorises the page *and* everything the page then fetches.
 
     The websocket and asset URLs come out of upstream's template, so they carry
@@ -164,7 +167,10 @@ async def test_the_token_is_exchanged_for_a_cookie(server: WebServer, client: An
     assert (await client.get("/static/", allow_redirects=False)).status != 403
 
 
-async def test_a_wrong_token_is_refused_like_none_at_all(server: WebServer, client: Any) -> None:
+async def test_a_wrong_token_is_refused_like_none_at_all(
+    server: WebServer,
+    client: Any,  # noqa: ANN401
+) -> None:
     """No hint, and no timing signal.
 
     Compared with `compare_digest`, because a token is a secret and `==` returns
@@ -216,7 +222,10 @@ def test_a_non_loopback_bind_says_what_it_costs() -> None:
 # ------------------------------------------------------- the browser's bytes --
 
 
-async def test_the_page_offers_somewhere_to_drop_a_file(server: WebServer, client: Any) -> None:
+async def test_the_page_offers_somewhere_to_drop_a_file(
+    server: WebServer,
+    client: Any,  # noqa: ANN401
+) -> None:
     """The drop zone is inserted into a page this module does not own.
 
     The marker is asserted because it is the one thing insertion can break —
@@ -233,7 +242,7 @@ async def test_the_page_offers_somewhere_to_drop_a_file(server: WebServer, clien
     assert "/api/attachments" in body, "and the zone knows where to post"
 
 
-async def test_an_upload_needs_the_token_like_everything_else(client: Any) -> None:
+async def test_an_upload_needs_the_token_like_everything_else(client: Any) -> None:  # noqa: ANN401
     """The interesting door, again: this one *writes*.
 
     A route that took bytes from anyone would be worse than a readable shell —
@@ -244,7 +253,8 @@ async def test_an_upload_needs_the_token_like_everything_else(client: Any) -> No
 
 
 async def test_a_post_that_is_not_a_dropped_file_is_refused_not_traced(
-    server: WebServer, client: Any
+    server: WebServer,
+    client: Any,  # noqa: ANN401
 ) -> None:
     """One multipart part named `file` — anything else gets a sentence.
 
@@ -276,7 +286,10 @@ async def test_a_post_that_is_not_a_dropped_file_is_refused_not_traced(
     assert "'file'" in await plain.text()
 
 
-async def test_an_upload_with_no_daemon_says_so(server: WebServer, client: Any) -> None:
+async def test_an_upload_with_no_daemon_says_so(
+    server: WebServer,
+    client: Any,  # noqa: ANN401
+) -> None:
     """No daemon means no session to stage onto, and that is a sentence.
 
     The *tabs* are what start a daemon, so a person who has not opened one has
@@ -316,7 +329,8 @@ async def test_an_upload_before_any_tab_exists_says_what_to_do(
 
 
 async def test_an_oversized_upload_is_refused_before_it_is_buffered(
-    server: WebServer, client: Any
+    server: WebServer,
+    client: Any,  # noqa: ANN401
 ) -> None:
     """The same ceiling the daemon enforces, applied where the bytes arrive.
 

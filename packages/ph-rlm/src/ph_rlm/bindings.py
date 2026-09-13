@@ -45,7 +45,7 @@ from ph.seams.subagents import (
     SubagentSpawnError,
     downgrade_text,
 )
-from ph.tools import ToolModel, ToolOutput, define_tool, text_content
+from ph.tools import ToolModel, ToolOutput, ToolRunContext, define_tool, text_content
 from ph.tools.code_mode import CodeBindingsRequest, ToolCallError, governed_binding
 from ph.wire import WireModel
 
@@ -119,7 +119,7 @@ class Config(WireModel):
     """Which `ctx.subagents` provider `rlm.run` delegates to."""
 
 
-def _render_handle(_args: JsonObject, value: Any) -> list[ContentBlock]:
+def _render_handle(_args: JsonObject, value: Any) -> list[ContentBlock]:  # noqa: ANN401
     lines = [
         f"admitted {value['name']} ({value['childId']}) on {value['model']}",
         f"session: {value['sessionId']}",
@@ -137,7 +137,7 @@ async def apply(ctx: Context, config: Config) -> None:
 
     tools = ctx.require(TOOLS)
 
-    async def run_child(args: RunArgs, run: Any) -> Any:
+    async def run_child(args: RunArgs, run: ToolRunContext) -> Any:  # noqa: ANN401
         try:
             handle = await ctx.require(SUBAGENTS).start(
                 config.provider,
@@ -171,13 +171,13 @@ async def apply(ctx: Context, config: Config) -> None:
             note=downgrade_text(reason) if reason is not None else None,
         ).to_wire()
 
-    def list_children(_args: Any, run: Any) -> Any:
+    def list_children(_args: Any, run: ToolRunContext) -> Any:  # noqa: ANN401
         """The roster, folded from the parent's own log — never a side table."""
         session = run.session
         rows = list(ctx.require(SUBAGENTS).roster(session).values()) if session is not None else []
         return {"children": rows}
 
-    async def delete_child(args: DeleteArgs, run: Any) -> Any:
+    async def delete_child(args: DeleteArgs, run: ToolRunContext) -> Any:  # noqa: ANN401
         session = run.session
         removed = (
             await ctx.require(RLM_CHILDREN).delete(session, args.child_id, reason=args.reason)
@@ -241,7 +241,7 @@ async def apply(ctx: Context, config: Config) -> None:
     tools.register_code_namespace(NAMESPACE, namespace)
 
 
-def _render_roster(_args: JsonObject, value: Any) -> list[ContentBlock]:
+def _render_roster(_args: JsonObject, value: Any) -> list[ContentBlock]:  # noqa: ANN401
     rows = value.get("children") or []
     if not rows:
         return text_content("no children")
@@ -253,5 +253,5 @@ def _render_roster(_args: JsonObject, value: Any) -> list[ContentBlock]:
     return text_content("\n".join(lines))
 
 
-def _render_deleted(_args: JsonObject, value: Any) -> list[ContentBlock]:
+def _render_deleted(_args: JsonObject, value: Any) -> list[ContentBlock]:  # noqa: ANN401
     return text_content(f"deleted {value['childId']}" if value["deleted"] else "no such child")

@@ -324,7 +324,7 @@ class ToolRunContext:
         return self.execution.name
 
     @property
-    def agent(self) -> Any:
+    def agent(self) -> Any:  # noqa: ANN401
         return self.execution.agent
 
     @property
@@ -560,7 +560,7 @@ class ToolDefinition:
         """The model-facing schema. Nothing else about the tool reaches the wire."""
         return ToolSchema(name=self.name, description=self.description, parameters=self.parameters)
 
-    def render(self, args: JsonValue, value: Any) -> tuple[ContentBlock, ...]:
+    def render(self, args: JsonValue, value: Any) -> tuple[ContentBlock, ...]:  # noqa: ANN401
         """Project a validated value into model-facing content.
 
         `args` arrives as whatever `parse_arguments` made of the model's JSON —
@@ -580,7 +580,7 @@ class ToolDefinition:
             raise ToolOutputError(self.name, [f"output.render failed: {error}"]) from error
         return tuple(rendered)
 
-    def project_meta(self, args: JsonValue, value: Any) -> Any:
+    def project_meta(self, args: JsonValue, value: Any) -> Any:  # noqa: ANN401
         if self.output.presentation_meta is None:
             return None
         try:
@@ -590,12 +590,12 @@ class ToolDefinition:
                 self.name, [f"output.presentation_meta failed: {error}"]
             ) from error
 
-    def classify(self, args: Any) -> ExecutionMode:
+    def classify(self, args: Any) -> ExecutionMode:  # noqa: ANN401
         """The live overlap classification for one call's arguments."""
         parallel = _answers_true(self.is_concurrency_safe, args)
         return ExecutionMode(kind="parallel" if parallel else "exclusive")
 
-    def irreversible(self, args: Any) -> bool:
+    def irreversible(self, args: Any) -> bool:  # noqa: ANN401
         """Whether this call declares itself hard to take back (P6-16)."""
         return _answers_true(self.is_irreversible, args)
 
@@ -682,7 +682,7 @@ def define_tool[A: BaseModel](
         parameters if isinstance(parameters, type) and issubclass(parameters, BaseModel) else None
     )
 
-    async def run(raw_args: Any, run_ctx: ToolRunContext) -> Any:
+    async def run(raw_args: Any, run_ctx: ToolRunContext) -> Any:  # noqa: ANN401
         args: Any = raw_args
         if typed is not None:
             args = typed.model_validate(raw_args if raw_args is not None else {})
@@ -714,7 +714,7 @@ def _classifier(flag: Callable[[Any], bool] | bool | None) -> Callable[[Any], bo
     return flag if callable(flag) else None
 
 
-def _answers_true(classifier: Callable[[Any], bool] | None, args: Any) -> bool:
+def _answers_true(classifier: Callable[[Any], bool] | None, args: Any) -> bool:  # noqa: ANN401
     """Only `True` counts. Omission, a non-`True` return and a **raise** all mean
     "not declared": a predicate that throws did not answer, and turning silence
     into a claim would make one buggy classifier claim on every call."""
@@ -726,7 +726,7 @@ def _answers_true(classifier: Callable[[Any], bool] | None, args: Any) -> bool:
         return False
 
 
-def _default_render(value: Any) -> str:
+def _default_render(value: Any) -> str:  # noqa: ANN401
     if isinstance(value, str):
         return value
     if value is None:

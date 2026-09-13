@@ -43,18 +43,18 @@ happened — or `None` where the effect leaves no countable trace and the reply'
 shape is the whole claim."""
 
 
-async def _prompt(client: Any, root: Any) -> dict[str, Any]:
+async def _prompt(client: Any, root: Any) -> dict[str, Any]:  # noqa: ANN401
     return {"prompt": "hello"}
 
 
-async def _command(client: Any, root: Any) -> dict[str, Any]:
+async def _command(client: Any, root: Any) -> dict[str, Any]:  # noqa: ANN401
     root.ctx.require(COMMANDS).register(
         CommandDefinition(name="probe", summary="a probe", run=lambda argument, ctx: "ran")
     )
     return {"line": "/probe"}
 
 
-async def _stage(client: Any, root: Any) -> dict[str, Any]:
+async def _stage(client: Any, root: Any) -> dict[str, Any]:  # noqa: ANN401
     reply = await client.call(
         "attachment/put",
         sessionId=root.id,
@@ -65,15 +65,15 @@ async def _stage(client: Any, root: Any) -> dict[str, Any]:
     return {"attachment": reply["attachment"]}
 
 
-async def _shell(client: Any, root: Any) -> dict[str, Any]:
+async def _shell(client: Any, root: Any) -> dict[str, Any]:  # noqa: ANN401
     return {"command": "echo hi"}
 
 
-async def _preset(client: Any, root: Any) -> dict[str, Any]:
+async def _preset(client: Any, root: Any) -> dict[str, Any]:  # noqa: ANN401
     return {"preset": "workspace-write"}
 
 
-async def _credential(client: Any, root: Any) -> dict[str, Any]:
+async def _credential(client: Any, root: Any) -> dict[str, Any]:  # noqa: ANN401
     return {"name": "PROBE_KEY", "value": "shh"}
 
 

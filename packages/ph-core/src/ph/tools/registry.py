@@ -1047,7 +1047,7 @@ class ToolRuntime:
         return result
 
 
-def _discard(items: list[Any], target: Any) -> None:
+def _discard(items: list[Any], target: Any) -> None:  # noqa: ANN401
     with suppress(ValueError):  # already released
         items.remove(target)
 
@@ -1072,7 +1072,10 @@ def _message_from_content(content: Sequence[Any]) -> str:
     return text or "tool result blocked by post-execute policy"
 
 
-def _unresolved(_args: Any, _run: ToolRunContext) -> Any:  # pragma: no cover - never dispatched
+def _unresolved(
+    _args: Any,  # noqa: ANN401
+    _run: ToolRunContext,
+) -> Any:  # pragma: no cover - never dispatched  # noqa: ANN401
     raise ToolNotFoundError("<unresolved>")
 
 

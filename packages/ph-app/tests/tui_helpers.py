@@ -39,7 +39,11 @@ Not in `ph.testing`, because `PHTuiApp` is ph-app's and ph-core may not name it.
 
 
 def tui_app(
-    *, home: Path, project: Path | None = None, trusted: bool = True, **overrides: Any
+    *,
+    home: Path,
+    project: Path | None = None,
+    trusted: bool = True,
+    **overrides: Any,  # noqa: ANN401
 ) -> PHTuiApp:
     """One `PHTuiApp` wired for a test, built in the one place.
 
@@ -180,7 +184,7 @@ class StubApp:
         self.ran: list[str] = []
         self.bound: list[Binding] = []
 
-    def run_worker(self, work: Coroutine[Any, Any, Any]) -> Any:
+    def run_worker(self, work: Coroutine[Any, Any, Any]) -> Any:  # noqa: ANN401
         # Closed rather than started: there is no app to own it here, and a
         # coroutine left unawaited warns.
         work.close()
@@ -190,6 +194,6 @@ class StubApp:
         self.bound.append(binding)
         return lambda: self.bound.remove(binding)
 
-    async def run_action(self, action: str) -> Any:
+    async def run_action(self, action: str) -> Any:  # noqa: ANN401
         self.ran.append(action)
         return None

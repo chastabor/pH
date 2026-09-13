@@ -354,7 +354,10 @@ class TuiEventAdapter:
         self._present_result(card, event.data.get("meta"), frame.view)
 
     def _present_result(
-        self, card: ToolCard, meta: Any, arrived: ToolCallView | ToolResultView | None
+        self,
+        card: ToolCard,
+        meta: Any,  # noqa: ANN401
+        arrived: ToolCallView | ToolResultView | None,
     ) -> None:
         view = (
             arrived

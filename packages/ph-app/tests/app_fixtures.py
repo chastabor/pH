@@ -59,7 +59,7 @@ async def make_tui_app(tmp_path: Path, tui_daemon: Daemon) -> MakeApp:
     """
     from tui_helpers import tui_app
 
-    def make(**overrides: Any) -> PHTuiApp:
+    def make(**overrides: Any) -> PHTuiApp:  # noqa: ANN401
         return tui_app(home=tmp_path, **overrides)
 
     return make

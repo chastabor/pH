@@ -138,7 +138,11 @@ class _FileApi:
 def wire(monkeypatch: pytest.MonkeyPatch) -> _FileApi:
     api = _FileApi()
 
-    async def post_raw(self: HttpClient, url: str, **kwargs: Any) -> tuple[dict[str, Any], Any]:
+    async def post_raw(
+        self: HttpClient,
+        url: str,
+        **kwargs: Any,  # noqa: ANN401
+    ) -> tuple[dict[str, Any], Any]:
         if url.endswith("/files"):
             api.starts.append(dict(kwargs["headers"]))
             name = api.issue()
@@ -146,7 +150,7 @@ def wire(monkeypatch: pytest.MonkeyPatch) -> _FileApi:
         name = url.rsplit("/upload.example/", 1)[-1]
         return {"file": api.record(name)}, {}
 
-    async def get_json(self: HttpClient, url: str, **kwargs: Any) -> dict[str, Any]:
+    async def get_json(self: HttpClient, url: str, **kwargs: Any) -> dict[str, Any]:  # noqa: ANN401
         api.polls += 1
         name = "files/" + url.rsplit("/files/", 1)[-1]
         if name in api.deleted:
@@ -162,7 +166,9 @@ def wire(monkeypatch: pytest.MonkeyPatch) -> _FileApi:
         return api.record(name)
 
     async def stream_sse(
-        self: HttpClient, url: str, **kwargs: Any
+        self: HttpClient,
+        url: str,
+        **kwargs: Any,  # noqa: ANN401
     ) -> AsyncIterator[tuple[str, dict[str, Any]]]:
         assert ":streamGenerateContent" in url, "this wire streams from a method, not a path"
         for event in api.events(kwargs["json"]):
@@ -175,7 +181,11 @@ def wire(monkeypatch: pytest.MonkeyPatch) -> _FileApi:
     return api
 
 
-async def _attached(ctx: Context, mime: str = "video/mp4", name: str = "clip.mp4") -> Any:
+async def _attached(
+    ctx: Context,
+    mime: str = "video/mp4",
+    name: str = "clip.mp4",
+) -> Any:  # noqa: ANN401
     ref = await ctx.require(ATTACHMENTS).save_bytes(content=CLIP, mime=mime, name=name)
     return create_user_message(
         content=[{"type": "text", "text": "what happens in this?"}, MediaBlock(attachment=ref)],
@@ -261,7 +271,7 @@ async def test_a_file_that_never_becomes_ready_falls_back_to_the_bytes(
     assert not [one for one in session.events if one.type == "attachment/uploaded"]
 
 
-def _impatient(**config: Any) -> dict[str, Any]:
+def _impatient(**config: Any) -> dict[str, Any]:  # noqa: ANN401
     """The shipped route with a budget of one poll.
 
     What is under test around the budget is what happens when it runs out, and

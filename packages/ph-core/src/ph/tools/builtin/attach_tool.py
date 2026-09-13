@@ -107,7 +107,7 @@ class AttachValue(ToolModel):
     height: int | None = None
 
 
-def _render(_args: JsonObject, value: Any) -> list[ContentBlock]:
+def _render(_args: JsonObject, value: Any) -> list[ContentBlock]:  # noqa: ANN401
     """The sentence the model reads, which has to say where the file went.
 
     A confirmation alone would leave the model to guess whether it is looking at
@@ -134,7 +134,7 @@ async def apply(ctx: Context, config: Config) -> None:
     """
     store = ctx.require(ATTACHMENTS)
 
-    async def attach(args: AttachArgs, run: ToolRunContext) -> Any:
+    async def attach(args: AttachArgs, run: ToolRunContext) -> Any:  # noqa: ANN401
         fs = ctx.require(FS)
         target = fs.resolve(args.path, agent=run.agent)
         mime = mime_of(target.name)

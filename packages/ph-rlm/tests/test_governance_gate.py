@@ -66,7 +66,7 @@ async def test_a_a_governed_write_is_intercepted_before_it_touches_disk(
     target = tmp_path / "gate-intercepted.txt"
     intents: list[str] = []
 
-    async def veto(intent: Any, _next: Any) -> Any:
+    async def veto(intent: Any, _next: Any) -> Any:  # noqa: ANN401
         intents.append(str(intent.path))
         return "the gate vetoed this write"
 
@@ -111,7 +111,7 @@ async def test_a_a_denied_dispatch_ends_the_run_uncatchably(
     )
     target, routed = tmp_path / "gate-denied.txt", tmp_path / "gate-routed-around.txt"
 
-    async def refuse(execution: Any, next_: Any) -> Any:
+    async def refuse(execution: Any, next_: Any) -> Any:  # noqa: ANN401
         if execution.name == "write":
             return Deny(reason="this deployment does not allow writes")
         return await next_()
@@ -209,7 +209,7 @@ async def test_c_one_oversized_dispatch_is_offloaded_without_its_siblings(
 
     seen: list[str] = []
 
-    async def offload(execution: Any, result: Any, next_: Any) -> Any:
+    async def offload(execution: Any, result: Any, next_: Any) -> Any:  # noqa: ANN401
         seen.append(execution.name)
         text = str((result.value or {}).get("text", ""))
         if len(text) <= 1024:

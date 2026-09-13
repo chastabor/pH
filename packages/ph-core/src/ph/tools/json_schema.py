@@ -98,7 +98,7 @@ def _model_schema(model: type[BaseModel]) -> dict[str, Any]:
     return model.model_json_schema()
 
 
-def unsupported_keywords(schema: Any) -> set[str]:
+def unsupported_keywords(schema: Any) -> set[str]:  # noqa: ANN401
     """Every keyword in `schema` that this validator does not enforce.
 
     Reported rather than assumed: a schema pH cannot fully check should be
@@ -119,7 +119,9 @@ def unsupported_keywords(schema: Any) -> set[str]:
     return found
 
 
-def validate_json_schema_value(schema: type[BaseModel] | dict[str, Any], value: Any) -> list[str]:
+def validate_json_schema_value(
+    schema: type[BaseModel] | dict[str, Any], value: object
+) -> list[str]:
     """Violations of `value` against `schema`, in validation order.
 
     An empty list means valid. A pydantic declaration delegates to pydantic, so
@@ -198,7 +200,13 @@ def _check_bounds(
             out.append(f"{where}: fails {keyword} {bound}")
 
 
-def _validate(schema: Any, value: Any, path: str, root: dict[str, Any], out: list[str]) -> None:
+def _validate(
+    schema: Any,  # noqa: ANN401
+    value: object,
+    path: str,
+    root: dict[str, Any],
+    out: list[str],
+) -> None:
     if not isinstance(schema, dict):
         return
     schema = _resolve(schema, root)

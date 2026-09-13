@@ -175,7 +175,7 @@ class _ActiveRun:
     `_serve_call` starts the abort from its own task, and the escalation clock
     the pump runs has to be the same clock."""
 
-    def settle(self, *, error: str | None = None, value: Any = None) -> bool:
+    def settle(self, *, error: str | None = None, value: Any = None) -> bool:  # noqa: ANN401
         """Record how this run ended. **The first writer wins**; returns whether
         this call was it.
 
@@ -814,7 +814,7 @@ class Kernel:
         call_id: int,
         *,
         ok: bool,
-        value: Any = None,
+        value: Any = None,  # noqa: ANN401
         message: str | None = None,
         name: str | None = None,
         fatal: bool | None = None,
@@ -825,7 +825,7 @@ class Kernel:
 
     # ----------------------------------------------------------------- pipes --
 
-    async def _drain(self, stream: Any, active: _ActiveRun) -> None:
+    async def _drain(self, stream: Any, active: _ActiveRun) -> None:  # noqa: ANN401
         """Collect the *process's* own fd 1/2 — a grandchild's output, mainly.
 
         A `print` in the cell arrives as a `log` frame instead, because the guest
@@ -1117,7 +1117,7 @@ class PythonCodeRuntime:
                 )
             return self._environment
 
-    def workspace_for(self, agent_id: str) -> Any:
+    def workspace_for(self, agent_id: str) -> Any:  # noqa: ANN401
         """This agent's workspace, or `None` before one is acquired.
 
         Resolved per kernel rather than held as one runtime-wide `cwd`, because
@@ -1176,7 +1176,9 @@ class PythonCodeRuntime:
             seam.report_denial(confined, (result.error, result.logs), namespace)
 
     def confiner(
-        self, namespace: str, workspace: Any = None
+        self,
+        namespace: str,
+        workspace: Any = None,  # noqa: ANN401
     ) -> Callable[[tuple[str, ...]], ConfinedArgv] | None:
         """How to bound this agent's kernel, or `None` where nothing can.
 
@@ -1255,7 +1257,7 @@ def _declare(namespace: CodeBindingNamespace) -> dict[str, Any]:
     }
 
 
-def _json_safe(value: Any) -> Any:
+def _json_safe(value: Any) -> Any:  # noqa: ANN401
     """A tool's result in a form the reply frame can carry.
 
     `thaw_json` is the whole job: a value that came back through the log is frozen —

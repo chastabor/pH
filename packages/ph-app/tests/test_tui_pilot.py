@@ -136,7 +136,13 @@ async def test_a_global_key_does_not_also_edit_the_prompt(make_tui_app: MakeApp)
 # ----------------------------------------------------------------- approval --
 
 
-async def _decide(app: Any, pilot: Any, root: Any, *, arguments: Any = None) -> list[Any]:
+async def _decide(
+    app: Any,  # noqa: ANN401
+    pilot: Any,  # noqa: ANN401
+    root: Any,  # noqa: ANN401
+    *,
+    arguments: Any = None,  # noqa: ANN401
+) -> list[Any]:
     """Put one approval on screen and hand back the list the answer lands in.
 
     Takes the daemon-side `root`, not the front end: the approval is raised where

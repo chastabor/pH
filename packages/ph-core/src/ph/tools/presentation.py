@@ -67,7 +67,7 @@ class ToolResultView(WireModel):
     meta: dict[str, Any] | None = None
 
 
-def render_call_view(tools: Any, name: str, arguments: str) -> ToolCallView | None:
+def render_call_view(tools: Any, name: str, arguments: str) -> ToolCallView | None:  # noqa: ANN401
     """Ask the tool how its pending call looks. `None` when it cannot say.
 
     `arguments` is a `str` because that is what the writer records — the model's
@@ -98,7 +98,12 @@ def render_call_view(tools: Any, name: str, arguments: str) -> ToolCallView | No
     return view
 
 
-def render_result_view(tools: Any, name: str, arguments: str, result: Any) -> ToolResultView | None:
+def render_result_view(
+    tools: Any,  # noqa: ANN401
+    name: str,
+    arguments: str,
+    result: Any,  # noqa: ANN401
+) -> ToolResultView | None:
     """Ask the tool how its settled call looks. `None` when it cannot say.
 
     `arguments` are the *call's*, not the result's: a tool presents its outcome
@@ -117,7 +122,7 @@ def render_result_view(tools: Any, name: str, arguments: str, result: Any) -> To
     return view
 
 
-def _presentable(tools: Any, name: str) -> Any:
+def _presentable(tools: Any, name: str) -> Any:  # noqa: ANN401
     """The definition behind a card, for presentation only.
 
     `DEPLOYMENT` and not an agent's scope (P6-32): this renders a call the *log*

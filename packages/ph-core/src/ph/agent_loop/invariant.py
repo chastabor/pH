@@ -36,7 +36,7 @@ class ModelVisibleNotLoggedError(AssertionError):
 async def apply(ctx: Context, config: None) -> None:
     """Assert `messages == derive_messages()` on every loop request."""
 
-    async def check(request: GenerateOptions, next_: Callable[[], Any]) -> Any:
+    async def check(request: GenerateOptions, next_: Callable[[], Any]) -> Any:  # noqa: ANN401
         # `is_loop_request` implies a session id, but through a property the
         # checker cannot see into; the explicit test is what lets `get` be typed.
         session_id = request.session_id

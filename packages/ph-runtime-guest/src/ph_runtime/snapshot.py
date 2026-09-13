@@ -78,7 +78,7 @@ class _BoundedSink:
         return len(data)
 
 
-def _dill() -> Any | None:
+def _dill() -> Any | None:  # noqa: ANN401
     try:
         import dill  # type: ignore[import-untyped]
     except ImportError:  # pragma: no cover — a venv without dill
@@ -97,7 +97,7 @@ def serializable_names(namespace: dict[str, Any], protected: set[str]) -> list[s
     )
 
 
-def _serialize(value: Any, cap: int) -> tuple[bytes | None, str, str]:
+def _serialize(value: object, cap: int) -> tuple[bytes | None, str, str]:
     """`(payload, skipped, reason)` — exactly one of payload / skipped is set."""
     sink = _BoundedSink(cap)
     try:
@@ -160,7 +160,7 @@ class NamespaceSnapshotter:
             records.append({"var": name, "skipped": "deleted"})
         return records
 
-    def _record(self, name: str, value: Any, cap: int) -> dict[str, Any] | None:
+    def _record(self, name: str, value: object, cap: int) -> dict[str, Any] | None:
         known = self._identities.get(name)
         if known is not None and known[0] == id(value) and type(value) in _IMMUTABLE:
             return None

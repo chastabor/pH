@@ -51,17 +51,17 @@ pytestmark = pytest.mark.anyio
 runner = CliRunner()
 
 
-async def _watchers(client: Any, session_id: str) -> int:
+async def _watchers(client: Any, session_id: str) -> int:  # noqa: ANN401
     """How many clients the daemon says are attached to this root."""
     listed = await client.call("sessions/list")
     row = next((one for one in listed["sessions"] if one["sessionId"] == session_id), None)
     return 0 if row is None else int(row["watchers"])
 
 
-async def _ph(*args: str) -> Any:
+async def _ph(*args: str) -> Any:  # noqa: ANN401
     """One `ph …` invocation, off the loop the daemon is serving on."""
 
-    def invoke() -> Any:
+    def invoke() -> Any:  # noqa: ANN401
         # Wide and unstyled, because these assertions are about content. Rich
         # wraps to 80 columns off a terminal, and a wrapped session id is a
         # substring that is present and unfindable; `FORCE_COLOR` — which CI
@@ -119,7 +119,7 @@ async def test_until_idle_exits_non_zero_when_the_last_turn_errored(
     """
     from ph.llm.fake import FakeAdapter
 
-    async def exploding(self: Any, options: Any) -> Any:
+    async def exploding(self: Any, options: Any) -> Any:  # noqa: ANN401
         raise RuntimeError("provider is down")
         yield  # pragma: no cover
 
@@ -694,7 +694,13 @@ async def test_attach_reads_the_status_it_was_handed_rather_than_asking_again(
     called: list[str] = []
     original = DaemonClient.call
 
-    async def recording(self: Any, verb: Any, params: Any = None, /, **fields: Any) -> Any:
+    async def recording(
+        self: Any,  # noqa: ANN401
+        verb: Any,  # noqa: ANN401
+        params: Any = None,  # noqa: ANN401
+        /,
+        **fields: Any,  # noqa: ANN401
+    ) -> Any:  # noqa: ANN401
         # `call`'s two doors since issue 74: a `Verb` with its params
         # positionally, or a bare name with the keyword form for a caller with
         # no model. The spy has to mirror both, or it drops whichever half it
@@ -880,7 +886,7 @@ async def test_an_unnamed_failure_surfaces_as_itself_not_as_a_group(
     """
     from ph_app.agents import _ask
 
-    async def boom(client: Any) -> None:
+    async def boom(client: Any) -> None:  # noqa: ANN401
         raise ValueError("nothing to do with the daemon")
 
     def invoke() -> None:

@@ -107,11 +107,17 @@ class _FileApi:
 def wire(monkeypatch: pytest.MonkeyPatch) -> _FileApi:
     api = _FileApi()
 
-    async def post_multipart(self: HttpClient, url: str, **kwargs: Any) -> dict[str, Any]:
+    async def post_multipart(
+        self: HttpClient,
+        url: str,
+        **kwargs: Any,  # noqa: ANN401
+    ) -> dict[str, Any]:
         return {"id": api.issue()}
 
     async def stream_sse(
-        self: HttpClient, url: str, **kwargs: Any
+        self: HttpClient,
+        url: str,
+        **kwargs: Any,  # noqa: ANN401
     ) -> AsyncIterator[tuple[str, dict[str, Any]]]:
         api.headers.append(dict(kwargs["headers"]))
         for event in api.events(kwargs["json"]):
@@ -123,7 +129,11 @@ def wire(monkeypatch: pytest.MonkeyPatch) -> _FileApi:
     return api
 
 
-async def _attached(ctx: Context, mime: str = "application/pdf", name: str = "paper.pdf") -> Any:
+async def _attached(
+    ctx: Context,
+    mime: str = "application/pdf",
+    name: str = "paper.pdf",
+) -> Any:  # noqa: ANN401
     ref = await ctx.require(ATTACHMENTS).save_bytes(content=PDF, mime=mime, name=name)
     return create_user_message(
         content=[{"type": "text", "text": "what happens here?"}, MediaBlock(attachment=ref)],

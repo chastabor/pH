@@ -82,7 +82,7 @@ def _assert_prefix_stable(requests: list[GenerateOptions]) -> None:
         )
 
 
-async def _record(ctx: Any, prompts: list[str]) -> Any:
+async def _record(ctx: Any, prompts: list[str]) -> Any:  # noqa: ANN401
     session = ctx.require(SESSIONS).create("recorded")
     agent = ctx.require(AGENTS).create(session, FAKE)
     for prompt in prompts:

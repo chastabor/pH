@@ -24,14 +24,14 @@ __all__ = ["UnavailableSkill", "wrap_skill_module"]
 class _CallableModule:
     """A module whose `run()` is reachable by calling the module itself."""
 
-    def __init__(self, module: ModuleType, entry: Any) -> None:
+    def __init__(self, module: ModuleType, entry: Any) -> None:  # noqa: ANN401
         self._module = module
         self._entry = entry
 
-    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
         return self._entry(*args, **kwargs)
 
-    def __getattr__(self, name: str) -> Any:
+    def __getattr__(self, name: str) -> Any:  # noqa: ANN401
         return getattr(self._module, name)
 
     def __dir__(self) -> list[str]:
@@ -55,10 +55,10 @@ class UnavailableSkill:
             "fixed rather than working around it."
         )
 
-    def __call__(self, *_args: Any, **_kwargs: Any) -> Any:
+    def __call__(self, *_args: Any, **_kwargs: Any) -> Any:  # noqa: ANN401
         self._fail()
 
-    def __getattr__(self, name: str) -> Any:
+    def __getattr__(self, name: str) -> Any:  # noqa: ANN401
         if name.startswith("_"):
             raise AttributeError(name)
         self._fail()
@@ -67,7 +67,7 @@ class UnavailableSkill:
         return f"<unavailable skill {self._name}: {self._reason}>"
 
 
-def wrap_skill_module(module: ModuleType) -> Any:
+def wrap_skill_module(module: ModuleType) -> Any:  # noqa: ANN401
     """The module, callable when it offers a `run()`; otherwise unchanged."""
     entry = getattr(module, "run", None)
     return _CallableModule(module, entry) if callable(entry) else module

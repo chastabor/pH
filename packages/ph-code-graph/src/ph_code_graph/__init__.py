@@ -331,7 +331,7 @@ def _doc(one: dict[str, Any]) -> str:
     return f"  — {doc[0][:70]}" if doc else ""
 
 
-def _render_index(args: JsonObject, value: Any) -> list[ContentBlock]:
+def _render_index(args: JsonObject, value: Any) -> list[ContentBlock]:  # noqa: ANN401
     if args.get("forget"):
         return text_content(
             f"Removed {count_of(value['removed'], 'file')} from the index. "
@@ -355,7 +355,7 @@ def _render_index(args: JsonObject, value: Any) -> list[ContentBlock]:
     return text_content("\n".join(lines))
 
 
-def _ambiguity(value: Any) -> str:
+def _ambiguity(value: Any) -> str:  # noqa: ANN401
     if value["definitions"] <= 1:
         return ""
     return (
@@ -365,7 +365,7 @@ def _ambiguity(value: Any) -> str:
     )
 
 
-def _render_graph(args: JsonObject, value: Any) -> list[ContentBlock]:
+def _render_graph(args: JsonObject, value: Any) -> list[ContentBlock]:  # noqa: ANN401
     mode = value["mode"]
     if mode in ("search", "define"):
         if not value["symbols"]:
@@ -535,7 +535,7 @@ async def apply(ctx: Context, config: Config) -> None:
     def store(run: ToolRunContext) -> CodeGraphStore:
         return seam.store_for(ctx.require(FS).root_for(run.agent))
 
-    async def index_tool(args: IndexArgs, run: ToolRunContext) -> Any:
+    async def index_tool(args: IndexArgs, run: ToolRunContext) -> Any:  # noqa: ANN401
         fs = ctx.require(FS)
         book = store(run)
         paths = await fs.collect(
@@ -661,7 +661,7 @@ async def apply(ctx: Context, config: Config) -> None:
             "languages": stats["languages"],
         }
 
-    async def graph_tool(args: GraphArgs, run: ToolRunContext) -> Any:
+    async def graph_tool(args: GraphArgs, run: ToolRunContext) -> Any:  # noqa: ANN401
         book = store(run)
         if not await anyio.to_thread.run_sync(book.exists):
             raise HarnessError(
@@ -763,7 +763,7 @@ async def apply(ctx: Context, config: Config) -> None:
         )
     )
 
-    async def install(argument: str, command: Any) -> str:
+    async def install(argument: str, command: Any) -> str:  # noqa: ANN401
         """`/code-graph install|status` — make the grammars ready, on purpose.
 
         A **command** rather than a tool, per the seam's own rule: a person asks

@@ -44,7 +44,12 @@ does: a fixture loaded from disk makes a wrong header read look like a missing
 file, and the store measures dimensions out of these bytes."""
 
 
-async def _put(client: Any, session_id: str, *, name: str = "diagram.png") -> dict[str, Any]:
+async def _put(
+    client: Any,  # noqa: ANN401
+    session_id: str,
+    *,
+    name: str = "diagram.png",
+) -> dict[str, Any]:
     reply = await client.call(
         "attachment/put",
         sessionId=session_id,

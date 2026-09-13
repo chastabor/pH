@@ -73,7 +73,7 @@ from typing import Any
 __all__ = ["apply_cancel_safe_socket_waits", "guarded", "resolves_a_future"]
 
 
-def resolves_a_future(callback: Any) -> bool:
+def resolves_a_future(callback: Any) -> bool:  # noqa: ANN401
     """Whether this I/O callback is a bound `Future.set_result`.
 
     The one shape that fails, named as a predicate so the test suite can assert
@@ -92,7 +92,7 @@ def resolves_a_future(callback: Any) -> bool:
     )
 
 
-def guarded(method: Any) -> bool:
+def guarded(method: Any) -> bool:  # noqa: ANN401
     """Whether this loop method is ours rather than asyncio's.
 
     Read off `__module__`, which the replacement carries for free, rather than
@@ -109,7 +109,7 @@ def _guarding(original: Callable[..., Any]) -> Callable[..., Any]:
     drifts, and is how anyio came to have five copies of the defect.
     """
 
-    def add(self: Any, fd: Any, callback: Any, *args: Any) -> Any:
+    def add(self: Any, fd: Any, callback: Any, *args: Any) -> Any:  # noqa: ANN401
         if not resolves_a_future(callback):
             return original(self, fd, callback, *args)
 

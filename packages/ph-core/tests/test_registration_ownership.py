@@ -178,7 +178,7 @@ def _declared_classes() -> Iterator[type]:
                 yield cls
 
 
-def _declared_methods(cls: Any) -> Iterator[tuple[str, Any]]:
+def _declared_methods(cls: Any) -> Iterator[tuple[str, Any]]:  # noqa: ANN401
     """The callables a class defines itself, dunders excluded."""
     for name, member in vars(cls).items():
         if not name.startswith("__") and callable(member):
@@ -402,83 +402,83 @@ def _recipe(name: str, key: str) -> Callable[[Callable[[Any], Any]], Callable[[A
     return keep
 
 
-def _command(service: Any) -> Any:
+def _command(service: Any) -> Any:  # noqa: ANN401
     return service.register(_definition("p612"))
 
 
-def _diagnostic(service: Any) -> Any:
+def _diagnostic(service: Any) -> Any:  # noqa: ANN401
     from ph.seams.diagnostics import Diagnostic
 
     return service.register(Diagnostic(id="p612", read=lambda: [("a", "b")]))
 
 
-def _invariant(service: Any) -> Any:
+def _invariant(service: Any) -> Any:  # noqa: ANN401
     from ph.seams.invariants import Invariant
 
     return service.register(Invariant(id="p612", statement="p612 holds", check=lambda: []))
 
 
-def _status(service: Any) -> Any:
+def _status(service: Any) -> Any:  # noqa: ANN401
     from ph.seams.tui_status import StatusField, StatusReading
 
     return service.register(StatusField(id="p612", read=lambda _s: StatusReading(text="x")))
 
 
-def _skill(service: Any) -> Any:
+def _skill(service: Any) -> Any:  # noqa: ANN401
     from ph.seams.skills import Skill
 
     return service.register(Skill(name="p612", description="a skill"))
 
 
-def _section(service: Any) -> Any:
+def _section(service: Any) -> Any:  # noqa: ANN401
     from ph.system_prompt.assembly import PromptSection
 
     return service.section(PromptSection(name="p612", text="text"))
 
 
-def _variable(service: Any) -> Any:
+def _variable(service: Any) -> Any:  # noqa: ANN401
     return service.variable("p612", lambda: "value")
 
 
-def _prompt_tools(service: Any) -> Any:
+def _prompt_tools(service: Any) -> Any:  # noqa: ANN401
     return service.tools(lambda _scope: [])
 
 
-def _guard(service: Any) -> Any:
+def _guard(service: Any) -> Any:  # noqa: ANN401
     return service.guard(lambda _execution: None)
 
 
-def _subagent_guard(service: Any) -> Any:
+def _subagent_guard(service: Any) -> Any:  # noqa: ANN401
     return service.guard(lambda _request: None)
 
 
-def _tool(service: Any) -> Any:
+def _tool(service: Any) -> Any:  # noqa: ANN401
     from ph.testing import simple_tool
 
     return service.register(simple_tool("p612_tool"))
 
 
-def _restrict(service: Any) -> Any:
+def _restrict(service: Any) -> Any:  # noqa: ANN401
     from ph.seams._restriction import NameFilter
 
     return service.restrict(NameFilter(deny=frozenset({"nothing"})))
 
 
-def _approval(service: Any) -> Any:
+def _approval(service: Any) -> Any:  # noqa: ANN401
     return service.register_answerer(lambda _request: None)
 
 
-def _question(service: Any) -> Any:
+def _question(service: Any) -> Any:  # noqa: ANN401
     return service.register_answerer(lambda _question: None)
 
 
-def _spill_claim(service: Any) -> Any:
+def _spill_claim(service: Any) -> Any:  # noqa: ANN401
     from ph.seams.spill import SpillClaim
 
     return service.claim(SpillClaim(label="p612", event_type="p612/spilled", owners=lambda _s: ()))
 
 
-def _note(service: Any) -> Any:
+def _note(service: Any) -> Any:  # noqa: ANN401
     from ph.seams.compaction import CompactionNote
 
     return service.note(CompactionNote(name="p612", text=lambda _session: "note"))
@@ -871,7 +871,7 @@ per test — the shape `test_cordis_dispatch.py` already uses. Keyed off
 """
 
 
-def _definition(name: str, run: Any = None) -> Any:
+def _definition(name: str, run: Any = None) -> Any:  # noqa: ANN401
     """The least a `CommandDefinition` needs, for tests that only watch it come and go.
 
     `run` for the one test that needs the body to *do* something — a second
@@ -1011,13 +1011,13 @@ async def test_every_dispatch_mode_runs_a_listener_as_its_own_scope(
     async def row(ctx: Context, config: None) -> None:
         if shape == "sync":
 
-            def sync_listener(*args: Any) -> None:
+            def sync_listener(*args: Any) -> None:  # noqa: ANN401
                 seen.append(Context.current_owner())
 
             ctx.on(event, sync_listener)
         else:
 
-            async def async_listener(*args: Any) -> None:
+            async def async_listener(*args: Any) -> None:  # noqa: ANN401
                 seen.append(Context.current_owner())
 
             ctx.on(event, async_listener)
@@ -1076,7 +1076,7 @@ async def test_a_tool_body_registers_inside_the_agent_it_runs_for(mount: MountPr
         ctx.require(SESSIONS).create("p626-child"), FAKE_OPTIONS, parent=parent
     )
 
-    def smuggle(_args: Any, run: Any) -> str:
+    def smuggle(_args: Any, run: Any) -> str:  # noqa: ANN401
         run.scope.require(TOOLS).register(simple_tool("p626_smuggled"))
         return "done"
 
@@ -1193,7 +1193,7 @@ async def test_a_tool_body_registers_as_its_row_and_for_its_agent(mount: MountPr
         agent = ctx.require(AGENTS).create(ctx.require(SESSIONS).create("p629-tool"), FAKE_OPTIONS)
         other = ctx.require(AGENTS).create(ctx.require(SESSIONS).create("p629-other"), FAKE_OPTIONS)
 
-        def smuggle(_args: Any, run: Any) -> str:
+        def smuggle(_args: Any, run: Any) -> str:  # noqa: ANN401
             run.scope.require(TOOLS).register(simple_tool("p629_made"))
             return "done"
 

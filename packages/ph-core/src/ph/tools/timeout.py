@@ -14,7 +14,7 @@ a deployment that wants a different timeout policy swaps the row.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 import anyio
@@ -30,7 +30,10 @@ __all__ = ["apply"]
 async def apply(ctx: Context, config: None) -> None:
     """Bound every dispatch whose tool declared `timeout_ms`."""
 
-    async def bounded(execution: ToolExecution, next_: Callable[..., Any]) -> Any:
+    async def bounded(
+        execution: ToolExecution,
+        next_: Callable[..., Awaitable[Any]],
+    ) -> Any:  # noqa: ANN401
         definition = ctx.require(TOOLS).get(execution.name, scope=execution.scope)
         budget = getattr(definition, "timeout_ms", None)
         if budget is None:

@@ -313,13 +313,13 @@ class JsonEncoder(json.JSONEncoder):
     a token no other parser reads.
     """
 
-    def __init__(self, **kwargs: Any) -> None:
+    def __init__(self, **kwargs: Any) -> None:  # noqa: ANN401
         kwargs.setdefault("allow_nan", False)
         kwargs.setdefault("separators", (",", ":"))
         kwargs.setdefault("ensure_ascii", False)
         super().__init__(**kwargs)
 
-    def default(self, o: Any) -> Any:
+    def default(self, o: Any) -> Any:  # noqa: ANN401
         if isinstance(o, MappingProxyType):
             return dict(o)
         return super().default(o)

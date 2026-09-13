@@ -45,7 +45,7 @@ from ph.llm.types import ContentBlock, PluginSource, create_user_message, new_me
 from ph.seams.code_runtime import CodeBindingNamespace
 from ph.seams.subagents import FamilyRole, reachable_family
 from ph.session import Session, derive_event_message
-from ph.tools import ToolModel, ToolOutput, define_tool, text_content
+from ph.tools import ToolModel, ToolOutput, ToolRunContext, define_tool, text_content
 from ph.tools.code_mode import CodeBindingsRequest, ToolCallError, governed_binding
 from ph.wire import WireModel
 
@@ -195,7 +195,7 @@ async def apply(ctx: Context, config: Config) -> None:
     def family(agent_id: str) -> dict[str, FamilyRole]:
         return reachable_family(ctx.require(SESSIONS).list(), agent_id)
 
-    def resolve(sender_id: str, args: Any) -> tuple[str | None, str]:
+    def resolve(sender_id: str, args: Any) -> tuple[str | None, str]:  # noqa: ANN401
         """`(target_id, refusal)` — the one resolution the guard and the body share.
 
         Returning the refusal rather than raising, because the guard needs the
@@ -234,7 +234,7 @@ async def apply(ctx: Context, config: Config) -> None:
     # C7. Deny-only and last, so no later listener can re-permit a send outside
     # the family — the boundary is not a policy a deployment may relax.
 
-    def family_guard(execution: Any) -> str | None:
+    def family_guard(execution: Any) -> str | None:  # noqa: ANN401
         if execution.name != SEND_TOOL:
             return None
         sender = getattr(execution.agent, "id", None)
@@ -251,7 +251,7 @@ async def apply(ctx: Context, config: Config) -> None:
 
     # ------------------------------------------------------------- the tools --
 
-    async def send(args: SendArgs, run: Any) -> Any:
+    async def send(args: SendArgs, run: ToolRunContext) -> Any:  # noqa: ANN401
         sender = run.agent
         sender_id = sender.id
         body = args.message.strip()
@@ -333,7 +333,7 @@ async def apply(ctx: Context, config: Config) -> None:
             pending=pending + 1,
         ).to_wire()
 
-    def list_agents(_args: Any, run: Any) -> Any:
+    def list_agents(_args: Any, run: ToolRunContext) -> Any:  # noqa: ANN401
         """Who this agent may address, and how each is related."""
         sender_id = run.agent.id
         rows = [
@@ -348,10 +348,10 @@ async def apply(ctx: Context, config: Config) -> None:
         ]
         return {"agents": rows}
 
-    def observe_list(_args: Any, run: Any) -> Any:
+    def observe_list(_args: Any, run: ToolRunContext) -> Any:  # noqa: ANN401
         return list_agents(_args, run)
 
-    def observe_get(args: ObserveArgs, run: Any) -> Any:
+    def observe_get(args: ObserveArgs, run: ToolRunContext) -> Any:  # noqa: ANN401
         """A bounded read of another family member's transcript.
 
         Reach-limited by the same rule as a send: an agent that may not talk to
@@ -455,7 +455,7 @@ def _namespace(
     return CodeBindingNamespace(name=name, description=description, bindings=tuple(bindings))
 
 
-def _arg(args: Any, key: str, default: Any) -> Any:
+def _arg(args: Any, key: str, default: Any) -> Any:  # noqa: ANN401
     """One read for both shapes: a validated model and a frozen argument map."""
     if hasattr(args, key):
         return getattr(args, key)
@@ -496,14 +496,14 @@ def _transcript(session: Session, limit: int) -> list[dict[str, Any]]:
     return rows
 
 
-def _render_receipt(_args: JsonObject, value: Any) -> list[ContentBlock]:
+def _render_receipt(_args: JsonObject, value: Any) -> list[ContentBlock]:  # noqa: ANN401
     return text_content(
         f"{value['deliveryStatus']} to {value['receiverId']} "
         f"({value['receiverRole']}); {value['pending']} pending"
     )
 
 
-def _render_agents(_args: JsonObject, value: Any) -> list[ContentBlock]:
+def _render_agents(_args: JsonObject, value: Any) -> list[ContentBlock]:  # noqa: ANN401
     rows = value.get("agents") or []
     if not rows:
         return text_content("no reachable agents")
@@ -516,7 +516,7 @@ def _render_agents(_args: JsonObject, value: Any) -> list[ContentBlock]:
     )
 
 
-def _render_transcript(_args: JsonObject, value: Any) -> list[ContentBlock]:
+def _render_transcript(_args: JsonObject, value: Any) -> list[ContentBlock]:  # noqa: ANN401
     rows = value.get("messages") or []
     if not rows:
         return text_content(f"{value.get('agentId')} has said nothing")

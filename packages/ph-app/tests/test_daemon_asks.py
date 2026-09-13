@@ -33,19 +33,24 @@ from ph.testing import StubAgent
 pytestmark = pytest.mark.anyio
 
 
-async def _root(daemon: Any, session_id: str = "asked") -> Any:
+async def _root(daemon: Any, session_id: str = "asked") -> Any:  # noqa: ANN401
     """One live root, started the way `session/attach` starts one."""
     return await daemon.running.supervisor.start(session_id)
 
 
-async def _ask(root: Any) -> Any:
+async def _ask(root: Any) -> Any:  # noqa: ANN401
     """Fire one approval through the seam, exactly as a gated tool does."""
     return await root.ctx.require(APPROVAL).request(
         agent=StubAgent(ctx=root.ctx, session=root.session), tool_name="write", call_id="c1"
     )
 
 
-async def _front_end(daemon: Any, root: Any, handler: Any, method: str = "approval/ask") -> Any:
+async def _front_end(
+    daemon: Any,  # noqa: ANN401
+    root: Any,  # noqa: ANN401
+    handler: Any,  # noqa: ANN401
+    method: str = "approval/ask",
+) -> Any:  # noqa: ANN401
     """One client that declares `asks`, answers `method`, and is attached.
 
     The four lines this replaces appeared at every front end in the file, which
@@ -57,7 +62,7 @@ async def _front_end(daemon: Any, root: Any, handler: Any, method: str = "approv
     return client
 
 
-def _answering(answer: str, seen: list[dict[str, Any]]) -> Any:
+def _answering(answer: str, seen: list[dict[str, Any]]) -> Any:  # noqa: ANN401
     async def handler(params: dict[str, Any]) -> dict[str, Any]:
         seen.append(params)
         return {"answer": answer}
@@ -273,7 +278,7 @@ async def test_answering_is_declared_once_for_a_connection_not_per_attach(
 # --------------------------------------------------------------- questions --
 
 
-async def _ask_question(root: Any) -> Any:
+async def _ask_question(root: Any) -> Any:  # noqa: ANN401
     """One question through the seam, exactly as `ask_user` puts it."""
     return await root.ctx.require(USER_QUESTIONS).ask(
         UserQuestion(question="which port?", ask_id="call-1"), session=root.session

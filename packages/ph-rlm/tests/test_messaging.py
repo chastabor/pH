@@ -38,7 +38,7 @@ ROWS: list[dict[str, Any]] = [PROVIDER_ROW, MESSAGING_ROW]
 def family_ctx(mount: MountProfile) -> Callable[..., Any]:
     """`await family_ctx()` → `(ctx, parent_session, parent)` with messaging on."""
 
-    async def build(**config: Any) -> tuple[Any, Any, Any]:
+    async def build(**config: Any) -> tuple[Any, Any, Any]:  # noqa: ANN401
         rows = [dict(ROWS[0]), dict(ROWS[1])]
         if config:
             rows[1]["config"] = config
@@ -49,13 +49,16 @@ def family_ctx(mount: MountProfile) -> Callable[..., Any]:
     return build
 
 
-async def _spawn(ctx: Any, parent: Any, name: str) -> Any:
+async def _spawn(ctx: Any, parent: Any, name: str) -> Any:  # noqa: ANN401
     return await ctx.require(SUBAGENTS).start(
         PROVIDER_NAME, SubagentRequest(prompt=f"work on {name}", parent=parent, name=name)
     )
 
 
-async def _siblings(family_ctx: MountedRuntime, **config: Any) -> tuple[Any, Any, Any, Any]:
+async def _siblings(
+    family_ctx: MountedRuntime,
+    **config: Any,  # noqa: ANN401
+) -> tuple[Any, Any, Any, Any]:
     """Two root agents, which the reach rule makes siblings of each other.
 
     Used for the limit tests because they must not race a child's completion:
@@ -67,13 +70,13 @@ async def _siblings(family_ctx: MountedRuntime, **config: Any) -> tuple[Any, Any
     return ctx, first_session, first, ctx.require(AGENTS).create(second_session, FAKE_OPTIONS)
 
 
-def _agent(ctx: Any, run: Any) -> Any:
+def _agent(ctx: Any, run: Any) -> Any:  # noqa: ANN401
     agent = ctx.require(AGENTS).get(run.session_id)
     assert agent is not None, "the child agent is not running"
     return agent
 
 
-async def _send(ctx: Any, sender: Any, session: Any, **arguments: Any) -> Any:
+async def _send(ctx: Any, sender: Any, session: Any, **arguments: Any) -> Any:  # noqa: ANN401
     return await run_tool(ctx, SEND_TOOL, arguments, agent=sender, session=session)
 
 

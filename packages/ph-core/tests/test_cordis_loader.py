@@ -38,7 +38,7 @@ def _doc(name: str, text: str) -> tuple[str, object]:
     return name, safe_yaml_load(text, origin=name)
 
 
-def _fake_module(name: str, **plugins: Any) -> None:
+def _fake_module(name: str, **plugins: Any) -> None:  # noqa: ANN401
     """Register `plugins` under an importable module name for `name:` to resolve.
 
     Written out four times in this file before it was one helper — each copy

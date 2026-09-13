@@ -132,7 +132,7 @@ def pytest_configure(config: pytest.Config) -> None:
 
     original = TestRunner._exception_handler
 
-    def attributing(runner: Any, loop: Any, context: dict[str, Any]) -> Any:
+    def attributing(runner: Any, loop: Any, context: dict[str, Any]) -> Any:  # noqa: ANN401
         error = context.get("exception")
         if isinstance(error, BaseException):
             named = ", ".join(
@@ -304,7 +304,7 @@ async def mount(tmp_path: Path) -> AsyncIterator[MountProfile]:
     """
     roots: list[Context] = []
 
-    async def _mount(*overlay_rows: dict[str, Any], profile: Any = None) -> Context:
+    async def _mount(*overlay_rows: dict[str, Any], profile: Any = None) -> Context:  # noqa: ANN401
         """`profile` layers a bundle between the base and the overlay.
 
         One keyword rather than a second fixture, because "mount the shipped

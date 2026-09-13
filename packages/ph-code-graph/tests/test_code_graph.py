@@ -132,7 +132,7 @@ def _grammar_cache(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Path]:
 _SEQ = itertools.count()
 
 
-def _agent(ctx: Any) -> Any:
+def _agent(ctx: Any) -> Any:  # noqa: ANN401
     """A fresh agent, on a session id nothing else has taken.
 
     Counted rather than fixed: a test that needs two agents (an index call and a
@@ -150,7 +150,7 @@ def _tree(root: Path) -> None:
     (root / "pkg" / "helpers.py").write_text(OTHER, encoding="utf-8")
 
 
-async def _indexed(mount: MountProfile, tmp_path: Path, **config: Any) -> Any:
+async def _indexed(mount: MountProfile, tmp_path: Path, **config: Any) -> Any:  # noqa: ANN401
     settings = {"path": str(tmp_path / "graph.db"), **config}
     ctx = await mount({**ROW, "config": settings})
     return ctx
@@ -493,7 +493,7 @@ def _counting_reads(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     reads: list[str] = []
     original = FsService.read
 
-    async def counted(self: Any, path: Any, **kwargs: Any) -> Any:
+    async def counted(self: Any, path: Any, **kwargs: Any) -> Any:  # noqa: ANN401
         reads.append(str(path))
         return await original(self, path, **kwargs)
 

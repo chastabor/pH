@@ -62,14 +62,14 @@ here is now `_coerce`'s, for the reason the module docstring gives.
 """
 
 
-def _decode_json(raw: str | bytes) -> Any:
+def _decode_json(raw: str | bytes) -> Any:  # noqa: ANN401
     # Decoded to `str` here rather than handing bytes to the decoder: measured
     # 0.49 µs against 0.65 µs on an 84-byte frame, because the bytes path sniffs
     # the encoding before doing exactly this.
     return _DECODER.decode(raw if isinstance(raw, str) else raw.decode("utf-8"))
 
 
-def _coerce(value: Any, kind: FieldKind) -> Any:
+def _coerce(value: Any, kind: FieldKind) -> Any:  # noqa: ANN401
     if kind == "any":
         return value
     if kind == "int":

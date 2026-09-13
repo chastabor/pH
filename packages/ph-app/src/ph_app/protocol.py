@@ -362,7 +362,7 @@ class Cursor(WireModel):
     sequence: int
 
 
-def cursor_of(session: Any, sequence: int | None = None) -> Cursor:
+def cursor_of(session: Any, sequence: int | None = None) -> Cursor:  # noqa: ANN401
     """A session's position as a `Cursor`; `to_wire()` puts it in a reply.
 
     Here rather than on the daemon's `Root`, because it is a fact about a
@@ -395,7 +395,7 @@ def cursor_text(cursor: Cursor) -> str:
     return f"{cursor.generation}:{cursor.sequence}"
 
 
-def parse_cursor(text: str, current: Any) -> Cursor | None:
+def parse_cursor(text: str, current: Any) -> Cursor | None:  # noqa: ANN401
     """`GENERATION:SEQ` or a bare `SEQ`, as a cursor — or `None` if it is neither.
 
     Two spellings, and only one of them can be checked. The full form is a cursor
@@ -421,7 +421,7 @@ def parse_cursor(text: str, current: Any) -> Cursor | None:
     return Cursor(generation=generation, sequence=int(sequence))
 
 
-def resume_at(session: Any, cursor: Cursor | None) -> int:
+def resume_at(session: Any, cursor: Cursor | None) -> int:  # noqa: ANN401
     """The index a cursor asks to resume from, or 0 when it cannot say.
 
     A cursor from another incarnation of the log is neither honoured nor

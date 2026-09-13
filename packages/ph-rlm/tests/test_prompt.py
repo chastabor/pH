@@ -49,7 +49,7 @@ def prompted(mounted_runtime: MountedRuntime) -> Callable[..., Any]:
         *,
         delegation: bool = True,
         extra_rows: list[dict[str, Any]] | None = None,
-        **kwargs: Any,
+        **kwargs: Any,  # noqa: ANN401
     ) -> tuple[Context, Session, AgentHandle]:
         rows = [
             *([PROVIDER_ROW, BINDINGS_ROW] if delegation else []),
@@ -64,15 +64,15 @@ def prompted(mounted_runtime: MountedRuntime) -> Callable[..., Any]:
     return build
 
 
-async def _assemble(ctx: Any, agent: Any) -> Any:
+async def _assemble(ctx: Any, agent: Any) -> Any:  # noqa: ANN401
     return await ctx.require(SYSTEM_PROMPT).assemble(agent.ctx, agent=agent)
 
 
-async def _prompt(ctx: Any, agent: Any) -> str:
+async def _prompt(ctx: Any, agent: Any) -> str:  # noqa: ANN401
     return render_prompt(await _assemble(ctx, agent))
 
 
-async def _snapshot(ctx: Any, agent: Any) -> str:
+async def _snapshot(ctx: Any, agent: Any) -> str:  # noqa: ANN401
     """The snapshot exactly as the driver builds it — same joiner, same text."""
     return join_context_sections(render_context_sections(await _assemble(ctx, agent)))
 

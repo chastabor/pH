@@ -62,7 +62,7 @@ class BashValue(ToolModel):
     timed_out: bool = False
 
 
-def _render(_args: JsonObject, value: Any) -> list[ContentBlock]:
+def _render(_args: JsonObject, value: Any) -> list[ContentBlock]:  # noqa: ANN401
     parts: list[str] = []
     if value["stdout"]:
         parts.append(value["stdout"].rstrip())
@@ -84,7 +84,7 @@ def _render(_args: JsonObject, value: Any) -> list[ContentBlock]:
 async def apply(ctx: Context, config: None) -> None:
     """Register the bash tool."""
 
-    async def run_command(args: BashArgs, run: ToolRunContext) -> Any:
+    async def run_command(args: BashArgs, run: ToolRunContext) -> Any:  # noqa: ANN401
         # The agent, not a directory: `ctx.shell` resolves the cwd and the
         # workspace environment from it, so this tool states who is running
         # rather than re-deriving where (D21, E2).

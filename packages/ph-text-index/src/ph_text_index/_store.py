@@ -280,7 +280,13 @@ class TextIndex:
                 self._index.remove(id_)
         return len(ids)
 
-    def add(self, path: str, chunks: list[Chunk], vectors: Any, vcs_id: str = "") -> int:
+    def add(
+        self,
+        path: str,
+        chunks: list[Chunk],
+        vectors: Any,  # noqa: ANN401
+        vcs_id: str = "",
+    ) -> int:
         """Index `chunks`, whose rows are `vectors`. Returns how many landed.
 
         :raises IndexMismatch: when the vectors' width is not the index's.
@@ -317,7 +323,7 @@ class TextIndex:
             self._by_path.setdefault(path, []).append(record.id)
         return len(chunks)
 
-    def _maybe_calibrate(self, rows: Any) -> None:
+    def _maybe_calibrate(self, rows: Any) -> None:  # noqa: ANN401
         """Fit TQ+ before the first add, when this batch is a fair sample of it."""
         import numpy as np
 
@@ -330,7 +336,11 @@ class TextIndex:
     # ------------------------------------------------------------ search ----
 
     def search(
-        self, vector: Any, k: int, *, allowed: list[int] | None = None
+        self,
+        vector: Any,  # noqa: ANN401
+        k: int,
+        *,
+        allowed: list[int] | None = None,
     ) -> list[tuple[float, Record]]:
         """The best `k` passages for one query vector, best first.
 
@@ -414,7 +424,7 @@ class TextIndex:
         }
 
 
-def _turbovec() -> Any:
+def _turbovec() -> Any:  # noqa: ANN401
     # No py.typed marker upstream, and the surface used here is four methods on
     # one class — a stub file would be more of this module than the module.
     import turbovec  # type: ignore[import-untyped]
