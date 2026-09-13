@@ -37,15 +37,21 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 import anyio
+from anyio.abc import TaskGroup
 
 from ph.cordis import Disposer
 from ph.keys import APPROVAL, USER_QUESTIONS
 from ph.llm.types import user_text
 from ph.seams.approval import ApprovalAnswer, ApprovalRequest, answer_from_wire
 from ph.seams.user_questions import UserQuestion
+
+if TYPE_CHECKING:
+    # `supervisor` imports this module for `AskDesk`, so the edge only runs the
+    # other way for the checker.
+    from .supervisor import Root
 
 from ..payloads import (
     ApprovalAsk,
@@ -82,14 +88,14 @@ class PendingAsk:
     params: dict[str, Any]
     answered: anyio.Event
     answer: dict[str, Any] | None = None
-    tasks: Any = None
+    tasks: TaskGroup | None = None
 
 
 @dataclass(slots=True)
 class AskDesk:
     """The answerers a root registers, and the front ends they reach."""
 
-    root: Any
+    root: Root
     front_ends: set[FrontEnd] = field(default_factory=set)
     asks: dict[str, PendingAsk] = field(default_factory=dict)
 

@@ -82,7 +82,7 @@ def presentation_of(
         ToolResult(
             content=(),
             is_error=as_bool(result_block(as_obj(event.data.get("message"))).get("isError")),
-            meta=event.data.get("meta"),
+            meta=as_obj(event.data.get("meta")),
         ),
     )
     return None if settled is None else settled.to_wire()

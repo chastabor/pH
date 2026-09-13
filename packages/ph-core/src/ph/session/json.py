@@ -76,7 +76,7 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping, Sequence
 from types import MappingProxyType
-from typing import Any, overload
+from typing import overload
 
 from ..json import JSON_MAX_SAFE_INTEGER, JsonObject, JsonValue
 
@@ -156,7 +156,7 @@ class _Walker:
             raise self._fail("circular reference")
         self._ancestors.add(identity)
 
-    def _object(self, value: Mapping[Any, Any]) -> Mapping[str, JsonValue]:
+    def _object(self, value: Mapping[object, object]) -> Mapping[str, JsonValue]:
         self._enter(value)
         result: dict[str, JsonValue] = {}
         for key, item in value.items():
@@ -168,7 +168,7 @@ class _Walker:
         self._ancestors.discard(id(value))
         return MappingProxyType(result)
 
-    def _array(self, value: Sequence[Any]) -> Sequence[JsonValue]:
+    def _array(self, value: Sequence[object]) -> Sequence[JsonValue]:
         self._enter(value)
         result: list[JsonValue] = []
         for index, item in enumerate(value):

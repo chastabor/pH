@@ -30,6 +30,8 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any
 
+from ..seams.code_runtime import CodeBinding, CodeBindingNamespace
+
 __all__ = ["code_only_rule", "render_python_sdk", "render_typescript_sdk"]
 
 _PYTHON_TYPES = {
@@ -53,13 +55,13 @@ _TS_TYPES = {
 }
 
 
-def _summary(binding: object) -> str:
-    description = str(getattr(binding, "description", "") or "").strip()
+def _summary(binding: CodeBinding) -> str:
+    description = binding.description.strip()
     return description.splitlines()[0] if description else ""
 
 
-def _properties(binding: object) -> list[tuple[str, dict[str, Any], bool]]:
-    parameters = getattr(binding, "parameters", None) or {}
+def _properties(binding: CodeBinding) -> list[tuple[str, dict[str, Any], bool]]:
+    parameters = binding.parameters
     properties = parameters.get("properties") or {}
     required = set(parameters.get("required") or ())
     return [
@@ -75,7 +77,7 @@ def _type_name(definition: dict[str, Any], table: dict[str, str], fallback: str)
     return table.get(str(declared), fallback)
 
 
-def render_python_sdk(namespaces: Sequence[Any]) -> str:
+def render_python_sdk(namespaces: Sequence[CodeBindingNamespace]) -> str:
     """Render the Python SDK block for a set of binding namespaces."""
     lines: list[str] = []
     for namespace in namespaces:
@@ -97,7 +99,7 @@ def render_python_sdk(namespaces: Sequence[Any]) -> str:
     return "\n".join(lines).rstrip()
 
 
-def render_typescript_sdk(namespaces: Sequence[Any]) -> str:
+def render_typescript_sdk(namespaces: Sequence[CodeBindingNamespace]) -> str:
     """Render the TypeScript SDK block for a set of binding namespaces."""
     lines: list[str] = []
     for namespace in namespaces:

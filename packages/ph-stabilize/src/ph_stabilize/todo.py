@@ -722,7 +722,7 @@ async def apply(ctx: Context, config: None) -> None:
                 title="Plan",
                 subtitle=_counts(
                     _entries(args.get("todos")),
-                    bare=len((result.meta or {}).get("unevidenced") or ()),
+                    bare=len(as_seq((result.meta or {}).get("unevidenced"))),
                 ),
                 is_error=result.is_error,
             ),

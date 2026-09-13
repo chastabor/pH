@@ -37,7 +37,15 @@ from ..json import as_seq
 from ..keys import ATTACHMENTS, LLM, SESSIONS
 from ..session import Session
 from .adapter import ResolvedModel
-from .types import AttachmentRef, GenerateOptions, Message, StreamChunk, TextBlock, attachment_of
+from .types import (
+    AttachmentRef,
+    ContentBlock,
+    GenerateOptions,
+    Message,
+    StreamChunk,
+    TextBlock,
+    attachment_of,
+)
 
 __all__ = [
     "ATTACHABLE",
@@ -200,7 +208,7 @@ def degrade_media(
     rewritten: list[Message] = []
     changed = False
     for message in messages:
-        blocks: list[Any] = []
+        blocks: list[ContentBlock] = []
         touched = False
         for block in message.content:
             attachment = attachment_of(block)

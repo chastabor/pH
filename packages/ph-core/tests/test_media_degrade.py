@@ -30,7 +30,14 @@ from ph.llm.media import (
     oversized_notices,
     unusable_reason,
 )
-from ph.llm.types import AttachmentRef, MediaBlock, Message, TextBlock, create_user_message
+from ph.llm.types import (
+    AttachmentRef,
+    ContentBlock,
+    MediaBlock,
+    Message,
+    TextBlock,
+    create_user_message,
+)
 from ph.seams.attachments import AttachmentStore
 from ph.testing import MountProfile, as_kind
 
@@ -50,7 +57,7 @@ def _ref(mime: str = "image/png", **facts: Any) -> AttachmentRef:  # noqa: ANN40
     return AttachmentRef(attachment_id="sha256:x", mime=mime, bytes=1024, name="shot.png", **facts)
 
 
-def _message(*blocks: object) -> Message:
+def _message(*blocks: ContentBlock) -> Message:
     return create_user_message(content=list(blocks), source={"kind": "user"})
 
 
@@ -86,7 +93,7 @@ def test_a_missing_blob_is_a_reason_not_a_crash() -> None:
 def test_an_unusable_block_becomes_a_sentence_in_its_place() -> None:
     """Replaced, not dropped — the position in the message is kept, so a model
     reading "look at this" still finds something where the image was."""
-    message = _message({"type": "text", "text": "look at this"}, MediaBlock(attachment=_ref()))
+    message = _message(TextBlock(text="look at this"), MediaBlock(attachment=_ref()))
 
     (rewritten,), degraded = degrade_media([message], _Store(), _takes())
 
@@ -100,7 +107,7 @@ def test_an_unusable_block_becomes_a_sentence_in_its_place() -> None:
 def test_a_request_with_nothing_to_degrade_is_left_identical() -> None:
     """The overwhelmingly common case allocates nothing and changes no bytes,
     which is what the prefix cache is counting on (A12)."""
-    messages = [_message({"type": "text", "text": "hello"})]
+    messages = [_message(TextBlock(text="hello"))]
 
     rewritten, degraded = degrade_media(messages, _Store(), _takes())
 
@@ -134,7 +141,7 @@ async def test_the_row_degrades_and_records_once(mount: MountProfile, tmp_path: 
     session = ctx.require(SESSIONS).create("degraded")
     agent = ctx.require(AGENTS).create(session, AgentOptions(provider="fake", model="fake-1"))
 
-    agent.followup(_message({"type": "text", "text": "what is this?"}, MediaBlock(attachment=ref)))
+    agent.followup(_message(TextBlock(text="what is this?"), MediaBlock(attachment=ref)))
     await agent.run()
     await agent.prompt("and again")
 
@@ -238,7 +245,7 @@ async def test_the_oversized_notice_lands_once_and_names_the_picture(
     session = ctx.require(SESSIONS).create("oversized")
     agent = ctx.require(AGENTS).create(session, AgentOptions(provider="fake", model="fake-1"))
 
-    agent.followup(_message({"type": "text", "text": "look"}, MediaBlock(attachment=ref)))
+    agent.followup(_message(TextBlock(text="look"), MediaBlock(attachment=ref)))
     await agent.run()
     await agent.prompt("and again")
 

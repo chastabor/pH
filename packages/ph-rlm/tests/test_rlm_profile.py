@@ -142,6 +142,7 @@ async def test_a_turn_runs_end_to_end_on_the_composed_profile(mount: MountProfil
     # computes it, the log freezes it, the view reads it back. Frozen, because
     # `MappingProxyType` is what a live payload is and is *not* a `dict`.
     computed = definition.output.presentation_meta({}, {"value": 1, "dispatches": 1})
+    assert computed is not None
     result_view = definition.present_result(
         {"program": "rows = 1"},
         ToolResult(content=(), is_error=False, meta=freeze_json_value(computed)),

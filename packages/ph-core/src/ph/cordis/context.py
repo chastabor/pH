@@ -1385,7 +1385,7 @@ class Context:
         """
         event_registry.check(event, "waterfall")
         hooks = self._hooks(event, scope=scope)
-        state: list[Any] = list(args)
+        state: list[object] = list(args)
         index = 0
 
         async def next_(*replacement: object) -> object:

@@ -41,6 +41,7 @@ __all__ = [
     "LlmFailure",
     "MediaBlock",
     "Message",
+    "MessageContent",
     "MessageSource",
     "ModelSource",
     "PluginSource",
@@ -179,6 +180,20 @@ ContentBlock: TypeAlias = Annotated[
 
 ToolResultBlock.model_rebuild()
 
+MessageContent: TypeAlias = Sequence[ContentBlock | JsonObject]
+"""What a message is built from: declared blocks, their wire form, or a mix.
+
+Both, because the constructors below validate through `Message.model_validate`,
+which coerces a raw block dict and passes an instance through — and callers use
+each: an adapter holds `ContentBlock`s it just assembled, while a row writing one
+message inline spells the dict.
+
+The wire half is the arm to watch. Every site in this tree that uses it passes a
+single text block, which `user_text` and `TextBlock` already name — so the union
+describes what callers happen to do rather than a contract worth keeping, and it
+narrows to `Sequence[ContentBlock]` the day they stop.
+"""
+
 _CONTENT_BLOCKS: TypeAdapter[list[ContentBlock]] = TypeAdapter(list[ContentBlock])
 
 
@@ -187,7 +202,9 @@ def content_from_wire(blocks: object) -> list[ContentBlock]:
     return _CONTENT_BLOCKS.validate_python(blocks)
 
 
-def text_of(blocks: Sequence[Any], *, placeholder: Callable[[str], str] | None = None) -> str:
+def text_of(
+    blocks: Sequence[ContentBlock], *, placeholder: Callable[[str], str] | None = None
+) -> str:
     """The text of a block list, joined by newlines.
 
     Non-text blocks are skipped, or rendered through `placeholder(type)` when a
@@ -195,24 +212,21 @@ def text_of(blocks: Sequence[Any], *, placeholder: Callable[[str], str] | None =
     """
     parts: list[str] = []
     for block in blocks:
-        kind = getattr(block, "type", None)
-        if kind == "text":
+        if isinstance(block, TextBlock):
             parts.append(block.text)
-        elif placeholder is not None and isinstance(kind, str):
-            parts.append(placeholder(kind))
+        elif placeholder is not None:
+            parts.append(placeholder(block.type))
     return "\n".join(parts)
 
 
-def attachment_of(block: object) -> AttachmentRef | None:
+def attachment_of(block: ContentBlock) -> AttachmentRef | None:
     """The attachment a block carries, or `None` — the one "is this media" test.
 
-    Beside `text_of` for the same reason that exists: the pair
-    `getattr(block, "attachment", None)` plus an `isinstance` check is the rule
-    for reading a brand-new content type, and every consumer that spelled it by
-    hand would be copying whichever call site it happened to read.
+    Beside `text_of` for the same reason that exists: "is this media" is the
+    rule for reading a brand-new content type, and every consumer that spelled it
+    by hand would be copying whichever call site it happened to read.
     """
-    attachment = getattr(block, "attachment", None)
-    return attachment if isinstance(attachment, AttachmentRef) else None
+    return block.attachment if isinstance(block, MediaBlock) else None
 
 
 # ------------------------------------------------------------------ sources --
@@ -312,7 +326,7 @@ ToolResultMessage: TypeAlias = Message
 def create_message(
     *,
     role: Literal["system", "user", "assistant"],
-    content: list[Any],
+    content: MessageContent,
     source: object,
 ) -> Message:
     """Create one identified message."""
@@ -321,7 +335,7 @@ def create_message(
     )
 
 
-def create_user_message(*, content: list[Any], source: object) -> Message:
+def create_user_message(*, content: MessageContent, source: object) -> Message:
     return create_message(role="user", content=content, source=source)
 
 
@@ -339,7 +353,7 @@ def user_text(text: str) -> Message:
 
 def create_assistant_message(
     *,
-    content: list[Any],
+    content: MessageContent,
     provider: str,
     model: str,
     replay_state: object = None,
@@ -350,10 +364,12 @@ def create_assistant_message(
     return create_message(role="assistant", content=content, source=source)
 
 
-def create_tool_result_message(*, call_id: str, content: list[Any], is_error: bool) -> Message:
+def create_tool_result_message(*, call_id: str, content: MessageContent, is_error: bool) -> Message:
     return create_user_message(
         content=[
-            {"type": "tool-result", "toolCallId": call_id, "content": content, "isError": is_error}
+            ToolResultBlock(
+                tool_call_id=call_id, content=content_from_wire(content), is_error=is_error
+            )
         ],
         source={"kind": "tool", "callId": call_id},
     )

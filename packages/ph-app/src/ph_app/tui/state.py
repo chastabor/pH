@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from enum import IntFlag
 from typing import Any, Literal, TypeAlias
 
-from ph.json import as_bool, as_str
+from ph.json import JsonValue, as_bool, as_str
 
 __all__ = [
     "CatalogEntry",
@@ -97,7 +97,7 @@ class ToolCard:
     """The call's full input, when the tool offered one (`ToolCallView.body`) —
     a cell's program. Kept apart from `arguments`, which is the raw JSON the
     model emitted and may not even parse."""
-    details: dict[str, Any] = field(default_factory=dict)
+    details: dict[str, JsonValue] = field(default_factory=dict)
     """The tool's own durable presentation payload, threaded verbatim from
     `tool/result.meta` — for a cell, `IpythonToolDetails`. The card shows what it
     understands and ignores the rest, so a tool can enrich its own card without

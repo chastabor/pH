@@ -34,12 +34,12 @@ Three things, and the reason each is here rather than in `ph-core`:
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from typing import Any
 
 from ph.cordis import Context, plugin
 from ph.json import JsonObject, as_bool, as_int, as_str
 from ph.keys import TOOLS
+from ph.llm.types import ContentBlock
 from ph.text import count_of
 from ph.tools.code_mode import CodeCellValue
 from ph.tools.definition import ToolOutput, ToolResult, TransportPresentation, text_content
@@ -95,7 +95,7 @@ class IpythonToolDetails(WireModel):
     """The kernel had died and this cell got a fresh, empty namespace."""
 
 
-def render_cell(_args: JsonObject, value: Any) -> list[Any]:  # noqa: ANN401
+def render_cell(_args: JsonObject, value: Any) -> list[ContentBlock]:  # noqa: ANN401
     """Prime Agent's four sections, in its order, minus its stream split.
 
     Absent sections are dropped rather than left as blank lines: a model reading
@@ -114,7 +114,7 @@ def render_cell(_args: JsonObject, value: Any) -> list[Any]:  # noqa: ANN401
     return text_content("\n".join(parts) if parts else "(no output)")
 
 
-def cell_details(_args: JsonObject, value: Any) -> Any:  # noqa: ANN401
+def cell_details(_args: JsonObject, value: Any) -> JsonObject:  # noqa: ANN401
     return IpythonToolDetails(
         status="error" if value.get("error") else "ok",
         dispatches=as_int(value.get("dispatches")),
@@ -154,10 +154,10 @@ def _present_result(args: JsonObject, result: ToolResult) -> ToolResultView:
         title=IPYTHON,
         subtitle=subtitle,
         is_error=result.is_error,
-        # `Mapping`, not `dict`: a live result's meta arrives frozen as a
-        # `MappingProxyType`, which is a Mapping and is *not* a dict instance —
-        # so a `dict` test silently dropped the payload the card is drawn from.
-        meta=dict(result.meta) if isinstance(result.meta, Mapping) else None,
+        # `dict(...)` because a live result's meta arrives frozen as a
+        # `MappingProxyType` and `ToolResultView.meta` is a real dict; the
+        # `isinstance` this used to guard with is now the declaration's job.
+        meta=None if result.meta is None else dict(result.meta),
     )
 
 

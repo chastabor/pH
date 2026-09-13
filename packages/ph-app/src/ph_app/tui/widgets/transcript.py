@@ -36,7 +36,7 @@ from textual.css.query import NoMatches
 from textual.widgets import Collapsible, Markdown, Static
 from textual.widgets.markdown import MarkdownStream
 
-from ph.json import as_int
+from ph.json import JsonValue, as_int
 from ph.text import count_of
 
 from ...wire import index_at_or_before
@@ -220,7 +220,7 @@ class ToolCardWidget(Vertical):
     def __init__(self, item: ChatItem) -> None:
         super().__init__(id=f"row-{_slug(item.key)}")
         self.item = item
-        self._shown: tuple[Any, ...] | None = None
+        self._shown: tuple[object, ...] | None = None
         self._dispatch_rows: dict[str, tuple[Static, tuple[bool, bool]]] = {}
         self._dispatch_box = Vertical(classes="dispatches")
 
@@ -244,7 +244,7 @@ class ToolCardWidget(Vertical):
         self.query_one(Collapsible).display = False
         await self.refresh_card()
 
-    def _snapshot(self) -> tuple[Any, ...]:
+    def _snapshot(self) -> tuple[object, ...]:
         card = self.item.tool
         if card is None:
             return (self.item.text,)
@@ -333,7 +333,7 @@ class ToolCardWidget(Vertical):
         )
 
 
-def _cell_facts(details: dict[str, Any]) -> str:
+def _cell_facts(details: dict[str, JsonValue]) -> str:
     """The `IpythonToolDetails` line — only the facts that are true.
 
     Read as a plain mapping rather than by importing the model: the payload is
@@ -391,7 +391,7 @@ class CodeCellWidget(ToolCardWidget):
         card = self.item.tool
         return "" if card is None else _cell_facts(card.details)
 
-    def _snapshot(self) -> tuple[Any, ...]:
+    def _snapshot(self) -> tuple[object, ...]:
         return (*super()._snapshot(), self._program(), self._facts())
 
     async def refresh_card(self) -> bool:

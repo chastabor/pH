@@ -54,6 +54,7 @@ from ..session.json import freeze_json_value
 from ..system_prompt.assembly import ORDER_TOOL_GUIDANCE, AssembleContext, PromptSection
 from ..wire import WireModel
 from .definition import (
+    ToolExecution,
     ToolExecutionInput,
     ToolExecutionResult,
     ToolOutput,
@@ -182,7 +183,7 @@ class DispatchBridge:
 
     tools: ToolRuntime
     ctx: Context
-    execution: Any
+    execution: ToolExecution
     session: Session | None
     token: CancelToken
     max_parallel: int = 10

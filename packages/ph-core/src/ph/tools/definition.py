@@ -130,7 +130,7 @@ class ToolOutput:
 
     schema: SchemaDeclaration
     render: Callable[[JsonObject, Any], Sequence[ContentBlock]]
-    presentation_meta: Callable[[JsonObject, Any], Any] | None = None
+    presentation_meta: Callable[[JsonObject, Any], JsonObject | None] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -153,7 +153,7 @@ class ToolResult:
 
     content: tuple[ContentBlock, ...]
     is_error: bool
-    meta: Any = None
+    meta: JsonObject | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -169,7 +169,7 @@ class ToolExecutionResult:
     content: tuple[ContentBlock, ...]
     value: Any = None
     error: ToolFailure | None = None
-    meta: Any = None
+    meta: JsonObject | None = None
     additional_contexts: tuple[Message, ...] = ()
     concludes_turn: bool = False
 
@@ -445,7 +445,7 @@ PreToolDecision: TypeAlias = "Allow | Deny | Ask | Respond"
 class Accept:
     """Keep the call successful, optionally replacing one projection."""
 
-    content: Sequence[Any] | None = None
+    content: Sequence[ContentBlock] | None = None
     value: Any = None
     has_value: bool = False
     additional_contexts: tuple[Message, ...] = ()
@@ -456,7 +456,7 @@ class Accept:
 class Block:
     """Turn the result into an error whose content is corrective feedback."""
 
-    feedback: Sequence[Any]
+    feedback: Sequence[ContentBlock]
     additional_contexts: tuple[Message, ...] = ()
     kind: Literal["block"] = "block"
 
@@ -583,7 +583,7 @@ class ToolDefinition:
             raise ToolOutputError(self.name, [f"output.render failed: {error}"]) from error
         return tuple(rendered)
 
-    def project_meta(self, args: JsonValue, value: object) -> Any:  # noqa: ANN401
+    def project_meta(self, args: JsonValue, value: object) -> JsonObject | None:
         if self.output.presentation_meta is None:
             return None
         try:
@@ -645,7 +645,7 @@ def define_tool[A: BaseModel](
     output: ToolOutput | SchemaDeclaration,
     execute: Callable[[A, ToolRunContext], Any],
     render: Callable[[JsonObject, Any], Sequence[ContentBlock]] | None = None,
-    presentation_meta: Callable[[JsonObject, Any], Any] | None = None,
+    presentation_meta: Callable[[JsonObject, Any], JsonObject | None] | None = None,
     finalize_content: Callable[..., Sequence[ContentBlock] | None] | None = None,
     timeout_ms: int | None = None,
     self_limits: bool = False,
@@ -737,7 +737,3 @@ def _default_render(value: object) -> str:
     if value is None:
         return "(no output)"
     return json.dumps(value, indent=2, ensure_ascii=False, default=str)
-
-
-def _content_blocks(blocks: Sequence[Any]) -> list[ContentBlock]:  # pragma: no cover - typing aid
-    return list(blocks)

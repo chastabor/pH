@@ -21,10 +21,17 @@ from base64 import b64encode
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from ph.keys import ATTACHMENTS
-from ph.llm.types import AttachmentRef, MediaBlock, Message, create_user_message
+from ph.llm.types import (
+    AttachmentRef,
+    ContentBlock,
+    MediaBlock,
+    Message,
+    TextBlock,
+    create_user_message,
+)
 
 if TYPE_CHECKING:  # pragma: no cover - a type, not a dependency
     from ph.cordis import Context
@@ -107,7 +114,7 @@ def prompt_message(text: str, attachments: Sequence[AttachmentRef] = ()) -> Mess
     builds when nothing is attached, so a front end can use this uniformly rather
     than branching on whether the person passed a file.
     """
-    content: list[Any] = [{"type": "text", "text": text}] if text else []
+    content: list[ContentBlock] = [TextBlock(text=text)] if text else []
     content.extend(MediaBlock(attachment=one) for one in attachments)
     return create_user_message(content=content, source={"kind": "user"})
 

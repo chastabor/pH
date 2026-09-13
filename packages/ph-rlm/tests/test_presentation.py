@@ -22,7 +22,7 @@ from ph.cordis import Context
 from ph.keys import TOOLS
 from ph.llm.types import ToolCallBlock
 from ph.session import Session
-from ph.testing import simple_tool
+from ph.testing import block_text, simple_tool
 from ph.tools.batch import execute_tool_calls
 from ph.tools.registry import RUN_CODE
 from ph_rlm.presentation import IPYTHON, IPYTHON_DESCRIPTION, cell_details, render_cell
@@ -99,20 +99,20 @@ def test_the_result_text_is_logs_then_result_then_error() -> None:
     [block] = render_cell(
         {}, {"logs": "printed\n", "value": 42, "error": "Traceback: boom", "dispatches": 0}
     )
-    assert block.text == "printed\n[result] 42\nTraceback: boom"
+    assert block_text(block) == "printed\n[result] 42\nTraceback: boom"
 
     [only_value] = render_cell({}, {"logs": "", "value": "x", "error": None})
-    assert only_value.text == "[result] 'x'"
+    assert block_text(only_value) == "[result] 'x'"
 
     [nothing] = render_cell({}, {"logs": "", "value": None, "error": None})
-    assert nothing.text == "(no output)"
+    assert block_text(nothing) == "(no output)"
 
 
 def test_a_falsy_value_is_still_a_result() -> None:
     """`0`, `False` and `""` are answers. `None` is the absence of one."""
     for value, expected in ((0, "[result] 0"), (False, "[result] False"), ("", "[result] ''")):
         [block] = render_cell({}, {"logs": "", "value": value, "error": None})
-        assert block.text == expected
+        assert block_text(block) == expected
 
 
 def test_the_details_payload_is_derived_from_the_durable_result() -> None:

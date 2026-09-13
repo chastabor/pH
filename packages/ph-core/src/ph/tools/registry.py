@@ -44,7 +44,7 @@ from ..cordis import (
 )
 from ..json import JsonValue, thaw_json
 from ..keys import APPROVAL, TOOLS
-from ..llm.types import ToolSchema, text_of
+from ..llm.types import ContentBlock, ToolSchema, text_of
 from ..seams._restriction import NameFilter
 from ..seams.approval import Edited, Responded, denial_reason
 from ..seams.code_runtime import CodeBindingNamespace, validate_binding_name
@@ -1075,7 +1075,7 @@ def _failure(error: object, *, started: bool = False) -> ToolExecutionResult:
     return error_result(error_message(error), error_info(error), kind=kind)
 
 
-def _message_from_content(content: Sequence[Any]) -> str:
+def _message_from_content(content: Sequence[ContentBlock]) -> str:
     text = text_of(content, placeholder=lambda kind: f"[{kind} content]")
     return text or "tool result blocked by post-execute policy"
 

@@ -41,6 +41,7 @@ seam unless something shadowed it for this agent alone.
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -65,6 +66,7 @@ from ..keys import LLM, SYSTEM_PROMPT
 from ..llm.adapter import LlmError
 from ..llm.assembler import BlockAssembler
 from ..llm.types import (
+    ContentBlock,
     FinishReason,
     GenerateOptions,
     LlmCallConfig,
@@ -489,7 +491,7 @@ class ReactLoopAgent:
         turn: int,
         step: int,
         request: GenerateOptions,
-        content: list[Any],
+        content: Sequence[ContentBlock],
         chunk_seqs: list[int],
         usage: TokenUsage | None,
         *,

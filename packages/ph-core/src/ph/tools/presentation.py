@@ -72,6 +72,11 @@ class ToolResultView(WireModel):
     body: str | None = None
     is_error: bool = False
     meta: dict[str, Any] | None = None
+    """The tool's own durable payload. `Any` and not `JsonValue` like the
+    `ToolResult.meta` it comes from: this is a pydantic field, and `JsonValue` is
+    a *recursive* alias whose schema pydantic cannot build — the same reason
+    `ApprovalRequest.arguments` keeps `Any`. `test_every_wire_model_is_built_at_import`
+    is what says so."""
 
 
 def render_call_view(tools: ToolRuntime | None, name: str, arguments: str) -> ToolCallView | None:

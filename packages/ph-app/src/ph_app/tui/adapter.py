@@ -351,12 +351,12 @@ class TuiEventAdapter:
         card.is_error = as_bool(result.get("isError"))
         card.failure_kind = as_str(event.data.get("failureKind"))
         card.body = body
-        self._present_result(card, event.data.get("meta"), frame.view)
+        self._present_result(card, as_obj(event.data.get("meta")), frame.view)
 
     def _present_result(
         self,
         card: ToolCard,
-        meta: object,
+        meta: JsonObject,
         arrived: ToolCallView | ToolResultView | None,
     ) -> None:
         view = (

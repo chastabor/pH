@@ -43,9 +43,10 @@ import logging
 import secrets
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Literal, TypeAlias
+from typing import Literal, TypeAlias
 
 import anyio
+from anyio.abc import TaskGroup
 from pydantic import Field
 
 from ..cancel import CancelToken
@@ -168,9 +169,9 @@ class JobService:
     it would be a producer that could forget to."""
     _jobs: dict[str, Job] = field(default_factory=dict)
     _queues: dict[_Key, _Queue] = field(default_factory=dict)
-    _scope: Any = None
+    _scope: TaskGroup | None = None
 
-    def bind(self, task_group: object) -> None:
+    def bind(self, task_group: TaskGroup) -> None:
         """Adopt the task group jobs run in.
 
         Optional. Without one, a job runs on `ctx.detach` — the pool
