@@ -47,7 +47,7 @@ from ..cancel import CancelToken
 from ..cordis import Context, events, maybe_await, plugin
 from ..json import thaw_json
 from ..keys import CODE_RUNTIME, SYSTEM_PROMPT, TOOLS
-from ..llm.types import ContentBlock
+from ..llm.types import ContentBlock, ToolSchema
 from ..seams.code_runtime import CodeBinding, CodeBindingNamespace, CodeRunRequest
 from ..session import Session
 from ..session.json import freeze_json_value
@@ -513,7 +513,7 @@ async def _dispatch(
 def governed_binding(
     request: CodeBindingsRequest,
     public_name: str,
-    definition: Any,  # noqa: ANN401
+    definition: ToolSchema,
     *,
     counts_as_spawn: bool = False,
 ) -> CodeBinding:

@@ -13,7 +13,7 @@ from .events import (
     is_surface_eligible_type,
     now_ms,
 )
-from .folds import SessionFoldCache
+from .folds import SessionFoldCache, SessionLog
 from .json import InvalidJsonValueError, freeze_json_value
 from .known_event_types import IGNORABLE_SESSION_EVENT_TYPES, KNOWN_SESSION_EVENT_TYPES
 from .request_header import (
@@ -60,6 +60,7 @@ __all__ = [
     "SessionForkError",
     "SessionHeader",
     "SessionKind",
+    "SessionLog",
     "SessionObserver",
     "SessionStore",
     "SurfaceError",

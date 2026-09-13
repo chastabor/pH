@@ -228,7 +228,7 @@ async def apply(ctx: Context, config: Config) -> None:
             ("delete_subagent", DELETE_TOOL, False),
         )
         bindings = [
-            governed_binding(request, public, definition, counts_as_spawn=spawns)
+            governed_binding(request, public, definition.schema(), counts_as_spawn=spawns)
             for public, tool_name, spawns in specs
             # A tool restricted away for this agent is absent from the SDK block
             # too, so the prompt cannot offer what a cell could not call.

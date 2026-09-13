@@ -10,8 +10,11 @@ actually happened.
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
+from ph.json import JsonObject
 from ph.llm import BlockAssembler
 from ph.llm.types import (
     BlockEnd,
@@ -68,6 +71,42 @@ def test_assembler_rebuilds_blocks_in_stream_order() -> None:
 def test_chunks_round_trip_through_the_log() -> None:
     for chunk in _recorded():
         assert chunk_from_wire(chunk.to_wire()) == chunk
+
+
+@pytest.mark.parametrize(
+    ("wire", "path"),
+    [
+        ({"type": "block-start", "index": "x", "blockType": "text"}, "block-start.index"),
+        ({"type": "block-start", "index": 0}, "block-start.blockType"),
+        ({"type": "text-delta", "index": 0, "text": 42}, "text-delta.text"),
+        (
+            {"type": "tool-call-delta", "index": 0, "id": "c1", "argumentsDelta": []},
+            "tool-call-delta.argumentsDelta",
+        ),
+        ({"type": "finish", "reason": "stop"}, "finish.reason"),
+    ],
+)
+def test_a_mis_shaped_chunk_is_refused_by_field_path(wire: JsonObject, path: str) -> None:
+    """A wrong *type* is as malformed as a missing key, and says where.
+
+    Only the missing key used to be caught: the chunks are frozen dataclasses that
+    validate nothing, so `{"index": "x"}` built a `BlockStart` whose index was a
+    string and handed it to an assembler that indexes and concatenates with it.
+    """
+    with pytest.raises(ValueError, match=re.escape(path)):
+        chunk_from_wire(wire)
+
+
+def test_a_chunk_keeps_a_key_a_later_build_added() -> None:
+    """A log is read by builds older than the one that wrote it."""
+    wire = {**TextDelta(index=0, text="hi").to_wire(), "futureKey": 1}
+    assert chunk_from_wire(wire) == TextDelta(index=0, text="hi")
+
+
+def test_an_unknown_finish_kind_is_refused_rather_than_replayed() -> None:
+    """The union validates the nested reason too, down to its `Literal` kind."""
+    with pytest.raises(ValueError, match=re.escape("finish.reason.kind")):
+        chunk_from_wire({"type": "finish", "reason": {"kind": "invented"}})
 
 
 def test_a_replayed_stream_produces_the_same_message() -> None:
@@ -153,5 +192,7 @@ def test_unknown_chunk_types_are_refused() -> None:
         # `object()` is the point: `push` must refuse a chunk that is not one,
         # so the argument is deliberately outside the union it declares.
         BlockAssembler().push(object())  # type: ignore[arg-type]
-    with pytest.raises(ValueError, match="unknown stream chunk"):
+    # The tagged union names every kind it knows, which is what a reader of a
+    # log written by a newer build needs to see.
+    with pytest.raises(ValueError, match=re.escape("Input tag 'nonsense'")):
         chunk_from_wire({"type": "nonsense"})

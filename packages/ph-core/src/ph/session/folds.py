@@ -46,11 +46,16 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable
 from typing import Any, Protocol
 
-__all__ = ["SessionFoldCache"]
+__all__ = ["SessionFoldCache", "SessionLog"]
 
 
-class _Log(Protocol):
-    """What a fold cache needs: an identity and a length."""
+class SessionLog(Protocol):
+    """What a fold cache needs of a log: an identity and a length.
+
+    Exported, unlike the `_Log` it was: `ph.testing.VerifyingFoldCache` subclasses
+    `SessionFoldCache` from another package and has to name this to override
+    `read` — which it could not, so it widened the parameter to `Any` instead. A
+    Protocol a subclass must spell is not private."""
 
     @property
     def id(self) -> str: ...
@@ -80,7 +85,7 @@ class SessionFoldCache[T]:
         self._extend = extend
         self._entries: dict[str, tuple[int, T]] = {}
 
-    def read(self, session: _Log) -> T:
+    def read(self, session: SessionLog) -> T:
         """The fold over this session, folded at most once per appended event.
 
         With `extend`, a miss folds only the new slice: `session.seq` bumps on
@@ -101,7 +106,7 @@ class SessionFoldCache[T]:
         self._entries[session.id] = (session.seq, value)
         return value
 
-    def stale(self, sessions: Iterable[Any]) -> list[str]:
+    def stale(self, sessions: Iterable[SessionLog]) -> list[str]:
         """Every cached answer that no longer equals the fold of its log (I6).
 
         Here rather than in the invariant row that declares it, for

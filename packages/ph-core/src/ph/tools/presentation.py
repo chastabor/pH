@@ -13,12 +13,19 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Mapping
-from typing import Any, Literal, TypeAlias, TypedDict
+from typing import TYPE_CHECKING, Any, Literal, TypeAlias, TypedDict
 
 from ..cordis import DEPLOYMENT
 from ..json import JsonObject, as_obj
 from ..wire import WireModel
 from .json_schema import parse_arguments
+
+if TYPE_CHECKING:
+    # `definition` imports this module for `ToolCallView`/`ToolResultView`, so the
+    # edge only runs the other way for the checker. Annotation-only: these are
+    # function signatures, not a runtime alias, so nothing resolves them.
+    from .definition import ToolDefinition, ToolResult
+    from .registry import ToolRuntime
 
 log = logging.getLogger("ph.tools.presentation")
 
@@ -67,7 +74,7 @@ class ToolResultView(WireModel):
     meta: dict[str, Any] | None = None
 
 
-def render_call_view(tools: object, name: str, arguments: str) -> ToolCallView | None:
+def render_call_view(tools: ToolRuntime | None, name: str, arguments: str) -> ToolCallView | None:
     """Ask the tool how its pending call looks. `None` when it cannot say.
 
     `arguments` is a `str` because that is what the writer records — the model's
@@ -99,10 +106,10 @@ def render_call_view(tools: object, name: str, arguments: str) -> ToolCallView |
 
 
 def render_result_view(
-    tools: object,
+    tools: ToolRuntime | None,
     name: str,
     arguments: str,
-    result: object,
+    result: ToolResult,
 ) -> ToolResultView | None:
     """Ask the tool how its settled call looks. `None` when it cannot say.
 
@@ -122,7 +129,7 @@ def render_result_view(
     return view
 
 
-def _presentable(tools: Any, name: str) -> Any:  # noqa: ANN401
+def _presentable(tools: ToolRuntime | None, name: str) -> ToolDefinition | None:
     """The definition behind a card, for presentation only.
 
     `DEPLOYMENT` and not an agent's scope (P6-32): this renders a call the *log*
@@ -162,11 +169,7 @@ class ToolViews(TypedDict):
     """The two presentation hooks, shaped to unpack into `define_tool(**views)`."""
 
     present_call: Callable[[JsonObject], ToolCallView | None]
-    # The result half stays `Any`: `ToolResult` lives in `definition`, and this
-    # module is *below* it — `presentation` → `definition` → `presentation` is
-    # the cycle `parse_arguments` was moved down here to avoid. `ToolDefinition`
-    # names the type at the slot these unpack into, which is where it is checked.
-    present_result: Callable[[JsonObject, Any], ToolResultView | None]
+    present_result: Callable[[JsonObject, ToolResult], ToolResultView | None]
 
 
 def simple_views(card: CardKind, title: str, key: str) -> ToolViews:

@@ -39,7 +39,7 @@ from typing import Any
 import anyio
 
 from ph.cordis import Context, plugin
-from ph.json import JsonObject
+from ph.json import JsonObject, thaw_json
 from ph.keys import AGENTS, SESSIONS, SUBAGENTS, TOOLS
 from ph.llm.types import ContentBlock, PluginSource, create_user_message, new_message_id, text_of
 from ph.seams.code_runtime import CodeBindingNamespace
@@ -195,15 +195,19 @@ async def apply(ctx: Context, config: Config) -> None:
     def family(agent_id: str) -> dict[str, FamilyRole]:
         return reachable_family(ctx.require(SESSIONS).list(), agent_id)
 
-    def resolve(sender_id: str, args: object) -> tuple[str | None, str]:
+    def resolve(sender_id: str, role: str, wanted: str | None) -> tuple[str | None, str]:
         """`(target_id, refusal)` — the one resolution the guard and the body share.
 
         Returning the refusal rather than raising, because the guard needs the
         reason as a string and the body needs it as an error; deciding twice is
         how a boundary and its error message drift apart.
+
+        Takes the two fields rather than the payload: both callers hold a
+        validated `SendArgs`, so reading them back out by string key was the one
+        way the guard and the body could still disagree — a role neither `str`
+        nor absent read as one thing to a `str()` coercion and another to a
+        default.
         """
-        role = str(_arg(args, "receiver_role", "parent"))
-        wanted = _arg(args, "receiver_name", None)
         reach = family(sender_id)
         candidates = [
             agent_id for agent_id, kind in reach.items() if kind == role and agent_id != sender_id
@@ -215,7 +219,7 @@ async def apply(ctx: Context, config: Config) -> None:
                 f"(reachable roles: {offered or 'none'}). {OUT_OF_REACH}."
             )
         if wanted is not None:
-            named = [agent_id for agent_id in candidates if _named(ctx, agent_id, str(wanted))]
+            named = [agent_id for agent_id in candidates if _named(ctx, agent_id, wanted)]
             if not named:
                 return None, (
                     f'no {role} is named "{wanted}"; '
@@ -240,7 +244,8 @@ async def apply(ctx: Context, config: Config) -> None:
         sender = execution.agent.id if execution.agent is not None else None
         if sender is None:
             return "an agent message needs a sending agent"
-        target, refusal = resolve(sender, execution.arguments)
+        asked = SendArgs.model_validate(thaw_json(execution.arguments))
+        target, refusal = resolve(sender, asked.receiver_role, asked.receiver_name)
         if target is None:
             return refusal
         if family(sender).get(target) in (None, "self"):
@@ -277,7 +282,7 @@ async def apply(ctx: Context, config: Config) -> None:
                 f"an agent message is at most {config.max_message_chars} characters; "
                 f"this one is {len(body)}. Write the detail to a file and send the path.",
             )
-        target_id, refusal = resolve(sender_id, args.model_dump())
+        target_id, refusal = resolve(sender_id, args.receiver_role, args.receiver_name)
         if target_id is None:
             # The guard has already refused this; reaching here means the guard
             # was not mounted, and the message must still not be delivered.
@@ -460,23 +465,13 @@ def _namespace(
 ) -> CodeBindingNamespace:
     view = ctx.require(TOOLS).view(request.scope)
     bindings = [
-        governed_binding(request, public, definition)
+        governed_binding(request, public, definition.schema())
         for public, tool_name in specs
         # Restricted away for this agent: absent from the SDK block too, so the
         # prompt cannot offer what a cell could not call.
         if (definition := view.visible.get(tool_name)) is not None
     ]
     return CodeBindingNamespace(name=name, description=description, bindings=tuple(bindings))
-
-
-def _arg(args: object, key: str, default: object) -> Any:  # noqa: ANN401
-    """One read for both shapes: a validated model and a frozen argument map."""
-    if hasattr(args, key):
-        return getattr(args, key)
-    if hasattr(args, "get"):
-        value = args.get(key)
-        return default if value is None else value
-    return default
 
 
 def _named(ctx: Context, agent_id: str, wanted: str) -> bool:

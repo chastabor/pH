@@ -15,7 +15,6 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from functools import partial
-from types import SimpleNamespace
 from typing import Any
 
 import anyio
@@ -24,6 +23,7 @@ import pytest
 from ph.cordis import DEPLOYMENT, Context
 from ph.json import as_obj, as_seq
 from ph.keys import AGENTS, CODE_RUNTIME_STUB, SESSIONS, SYSTEM_PROMPT, TOOLS
+from ph.llm.types import ToolSchema
 from ph.seams.code_runtime import CodeBindingNamespace
 from ph.session import Session
 from ph.system_prompt.assembly import render_prompt
@@ -499,7 +499,7 @@ def _extra_namespace(request: Any) -> CodeBindingNamespace:  # noqa: ANN401
     goes through the *bridge*, so the budgets and the dispatch records are the
     bridge's, exactly as for the `tools` namespace.
     """
-    definition = SimpleNamespace(
+    definition = ToolSchema(
         name="spawn_child",
         description="Start a child.",
         parameters={"type": "object", "properties": {"n": {"type": "string"}}},

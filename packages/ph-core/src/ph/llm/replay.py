@@ -128,7 +128,7 @@ def recorded_steps(events: Sequence[SessionEvent]) -> list[RecordedStep]:
         if key not in grouped:
             grouped[key] = []
             order.append(key)
-        grouped[key].append(chunk_from_wire(dict(as_obj(event.data["chunk"]))))
+        grouped[key].append(chunk_from_wire(as_obj(event.data["chunk"])))
     return [
         RecordedStep(turn=turn, step=step, chunks=tuple(grouped[(turn, step)]))
         for turn, step in order

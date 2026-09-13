@@ -40,6 +40,7 @@ from ph.json import as_bool, as_obj, as_str
 from ph.session import Session, SessionEvent
 from ph.tools import ToolResult
 from ph.tools.presentation import CARD_VIEWS, render_call_view, render_result_view
+from ph.tools.registry import ToolRuntime
 
 from ..wire import result_block
 
@@ -55,7 +56,7 @@ service lookup per chunk to reach a `return None`."""
 
 
 def presentation_of(
-    tools: object,
+    tools: ToolRuntime | None,
     session: Session,
     event: SessionEvent,
 ) -> dict[str, Any] | None:

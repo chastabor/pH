@@ -48,7 +48,6 @@ from __future__ import annotations
 import json
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from typing import Any
 
 from pydantic import ValidationError
 
@@ -65,6 +64,7 @@ from ph.session.request_header import parse_request_context
 from ph.text import count_of
 from ph.tools import ToolCallView, ToolResult, ToolResultView
 from ph.tools.presentation import render_call_view, render_result_view
+from ph.tools.registry import ToolRuntime
 
 from ..shell import shell_body
 from ..wire import media_labels, one_line, result_block, text_of_wire
@@ -112,7 +112,7 @@ class TuiEventAdapter:
     """Folds session events into a `TuiState`."""
 
     state: TuiState = field(default_factory=TuiState)
-    tools: Any = None
+    tools: ToolRuntime | None = None
     """`ctx.tools`, when the harness is in this process, so a card can use the
     tool's own `present_call`/`present_result`. `None` over a socket, where the
     daemon renders the same views and sends them beside the event — see `Frame.view`."""

@@ -45,7 +45,7 @@ from ..tools.registry import ToolRestriction
 from ..wire import WireModel
 from ._registry import claim_entry, claim_key
 from .invariants import contribute_fold_cache
-from .skills import ORDER_SKILLS, SkillRestriction
+from .skills import ORDER_SKILLS, SkillRestriction, SkillService
 
 __all__ = [
     "ADMITTED",
@@ -1204,7 +1204,7 @@ class Grant:
             )
 
 
-def _brief_text(skills: Any, named: Sequence[str], scope: Context) -> str:  # noqa: ANN401
+def _brief_text(skills: SkillService, named: Sequence[str], scope: Context) -> str:
     """The named skills' instructions, read once.
 
     **A named skill is direction, not a lookup.** G9 keeps bodies out of the

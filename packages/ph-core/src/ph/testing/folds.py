@@ -48,9 +48,8 @@ import sys
 from collections.abc import Callable
 from itertools import combinations, pairwise
 from types import FrameType
-from typing import Any
 
-from ..session import Session, SessionFoldCache
+from ..session import Session, SessionFoldCache, SessionLog
 
 __all__ = ["VerifyingFoldCache", "assert_fold_laws", "check_fold_laws", "prefix_of"]
 
@@ -119,8 +118,8 @@ def prefix_of(session: Session, length: int) -> Session:
 
 def check_fold_laws[T](
     session: Session,
-    compute: Callable[[Any], T],
-    extend: Callable[[T, Any, int], T] | None = None,
+    compute: Callable[[Session], T],
+    extend: Callable[[T, Session, int], T] | None = None,
     *,
     start: int | None = None,
 ) -> list[str]:
@@ -186,8 +185,8 @@ def check_fold_laws[T](
 
 def _batching_findings[T](
     session: Session,
-    compute: Callable[[Any], T],
-    extend: Callable[[T, Any, int], T],
+    compute: Callable[[Session], T],
+    extend: Callable[[T, Session, int], T],
     prefixes: dict[int, Session],
 ) -> list[str]:
     """The `extend` laws: resume from anywhere, walk step by step, extend by nothing.
@@ -242,8 +241,8 @@ def _batching_findings[T](
 
 def assert_fold_laws[T](
     session: Session,
-    compute: Callable[[Any], T],
-    extend: Callable[[T, Any, int], T] | None = None,
+    compute: Callable[[Session], T],
+    extend: Callable[[T, Session, int], T] | None = None,
     *,
     start: int | None = None,
 ) -> None:
@@ -267,7 +266,7 @@ class VerifyingFoldCache[T](SessionFoldCache[T]):
     cost the cache exists to avoid, which is why this is a test double.
     """
 
-    def read(self, session: Any) -> T:  # noqa: ANN401
+    def read(self, session: SessionLog) -> T:
         value = super().read(session)
         cold = self._compute(session)
         if value != cold:

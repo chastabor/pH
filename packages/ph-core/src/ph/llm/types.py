@@ -19,9 +19,10 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Annotated, Any, Literal, TypeAlias
 
-from pydantic import Field, TypeAdapter, model_validator
+from pydantic import ConfigDict, Field, TypeAdapter, ValidationError, model_validator
 
-from ..wire import WireDataclass, WireModel
+from ..json import JsonObject, thaw_json
+from ..wire import WireDataclass, WireModel, validation_errors, wire_alias
 
 __all__ = [
     "AssistantMessage",
@@ -488,14 +489,6 @@ class FinishReason(WireDataclass):
     kind: FinishKind
     failure: LlmFailure | None = None
 
-    @classmethod
-    def from_wire(cls, wire: Any) -> FinishReason:  # noqa: ANN401
-        failure = wire.get("failure")
-        return cls(
-            kind=wire["kind"],
-            failure=None if failure is None else LlmFailure.model_validate(failure),
-        )
-
 
 @dataclass(frozen=True, slots=True)
 class BlockStart(WireDataclass):
@@ -560,39 +553,45 @@ consumer sees it — so a consumer never has to handle both shapes.
 """
 
 
-def chunk_from_wire(wire: Any) -> StreamChunk:  # noqa: ANN401
+_CHUNKS: TypeAdapter[StreamChunk] = TypeAdapter(
+    Annotated[StreamChunk, Field(discriminator="type")],
+    config=ConfigDict(alias_generator=wire_alias, populate_by_name=True, extra="ignore"),
+)
+"""The tagged union, decoded the way `ContentBlock` already is.
+
+**The read side is not hot** — `ph.session.events` says the same of its own
+dataclass, and for the same reason: D4 is about *constructing* a chunk per token,
+which an adapter does per streamed message and this never touches. There is one
+caller, `ph.llm.replay`, reading a log back.
+
+So the eight-branch ladder this replaces was the second answer in one file to a
+problem `content_from_wire` had already solved. It also had a hole: the chunks
+are frozen dataclasses and validate nothing, so a missing key raised but a
+*mis-typed* one built silently — `{"index": "x"}` produced a `BlockStart` whose
+index was a string, and handed it to an assembler that indexes and concatenates.
+
+`extra="ignore"` rather than `WireModel`'s `forbid`: a log is read by builds older
+than the one that wrote it, so a key added later is skipped rather than condemning
+the step. That is the ladder's behaviour, kept.
+"""
+
+
+def chunk_from_wire(wire: JsonObject) -> StreamChunk:
     """Rebuild one stream chunk from its logged JSON form (replay fidelity).
 
-    A malformed chunk is reported as `ValueError` naming its kind, so a replay
-    reader can say which line was wrong rather than surfacing a `KeyError` from
-    three frames down.
+    A malformed chunk is reported as `ValueError` naming the chunk kind and the
+    field path, so a replay reader can say which line was wrong rather than
+    surfacing a `KeyError` from three frames down.
     """
-    kind = wire.get("type")
     try:
-        if kind == "block-start":
-            return BlockStart(index=wire["index"], block_type=wire["blockType"])
-        if kind == "text-delta":
-            return TextDelta(index=wire["index"], text=wire["text"])
-        if kind == "reasoning-delta":
-            return ReasoningDelta(index=wire["index"], text=wire["text"])
-        if kind == "tool-call-delta":
-            return ToolCallDelta(
-                index=wire["index"],
-                id=wire["id"],
-                arguments_delta=wire["argumentsDelta"],
-                name=wire.get("name"),
-            )
-        if kind == "block-end":
-            return BlockEnd(index=wire["index"], block=content_from_wire([wire["block"]])[0])
-        if kind == "usage":
-            return UsageChunk(usage=TokenUsage.model_validate(wire["usage"]))
-        if kind == "finish":
-            return Finish(
-                reason=FinishReason.from_wire(wire["reason"]), replay_state=wire.get("replayState")
-            )
-    except (KeyError, TypeError) as error:
-        raise ValueError(f"malformed {kind!r} stream chunk: {error!r}") from error
-    raise ValueError(f"unknown stream chunk type {kind!r}")
+        # `thaw_json` first: the log freezes payloads into `MappingProxyType` and
+        # `tuple`, and pydantic refuses those for a *dataclass* target — `WireModel`
+        # thaws them in `_thaw_frozen_input`, which a `WireDataclass` has no
+        # equivalent of. A whole-tree thaw, not the shallow `dict(...)` this used
+        # to carry, which left nested frozen containers in `replay_state`.
+        return _CHUNKS.validate_python(thaw_json(wire))
+    except ValidationError as error:
+        raise ValueError(f"malformed stream chunk: {validation_errors(error)}") from error
 
 
 def is_token_delta(chunk: StreamChunk) -> bool:

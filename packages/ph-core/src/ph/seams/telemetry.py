@@ -32,6 +32,7 @@ import anyio
 from ..cordis import (
     Context,
     Disposer,
+    MaybeAwaitable,
     Running,
     events,
     maybe_await,
@@ -84,7 +85,7 @@ class _Sink:
     as a tool's `execute`, and it ran unbound, so an exporter that registered
     anything landed it on the seam and outlived its row."""
 
-    export: Callable[[SessionTelemetryRecord], Any]
+    export: Callable[[SessionTelemetryRecord], MaybeAwaitable[None]]
     by: Running
 
 
@@ -108,7 +109,10 @@ class SessionTelemetry:
     session rather than one per step, so it does not grow with the conversation."""
 
     def add_sink(
-        self, sink: Callable[[SessionTelemetryRecord], Any], *, scope: Context | None = None
+        self,
+        sink: Callable[[SessionTelemetryRecord], MaybeAwaitable[None]],
+        *,
+        scope: Context | None = None,
     ) -> Disposer:
         """Register an exporter. It sees only post-redaction records."""
         by = self.ctx.running_for(scope)
@@ -236,7 +240,7 @@ async def apply(ctx: Context, config: Config) -> None:
 
         telemetry.add_sink(write)
 
-    def on_event(session: Session, event: SessionEvent) -> Any:  # noqa: ANN401
+    def on_event(session: Session, event: SessionEvent) -> MaybeAwaitable[None]:
         # The returned coroutine is scheduled by `emit`, never awaited on the
         # append path; a chunk that will not ship returns nothing and costs no
         # task at all.
