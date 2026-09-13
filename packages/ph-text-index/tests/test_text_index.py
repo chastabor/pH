@@ -33,6 +33,7 @@ from __future__ import annotations
 import hashlib
 import itertools
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass
 from itertools import pairwise
 from pathlib import Path
@@ -49,6 +50,7 @@ from ph.testing.git import git, git_repo
 from ph.testing.jj import jj_repo
 from ph_text_index import TEXT_INDEX
 from ph_text_index._chunk import chunk_text
+from ph_text_index._embed import Vectors
 from ph_text_index._store import IndexMismatch, TextIndex
 
 pytestmark = pytest.mark.anyio
@@ -80,7 +82,7 @@ class HashingEmbedder:
     def name(self) -> str:
         return f"stub-hashing:{self.dim}"
 
-    def encode(self, texts: Any, *, query: bool) -> Any:  # noqa: ANN401
+    def encode(self, texts: Sequence[str], *, query: bool) -> Vectors:
         self.calls += 1
         rows = np.zeros((len(texts), self.dim), dtype=np.float32)
         for index, text in enumerate(texts):

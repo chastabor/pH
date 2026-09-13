@@ -20,6 +20,7 @@ from ph.cordis import Context, Disposer, LoaderError, plugin
 from ph.cordis.loader import (
     PROJECT_ROOT,
     Profile,
+    ProfileDocument,
     _state,
     compose_rows,
     evaluate_predicate,
@@ -33,7 +34,7 @@ from ph.wire import WireModel
 pytestmark = pytest.mark.anyio
 
 
-def _doc(name: str, text: str) -> tuple[str, object]:
+def _doc(name: str, text: str) -> ProfileDocument:
     return name, safe_yaml_load(text, origin=name)
 
 
@@ -99,7 +100,7 @@ def test_timestamps_stay_strings() -> None:
     # A config file is data. A value that looks like a date is the string the
     # author wrote, not a datetime someone has to guess about.
     parsed = safe_yaml_load("- id: a\n  name: mod.a\n  config:\n    when: 2026-08-26\n")
-    assert parsed[0]["config"]["when"] == "2026-08-26"
+    assert parsed == [{"id": "a", "name": "mod.a", "config": {"when": "2026-08-26"}}]
 
 
 def test_env_interpolation_with_defaults() -> None:

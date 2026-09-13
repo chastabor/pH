@@ -43,7 +43,7 @@ from collections.abc import Awaitable, Callable, Iterator, MutableMapping, Seque
 from contextlib import suppress
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
-from typing import Any, TypeAlias, cast, overload
+from typing import Any, Final, TypeAlias, cast, overload
 
 import anyio
 
@@ -115,7 +115,7 @@ It states a convention, not a check: `on` takes a `Listener`, so a listener's ow
 annotation is what it claims rather than what anything verifies."""
 
 _MAX_RECONCILE_ROUNDS = 64
-_MISSING: Any = object()
+_MISSING: Final = object()
 
 
 async def maybe_await[T](value: MaybeAwaitable[T]) -> T:
@@ -965,7 +965,7 @@ class Context:
 
         return self.add_disposer(unprovide, label=f"provide({name})")
 
-    def _provision(self, key: str) -> Any:  # noqa: ANN401
+    def _provision(self, key: str) -> object:
         """Resolve `key` most-specific-first up the scope chain."""
         for node in self._chain():
             provision = node._services.get(key)

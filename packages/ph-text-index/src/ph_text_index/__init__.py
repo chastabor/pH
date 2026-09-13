@@ -69,7 +69,7 @@ from ph.tools.presentation import simple_views
 from ph.wire import WireModel
 
 from ._chunk import Chunk, chunk_text
-from ._embed import Embedder, LocalWeights, SentenceTransformerEmbedder
+from ._embed import Embedder, LocalWeights, SentenceTransformerEmbedder, Vectors
 from ._store import Record, TextIndex
 
 __all__ = [
@@ -345,7 +345,7 @@ class TextIndexSeam:
             self._index = store
         return self._index
 
-    async def embed(self, texts: list[str], *, query: bool) -> Any:  # noqa: ANN401
+    async def embed(self, texts: list[str], *, query: bool) -> Vectors:
         embedder = self.embedder
         return await anyio.to_thread.run_sync(
             lambda: embedder.encode(texts, query=query), abandon_on_cancel=True

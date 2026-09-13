@@ -28,11 +28,28 @@ from __future__ import annotations
 import logging
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, TypeAlias, runtime_checkable
 
-__all__ = ["Embedder", "LocalWeights", "SentenceTransformerEmbedder"]
+__all__ = ["Embedder", "LocalWeights", "SentenceTransformerEmbedder", "Vectors"]
 
 log = logging.getLogger("ph_text_index.embed")
+
+
+if TYPE_CHECKING:
+    import numpy as np
+    from numpy.typing import NDArray
+
+Vectors: TypeAlias = "NDArray[np.float32]"
+"""One L2-normalised float32 row per text — `(len(texts), dim)`.
+
+The shape the whole chain moves: `Embedder.encode` produces it, `TextIndexSeam.embed`
+carries it across the worker-thread hop, and `TextIndex.add`/`_maybe_calibrate`/`search`
+consume it. Named rather than repeated so the stub embedder a test registers is held
+to what the store indexes.
+
+Imported under `TYPE_CHECKING` alone: numpy is loaded lazily inside the functions
+that need it, and an annotation must not be what drags it into import time.
+"""
 
 
 @runtime_checkable
@@ -47,7 +64,7 @@ class Embedder(Protocol):
         the space does — the model, and anything else that moves a vector.
         """
 
-    def encode(self, texts: Sequence[str], *, query: bool) -> Any:  # noqa: ANN401
+    def encode(self, texts: Sequence[str], *, query: bool) -> Vectors:
         """`(len(texts), dim)` float32, L2-normalised.
 
         **Blocking**; the seam calls it in a worker thread. Normalised because
@@ -190,7 +207,7 @@ class SentenceTransformerEmbedder:
         """
         return self._model is not None
 
-    def encode(self, texts: Sequence[str], *, query: bool) -> Any:  # noqa: ANN401
+    def encode(self, texts: Sequence[str], *, query: bool) -> Vectors:
         import numpy as np
 
         prefix = self.query_prefix if query else self.document_prefix

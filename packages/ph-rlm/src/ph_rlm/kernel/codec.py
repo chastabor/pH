@@ -40,43 +40,36 @@ from __future__ import annotations
 import json
 from typing import Any, Final, cast
 
-from ph.json import JSON_MAX_SAFE_INTEGER
+from ph.json import JSON_MAX_SAFE_INTEGER, JsonValue, loads
 from ph.wire import WireModel
 
 from .protocol import INBOUND, FieldKind, InboundFrame
 
 __all__ = ["decode", "encode"]
 
-_INVALID: Final = object()
+
+class _Invalid:
+    """The marker for "this field failed its declared shape".
+
+    A class rather than a bare `object()` so `_coerce` can *say* what it returns
+    — a JSON value or this — instead of erasing both into `Any`.
+    """
+
+    __slots__ = ()
 
 
-_DECODER: Final = json.JSONDecoder()
-"""Built once, and **hookless**.
-
-Two separate reasons, and dropping the object when the hook went would have lost
-the first. *Built once*: `json.loads` re-dispatches per call — a wrapper frame plus
-the str/bytes sniff — which measured **0.406 µs against 0.334 µs** for this object
-on a `log` frame, the most numerous frame on the stdout path, and `decode` runs on
-every frame the guest sends. *Hookless*: the `parse_int` guard that used to live
-here is now `_coerce`'s, for the reason the module docstring gives.
-"""
+_INVALID: Final = _Invalid()
 
 
-def _decode_json(raw: str | bytes) -> Any:  # noqa: ANN401
-    # Decoded to `str` here rather than handing bytes to the decoder: measured
-    # 0.49 µs against 0.65 µs on an 84-byte frame, because the bytes path sniffs
-    # the encoding before doing exactly this.
-    return _DECODER.decode(raw if isinstance(raw, str) else raw.decode("utf-8"))
-
-
-def _coerce(value: Any, kind: FieldKind) -> Any:  # noqa: ANN401
+def _coerce(value: JsonValue, kind: FieldKind) -> JsonValue | _Invalid:
     if kind == "any":
         return value
     if kind == "int":
         # `bool` is an `int` in Python and would sail through a bare isinstance;
         # and an int a JS reader cannot hold is not one the host may echo (Q2).
-        numeric = isinstance(value, int) and not isinstance(value, bool)
-        return value if numeric and abs(value) <= JSON_MAX_SAFE_INTEGER else _INVALID
+        if isinstance(value, bool) or not isinstance(value, int):
+            return _INVALID
+        return value if abs(value) <= JSON_MAX_SAFE_INTEGER else _INVALID
     if kind == "str":
         return value if isinstance(value, str) else _INVALID
     if kind == "bool":
@@ -96,7 +89,7 @@ def decode(raw: str | bytes) -> InboundFrame | None:
     check the type system could see.
     """
     try:
-        frame = _decode_json(raw)
+        frame = loads(raw)
     except (ValueError, UnicodeDecodeError):
         return None
     if not isinstance(frame, dict):

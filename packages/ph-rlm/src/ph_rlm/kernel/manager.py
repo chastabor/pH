@@ -807,7 +807,12 @@ class Kernel:
                 frame["id"], ok=False, message=error_message(error), name=frame["name"]
             )
         else:
-            await self._reply(frame["id"], ok=True, value=_json_safe(value))
+            # `thaw_json` is the whole job: a value that came back through the log is
+            # frozen — a `MappingProxyType` over tuples — and `json.dumps` will not
+            # serialize that. Deliberately **no round trip through JSON here**, because
+            # `encode` is about to serialize the frame anyway; anything `json` still
+            # cannot represent is handled by `encode`'s `default`.
+            await self._reply(frame["id"], ok=True, value=thaw_json(value))
 
     async def _reply(
         self,
@@ -1251,18 +1256,6 @@ def _declare(namespace: CodeBindingNamespace) -> dict[str, Any]:
             for binding in namespace.bindings
         ],
     }
-
-
-def _json_safe(value: object) -> Any:  # noqa: ANN401
-    """A tool's result in a form the reply frame can carry.
-
-    `thaw_json` is the whole job: a value that came back through the log is frozen —
-    a `MappingProxyType` over tuples — and `json.dumps` will not serialize that. There
-    is deliberately **no round trip through JSON here**, because `encode` is about to
-    serialize the frame anyway. Anything `json` still cannot represent is handled by
-    `encode`'s `default`.
-    """
-    return thaw_json(value)
 
 
 class Config(KernelLimits):

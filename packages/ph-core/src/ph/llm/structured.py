@@ -30,15 +30,16 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import replace
-from typing import Any
+from typing import Any, overload
 
 from pydantic import BaseModel
 
+from ..json import JsonObject, JsonValue, loads
 from ..tools.json_schema import schema_of, validate_json_schema_value
 from .assembler import BlockAssembler
-from .types import GenerateOptions, create_message, text_of
+from .types import GenerateOptions, StreamChunk, create_message, text_of
 
 __all__ = [
     "SchemaViolation",
@@ -100,7 +101,7 @@ def structural_warning(schema: dict[str, Any]) -> str | None:
     )
 
 
-def _object_in(text: str) -> Any:  # noqa: ANN401
+def _object_in(text: str) -> JsonValue:
     """The JSON value in a reply, tolerating a fence or a sentence around it.
 
     Kept even where the wire enforces the schema, because "enforced" is a
@@ -109,7 +110,7 @@ def _object_in(text: str) -> Any:  # noqa: ANN401
     """
     for candidate in (text.strip(), *_braced(text)):
         try:
-            return json.loads(candidate)
+            return loads(candidate)
         except json.JSONDecodeError:
             continue
     raise SchemaViolation(["the reply is not JSON"])
@@ -120,14 +121,19 @@ def _braced(text: str) -> list[str]:
     return [text[start : end + 1]] if start != -1 and end > start else []
 
 
-def validated_shape(text: str, shape: type[BaseModel] | dict[str, Any]) -> Any:  # noqa: ANN401
+@overload
+def validated_shape[Shape: BaseModel](text: str, shape: type[Shape]) -> Shape: ...
+@overload
+def validated_shape(text: str, shape: dict[str, Any]) -> JsonObject: ...
+def validated_shape(text: str, shape: type[BaseModel] | dict[str, Any]) -> BaseModel | JsonObject:
     """The reply as a validated value, or `SchemaViolation` naming what is wrong.
 
     `shape` is the same union `ToolOutput.schema` takes, and for the same reason:
     a pydantic model is one declaration that produces both the wire schema and
     the validator, so a caller that has one does not get a *second*, weaker check
     here and then the real one at home. Given a model it returns the instance;
-    given a dict it returns the dict it validated.
+    given a dict it returns the dict it validated. Overloaded so that sentence is
+    a *type* rather than a promise a caller has to restate at the call site.
     """
     value = _object_in(text)
     if not isinstance(value, dict):
@@ -141,7 +147,7 @@ def validated_shape(text: str, shape: type[BaseModel] | dict[str, Any]) -> Any: 
 
 
 async def ask_for_shape[Shape: BaseModel](
-    stream: Callable[[GenerateOptions], Awaitable[Any]],
+    stream: Callable[[GenerateOptions], Awaitable[AsyncIterator[StreamChunk]]],
     options: GenerateOptions,
     shape: type[Shape],
     *,
@@ -189,8 +195,7 @@ async def ask_for_shape[Shape: BaseModel](
             raise SchemaViolation([failure.message if failure else "the model call failed"])
         reply = text_of(assembler.blocks()).strip()
         try:
-            settled: Shape = validated_shape(reply, shape)
-            return settled
+            return validated_shape(reply, shape)
         except SchemaViolation as violation:
             if enforced and turn == 0:
                 log.warning(

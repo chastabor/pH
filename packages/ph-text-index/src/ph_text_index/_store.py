@@ -52,11 +52,14 @@ import secrets
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ph.json import as_int, as_str
 
 from ._chunk import Chunk
+
+if TYPE_CHECKING:
+    from ._embed import Vectors
 
 __all__ = ["CALIBRATION_SAMPLE", "IndexMismatch", "Record", "TextIndex"]
 
@@ -284,7 +287,7 @@ class TextIndex:
         self,
         path: str,
         chunks: list[Chunk],
-        vectors: Any,  # noqa: ANN401
+        vectors: Vectors,
         vcs_id: str = "",
     ) -> int:
         """Index `chunks`, whose rows are `vectors`. Returns how many landed.
@@ -323,7 +326,7 @@ class TextIndex:
             self._by_path.setdefault(path, []).append(record.id)
         return len(chunks)
 
-    def _maybe_calibrate(self, rows: Any) -> None:  # noqa: ANN401
+    def _maybe_calibrate(self, rows: Vectors) -> None:
         """Fit TQ+ before the first add, when this batch is a fair sample of it."""
         import numpy as np
 
@@ -337,7 +340,7 @@ class TextIndex:
 
     def search(
         self,
-        vector: Any,  # noqa: ANN401
+        vector: Vectors,
         k: int,
         *,
         allowed: list[int] | None = None,

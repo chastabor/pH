@@ -32,6 +32,7 @@ from typing import Any, NoReturn
 
 import yaml
 
+from ..json import JsonObject, JsonValue
 from .context import Context, ForkScope
 from .errors import LoaderError
 from .events import events
@@ -117,12 +118,19 @@ SafeRowLoader.add_multi_constructor("!", _reject_unknown_tag)
 SafeRowLoader.add_multi_constructor("tag:", _reject_unknown_tag)
 
 
-def safe_yaml_load(text: str, *, origin: str = "<string>") -> Any:  # noqa: ANN401
-    """Parse YAML with no code evaluation and no implicit date coercion."""
+def safe_yaml_load(text: str, *, origin: str = "<string>") -> JsonValue:
+    """Parse YAML with no code evaluation and no implicit date coercion.
+
+    `SafeRowLoader` is what makes the result a JSON tree rather than `yaml.load`'s
+    `Any` — no custom tags, no implicit dates, so the only things it can build are
+    the ones `JsonValue` names. This is the one YAML entry point, so that is said
+    here instead of at each reader.
+    """
     try:
-        return yaml.load(text, Loader=SafeRowLoader)
+        value: JsonValue = yaml.load(text, Loader=SafeRowLoader)
     except yaml.YAMLError as error:
         raise LoaderError(f"{origin}: {error}") from error
+    return value
 
 
 # --------------------------------------------------------------------- rows --
@@ -168,7 +176,7 @@ class Row:
 # ------------------------------------------------------------ interpolation --
 
 
-def interpolate(value: object, env: Mapping[str, str] | None = None) -> Any:  # noqa: ANN401
+def interpolate(value: object, env: Mapping[str, str] | None = None) -> object:
     """Expand `${env:VAR:-default}` through a value tree.
 
     A whole-string match keeps the environment value's own type only insofar as
@@ -229,7 +237,7 @@ def evaluate_predicate(value: object, env: Mapping[str, str] | None = None) -> b
 # ----------------------------------------------------------------- patching --
 
 
-def _as_rows(entries: Iterable[Any], layer: str) -> list[Row]:
+def _as_rows(entries: Iterable[JsonValue], layer: str) -> list[Row]:
     rows: list[Row] = []
     for entry in entries:
         if not isinstance(entry, dict):
@@ -274,7 +282,7 @@ def _as_isolate(value: object, layer: str) -> dict[str, Any] | None:
     raise LoaderError(f"{layer}: isolate: must be a list of row ids or a mapping, got {value!r}")
 
 
-def _apply_patch(rows: list[Row], patch: Mapping[str, Any], layer: str) -> list[Row]:
+def _apply_patch(rows: list[Row], patch: JsonObject, layer: str) -> list[Row]:
     """Apply one patch entry to the composed row list."""
     unknown = set(patch) - {"insert", "id", "config", "disabled", "remove", "isolate"}
     if unknown:
@@ -341,7 +349,7 @@ def _check_isolation(rows: Sequence[Row]) -> None:
                 )
 
 
-ProfileDocument = tuple[str, Any]
+ProfileDocument = tuple[str, JsonValue]
 """One parsed layer of a profile: where it came from, and its entries.
 
 The provenance is a *name*, not a path, because not every layer has a file — a
@@ -400,14 +408,16 @@ def resolve_entry_point(
     name: str,
     *,
     default_attribute: str = "",
-) -> Any:  # noqa: ANN401
+) -> object:
     """Import what `name` registers in `group`, or `None` if nothing does.
 
     The mechanical half of resolution — look up, import, `getattr` — with no
     policy: a caller that wants an exception raises its own, and one that wants
-    to offer an alternative gets `None`. Both `resolve_plugin` and
-    `ph.bundles.resolve_bundle` are thin wrappers over this, so a third group
-    does not bring a third copy of the importlib dance.
+    to offer an alternative gets `None`. `ph.bundles.resolve_bundle` is a thin
+    wrapper over this. `resolve_plugin` is **not**: it needs a dotted-path
+    fallback, a `LoaderError` rather than `None`, and two attribute candidates
+    rather than one, so it carries its own copy of the dance — a third group
+    wanting any of those three should widen this rather than add a fourth.
     """
     target = _entry_point_targets(group).get(name)
     if target is None:
@@ -461,7 +471,7 @@ def import_plugin_modules() -> list[ModuleType]:
     return modules
 
 
-def resolve_plugin(name: str) -> Any:  # noqa: ANN401
+def resolve_plugin(name: str) -> object:
     """Resolve a row's `name:` to a plugin object.
 
     Looked up first in the `ph.plugins` entry-point group — the compatibility
