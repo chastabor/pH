@@ -1142,8 +1142,7 @@ class PythonCodeRuntime:
         kernel = self._kernels.get(namespace)
         if kernel is None:
             kernel = await self._acquire(namespace)
-        token = request.cancel_scope if isinstance(request.cancel_scope, CancelToken) else None
-        result = await kernel.run(request.program, request.bindings, token)
+        result = await kernel.run(request.program, request.bindings, request.token)
         self._note_denial(kernel, namespace, result)
         return result
 

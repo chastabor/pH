@@ -203,12 +203,21 @@ def content_from_wire(blocks: object) -> list[ContentBlock]:
 
 
 def text_of(
-    blocks: Sequence[ContentBlock], *, placeholder: Callable[[str], str] | None = None
+    blocks: Sequence[ContentBlock],
+    *,
+    placeholder: Callable[[str], str] | None = None,
+    separator: str = "\n",
 ) -> str:
-    """The text of a block list, joined by newlines.
+    """The text of a block list, joined by `separator` — newlines by default.
 
     Non-text blocks are skipped, or rendered through `placeholder(type)` when a
     caller wants a marker — the one join every mode and adapter needs.
+
+    `separator` is for the one wire that cannot take the default: an assistant
+    message on the OpenAI wire concatenates its text fragments with no join, and
+    changing those bytes would invalidate the cached prefix (A12). A parameter
+    rather than a second hand-rolled comprehension at that call site, so the
+    "which blocks count as text" rule stays in one place.
     """
     parts: list[str] = []
     for block in blocks:
@@ -216,7 +225,7 @@ def text_of(
             parts.append(block.text)
         elif placeholder is not None:
             parts.append(placeholder(block.type))
-    return "\n".join(parts)
+    return separator.join(parts)
 
 
 def attachment_of(block: ContentBlock) -> AttachmentRef | None:

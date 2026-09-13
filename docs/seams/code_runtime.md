@@ -36,7 +36,7 @@ class CodeRuntime(Protocol):
 ```
 
 `CodeRunRequest` carries `program`, `bindings`, `namespace` (`None` keeps the
-fresh-per-run contract; a key selects a persistent one) and `cancel_scope`.
+fresh-per-run contract; a key selects a persistent one) and `token`.
 
 `CodeRunResult` carries `logs`, `value`, `error`, `truncated`, `reset` and
 `displays`. Two of those are worth knowing:

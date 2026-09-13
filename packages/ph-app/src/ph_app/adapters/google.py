@@ -35,7 +35,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -54,6 +54,7 @@ from ph.llm.types import (
     FinishKind,
     FinishReason,
     GenerateOptions,
+    Message,
     ReasoningBlock,
     ReasoningDelta,
     StreamChunk,
@@ -62,8 +63,10 @@ from ph.llm.types import (
     TokenUsage,
     ToolCallBlock,
     ToolCallDelta,
+    ToolResultBlock,
     UsageChunk,
     attachment_of,
+    text_of,
 )
 from ph.seams.uploads import FileHandle
 from ph.session import now_ms
@@ -534,7 +537,7 @@ def _expiry(stated: object) -> int | None:
         return None
 
 
-def _call_names(messages: Any) -> dict[str, str]:  # noqa: ANN401
+def _call_names(messages: Sequence[Message]) -> dict[str, str]:
     """`tool_call_id → name`, so a result can be addressed the way this wire does.
 
     A `functionResponse` carries the function's **name**; pH's `ToolResultBlock`
@@ -547,13 +550,13 @@ def _call_names(messages: Any) -> dict[str, str]:  # noqa: ANN401
     names: dict[str, str] = {}
     for message in messages:
         for block in message.content:
-            if getattr(block, "type", "") == "tool-call":
+            if isinstance(block, ToolCallBlock):
                 names[block.id] = block.name
     return names
 
 
 def _to_google(
-    message: Any,  # noqa: ANN401
+    message: Message,
     media: dict[str, str],
     handles: dict[str, str],
     names: dict[str, str],
@@ -566,24 +569,23 @@ def _to_google(
     """
     parts: list[dict[str, Any]] = []
     for block in message.content:
-        kind = getattr(block, "type", "")
         attachment = attachment_of(block)
         if attachment is not None:
             parts.append(_media_part(attachment, media, handles))
-        elif kind == "text":
+        elif isinstance(block, TextBlock):
             parts.append({"text": block.text})
-        elif kind == "tool-call":
+        elif isinstance(block, ToolCallBlock):
             try:
                 arguments = json.loads(block.arguments) if block.arguments else {}
             except json.JSONDecodeError:
                 arguments = {}
             parts.append({"functionCall": {"name": block.name, "args": arguments}})
-        elif kind == "tool-result":
+        elif isinstance(block, ToolResultBlock):
             parts.append(
                 {
                     "functionResponse": {
                         "name": names.get(block.tool_call_id, block.tool_call_id),
-                        "response": {"output": _result_text(block)},
+                        "response": {"output": text_of(block.content)},
                     }
                 }
             )
@@ -594,10 +596,6 @@ def _to_google(
     if not parts:
         return None
     return {"role": "model" if message.role == "assistant" else "user", "parts": parts}
-
-
-def _result_text(block: Any) -> str:  # noqa: ANN401
-    return "\n".join(inner.text for inner in block.content if getattr(inner, "type", "") == "text")
 
 
 def _media_part(

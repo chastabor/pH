@@ -30,10 +30,10 @@ from __future__ import annotations
 import logging
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import replace
-from typing import Any, Protocol
+from typing import Protocol
 
 from ..cordis import Context, Next, plugin
-from ..json import as_seq
+from ..json import JsonObject, as_seq
 from ..keys import ATTACHMENTS, LLM, SESSIONS
 from ..session import Session
 from .adapter import ResolvedModel
@@ -99,7 +99,7 @@ def _longest_edge(attachment: AttachmentRef) -> int | None:
     return max(attachment.width, attachment.height)
 
 
-def oversized_notices(messages: Sequence[Message], route: ResolvedModel) -> list[dict[str, Any]]:
+def oversized_notices(messages: Sequence[Message], route: ResolvedModel) -> list[JsonObject]:
     """Images that will be *sent* and then scaled down at the far end (P7-03).
 
     Not a degradation and deliberately not on the same path: nothing is replaced,
@@ -115,7 +115,7 @@ def oversized_notices(messages: Sequence[Message], route: ResolvedModel) -> list
     """
     if route.usable_image_edge is None:
         return []
-    notices: list[dict[str, Any]] = []
+    notices: list[JsonObject] = []
     seen: set[str] = set()
     for message in messages:
         for block in message.content:
@@ -197,14 +197,14 @@ def degrade_media(
     messages: Sequence[Message],
     store: MediaPresence | None,
     route: ResolvedModel,
-) -> tuple[tuple[Message, ...], list[dict[str, Any]]]:
+) -> tuple[tuple[Message, ...], list[JsonObject]]:
     """The messages an adapter should see, and an account of what was replaced.
 
     Returns the originals unchanged when nothing had to go, so the overwhelmingly
     common case allocates nothing and leaves the request byte-identical — which
     is what the prefix cache is counting on (A12).
     """
-    degraded: list[dict[str, Any]] = []
+    degraded: list[JsonObject] = []
     rewritten: list[Message] = []
     changed = False
     for message in messages:
@@ -234,9 +234,7 @@ def degrade_media(
     return (tuple(rewritten) if changed else tuple(messages)), degraded
 
 
-def _record_once(
-    session: Session, event_type: str, provider: str, items: list[dict[str, Any]]
-) -> bool:
+def _record_once(session: Session, event_type: str, provider: str, items: list[JsonObject]) -> bool:
     """Append a media notice, but only when it says something new.
 
     One fold for both notices, because the *mechanism* is what they share and the
@@ -264,12 +262,12 @@ def _record_once(
     return True
 
 
-def record_degraded(session: Session, provider: str, degraded: list[dict[str, Any]]) -> bool:
+def record_degraded(session: Session, provider: str, degraded: list[JsonObject]) -> bool:
     """Media a route would not take at all."""
     return _record_once(session, "attachment/degraded", provider, degraded)
 
 
-def record_oversized(session: Session, provider: str, notices: list[dict[str, Any]]) -> bool:
+def record_oversized(session: Session, provider: str, notices: list[JsonObject]) -> bool:
     """Media that was sent and is larger than the route can use (P7-03)."""
     return _record_once(session, "attachment/oversized", provider, notices)
 

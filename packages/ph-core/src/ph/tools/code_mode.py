@@ -354,7 +354,7 @@ async def apply(ctx: Context, config: Config) -> None:
                 program=program,
                 bindings=namespaces,
                 namespace=run.agent.id,
-                cancel_scope=bridge.token,
+                token=bridge.token,
             )
         )
         return CodeCellValue(

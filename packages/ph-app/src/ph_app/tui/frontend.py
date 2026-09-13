@@ -155,6 +155,18 @@ class FrontSession(Protocol):
         """One registered screen definition, or `None`."""
         ...
 
+    @property
+    def diverged(self) -> bool:
+        """Whether this front end's view of the log has stopped matching the harness's.
+
+        On the Protocol rather than probed for, because everything the terminal
+        reads off its harness has to be something a *remote* one can answer — the
+        rule `test_the_terminal_never_reaches_past_the_front_session` enforces. A
+        `getattr(front, "diverged", False)` slipped past it precisely by not being
+        an attribute access.
+        """
+        ...
+
     def providers(self) -> list[str]:
         """The model routes this deployment can reach, by provider name."""
         ...

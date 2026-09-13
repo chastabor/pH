@@ -43,6 +43,7 @@ from ph.llm.types import (
     FinishKind,
     FinishReason,
     GenerateOptions,
+    Message,
     ReasoningBlock,
     ReasoningDelta,
     StreamChunk,
@@ -51,6 +52,7 @@ from ph.llm.types import (
     TokenUsage,
     ToolCallBlock,
     ToolCallDelta,
+    ToolResultBlock,
     UsageChunk,
     attachment_of,
     text_of,
@@ -271,7 +273,7 @@ class OpenAiCompatibleAdapter:
         secret = resolve_secret(self.ctx, self.profile.api_key_env, self.profile.provider)
         return {"Authorization": f"Bearer {secret}", "Content-Type": "application/json"}
 
-    async def upload(self, ref: Any, content: bytes) -> FileHandle:  # noqa: ANN401
+    async def upload(self, ref: AttachmentRef, content: bytes) -> FileHandle:
         """Hand the bytes to the Files API and keep the id it returns (P7-03).
 
         The `Uploader` half of `ctx.uploads` for this wire. `purpose` is the one
@@ -599,7 +601,7 @@ def _media_part(
 
 
 def _to_openai(
-    message: Any,  # noqa: ANN401
+    message: Message,
     media: dict[str, str],
     handles: dict[str, str],
 ) -> list[dict[str, Any]]:
@@ -611,9 +613,7 @@ def _to_openai(
     what it was, which is what the prefix cache is counting on (A12).
     """
     if message.role == "assistant":
-        text = "".join(
-            block.text for block in message.content if getattr(block, "type", "") == "text"
-        )
+        text = text_of(message.content, separator="")
         calls = [
             {
                 "id": block.id,
@@ -621,13 +621,13 @@ def _to_openai(
                 "function": {"name": block.name, "arguments": block.arguments},
             }
             for block in message.content
-            if getattr(block, "type", "") == "tool-call"
+            if isinstance(block, ToolCallBlock)
         ]
         entry: dict[str, Any] = {"role": "assistant", "content": text or None}
         if calls:
             entry["tool_calls"] = calls
         return [entry]
-    results = [block for block in message.content if getattr(block, "type", "") == "tool-result"]
+    results = [block for block in message.content if isinstance(block, ToolResultBlock)]
     if results:
         # A tool result is its own wire role, so it cannot be merged with text.
         return [
@@ -650,7 +650,7 @@ def _to_openai(
                 handles.get(attachment.attachment_id),
             )
             parts.append(part if part is not None else media_pointer(attachment))
-        elif getattr(block, "type", "") == "text":
+        elif isinstance(block, TextBlock):
             parts.append({"type": "text", "text": block.text})
     if carries_media:
         # Keyed on the message *having* media, not on the rendered parts still

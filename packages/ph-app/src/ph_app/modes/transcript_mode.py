@@ -13,6 +13,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 from ph.cordis import Profile
 from ph.llm.types import Message, ReasoningBlock, TextBlock, ToolCallBlock, ToolResultBlock, text_of
@@ -28,7 +29,14 @@ class TranscriptResult:
     text: str
 
 
-_SPEAKER = {"user": "you", "assistant": "pH", "system": "system"}
+_SPEAKER: dict[Literal["system", "user", "assistant"], str] = {
+    "user": "you",
+    "assistant": "pH",
+    "system": "system",
+}
+"""Keyed on `Message.role`'s own union, so the checker enforces that the table
+covers it. A `.get(role, role)` default here could never fire — the same dead
+defence this round removed one line below."""
 
 
 def render_transcript(messages: tuple[Message, ...]) -> str:
@@ -37,10 +45,7 @@ def render_transcript(messages: tuple[Message, ...]) -> str:
     for message in messages:
         for block in message.content:
             if isinstance(block, TextBlock):
-                source = getattr(message.source, "kind", "user")
-                speaker = (
-                    "context" if source == "plugin" else _SPEAKER.get(message.role, message.role)
-                )
+                speaker = "context" if message.source.kind == "plugin" else _SPEAKER[message.role]
                 lines.append(f"{speaker}: {block.text}")
             elif isinstance(block, ReasoningBlock):
                 lines.append(f"pH (thinking): {block.text}")

@@ -38,6 +38,7 @@ from ph.json import as_int, as_str
 from ph.keys import ATTACHMENTS, CREDENTIALS, LLM, UPLOADS
 from ph.llm.adapter import LlmError, ResolvedModel, resolved
 from ph.llm.types import (
+    AttachmentRef,
     BlockEnd,
     BlockStart,
     ContentBlock,
@@ -46,6 +47,7 @@ from ph.llm.types import (
     FinishReason,
     GenerateOptions,
     LlmFailure,
+    Message,
     ReasoningBlock,
     ReasoningDelta,
     StreamChunk,
@@ -54,7 +56,9 @@ from ph.llm.types import (
     TokenUsage,
     ToolCallBlock,
     ToolCallDelta,
+    ToolResultBlock,
     UsageChunk,
+    attachment_of,
 )
 from ph.seams.uploads import FileHandle
 from ph.session import now_ms
@@ -265,7 +269,7 @@ class AnthropicAdapter:
             headers["anthropic-beta"] = self.config.files_beta
         return headers
 
-    async def upload(self, ref: Any, content: bytes) -> FileHandle:  # noqa: ANN401
+    async def upload(self, ref: AttachmentRef, content: bytes) -> FileHandle:
         """Hand the bytes to the Files API and keep the id it returns.
 
         The `Uploader` half of `ctx.uploads`. No expiry is recorded: this
@@ -531,8 +535,36 @@ def _merge_usage(current: TokenUsage | None, raw: dict[str, Any]) -> TokenUsage:
     )
 
 
+def _media_part(
+    attachment: AttachmentRef, media: dict[str, str], handles: dict[str, str]
+) -> dict[str, Any]:
+    """One attachment as a `file` or `base64` source, or a pointer if neither.
+
+    Total over its own vocabulary, not a second copy of the accept policy:
+    `media-degrade` decides what may be sent, but this renderer still has to be
+    honest about what it can *express*. Without the fallback, a MIME it has no
+    shape for would be dressed as an image.
+
+    `handles` wins over `media`: a file the provider already holds is referenced
+    by id, which is the whole point of uploading it.
+    """
+    shape = _WIRE_SHAPES.get(attachment.mime)
+    if shape is None:
+        return media_pointer(attachment)
+    handle = handles.get(attachment.attachment_id)
+    if handle is not None:
+        return {"type": shape, "source": {"type": "file", "file_id": handle}}
+    data = media.get(attachment.attachment_id)
+    if data is None:
+        return media_pointer(attachment)
+    return {
+        "type": shape,
+        "source": {"type": "base64", "media_type": attachment.mime, "data": data},
+    }
+
+
 def _to_anthropic(
-    message: Any,  # noqa: ANN401
+    message: Message,
     media: dict[str, str],
     handles: dict[str, str] | None = None,
 ) -> dict[str, Any]:
@@ -551,42 +583,20 @@ def _to_anthropic(
     """
     blocks: list[dict[str, Any]] = []
     for block in message.content:
-        kind = getattr(block, "type", "")
-        if kind == "text":
+        attachment = attachment_of(block)
+        if attachment is not None:
+            blocks.append(_media_part(attachment, media, handles or {}))
+        elif isinstance(block, TextBlock):
             blocks.append({"type": "text", "text": block.text})
-        elif kind == "media":
-            handle = (handles or {}).get(block.attachment.attachment_id)
-            data = media.get(block.attachment.attachment_id)
-            shape = _WIRE_SHAPES.get(block.attachment.mime)
-            if handle is not None and shape is not None:
-                blocks.append({"type": shape, "source": {"type": "file", "file_id": handle}})
-                continue
-            # Total over its own vocabulary, not a second copy of the accept
-            # policy: `media-degrade` decides what may be sent, but this renderer
-            # still has to be honest about what it can *express*. Without the
-            # fallback, a MIME it has no shape for would be dressed as an image.
-            if data is None or shape is None:
-                blocks.append(media_pointer(block.attachment))
-            else:
-                blocks.append(
-                    {
-                        "type": shape,
-                        "source": {
-                            "type": "base64",
-                            "media_type": block.attachment.mime,
-                            "data": data,
-                        },
-                    }
-                )
-        elif kind == "reasoning":
+        elif isinstance(block, ReasoningBlock):
             blocks.append({"type": "thinking", "thinking": block.text})
-        elif kind == "tool-call":
+        elif isinstance(block, ToolCallBlock):
             try:
                 parsed = json.loads(block.arguments) if block.arguments else {}
             except json.JSONDecodeError:
                 parsed = {}
             blocks.append({"type": "tool_use", "id": block.id, "name": block.name, "input": parsed})
-        elif kind == "tool-result":
+        elif isinstance(block, ToolResultBlock):
             blocks.append(
                 {
                     "type": "tool_result",
@@ -594,7 +604,7 @@ def _to_anthropic(
                     "content": [
                         {"type": "text", "text": inner.text}
                         for inner in block.content
-                        if getattr(inner, "type", "") == "text"
+                        if isinstance(inner, TextBlock)
                     ],
                     **({"is_error": True} if block.is_error else {}),
                 }

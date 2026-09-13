@@ -575,7 +575,7 @@ class PHTuiApp(App[str | None]):
                 markup=False,
             )
             return
-        if getattr(front, "diverged", False):
+        if front.diverged:
             # A screen is built from this client's mirror of the log, and a mirror
             # that refused a frame is a *prefix* with no way to tell how short. Said
             # rather than drawn: the old code rebuilt the session here and a

@@ -30,6 +30,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol, TypeAlias, runtime_checkable
 
+from ..cancel import CancelToken
 from ..cordis import Context, Disposer, Running, plugin, running
 from ..keys import CODE_RUNTIME
 from ._registry import claim_key, claim_slot
@@ -176,7 +177,15 @@ class CodeRunRequest:
     bindings: tuple[CodeBindingNamespace, ...] = ()
     namespace: str | None = None
     """`None` keeps dsh's fresh-per-run contract; a key selects a persistent one."""
-    cancel_scope: Any = None
+    token: CancelToken | None = None
+    """The caller's cancellation view for this run.
+
+    `token` because that is what a held `CancelToken` is called everywhere else:
+    `bridge.token` writes this one and `Kernel.run`'s `token` reads it, so the
+    same word carries it the whole way — and `tasks.cancel_scope` is a real
+    `anyio.CancelScope` in a dozen files here. See `ph.cancel` for why this is a
+    token and not a scope.
+    """
 
 
 @dataclass(frozen=True, slots=True)

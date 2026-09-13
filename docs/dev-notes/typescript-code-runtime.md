@@ -71,7 +71,7 @@ async def run(self, request: CodeRunRequest) -> CodeRunResult: ...
 ```
 
 Registered with `ctx.code_runtime.register(provider)`. `CodeRunRequest` carries
-`program`, `bindings`, `namespace` and `cancel_scope`; `CodeRunResult` carries
+`program`, `bindings`, `namespace` and `token`; `CodeRunResult` carries
 `logs`, `value`, `error`, `truncated`, `reset` and `displays`.
 
 ### 2. A host↔guest call bridge — the real work
