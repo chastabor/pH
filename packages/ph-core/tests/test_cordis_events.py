@@ -22,7 +22,11 @@ async def test_wrong_dispatch_mode_raises() -> None:
     with pytest.raises(EventModeError, match='declared "emit"'):
         await root.parallel("test/registry-emit")
     with pytest.raises(EventModeError):
-        await root.waterfall("test/registry-emit", inner=lambda: None)
+
+        async def inner() -> None:
+            return None
+
+        await root.waterfall("test/registry-emit", inner=inner)
 
 
 async def test_undeclared_event_raises_on_dispatch_and_listen() -> None:

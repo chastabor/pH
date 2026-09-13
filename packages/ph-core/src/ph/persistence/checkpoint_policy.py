@@ -28,15 +28,14 @@ worse than a side effect that did not happen.
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
-from typing import Any
+from collections.abc import AsyncIterator
 
 from ..agent.types import PreStepDecision, PreStepRequest
 from ..cancel import is_cancelled
-from ..cordis import Context, plugin
+from ..cordis import Context, Next, plugin
 from ..keys import SESSIONS
-from ..llm.types import GenerateOptions
-from ..tools.definition import ToolExecution, aborted_result
+from ..llm.types import GenerateOptions, StreamChunk
+from ..tools.definition import ToolExecution, ToolExecutionResult, aborted_result
 
 __all__ = ["apply"]
 
@@ -47,8 +46,8 @@ async def apply(ctx: Context, config: None) -> None:
 
     async def before_request(
         request: GenerateOptions,
-        next_: Callable[..., Awaitable[Any]],
-    ) -> Any:  # noqa: ANN401
+        next_: Next[AsyncIterator[StreamChunk]],
+    ) -> AsyncIterator[StreamChunk]:
         if request.session_id is not None:
             session = ctx.require(SESSIONS).get(request.session_id)
             if session is not None:
@@ -59,8 +58,8 @@ async def apply(ctx: Context, config: None) -> None:
         return await next_()
 
     async def before_tool_body(
-        execution: ToolExecution, next_: Callable[..., Awaitable[Any]]
-    ) -> Any:  # noqa: ANN401
+        execution: ToolExecution, next_: Next[ToolExecutionResult]
+    ) -> ToolExecutionResult:
         if execution.session is None or execution.parent is not None:
             # A nested dispatch is already covered by its outer call's barrier.
             return await next_()
@@ -71,7 +70,7 @@ async def apply(ctx: Context, config: None) -> None:
 
     async def after_pre_step(
         request: PreStepRequest,
-        next_: Callable[..., Awaitable[PreStepDecision]],
+        next_: Next[PreStepDecision],
     ) -> PreStepDecision:
         decision = await next_()
         if decision.kind == "reject":

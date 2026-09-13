@@ -283,8 +283,7 @@ class LlmRuntime:
             with running(handle.by):
                 return _normalized(handle.adapter.stream(request), request)
 
-        result = await self.ctx.waterfall("llm/stream", options, inner=inner)
-        return result  # type: ignore[no-any-return]
+        return await self.ctx.waterfall("llm/stream", options, inner=inner)
 
 
 async def _normalized(

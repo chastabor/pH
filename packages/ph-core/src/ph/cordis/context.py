@@ -43,7 +43,7 @@ from collections.abc import Awaitable, Callable, Iterator, MutableMapping, Seque
 from contextlib import suppress
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
-from typing import Any, TypeAlias, overload
+from typing import Any, TypeAlias, cast, overload
 
 import anyio
 
@@ -58,6 +58,7 @@ __all__ = [
     "ForkScope",
     "Hook",
     "Listener",
+    "Next",
     "is_bailed",
     "maybe_await",
 ]
@@ -68,6 +69,17 @@ Disposer: TypeAlias = Callable[[], Any]
 """A teardown callable. It may return an awaitable; `dispose()` awaits it."""
 
 Listener: TypeAlias = Callable[..., Any]
+
+type Next[T] = Callable[..., Awaitable[T]]
+"""The rest of a `waterfall` chain, as the listener wrapping it sees.
+
+`T` is the chain's own type, which `waterfall` reads off the producer's `inner`
+— so a listener on `agent/pre-step` takes a `Next[PreStepDecision]` and returns
+one. Named because twenty listeners across twelve files spell this shape, and
+ten of them imported `Callable` and `Awaitable` for nothing else.
+
+It states a convention, not a check: `on` takes a `Listener`, so a listener's own
+annotation is what it claims rather than what anything verifies."""
 
 _MAX_RECONCILE_ROUNDS = 64
 _MISSING: Any = object()
@@ -1255,13 +1267,13 @@ class Context:
         if failures:
             raise ExceptionGroup(f'listeners failed for "{event}"', failures)
 
-    async def waterfall(
+    async def waterfall[T](
         self,
         event: str,
         *args: object,
-        inner: Callable[..., Any],
+        inner: Callable[..., Awaitable[T]],
         scope: Context | None = None,
-    ) -> Any:  # noqa: ANN401
+    ) -> T:
         """Around-middleware: each listener wraps the rest of the chain.
 
         Listeners run outermost-first and receive `(*args, next)`. Calling
@@ -1273,6 +1285,24 @@ class Context:
         arguments. Cordis expects a listener to mutate a shared payload instead,
         which is not available here: pH's payloads are frozen values, and a
         rewrite that has to be explicit is a rewrite a reader can see.
+
+        **The chain's type comes from `inner`.** Every waterfall settles on one
+        type — `agent/pre-step` on a `PreStepDecision`, `approval/request` on an
+        `ApprovalAnswer` — and that type was previously restated by hand at every
+        listener, twenty of them across twelve files, with nothing checking any
+        against the producer.
+
+        What that buys is asymmetric, and worth being exact about. A *caller's*
+        result is now checked: `T` flows from the `inner` it passed. A
+        *listener's* `Next[T]` is not — `on` takes a `Listener`, so a listener's
+        annotation is what it claims rather than what anything verifies. The
+        convention is one declaration instead of twenty; the checking stops at
+        the producer.
+
+        So an `inner` must declare what the *chain* resolves to rather than what
+        its own default happens to be: `tools/pre-execute` returns an `Allow`
+        while the chain is a four-way `PreToolDecision`, and inferring `T` from
+        the default there would be wrong for every other listener.
         """
         event_registry.check(event, "waterfall")
         hooks = self._hooks(event, scope=scope)
@@ -1294,9 +1324,14 @@ class Context:
             # of them and binds itself from the inside, before calling on. The
             # other thirteen are a seam's own fallback, which is the row's code
             # and wants the row's binding — exactly what it inherits here.
-            return await maybe_await(inner(*state))
+            return await inner(*state)
 
-        return await next_()
+        # The one place the chain's type is unverifiable: `on` takes a
+        # `Listener`, rows load through entry points, so a listener's return is
+        # never seen by this repo's checker. The producers narrow what comes back
+        # — `driver` raises `TypeError` on a decision that is not one — and this
+        # cast is what lets them state that once instead of at every listener.
+        return cast("T", await next_())
 
     def detach(self, coro: Any, *, label: str) -> None:  # noqa: ANN401
         """Run `coro` outside the caller's lifetime, tracked and drained.

@@ -336,7 +336,11 @@ class ApprovalService:
         if is_cancelled(cancel):
             return "cancelled"
 
-        async def inner(_request: ApprovalRequest) -> ApprovalOutcome:
+        # `ApprovalAnswer`, not `ApprovalOutcome`: `waterfall` reads the chain's
+        # type from here, and an answerer may return an `Edited` or a `Responded`
+        # as well as a bare outcome. Declaring the default's own narrower type
+        # would make the branch below statically dead for every answerer.
+        async def inner(_request: ApprovalRequest) -> ApprovalAnswer:
             # No answerer took the prompt. Absence is not consent.
             return "unavailable"
 
@@ -345,8 +349,10 @@ class ApprovalService:
         except Exception:
             log.exception("ph.seams.approval: an answerer failed; denying")
             return "unavailable"
-        # A waterfall returns `Any`, so this is the boundary. Through the lookup
-        # for the same reason as everywhere else — `literal_lookup` says why.
+        # `waterfall` carries the chain's type, but its last step is a `cast`: a
+        # listener arrives through an entry point and no checker sees what it
+        # returns, so this is where the claim is checked. Through the lookup for
+        # the same reason as everywhere else — `literal_lookup` says why.
         # `str(outcome)` rather than an `isinstance` guard: the only job that
         # guard had was keeping an unhashable value out of `.get`, and the next
         # line already `%r`s the same object.

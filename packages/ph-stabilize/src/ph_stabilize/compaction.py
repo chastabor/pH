@@ -60,7 +60,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, cast
 
@@ -73,7 +73,7 @@ from ph.agent.types import (
 )
 from ph.agent_loop import AgentCancelled
 from ph.cancel import Cancelled
-from ph.cordis import Context, plugin
+from ph.cordis import Context, Next, plugin
 from ph.json import as_obj, as_seq, as_str, dumps, thaw_json
 from ph.keys import COMPACTION, LLM, SPILL_STORE, TOKEN_METER, TOOLS
 from ph.llm import BlockAssembler
@@ -1301,7 +1301,7 @@ async def apply(ctx: Context, config: Config) -> None:
 
     async def on_pre_step(
         request: PreStepRequest,
-        next_: Callable[..., Awaitable[PreStepDecision]],
+        next_: Next[PreStepDecision],
     ) -> PreStepDecision:
         decision = await next_(request)
         # After the rest of the chain, so a step another row rejected is not
@@ -1312,8 +1312,8 @@ async def apply(ctx: Context, config: Config) -> None:
         return decision
 
     async def on_request_error(
-        failure: RequestFailure, next_: Callable[..., Awaitable[Any]]
-    ) -> Any:  # noqa: ANN401
+        failure: RequestFailure, next_: Next[RequestErrorAction | None]
+    ) -> RequestErrorAction | None:
         if failure.failure.code != CONTEXT_WINDOW_EXCEEDED:
             return await next_(failure)
         # Clip first, summarize second — upstream's order, and the order that

@@ -44,7 +44,17 @@ from typing import Any, Literal, TypeAlias
 import anyio
 
 from ..agent.types import AgentHandle
-from ..cordis import Boundary, Context, Disposer, Running, boundary_of, events, plugin, running
+from ..cordis import (
+    Boundary,
+    Context,
+    Disposer,
+    Next,
+    Running,
+    boundary_of,
+    events,
+    plugin,
+    running,
+)
 from ..keys import FS, PROJECT_ROOT
 from ..session import Session
 from ..tools.errors import FailureKind, HarnessError
@@ -1039,7 +1049,7 @@ async def read_before_edit(ctx: Context, config: None) -> None:
     """
     fs: FsService = ctx.require(FS)
 
-    async def gate(intent: EditIntent, next_: Callable[[], Any]) -> Any:  # noqa: ANN401
+    async def gate(intent: EditIntent, next_: Next[str | None]) -> str | None:
         observed = fs.observed_mtime(intent.path)
         if observed is None:
             return (

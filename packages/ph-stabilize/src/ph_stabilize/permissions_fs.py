@@ -54,14 +54,14 @@ time.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal, TypeAlias
 
 from ph.agent.types import AgentHandle
-from ph.cordis import Context, ServiceKey, plugin
+from ph.cordis import Context, Next, ServiceKey, plugin
 from ph.keys import APPROVAL, FS
 from ph.paths import canonical, is_under
 from ph.seams.approval import denial_reason
@@ -639,7 +639,9 @@ async def apply(ctx: Context, config: Config) -> None:
     fs.screen(permissions.screen, scope=ctx)
 
 
-def _gate(ctx: Context, permissions: FsPermissions, operation: Operation) -> Any:  # noqa: ANN401
+def _gate(
+    ctx: Context, permissions: FsPermissions, operation: Operation
+) -> Callable[[FsIntent, Callable[[], Awaitable[str | None]]], Awaitable[str | None]]:
     """One intent listener, holding only what it reads.
 
     A closure over three small values rather than a class, and `ctx` rather than
@@ -650,8 +652,8 @@ def _gate(ctx: Context, permissions: FsPermissions, operation: Operation) -> Any
 
     async def gate(
         intent: FsIntent,
-        next_: Callable[[], Any],
-    ) -> Any:  # noqa: ANN401
+        next_: Next[str | None],
+    ) -> str | None:
         rule = permissions.objection(operation, intent.path, intent.agent)
         if rule is None:
             return await next_()

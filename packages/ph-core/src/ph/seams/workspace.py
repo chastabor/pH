@@ -45,12 +45,12 @@ import anyio
 from pydantic import Field
 
 from ..agent.types import AgentHandle, PreStepDecision, PreStepRequest
-from ..cordis import Context, Disposer, Running, maybe_await, plugin, running, safe_yaml_load
+from ..cordis import Context, Disposer, Next, Running, maybe_await, plugin, running, safe_yaml_load
 from ..json import as_str
 from ..keys import AGENTS, CONTAINMENT, FS, SESSION_PERSISTENCE, SESSIONS, TOOLS, WORKSPACE
 from ..paths import canonical, default_home_path
 from ..session import Session, SessionEvent
-from ..tools.definition import ToolExecution
+from ..tools.definition import ToolExecution, ToolExecutionResult
 from ..tools.errors import HarnessError
 from ..wire import WireModel, literal_lookup
 from . import workspace_provision
@@ -1992,7 +1992,7 @@ async def lifecycle(ctx: Context, config: LifecycleConfig) -> None:
 
     async def ensure(
         request: PreStepRequest,
-        next_: Callable[..., Awaitable[PreStepDecision]],
+        next_: Next[PreStepDecision],
     ) -> PreStepDecision:
         agent = request.agent
         if ctx.require(WORKSPACE).of(agent.id) is None:
@@ -2126,8 +2126,8 @@ async def checkpoint_policy(ctx: Context, config: None) -> None:
 
     async def around(
         execution: ToolExecution,
-        next_: Callable[..., Awaitable[Any]],
-    ) -> Any:  # noqa: ANN401
+        next_: Next[ToolExecutionResult],
+    ) -> ToolExecutionResult:
         # A failure here never blocks the run: a missing restore point is worse than
         # no restore point only if it is believed in, and the log records which runs
         # have one. The guard is inside the `try` on purpose — reading the tool view

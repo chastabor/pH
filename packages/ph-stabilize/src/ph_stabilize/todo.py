@@ -43,12 +43,12 @@ calls, so the ambiguity it guards against cannot arise there (see
 from __future__ import annotations
 
 from collections import Counter
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Mapping
 from typing import Any, Literal
 
 from pydantic import Field
 
-from ph.cordis import Context, plugin
+from ph.cordis import Context, Next, plugin
 from ph.json import as_int, as_seq, as_str, thaw_json
 from ph.keys import SYSTEM_PROMPT, TOOLS
 from ph.llm.types import ToolCallBlock
@@ -63,6 +63,7 @@ from ph.text import count_of
 from ph.tools import ToolCallView, ToolResultView
 from ph.tools.definition import (
     Deny,
+    PreToolDecision,
     ToolExecution,
     ToolModel,
     ToolOutput,
@@ -729,8 +730,8 @@ async def apply(ctx: Context, config: None) -> None:
     )
 
     async def refuse_parallel_calls(
-        execution: ToolExecution, next_: Callable[..., Awaitable[Any]]
-    ) -> Any:  # noqa: ANN401
+        execution: ToolExecution, next_: Next[PreToolDecision]
+    ) -> PreToolDecision:
         if execution.name == TOOL_NAME and _parallel_write_todos(execution.session):
             return Deny(reason=PARALLEL_CALL_ERROR)
         return await next_(execution)

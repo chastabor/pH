@@ -28,16 +28,16 @@ appending per request would bury the conversation in one repeated sentence.
 from __future__ import annotations
 
 import logging
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import AsyncIterator, Sequence
 from dataclasses import replace
 from typing import Any, Protocol
 
-from ..cordis import Context, plugin
+from ..cordis import Context, Next, plugin
 from ..json import as_seq
 from ..keys import ATTACHMENTS, LLM, SESSIONS
 from ..session import Session
 from .adapter import ResolvedModel
-from .types import AttachmentRef, GenerateOptions, Message, TextBlock, attachment_of
+from .types import AttachmentRef, GenerateOptions, Message, StreamChunk, TextBlock, attachment_of
 
 __all__ = [
     "ATTACHABLE",
@@ -272,8 +272,8 @@ async def apply(ctx: Context, config: None) -> None:
 
     async def degrade(
         options: GenerateOptions,
-        next_: Callable[..., Awaitable[Any]],
-    ) -> Any:  # noqa: ANN401
+        next_: Next[AsyncIterator[StreamChunk]],
+    ) -> AsyncIterator[StreamChunk]:
         store = ctx.get(ATTACHMENTS)
         route = ctx.require(LLM).resolve_model(options.provider, options.model)
         messages, degraded = degrade_media(options.messages, store, route)

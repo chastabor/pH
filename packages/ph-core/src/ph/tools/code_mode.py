@@ -47,6 +47,7 @@ from ..cancel import CancelToken
 from ..cordis import Context, events, maybe_await, plugin
 from ..json import thaw_json
 from ..keys import CODE_RUNTIME, SYSTEM_PROMPT, TOOLS
+from ..llm.types import ContentBlock
 from ..seams.code_runtime import CodeBinding, CodeBindingNamespace, CodeRunRequest
 from ..session import Session
 from ..session.json import freeze_json_value
@@ -292,7 +293,9 @@ class DispatchBridge:
         )
 
     async def _log_settle(self, ref: CodeDispatchRef, result: ToolExecutionResult) -> None:
-        async def inner(record: CodeDispatchLog, blocks: Sequence[Any]) -> Sequence[Any]:
+        async def inner(
+            record: CodeDispatchLog, blocks: Sequence[ContentBlock]
+        ) -> Sequence[ContentBlock]:
             return blocks
 
         record = CodeDispatchLog(**ref.__dict__, is_error=result.is_error)

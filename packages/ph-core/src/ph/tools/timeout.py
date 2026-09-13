@@ -14,14 +14,11 @@ a deployment that wants a different timeout policy swaps the row.
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
-from typing import Any
-
 import anyio
 
-from ..cordis import Context, plugin
+from ..cordis import Context, Next, plugin
 from ..keys import TOOLS
-from .definition import ToolExecution, error_result
+from .definition import ToolExecution, ToolExecutionResult, error_result
 
 __all__ = ["apply"]
 
@@ -32,8 +29,8 @@ async def apply(ctx: Context, config: None) -> None:
 
     async def bounded(
         execution: ToolExecution,
-        next_: Callable[..., Awaitable[Any]],
-    ) -> Any:  # noqa: ANN401
+        next_: Next[ToolExecutionResult],
+    ) -> ToolExecutionResult:
         definition = ctx.require(TOOLS).get(execution.name, scope=execution.scope)
         budget = getattr(definition, "timeout_ms", None)
         if budget is None:

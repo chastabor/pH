@@ -35,14 +35,14 @@ loop already has. Nothing has to be un-dispatched.
 from __future__ import annotations
 
 import logging
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from pydantic import Field
 
 from ph.agent.types import PreStepDecision, PreStepRequest
-from ph.cordis import Context, plugin
+from ph.cordis import Context, Next, plugin
 from ph.json import as_bool, as_str
 from ph.keys import SESSIONS, SUBAGENTS, TUI_STATUS
 from ph.llm.types import ToolResultBlock
@@ -51,7 +51,7 @@ from ph.seams.invariants import contribute_fold_cache
 from ph.seams.subagents import ADMITTED, SubagentRequest
 from ph.seams.tui_status import StatusField, StatusReading
 from ph.session import Session, SessionEvent, SessionFoldCache, derive_event_message
-from ph.tools.definition import Deny, ToolExecution
+from ph.tools.definition import Deny, PreToolDecision, ToolExecution
 from ph.wire import WireModel
 
 from .compaction import TRIGGER_FRACTION
@@ -435,7 +435,7 @@ async def apply(ctx: Context, config: Config) -> None:
 
     async def on_pre_step(
         request: PreStepRequest,
-        next_: Callable[..., Awaitable[PreStepDecision]],
+        next_: Next[PreStepDecision],
     ) -> PreStepDecision:
         settings = config.model_calls
         session = request.session
@@ -462,8 +462,8 @@ async def apply(ctx: Context, config: Config) -> None:
 
     async def on_pre_execute(
         execution: ToolExecution,
-        next_: Callable[..., Awaitable[Any]],
-    ) -> Any:  # noqa: ANN401
+        next_: Next[PreToolDecision],
+    ) -> PreToolDecision:
         session = execution.session
         settings = config.tool_calls
         breaker = config.breaker.consecutive_failures

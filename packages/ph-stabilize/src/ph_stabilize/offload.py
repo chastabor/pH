@@ -37,15 +37,18 @@ caps are per stream, so one cell can still emit twice the threshold.
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
-from typing import Any
-
-from ph.cordis import Context, plugin
+from ph.cordis import Context, Next, plugin
 from ph.keys import SPILL_STORE, TOOLS
 from ph.llm.types import text_of
 from ph.seams.spill import SpillClaim
 from ph.session import Session
-from ph.tools.definition import Accept, ToolExecution, ToolExecutionResult, text_content
+from ph.tools.definition import (
+    Accept,
+    PostToolDecision,
+    ToolExecution,
+    ToolExecutionResult,
+    text_content,
+)
 from ph.wire import WireModel
 
 __all__ = [
@@ -211,8 +214,10 @@ async def apply(ctx: Context, config: Config) -> None:
     )
 
     async def offload(
-        execution: ToolExecution, result: ToolExecutionResult, next_: Callable[..., Awaitable[Any]]
-    ) -> Any:  # noqa: ANN401
+        execution: ToolExecution,
+        result: ToolExecutionResult,
+        next_: Next[PostToolDecision],
+    ) -> PostToolDecision:
         decision = await next_(execution, result)
         session = execution.session
         if session is None or _self_limiting(execution):

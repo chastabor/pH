@@ -45,18 +45,17 @@ reader, and asks about *that cell* rather than about the transport.
 from __future__ import annotations
 
 import re
-from collections.abc import Awaitable, Callable
 from functools import lru_cache
-from typing import Any, Final, Literal
+from typing import Final, Literal
 
 from pydantic import Field
 
-from ph.cordis import Context, plugin
+from ph.cordis import Context, Next, plugin
 from ph.json import JsonValue
 from ph.keys import APPROVAL, TOOLS
 from ph.seams.approval import ApprovalDecisionName
 from ph.session import Session
-from ph.tools.definition import Ask, ToolExecution
+from ph.tools.definition import Ask, PreToolDecision, ToolExecution
 from ph.tools.registry import RUN_CODE
 from ph.wire import WireModel
 from ph_stabilize.destructive import findings, strings_in
@@ -228,8 +227,8 @@ async def apply(ctx: Context, config: Config) -> None:
 
     async def gate(
         execution: ToolExecution,
-        next_: Callable[..., Awaitable[Any]],
-    ) -> Any:  # noqa: ANN401
+        next_: Next[PreToolDecision],
+    ) -> PreToolDecision:
         rule = rule_for(execution)
         if rule is None:
             return await next_(execution)

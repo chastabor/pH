@@ -57,6 +57,7 @@ from .definition import (
     ExecutionMode,
     FailureKind,
     PostToolDecision,
+    PreToolDecision,
     Respond,
     ToolDefinition,
     ToolExecution,
@@ -843,8 +844,10 @@ class ToolRuntime:
             return PreparedCall(run=run, result=aborted_result(started=False))
 
         try:
-
-            async def inner(_exec: ToolExecution) -> Allow:
+            # `PreToolDecision`, not `Allow`: the chain is the four-way union
+            # and a listener returns any of them. `waterfall` reads its type
+            # from here, so the default's own type would narrow every caller.
+            async def inner(_exec: ToolExecution) -> PreToolDecision:
                 return Allow()
 
             gate = await self.ctx.waterfall(

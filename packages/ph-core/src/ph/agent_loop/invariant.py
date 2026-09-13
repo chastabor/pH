@@ -17,12 +17,11 @@ leaving a flag at its default.
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from typing import Any
+from collections.abc import AsyncIterator
 
-from ..cordis import Context, plugin
+from ..cordis import Context, Next, plugin
 from ..keys import SESSIONS
-from ..llm.types import GenerateOptions
+from ..llm.types import GenerateOptions, StreamChunk
 from ..seams.invariants import Invariant, contribute
 
 __all__ = ["ModelVisibleNotLoggedError", "apply"]
@@ -36,7 +35,9 @@ class ModelVisibleNotLoggedError(AssertionError):
 async def apply(ctx: Context, config: None) -> None:
     """Assert `messages == derive_messages()` on every loop request."""
 
-    async def check(request: GenerateOptions, next_: Callable[[], Any]) -> Any:  # noqa: ANN401
+    async def check(
+        request: GenerateOptions, next_: Next[AsyncIterator[StreamChunk]]
+    ) -> AsyncIterator[StreamChunk]:
         # `is_loop_request` implies a session id, but through a property the
         # checker cannot see into; the explicit test is what lets `get` be typed.
         session_id = request.session_id

@@ -56,10 +56,13 @@ async def _pre_step(ctx: Context, agent: AgentDriver, *, turn: int, step: int) -
     """The decision `agent/pre-step` reaches, with the loop's own `inner`."""
     from ph.agent.types import PreStepDecision, PreStepRequest
 
+    async def inner(request: PreStepRequest) -> PreStepDecision:
+        return PreStepDecision(kind="enter", messages=request.messages)
+
     return await ctx.waterfall(
         "agent/pre-step",
         PreStepRequest(agent=agent, session=session_of(agent), messages=(), turn=turn, step=step),
-        inner=lambda request: PreStepDecision(kind="enter", messages=request.messages),
+        inner=inner,
     )
 
 

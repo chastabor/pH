@@ -25,13 +25,11 @@ So the classification is explicit:
 from __future__ import annotations
 
 import logging
-from collections.abc import Awaitable, Callable
-from typing import Any
 
 import anyio
 
-from ..agent.types import RequestFailure
-from ..cordis import Context, plugin
+from ..agent.types import RequestErrorAction, RequestFailure
+from ..cordis import Context, Next, plugin
 from ..keys import SESSIONS
 from ..wire import WireModel
 from .types import CONTEXT_WINDOW_EXCEEDED, EMPTY_RESPONSE, FILE_EXPIRED, LlmFailure
@@ -88,10 +86,8 @@ async def apply(ctx: Context, config: Config) -> None:
 
     async def on_error(
         failure_payload: RequestFailure,
-        next_: Callable[..., Awaitable[Any]],
-    ) -> Any:  # noqa: ANN401
-        from ..agent.types import RequestErrorAction
-
+        next_: Next[RequestErrorAction | None],
+    ) -> RequestErrorAction | None:
         failure = failure_payload.failure
         key = f"{failure_payload.turn}:{failure_payload.step}"
         if not is_transient(failure):

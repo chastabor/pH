@@ -11,14 +11,14 @@ the fake-provider options. Each was being re-declared per test module.
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NoReturn
 
 import anyio
 
 from ..agent.types import AgentHandle, AgentOptions, AgentStatus
-from ..cordis import DEPLOYMENT, Boundary, Context
+from ..cordis import DEPLOYMENT, Boundary, Context, Next
 from ..json import dumps
 from ..keys import SESSION_PERSISTENCE, SKILLS, TOOLS
 from ..llm.types import ContextForm, PluginSource, ReasoningBlock, TextBlock
@@ -32,7 +32,7 @@ from ..seams.workspace import (
     WorkspaceSeam,
 )
 from ..session import Session, SessionEvent, SessionHeader, SessionKind
-from ..tools import ToolExecution, ToolExecutionResult
+from ..tools import PreToolDecision, ToolExecution, ToolExecutionResult
 from ..tools.definition import ToolDefinition, ToolOutput, define_tool, text_content
 from ..tools.registry import ToolRuntime
 
@@ -125,7 +125,7 @@ def parked_gate(ctx: Context, *, only: str | None = None) -> tuple[anyio.Event, 
     """
     reached, release = anyio.Event(), anyio.Event()
 
-    async def parked(execution: ToolExecution, next_: Callable[..., Awaitable[Any]]) -> Any:  # noqa: ANN401
+    async def parked(execution: ToolExecution, next_: Next[PreToolDecision]) -> PreToolDecision:
         if only is None or execution.name == only:
             reached.set()
             await release.wait()

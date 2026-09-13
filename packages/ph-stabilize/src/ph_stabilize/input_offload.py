@@ -31,13 +31,12 @@ a `user/message`, so the next request finds it, sees a replacement, and stops.
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Any
 
-from ph.cordis import Context, plugin
+from ph.agent.types import RequestProposal
+from ph.cordis import Context, Next, plugin
 from ph.keys import SPILL_STORE
-from ph.llm.types import PluginSource, create_user_message, text_of
+from ph.llm.types import LlmCallConfig, PluginSource, create_user_message, text_of
 from ph.seams.spill import SpillClaim
 from ph.session import (
     Session,
@@ -110,8 +109,8 @@ async def apply(ctx: Context, config: Config) -> None:
         SpillClaim.under_session("input-offload", "offload/input-spilled")
     )
 
-    async def offload(proposal: Any, next_: Callable[..., Awaitable[Any]]) -> Any:  # noqa: ANN401
-        session: Session | None = proposal.agent.session
+    async def offload(proposal: RequestProposal, next_: Next[LlmCallConfig]) -> LlmCallConfig:
+        session = proposal.agent.session
         pending = _pending(session, config) if session is not None else None
         if session is None or pending is None:
             return await next_(proposal)
