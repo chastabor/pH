@@ -237,7 +237,7 @@ async def apply(ctx: Context, config: Config) -> None:
     def family_guard(execution: ToolExecution) -> str | None:
         if execution.name != SEND_TOOL:
             return None
-        sender = getattr(execution.agent, "id", None)
+        sender = execution.agent.id if execution.agent is not None else None
         if sender is None:
             return "an agent message needs a sending agent"
         target, refusal = resolve(sender, execution.arguments)

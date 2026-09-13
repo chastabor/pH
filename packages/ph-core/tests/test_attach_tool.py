@@ -30,8 +30,8 @@ from ph.cordis import Context
 from ph.json import dumps
 from ph.keys import AGENTS, ATTACHMENTS, LLM_FAKE, SESSIONS, TOOLS
 from ph.llm.adapter import ResolvedModel
-from ph.llm.types import ToolCallBlock, attachment_of
-from ph.testing import MountProfile, run_tool
+from ph.llm.types import PluginSource, ToolCallBlock, attachment_of
+from ph.testing import MountProfile, as_kind, not_none, run_tool
 from ph.tools.batch import execute_tool_calls
 from ph.tools.builtin.attach_tool import MAX_ATTACH_BYTES
 
@@ -139,7 +139,8 @@ async def test_the_media_is_not_in_the_tool_result(mount: MountProfile, tmp_path
 
     assert [block.type for block in result.content] == ["text"]
     assert len(result.additional_contexts) == 1
-    assert result.additional_contexts[0].source.form == "relay", "a person did not attach this"
+    source = as_kind(result.additional_contexts[0].source, PluginSource)
+    assert source.form == "relay", "a person did not attach this"
 
 
 async def test_the_read_gate_bounds_what_a_model_may_attach(
@@ -199,8 +200,8 @@ async def test_a_file_no_provider_ingests_is_refused_with_the_way_out(
     # An extension nothing classifies reads as "no recognisable type" rather than
     # as the literal `application/octet-stream`, which names a MIME the model
     # might reasonably try to fix by renaming the file.
-    assert "no recognisable type" in unknown.error.message
-    assert "text/plain" in text.error.message
+    assert "no recognisable type" in not_none(unknown.error).message
+    assert "text/plain" in not_none(text.error).message
 
 
 async def test_an_oversized_file_is_refused_before_it_is_read(

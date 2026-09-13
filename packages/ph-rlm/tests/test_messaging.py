@@ -20,7 +20,7 @@ from ph.cordis import Context
 from ph.keys import AGENTS, JOBS, SESSIONS, SUBAGENTS
 from ph.seams.subagents import SubagentRequest, family_reach, reachable_family
 from ph.session import Session
-from ph.testing import FAKE_OPTIONS, MountProfile, run_tool
+from ph.testing import FAKE_OPTIONS, MountProfile, not_none, run_tool
 from ph.tools import Allow
 from ph_rlm.keys import RLM_CHILDREN
 from ph_rlm.messaging import (
@@ -430,7 +430,7 @@ async def test_observe_is_bounded_by_the_same_reach_rule(family_ctx: MountedRunt
         session=session,
     )
     assert refused.is_error is True
-    assert OUT_OF_REACH in refused.error.message
+    assert OUT_OF_REACH in not_none(refused.error).message
 
 
 async def test_an_observe_read_is_capped(family_ctx: MountedRuntime) -> None:

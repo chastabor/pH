@@ -26,7 +26,14 @@ from ph.cordis import Context
 from ph.json import as_obj
 from ph.keys import AGENTS, FS, SESSIONS, WORKSPACE
 from ph.seams.workspace import PROJECT_PROVISION_FILE, discover_provisioning
-from ph.testing import FAKE_OPTIONS, MountProfile, StubWorkspaceProvider, not_none, run_tool
+from ph.testing import (
+    FAKE_OPTIONS,
+    MountProfile,
+    StubWorkspaceProvider,
+    block_text,
+    not_none,
+    run_tool,
+)
 
 pytestmark = pytest.mark.anyio
 
@@ -308,7 +315,7 @@ async def test_the_model_is_told_when_its_command_said_more_than_was_kept(
     assert result.value["exit_code"] == 0, "the child finished; nothing blocked on a full pipe"
     assert len(result.value["stdout"]) == 4096
     assert result.value["dropped"] == 100
-    assert "100 bytes dropped, cap 4096 bytes" in result.content[0].text
+    assert "100 bytes dropped, cap 4096 bytes" in block_text(result.content[0])
 
 
 # -------------------------------------------------------------- provisioning --

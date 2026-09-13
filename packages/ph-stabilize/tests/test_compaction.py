@@ -45,7 +45,7 @@ from ph.llm.types import (
     ToolResultBlock,
     text_of,
 )
-from ph.seams.compaction import CompactionNote
+from ph.seams.compaction import CompactionError, CompactionNote
 from ph.session import Session, SurfaceIntent, derive_event_message
 from ph.session.known_event_types import (
     IGNORABLE_SESSION_EVENT_TYPES,
@@ -54,6 +54,7 @@ from ph.session.known_event_types import (
 from ph.testing import (
     FAKE_OPTIONS,
     MountProfile,
+    StubAgent,
     assistant_payload,
     not_none,
     tool_result_payload,
@@ -480,15 +481,20 @@ def _engine(ctx: Context) -> SummarizeEngine:
     return engine
 
 
-def _truncate(ctx: Context, session: Session, agent: Any = None) -> tuple[int, ...]:  # noqa: ANN401
+def _truncate(ctx: Context, session: Session) -> tuple[int, ...]:
     """The truncation pass with the baseline its caller now computes once.
 
-    `agent` may be `None`: the tool lookup falls back to the root scope, which
-    is where the fs tools register, so a hand-built session still asks the real
-    registry whether a tool declares its arguments disposable.
+    A `StubAgent` on the mount rather than the `None` this took and no caller
+    ever passed: the lookup wants a scope, and the mount is the root scope the
+    fs tools register on — so a hand-built session still asks the real registry
+    whether a tool declares its arguments disposable. The `None` was costing
+    `truncate_arguments` and `_elides_arguments` their non-optional agent.
     """
     return _engine(ctx).truncate_arguments(
-        agent, session, "pressure", ctx.require(TOKEN_METER).baseline(session)
+        StubAgent(ctx=ctx, session=session),
+        session,
+        "pressure",
+        ctx.require(TOKEN_METER).baseline(session),
     )
 
 
@@ -1109,6 +1115,29 @@ async def test_a_refusal_before_any_attempt_is_not_recorded(mount: MountProfile)
     await ctx.require(COMMANDS).dispatch("/compact", session=agent.session, agent=agent)
 
     assert not _events(agent.session, "compaction/declined")
+
+
+async def test_a_stub_that_says_it_is_working_is_refused_like_a_driver(
+    mount: MountProfile,
+) -> None:
+    """The refusal reads `AgentHandle.status`, so a stand-in can state it.
+
+    It could not before. `status` lived on `AgentDriver`, and the guard asked
+    `getattr(agent, "status", "idle")` — so every `StubAgent` answered *idle* and
+    this branch was unreachable for any test that did not stand up a whole loop.
+    The sibling above drives a real one through `_set_phase`; this is the same
+    refusal asked of the surface the seams actually hold.
+    """
+    ctx = await mount(profile=PROFILE)
+    _route(ctx)
+    session = ctx.require(SESSIONS).create("busy-stub")
+    working = StubAgent(ctx=ctx, session=session, status="running")
+
+    with pytest.raises(CompactionError) as refused:
+        await _engine(ctx).compact_now(working)
+
+    assert refused.value.code == "busy"
+    assert "the agent is working" in str(refused.value)
 
 
 async def test_an_unexpected_failure_neither_escapes_nor_goes_unrecorded(

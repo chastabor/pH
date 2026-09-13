@@ -207,16 +207,15 @@ class CommandRegistry:
             # deleting its second branch. The recorded pair is a better answer
             # than either, and it is available unconditionally.
             #
-            # Only the *layer* still comes from the agent, and only that half
-            # uses P6-24's `getattr` idiom. It fails open to the registration's
-            # own layer, which for every command in the tree is the global one —
+            # Only the *layer* still comes from the agent, and it reads the
+            # declared `ctx` — the `getattr` probe this used to spell fell back to
+            # the registration's own layer, which for every command is the global one —
             # narrower than the seam, and stated here because a per-agent command
             # would make this the line that decides who sees what it registers.
-            stated = scope if scope is not None else getattr(agent, "ctx", None)
-            # Resolved once: `None` past this line means "no boundary was
-            # readable", and the two consumers below spell their own fallbacks
-            # (bind nothing; hand the body the registration's layer).
-            resolved = stated if isinstance(stated, Context) else None
+            # `None` past this line means "no boundary was stated and no agent
+            # to read one from"; the two consumers below spell their own
+            # fallbacks (bind nothing; hand the body the registration's layer).
+            resolved = scope if scope is not None else (agent.ctx if agent is not None else None)
             with running(entry.by, resolved):
                 result = await maybe_await(
                     definition.run(

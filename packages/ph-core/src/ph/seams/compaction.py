@@ -164,8 +164,7 @@ class CompactionSeam:
     Entered around every call into the engine, so anything its body registers
     unwinds with the row that registered the engine rather than with this seam.
     The layer stays the registration's own — **not the agent being compacted**,
-    which both call sites have in hand — because reading it means a fourteenth
-    copy of P6-24's `getattr(agent, "ctx", None)`, and an engine is one
+    which both call sites have in hand — because an engine is one
     deployment-wide object rather than a per-agent one. `ph.seams.fs` is the one
     provider whose target is already derived, and it passes it. P6-24 did not
     change that: it fixed the boundary a *policy* call is judged in, and an engine

@@ -152,13 +152,14 @@ class _Screen:
     owner: Context
 
 
-def _scope_of(agent: AgentHandle) -> Context | None:
+def _scope_of(agent: AgentHandle) -> Context:
     """An agent's own scope, for the workspace root — or `None` for no agent.
 
-    Duck-typed rather than importing the agent: `ph.seams.fs` sits below
-    `ph.agent_loop`, and a seam that imported its consumer would invert the
-    layering the whole plugin model rests on. Every driver in the tree assigns
-    `self.ctx` in its constructor.
+    Read off `AgentHandle`, which `ph.agent.types` declares and this module
+    imports. It was a `getattr` probe, on the reasoning that `ph.seams.fs` sits
+    below `ph.agent_loop` and must not import its consumer — but the Protocol is
+    *not* the driver, which is the whole reason it exists, so naming it inverts
+    no layering. `tests/test_agent_vocabulary.py` now holds that.
 
     **One caller, and `None` is benign there** (P6-32). It had two that read
     `None` oppositely — the policy boundary had to *refuse* it, the workspace
@@ -167,8 +168,7 @@ def _scope_of(agent: AgentHandle) -> Context | None:
     where `None` means no layer to override the resolver's own with: a fallback
     with nothing wider to widen to, which is why it is silent.
     """
-    scope = getattr(agent, "ctx", None)
-    return scope if isinstance(scope, Context) else None
+    return agent.ctx
 
 
 @dataclass(frozen=True, slots=True)

@@ -68,7 +68,7 @@ class StubSubagentProvider:
             id=f"run-{index}",
             name=request.name or f"child-{index}",
             session_id=f"session-{index}",
-            parent_id=getattr(request.parent, "id", "parent"),
+            parent_id=request.parent.id,
             model_provider="fake",
             model="fake-1",
             requested_access=request.access,
@@ -82,7 +82,7 @@ class StubSubagentProvider:
             # request's parent when it has one, which is what
             # `AgentRegistry.create` does since P6-27, so a stubbed child
             # inherits the ceiling the same way a real one does.
-            owner = getattr(request.parent, "ctx", None) or self.root
+            owner = request.parent.ctx
             run.scope = owner.scope(f"agent:{run.id}")
         if self.waitable:
             run.result = self._settle

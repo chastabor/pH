@@ -274,7 +274,7 @@ class HarnessService:
         current = self.state(session)
         # The *agent's* scope when there is one, because whether a binding of
         # that name is visible is a per-agent question (B7).
-        target_scope = getattr(agent, "ctx", None) or self.ctx
+        target_scope = agent.ctx if agent is not None else self.ctx
         applied: list[AppliedEdit] = []
         for edit in accepted:
             # `validate` stamped an id on every accepted edit — it is the one

@@ -43,13 +43,18 @@ AgentStatus: TypeAlias = Literal["idle", "running"]
 class AgentHandle(Protocol):
     """What a seam, a tool body or a waterfall payload may assume about an agent.
 
-    Three read-only facts, and deliberately no more: this is the surface the
-    seams actually read — codegraph over the tree finds `id`, `ctx` and `session`
-    and nothing else outside the registry and the daemon — and it is the surface
-    `ph.testing.StubAgent` has, so a test can stand in an agent without standing
-    up a loop. A Protocol rather than the driver class for two reasons that
-    reinforce each other: two implementations exist (the loop and the stub), and
-    the driver imports this module, so naming it here would be a cycle.
+    Five read-only facts, and deliberately no more: this is the surface the
+    seams actually read, and it is the surface `ph.testing.StubAgent` has, so a
+    test can stand in an agent without standing up a loop. A Protocol rather than
+    the driver class for two reasons that reinforce each other: two
+    implementations exist (the loop and the stub), and the driver imports this
+    module, so naming it here would be a cycle.
+
+    **`status` is a fact, not a verb**, which is why it is here and not on
+    `AgentDriver` beside `cancel`. It was on the driver, so a seam holding a
+    handle could not ask whether the agent was busy — and `compaction` asked with
+    `getattr(agent, "status", "idle")`, whose default answered *idle* for every
+    stub, in the one place that refuses to compact a working agent.
 
     Properties rather than attributes, so that a driver whose `session` is a
     `Session` satisfies a reader that accepts `Session | None`: a Protocol
@@ -65,6 +70,8 @@ class AgentHandle(Protocol):
     def session(self) -> Session | None: ...
     @property
     def options(self) -> AgentOptions: ...
+    @property
+    def status(self) -> AgentStatus: ...
 
 
 class AgentDriver(AgentHandle, Protocol):
@@ -76,8 +83,6 @@ class AgentDriver(AgentHandle, Protocol):
     parameter typed for reading is a seam that will, eventually.
     """
 
-    @property
-    def status(self) -> AgentStatus: ...
     @property
     def inbox(self) -> Inbox: ...
     def steer(self, message: Message) -> None: ...

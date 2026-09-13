@@ -178,7 +178,7 @@ async def apply(ctx: Context, config: None) -> None:
         if session.header.cwd:
             lines.append(f"Working directory: {session.header.cwd}")
         lines.append(f"Conversation log: {session.id}")
-        lines.extend(_workspace(ctx, request.agent.id if request.agent else ""))
+        lines.extend(_workspace(ctx, request.agent.id if request.agent is not None else ""))
 
         sessions = ctx.require(SESSIONS).list()
         family = [

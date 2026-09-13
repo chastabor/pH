@@ -82,7 +82,7 @@ async def apply(ctx: Context, config: None) -> None:
         # that took it, and asking the seam a second time for that agent's root
         # was both a second spelling of one question and *less* safe — a disposed
         # agent whose directory got reused would have compared equal.
-        agent_id = invocation.agent.id if invocation.agent else ""
+        agent_id = invocation.agent.id if invocation.agent is not None else ""
         if workspace is None or agent_id != as_str(point["agentId"]):
             return (
                 f"refusing: restore point {raw} belongs to agent "

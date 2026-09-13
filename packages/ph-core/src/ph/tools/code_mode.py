@@ -345,7 +345,7 @@ async def apply(ctx: Context, config: Config) -> None:
             CodeRunRequest(
                 program=program,
                 bindings=namespaces,
-                namespace=getattr(run.agent, "id", None),
+                namespace=run.agent.id,
                 cancel_scope=bridge.token,
             )
         )

@@ -113,7 +113,7 @@ class ShellService:
                     "ph.seams.shell: %s has a workspace but no sandbox backend; running unconfined",
                     cwd,
                 )
-        agent_id: str | None = agent if isinstance(agent, str) else getattr(agent, "id", None)
+        agent_id = agent if isinstance(agent, str) else (agent.id if agent is not None else None)
         confined_by: str | None = None
         confined: ConfinedArgv | None = None
         if policy is not None:

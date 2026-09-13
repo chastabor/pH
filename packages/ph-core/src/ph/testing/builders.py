@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any, NoReturn
 
 import anyio
 
-from ..agent.types import AgentHandle, AgentOptions
+from ..agent.types import AgentHandle, AgentOptions, AgentStatus
 from ..cordis import DEPLOYMENT, Boundary, Context
 from ..json import dumps
 from ..keys import SESSION_PERSISTENCE, SKILLS, TOOLS
@@ -32,7 +32,7 @@ from ..seams.workspace import (
     WorkspaceSeam,
 )
 from ..session import Session, SessionEvent, SessionHeader, SessionKind
-from ..tools import ToolExecution
+from ..tools import ToolExecution, ToolExecutionResult
 from ..tools.definition import ToolDefinition, ToolOutput, define_tool, text_content
 from ..tools.registry import ToolRuntime
 
@@ -89,7 +89,7 @@ def simple_tool(
     )
 
 
-def boundary_for(scope: Boundary | None, agent: AgentHandle) -> Boundary:
+def boundary_for(scope: Boundary | None, agent: AgentHandle | None) -> Boundary:
     """What a test meant, when it did not say (P6-32).
 
     The agent's own scope, which is what a test almost always means; `DEPLOYMENT`
@@ -97,26 +97,18 @@ def boundary_for(scope: Boundary | None, agent: AgentHandle) -> Boundary:
     anything. Stated here rather than defaulted in the seam, which is the whole
     of that row: the helper knows what its caller meant, the registry does not.
 
-    **An agent whose `ctx` cannot be read refuses, exactly as production does.**
-    The first version resolved it to `DEPLOYMENT`, which reintroduced the deleted
-    defect one layer up: a policy test whose stub forgot its `ctx` would silently
-    exercise the unrestricted view, and a visibility assertion would pass
-    vacuously — silent-wide, scoped to precisely the population most likely to
-    write it. A test that means the wide view spells `DEPLOYMENT`, which is the
-    row's own principle: the answer that widens is the one you type.
+    **A stub with no `ctx` no longer reaches here to be refused.** That case was
+    a `TypeError` raised on an `isinstance` behind a `getattr`; `AgentHandle`
+    declares `ctx: Context`, so a stub missing it fails the Protocol at
+    `_STUB_IS_A_HANDLE` below rather than at a call site. What the refusal
+    protected still holds and is now the type's job: a test that means the wide
+    view spells `DEPLOYMENT`, because the answer that widens is the one you type.
     """
     if scope is not None:
         return scope
     if agent is None:
         return DEPLOYMENT
-    own = getattr(agent, "ctx", None)
-    if not isinstance(own, Context):
-        raise TypeError(
-            f"{type(agent).__name__} was passed to run_tool as `agent` but exposes no "
-            "`ctx: Context`; pass `scope=` beside it (or `scope=DEPLOYMENT` for the "
-            "deployment-wide view, on purpose)"
-        )
-    return own
+    return agent.ctx
 
 
 def parked_gate(ctx: Context, *, only: str | None = None) -> tuple[anyio.Event, anyio.Event]:
@@ -152,7 +144,7 @@ async def run_tool(
     scope: Boundary | None = None,
     session: Session | None = None,
     call_id: str = "call-1",
-) -> Any:  # noqa: ANN401
+) -> ToolExecutionResult:
     """Execute one tool the way the loop does, for a test that is not the loop.
 
     The `ToolExecutionInput(...)` incantation — `scope=agent.ctx`, `session=`,
@@ -223,12 +215,17 @@ class StubAgent:
     """
 
     def __init__(
-        self, ctx: Context | None = None, session: Session | None = None, agent_id: str = "agent-a"
+        self,
+        ctx: Context | None = None,
+        session: Session | None = None,
+        agent_id: str = "agent-a",
+        status: AgentStatus = "idle",
     ) -> None:
         self.ctx = ctx if ctx is not None else Context()
         self.session = session
         self.id = agent_id
         self.options = FAKE_OPTIONS
+        self.status = status
 
 
 if TYPE_CHECKING:

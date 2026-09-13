@@ -1128,8 +1128,7 @@ class WorkspaceSeam:
         """
         agents = self.ctx.get(AGENTS)
         agent = agents.get(agent_id) if agents is not None else None
-        owner = getattr(agent, "ctx", None)
-        return owner if isinstance(owner, Context) and owner.active else None
+        return agent.ctx if agent is not None and agent.ctx.active else None
 
     async def _track(self, workspace: Workspace, agent_id: str, scope: Context | None) -> _Held:
         """Register the teardown as an effect, so the workspace has an owner.
@@ -2135,13 +2134,14 @@ async def checkpoint_policy(ctx: Context, config: None) -> None:
             workspace = workspace_of(ctx, execution.agent)
             if (
                 execution.session is not None
+                and execution.agent is not None
                 and execution.name == view.transport_name
                 and workspace is not None
             ):
                 await ctx.require(WORKSPACE).checkpoint(
                     workspace,
                     session=execution.session,
-                    agent_id=getattr(execution.agent, "id", ""),
+                    agent_id=execution.agent.id,
                     call_id=execution.call_id,
                 )
         except Exception:

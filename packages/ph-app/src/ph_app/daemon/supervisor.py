@@ -507,7 +507,7 @@ class Root:
         *is* its session here) and `events` was `cursor.sequence`, which left a
         client picking which of two spellings was authoritative.
         """
-        options = getattr(self.agent, "options", None)
+        options = self.agent.options
         return RootDescription(
             session_id=self.session.id,
             status=self.status,
@@ -520,8 +520,8 @@ class Root:
             # that has just attached has a footer to draw now, and "no model"
             # over a socket where the in-process one said `fake-1` was the whole
             # of a snapshot diff nobody could read.
-            provider=getattr(options, "provider", "") or "",
-            model=getattr(options, "model", "") or "",
+            provider=options.provider or "",
+            model=options.model or "",
         )
 
     def detail(self) -> RootDetail:

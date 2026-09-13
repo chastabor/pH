@@ -73,7 +73,7 @@ from ph.agent.types import (
 )
 from ph.agent_loop import AgentCancelled
 from ph.cancel import Cancelled
-from ph.cordis import DEPLOYMENT, Context, plugin
+from ph.cordis import Context, plugin
 from ph.json import as_obj, as_seq, as_str, dumps, thaw_json
 from ph.keys import COMPACTION, LLM, SPILL_STORE, TOKEN_METER, TOOLS
 from ph.llm import BlockAssembler
@@ -701,7 +701,7 @@ class SummarizeEngine:
             raise CompactionError("busy", "this agent has no session to compact")
         if session.id in self._running:
             raise CompactionError("busy", "a compaction is already running for this session")
-        if getattr(agent, "status", "idle") != "idle":
+        if agent.status != "idle":
             raise CompactionError("busy", "the agent is working; compaction needs an idle session")
         try:
             return await self._compact(agent, session, "manual", instructions=instructions)
@@ -831,7 +831,7 @@ class SummarizeEngine:
         which is what makes the answer right for an agent-shadowed registration.
         """
         extra = self.config.truncate_args.tools
-        scope = getattr(agent, "ctx", None) or self.ctx
+        scope = agent.ctx
 
         def elides(name: str) -> bool:
             if name in extra:
@@ -1083,10 +1083,7 @@ class SummarizeEngine:
         # site keeps computing it under another name. Deriving the *scope*
         # from an agent is the shape that row blesses; defaulting the
         # *widest* one is the shape it deletes.
-        own = getattr(agent, "ctx", None)
-        notes = self.ctx.require(COMPACTION).notes(
-            session, scope=own if own is not None else DEPLOYMENT
-        )
+        notes = self.ctx.require(COMPACTION).notes(session, scope=agent.ctx)
         blocks = [NOTES_PROMPT.format(notes="\n\n".join(notes))] if notes else []
         if instructions.strip():
             blocks.append(FOCUS_PROMPT.format(instructions=instructions.strip()))
@@ -1131,9 +1128,9 @@ class SummarizeEngine:
         is the path a session with no logged request takes and there may be no
         header to read.
         """
-        options = getattr(agent, "options", None)
-        provider = str(getattr(options, "provider", "") or "")
-        model = str(getattr(options, "model", "") or "")
+        options = agent.options
+        provider = str(options.provider or "")
+        model = str(options.model or "")
         if not provider or not model:
             raise CompactionError("summary", "the agent has no model route to summarize with")
         system = _with_extras(SUMMARY_PROMPT, extras).format(messages=rendered)
@@ -1197,7 +1194,7 @@ class SummarizeEngine:
             suggested_name=f"{HISTORY_PREFIX}/{session.seq}.md",
             content=history,
         )
-        options = getattr(agent, "options", None)
+        options = agent.options
         # No `await` between here and the replacement: the two events are
         # adjacent by construction, which is what lets a consumer price a
         # shadowed range from the record immediately before it.
@@ -1208,8 +1205,8 @@ class SummarizeEngine:
                 "shadowedSeqs": list(plan.shadowed_seqs),
                 "shadowedTokens": plan.shadowed_tokens,
                 "kept": plan.kept,
-                "provider": str(getattr(options, "provider", "") or ""),
-                "model": str(getattr(options, "model", "") or ""),
+                "provider": str(options.provider or ""),
+                "model": str(options.model or ""),
                 "maxTokens": self.config.max_tokens,
                 "locator": None if ref is None else ref.locator,
                 "usage": None if usage is None else usage.to_wire(),

@@ -124,8 +124,7 @@ class AgentRegistry:
         """
         if self.driver_factory is None:
             raise RuntimeError("no agent driver is registered; mount an agent-loop row")
-        owner = getattr(parent, "ctx", None)
-        base = owner if isinstance(owner, Context) else self.ctx
+        base = parent.ctx if parent is not None else self.ctx
         scope = base.scope(f"agent:{session.id}")
         agent = self.driver_factory(scope, session, options or AgentOptions())
         scope.provide(AGENT, agent)

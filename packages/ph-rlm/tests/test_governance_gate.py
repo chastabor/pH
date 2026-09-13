@@ -42,7 +42,7 @@ from runtime_helpers import dispatch_names, run_ipython_cell, settled_dispatches
 
 from ph.keys import AGENTS, SESSIONS, SUBAGENTS
 from ph.seams.subagents import SubagentRequest
-from ph.testing import run_tool
+from ph.testing import not_none, run_tool
 from ph.tools import Accept, Allow, Deny, ToolExecution
 from ph_rlm.messaging import OUT_OF_REACH
 from ph_rlm.subagents import PROVIDER_NAME
@@ -331,5 +331,6 @@ async def test_the_shipped_profile_still_refuses_a_native_tool_call(
     )
 
     assert result.is_error is True
-    assert result.error.kind == "denied"
-    assert "ipython" in result.error.message, "the route back does not name the transport"
+    failure = not_none(result.error)
+    assert failure.kind == "denied"
+    assert "ipython" in failure.message, "the route back does not name the transport"

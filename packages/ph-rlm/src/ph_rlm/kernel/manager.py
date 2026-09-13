@@ -1135,10 +1135,7 @@ class PythonCodeRuntime:
 
     def remember_scope(self, agent: AgentHandle) -> None:
         """Note an agent's scope, so its kernel can be owned by it."""
-        agent_id = getattr(agent, "id", None)
-        scope = getattr(agent, "ctx", None)
-        if isinstance(agent_id, str) and scope is not None:
-            self._scopes[agent_id] = scope
+        self._scopes[agent.id] = agent.ctx
 
     async def run(self, request: CodeRunRequest) -> CodeRunResult:
         namespace = request.namespace or "default"

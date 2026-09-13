@@ -294,9 +294,9 @@ class RefinementPlanner:
         messages to `derive_messages()`. Nothing is appended — the refinement's
         record is `harness/refined`, and this call's output is on it.
         """
-        options = getattr(agent, "options", None)
-        provider = str(getattr(options, "provider", "") or "")
-        model = str(getattr(options, "model", "") or "")
+        options = agent.options
+        provider = str(options.provider or "")
+        model = str(options.model or "")
         if not provider or not model:
             raise PlannerError("the agent has no model route to plan a refinement with")
 
