@@ -39,7 +39,7 @@ import re
 from collections.abc import Awaitable, Callable, Container, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Literal, Protocol, TypeAlias, runtime_checkable
+from typing import TYPE_CHECKING, Any, Literal, Protocol, TypeAlias, runtime_checkable
 
 import anyio
 from pydantic import Field
@@ -53,6 +53,13 @@ from ..session import Session, SessionEvent
 from ..tools.definition import ToolExecution, ToolExecutionResult
 from ..tools.errors import HarnessError
 from ..wire import WireModel, literal_lookup
+
+if TYPE_CHECKING:
+    # Annotation-only. `ph/persistence/__init__.py` imports the JSONL backend, so
+    # an unguarded import would put it — and `filelock`, and `sqlite3` — into every
+    # process that mounts a workspace.
+    from ..persistence.protocol import SessionArchive
+
 from . import workspace_provision
 from ._registry import claim_entry, claim_slot
 from .diagnostics import Diagnostic, contribute
@@ -1787,7 +1794,7 @@ def latest_checkpoint(session: Session, agent_id: str) -> str:
 
 
 def stored_survivors(
-    store: Any,  # noqa: ANN401
+    store: SessionArchive,
     *,
     limit: int = 50,
     family: str = "",

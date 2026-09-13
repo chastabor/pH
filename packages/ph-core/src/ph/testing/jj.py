@@ -18,9 +18,12 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from ..agent.types import AgentDriver
 from ..cordis import Context
 from ..keys import AGENTS, FS, SESSIONS
 from ..seams.workspace_jj import jj
+from ..session import Session
+from . import MountProfile
 
 __all__ = ["JJ_ROWS", "jj", "jj_agent", "jj_repo"]
 
@@ -56,9 +59,9 @@ async def jj_repo(ctx: Context, path: Path) -> Path:
 
 
 async def jj_agent(
-    mount: Any,  # noqa: ANN401
+    mount: MountProfile,
     *extra_rows: dict[str, Any],
-) -> tuple[Any, Any, Any, Any]:
+) -> tuple[Context, Path, Session, AgentDriver]:
     """`(ctx, base, session, agent)` — a mounted jj tier and somebody to ask it things.
 
     `worktree_agent`'s counterpart, and it exists for that helper's reason: six tests

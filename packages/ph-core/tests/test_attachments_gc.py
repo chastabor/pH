@@ -51,9 +51,10 @@ OTHER = PNG + b"different"
 class _Store:
     """A persistence stub: logs in memory, one of them optionally unreadable.
 
-    The two methods `SessionArchive` declares, and no more — a test that had to
-    stand up a JSONL backend to assert a reference rule would be testing the
-    backend. That the fold names the read-only half is what keeps this legal.
+    `SessionArchive`, and nothing beyond it — a test that had to stand up a JSONL
+    backend to assert a reference rule would be testing the backend. That the fold
+    names the read-only half rather than `SessionPersistence` is what keeps this
+    to three methods instead of ten.
     """
 
     def __init__(self, *sessions: Session, broken: str = "", truncate: bool = False) -> None:
@@ -83,6 +84,11 @@ class _Store:
             raise ValueError("torn log")
         session = self.sessions[session_id]
         return session.header, list(session.events)
+
+    def read(self, session_id: str) -> tuple[SessionHeader, list[SessionEvent]]:
+        """Whole logs in memory, so the materialised read *is* the unchained one.
+        Declared because `SessionArchive` carries both; the fold uses `read_own`."""
+        return self.read_own(session_id)
 
 
 def _session(session_id: str, *events: tuple[str, Any]) -> Session:

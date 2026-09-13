@@ -34,7 +34,7 @@ from ph.cordis import Context
 from ph.keys import AGENTS, COMMANDS, SESSIONS, WORKSPACE
 from ph.seams.workspace import CHECKPOINT, WorkspaceRecord
 from ph.seams.workspace_jj import _needs_the_tree
-from ph.testing import FAKE_OPTIONS, MountProfile
+from ph.testing import FAKE_OPTIONS, MountProfile, not_none
 from ph.testing.git import git
 from ph.testing.jj import jj, jj_agent, jj_repo
 
@@ -781,7 +781,7 @@ async def test_a_stray_jj_workspace_is_listed_with_its_path_and_can_be_removed(
     never held and so will never dispose.
     """
     ctx, base, session, agent = await jj_agent(mount)
-    stray = await ctx.require(WORKSPACE).provider.acquire(
+    stray = await not_none(ctx.require(WORKSPACE).provider).acquire(
         session_id="s1", agent_id="a1", base=base, scratch=tmp_path / "scratch"
     )
     assert stray is not None

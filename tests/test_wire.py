@@ -187,7 +187,7 @@ def test_every_wire_model_is_built_at_import() -> None:
 
 
 def _sample(model: type[BaseModel]) -> BaseModel | None:
-    from ph.llm.types import LlmCallConfig, TextBlock, ToolSchema, UserSource
+    from ph.llm.types import LlmCallConfig, Message, TextBlock, ToolSchema, UserSource
 
     prepared: dict[str, Any] = {
         "Message": {
@@ -197,6 +197,16 @@ def _sample(model: type[BaseModel]) -> BaseModel | None:
             "source": UserSource(),
         },
         "TextBlock": {"text": "hi"},
+        "InboxSplice": {
+            "target": "next-turn",
+            "start": 0,
+            # Both optionals absent on purpose: `to_wire()` omits them, and an
+            # insert-only splice that began emitting `"removedCount": 0` would
+            # change the durable form of `agent/inbox/spliced`.
+            "inserted": [
+                Message(id="m1", role="user", content=[TextBlock(text="hi")], source=UserSource())
+            ],
+        },
         "PresetSchema": {"name": "read-only", "summary": "Reads freely.", "active": True},
         "Schedule": {"id": "s1", "kind": "interval", "spec": "300000", "prompt": "go"},
         "Goal": {"id": "g1", "objective": "make the tests pass"},

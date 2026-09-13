@@ -43,7 +43,7 @@ from ph.seams.workspace import (
     workspace_leaks,
     workspace_survivors,
 )
-from ph.session import Session, SessionHeader
+from ph.session import Session, SessionEvent, SessionHeader
 from ph.testing import (
     workspace_acquired,
     workspace_seam,
@@ -465,23 +465,30 @@ async def test_collecting_without_a_reclaiming_tier_removes_nothing(
 
 
 class _Store:
-    """Enough of `SessionPersistence` to be folded, including one bad log."""
+    """`SessionArchive`, in memory, including one log that will not read."""
 
     def __init__(self, sessions: list[Session], *, unreadable: str = "") -> None:
         self.sessions = {session.id: session for session in sessions}
         self.unreadable = unreadable
 
-    def stored(self, *, limit: int = 50) -> list[Any]:
+    def stored(self, *, limit: int = 50) -> list[StoredSession]:
         return [
             StoredSession(session_id=one, modified=float(index))
             for index, one in enumerate(self.sessions)
         ][:limit]
 
-    def read(self, session_id: str) -> tuple[SessionHeader, list[Any]]:
+    def read(self, session_id: str) -> tuple[SessionHeader, list[SessionEvent]]:
         if session_id == self.unreadable:
             raise ValueError("a half-written log")
         session = self.sessions[session_id]
         return session.header, list(session.events)
+
+    def read_own(
+        self, session_id: str, upto: int | None = None, family: str | None = None
+    ) -> tuple[SessionHeader, list[SessionEvent]]:
+        """Whole logs in memory, so the unchained read *is* the materialised one.
+        Declared because `SessionArchive` carries both; the fold uses `read`."""
+        return self.read(session_id)
 
 
 def test_the_store_fold_skips_a_log_it_cannot_read() -> None:

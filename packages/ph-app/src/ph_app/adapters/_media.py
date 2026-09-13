@@ -25,13 +25,12 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Collection, Sequence
-from typing import Any
 
 from ph.cordis import Context
 from ph.keys import UPLOADS
 from ph.llm.adapter import LlmError
 from ph.llm.media import media_pointer_text
-from ph.llm.types import FILE_EXPIRED, Message, attachment_of
+from ph.llm.types import FILE_EXPIRED, AttachmentRef, Message, attachment_of
 from ph.seams.attachments import AttachmentStore
 from ph.seams.uploads import UploadRegistry
 
@@ -79,7 +78,7 @@ def forget_named_handle(
     return error
 
 
-def media_pointer(attachment: Any) -> dict[str, Any]:  # noqa: ANN401
+def media_pointer(attachment: AttachmentRef) -> dict[str, str]:
     """The text block that stands in for media that could not be loaded.
 
     Reached only on a race — `media-degrade` already checked the blob was there,

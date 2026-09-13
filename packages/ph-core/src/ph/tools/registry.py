@@ -108,7 +108,13 @@ CodeNamespaceFactory = Callable[[Any], "MaybeAwaitable[CodeBindingNamespace]"]
 """Builds one binding namespace for one question — a live run, or the SDK block.
 
 The argument is a `CodeBindingsRequest` (`ph.tools.code_mode`), typed `Any` here
-because the registry must not import the module that consumes it."""
+because the registry must not import the module that consumes it.
+
+**And not a `TYPE_CHECKING` forward reference either**, which is the obvious fix
+and breaks a gate: this alias is a runtime value, so `get_type_hints(_Layer)` —
+which `test_registration_ownership` calls on every declared dataclass — raises
+`NameError` on a name that only exists for the checker, and the walk swallows it
+and drops `code_namespaces` from the surface it is auditing."""
 
 
 events.declare(

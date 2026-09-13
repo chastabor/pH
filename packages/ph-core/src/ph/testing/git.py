@@ -19,9 +19,13 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from ..agent.types import AgentDriver
 from ..cordis import Context
 from ..keys import AGENTS, SESSIONS, WORKSPACE
+from ..seams.workspace import Workspace
 from ..seams.workspace_git import git
+from ..session import Session
+from . import MountProfile
 
 __all__ = ["WORKTREE_ROWS", "git", "git_repo", "worktree_agent"]
 
@@ -38,10 +42,10 @@ P4-11's decision — so a test that wants the tier says so explicitly."""
 
 
 async def worktree_agent(
-    mount: Any,  # noqa: ANN401
+    mount: MountProfile,
     tmp_path: Path,
     *extra_rows: dict[str, Any],
-) -> tuple[Any, Any, Any, Any]:
+) -> tuple[Context, Session, AgentDriver, Workspace]:
     """`(ctx, session, agent, workspace)` — one agent holding a real worktree.
 
     The whole tier is mounted, and the repository is built under `tmp_path` and

@@ -113,13 +113,19 @@ def stored_row(session_id: str, header: SessionHeader | None, modified: float) -
 
 @runtime_checkable
 class SessionArchive(Protocol):
-    """A session store's listing and its unchained read — the read-only half.
+    """A session store's listing and its two reads — what a fold needs, and no more.
 
     Split out the way `AgentHandle` is split from `AgentDriver`, and for the same
-    reason: a fold that only *reads* the store has no business holding `track`,
-    `flush` or `forget`, and a test standing in for it should not have to
-    implement eight methods it never calls. `SessionPersistence` extends this, so
-    the two signatures are written once and a real backend satisfies both.
+    reason: a fold that only *reads* has no business holding `track`, `flush` or
+    `forget`, and a test standing in for one should not implement seven methods it
+    never calls. `SessionPersistence` extends this, so each signature is written
+    once and a real backend satisfies both.
+
+    `read` and `read_own` are not interchangeable, and the folds pick deliberately:
+    `ph attachments gc` wants `read_own`, because a chained read fails when an
+    ancestor is missing and would refuse a collection that is safe to make;
+    `stored_survivors` wants `read`, because a tree is only accounted for by the
+    whole lineage that built it.
     """
 
     def read_own(
@@ -145,6 +151,15 @@ class SessionArchive(Protocol):
 
     def stored(self, *, limit: int = 50) -> list[StoredSession]:
         """What is on record, most recently touched first."""
+        ...
+
+    def read(self, session_id: str) -> tuple[SessionHeader, list[SessionEvent]]:
+        """The full log, **materialised**: dense from seq 0, chain followed.
+
+        A backend whose file stores only its own run must walk `parent_session`
+        to assemble the rest — `materialise(self.read_own, session_id)` is that
+        walk, and both backends' `read` is exactly that one line.
+        """
         ...
 
 
@@ -185,15 +200,6 @@ class SessionPersistence(SessionArchive, Protocol):
 
     def exists(self, session_id: str) -> bool:
         """Whether this backend has a stored log under that id."""
-        ...
-
-    def read(self, session_id: str) -> tuple[SessionHeader, list[SessionEvent]]:
-        """The full log, **materialised**: dense from seq 0, chain followed.
-
-        A backend whose file stores only its own run must walk `parent_session`
-        to assemble the rest — `materialise(self.read_own, session_id)` is that
-        walk, and both backends' `read` is exactly that one line.
-        """
         ...
 
     def locate(self, session_id: str) -> Path | None:

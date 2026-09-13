@@ -16,6 +16,7 @@ from typing import Any
 
 import pytest
 
+from ph.agent.inbox import InboxSplice
 from ph.agent.types import (
     AgentCancelCause,
     AgentOptions,
@@ -26,7 +27,7 @@ from ph.agent.types import (
     RequestProposal,
 )
 from ph.agent_loop.invariant import ModelVisibleNotLoggedError
-from ph.json import as_obj
+from ph.json import as_obj, thaw_json
 from ph.keys import AGENTS, LLM, LLM_FAKE, SESSIONS, SYSTEM_PROMPT
 from ph.llm.types import (
     BlockEnd,
@@ -353,3 +354,72 @@ async def test_agent_scoped_listeners_hear_only_their_agent(mount: MountProfile)
     assert heard == []
     await a.prompt("hello")
     assert heard == ["a:running", "a:idle"]
+
+
+@pytest.mark.parametrize(
+    ("splice", "field"),
+    [
+        ({"inserted": [{"role": "user"}]}, "inserted.0.id"),
+        ({"inserted": ["nope"]}, "inserted.0"),
+        ({"inserted": "nope"}, "inserted"),
+        ({"target": "elsewhere", "inserted": []}, "target"),
+        ({"start": "x", "inserted": []}, "start"),
+    ],
+)
+async def test_a_corrupt_inbox_splice_names_the_field_that_is_wrong(
+    mount: MountProfile, splice: dict[str, Any], field: str
+) -> None:
+    """Replay refuses a log it cannot read, and says which event and which field.
+
+    The field is the assertion. Before `InboxSplice` these were hand-parsed, and
+    two of the five reached `Inbox.__init__` as `KeyError`/`TypeError` — past the
+    `except ValueError` written to name the seq — while two malformed items in one
+    splice both read as id `""` and tripped the duplicate rule, reporting a
+    message collision that was not the fault.
+    """
+    ctx = await mount()
+    session = ctx.require(SESSIONS).create("corrupt")
+    session.append("agent/inbox/spliced", {"target": "next-turn", "start": 0, **splice})
+
+    with pytest.raises(ValueError, match="invalid persisted inbox splice") as caught:
+        ctx.require(AGENTS).create(session, FAKE)
+    assert field in str(caught.value.__cause__)
+
+
+TEXT_A: dict[str, Any] = {"type": "text", "text": "a"}
+TEXT_B: dict[str, Any] = {"type": "text", "text": "b"}
+
+
+async def test_an_inbox_splice_written_today_is_read_back_unchanged(
+    mount: MountProfile,
+) -> None:
+    """The durable form is the model's form, for every shape a write can take.
+
+    `agent/inbox/spliced` is on disk in logs this build did not write, so the keys
+    and their absences are a compatibility surface: `removedCount` and `outcome`
+    are omitted rather than defaulted, and a key a later build adds is skipped
+    rather than refused.
+    """
+    ctx = await mount()
+    session = ctx.require(SESSIONS).create("rt")
+    agent = ctx.require(AGENTS).create(session, FAKE)
+    inbox = agent.inbox
+    said = {"kind": "user"}
+
+    inbox.append("next-turn", create_user_message(content=[TEXT_A], source=said))
+    inbox.append("next-step", create_user_message(content=[TEXT_B], source=said))
+    inbox.claim("next-step", 1)
+    inbox.clear()
+
+    # `thaw_json`, because the log freezes payloads into `MappingProxyType`/tuple
+    # and `to_wire()` answers plain dicts and lists — a difference of container,
+    # not of content, and not what this test is about.
+    written = [thaw_json(one.data) for one in session.events if one.type == "agent/inbox/spliced"]
+    assert written, "no splices were recorded"
+    for payload in written:
+        assert set(payload) <= {"target", "start", "inserted", "removedCount", "outcome"}
+        assert payload.get("removedCount") != 0, "an absent count must not be written as 0"
+        assert InboxSplice.model_validate(payload).to_wire() == payload
+
+    payload = {**written[0], "futureKey": 1}
+    assert "futureKey" not in InboxSplice.model_validate(payload).to_wire()

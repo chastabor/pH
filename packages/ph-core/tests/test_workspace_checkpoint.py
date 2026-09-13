@@ -53,10 +53,10 @@ import pytest
 from ph.agent.types import AgentDriver
 from ph.cordis import Context
 from ph.keys import CODE_RUNTIME_STUB, COMMANDS, SESSIONS, WORKSPACE
-from ph.seams.workspace import CHECKPOINT, checkpoints
+from ph.seams.workspace import CHECKPOINT, checkpoints, latest_checkpoint
 from ph.seams.workspace_git import pre_run_ref
 from ph.session import Session
-from ph.testing import MountProfile, run_tool
+from ph.testing import MountProfile, not_none, run_tool
 from ph.testing.git import git, git_repo, worktree_agent
 from ph.tools.registry import RUN_CODE
 
@@ -145,7 +145,9 @@ async def test_the_pin_and_the_event_name_each_other(mount: MountProfile, tmp_pa
     assert set(event.data) == {"agentId", "tree", "callId"}
     assert event.data["tree"] == token
     assert workspace.ref is not None
-    _, resolved, _ = await git(ctx, workspace.root, "rev-parse", pre_run_ref(workspace.ref, token))
+    _, resolved, _ = await git(
+        ctx, workspace.root, "rev-parse", pre_run_ref(workspace.ref, not_none(token))
+    )
     assert resolved.strip() == event.data["tree"]
 
 
@@ -190,7 +192,7 @@ async def test_a_denied_run_reverts_exactly(mount: MountProfile, tmp_path: Path)
     await ctx.require(WORKSPACE).checkpoint(
         workspace, session=session, agent_id=agent.id, call_id="c1"
     )
-    tree = next(item.data["tree"] for item in session.events if item.type == CHECKPOINT)
+    tree = latest_checkpoint(session, agent.id)
 
     # ... the run, before it was denied.
     (root / "tracked.txt").write_text("clobbered\n", encoding="utf-8")
@@ -220,7 +222,7 @@ async def test_ignored_paths_are_never_touched(mount: MountProfile, tmp_path: Pa
     await ctx.require(WORKSPACE).checkpoint(
         workspace, session=session, agent_id=agent.id, call_id="c1"
     )
-    tree = next(item.data["tree"] for item in session.events if item.type == CHECKPOINT)
+    tree = latest_checkpoint(session, agent.id)
     (root / "build.log").write_text("cached, then some\n", encoding="utf-8")
     (root / "after.log").write_text("also ignored\n", encoding="utf-8")
 
@@ -243,7 +245,7 @@ async def test_an_untracked_file_comes_back_untracked(mount: MountProfile, tmp_p
     await ctx.require(WORKSPACE).checkpoint(
         workspace, session=session, agent_id=agent.id, call_id="c1"
     )
-    tree = next(item.data["tree"] for item in session.events if item.type == CHECKPOINT)
+    tree = latest_checkpoint(session, agent.id)
     (root / "untracked.txt").write_text("changed\n", encoding="utf-8")
 
     await ctx.require(WORKSPACE).restore(workspace, tree)
@@ -264,7 +266,7 @@ async def test_scratch_survives_a_revert(mount: MountProfile, tmp_path: Path) ->
     await ctx.require(WORKSPACE).checkpoint(
         workspace, session=session, agent_id=agent.id, call_id="c1"
     )
-    tree = next(item.data["tree"] for item in session.events if item.type == CHECKPOINT)
+    tree = latest_checkpoint(session, agent.id)
 
     await ctx.require(WORKSPACE).restore(workspace, tree)
 
@@ -467,7 +469,7 @@ async def test_provisioned_materials_are_not_the_agents_work(
     ctx.require(WORKSPACE)._held[agent.id].workspace = held
 
     await ctx.require(WORKSPACE).checkpoint(held, session=session, agent_id=agent.id, call_id="c1")
-    tree = next(item.data["tree"] for item in session.events if item.type == CHECKPOINT)
+    tree = latest_checkpoint(session, agent.id)
     _, listing, _ = await git(ctx, workspace.root, "ls-tree", "-r", "--name-only", tree)
 
     assert "node_modules/dep.js" not in listing
