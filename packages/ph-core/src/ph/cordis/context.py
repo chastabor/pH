@@ -77,7 +77,11 @@ return something, and `None | Awaitable[None]` would make every one of those
 spell a discard.
 """
 
-Listener: TypeAlias = Callable[..., Any]
+Listener: TypeAlias = Callable[..., object]
+"""One registered listener. The arguments stay open — fourteen chains across the
+tree take different ones — but the return is `object` for `Disposer`'s reason:
+`_invoke` hands it to `is_bailed` and `maybe_await`, both of which take `object`,
+and every chain's answer is made good by `settled`."""
 
 type Next[T] = Callable[..., Awaitable[T]]
 """The rest of a `waterfall` chain, as the listener wrapping it sees.

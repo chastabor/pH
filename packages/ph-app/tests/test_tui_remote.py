@@ -423,9 +423,9 @@ async def test_a_daemon_verb_is_dispatched_over_the_wire(tmp_path: Path) -> None
         local = {verb.name for verb in TUI_VERBS}
         remote = next(one for one in front.commands() if one.name not in local)
 
-        # The definition's own `run` is the wire call — one kind of thing in the
-        # palette, dispatched one way, whichever end executes it.
-        await remote.run("", None)
+        # One kind of thing in the palette, dispatched one way, whichever end
+        # executes it: `run_command` reaches the remote proxy's `run` exactly as
+        # it reaches a local verb's.
         await front.run_command(f"/{remote.name}")
         root = daemon.running.supervisor.roots["remote"]
         assert any(one.type == "command/run" for one in root.session.events)

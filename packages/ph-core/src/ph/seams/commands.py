@@ -12,19 +12,31 @@ decided. So a command dispatches directly, records `command/run` and
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from functools import partial
-from typing import Any
+from typing import TypeAlias
 
 from ..agent.types import AgentHandle
-from ..cordis import Context, Disposer, Running, events, maybe_await, plugin, running
+from ..cordis import (
+    Context,
+    Disposer,
+    Running,
+    events,
+    maybe_await,
+    plugin,
+    running,
+    settled_or_none,
+)
+from ..json import JsonValue
 from ..keys import COMMANDS
 from ..session import Session
 from ..wire import WireModel, declarable
 from ._registry import claim_key
 
 __all__ = [
+    "CommandBody",
+    "CommandContext",
     "CommandDefinition",
     "CommandRegistry",
     "CommandSchema",
@@ -56,14 +68,28 @@ class CommandSchema(WireModel):
     argument_hint: str = ""
 
 
+CommandBody: TypeAlias = Callable[[str, "CommandContext"], "str | Awaitable[str | None] | None"]
+"""What a slash command *is*: the line the human typed, and what to show them.
+
+Sync or async, because a body arrives through a plugin row's entry point and no
+checker between that row and `dispatch` sees it; `maybe_await` is what lets a row
+written either way work rather than fail on an `await`. Every body in this tree
+is `async def`. `None` is a command that did its work and has nothing to say.
+
+A declaration rather than the prose one — `run(argument, ctx) -> str | None`
+written underneath a `Callable[..., Any]` — that stood here before: this alias is
+the only thing standing between a row's signature and the dispatch that calls it.
+"""
+
+
 @dataclass(frozen=True, slots=True)
 class CommandDefinition:
     """One slash command."""
 
     name: str
     summary: str
-    run: Callable[..., Any]
-    """`run(argument: str, ctx: CommandContext) -> str | None` — the line to show."""
+    run: CommandBody
+    """The body. Returns the line to show the human, or nothing."""
     argument_hint: str = ""
 
     def schema(self) -> CommandSchema:
@@ -228,7 +254,14 @@ class CommandRegistry:
                         ),
                     )
                 )
-            detail = result if isinstance(result, str) else None
+            # **Checked, not coerced.** A body arrives through a plugin row's
+            # entry point, so `CommandBody` is a claim no checker between that
+            # row and here has seen — and this used to read `result if
+            # isinstance(result, str) else None`, which is the "quietly
+            # substituted a default" `settled_or_none` was written to end. It
+            # also protects the `finally` below: a non-JSON detail would raise
+            # out of `session.append` *there*, masking the body's own exception.
+            detail = settled_or_none(f"/{name}", result, str)
             return detail
         except Exception as error:
             outcome = "error"
@@ -236,7 +269,7 @@ class CommandRegistry:
             raise
         finally:
             if session is not None:
-                data: dict[str, Any] = {"name": name, "outcome": outcome}
+                data: dict[str, JsonValue] = {"name": name, "outcome": outcome}
                 if detail is not None:
                     data["detail"] = detail
                 session.append("command/done", data)

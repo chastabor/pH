@@ -30,7 +30,7 @@ from collections.abc import Mapping
 from itertools import islice
 from typing import Any
 
-from ..cordis import Context, plugin
+from ..cordis import Boundary, Context, plugin
 from ..json import JsonValue, as_str
 from ..keys import COMMANDS, SUBPROCESS, TOOLS, WORKSPACE
 from ..seams.commands import CommandContext, CommandDefinition
@@ -156,7 +156,7 @@ def _not_undone(ctx: Context, scope: Context, session: Session, call_id: str) ->
     ]
 
 
-def _covered(ctx: Context, name: str, scope: Any) -> bool:  # noqa: ANN401
+def _covered(ctx: Context, name: str, scope: Boundary) -> bool:
     """Scope-aware, because a shadowed registration is a different tool.
 
     `offload`'s reader of `self_limits` makes the same point: an agent-scoped or

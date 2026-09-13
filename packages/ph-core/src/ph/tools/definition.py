@@ -19,7 +19,6 @@ returning — defer a context message, and conclude the turn.
 
 from __future__ import annotations
 
-import inspect
 import json
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field, replace
@@ -30,7 +29,7 @@ from pydantic import BaseModel, ConfigDict
 
 from ..agent.types import AgentHandle
 from ..cancel import CancelToken
-from ..cordis import Boundary, Context, Running
+from ..cordis import Boundary, Context, Running, maybe_await
 from ..json import JsonObject, JsonValue, as_obj
 from ..llm.types import ContentBlock, Message, TextBlock, ToolSchema
 from ..session import Session
@@ -686,8 +685,7 @@ def define_tool[A: BaseModel](
         args: Any = raw_args
         if typed is not None:
             args = typed.model_validate(raw_args if raw_args is not None else {})
-        result = execute(args, run_ctx)
-        return await result if inspect.isawaitable(result) else result
+        return await maybe_await(execute(args, run_ctx))
 
     return ToolDefinition(
         name=name,

@@ -29,16 +29,16 @@ import re
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
 
 import anyio
 import yaml
 
 from ..cordis import Context, Row, plugin
+from ..json import PlainJsonValue
 from ..keys import COMMANDS, MOUNT, SANDBOX, TUI_STATUS
 from ..paths import resolve_roots, write_text_under
 from ..seams._registry import contribute_item
-from ..seams.commands import CommandDefinition
+from ..seams.commands import CommandContext, CommandDefinition
 from ..seams.invariants import contribute_fold_cache
 from ..seams.sandbox import DENIED, NETWORK_MODES, Allowances, NetworkAllowance
 from ..seams.sandbox_allow import describe
@@ -206,7 +206,7 @@ class _Sandbox:
             )
         return rows[0]
 
-    async def _persist(self, row_id: str, config: dict[str, Any]) -> str:
+    async def _persist(self, row_id: str, config: dict[str, PlainJsonValue]) -> str:
         """Write the drop-in, or say why the change lives only in this process."""
         name = self.ctx.require(MOUNT).profile.name
         if not name:
@@ -318,7 +318,7 @@ class _Denials:
 async def apply(ctx: Context, config: None) -> None:
     """Register `/sandbox`, and the footer reading that says refusals happened."""
 
-    async def sandbox(argument: str, invocation: Any) -> str:  # noqa: ANN401
+    async def sandbox(argument: str, invocation: CommandContext) -> str:
         verb, _, rest = argument.strip().partition(" ")
         view = _Sandbox(ctx=ctx, session=invocation.session)
         try:

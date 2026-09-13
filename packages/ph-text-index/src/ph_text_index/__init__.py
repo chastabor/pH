@@ -59,7 +59,7 @@ from ph.llm.types import ContentBlock
 from ph.paths import default_cache_path, resolve_roots
 from ph.seams._registry import claim_slot, contribute_item
 from ph.seams.changes import TreeState, tree_state
-from ph.seams.commands import CommandDefinition
+from ph.seams.commands import CommandContext, CommandDefinition
 from ph.seams.diagnostics import Diagnostic, contribute
 from ph.seams.skills import discover_skills
 from ph.text import count_of
@@ -655,7 +655,7 @@ async def apply(ctx: Context, config: Config) -> None:
             scope=scope,
         )
 
-    async def install(argument: str, command: object) -> str:
+    async def install(argument: str, _invocation: CommandContext) -> str:
         """`/text-index install` — fetch and load the model, now, on purpose.
 
         A **command** and not a tool, per the seam's own rule: this is a thing

@@ -33,12 +33,11 @@ Four placements worth stating:
 from __future__ import annotations
 
 import logging
-from typing import Any
 
 from ph.cordis import Context, plugin
 from ph.keys import AGENTS, COMMANDS, JOBS, LLM, SESSIONS, SYSTEM_PROMPT, TOOLS
 from ph.paths import resolve_roots
-from ph.seams.commands import CommandDefinition
+from ph.seams.commands import CommandContext, CommandDefinition
 from ph.seams.jobs import Job
 from ph.session import Session, SessionEvent
 from ph.system_prompt.assembly import AssembleContext, PromptContext
@@ -242,7 +241,7 @@ async def apply(ctx: Context, config: Config) -> None:
         )
         return f"no refinement: {reason}"
 
-    async def start(request: RefineRequest) -> Any:  # noqa: ANN401
+    async def start(request: RefineRequest) -> Job:
         """Run one pass as a job owned by the agent's scope."""
 
         async def body(job: Job) -> str:
@@ -272,7 +271,7 @@ async def apply(ctx: Context, config: Config) -> None:
 
     # -------------------------------------------------------- the command --
 
-    async def command(argument: str, invocation: Any) -> str:  # noqa: ANN401
+    async def command(argument: str, invocation: CommandContext) -> str:
         """`/refine [--global] [--show] [--rollback <id>] [instructions]`."""
         words = argument.split()
         scope: HarnessScope = "global" if "--global" in words else "local"

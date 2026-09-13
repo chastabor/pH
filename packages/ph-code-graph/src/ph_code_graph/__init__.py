@@ -57,7 +57,7 @@ from ph.llm.types import ContentBlock
 from ph.paths import default_cache_path, resolve_roots
 from ph.seams._registry import contribute_item
 from ph.seams.changes import tree_state
-from ph.seams.commands import CommandDefinition
+from ph.seams.commands import CommandContext, CommandDefinition
 from ph.seams.diagnostics import Diagnostic, contribute
 from ph.seams.skills import discover_skills
 from ph.text import count_of
@@ -763,7 +763,7 @@ async def apply(ctx: Context, config: Config) -> None:
         )
     )
 
-    async def install(argument: str, command: object) -> str:
+    async def install(argument: str, _invocation: CommandContext) -> str:
         """`/code-graph install|status` — make the grammars ready, on purpose.
 
         A **command** rather than a tool, per the seam's own rule: a person asks

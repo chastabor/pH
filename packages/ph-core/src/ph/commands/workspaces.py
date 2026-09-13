@@ -53,7 +53,7 @@ from pathlib import Path
 
 from ..cordis import Context, plugin
 from ..keys import COMMANDS, FS, SESSION_PERSISTENCE, WORKSPACE
-from ..seams.commands import CommandDefinition
+from ..seams.commands import CommandContext, CommandDefinition
 from ..seams.workspace import BRANCH_PREFIX as PREFIX
 from ..seams.workspace import stored_survivors
 
@@ -111,7 +111,7 @@ async def apply(ctx: Context, config: None) -> None:
     its checkouts. The tier answers now, and it knows where it puts them.
     """
 
-    async def workspaces(argument: str, invocation: object) -> str:
+    async def workspaces(argument: str, _invocation: CommandContext) -> str:
         verb, _, rest = argument.strip().partition(" ")
         view = _Workspaces(ctx=ctx, base=ctx.require(FS).root)
         try:

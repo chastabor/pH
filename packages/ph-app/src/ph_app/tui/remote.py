@@ -54,15 +54,21 @@ from collections.abc import Awaitable, Callable, Coroutine, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 import anyio
 from textual.binding import Binding
 
+from ph.cordis import maybe_await
 from ph.llm.types import AttachmentRef
 from ph.seams.approval import answer_to_wire
 from ph.seams.attachments import read_for_attach
-from ph.seams.commands import CommandDefinition, CommandSchema, parse_command_line
+from ph.seams.commands import (
+    CommandContext,
+    CommandDefinition,
+    CommandSchema,
+    parse_command_line,
+)
 from ph.seams.permission_presets import PresetName, PresetSchema
 from ph.seams.tui_screens import ScreenDefinition, ScreenSchema
 from ph.seams.tui_status import StatusReading
@@ -440,8 +446,11 @@ class DaemonSession:
         name, argument = parse_command_line(line)
         for definition in self.commands():
             if definition.name == name:
-                shown = await definition.run(argument, None)
-                return str(shown) if shown else None
+                # A client holds no `Context`, so it can build no `CommandContext`
+                # — and neither body reachable here reads one: the daemon builds
+                # the real one when `elsewhere` sends the line back to `dispatch`.
+                shown = await maybe_await(definition.run(argument, cast("CommandContext", None)))
+                return shown or None
         raise KeyError(f'unknown command "/{name}"')
 
     async def shell(self, command: str) -> None:

@@ -15,12 +15,11 @@ events, which is the honest answer for something with no namespace to keep.
 
 from __future__ import annotations
 
-import inspect
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..cordis import Context, plugin
+from ..cordis import Context, maybe_await, plugin
 from ..keys import CODE_RUNTIME, CODE_RUNTIME_STUB
 from .code_runtime import CodeRunRequest, CodeRunResult, Isolation, Persistence
 
@@ -53,9 +52,7 @@ class StubCodeRuntime:
             self.logs.append(line)
 
         try:
-            outcome = program(namespaces, emit)
-            if inspect.isawaitable(outcome):
-                outcome = await outcome
+            outcome = await maybe_await(program(namespaces, emit))
         except Exception as error:
             # A raise inside the program is the program's outcome, not the
             # runtime's failure — except for the ones the bridge raises to end
