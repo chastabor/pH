@@ -27,6 +27,7 @@ import pytest
 from daemon_helpers import Daemon, running
 
 from ph.keys import APPROVAL, USER_QUESTIONS
+from ph.seams.approval import ApprovalAnswer
 from ph.seams.user_questions import UserQuestion
 from ph.testing import StubAgent
 from ph_app.daemon.supervisor import Root
@@ -39,7 +40,7 @@ async def _root(daemon: Daemon, session_id: str = "asked") -> Root:
     return await daemon.running.supervisor.start(session_id)
 
 
-async def _ask(root: Root) -> Any:  # noqa: ANN401
+async def _ask(root: Root) -> ApprovalAnswer:
     """Fire one approval through the seam, exactly as a gated tool does."""
     return await root.ctx.require(APPROVAL).request(
         agent=StubAgent(ctx=root.ctx, session=root.session), tool_name="write", call_id="c1"
@@ -279,7 +280,7 @@ async def test_answering_is_declared_once_for_a_connection_not_per_attach(
 # --------------------------------------------------------------- questions --
 
 
-async def _ask_question(root: Root) -> Any:  # noqa: ANN401
+async def _ask_question(root: Root) -> str | None:
     """One question through the seam, exactly as `ask_user` puts it."""
     return await root.ctx.require(USER_QUESTIONS).ask(
         UserQuestion(question="which port?", ask_id="call-1"), session=root.session

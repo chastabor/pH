@@ -308,12 +308,12 @@ class ApprovalService:
         arguments: object = None,
     ) -> ApprovalAnswer:
         """Ask, record both halves, and return the outcome. Never raises."""
-        session: Session | None = agent.session
+        session = agent.session
         request = ApprovalRequest(
             tool_name=tool_name,
             call_id=call_id,
             reason=reason,
-            agent_id=getattr(agent, "id", None),
+            agent_id=agent.id,
             allowed_decisions=list(allowed_decisions),
             arguments=arguments,
         )

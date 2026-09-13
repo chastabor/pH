@@ -30,6 +30,7 @@ from typing import Any
 
 import anyio
 
+from ..agent.types import RequestFailure
 from ..cordis import Context, plugin
 from ..keys import SESSIONS
 from ..wire import WireModel
@@ -86,12 +87,12 @@ async def apply(ctx: Context, config: Config) -> None:
     attempts: dict[str, int] = {}
 
     async def on_error(
-        failure_payload: Any,  # noqa: ANN401
+        failure_payload: RequestFailure,
         next_: Callable[..., Awaitable[Any]],
     ) -> Any:  # noqa: ANN401
         from ..agent.types import RequestErrorAction
 
-        failure: LlmFailure = failure_payload.failure
+        failure = failure_payload.failure
         key = f"{failure_payload.turn}:{failure_payload.step}"
         if not is_transient(failure):
             attempts.pop(key, None)
@@ -109,8 +110,7 @@ async def apply(ctx: Context, config: Config) -> None:
             # bucket refills.
             delay_ms = max(delay_ms, failure.provider_retry_after_ms)
 
-        agent = getattr(failure_payload, "agent", None)
-        session = agent.session if agent is not None else None
+        session = failure_payload.agent.session
         if session is not None:
             session.append(
                 "llm/retry",

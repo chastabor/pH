@@ -49,7 +49,7 @@ async def apply(ctx: Context, config: None) -> None:
     """Register `/revert`."""
 
     async def revert(argument: str, invocation: CommandContext) -> str:
-        session: Session | None = invocation.session
+        session = invocation.session
         if session is None:
             return "refusing: /revert needs a session to read restore points from"
         workspace = workspace_of(ctx, invocation.agent)
@@ -82,7 +82,8 @@ async def apply(ctx: Context, config: None) -> None:
         # that took it, and asking the seam a second time for that agent's root
         # was both a second spelling of one question and *less* safe — a disposed
         # agent whose directory got reused would have compared equal.
-        if workspace is None or getattr(invocation.agent, "id", "") != as_str(point["agentId"]):
+        agent_id = invocation.agent.id if invocation.agent else ""
+        if workspace is None or agent_id != as_str(point["agentId"]):
             return (
                 f"refusing: restore point {raw} belongs to agent "
                 f"{point['agentId']!r}, which does not hold a workspace here"

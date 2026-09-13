@@ -158,7 +158,7 @@ async def apply(ctx: Context, config: None) -> None:
         return DELEGATION if ctx.require(TOOLS).view(request.scope).visible.get(RUN_TOOL) else ""
 
     def child_doctrine(request: AssembleContext) -> str:
-        session = request.agent.session if request.agent is not None else None
+        session = request.session
         return CHILD_DOCTRINE if session is not None and delegation_depth(session) else ""
 
     def facts(request: AssembleContext) -> str:
@@ -168,7 +168,7 @@ async def apply(ctx: Context, config: None) -> None:
         answers from it, and folding once per name turned prompt assembly into
         N+1 scans of the parent's whole log per model step.
         """
-        session = request.agent.session if request.agent is not None else None
+        session = request.session
         if session is None:
             return ""
         depth = delegation_depth(session)
@@ -178,7 +178,7 @@ async def apply(ctx: Context, config: None) -> None:
         if session.header.cwd:
             lines.append(f"Working directory: {session.header.cwd}")
         lines.append(f"Conversation log: {session.id}")
-        lines.extend(_workspace(ctx, getattr(request.agent, "id", "")))
+        lines.extend(_workspace(ctx, request.agent.id if request.agent else ""))
 
         sessions = ctx.require(SESSIONS).list()
         family = [

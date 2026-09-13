@@ -37,6 +37,7 @@ from ..cordis import (
 from ..keys import SYSTEM_PROMPT
 from ..llm.types import ContextSnapshotSection, ToolSchema
 from ..seams._registry import claim_entry
+from ..session import Session
 
 __all__ = [
     "AssembleContext",
@@ -123,6 +124,17 @@ class AssembleContext:
     `ToolExecution.scope` is a `Context` because the pipeline hands it on. Input
     states, downstream carries."""
     agent: AgentHandle | None = None
+
+    @property
+    def session(self) -> Session | None:
+        """The session behind the agent, when there is an agent at all.
+
+        Two optionals, one question. Five readers across three packages each
+        spelled `request.agent.session if request.agent is not None else None`,
+        which is the derivation — not the fact — repeated. `CommandContext` pairs
+        the two the same way.
+        """
+        return self.agent.session if self.agent is not None else None
 
 
 @dataclass(frozen=True, slots=True)

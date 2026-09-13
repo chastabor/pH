@@ -204,14 +204,6 @@ class WriteIntent:
     agent: AgentHandle | None = None
 
 
-FsIntent: TypeAlias = "ReadIntent | WriteIntent | EditIntent"
-"""The three things a policy row is asked about.
-
-Spelled once because the union is the gate's argument in two packages —
-`FsService._gate` here and `ph_stabilize.permissions_fs`'s row — and a fourth
-intent should be a one-line edit, not a search."""
-
-
 @dataclass(frozen=True, slots=True)
 class EditIntent:
     """An in-place replacement awaiting policy."""
@@ -222,6 +214,14 @@ class EditIntent:
     replace_all: bool
     scope: Context
     agent: AgentHandle | None = None
+
+
+FsIntent: TypeAlias = ReadIntent | WriteIntent | EditIntent
+"""The three things a policy row is asked about.
+
+Spelled once because the union is the gate's argument in two packages —
+`FsService._gate` here and `ph_stabilize.permissions_fs`'s row — and a fourth
+intent should be a one-line edit, not a search."""
 
 
 class FsDenied(HarnessError, PermissionError):

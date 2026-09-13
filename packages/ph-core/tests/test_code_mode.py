@@ -169,8 +169,7 @@ async def test_a_denied_binding_call_fails_the_whole_run(mount: MountProfile) ->
 
     result, _session = await _run(ctx, "denied", program)
     assert result.is_error
-    assert result.error is not None
-    assert "was refused" in result.error.message
+    assert "was refused" in not_none(result.error).message
     # Everything after the refusal is abandoned, so partial state is bounded to
     # this one cell (C3).
     assert calls == ["touch:1"]
@@ -208,8 +207,7 @@ async def test_a_runaway_program_fails_at_its_budget(mount: MountProfile) -> Non
     result, _session = await _run(ctx, "runaway", program)
     assert result.is_error
     # The budget is named, so the model can split the work rather than guess.
-    assert result.error is not None
-    assert "max_dispatches_per_run=4" in result.error.message
+    assert "max_dispatches_per_run=4" in not_none(result.error).message
     assert len(calls) == 4
 
 
@@ -327,8 +325,7 @@ async def test_a_pre_execute_denial_of_a_sub_call_also_fails_the_run(mount: Moun
 
     result, _session = await _run(ctx, "pre-denied", program)
     assert result.is_error
-    assert result.error is not None
-    assert "not now" in result.error.message
+    assert "not now" in not_none(result.error).message
 
 
 # ------------------------------------------------- transport presentation --

@@ -174,7 +174,7 @@ async def apply(ctx: Context, config: Config) -> None:
         A `context()`, not a `section`: a refinement changes this text mid-session,
         and in the cached prefix every apply would re-bill the whole prompt.
         """
-        session = request.agent.session if request.agent is not None else None
+        session = request.session
         return render_state(
             service.state(session),
             per_kind=config.max_per_kind,
@@ -261,7 +261,7 @@ async def apply(ctx: Context, config: Config) -> None:
                 kind="refine",
                 label=f"refine {request.session.id} ({request.trigger})",
                 run=body,
-                scope=getattr(request.agent, "ctx", None) or ctx,
+                scope=request.agent.ctx,
             )
         except BaseException:
             # A start that failed never ran `body`, so nothing else would take

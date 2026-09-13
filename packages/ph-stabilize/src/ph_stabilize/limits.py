@@ -438,7 +438,7 @@ async def apply(ctx: Context, config: Config) -> None:
         next_: Callable[..., Awaitable[Any]],
     ) -> Any:  # noqa: ANN401
         settings = config.model_calls
-        session: Session | None = request.agent.session
+        session = request.agent.session
         if session is None or settings.unlimited:
             return await next_(request)
         current = counts.read(session)
