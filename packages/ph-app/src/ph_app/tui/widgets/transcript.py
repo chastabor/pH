@@ -26,7 +26,7 @@ a 200-row transcript re-rendered 200 widgets per frame while streaming.
 from __future__ import annotations
 
 from contextlib import suppress
-from typing import Any
+from typing import Any, TypeAlias
 
 import anyio
 from textual.app import ComposeResult
@@ -407,6 +407,17 @@ class CodeCellWidget(ToolCardWidget):
         return changed
 
 
+RowWidget: TypeAlias = ToolCardWidget | StreamingMessage | TranscriptRow
+"""One transcript row, whatever shape the item asked for.
+
+Not Textual's `Widget`: the three carry different bases (`Vertical`, `Markdown`)
+and share exactly one thing this view needs — `item`, the `ChatItem` they were
+built from. `_row_for_seq` reads `row.item.seq` and `seq_in_view` reads it again,
+so a base that only promises "mountable" would not typecheck the navigation this
+widget exists to provide. `CodeCellWidget` rides in under `ToolCardWidget`.
+"""
+
+
 class TranscriptView(VerticalScroll):
     """Renders a list of rows, mounting new ones and updating changed ones.
 
@@ -420,7 +431,7 @@ class TranscriptView(VerticalScroll):
 
     def __init__(self, **kwargs: Any) -> None:  # noqa: ANN401
         super().__init__(**kwargs)
-        self._rows: dict[str, Any] = {}
+        self._rows: dict[str, RowWidget] = {}
         self._followed = False
         self._mounting = anyio.Lock()
         """Serialises `sync`, because Textual refuses a mount while one is pending.
@@ -477,7 +488,7 @@ class TranscriptView(VerticalScroll):
             self._followed = True
             self.anchor()
 
-    def _build(self, item: ChatItem) -> Any:  # noqa: ANN401
+    def _build(self, item: ChatItem) -> RowWidget:
         if item.role == "tool":
             kind = item.tool.card if item.tool is not None else "generic"
             return CodeCellWidget(item) if kind == "terminal" else ToolCardWidget(item)
@@ -485,7 +496,7 @@ class TranscriptView(VerticalScroll):
             return StreamingMessage(item)
         return TranscriptRow(item)
 
-    async def _update(self, widget: object, item: ChatItem) -> None:
+    async def _update(self, widget: RowWidget, item: ChatItem) -> None:
         if isinstance(widget, ToolCardWidget):
             await widget.refresh_card()
         elif isinstance(widget, StreamingMessage):
@@ -495,7 +506,7 @@ class TranscriptView(VerticalScroll):
                 await widget.write_tail(item.text)
             else:
                 await widget.finalize(item.text)
-        elif isinstance(widget, TranscriptRow):
+        else:
             widget.refresh_text()
 
     async def rebuild(self, items: list[ChatItem]) -> None:
@@ -536,7 +547,7 @@ class TranscriptView(VerticalScroll):
                 return int(widget.item.seq)
         return -1
 
-    def _row_for_seq(self, seq: int) -> Any:  # noqa: ANN401
+    def _row_for_seq(self, seq: int) -> RowWidget | None:
         """The row for `seq`, or the nearest one before it.
 
         `index_at_or_before` owns the "nearest" rule and why it is nearest, so

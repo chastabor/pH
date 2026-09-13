@@ -21,7 +21,7 @@ from typing import Any, TextIO
 import anyio
 
 from ph.agent.types import AgentOptions
-from ph.cordis import DEPLOYMENT, Profile
+from ph.cordis import DEPLOYMENT, Context, Profile
 from ph.json import dumps
 from ph.keys import AGENTS, SESSIONS, TOOLS
 from ph.session import Session, SessionEvent
@@ -35,6 +35,7 @@ from ..payloads import (
 )
 from ..protocol import (
     Frame,
+    MethodResult,
     NoParams,
     SessionParams,
     UnknownMethod,
@@ -76,7 +77,7 @@ class _PromptParams(WireModel):
 class RpcServer:
     """One stdio JSON-RPC endpoint over a mounted pH."""
 
-    ctx: Any
+    ctx: Context
     out: TextIO
     provider: str = "fake"
     model: str = "fake-1"
@@ -101,7 +102,7 @@ class RpcServer:
         if reply is not None:
             self._write(reply)
 
-    async def _dispatch(self, method: str, params: dict[str, Any]) -> Any:  # noqa: ANN401
+    async def _dispatch(self, method: str, params: dict[str, Any]) -> MethodResult:
         if method in ("initialize", "daemon/hello"):
             # The same block the daemon answers with, minus what stdio cannot
             # do: one process, one peer, no supervision. The params are parsed

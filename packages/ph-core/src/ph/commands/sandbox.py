@@ -34,7 +34,7 @@ from typing import Any
 import anyio
 import yaml
 
-from ..cordis import Context, plugin
+from ..cordis import Context, Row, plugin
 from ..keys import COMMANDS, MOUNT, SANDBOX, TUI_STATUS
 from ..paths import resolve_roots, write_text_under
 from ..seams._registry import contribute_item
@@ -43,7 +43,7 @@ from ..seams.invariants import contribute_fold_cache
 from ..seams.sandbox import DENIED, NETWORK_MODES, Allowances, NetworkAllowance
 from ..seams.sandbox_allow import describe
 from ..seams.tui_status import StatusField, StatusReading
-from ..session import Session, SessionFoldCache
+from ..session import Session, SessionEvent, SessionFoldCache
 from ..text import count_of
 
 __all__ = ["apply"]
@@ -77,7 +77,7 @@ _HOST = re.compile(r"^(\*\.)?[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*(:\d{1,5})?$")
 No scheme and no path — those are what people paste, and the proxy matches hosts."""
 
 
-def _denials_in(session: Session) -> tuple[Any, ...]:
+def _denials_in(session: Session) -> tuple[SessionEvent, ...]:
     """Every `sandbox/denied` record in a session, oldest first."""
     return session.select(DENIED)
 
@@ -193,7 +193,7 @@ class _Sandbox:
         kept = await self._persist(row.id, config)
         return f"{said}; {self.ctx.require(SANDBOX).network_posture()}. {kept}"
 
-    def _row(self) -> Any:  # noqa: ANN401
+    def _row(self) -> Row:
         rows = [
             row
             for row in self.ctx.require(MOUNT).profile.rows

@@ -53,7 +53,8 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import anyio
-from anyio.abc import ByteStream
+from anyio.abc import ByteStream, TaskGroup
+from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
 
 from ph.json import as_str
 from ph.wire import WireModel
@@ -63,6 +64,7 @@ from ..protocol import (
     DaemonGone,
     Dispatch,
     Frame,
+    MethodResult,
     notification,
     parse_params,
     request,
@@ -86,7 +88,7 @@ what the transport does not do is pretend a dict is one of them.
 The method travels beside the payload rather than inside it because JSON-RPC
 already carries it in the envelope, and this signature is the envelope's."""
 
-Handler = Callable[[dict[str, Any]], Awaitable[Any]]
+Handler = Callable[[dict[str, Any]], Awaitable[MethodResult]]
 """What this end will answer when the *peer* asks it something (P5-13).
 
 `dict` in for `Notification`'s reason. `answering` below is the typed door, so
@@ -186,12 +188,14 @@ class Peer:
     """How many notifications this end has failed to read. The first is logged
     with its traceback and the rest at debug — see `_watch`."""
     _pending: dict[str, _Pending] = field(default_factory=dict)
-    _outbox: Any = None
-    _inbox: Any = None
+    _streams: tuple[MemoryObjectSendStream[Frame], MemoryObjectReceiveStream[Frame]] | None = None
+    """Both halves of the outbound queue, or neither: `_queue` builds the pair
+    and `serve` drains it, so one half without the other is not a state anything
+    here can act on."""
 
     # ------------------------------------------------------------- outbound --
 
-    def _queue(self) -> Any:  # noqa: ANN401
+    def _queue(self) -> tuple[MemoryObjectSendStream[Frame], MemoryObjectReceiveStream[Frame]]:
         """The outbound stream, built on first use.
 
         **Not in `serve()`**, which is the obvious place and is a race: a caller
@@ -201,11 +205,9 @@ class Peer:
         """
         if self.closed.is_set():
             raise DaemonGone
-        if self._outbox is None:
-            self._outbox, self._inbox = anyio.create_memory_object_stream[Frame](
-                max_buffer_size=OUTBOX
-            )
-        return self._outbox
+        if self._streams is None:
+            self._streams = anyio.create_memory_object_stream[Frame](max_buffer_size=OUTBOX)
+        return self._streams
 
     def tell(self, method: str, params: dict[str, Any]) -> None:
         """Queue a notification, or **raise** so the caller drops this peer.
@@ -216,9 +218,9 @@ class Peer:
         The subscriber list belongs to whoever owns it, so this only has to fail
         loudly enough to be noticed.
         """
-        # The relay calls this once per event per watcher, so the built queue is
+        # The relay calls this once per event per watcher, so the built pair is
         # read straight off the field and `_queue()` is only the first time.
-        outbox = self._outbox or self._queue()
+        outbox, _ = self._streams or self._queue()
         outbox.send_nowait(notification(method, params))
 
     async def send(self, frame: Frame) -> None:
@@ -228,7 +230,7 @@ class Peer:
         what goes *out* is ours to get right, and the type is what checks it.
         What comes *in* stays a `dict[str, Any]` (`_settle`, `result_of`),
         because a peer's frame is a claim."""
-        await self._queue().send(frame)
+        await self._queue()[0].send(frame)
 
     async def ask(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         """Put a request to the other end and wait for its answer.
@@ -259,7 +261,7 @@ class Peer:
 
     async def serve(self) -> None:
         """Read until the socket closes, answering and settling as frames arrive."""
-        send, receive = self._queue(), self._inbox
+        send, receive = self._queue()
         limit = anyio.Semaphore(IN_FLIGHT)
         try:
             async with anyio.create_task_group() as tasks:
@@ -279,7 +281,7 @@ class Peer:
             # In `finally`, so a waiter is woken by a cancellation and a crash as
             # well as by an orderly end. A wait that only completes on the happy
             # path is a hang wearing a timeout.
-            self._outbox = None
+            self._streams = None
             self.closed.set()
             for entry in self._pending.values():
                 entry.answered.set()
@@ -287,7 +289,7 @@ class Peer:
             with suppress(anyio.ClosedResourceError):
                 await send.aclose()
 
-    async def _write(self, receive: Any) -> None:  # noqa: ANN401
+    async def _write(self, receive: MemoryObjectReceiveStream[Frame]) -> None:
         async with receive:
             async for frame in receive:
                 try:
@@ -295,7 +297,7 @@ class Peer:
                 except (anyio.BrokenResourceError, anyio.ClosedResourceError):
                     return
 
-    async def _read(self, tasks: Any, limit: anyio.Semaphore) -> None:  # noqa: ANN401
+    async def _read(self, tasks: TaskGroup, limit: anyio.Semaphore) -> None:
         """Route each frame by direction, and never handle one inline.
 
         `method` is the discriminator, not `id` — see `protocol.request`. Both

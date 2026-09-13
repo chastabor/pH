@@ -30,7 +30,10 @@ from ph.keys import APPROVAL, USER_QUESTIONS
 from ph.seams.approval import ApprovalAnswer
 from ph.seams.user_questions import UserQuestion
 from ph.testing import StubAgent
+from ph_app.daemon.client import DaemonClient
+from ph_app.daemon.duplex import Handler
 from ph_app.daemon.supervisor import Root
+from ph_app.payloads import ApprovalAskReply, QuestionAskReply
 
 pytestmark = pytest.mark.anyio
 
@@ -50,9 +53,9 @@ async def _ask(root: Root) -> ApprovalAnswer:
 async def _front_end(
     daemon: Daemon,
     root: Root,
-    handler: Any,  # noqa: ANN401
+    handler: Handler,
     method: str = "approval/ask",
-) -> Any:  # noqa: ANN401
+) -> DaemonClient:
     """One client that declares `asks`, answers `method`, and is attached.
 
     The four lines this replaces appeared at every front end in the file, which
@@ -64,10 +67,10 @@ async def _front_end(
     return client
 
 
-def _answering(answer: str, seen: list[dict[str, Any]]) -> Any:  # noqa: ANN401
-    async def handler(params: dict[str, Any]) -> dict[str, Any]:
+def _answering(answer: str, seen: list[dict[str, Any]]) -> Handler:
+    async def handler(params: dict[str, Any]) -> ApprovalAskReply:
         seen.append(params)
-        return {"answer": answer}
+        return ApprovalAskReply(answer=answer)
 
     return handler
 
@@ -109,10 +112,10 @@ async def test_every_attached_front_end_is_asked_and_the_first_answer_wins(
         second = await daemon.client("asks", on_notify=lambda m, p: settled.append((m, p)))
         first.handlers["approval/ask"] = _answering("allowed-once", fast)
 
-        async def dawdle(params: dict[str, Any]) -> dict[str, Any]:
+        async def dawdle(params: dict[str, Any]) -> ApprovalAskReply:
             slow.append(params)
             await anyio.sleep(30)
-            return {"answer": "rejected"}
+            return ApprovalAskReply(answer="rejected")
 
         second.handlers["approval/ask"] = dawdle
         root = await _root(daemon)
@@ -222,9 +225,9 @@ async def test_a_front_end_that_vanishes_mid_ask_is_dropped_not_answered_for(
         root = await _root(daemon)
         outcome: list[Any] = []
 
-        async def never(params: dict[str, Any]) -> dict[str, Any]:
+        async def never(params: dict[str, Any]) -> ApprovalAskReply:
             await anyio.sleep(30)
-            return {"answer": "rejected"}
+            return ApprovalAskReply(answer="rejected")
 
         async with anyio.create_task_group() as tasks:
             leaver = await _front_end(daemon, root, never)
@@ -297,9 +300,9 @@ async def test_a_question_over_the_socket_reaches_a_front_end(tmp_path: Path) ->
     async with running(tmp_path) as daemon:
         seen: list[dict[str, Any]] = []
 
-        async def answer(params: dict[str, Any]) -> dict[str, Any]:
+        async def answer(params: dict[str, Any]) -> QuestionAskReply:
             seen.append(params)
-            return {"answer": "8080"}
+            return QuestionAskReply(answer="8080")
 
         root = await _root(daemon, "asked-a-question")
         await _front_end(daemon, root, answer, "question/ask")
@@ -322,9 +325,9 @@ async def test_the_wire_ask_id_is_the_one_the_log_wrote(tmp_path: Path) -> None:
     async with running(tmp_path) as daemon:
         posed: list[dict[str, Any]] = []
 
-        async def answer(params: dict[str, Any]) -> dict[str, Any]:
+        async def answer(params: dict[str, Any]) -> QuestionAskReply:
             posed.append(params)
-            return {"answer": "8080"}
+            return QuestionAskReply(answer="8080")
 
         root = await _root(daemon, "keyed")
         await _front_end(daemon, root, answer, "question/ask")
@@ -378,10 +381,10 @@ async def test_re_attaching_while_a_question_is_open_does_not_ask_twice(
         posed: list[dict[str, Any]] = []
         answer = anyio.Event()
 
-        async def wait(params: dict[str, Any]) -> dict[str, Any]:
+        async def wait(params: dict[str, Any]) -> ApprovalAskReply:
             posed.append(params)
             await answer.wait()
-            return {"answer": "allowed-once"}
+            return ApprovalAskReply(answer="allowed-once")
 
         root = await _root(daemon, "re-attached")
         client = await _front_end(daemon, root, wait)

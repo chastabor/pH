@@ -63,9 +63,9 @@ from ph.seams.code_runtime import (
     CodeRunResult,
 )
 from ph.seams.diagnostics import Diagnostic, contribute
-from ph.seams.sandbox import ConfinedArgv, SandboxPolicy
+from ph.seams.sandbox import ConfinedArgv, SandboxPolicy, SandboxSeam
 from ph.seams.subprocess import first_line, scrub_env
-from ph.seams.workspace import workspace_of, workspace_policy
+from ph.seams.workspace import Workspace, workspace_of, workspace_policy
 from ph.tools.code_mode import CodeRunFailure, ToolCallError
 from ph.tools.errors import error_message
 from ph.wire import WireModel
@@ -992,9 +992,9 @@ class PythonCodeRuntime:
     Two lists rather than one because they answer different questions and can
     legitimately differ: a distribution named `acme-websearch` imports as
     `acme_websearch`, and `rlm-skills-python` is what knows both."""
-    workspaces: Callable[[str], Any] | None = None
+    workspaces: Callable[[str], Workspace | None] | None = None
     """Agent id → its `Workspace`, set by the row (D21). See `workspace_for`."""
-    sandbox: Callable[[], Any] | None = None
+    sandbox: Callable[[], SandboxSeam | None] | None = None
     """The `ctx.sandbox` seam, asked for **when a kernel starts** rather than held.
 
     A resolver rather than the seam itself, for the reason `workspaces` is one: a
@@ -1117,7 +1117,7 @@ class PythonCodeRuntime:
                 )
             return self._environment
 
-    def workspace_for(self, agent_id: str) -> Any:  # noqa: ANN401
+    def workspace_for(self, agent_id: str) -> Workspace | None:
         """This agent's workspace, or `None` before one is acquired.
 
         Resolved per kernel rather than held as one runtime-wide `cwd`, because
@@ -1175,7 +1175,7 @@ class PythonCodeRuntime:
     def confiner(
         self,
         namespace: str,
-        workspace: Any = None,  # noqa: ANN401
+        workspace: Workspace | None = None,
     ) -> Callable[[tuple[str, ...]], ConfinedArgv] | None:
         """How to bound this agent's kernel, or `None` where nothing can.
 

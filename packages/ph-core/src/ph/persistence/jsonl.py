@@ -390,7 +390,7 @@ def read_session(
     return header, events
 
 
-async def resume_session(ctx: Context, session_id: str) -> Any:  # noqa: ANN401
+async def resume_session(ctx: Context, session_id: str) -> Session:
     """Read a stored session, repair a crashed tail, and publish it.
 
     The repair runs on the seed rather than after publication, so a resumed

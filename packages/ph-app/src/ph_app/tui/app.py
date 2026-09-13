@@ -49,6 +49,7 @@ from textual.timer import Timer
 from ph.paths import resolve_roots
 from ph.seams.approval import ApprovalAnswer, ApprovalRequest
 from ph.seams.permission_presets import PRESET_NAMES
+from ph.seams.tui_screens import ScreenDefinition
 from ph.seams.tui_status import StatusReading
 from ph.seams.user_questions import UserQuestion
 from ph.session import new_session_id
@@ -74,7 +75,7 @@ from .modals.pickers import (
 from .modals.trust import project_trust_modal
 from .remote import attach_session
 from .screens import Revealing, RevealSeq
-from .state import CatalogEntry, Surface
+from .state import CatalogEntry, ChatItem, Surface
 from .terminal import TerminalTitle
 from .themes import ThemeCatalog, fallback_variables, load_catalog
 from .widgets.prompt import PromptInput
@@ -166,7 +167,7 @@ class PHTuiApp(App[str | None]):
         on an append — which marks the view dirty and draws. Recomputing them per
         frame ran every registered status field over the whole session thirty
         times a second to get the same answer."""
-        self._command_disposers: list[Callable[[], Any]] = []
+        self._command_disposers: list[Callable[[], None]] = []
         # Held rather than queried. `App.query_one` searches the *top* screen,
         # so every lookup would fail while a modal is up — and the frame timer
         # runs thirty times a second whether or not one is.
@@ -182,7 +183,7 @@ class PHTuiApp(App[str | None]):
     def get_theme_variable_defaults(self) -> dict[str, str]:
         return fallback_variables()
 
-    def add_binding(self, binding: Binding) -> Callable[[], Any]:
+    def add_binding(self, binding: Binding) -> Callable[[], None]:
         """Bind a key on the live app, and hand back its removal.
 
         Here rather than in `screens.py` because this is the one place that
@@ -417,7 +418,7 @@ class PHTuiApp(App[str | None]):
         self.title_writer.set(f"{status.glyph} working")
         status.show(front.state, self._readings)
 
-    def _rows(self, front: FrontSession) -> list[Any]:
+    def _rows(self, front: FrontSession) -> list[ChatItem]:
         return front.state.visible_items(
             thinking=self.settings.show_thinking, tool_results=self.settings.show_tool_results
         )
@@ -616,7 +617,7 @@ class PHTuiApp(App[str | None]):
                 markup=False,
             )
 
-    def _screen(self, screen_id: str) -> Any:  # noqa: ANN401
+    def _screen(self, screen_id: str) -> ScreenDefinition | None:
         """The registered screen with this id, or `None`."""
         front = self.front
         return front.screen(screen_id) if front is not None else None

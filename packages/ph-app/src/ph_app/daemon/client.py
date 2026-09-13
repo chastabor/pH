@@ -24,7 +24,7 @@ from ph.wire import WireModel
 from .. import verbs
 from ..params import InitializeParams, MutationParams, PromptParams
 from ..payloads import MutationRepeated, RootDescription
-from ..protocol import CapabilityBlock, Notify, Verb, notification
+from ..protocol import CapabilityBlock, MethodResult, Notify, Verb, notification
 from .duplex import Handler, Notification, Peer
 
 __all__ = ["DaemonClient", "Exchange", "connected"]
@@ -78,7 +78,7 @@ class DaemonClient:
         """Set when the pump stops, whichever end ended it."""
         return self.peer.closed
 
-    async def _answer(self, method: str, params: dict[str, Any]) -> Any:  # noqa: ANN401
+    async def _answer(self, method: str, params: dict[str, Any]) -> MethodResult:
         handler = self.handlers.get(method)
         if handler is None:
             raise LookupError(f'this client cannot answer "{method}"')

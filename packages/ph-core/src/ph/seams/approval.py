@@ -30,7 +30,7 @@ from pydantic import Field
 from ..agent.types import AgentHandle
 from ..cancel import CancelToken, is_cancelled
 from ..cordis import Context, Disposer, events, plugin
-from ..json import as_str
+from ..json import JsonValue, as_str
 from ..keys import APPROVAL
 from ..session import Session
 from ..wire import WireModel, literal_lookup
@@ -134,7 +134,7 @@ class Edited:
     model's mouth, which is the falsehood this codebase refuses everywhere else.
     """
 
-    arguments: Any
+    arguments: JsonValue
     kind: Literal["edited"] = "edited"
 
 
@@ -184,7 +184,7 @@ def answer_from_wire(raw: object) -> ApprovalAnswer:
     return "unavailable"
 
 
-def answer_to_wire(answer: ApprovalAnswer) -> Any:  # noqa: ANN401
+def answer_to_wire(answer: ApprovalAnswer) -> str | dict[str, JsonValue]:
     """One answer on its way *out* of the process that decided it.
 
     `answer_from_wire`'s inverse, and the pair has to be a pair: four of the six
@@ -233,6 +233,12 @@ class ApprovalRequest(WireModel):
     fails in someone's session rather than here."""
     arguments: Any = None
     """The call as it stands, so a human can correct it rather than only refuse.
+
+    `Any` and not `JsonValue` like `Edited.arguments` below, though it is the
+    same value: `JsonValue` is a *recursive* alias, and pydantic builds a
+    validator from a model field where a dataclass never evaluates its
+    annotation — so this field spelled that way sends schema generation into
+    unbounded recursion and every `ApprovalRequest(...)` raises.
 
     **Deliberately not recorded on `approval/asked`.** The assistant message
     already holds them; a second copy in the log is two statements of one fact
@@ -305,7 +311,7 @@ class ApprovalService:
         reason: str | None = None,
         cancel: CancelToken | None = None,
         allowed_decisions: tuple[ApprovalDecisionName, ...] = (),
-        arguments: object = None,
+        arguments: JsonValue = None,
     ) -> ApprovalAnswer:
         """Ask, record both halves, and return the outcome. Never raises."""
         session = agent.session

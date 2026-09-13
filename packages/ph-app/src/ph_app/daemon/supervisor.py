@@ -51,7 +51,7 @@ from ph.keys import (
 from ph.llm.types import AttachmentRef
 from ph.paths import resolve_roots
 from ph.persistence import resumption_of
-from ph.seams.schedule import Schedule, state_to_wire
+from ph.seams.schedule import Schedule, ScheduleService, ScheduleState, state_to_wire
 from ph.seams.schedule_index import Appointment, ScheduleIndex
 from ph.seams.shell import ShellService
 from ph.seams.subagents import child_is_live
@@ -865,7 +865,7 @@ class Supervisor:
                 await self._flush(root)
                 await anyio.sleep(state.delay)
 
-    def _schedule_seam(self, root: Root) -> Any:  # noqa: ANN401
+    def _schedule_seam(self, root: Root) -> ScheduleService:
         """This root's schedule seam, or a refusal naming why there is none.
 
         The read `_live_schedules` does quietly — a `None` seam means "no
@@ -914,7 +914,7 @@ class Supervisor:
         stamp = now_ms()
         return [state_to_wire(state, now=stamp) for state in self._live_schedules(root)]
 
-    def _live_schedules(self, root: Root) -> list[Any]:
+    def _live_schedules(self, root: Root) -> list[ScheduleState]:
         """This root's schedules that could still fire, or an empty list.
 
         The seam lookup and its `None` guard written once: three callers wanted

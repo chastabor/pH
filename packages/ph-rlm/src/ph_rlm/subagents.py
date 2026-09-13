@@ -64,6 +64,7 @@ from ph.seams.subagents import (
     Access,
     DowngradeReason,
     StatusCause,
+    SubagentAwaiter,
     SubagentRequest,
     SubagentResult,
     SubagentRun,
@@ -73,7 +74,7 @@ from ph.seams.subagents import (
     default_child_name,
 )
 from ph.seams.workspace import discards_writes, project_access, workspace_survivors
-from ph.session import Session, SessionEvent, derive_event_message
+from ph.session import Session, SessionEvent, SessionObserver, derive_event_message
 from ph.wire import WireModel
 
 from .keys import RLM_CHILDREN
@@ -555,14 +556,14 @@ class RlmChildProvider:
         # being asked a second question may widen what the first was allowed.
         await self._workspace(parent, agent, session, child.run.requested_access)
 
-    def _awaiter(self, child: _Child) -> Any:  # noqa: ANN401
+    def _awaiter(self, child: _Child) -> SubagentAwaiter:
         async def wait() -> SubagentResult:
             await child.finished.wait()
             return child.result or SubagentResult(status="error", error="the child never settled")
 
         return wait
 
-    def _mirror(self, child: _Child) -> Any:  # noqa: ANN401
+    def _mirror(self, child: _Child) -> SessionObserver:
         """Attribute the child's usage to the parent as it is produced."""
         parent_session, run_id = child.parent_session, child.run.id
 

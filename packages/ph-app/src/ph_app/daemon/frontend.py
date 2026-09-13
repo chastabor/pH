@@ -36,12 +36,12 @@ turn, and it simply stops being asked. The ask stays pending for the others.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 import anyio
 
+from ph.cordis import Disposer
 from ph.keys import APPROVAL, USER_QUESTIONS
 from ph.llm.types import user_text
 from ph.seams.approval import ApprovalAnswer, ApprovalRequest, answer_from_wire
@@ -95,14 +95,14 @@ class AskDesk:
 
     # ------------------------------------------------------------- wiring --
 
-    def attach(self) -> list[Callable[[], Any]]:
+    def attach(self) -> list[Disposer]:
         """Register both answerers on the root's context. Returns their disposers.
 
         `register_answerer` is sugar over `ctx.on(...)`, so these unwind with
         whatever scope the root gives them — which is the root's own, since this
         runs outside any row's `apply`.
         """
-        disposers: list[Callable[[], Any]] = []
+        disposers: list[Disposer] = []
         approval = self.root.ctx.get(APPROVAL)
         if approval is not None:
             disposers.append(approval.register_answerer(self.answer_approval))

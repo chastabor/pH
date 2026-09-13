@@ -67,8 +67,15 @@ __all__ = [
 
 log = logging.getLogger("ph.cordis")
 
-Disposer: TypeAlias = Callable[[], Any]
-"""A teardown callable. It may return an awaitable; `dispose()` awaits it."""
+Disposer: TypeAlias = Callable[[], object]
+"""A teardown callable. It may return an awaitable; `dispose()` awaits it.
+
+`object` rather than `Any` because nothing here inspects what a disposer hands
+back — `dispose()` awaits it and drops it — and `Any` invited a caller to.
+Narrower would be wrong: a disposer is often an existing call that happens to
+return something, and `None | Awaitable[None]` would make every one of those
+spell a discard.
+"""
 
 Listener: TypeAlias = Callable[..., Any]
 
@@ -87,8 +94,15 @@ _MAX_RECONCILE_ROUNDS = 64
 _MISSING: Any = object()
 
 
-async def maybe_await(value: object) -> Any:  # noqa: ANN401
-    """Await `value` when it is awaitable, otherwise return it unchanged."""
+async def maybe_await[T](value: T | Awaitable[T]) -> T:
+    """Await `value` when it is awaitable, otherwise return it unchanged.
+
+    Generic for the reason `waterfall` is: the caller knows what it handed in,
+    and an `Any` here erased it again at every call site — `effect` got back an
+    untyped `dispose`, `code_mode` an untyped namespace. A caller whose own
+    argument is `Any` still gets `Any`, which is the honest answer: the erasure
+    is that caller's to fix, not this one's.
+    """
     if inspect.isawaitable(value):
         return await value
     return value
@@ -153,7 +167,7 @@ class Hook:
     global_: bool = False
 
 
-def _invoke(hook: Hook, *args: object) -> Any:  # noqa: ANN401
+def _invoke(hook: Hook, *args: object) -> object:
     """Call one listener as an effect of the scope that registered it (P6-25).
 
     **The one place ownership is established for a dispatch.** A function rather
@@ -571,7 +585,7 @@ class running:
             self._token = None
 
 
-async def _as_owner(scope: Context, awaitable: Any) -> Any:  # noqa: ANN401
+async def _as_owner(scope: Context, awaitable: Awaitable[object]) -> object:
     """Await something as an effect of `scope`, binding when the body *runs*.
 
     An `async def` listener called by `emit` only *builds* a coroutine — the body
@@ -978,7 +992,7 @@ class Context:
         effect = _Effect(dispose=dispose, label=label)
         self._effects.append(effect)
 
-        def release() -> Any:  # noqa: ANN401
+        def release() -> object:
             if effect.done:
                 return None
             effect.done = True
@@ -1270,7 +1284,7 @@ class Context:
         event: str,
         *args: object,
         scope: Context | None = None,
-    ) -> Any:  # noqa: ANN401
+    ) -> object:
         """Await listeners in registration order until one bails."""
         event_registry.check(event, "serial")
         for hook in self._hooks(event, scope=scope):
@@ -1350,7 +1364,7 @@ class Context:
         state: list[Any] = list(args)
         index = 0
 
-        async def next_(*replacement: object) -> Any:  # noqa: ANN401
+        async def next_(*replacement: object) -> object:
             nonlocal index
             if replacement:
                 state[:] = replacement

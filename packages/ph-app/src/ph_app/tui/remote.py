@@ -133,7 +133,7 @@ class DaemonSession:
     has something to dispatch into and async work has an owner. `None` until then,
     which is the state a headless test drives this in."""
     _verbs: list[CommandDefinition] = field(default_factory=list)
-    _keys: list[Callable[[], Any]] = field(default_factory=list)
+    _keys: list[Callable[[], None]] = field(default_factory=list)
     _unreadable: int = 0
     """Frames this client could not rebuild **or admit**. Counted so the warning is
     one — and read as a fact, not only as a log-quietener: see `diverged`."""
@@ -471,7 +471,7 @@ class DaemonSession:
 
     # ------------------------------------------------------------ lifecycle --
 
-    def attach_surfaces(self, app: AppSurface) -> list[Callable[[], Any]]:
+    def attach_surfaces(self, app: AppSurface) -> list[Callable[[], None]]:
         """Take the app, and build the local verbs that dispatch into it.
 
         Built once here rather than per `commands()` call, which the completion

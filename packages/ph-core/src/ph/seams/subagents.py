@@ -61,6 +61,7 @@ __all__ = [
     "RehydratableProvider",
     "SpawnGuard",
     "StatusCause",
+    "SubagentAwaiter",
     "SubagentPreset",
     "SubagentPresetService",
     "SubagentProvider",
@@ -305,6 +306,15 @@ class SubagentResult:
     error: str | None = None
 
 
+SubagentAwaiter: TypeAlias = Callable[[], Awaitable[SubagentResult]]
+"""How a caller waits for one delegation to settle.
+
+Named because a provider *builds* one and `SubagentRun.result` *holds* one, in
+different packages — `ph_rlm.subagents._awaiter` spelled this union out by hand
+so that the two copies had nothing linking them.
+"""
+
+
 @dataclass(slots=True)
 class SubagentRun:
     """A live delegation. Returned at admission, before the child answers.
@@ -342,10 +352,10 @@ class SubagentRun:
     was refused today stops being true when the workspace tier lands, in every
     log already written. `downgrade_text()` renders the sentence from the code,
     once."""
-    result: Callable[[], Awaitable[SubagentResult]] | None = None
+    result: SubagentAwaiter | None = None
     """Awaits quiescence and reports the outcome. `None` from a provider whose
     children cannot be waited on."""
-    dispose: Callable[[], Any] | None = None
+    dispose: Disposer | None = None
     """Releases the child early. Registered as an effect of the parent's scope by
     the provider, so a disposed parent unwinds its children (I2)."""
     grant: Grant | None = None

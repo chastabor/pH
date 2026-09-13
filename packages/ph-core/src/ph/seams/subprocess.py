@@ -34,16 +34,16 @@ import logging
 import os
 import re
 import sys
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal, TypeAlias
+from typing import Literal, TypeAlias
 
 import anyio
 import anyio.abc
 from pydantic import Field
 
-from ..cordis import Context, plugin
+from ..cordis import Context, Disposer, plugin
 from ..keys import SUBPROCESS
 from ..wire import WireModel
 
@@ -236,7 +236,7 @@ class SubprocessHandle:
     """A live child, with offset-addressable output."""
 
     spec: SubprocessSpawnSpec
-    process: Any
+    process: anyio.abc.Process
     stdout: bytearray = field(default_factory=bytearray)
     stderr: bytearray = field(default_factory=bytearray)
     cap: int = MAX_OUTPUT
@@ -426,7 +426,7 @@ class SubprocessService:
         cap = self.max_output if spec.max_output is None else spec.max_output
         handle: dict[str, SubprocessHandle] = {}
 
-        async def enter() -> Any:  # noqa: ANN401
+        async def enter() -> Disposer:
             process = await anyio.open_process(
                 list(spec.argv),
                 cwd=str(spec.cwd),
@@ -438,7 +438,7 @@ class SubprocessService:
             child = SubprocessHandle(spec=spec, process=process, cap=cap)
             handle["child"] = child
 
-            def release() -> Any:  # noqa: ANN401
+            def release() -> Awaitable[None]:
                 return child.terminate()
 
             return release
@@ -481,7 +481,7 @@ class SubprocessService:
         )
 
 
-def _stdio(mode: Stdio) -> Any:  # noqa: ANN401
+def _stdio(mode: Stdio) -> int | None:
     import subprocess as _sp
 
     if mode == "pipe":

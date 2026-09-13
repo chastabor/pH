@@ -95,6 +95,7 @@ from ..protocol import (
     PROTOCOL_VERSION,
     SNAPSHOT_EVENTS,
     CapabilityBlock,
+    MethodResult,
     NoParams,
     Notify,
     Refusal,
@@ -405,7 +406,7 @@ class _Connection:
                         root.desk.leave(self)
             self.attached.clear()
 
-    async def _dispatch(self, method: str, params: dict[str, Any]) -> Any:  # noqa: ANN401
+    async def _dispatch(self, method: str, params: dict[str, Any]) -> MethodResult:
         """The daemon's half of the vocabulary — dsh's names (P5-02).
 
         `session/*` rather than P5-01's `root/*`: a supervised root *is* a
@@ -434,9 +435,9 @@ class _Connection:
 
     async def _mutate(
         self,
-        mutation: Mutation[Any, Any],
+        mutation: Mutation[Any, WireModel],
         params: dict[str, Any],
-    ) -> Any:  # noqa: ANN401
+    ) -> MethodResult:
         """Every method that changes a root goes through this one wrapper.
 
         Parse, resolve the root (through `start`, so acting on a passivated one

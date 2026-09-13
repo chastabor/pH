@@ -18,9 +18,8 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Any
 
-from ..json import thaw_json
+from ..json import PlainJsonValue, thaw_json
 from .events import (
     SessionEvent,
     SurfaceOp,
@@ -221,7 +220,7 @@ def _assert_tool_result_rewrite(
         raise SurfaceError("tool/result surface replacement may change only content")
 
 
-def _blank_result_content(data: object) -> Any:  # noqa: ANN401
+def _blank_result_content(data: object) -> PlainJsonValue:
     """A `tool/result` payload with the result block's content blanked out."""
     plain = thaw_json(data)
     message = plain.get("message") if isinstance(plain, dict) else None

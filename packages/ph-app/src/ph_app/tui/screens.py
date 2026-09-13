@@ -84,19 +84,24 @@ class AppSurface(Protocol):
     implementing one member and never reaching the other two.
     """
 
-    def run_worker(self, work: Coroutine[Any, Any, Any]) -> Any:  # noqa: ANN401
+    def run_worker(self, work: Coroutine[Any, Any, Any]) -> object:
         """Own a coroutine started from a sync caller, so it dies with the app.
 
         Textual's own parameters are not restated: a structural match needs only
         what is called, and `exclusive=False` — the one this used to carry — is
-        the default it was passing anyway, in three places that had to agree."""
+        the default it was passing anyway, in three places that had to agree.
+
+        `object`, not Textual's `Worker`: no caller reads what comes back, here
+        or in `run_action` below, so naming the class would import it for a value
+        nobody holds — and a return type this surface does not promise is one an
+        implementation is free to widen."""
         ...
 
-    def add_binding(self, binding: Binding) -> Callable[[], Any]:
+    def add_binding(self, binding: Binding) -> Callable[[], None]:
         """Bind a key on the live app; the return removes it again."""
         ...
 
-    async def run_action(self, action: str) -> Any:  # noqa: ANN401
+    async def run_action(self, action: str) -> object:
         """Dispatch a Textual action — how every local slash command has a body."""
         ...
 

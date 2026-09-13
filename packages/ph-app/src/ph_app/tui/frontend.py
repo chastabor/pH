@@ -32,7 +32,7 @@ a rule someone has to remember.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from typing import Any, Protocol
+from typing import Protocol
 
 from ph.llm.types import AttachmentRef
 from ph.seams.approval import ApprovalAnswer, ApprovalRequest
@@ -135,7 +135,7 @@ class FrontSession(Protocol):
     async def flush(self) -> None: ...
     async def close(self) -> None: ...
 
-    def attach_surfaces(self, app: AppSurface) -> list[Callable[[], Any]]:
+    def attach_surfaces(self, app: AppSurface) -> list[Callable[[], None]]:
         """Register this front end's own verbs and screens; return their disposers."""
         ...
 

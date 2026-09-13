@@ -53,6 +53,7 @@ __all__ = [
     "ErrorFrame",
     "Frame",
     "InvalidParams",
+    "MethodResult",
     "NoParams",
     "NotificationFrame",
     "Notify",
@@ -98,7 +99,24 @@ discarded. A count needs no measuring pass, and the transport's `MAX_LINE` is th
 real protection against an oversized frame.
 """
 
-Dispatch = Callable[[str, dict[str, Any]], Awaitable[Any]]
+MethodResult: TypeAlias = WireModel | dict[str, Any] | None
+"""What one method hands back: its reply model, the object it would dump to, or
+nothing at all.
+
+A model *and* an object, because `respond` is the single point where a result
+becomes a frame — a handler that answers with a model never spells `.to_wire()`
+at its own `return`, and one whose reply has no model returns the object
+outright. Nothing wider: `result_of` reads the far end of this contract as
+`dict[str, Any]`, so a method answering with a bare list or string would arrive
+as `{}`.
+
+`None` is what a `Notify` answers — see `Announced` in `daemon/server.py`. Its
+frame carries no id, so `respond` computes nothing and writes nothing; the
+alternative was an `{"ok": True}` literal existing to give the handler something
+to return.
+"""
+
+Dispatch = Callable[[str, dict[str, Any]], Awaitable[MethodResult]]
 """A server's method table: `(method, params) -> result`, raising to refuse.
 
 `params` arrives as the peer sent it. Narrowing it to the method's model is the
@@ -148,7 +166,12 @@ class ErrorBody(TypedDict):
 class ResultFrame(TypedDict):
     jsonrpc: Literal["2.0"]
     id: int | str
-    result: Any
+    result: dict[str, Any] | None
+    """`None` for a `Notify` answered with an id — an acknowledgement carrying
+    nothing, which is the point: `shutdown` has no reply model, and coercing this
+    to `{}` would put back the invented `{"ok": true}` that
+    `test_an_rpc_round_trip_in_the_sdk_shape` exists to keep out. `result_of`
+    reads either back as `{}`."""
 
 
 class ErrorFrame(TypedDict):

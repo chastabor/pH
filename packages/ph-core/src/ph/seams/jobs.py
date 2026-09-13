@@ -117,7 +117,7 @@ class Job:
     label: str
     token: CancelToken
     state: JobState = "running"
-    result: Any = None
+    result: object = None
     error: BaseException | None = None
     release: Disposer | None = None
     """Deregisters this job's effect from its owning scope. Set by `start`, and
@@ -187,7 +187,7 @@ class JobService:
         *,
         kind: str,
         label: str,
-        run: Callable[[Job], Any],
+        run: Callable[[Job], object],
         scope: Context | None = None,
         slot: Slot | None = None,
         on_queued: Callable[[], None] | None = None,
