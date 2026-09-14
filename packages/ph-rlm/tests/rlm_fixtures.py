@@ -24,11 +24,11 @@ import pytest
 from ph.agent.types import AgentDriver
 from ph.cordis import Context
 from ph.keys import AGENTS, SESSIONS
+from ph.orphans import OrphanJournal
 from ph.session import Session
 from ph.testing import FAKE_OPTIONS, MountProfile
 from ph_rlm import BUNDLE
 from ph_rlm.harness import HarnessEdit
-from ph_rlm.kernel.journal import OrphanJournal
 from ph_rlm.kernel.manager import Kernel, KernelLimits, _declare
 from ph_rlm.kernel.venv import resolve_interpreter
 

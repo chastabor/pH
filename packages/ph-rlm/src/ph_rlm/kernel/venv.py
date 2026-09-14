@@ -38,7 +38,8 @@ from functools import cache
 from pathlib import Path
 from typing import Literal, TypeAlias
 
-from .journal import argv_digest
+from ph.orphans import argv_digest
+
 from .protocol import PROTOCOL_VERSION
 
 __all__ = [

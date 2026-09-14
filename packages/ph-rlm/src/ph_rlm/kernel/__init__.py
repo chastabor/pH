@@ -8,7 +8,8 @@ different venv on purpose.
 
 from __future__ import annotations
 
-from .journal import OrphanJournal, SweepReport
+from ph.orphans import OrphanJournal, SweepReport
+
 from .manager import Config, Kernel, KernelLimits, PythonCodeRuntime
 from .protocol import PROTOCOL_FD, PROTOCOL_VERSION
 from .venv import RuntimeEnvironment, resolve_interpreter

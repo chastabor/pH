@@ -1516,7 +1516,7 @@ class Supervisor:
         await root.wake.aclose()
         await self._release(root)
 
-    async def aclose(self) -> None:
+    async def aclose(self, *, deadline: float | None = None) -> None:
         """Close every root's wake channel and unwind its context.
 
         Channels first, so each task leaves its own loop rather than being
@@ -1524,9 +1524,18 @@ class Supervisor:
         must not strand the others (I2) — and each is flushed *before* it
         unwinds, since disposal appends events of its own and a session lost on
         exit is the worst way to learn that.
+
+        **`deadline` is one budget for the whole shutdown**, seeded onto each
+        root before it is released. Every root is its own `Context` with its own
+        runtime, and `Context.dispose` shields itself — so without this each took
+        a fresh `GRACE_SECONDS`, and the caller's ten-second bound became ten
+        seconds *per root*. Seeded rather than passed, because a root unwinds
+        through its `AsyncExitStack` and there is no argument to thread.
         """
         for root in self.roots.values():
             await root.wake.aclose()
         for root in list(self.roots.values()):
+            if deadline is not None:
+                root.ctx.unwind_by(deadline)
             await self._release(root)
         self.roots.clear()

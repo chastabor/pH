@@ -34,7 +34,7 @@ import logging
 import os
 import re
 import sys
-from collections.abc import Awaitable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, TypeAlias
@@ -43,9 +43,11 @@ import anyio
 import anyio.abc
 from pydantic import Field
 
-from ..cordis import Context, Disposer, plugin
+from ..cordis import Context, Disposer, maybe_await, plugin
 from ..keys import SUBPROCESS
+from ..orphans import OrphanJournal, host_journal
 from ..wire import WireModel
+from .diagnostics import Diagnostic, contribute
 
 __all__ = [
     "COHERENT",
@@ -249,6 +251,12 @@ class SubprocessHandle:
     a model than "37 MB was dropped", and a caller deciding whether to re-run the
     command with a filter wants the size. Summed, because every reader of it —
     the shell seam, `!!`, `tool-bash` — asks only how much went missing."""
+    dispose: Disposer | None = None
+    """Releases this child's effect: terminate, reap, forget, deregister.
+
+    Set by `spawn`, which used to discard what `ctx.effect` returned — so a
+    caller finished with a child had no way to say so, and the effect lived as
+    long as its scope did. `run` is the caller that always is finished."""
 
     @property
     def pid(self) -> int | None:
@@ -366,6 +374,12 @@ class SubprocessResult:
 class Config(WireModel):
     """Row config for `subprocess-local`."""
 
+    sweep_orphans: bool = True
+    """Whether mounting this row kills children a hard-killed run left behind.
+
+    On by default because a re-parented child is burning CPU now, and off is what
+    a deployment sharing `$PH_RUNTIME` with something pH does not own would set.
+    `code-runtime-python` carries the same switch for the same reason."""
     scrub: list[str] = Field(default_factory=lambda: list(DEFAULT_SCRUB))
     """Substrings that mark an environment variable as a credential a child never
     inherits (I-4). Case-insensitive, matched anywhere in the name.
@@ -396,6 +410,15 @@ class SubprocessService:
     """The service published as `ctx.subprocess`."""
 
     ctx: Context
+    journal: OrphanJournal | None = None
+    """Where a spawn is recorded so a hard kill leaves a trail (F5).
+
+    **Optional, because a deployment may have nowhere to write it** — a
+    read-only `$PH_RUNTIME`, a test with no roots — and a seam that refused to
+    spawn over a diagnostic would be trading a working harness for a tidier one.
+    `None` means the hole this closes is open again, which `ph doctor` says out
+    loud rather than the seam pretending otherwise.
+    """
     max_output: int = MAX_OUTPUT
     """The deployment's ceiling, applied to any spec that names none."""
     scrub: EnvScrub = field(default_factory=EnvScrub)
@@ -437,14 +460,37 @@ class SubprocessService:
             )
             child = SubprocessHandle(spec=spec, process=process, cap=cap)
             handle["child"] = child
+            # **Journalled here, between the spawn and the disposer.** Every
+            # cleanup path pH has is structural — this effect, the scope that
+            # owns it, the reap in `terminate`'s `finally` — and none of them
+            # runs under `SIGKILL`, which POSIX answers by re-parenting the child
+            # to init rather than killing it. The record is what a later start
+            # sweeps by.
+            #
+            # Inline rather than through `to_thread`: without the `fsync` this is
+            # one buffered write (~20 µs), and the hop cost more than the work.
+            journal = self.journal
+            if journal is not None:
+                journal.record(pid=process.pid, argv=spec.argv, label=spec.argv[0])
 
-            def release() -> Awaitable[None]:
-                return child.terminate()
+            async def release() -> None:
+                try:
+                    await child.terminate()
+                finally:
+                    # In the `finally` for `terminate`'s own reason: a reap that
+                    # did not happen must not also lose the record of the child
+                    # it was for, or the next sweep hunts something already gone.
+                    if journal is not None:
+                        journal.forget(process.pid)
 
             return release
 
-        await owner.effect(enter, label=f"subprocess({spec.argv[0]})")
-        return handle["child"]
+        # The disposer is assigned after `effect` returns, because `enter` is
+        # what puts the handle in the dict in the first place.
+        release = await owner.effect(enter, label=f"subprocess({spec.argv[0]})")
+        child = handle["child"]
+        child.dispose = release
+        return child
 
     async def run(
         self, spec: SubprocessSpawnSpec, *, scope: Context | None = None
@@ -465,10 +511,14 @@ class SubprocessService:
                 await child.pump()
                 await child.wait()
         finally:
-            # Reaping in a finally is the whole point: an exception between
-            # spawn and wait must not leave the child unreaped (F4).
-            if child.returncode is None:
-                await child.terminate()
+            # **Released, not merely reaped.** Reaping in a `finally` is the
+            # point (F4) — an exception between spawn and wait must not leave the
+            # child alive — and the disposer does that *and* closes the journal
+            # record *and* drops the effect. Only reaping left both open until
+            # the owning scope unwound, which for a daemon root is hours: the
+            # journal grew a live `spawn` line per command run, and `_effects`
+            # grew an entry per command beside it.
+            await maybe_await(child.dispose() if child.dispose is not None else None)
         # `returncode` rather than `wait()`'s value: both paths out of the block
         # leave it set, and reading it once means the timeout path has no second
         # spelling. `-1` only when a child left no status at all.
@@ -493,15 +543,46 @@ def _stdio(mode: Stdio) -> int | None:
 
 @plugin("subprocess-local", config=Config)
 async def apply(ctx: Context, config: Config) -> None:
-    """Mount the local subprocess provider."""
+    """Mount the local subprocess provider, and sweep what a hard kill left (F5).
+
+    **The sweep runs at every start**, which is the journal's own rule: a session
+    nobody reopens would never reconcile its strays, and a child re-parented to
+    init is burning CPU now rather than waiting to be noticed. It is safe to run
+    from any pH process because the journal records each child's *owner* — a
+    live owner's children are held, never killed.
+
+    Off the loop, because it stats `/proc` per record and may `SIGKILL`; and
+    after `provide`, so a deployment whose sweep fails still has a working seam.
+    """
+    journal = host_journal()
     ctx.provide(
         SUBPROCESS,
         SubprocessService(
             ctx=ctx,
+            journal=journal,
             max_output=config.max_output_bytes,
             scrub=EnvScrub(marks=tuple(config.scrub), keep=frozenset(config.keep)),
         ),
     )
+    contribute(
+        ctx,
+        Diagnostic(
+            id="subprocess",
+            title="Child processes",
+            read=lambda: _describe(journal),
+            order=21,
+        ),
+    )
+    if journal is not None and config.sweep_orphans:
+        # `sweep` already logs what it did, under the same condition — a second
+        # sentence here for one event is what `ph.text` exists to prevent.
+        await anyio.to_thread.run_sync(journal.sweep)
+
+
+def _describe(journal: OrphanJournal | None) -> list[tuple[str, str]]:
+    if journal is None:
+        return [("orphan journal", "unavailable — a hard kill will leave strays unswept")]
+    return [("orphan journal", str(journal.path))]
 
 
 def platform_shell() -> Sequence[str]:

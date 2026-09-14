@@ -10,7 +10,10 @@ scopes whose disposal unwinds every registration and every acquired artifact
 from __future__ import annotations
 
 from .context import (
+    ABANDONED_LEDGER,
     DEPLOYMENT,
+    GRACE_SECONDS,
+    Abandoned,
     Boundary,
     Context,
     Deployment,
@@ -58,8 +61,11 @@ from .loader import (
 from .plugin import PluginSpec, normalize_plugin, plugin
 
 __all__ = [
+    "ABANDONED_LEDGER",
     "DEPLOYMENT",
     "ENTRY_POINT_GROUP",
+    "GRACE_SECONDS",
+    "Abandoned",
     "Boundary",
     "Context",
     "CordisError",

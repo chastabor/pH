@@ -22,6 +22,7 @@ fire, which is the failure mode an invariant suite has.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable, Mapping
 from typing import Any
 
@@ -38,6 +39,7 @@ from ph.session import SurfaceIntent
 from ph.session.invariant import violations as session_violations
 from ph.testing import (
     MountProfile,
+    raising,
     report_section,
     simple_tool,
     skill,
@@ -485,6 +487,7 @@ async def test_the_rows_reach_the_report_through_the_real_mount(mount: MountProf
         "tool-view-cache",
         "skill-reach-cache",
         "scope-unwind",
+        "scope-teardown",
         # One per `SessionFoldCache` in the base bundle. Listed rather than
         # summarised, so a seam that stops declaring its fold cache fails here
         # instead of quietly leaving the property unchecked.
@@ -518,6 +521,70 @@ async def test_a_drifted_fold_cache_is_reported_by_the_row_that_owns_it(
     assert [one.invariant for one in violations] == ["goal-fold-cache"]
     assert "drifted" in violations[0].detail
     assert report_section(ctx, "Invariants")["goal-fold-cache"].startswith("VIOLATED ·")
+
+
+async def test_a_stranded_effect_reaches_the_report(mount: MountProfile) -> None:
+    """The abandoned-teardown ledger, end to end through a real mount.
+
+    This is the half `scope_invariant` used to declare unenforced: a cancelled
+    unwind leaves effects nobody will run, and the only account of it was a
+    `log.warning` no shipped entry point installed a handler for. A lease or a
+    worktree stranded that way was invisible to `ph doctor`.
+
+    Driven through the seam rather than by reading `ctx.abandoned`, because the
+    claim is that the ledger *reaches a reader*: the unit tests in
+    `test_cordis_context` already pin what `_leave_tree` records.
+    """
+    ctx = await mount()
+    scope = ctx.scope("doomed")
+    scope.add_disposer(lambda: None, label="a-worktree")
+    scope.add_disposer(raising(asyncio.CancelledError()), label="cancelled-here")
+
+    with pytest.raises(asyncio.CancelledError):
+        await scope.dispose()
+
+    violations = ctx.require(INVARIANTS).verify()
+    assert {one.invariant for one in violations} == {"scope-teardown"}
+    # One entry, two findings: what a holder can still release, and what nothing
+    # can. They are separate lines because they ask different things of a reader.
+    details = " | ".join(one.detail for one in violations)
+    assert "a-worktree" in details, "the report names what was stranded"
+    assert "nothing can now release" in details, "and what cannot be acted on"
+    assert report_section(ctx, "Invariants")["scope-teardown"].startswith("VIOLATED ·")
+
+
+async def test_a_released_effect_stops_being_reported_and_a_stranded_one_does_not(
+    mount: MountProfile,
+) -> None:
+    """The two kinds, end to end, and why they are two.
+
+    The invariant is about resources still held, not the history of unwinds that
+    went badly. But "still held" splits: an unclaimed effect can be released by
+    whoever holds its closure, and clears when they do; one the unwind claimed
+    and never finished cannot be retried at all — `release` refuses it on the
+    `done` guard — so it stays, worded as stranded rather than as a chore.
+    """
+    ctx = await mount()
+    scope = ctx.scope("doomed")
+    release = scope.add_disposer(lambda: None, label="a-worktree")
+    # Both are owed after this: the one never reached, and the one that raised
+    # partway. Nothing can tell "raised immediately" from "cancelled halfway
+    # through unmounting", so both are reported and both have to be settled.
+    settle = scope.add_disposer(raising(asyncio.CancelledError()), label="cancelled-here")
+
+    with pytest.raises(asyncio.CancelledError):
+        await scope.dispose()
+    assert ctx.require(INVARIANTS).verify(), "violated while the effects are outstanding"
+
+    release()
+
+    # The actionable half clears. The other cannot: `settle` is refused on the
+    # `done` guard, which is exactly why it is reported as stranded rather than
+    # as work somebody should go and do.
+    assert settle() is None, "a claimed effect cannot be retried by its holder"
+    (still,) = ctx.require(INVARIANTS).verify()
+    assert "a-worktree" not in still.detail, "the one that could be released was"
+    assert "nothing can now release" in still.detail and "cancelled-here" in still.detail
 
 
 @pytest.mark.parametrize(

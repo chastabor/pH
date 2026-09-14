@@ -32,8 +32,8 @@ from typing import Any
 import anyio
 import pytest
 
+from ph.orphans import OrphanJournal
 from ph_rlm.kernel import codec
-from ph_rlm.kernel.journal import OrphanJournal
 from ph_rlm.kernel.manager import Kernel, KernelLimits, PythonCodeRuntime
 from ph_rlm.kernel.venv import resolve_interpreter
 from ph_runtime.limits import apply_limits

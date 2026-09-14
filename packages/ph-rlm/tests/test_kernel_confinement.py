@@ -39,13 +39,13 @@ from rlm_fixtures import MountedRuntime
 from ph.agent.types import AgentDriver
 from ph.cordis import Context
 from ph.keys import AGENTS, CODE_RUNTIME, SANDBOX, WORKSPACE
+from ph.orphans import OrphanJournal
 from ph.seams.code_runtime import CodeRunRequest
 from ph.seams.sandbox import DENIED, ConfinedArgv, SandboxPolicy
 from ph.seams.sandbox_local import Bubblewrap, Seatbelt, local_backend
 from ph.seams.workspace import workspace_policy
 from ph.session import Session
 from ph.testing import StubSandboxProvider, report_section
-from ph_rlm.kernel.journal import OrphanJournal
 from ph_rlm.kernel.manager import Kernel, KernelLimits, PythonCodeRuntime
 from ph_rlm.kernel.venv import resolve_interpreter
 from ph_rlm.keys import PYTHON_RUNTIME

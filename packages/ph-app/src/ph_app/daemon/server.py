@@ -1482,15 +1482,22 @@ async def serve(
             # short here loses everything teardown is for: sessions unflushed,
             # worktrees unreclaimed (F6), and P5-03's leases never released, so
             # the next daemon refuses a session whose holder is already gone.
-            # `move_on_after` rather than a bare shield, because a root that
-            # will not unwind must not become a process that will not exit.
-            # `GRACE_SECONDS` rather than a number of its own: it is the same
-            # budget `install_lifecycle` spends on `ctx.dispose()`, with the
-            # same `move_on_after(shield=True)`, and two constants for one
-            # tunable is how an inner budget silently becomes dead code (when
-            # it exceeds the outer one) or the only one that ever fires.
-            with anyio.move_on_after(GRACE_SECONDS, shield=True):
-                await supervisor.aclose()
+            # **Both halves, and they do different jobs.** The scope shields
+            # `aclose`'s own work — the flushes, the channel closes, the loop
+            # between roots — which an outer cancellation would otherwise cut,
+            # leaving a lease held and the next daemon refusing the session.
+            # The *deadline* is what bounds the roots: `Context.dispose` shields
+            # itself, so a deadline out here could never reach inside one, and
+            # each root would have started a fresh `GRACE_SECONDS` of its own —
+            # ten roots, ten budgets, from a line that says ten seconds.
+            #
+            # One instant for both, so they end together: a root that will not
+            # unwind must not become a process that will not exit, and two
+            # constants for one tunable is how a budget stops being the one that
+            # fires.
+            until = anyio.current_time() + GRACE_SECONDS
+            with anyio.CancelScope(deadline=until, shield=True):
+                await supervisor.aclose(deadline=until)
             socket_path.unlink(missing_ok=True)
             # Last: the accept loop and any root task still in flight. Roots are
             # unwound above by their own channels closing, so this cancels a

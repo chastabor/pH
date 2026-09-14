@@ -44,6 +44,7 @@ from contextlib import suppress
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from typing import Any, Final, TypeAlias, cast, overload
+from weakref import ref
 
 import anyio
 
@@ -228,11 +229,117 @@ def _invoke(hook: Hook, *args: object) -> object:
         _ACTIVATING.reset(token)
 
 
-@dataclass(slots=True)
+@dataclass(slots=True, weakref_slot=True)
 class _Effect:
+    """One registered teardown, and two facts about it that are not the same.
+
+    `done` means **claimed** — somebody has taken responsibility for running
+    this, so nobody else may. `ran` means **completed** — nothing is owed. One
+    flag served both until the unwind gained a deadline, and then the difference
+    became the whole story: at the moment the budget expires the loop marks each
+    remaining effect claimed and never runs it, so a single flag reported a tree
+    that had torn down nothing as a tree that owed nothing.
+    """
+
     dispose: Disposer
     label: str
     done: bool = False
+    ran: bool = False
+
+
+GRACE_SECONDS = 10.0
+"""How long one scope tree's unwind may take before it stops waiting on itself.
+
+**Here rather than in `ph.resources`, because this is what now bounds it.** The
+number was `resources.GRACE_SECONDS`, where the process-level shutdown path
+wrapped `ctx.dispose()` in a shielded `move_on_after` — a caller hand-rolling a
+guarantee the primitive should own, while every other caller had none. `dispose`
+applies it itself now, and `ph.resources` re-exports the name so the shutdown
+path reads unchanged.
+
+Ten seconds because it is a budget for *finishing*, not a timeout for one
+operation: a worktree to unlink, a child to reap, a proxy to close. The
+`server.py` shutdown says the other half — a root that will not unwind must not
+become a process that will not exit — which is why this is a deadline and not a
+bare shield.
+"""
+
+ABANDONED_LEDGER = 64
+"""How many cut-short unwinds one tree remembers.
+
+Bounded because the ledger holds the abandoned disposers alive — deliberately,
+since they are still callable and each stands for a resource nobody has freed —
+and an unbounded list of them in a process that keeps abandoning would be a leak
+about a leak. 64 is far past the point where a reader has stopped counting and
+started asking what is wrong with the deployment; the count of what fell off is
+kept, so the report never quietly under-states.
+"""
+
+
+@dataclass(frozen=True, slots=True)
+class Abandoned:
+    """One scope whose unwind was cut short, and the teardown it left holding.
+
+    **`outstanding` is derived, not recorded.** The entry watches the live
+    effects rather than snapshotting their names, so one released afterwards
+    through the closure `add_disposer` handed out drops off the report by
+    itself. A name-snapshot would keep accusing a deployment of a lease somebody
+    had already returned — and `dispose()` cannot be that somebody, since its
+    early return makes a second call a no-op, so those closures are the only way
+    back and the ledger has to notice them being used.
+
+    **Weakly, because the alternative is a leak about a leak.** A strong
+    reference pins far more than the disposer: `provide`'s `unprovide` captures
+    the `Context` and the service, and `on`'s `off` captures a `Hook` holding the
+    same context — so any scope that ever called either kept its whole subtree
+    and every service in it alive for the life of the tree, none of which
+    `outstanding` ever mentioned. Real disposers here are bound methods on live
+    objects (an httpx client and its pool, a subprocess handle), which CPython
+    reclaims on the last reference and cannot while a diagnostic holds one.
+
+    The label is cached beside the reference because it outlives it, and the two
+    cases are different answers rather than one: a live reference not yet done is
+    **outstanding** — somebody still holds the closure and can release it — while
+    a dead one is `unreclaimable`, since nothing can ever call it again.
+    """
+
+    path: str
+    watched: tuple[tuple[str, ref[_Effect]], ...]
+    """Each undisposed effect's label and a weak reference to it. Read through
+    `outstanding` and `unreclaimable`; never dereferenced elsewhere."""
+
+    @property
+    def outstanding(self) -> tuple[str, ...]:
+        """Effects nobody has claimed, that a holder could still run.
+
+        Unclaimed *and* still referenced. `release` refuses an effect the unwind
+        already claimed — that guard is what stops a disposer running twice — so
+        a claimed one is not something anybody can act on, however incomplete.
+        """
+        return tuple(
+            label for label, watch in self.watched if (one := watch()) is not None and not one.done
+        )
+
+    @property
+    def unreclaimable(self) -> tuple[str, ...]:
+        """Effects nothing will ever run, for either of the two reasons.
+
+        The last holder is gone, so no closure survives to call — or the unwind
+        claimed it and never finished it, which `release` then refuses on the
+        `done` guard. The second is the case a deadline creates: the disposer cut
+        off mid-unmount is the one most likely to have left something half-done,
+        and it is also the one nobody can retry.
+
+        Kept apart from `outstanding` because they ask different things of a
+        reader. One names work somebody can still do; this names a resource that
+        is stranded until the process ends, and telling an operator to go and act
+        on it would be telling them to do something impossible.
+        """
+        return tuple(
+            label
+            for label, watch in self.watched
+            if (one := watch()) is None or (one.done and not one.ran)
+        )
 
 
 @dataclass(slots=True)
@@ -303,6 +410,33 @@ class _Runtime:
     dependents: list[_Dependent] = field(default_factory=list)
     dirty: bool = True
     background: set[asyncio.Future[Any]] = field(default_factory=set)
+    unwind_deadline: float | None = None
+    """The instant this tree's unwind must finish by, or `None` when none is set.
+
+    **One budget per tree, not one per scope.** `dispose` recurses into children,
+    so a deadline computed fresh at each level would multiply down the depth of
+    the tree — `GRACE_SECONDS` at every layer, which is exactly the failure
+    `daemon/server.py` names when it insists on one shared number.
+
+    Set by whoever starts the unwind, or *before* it by `Context.unwind_by` —
+    which is how a caller holding several trees spends one budget across all of
+    them. Cleared when that unwind ends.
+    """
+    unwinding: bool = False
+    """Whether a shield is already up for this tree.
+
+    Separate from `unwind_deadline` because a pre-seeded budget is not the same
+    fact as an unwind in progress: with one field, `unwind_by` would look exactly
+    like a nested call and the outermost `dispose` would decline to raise the
+    shield at all."""
+    abandoned: list[Abandoned] = field(default_factory=list)
+    """Unwinds this tree could not finish, newest last, capped at
+    `ABANDONED_LEDGER`. On the runtime rather than on the scope because the scope
+    that could not finish is, by the end of `_leave_tree`, unreachable from
+    anything — which is precisely why this was invisible."""
+    abandoned_dropped: int = 0
+    """How many entries the cap discarded, so a report can say so rather than
+    imply the oldest abandonment was the first."""
 
 
 class ForkScope:
@@ -855,6 +989,25 @@ class Context:
         *_, last = self._chain()
         return last
 
+    @property
+    def abandoned(self) -> tuple[Abandoned, ...]:
+        """Unwinds in this tree that were cut short, oldest first.
+
+        A tree-wide fact read from any scope, because the record is on the shared
+        runtime — the scope it describes is gone by the time the entry exists.
+        Empty is the ordinary answer and the one a healthy process keeps.
+
+        A copy, for `children`'s reason: the list is appended to from
+        `_leave_tree`, which runs in a `finally` during cancellation, and a
+        caller iterating the live list would be walking it as it grew.
+        """
+        return tuple(self._runtime.abandoned)
+
+    @property
+    def abandoned_dropped(self) -> int:
+        """How many ledger entries the cap discarded. See `ABANDONED_LEDGER`."""
+        return self._runtime.abandoned_dropped
+
     def descendants(self) -> Iterator[Context]:
         """Every scope beneath this one, itself first, with a cycle guard.
 
@@ -1019,7 +1172,7 @@ class Context:
         def release() -> object:
             if effect.done:
                 return None
-            effect.done = True
+            effect.done = effect.ran = True
             with suppress(ValueError):  # already removed by dispose()
                 self._effects.remove(effect)
             return effect.dispose()
@@ -1147,40 +1300,118 @@ class Context:
             f"is oscillating after {_MAX_RECONCILE_ROUNDS} rounds"
         )
 
-    async def dispose(self) -> None:
+    async def dispose(self, *, deadline: float | None = None) -> None:
         """Unwind this scope: children first, then own effects LIFO.
 
         The order is load-bearing for anything that registers an effect *about* a
-        child — a subagent's tombstone, a supervisor's bookkeeping — because
-        such an effect runs after that child's scope is already gone. See
+        child — a subagent's tombstone, a supervisor's bookkeeping — because such
+        an effect runs after that child's scope is already gone. See
         `ph_rlm.subagents._release`, which is exactly that shape.
 
         **Leaving the tree is guaranteed, whatever the unwind does** (I2). Every
         `await` below can be cancelled, and `CancelledError` is a `BaseException`
-        that the effect loop's `except Exception` deliberately does not catch —
-        so without the `finally` a cancellation partway through left this scope
+        that the effect loop's `except Exception` deliberately does not catch — so
+        without the `finally` a cancellation partway through left this scope
         `_active=False`, still in its parent's `_children`, still holding its
         services, and unretryable, because the early return above makes a second
-        `dispose()` a no-op. That state is a leak of everything beneath it, and
-        it is the one path a live process can reach it by.
+        `dispose()` a no-op. That state is a leak of everything beneath it, and it
+        is the one path a live process can reach it by.
+
+        **Shielded, so an outside cancellation cannot strand the teardown it
+        interrupted** — the larger half of the same failure. Until this was here,
+        a Ctrl-C or a task group closing during unwind abandoned every effect
+        after the one in flight: the worktree unlinked but the child unreaped, the
+        lease held, and a `log.warning` nobody handled. `ph.resources` had
+        hand-rolled exactly this around its own `ctx.dispose()`; every other
+        caller — the agent registry, the loader, `ph_app.runtime.mounted`, and the
+        recursive call below — had nothing.
+
+        **A deadline and not a bare shield**, for `daemon/server.py`'s reason: a
+        root that will not unwind must not become a process that will not exit. So
+        a disposer that hangs still loses the effects behind it once the budget is
+        spent — recorded by `_leave_tree`, which is the case the abandonment
+        ledger genuinely exists for now that cancellation is handled here.
+
+        **`deadline` is how a caller spends one budget over several trees.** A
+        tree handed none takes `GRACE_SECONDS` from now, and nested scopes inherit
+        it through `_Runtime.unwind_deadline`, so one unwind is one budget however
+        deep it goes. What that cannot express is *several roots*, which are
+        several runtimes: a daemon closing ten of them would otherwise spend ten
+        budgets, so it passes one instant to each.
         """
         if not self._active:
             return
         self._active = False
+        runtime = self._runtime
+        if deadline is not None:
+            runtime.unwind_deadline = deadline
+        elif runtime.unwind_deadline is None:
+            runtime.unwind_deadline = anyio.current_time() + GRACE_SECONDS
+        budget = runtime.unwind_deadline
+        owns_budget = not runtime.unwinding
         try:
-            for child in reversed(list(self._children)):
-                await child.dispose()
-            while self._effects:
-                effect = self._effects.pop()
-                if effect.done:
-                    continue
-                effect.done = True
-                try:
-                    await maybe_await(effect.dispose())
-                except Exception:
-                    log.exception("ph.cordis: effect %r failed to dispose", effect.label)
+            if owns_budget:
+                runtime.unwinding = True
+                # **Entered once per unwind, not once per scope.** Every nested
+                # `dispose` already runs inside this scope with the same
+                # deadline, so its own would be a second shield against nothing —
+                # measured at +232% on a 341-scope tree, which is the ordinary
+                # shape of a mounted profile going away.
+                #
+                # `CancelScope(deadline=)` rather than `move_on_after(delay)`:
+                # the budget is an instant, and a nested call re-deriving a delay
+                # from it would drift by however long the layers above it took.
+                with anyio.CancelScope(deadline=budget, shield=True):
+                    await self._unwind()
+            else:
+                await self._unwind()
         finally:
+            if owns_budget:
+                runtime.unwinding = False
+                runtime.unwind_deadline = None
             self._leave_tree()
+
+    def unwind_by(self, deadline: float) -> None:
+        """Set the instant this tree's unwind must finish by, before it starts.
+
+        For the caller that disposes several trees and wants **one** budget
+        across them — a daemon closing ten roots, each its own `Context` with its
+        own runtime, each reached through an `AsyncExitStack` that `dispose`'s
+        own `deadline` argument cannot be threaded through. Without this each
+        root took a fresh `GRACE_SECONDS` behind its own shield, so a bound the
+        caller wrote as ten seconds was ten times that.
+
+        Idempotent and harmless on a tree that is never disposed: the field is
+        read only by `dispose`.
+        """
+        self._runtime.unwind_deadline = deadline
+
+    async def _unwind(self) -> None:
+        """Children first, then this scope's own effects, LIFO.
+
+        Split out of `dispose` so the shielded and nested paths share one body
+        rather than one being a copy of the other under a `with`.
+        """
+        for child in reversed(list(self._children)):
+            await child.dispose()
+        while self._effects:
+            # Peeked, and popped only once it has actually run. Popping first
+            # made the effect in flight when the budget expired invisible to
+            # `_leave_tree` — the one most likely to be half-done, and the one a
+            # reader most needs named.
+            effect = self._effects[-1]
+            if effect.done:
+                self._effects.pop()
+                continue
+            effect.done = True
+            try:
+                await maybe_await(effect.dispose())
+            except Exception:
+                # A disposer that raised still ran; what it left behind is its
+                # own business, and the traceback is the account of it.
+                log.exception("ph.cordis: effect %r failed to dispose", effect.label)
+            effect.ran = True
+            self._effects.pop()
 
     def _leave_tree(self) -> None:
         """Unlink from the parent and drop what this scope served. Cannot fail.
@@ -1202,20 +1433,43 @@ class Context:
         `release` closure `add_disposer` handed out, which is why this reports
         them and leaves them alone.
 
-        Not enforced (§5 rule 6): that report is a `log.warning`, and no shipped
-        entry point installs a handler for it. Making abandoned teardown
-        *queryable* — a ledger on `_Runtime`, or a durable event a seam records —
-        is unbuilt, and it is the half that would let `ph doctor` see a lease or a
-        worktree stranded by a cancelled unwind.
+        **Recorded as well as logged**, on the runtime rather than here, because
+        by the last line of this method the scope that could not finish is
+        unreachable from anything — unlinked from its parent, holding services it
+        has dropped — which is exactly why a stranded lease or worktree used to
+        be invisible to everything but a log nobody was reading. `scope_invariant`
+        turns the ledger into a pollable invariant, so `ph doctor` and the
+        daemon's own poll both report it without either learning what an effect
+        is.
+
         """
         if self._effects or self._children:
+            entry = Abandoned(
+                path=self.path,
+                watched=tuple((one.label or "unlabelled", ref(one)) for one in self._effects),
+            )
             log.warning(
                 "ph.cordis: %s was cut short while unwinding; %d child scope(s) and these "
                 "effect(s) were never disposed: %s",
                 self.path,
                 len(self._children),
-                [effect.label or "unlabelled" for effect in self._effects],
+                list(entry.outstanding),
             )
+            ledger = self._runtime.abandoned
+            # Entries nothing is owed on go first: `outstanding` is derived, so an
+            # entry whose effects were all released afterwards is a record of
+            # history the log already carries, and evicting it before a live one
+            # keeps the cap spent on what a person can still act on.
+            if len(ledger) >= ABANDONED_LEDGER:
+                ledger[:] = [one for one in ledger if one.outstanding or one.unreclaimable]
+            ledger.append(entry)
+            # One entry is appended per call and the cap is enforced on every
+            # one, so the ledger can only ever be a single entry over it. A
+            # general slice-and-count here defended a case that cannot arise, and
+            # its comment claimed the opposite of the invariant.
+            if len(ledger) > ABANDONED_LEDGER:
+                del ledger[0]
+                self._runtime.abandoned_dropped += 1
         self._services.clear()
         # Breaks the `self -> Running -> self` cycle the memo makes, in the
         # same breath as the parent/child one below: a context that has been

@@ -27,7 +27,7 @@ import pytest
 HOST = """
 import anyio, sys
 from pathlib import Path
-from ph_rlm.kernel.journal import OrphanJournal
+from ph.orphans import OrphanJournal
 from ph_rlm.kernel.manager import Kernel, KernelLimits
 from ph_rlm.kernel.venv import resolve_interpreter
 

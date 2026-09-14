@@ -36,6 +36,7 @@ from ..keys import COMMANDS, SUBPROCESS, TOOLS, WORKSPACE
 from ..seams.commands import CommandContext, CommandDefinition
 from ..seams.workspace import checkpoints, workspace_of
 from ..session import Session
+from ..text import brief_value
 
 __all__ = ["apply"]
 
@@ -184,5 +185,8 @@ def _brief(arguments: JsonValue) -> str:
 
 
 def _clip(value: JsonValue) -> str:
-    text = str(value)
+    """One argument, short enough for a listing — see `brief_value` for why it
+    is not `str()`: a nested argument object rendered as a Python literal in the
+    one report a person reads while deciding whether a restore was enough."""
+    text = brief_value(value)
     return text if len(text) <= 40 else f"{text[:37]}..."

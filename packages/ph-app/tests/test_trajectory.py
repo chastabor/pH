@@ -38,6 +38,7 @@ from ph.session.known_event_types import KNOWN_SESSION_EVENT_TYPES
 from ph.testing import MountProfile, assistant_payload, store_root, stored_log, user_payload
 from ph_app.tui.adapter import RECORDLESS as TRANSCRIPT_RECORDLESS
 from ph_app.tui.trajectory import HANDLERS, RECORDLESS, TrajectoryRecord, build_trajectory
+from ph_app.wire import describe
 
 pytestmark = pytest.mark.anyio
 
@@ -279,6 +280,52 @@ def test_a_compaction_is_its_own_kind() -> None:
         SurfaceIntent(SurfaceReplace(replaces=(first.seq,)), (first.seq,)),
     )
     assert kinds(build_trajectory(session)) == ["user", "compacted"]
+
+
+def test_the_generic_reading_never_emits_a_python_repr() -> None:
+    """The fallback must degrade to *less informative*, never to garbage.
+
+    Fifty-six event types reach `_describe` rather than a phrase of their own,
+    and `ph agents attach` reads the same sentences. So the failure mode of
+    "nobody wrote a dedicated handler" has to be a thinner line, not a Python
+    literal in a document a person reads — which is what `f"{key}={value}"` gave
+    for every payload with structure in it.
+
+    `agent/inbox/spliced` is the worst real case and the reason this is a gate
+    rather than a tidy-up: its payload carries whole `Message` objects, so the
+    auditor's one-line summary was a uuid, a role and nested content blocks,
+    truncated mid-token.
+
+    Sabotage: render a value with `str()` and the literal markers below appear.
+    """
+    payloads = [
+        {"target": "next-step", "inserted": [{"id": "m1", "role": "user", "content": [{}]}]},
+        {"todos": [{"content": "fix it", "status": "pending"}]},
+        {"limit": "turns", "spent": {"turns": 9}, "cap": 8},
+        {"a": {"b": {"c": 1, "d": 2}}},
+    ]
+    for payload in payloads:
+        line = describe(payload)
+        assert "{'" not in line and "[{" not in line, f"a Python literal reached a reader: {line}"
+        assert "': " not in line, f"a dict repr reached a reader: {line}"
+
+
+def test_the_generic_reading_keeps_the_facts_that_fit() -> None:
+    """Bounded, but not so bounded it stops answering anything.
+
+    A mapping is expanded one level because that is where the readable facts
+    usually are — `spent={turns=9}` is what somebody wanted to know — while a
+    list is counted, since a list is never one-line material. Named rather than
+    dropped, which is `block_marker`'s rule one layer up: a reader has to be able
+    to see that something was there.
+    """
+    assert describe({"limit": "turns", "spent": {"turns": 9}, "cap": 8}) == (
+        "limit=turns, spent={turns=9}, cap=8"
+    )
+    assert describe({"todos": [1, 2, 3]}) == "todos=[3 items]"
+    assert describe({"todos": [1]}) == "todos=[1 item]", "and it agrees with itself on one"
+    assert describe({"a": {"b": {"c": 1, "d": 2}}}) == "a={b={2 fields}}"
+    assert describe({"turn": 1, "reason": "completed"}) == "turn=1, reason=completed"
 
 
 def test_both_invariant_transitions_read_as_themselves() -> None:

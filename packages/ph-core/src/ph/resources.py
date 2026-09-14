@@ -36,6 +36,7 @@ from typing import Any
 
 import anyio
 
+from .cordis import GRACE_SECONDS as _GRACE_SECONDS
 from .cordis import Context, Disposer
 
 __all__ = [
@@ -46,8 +47,13 @@ __all__ = [
 
 log = logging.getLogger("ph.resources")
 
-GRACE_SECONDS = 10.0
-"""How long an orderly shutdown may take before pH stops waiting on itself."""
+GRACE_SECONDS = _GRACE_SECONDS
+"""How long an orderly shutdown may take before pH stops waiting on itself.
+
+Re-exported from `ph.cordis`, which now owns the number because `Context.dispose`
+applies it itself. The name stays here because three shutdown paths import it
+from this module, and because "how long shutdown may take" is a statement about
+this module's subject even when the enforcement moved down a layer."""
 
 
 async def temporary_directory(ctx: Context, *, prefix: str = "ph-") -> Path:
@@ -100,8 +106,14 @@ def install_lifecycle(
 
     async def unwind(signum: int) -> None:
         try:
-            with anyio.move_on_after(grace_seconds, shield=True):
-                await ctx.dispose()
+            # **The budget is handed to `dispose`, not wrapped around it.** This
+            # was a shielded `move_on_after` here, and once `Context.dispose`
+            # grew its own shield that scope became *inert* — a shielded child
+            # is by definition immune to a parent's cancellation, so the outer
+            # deadline could never land. Two constants for one tunable is how an
+            # inner budget silently becomes dead code (`daemon/server.py` names
+            # the hazard); here it was the outer one that died.
+            await ctx.dispose(deadline=anyio.current_time() + grace_seconds)
         except Exception:
             log.exception("ph.resources: orderly disposal failed")
         finally:
@@ -163,5 +175,10 @@ def _leave(signum: int) -> None:
 
 
 async def _dispose_within(ctx: Context, grace_seconds: float) -> None:
-    with anyio.move_on_after(grace_seconds):
-        await ctx.dispose()
+    """`anyio.run`'s entry point for the no-loop path.
+
+    A function rather than `partial`, because `dispose`'s budget is an *instant*
+    and `anyio.current_time()` is only meaningful once the loop this call starts
+    is running.
+    """
+    await ctx.dispose(deadline=anyio.current_time() + grace_seconds)

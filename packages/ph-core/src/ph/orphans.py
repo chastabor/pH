@@ -1,4 +1,4 @@
-"""The orphan journal (F5): strays from a run nothing cleaned up.
+"""The orphan journal (F5): child processes from a run nothing cleaned up.
 
 Every other cleanup path in pH is structural — an effect disposer, a scope
 unwinding, `await proc.wait()` in a `finally`. None of them runs under `SIGKILL`,
@@ -16,7 +16,14 @@ stray is killed only when the token still matches. Where the token cannot be
 read at all, the record is reported and **not** killed: an honest "there may be
 a stray" beats a confident kill of something else.
 
-@module ph_rlm.kernel.journal
+**Here rather than in `ph_rlm.kernel`, where it was built.** The reasoning above
+is about POSIX and `SIGKILL`, not about the RLM guest — it was simply the first
+child pH hard-killed and then noticed. `ph.seams.subprocess` spawns every other
+one (git, jj, agentfs, the sandbox backend, `bash`, `!`), all with the same
+disposer-based cleanup and the same hole under it, and a second journal for them
+would be a second set of rules about when it is safe to kill a pid.
+
+@module ph.orphans
 """
 
 from __future__ import annotations
@@ -31,14 +38,42 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ph.json import dumps
-from ph.persistence import read_records
+from .json import dumps
+from .paths import RuntimeDirError, resolve_roots
+from .persistence import read_records
 
-__all__ = ["JOURNAL_NAME", "OrphanJournal", "SweepReport", "argv_digest", "process_start_token"]
+__all__ = [
+    "JOURNAL_NAME",
+    "OrphanJournal",
+    "SweepReport",
+    "argv_digest",
+    "host_journal",
+    "process_start_token",
+]
 
-log = logging.getLogger("ph_rlm.kernel.journal")
+log = logging.getLogger("ph.orphans")
 
 JOURNAL_NAME = "processes.jsonl"
+
+
+def host_journal() -> OrphanJournal | None:
+    """This host's journal, or `None` where there is nowhere to put it.
+
+    One constructor, because two callers resolved the same two lines themselves
+    and a third would have. `$PH_RUNTIME` is the tier and `ph.paths` says why: it
+    is wiped on reboot, and a journal of pids that outlived a reboot would be
+    actively dangerous once those pids are reused.
+
+    `None` rather than raising: a read-only `$PH_RUNTIME` is a deployment fact,
+    and refusing to spawn `git` over a diagnostic would trade a working harness
+    for a tidier one. The hole is open again in that deployment, which the
+    `subprocess` diagnostic says out loud.
+    """
+    try:
+        return OrphanJournal(path=resolve_roots().runtime / JOURNAL_NAME)
+    except RuntimeDirError:
+        log.warning("ph.orphans: no $PH_RUNTIME; spawns will not be journalled")
+        return None
 
 
 def argv_digest(argv: Sequence[str]) -> str:
@@ -74,6 +109,8 @@ class SweepReport:
     """Recorded, gone, and reaped from the journal."""
     unverifiable: tuple[int, ...] = ()
     """Still alive but not provably ours. Reported, never killed."""
+    held: tuple[int, ...] = ()
+    """Alive, and owned by a pH process that is also alive. Left to its owner."""
 
 
 @dataclass(slots=True)
@@ -81,20 +118,42 @@ class OrphanJournal:
     """An append-only record of live runtime children, outside any session."""
 
     path: Path
+    _owner: tuple[int, str | None] | None = None
+    """This process's `(pid, start token)`, read once. Both are constants for the
+    life of the process, and `process_start_token` is a `/proc` read and parse —
+    56% of a record's cost when it was done per spawn."""
 
-    def record(self, *, pid: int, argv: Sequence[str], namespace: str | None) -> None:
+    def _owned_by(self) -> tuple[int, str | None]:
+        if self._owner is None:
+            pid = os.getpid()
+            self._owner = (pid, process_start_token(pid))
+        return self._owner
+
+    def record(self, *, pid: int, argv: Sequence[str], label: str | None = None) -> None:
         """Note a spawn durably before the child can do anything.
 
         `fsync`ed because the failure this guards against is the host dying, and
         a buffered record would die with it.
+
+        **The owner is recorded beside the child**, which is what makes this
+        journal safe to share. One file per user per boot means a daemon's live
+        children and a dead run's strays sit in it together, and a sweep that
+        told them apart only by "is the pid alive" would kill the daemon's — the
+        exact failure the start token exists to prevent, one level up. A record
+        whose owner is still running belongs to a process that will clean it up
+        itself, so `sweep` leaves it alone; the owner gets a token too, because
+        an owner pid is reusable in exactly the way a child pid is.
         """
+        owner, owner_token = self._owned_by()
         self._append(
             {
                 "op": "spawn",
                 "pid": pid,
                 "startToken": process_start_token(pid),
                 "argv": argv_digest(argv),
-                "namespace": namespace,
+                "label": label,
+                "owner": owner,
+                "ownerToken": owner_token,
             }
         )
 
@@ -108,11 +167,20 @@ class OrphanJournal:
         killed: list[int] = []
         stale: list[int] = []
         unverifiable: list[int] = []
+        held: list[int] = []
         for pid, record in sorted(live.items()):
-            token = process_start_token(pid)
+            if _owner_alive(record):
+                # Somebody else's live children. They are not strays, and this
+                # process has no business killing them — see `record`.
+                held.append(pid)
+                continue
             if not _alive(pid):
                 stale.append(pid)
                 continue
+            # Read after the liveness check, not before: a dead pid's token is a
+            # `/proc` read whose answer is discarded, and most records in a
+            # long-lived journal are dead by the time anyone sweeps.
+            token = process_start_token(pid)
             recorded = record.get("startToken")
             if recorded is not None and token is not None and recorded != token:
                 # The pid came back as something else. Leaving it alone is the
@@ -126,27 +194,44 @@ class OrphanJournal:
                 killed.append(pid)
             else:
                 stale.append(pid)
-        self._rewrite([live[pid] for pid in unverifiable])
+        # A held record stays: its owner is still responsible for it, and
+        # compacting it away would hide the child from the sweep that runs after
+        # that owner finally dies.
+        keep = [live[pid] for pid in sorted(unverifiable + held)]
+        # Nothing read, nothing owed: every `ph` invocation otherwise wrote a
+        # temp file and renamed it over a journal that was absent or unchanged.
+        if live or self.path.exists():
+            self._rewrite(keep)
         if killed or unverifiable:
             log.info(
-                "ph_rlm.kernel: swept %d stray runtime child(ren); %d unverifiable",
+                "ph.orphans: swept %d stray runtime child(ren); %d unverifiable",
                 len(killed),
                 len(unverifiable),
             )
-        return SweepReport(tuple(killed), tuple(stale), tuple(unverifiable))
+        return SweepReport(tuple(killed), tuple(stale), tuple(unverifiable), tuple(held))
 
     # ------------------------------------------------------------ internals --
 
     def _append(self, record: dict[str, Any]) -> None:
+        """One line, written and closed — deliberately **not** `fsync`ed.
+
+        It was, on the reasoning that "the failure this guards against is the
+        host dying". That reasoning does not survive where the file lives: this
+        journal is in `$PH_RUNTIME` precisely because that is wiped on reboot,
+        so an unclean host crash destroys the very records an `fsync` would have
+        saved. What it has to survive is a `SIGKILL` of *pH*, and a closed write
+        is already in the page cache, which outlives the process.
+
+        Measured, because the cost was not small: 1023 µs per record against
+        22.6 µs on a disk-backed `$PH_RUNTIME`, paid on every `git`, `jj`,
+        `bash` and `!` this seam spawns.
+        """
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        line = dumps(record) + "\n"
         try:
             with self.path.open("a", encoding="utf-8") as handle:
-                handle.write(line)
-                handle.flush()
-                os.fsync(handle.fileno())
+                handle.write(dumps(record) + "\n")
         except OSError:
-            log.warning("ph_rlm.kernel: could not journal %r", record, exc_info=True)
+            log.warning("ph.orphans: could not journal %r", record, exc_info=True)
 
     def _records(self) -> Iterator[dict[str, Any]]:
         """This journal's lines, tolerating the tail a hard kill leaves.
@@ -183,7 +268,25 @@ class OrphanJournal:
             temporary.write_text(body, encoding="utf-8")
             temporary.replace(self.path)
         except OSError:
-            log.warning("ph_rlm.kernel: could not compact the orphan journal", exc_info=True)
+            log.warning("ph.orphans: could not compact the orphan journal", exc_info=True)
+
+
+def _owner_alive(record: dict[str, Any]) -> bool:
+    """Whether the pH process that spawned this child is still running.
+
+    A record with no owner is from a build that did not write one; treating it
+    as ownerless is the safe reading, because the alternative — assuming some
+    live process owns it — would never sweep anything.
+    """
+    owner = record.get("owner")
+    if not isinstance(owner, int) or not _alive(owner):
+        return False
+    recorded = record.get("ownerToken")
+    token = process_start_token(owner)
+    # An owner pid that came back as something else is not the owner; one neither
+    # side can identify is given the benefit of the doubt, which is the same
+    # restraint the child's own token gets.
+    return recorded is None or token is None or recorded == token
 
 
 def _alive(pid: int) -> bool:

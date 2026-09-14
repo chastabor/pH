@@ -31,6 +31,7 @@ from typing import Any
 from pydantic import ValidationError
 
 from ph.json import JsonObject, JsonValue, as_obj, as_seq, as_str
+from ph.text import brief_value
 from ph.tools import ToolCallView, ToolResultView
 from ph.tools.presentation import CARD_VIEWS
 
@@ -150,7 +151,9 @@ def describe(data: object) -> str:
     iterate its top level was a second full copy of the same tree.
     """
     payload = as_obj(data)
-    return one_line(", ".join(f"{key}={value}" for key, value in payload.items() if value != ""))
+    return one_line(
+        ", ".join(f"{key}={brief_value(value)}" for key, value in payload.items() if value != "")
+    )
 
 
 def source_of(message: object) -> tuple[str, str, str]:

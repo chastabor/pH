@@ -1513,6 +1513,7 @@ UNBOUND: dict[str, str] = {
     # for the same reason.
     "Job.release": "teardown; runs as its scope unwinds",
     "SubagentRun.dispose": "teardown; runs as its scope unwinds",
+    "SubprocessHandle.dispose": "teardown; runs as its scope unwinds, or when `run` is done",
     "Workspace.release": "teardown; runs as its scope unwinds",
     "_Effect.dispose": "teardown; runs as its scope unwinds",
     "_Held.dispose": "teardown; runs as its scope unwinds",

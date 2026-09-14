@@ -55,6 +55,7 @@ from ph.cancel import CancelToken, is_cancelled
 from ph.cordis import Context, Disposer, plugin
 from ph.json import as_str, thaw_json
 from ph.keys import CODE_RUNTIME
+from ph.orphans import OrphanJournal, host_journal
 from ph.paths import resolve_roots
 from ph.seams.code_runtime import (
     CodeBinding,
@@ -72,7 +73,6 @@ from ph.wire import WireModel
 
 from ..keys import PYTHON_RUNTIME
 from .codec import decode, encode
-from .journal import JOURNAL_NAME, OrphanJournal
 from .protocol import (
     FD_ENV,
     PROTOCOL_VERSION,
@@ -233,7 +233,7 @@ class Kernel:
     namespace: str
     environment: RuntimeEnvironment
     limits: KernelLimits
-    journal: OrphanJournal
+    journal: OrphanJournal | None
     cwd: Path | None = None
     """The child's working directory — `workspace.root` for this agent (D21).
 
@@ -373,11 +373,11 @@ class Kernel:
         self._sock = host_end
         self._alive = True
         pid = self._process.pid
-        if pid is not None:
+        if pid is not None and self.journal is not None:
             # What is actually running, wrapper included: the journal verifies an
             # orphan is ours before killing it, and the pid it holds is the
             # wrapper's.
-            self.journal.record(pid=pid, argv=spawn, namespace=self.namespace)
+            self.journal.record(pid=pid, argv=spawn, label=self.namespace)
 
         await self._send(
             self.limits.to_boot(
@@ -952,7 +952,7 @@ class Kernel:
             # zombie; this is the `finally` that prevents one (F4).
             with suppress(Exception):
                 await process.wait()
-            if process.pid is not None:
+            if process.pid is not None and self.journal is not None:
                 self.journal.forget(process.pid)
         if self._sock is not None:
             # `notify_closing` before the close, because `_pump`'s read has no
@@ -984,7 +984,7 @@ class PythonCodeRuntime:
     turns the frames this provider surfaces into `kernel/snapshot` events."""
 
     limits: KernelLimits
-    journal: OrphanJournal
+    journal: OrphanJournal | None
     cache: Path
     interpreter_mode: InterpreterMode = "managed"
     interpreter_override: str | None = None
@@ -1280,23 +1280,25 @@ class Config(KernelLimits):
     the namespace."""
     skills: tuple[str, ...] = ()
     sweep_orphans: bool = True
+    """Vestigial: `subprocess-local` owns the one sweep now. Kept so a profile
+    that sets it still loads; see `apply`."""
 
 
 @plugin("code-runtime-python", config=Config, inject=[CODE_RUNTIME])
 async def apply(ctx: Context, config: Config) -> None:
-    """Register the runtime, and sweep strays from a run that was hard-killed."""
+    """Register the runtime. The journal is shared; `subprocess-local` sweeps it.
+
+    **This row used to sweep too, and both rows swept the same file.** One
+    journal per user per boot meant an `rlm` profile parsed and rewrote it twice
+    at every start, the second pass a no-op over the first's output, each behind
+    its own thread hop. `subprocess-local` is in `base.yaml` and therefore always
+    mounted, so it owns the sweep; this row keeps its own handle because the
+    guest is spawned with `pass_fds`, which `SubprocessSpawnSpec` cannot express
+    — so the kernel journals through `ph.orphans` directly while sharing the
+    ledger and the sweep.
+    """
     roots = resolve_roots()
-    journal = OrphanJournal(path=roots.runtime / JOURNAL_NAME)
-    if config.sweep_orphans:
-        # At every start, because a session nobody reopens would never reconcile
-        # its own strays (F5).
-        report = await anyio.to_thread.run_sync(journal.sweep)
-        if report.killed or report.unverifiable:
-            log.info(
-                "ph_rlm.kernel: killed %s, could not verify %s",
-                list(report.killed),
-                list(report.unverifiable),
-            )
+    journal = host_journal()
 
     runtime = PythonCodeRuntime(
         # `Config` *is* a `KernelLimits`, so the limits need no copying.
