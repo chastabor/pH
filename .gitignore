@@ -13,6 +13,9 @@ w2/
 .mypy_cache/
 .ruff_cache/
 .coverage
+# Written by the guest's subprocess collectors and combined at the end of the
+# run; see `conftest.GUEST_COVERAGE_RC`.
+.coverage-guest*
 htmlcov/
 # Dropped at the repo root by pytest-textual-snapshot when a snapshot test
 # fails. The reference snapshots under `__snapshots__/` are the committed

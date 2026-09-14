@@ -1,0 +1,40 @@
+# Coverage for the guest, which runs in a subprocess and is therefore invisible
+# to the coverage the parent process is collecting.
+#
+# **Its own file, and its own data, on purpose.** The workspace gate is
+# `--cov=ph` against `fail_under = 93` in the root `pyproject.toml`, measuring
+# `ph-core` alone. Folding `ph_runtime` into that `source` would change the
+# denominator the ratchet was measured against — 683 statements at ~84 % beside
+# 16 821 at ~93 % lands the total just under the floor — so a package getting
+# *measured* for the first time would read as a package that had regressed.
+# Two questions, two numbers.
+#
+# `conftest.pytest_configure` points `COVERAGE_PROCESS_START` here whenever the
+# parent run has coverage on; `coverage`'s own `.pth` hook reads that variable
+# at interpreter startup and starts a collector inside every child. The variable
+# survives `ph.seams.subprocess.scrub_env` because that is a credential
+# denylist, not an allowlist, so nothing here needs a hole poked in the scrub.
+[run]
+source = ph_runtime
+branch = True
+
+# One data file per process, merged afterwards: every cell the suite runs is a
+# fresh `python -m ph_runtime`, and without this they would overwrite each
+# other and the report would describe whichever guest exited last.
+parallel = True
+
+# **Absolute, from the environment, because the guest's cwd is not the repo.**
+# A kernel spawns it in the session's workspace — a `tmp_path` that pytest
+# deletes — so a relative `data_file` writes the measurements into a directory
+# that is gone before anything can combine them. That is one of the two reasons
+# this collection silently produced nothing for so long; the other is that
+# nothing set `COVERAGE_PROCESS_START` at all.
+data_file = ${PH_GUEST_COVERAGE_DATA}
+
+[report]
+# No `fail_under` yet, deliberately. The honest baseline is 84.1 %, measured the
+# first time this file made it measurable, and a floor belongs here once it has
+# survived a few runs on more than one machine — the workspace gate's own
+# comment makes the argument about a number set from one measurement.
+show_missing = True
+skip_covered = False

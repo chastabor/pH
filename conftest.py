@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from _pytest.terminal import TerminalReporter
 
 from ph.bundles import BASE, HEADLESS
 from ph.cordis import Context, Profile, load_profile_documents
@@ -99,6 +100,91 @@ so check it before looking anywhere else.
 Any *other* callback is a new one, and the name above is the lead."""
 
 
+REPO = Path(__file__).resolve().parent
+"""The checkout root — this file sits in it."""
+
+GUEST_COVERAGE_RC = REPO / "packages" / "ph-runtime-guest" / ".coveragerc"
+GUEST_COVERAGE_DATA = REPO / ".coverage-guest"
+"""Where the guest's own coverage is configured, and where it lands.
+
+**`ph-runtime-guest` is the one package the parent process cannot see.** Every
+cell the suite runs is a fresh `python -m ph_runtime` subprocess, so a collector
+in the parent records none of it — which read as `runner.py` at 0 % while
+twenty-six kernel tests were driving cells through it, and as 26.1 % for the
+package against a true 84.1 %.
+
+That is worse than a missing number: it is a *wrong* one, pointing at the half
+of the harness that executes model-written code across a process boundary. Any
+decision about what to test there, made from the reported figure, would have
+been spent on modules that are already covered.
+
+The fix is two environment variables, and both have to be right. `coverage`
+ships a `.pth` that starts a collector at interpreter startup when
+`COVERAGE_PROCESS_START` names a config — nothing set it. And the config's
+`data_file` has to be absolute, because the guest's cwd is a `tmp_path`
+workspace that pytest deletes, so anything written relative to it is gone before
+`combine` could reach it.
+
+Both survive `ph.seams.subprocess.scrub_env`, which is a credential denylist
+rather than an allowlist, so the guest inherits them without the scrub needing
+an exception for either.
+"""
+
+
+def _guest_coverage_parts() -> list[Path]:
+    """The per-process data files, before they are combined."""
+    return sorted(REPO.glob(f"{GUEST_COVERAGE_DATA.name}.*"))
+
+
+def _arm_guest_coverage(config: pytest.Config) -> None:
+    """Arm the subprocess collector, if this run is measuring coverage at all.
+
+    Gated on the parent's own `--cov`, so an ordinary `pytest` run spawns no
+    collectors and litters no data files; the cost is paid only by the run that
+    asked for the number.
+    """
+    if not getattr(config.option, "cov_source", None):
+        return
+    # Stragglers from a run that died before combining would otherwise be folded
+    # into this one's total and report lines nothing here executed.
+    for stale in _guest_coverage_parts():
+        stale.unlink(missing_ok=True)
+    GUEST_COVERAGE_DATA.unlink(missing_ok=True)
+
+    # Only the data path here. `COVERAGE_PROCESS_START` is armed per test by
+    # `_guest_coverage` below, because it is inherited by *every* descendant and
+    # not merely by the guest — see that fixture for what that broke.
+    os.environ["PH_GUEST_COVERAGE_DATA"] = str(GUEST_COVERAGE_DATA)
+
+
+def pytest_terminal_summary(terminalreporter: TerminalReporter) -> None:
+    """Combine what the guests wrote and say the number out loud.
+
+    In the same run rather than behind a second command, because a number nobody
+    prints is a number nobody reads — which is how this package came to be
+    reported at a third of its real coverage without anyone noticing.
+    """
+    parts = _guest_coverage_parts()
+    if not parts:
+        return
+    try:
+        from coverage import Coverage
+
+        coverage = Coverage(data_file=str(GUEST_COVERAGE_DATA), config_file=str(GUEST_COVERAGE_RC))
+        coverage.combine(strict=False, keep=False)
+        coverage.load()
+        with open(os.devnull, "w", encoding="utf-8") as quiet:
+            percent = coverage.report(file=quiet)
+    except Exception as error:  # pragma: no cover — reporting must not fail a run
+        terminalreporter.write_line(f"ph-runtime-guest coverage unavailable: {error}")
+        return
+    terminalreporter.write_line(
+        f"ph-runtime-guest (subprocess) coverage: {percent:.1f}% "
+        f"from {len(parts)} guest processes — `coverage report "
+        f"--data-file={GUEST_COVERAGE_DATA.name}` for the detail"
+    )
+
+
 def pytest_configure(config: pytest.Config) -> None:
     """Make a stray event-loop callback name its own cause.
 
@@ -118,6 +204,8 @@ def pytest_configure(config: pytest.Config) -> None:
     Wrapping anyio's handler rather than `loop.set_exception_handler`, because
     the runner installs its own on every loop it makes and would overwrite ours.
 
+    Also arms the guest's subprocess coverage — see `GUEST_COVERAGE_RC`.
+
     **A heavier companion to this was tried and removed.** While issue 58's
     callback was unknown, a wrapper on `asyncio.BaseEventLoop.call_soon`
     recorded any `set_result` scheduled onto an already-resolved future,
@@ -128,6 +216,7 @@ def pytest_configure(config: pytest.Config) -> None:
     re-adding for the hunt and removing again after; leaving it armed is the
     part that was not worth it.
     """
+    _arm_guest_coverage(config)
     from anyio._backends._asyncio import TestRunner
 
     original = TestRunner._exception_handler
@@ -166,6 +255,36 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
         for item in items:
             if marker in item.keywords:
                 item.add_marker(skip)
+
+
+@pytest.fixture(autouse=True)
+def _guest_coverage(request: pytest.FixtureRequest) -> Iterator[None]:
+    """Arm the subprocess collector around the tests that actually spawn a guest.
+
+    **`COVERAGE_PROCESS_START` is inherited by every descendant, not by the one
+    we meant.** Setting it for the whole session put a collector inside each of
+    the suite's confined `bwrap` children too, and a confined child cannot write
+    to the host path the config names — so it exited with an `Exception ignored
+    in atexit callback` traceback on its output. Three `ph-core` sandbox tests
+    parse a confined command's printed number, and `int()` was handed a
+    traceback (`test_the_namespaces_are_real` and two beside it).
+
+    The instrument had become the thing under test, which is the failure mode
+    this whole exercise is about: a measurement that changes what it measures.
+
+    So it is armed only while a test under `packages/ph-rlm/tests` runs — the
+    suite that owns the kernel and is the only one that starts guests. Every
+    other subprocess the session spawns is left alone, which is both correct and
+    the cheaper half: there is nothing to collect in them.
+    """
+    if not os.environ.get("PH_GUEST_COVERAGE_DATA") or "ph-rlm" not in str(request.node.path):
+        yield
+        return
+    os.environ["COVERAGE_PROCESS_START"] = str(GUEST_COVERAGE_RC)
+    try:
+        yield
+    finally:
+        os.environ.pop("COVERAGE_PROCESS_START", None)
 
 
 @pytest.fixture(autouse=True)
