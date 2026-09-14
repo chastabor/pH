@@ -1,12 +1,38 @@
 # pH
 
-*A plugin-composed Python agent harness.*
+*phern* — a Python Harness, in earnest.
 
-There is no privileged core. The agent loop, the model adapter, the tool
-registry and the session log are all **rows in a YAML profile**, mounted by the
+An experiment in breaking a harness into small, replaceable components. It
+borrows deliberately and says where: the **Deepseek harness** (`dsh`) for the
+space/time split and the wire envelope, **LangChain Deep Agents** for the todo
+list as a cognitive anchor, **OpenMono's playbooks** for structured-reply repair
+and step ordering, and **prime-agent** for the RLM programming model. Each is
+credited in the source at the point it is used, not just here.
+
+**There is no privileged core.** The agent loop, the model adapter, the tool
+registry and the session log are all *rows in a YAML profile*, mounted by the
 same loader in file order — so any of them can be replaced without forking
-anything else. [`DESIGN.md`](DESIGN.md) is the specification;
-[`docs/`](docs/README.md) is how to extend it.
+anything else.
+
+**A session is an append-only log, and what the model sees is a projection of
+it.** Because the log is never rewritten, the prompt prefix stays byte-identical
+and a provider's cache keeps hitting across a turn. And because state is derived
+rather than held, a restart is a replay: an agent that crashed, was paused, or
+had its terminal closed rebuilds from its log and carries on from where it got
+to. Side effects *outside* the harness still have to be idempotent — a log can
+only promise what it recorded.
+
+**Results are checked rather than taken on trust.** Values that cross a boundary
+are declared pydantic shapes, validated before anything renders or records them.
+The same principle steers the loop instead of driving it: a `SKILL.md` that
+declares `steps:` seeds them as todo entries the model may complete but may not
+delete, and a listener on the turn boundary objects while any remain — steering
+the agent rather than reaching into loop state. A finished entry carries
+`worked`, the number of tools the harness *saw* run, because a receipt the
+claimant issues is not a receipt.
+
+[`DESIGN.md`](DESIGN.md) is the specification; [`docs/`](docs/README.md) is how
+to extend it.
 
 ## Install
 
