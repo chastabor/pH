@@ -201,6 +201,7 @@ async def test_a_read_agent_gets_an_ephemeral_workspace_it_may_still_write(
     (workspace.root / "notes.txt").write_text("scratch thinking\n", encoding="utf-8")
 
 
+@pytest.mark.needs_git
 async def test_a_directory_jj_does_not_manage_declines_and_the_seam_falls_back(
     mount: MountProfile, tmp_path: Path
 ) -> None:
@@ -1088,6 +1089,7 @@ async def test_the_calls_that_must_see_the_tree_still_do(
 # --------------------------------------------------- the seam's own materials --
 
 
+@pytest.mark.needs_jj
 async def test_a_provisioned_material_stays_out_of_what_an_agent_contributes(
     mount: MountProfile, tmp_path: Path
 ) -> None:

@@ -55,7 +55,11 @@ jobs:
       - name: Format
         run: uv run ruff format --check .
 
-      - name: Type-check ph-core
+      # Not one package: `[tool.mypy] files` in the root manifest names all seven
+      # plus every test tree — 438 source files — because `ph_rlm` and
+      # `ph_runtime` are where the subprocess protocol lives, and a gate that
+      # checked only `ph` would have let the guest half drift untyped.
+      - name: Type-check the workspace
         run: uv run mypy
 
       - name: Test

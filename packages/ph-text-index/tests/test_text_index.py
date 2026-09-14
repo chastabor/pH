@@ -1012,6 +1012,7 @@ async def test_jj_stops_an_unchanged_document_being_re_embedded(
     assert embedder.calls == after_first
 
 
+@pytest.mark.needs_jj
 async def test_a_document_the_index_never_held_is_not_vouched_for(
     mount: MountProfile, tmp_path: Path
 ) -> None:
