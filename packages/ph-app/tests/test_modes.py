@@ -125,6 +125,33 @@ def test_the_transcript_renderer_labels_every_block_kind() -> None:
     assert rendered[5] == "← file body"
 
 
+def test_a_transcript_names_media_rather_than_dropping_it() -> None:
+    """The rule `ph_app.tui.trajectory._text` states: an auditor wants to see that
+    an image was there. Every other renderer of blocks already follows it; this
+    mode dropped instead, so a transcript of a turn carrying a screenshot did not
+    say one existed. Nothing was lost from the log — only the reader was misled.
+    """
+    from ph.llm.types import create_user_message
+
+    messages = (
+        create_user_message(
+            content=[
+                {"type": "text", "text": "look at this"},
+                {
+                    "type": "media",
+                    "attachment": {
+                        "attachmentId": "sha256:abc",
+                        "mime": "image/png",
+                        "bytes": 12,
+                    },
+                },
+            ],
+            source={"kind": "user"},
+        ),
+    )
+    assert render_transcript(messages).splitlines() == ["you: look at this", "you: [media]"]
+
+
 async def test_an_rpc_round_trip_in_the_sdk_shape(profile: Profile) -> None:
     requests = [
         {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},

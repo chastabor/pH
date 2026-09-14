@@ -27,7 +27,7 @@ from __future__ import annotations
 import logging
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any, Literal, assert_never
 
 import anyio
 
@@ -43,6 +43,7 @@ from ph.llm.types import (
     FinishKind,
     FinishReason,
     GenerateOptions,
+    MediaBlock,
     Message,
     ReasoningBlock,
     ReasoningDelta,
@@ -54,7 +55,6 @@ from ph.llm.types import (
     ToolCallDelta,
     ToolResultBlock,
     UsageChunk,
-    attachment_of,
     text_of,
 )
 from ph.seams.diagnostics import Diagnostic, contribute
@@ -641,17 +641,25 @@ def _to_openai(
     parts: list[dict[str, Any]] = []
     carries_media = False
     for block in message.content:
-        attachment = attachment_of(block)
-        if attachment is not None:
-            carries_media = True
-            part = _media_part(
-                attachment,
-                media.get(attachment.attachment_id),
-                handles.get(attachment.attachment_id),
-            )
-            parts.append(part if part is not None else media_pointer(attachment))
-        elif isinstance(block, TextBlock):
-            parts.append({"type": "text", "text": block.text})
+        match block:
+            case TextBlock():
+                parts.append({"type": "text", "text": block.text})
+            case MediaBlock():
+                carries_media = True
+                attachment = block.attachment
+                part = _media_part(
+                    attachment,
+                    media.get(attachment.attachment_id),
+                    handles.get(attachment.attachment_id),
+                )
+                parts.append(part if part is not None else media_pointer(attachment))
+            case ToolCallBlock() | ToolResultBlock() | ReasoningBlock():
+                # Cannot reach here: an assistant message returned above with its
+                # calls, a tool result returned above as its own wire role, and a
+                # reasoning block is never sent back.
+                pass
+            case _ as unhandled:
+                assert_never(unhandled)
     if carries_media:
         # Keyed on the message *having* media, not on the rendered parts still
         # looking like media. A degraded attachment renders as a text part, so

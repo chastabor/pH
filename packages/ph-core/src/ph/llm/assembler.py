@@ -17,7 +17,7 @@ Ported from dsh `packages/llm/llm/src/assembler.ts`.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Never, NoReturn
 
 from .types import (
     BlockEnd,
@@ -52,6 +52,19 @@ class _Partial:
     """Set by `block-end` — authoritative, and freezes the partial."""
 
 
+def _refuse(chunk: Never) -> NoReturn:
+    """Both halves of "this cannot happen", in one call.
+
+    The `Never` parameter is `assert_never`'s own signature, so adding a
+    `StreamChunk` variant without an arm fails the type check. The raise is a
+    `TypeError` rather than `assert_never`'s `AssertionError` because the runtime
+    case is not an unreachable branch — a chunk arrives from an adapter, an
+    adapter is a plugin, and "you passed the wrong type" is what happened.
+    `test_unknown_chunk_types_are_refused` pins that.
+    """
+    raise TypeError(f"BlockAssembler.push: unknown chunk {chunk!r}")
+
+
 @dataclass(slots=True)
 class BlockAssembler:
     """Incrementally assembles raw chunks into blocks and a final message."""
@@ -64,42 +77,43 @@ class BlockAssembler:
 
     def push(self, chunk: StreamChunk) -> None:
         """Feed one chunk, in stream order."""
-        if isinstance(chunk, BlockStart):
-            if chunk.index not in self._partials:
-                self._order.append(chunk.index)
-                self._partials[chunk.index] = _Partial(block_type=chunk.block_type)
-            return
-        if isinstance(chunk, (TextDelta, ReasoningDelta)):
-            kind = "text" if isinstance(chunk, TextDelta) else "reasoning"
-            partial = self._ensure(chunk.index, kind)
-            if partial.block is not None:
-                return  # closed by block-end; ignore stragglers
-            partial.text += chunk.text
-            return
-        if isinstance(chunk, ToolCallDelta):
-            partial = self._ensure(chunk.index, "tool-call")
-            if partial.block is not None:
-                return
-            partial.tool_call_id = chunk.id
-            if chunk.name:
-                partial.tool_call_name = chunk.name
-            partial.tool_call_arguments += chunk.arguments_delta
-            return
-        if isinstance(chunk, BlockEnd):
-            partial = self._ensure(chunk.index, getattr(chunk.block, "type", "text"))
-            # First close wins: ignoring re-close stragglers keeps streamed
-            # output and the final assembled block in agreement.
-            if partial.block is None:
-                partial.block = chunk.block
-            return
-        if isinstance(chunk, UsageChunk):
-            self._usage = chunk.usage
-            return
-        if isinstance(chunk, Finish):
-            self._finish = chunk.reason
-            self._replay_state = chunk.replay_state
-            return
-        raise TypeError(f"BlockAssembler.push: unknown chunk {chunk!r}")
+        # Arm order is load-bearing, not the declaration order of the union: a
+        # `match` pays ~30 ns on the arm that *hits* and a miss costs what an
+        # `isinstance` did, so the most frequent chunk belongs first. A stream is
+        # ~98% `TextDelta`, and behind `BlockStart` every token paid for the miss.
+        match chunk:
+            case TextDelta():
+                partial = self._ensure(chunk.index, "text")
+                if partial.block is None:  # closed by block-end; ignore stragglers
+                    partial.text += chunk.text
+            case ReasoningDelta():
+                partial = self._ensure(chunk.index, "reasoning")
+                if partial.block is None:
+                    partial.text += chunk.text
+            case ToolCallDelta():
+                partial = self._ensure(chunk.index, "tool-call")
+                if partial.block is None:
+                    partial.tool_call_id = chunk.id
+                    if chunk.name:
+                        partial.tool_call_name = chunk.name
+                    partial.tool_call_arguments += chunk.arguments_delta
+            case BlockStart():
+                if chunk.index not in self._partials:
+                    self._order.append(chunk.index)
+                    self._partials[chunk.index] = _Partial(block_type=chunk.block_type)
+            case BlockEnd():
+                partial = self._ensure(chunk.index, chunk.block.type)
+                # First close wins: ignoring re-close stragglers keeps streamed
+                # output and the final assembled block in agreement.
+                if partial.block is None:
+                    partial.block = chunk.block
+            case UsageChunk():
+                self._usage = chunk.usage
+            case Finish():
+                self._finish = chunk.reason
+                self._replay_state = chunk.replay_state
+            case _ as unhandled:
+                _refuse(unhandled)
 
     def _ensure(self, index: int, block_type: str) -> _Partial:
         partial = self._partials.get(index)

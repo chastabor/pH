@@ -13,10 +13,19 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Literal, assert_never
 
 from ph.cordis import Profile
-from ph.llm.types import Message, ReasoningBlock, TextBlock, ToolCallBlock, ToolResultBlock, text_of
+from ph.llm.types import (
+    MediaBlock,
+    Message,
+    ReasoningBlock,
+    TextBlock,
+    ToolCallBlock,
+    ToolResultBlock,
+    text_of,
+)
+from ph.text import block_marker
 
 from ..runtime import prompted
 
@@ -44,17 +53,24 @@ def render_transcript(messages: tuple[Message, ...]) -> str:
     lines: list[str] = []
     for message in messages:
         for block in message.content:
-            if isinstance(block, TextBlock):
-                speaker = "context" if message.source.kind == "plugin" else _SPEAKER[message.role]
-                lines.append(f"{speaker}: {block.text}")
-            elif isinstance(block, ReasoningBlock):
-                lines.append(f"pH (thinking): {block.text}")
-            elif isinstance(block, ToolCallBlock):
-                lines.append(f"pH → {block.name}({block.arguments})")
-            elif isinstance(block, ToolResultBlock):
-                body = text_of(block.content)
-                marker = "!" if block.is_error else "←"
-                lines.append(f"{marker} {body}")
+            match block:
+                case TextBlock():
+                    speaker = (
+                        "context" if message.source.kind == "plugin" else _SPEAKER[message.role]
+                    )
+                    lines.append(f"{speaker}: {block.text}")
+                case ReasoningBlock():
+                    lines.append(f"pH (thinking): {block.text}")
+                case ToolCallBlock():
+                    lines.append(f"pH → {block.name}({block.arguments})")
+                case ToolResultBlock():
+                    body = text_of(block.content, placeholder=block_marker)
+                    marker = "!" if block.is_error else "←"
+                    lines.append(f"{marker} {body}")
+                case MediaBlock():
+                    lines.append(f"{_SPEAKER[message.role]}: {block_marker(block.type)}")
+                case _ as unhandled:
+                    assert_never(unhandled)
     return "\n".join(lines)
 
 

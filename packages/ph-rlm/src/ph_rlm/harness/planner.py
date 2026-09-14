@@ -35,6 +35,7 @@ from ph.keys import LLM
 from ph.llm.structured import SchemaViolation, ask_for_shape
 from ph.llm.types import GenerateOptions, create_message, text_of
 from ph.session import Session
+from ph.text import block_marker
 from ph.wire import WireModel
 
 from .service import HarnessService
@@ -262,7 +263,7 @@ class RefinementPlanner:
         parts: list[str] = []
         used = 0
         for message in reversed(session.derive_messages()):
-            text = text_of(message.content, placeholder=lambda kind: f"[{kind}]")
+            text = text_of(message.content, placeholder=block_marker)
             parts.append(f"{message.role}: {text}")
             used += len(parts[-1]) + 2
             if used > budget:

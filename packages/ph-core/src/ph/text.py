@@ -11,7 +11,18 @@ a half, in the one place among four that had inlined the ternary by hand.
 
 from __future__ import annotations
 
-__all__ = ["count_of", "thousands", "truncation_marker"]
+__all__ = ["block_marker", "count_of", "thousands", "truncation_marker"]
+
+
+def block_marker(kind: str) -> str:
+    """`[media]`, `[tool-call]` — a content block a renderer skipped, named.
+
+    Every renderer that shows blocks to a person owes the same answer: name what
+    was not rendered rather than drop it, so a reader can see an image was there
+    (`ph_app.tui.trajectory._text` states the rule). Five callers spelled this
+    inline, and one of them already says something else.
+    """
+    return f"[{kind}]"
 
 
 def count_of(count: int, noun: str, plural: str = "") -> str:

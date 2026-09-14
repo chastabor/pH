@@ -62,7 +62,7 @@ import json
 import logging
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, cast
+from typing import Any, assert_never, cast
 
 from ph.agent.types import (
     AgentHandle,
@@ -79,7 +79,9 @@ from ph.keys import COMPACTION, LLM, SPILL_STORE, TOKEN_METER, TOOLS
 from ph.llm import BlockAssembler
 from ph.llm.types import (
     CONTEXT_WINDOW_EXCEEDED,
+    ContentBlock,
     GenerateOptions,
+    MediaBlock,
     Message,
     PluginSource,
     ReasoningBlock,
@@ -96,7 +98,7 @@ from ph.seams.spill import SpillClaim
 from ph.seams.token_meter import TokenBaseline
 from ph.session import EpochHeader, Session, SessionEvent, SurfaceIntent, derive_event_message
 from ph.session.events import SurfaceReplace
-from ph.text import count_of
+from ph.text import block_marker, count_of
 from ph.wire import WireModel
 
 from .offload import HISTORY_PREFIX, spill_tool_result
@@ -547,20 +549,25 @@ def truncated_assistant_payload(
 # ------------------------------------------------------------------ reading --
 
 
-def _block_text(block: object) -> str:
-    if isinstance(block, TextBlock):
-        return block.text
-    if isinstance(block, ToolCallBlock):
-        return f"[tool-call {block.name} {block.arguments}]"
-    if isinstance(block, ToolResultBlock):
-        body = text_of(block.content, placeholder=lambda kind: f"[{kind}]")
-        return f"[tool-result {block.tool_call_id}]\n{body}"
-    if isinstance(block, ReasoningBlock):
-        # The model's own scratch, not conversation. Several providers refuse to
-        # accept reasoning back at all, and summarizing it would let a discarded
-        # line of thought outlive the turn that discarded it.
-        return ""
-    return f"[{getattr(block, 'type', 'unknown')}]"
+def _block_text(block: ContentBlock) -> str:
+    """One block as the line the summarizing model reads."""
+    match block:
+        case TextBlock():
+            return block.text
+        case ToolCallBlock():
+            return f"[tool-call {block.name} {block.arguments}]"
+        case ToolResultBlock():
+            body = text_of(block.content, placeholder=block_marker)
+            return f"[tool-result {block.tool_call_id}]\n{body}"
+        case ReasoningBlock():
+            # The model's own scratch, not conversation. Several providers refuse to
+            # accept reasoning back at all, and summarizing it would let a discarded
+            # line of thought outlive the turn that discarded it.
+            return ""
+        case MediaBlock():
+            return block_marker(block.type)
+        case _ as unhandled:
+            assert_never(unhandled)
 
 
 def render_for_summary(messages: tuple[Message, ...], *, trimmed: bool) -> str:
@@ -982,7 +989,7 @@ class SummarizeEngine:
         block = next((one for one in message.content if isinstance(one, ToolResultBlock)), None)
         if block is None:
             return False
-        text = text_of(block.content, placeholder=lambda kind: f"[{kind}]")
+        text = text_of(block.content, placeholder=block_marker)
         call_id = block.tool_call_id
         # The offload row's own operation, not a second copy of it: where the file
         # goes, the `offload/spilled` accounting and the sentence the model reads to

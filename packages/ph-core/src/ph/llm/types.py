@@ -229,11 +229,17 @@ def text_of(
 
 
 def attachment_of(block: ContentBlock) -> AttachmentRef | None:
-    """The attachment a block carries, or `None` — the one "is this media" test.
+    """The attachment a block carries, or `None` — for readers that want only that.
 
-    Beside `text_of` for the same reason that exists: "is this media" is the
-    rule for reading a brand-new content type, and every consumer that spelled it
-    by hand would be copying whichever call site it happened to read.
+    Beside `text_of` for the same reason that exists: a walk that asks one
+    question about every block should not spell the answer by hand. Its callers
+    are the loops that collect or measure attachments and ignore the rest.
+
+    **Not for a dispatch that must stay exhaustive.** Returning `Optional` erases
+    the union, so a renderer using it narrows nothing and a variant it forgot
+    falls through silently — which is what hid the missing `media` arms. Those
+    match `MediaBlock` directly and close on `assert_never`;
+    `test_exhaustive_dispatch` enforces it.
     """
     return block.attachment if isinstance(block, MediaBlock) else None
 

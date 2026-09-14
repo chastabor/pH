@@ -31,7 +31,7 @@ import json
 import logging
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, assert_never
 
 from ph.cordis import Context, plugin
 from ph.json import as_int, as_str
@@ -47,6 +47,7 @@ from ph.llm.types import (
     FinishReason,
     GenerateOptions,
     LlmFailure,
+    MediaBlock,
     Message,
     ReasoningBlock,
     ReasoningDelta,
@@ -58,7 +59,6 @@ from ph.llm.types import (
     ToolCallDelta,
     ToolResultBlock,
     UsageChunk,
-    attachment_of,
 )
 from ph.seams.uploads import FileHandle
 from ph.session import now_ms
@@ -583,32 +583,36 @@ def _to_anthropic(
     """
     blocks: list[dict[str, Any]] = []
     for block in message.content:
-        attachment = attachment_of(block)
-        if attachment is not None:
-            blocks.append(_media_part(attachment, media, handles or {}))
-        elif isinstance(block, TextBlock):
-            blocks.append({"type": "text", "text": block.text})
-        elif isinstance(block, ReasoningBlock):
-            blocks.append({"type": "thinking", "thinking": block.text})
-        elif isinstance(block, ToolCallBlock):
-            try:
-                parsed = json.loads(block.arguments) if block.arguments else {}
-            except json.JSONDecodeError:
-                parsed = {}
-            blocks.append({"type": "tool_use", "id": block.id, "name": block.name, "input": parsed})
-        elif isinstance(block, ToolResultBlock):
-            blocks.append(
-                {
-                    "type": "tool_result",
-                    "tool_use_id": block.tool_call_id,
-                    "content": [
-                        {"type": "text", "text": inner.text}
-                        for inner in block.content
-                        if isinstance(inner, TextBlock)
-                    ],
-                    **({"is_error": True} if block.is_error else {}),
-                }
-            )
+        match block:
+            case TextBlock():
+                blocks.append({"type": "text", "text": block.text})
+            case ToolResultBlock():
+                blocks.append(
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": block.tool_call_id,
+                        "content": [
+                            {"type": "text", "text": inner.text}
+                            for inner in block.content
+                            if isinstance(inner, TextBlock)
+                        ],
+                        **({"is_error": True} if block.is_error else {}),
+                    }
+                )
+            case ToolCallBlock():
+                try:
+                    parsed = json.loads(block.arguments) if block.arguments else {}
+                except json.JSONDecodeError:
+                    parsed = {}
+                blocks.append(
+                    {"type": "tool_use", "id": block.id, "name": block.name, "input": parsed}
+                )
+            case ReasoningBlock():
+                blocks.append({"type": "thinking", "thinking": block.text})
+            case MediaBlock():
+                blocks.append(_media_part(block.attachment, media, handles or {}))
+            case _ as unhandled:
+                assert_never(unhandled)
     role = "assistant" if message.role == "assistant" else "user"
     return {"role": role, "content": blocks or [{"type": "text", "text": ""}]}
 

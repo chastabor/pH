@@ -34,6 +34,7 @@ from typing import Any, Literal, TypeAlias
 from ph.json import as_int, as_obj, as_str
 from ph.session import Session, SessionEvent, fork_boundaries, is_replacement_surface_event
 from ph.session.request_header import parse_request_header
+from ph.text import block_marker
 
 from ..wire import describe, message_of, one_line, result_block, source_of, text_of_wire
 
@@ -176,7 +177,7 @@ def _source_ref(message: Mapping[str, Any]) -> SourceRef:
 def _text(blocks: object) -> str:
     """The visible text of wire content, with other blocks named rather than
     dropped — an auditor wants to see that an image was there."""
-    return text_of_wire(blocks, placeholder=lambda kind: f"[{kind}]")
+    return text_of_wire(blocks, placeholder=block_marker)
 
 
 @dataclass(slots=True)

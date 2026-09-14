@@ -24,7 +24,7 @@ import logging
 from collections.abc import Callable, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
-from typing import Any, Literal, NoReturn
+from typing import Any, Literal, Never, NoReturn
 
 from ..cancel import Cancelled, is_cancelled
 from ..cordis import (
@@ -255,6 +255,19 @@ class Config(WireModel):
     """
 
     mode: PresentationMode = "native"
+
+
+def _refuse_decision(decision: Never, *, hook: str, expected: str) -> NoReturn:
+    """A `waterfall` hook resolved to something outside its decision union.
+
+    `Never` gives `assert_never`'s build-time check: a variant added without an
+    arm fails the type check. The raise is a `TypeError` rather than
+    `assert_never`'s `AssertionError` because at run time this is not an
+    unreachable branch — `waterfall` calls listeners a plugin registered, so the
+    value is wrong rather than impossible, which is the house convention
+    (`ph.cordis.context` raises the same for an effect that returns no disposer).
+    """
+    raise TypeError(f"{hook} must resolve to {expected}")
 
 
 @dataclass(slots=True)
@@ -873,6 +886,9 @@ class ToolRuntime:
                     ),
                     needs_post=False,
                 )
+            if not isinstance(gate, (Allow, Deny)):
+                # A fifth decision must not reach `gate.reason` below and silently deny.
+                _refuse_decision(gate, hook="tools/pre-execute", expected="an Allow or Deny")
             if isinstance(gate, Allow) and gate.has_arguments:
                 # The substitution lands here, in the one place that owns the
                 # execution — after every `tools/pre-execute` listener has seen
@@ -1013,7 +1029,7 @@ class ToolRuntime:
                 additional_contexts=decision.additional_contexts,
             )
         if not isinstance(decision, Accept):
-            raise TypeError("tools/post-execute must resolve to an Accept or Block")
+            _refuse_decision(decision, hook="tools/post-execute", expected="an Accept or Block")
         if decision.content is not None and decision.has_value:
             raise TypeError("tools/post-execute accept cannot replace both value and content")
         changes: dict[str, Any] = {

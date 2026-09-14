@@ -38,7 +38,7 @@ import logging
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any
+from typing import Any, assert_never
 
 import anyio
 
@@ -54,6 +54,7 @@ from ph.llm.types import (
     FinishKind,
     FinishReason,
     GenerateOptions,
+    MediaBlock,
     Message,
     ReasoningBlock,
     ReasoningDelta,
@@ -65,7 +66,6 @@ from ph.llm.types import (
     ToolCallDelta,
     ToolResultBlock,
     UsageChunk,
-    attachment_of,
     text_of,
 )
 from ph.seams.uploads import FileHandle
@@ -569,30 +569,34 @@ def _to_google(
     """
     parts: list[dict[str, Any]] = []
     for block in message.content:
-        attachment = attachment_of(block)
-        if attachment is not None:
-            parts.append(_media_part(attachment, media, handles))
-        elif isinstance(block, TextBlock):
-            parts.append({"text": block.text})
-        elif isinstance(block, ToolCallBlock):
-            try:
-                arguments = json.loads(block.arguments) if block.arguments else {}
-            except json.JSONDecodeError:
-                arguments = {}
-            parts.append({"functionCall": {"name": block.name, "args": arguments}})
-        elif isinstance(block, ToolResultBlock):
-            parts.append(
-                {
-                    "functionResponse": {
-                        "name": names.get(block.tool_call_id, block.tool_call_id),
-                        "response": {"output": text_of(block.content)},
+        match block:
+            case TextBlock():
+                parts.append({"text": block.text})
+            case ToolCallBlock():
+                try:
+                    arguments = json.loads(block.arguments) if block.arguments else {}
+                except json.JSONDecodeError:
+                    arguments = {}
+                parts.append({"functionCall": {"name": block.name, "args": arguments}})
+            case ToolResultBlock():
+                parts.append(
+                    {
+                        "functionResponse": {
+                            "name": names.get(block.tool_call_id, block.tool_call_id),
+                            "response": {"output": text_of(block.content)},
+                        }
                     }
-                }
-            )
-        # A `reasoning` block falls through deliberately — see the module
-        # docstring. There is no input shape for a thought here, and rendering one
-        # as text would make the transcript claim the model said what it was only
-        # considering.
+                )
+            case ReasoningBlock():
+                # Dropped deliberately — see the module docstring. There is no
+                # input shape for a thought here, and rendering one as text would
+                # make the transcript claim the model said what it was only
+                # considering.
+                pass
+            case MediaBlock():
+                parts.append(_media_part(block.attachment, media, handles))
+            case _ as unhandled:
+                assert_never(unhandled)
     if not parts:
         return None
     return {"role": "model" if message.role == "assistant" else "user", "parts": parts}
