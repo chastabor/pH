@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any, NoReturn
 import anyio
 
 from ..agent.types import AgentHandle, AgentOptions, AgentStatus
+from ..cancel import CancelToken
 from ..cordis import DEPLOYMENT, Boundary, Context, Next
 from ..json import dumps
 from ..keys import SESSION_PERSISTENCE, SKILLS, TOOLS
@@ -226,6 +227,7 @@ class StubAgent:
         self.id = agent_id
         self.options = FAKE_OPTIONS
         self.status = status
+        self.signal = CancelToken()
 
 
 if TYPE_CHECKING:

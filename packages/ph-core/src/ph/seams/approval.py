@@ -28,7 +28,7 @@ from typing import Any, Literal, TypeAlias
 from pydantic import Field
 
 from ..agent.types import AgentHandle
-from ..cancel import CancelToken, is_cancelled
+from ..cancel import Cancellation, is_cancelled
 from ..cordis import Context, Disposer, events, plugin
 from ..json import JsonValue, as_str
 from ..keys import APPROVAL
@@ -309,11 +309,20 @@ class ApprovalService:
         tool_name: str,
         call_id: str | None = None,
         reason: str | None = None,
-        cancel: CancelToken | None = None,
+        cancel: Cancellation | None = None,
         allowed_decisions: tuple[ApprovalDecisionName, ...] = (),
         arguments: JsonValue = None,
     ) -> ApprovalAnswer:
-        """Ask, record both halves, and return the outcome. Never raises."""
+        """Ask, record both halves, and return the outcome. Never raises.
+
+        **`cancel` narrows; it does not enable.** The floor is the agent's own
+        token, defaulted below, because "a question is not put to a person about
+        work they already stopped" is a property of asking rather than of any one
+        caller remembering to say so — and three callers did not. Pass it only to
+        supply something *narrower*: `ToolRuntime` passes `execution.signal`,
+        which a Code Mode cell narrows to a child that settles with the cell
+        while the agent keeps running.
+        """
         session = agent.session
         request = ApprovalRequest(
             tool_name=tool_name,
@@ -333,12 +342,12 @@ class ApprovalService:
         if session is not None:
             self._record_asked(session, request)
 
-        outcome = await self._route(request, cancel)
+        outcome = await self._route(request, cancel if cancel is not None else agent.signal)
         if session is not None:
             self._record_decided(session, request, outcome, automatic=False)
         return outcome
 
-    async def _route(self, request: ApprovalRequest, cancel: CancelToken | None) -> ApprovalAnswer:
+    async def _route(self, request: ApprovalRequest, cancel: Cancellation | None) -> ApprovalAnswer:
         if is_cancelled(cancel):
             return "cancelled"
 

@@ -15,6 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, Protocol, TypeAlias
 
+from ..cancel import Cancellation
 from ..llm.types import LlmCallConfig, LlmFailure, Message
 from ..wire import WireDataclass
 
@@ -43,12 +44,24 @@ AgentStatus: TypeAlias = Literal["idle", "running"]
 class AgentHandle(Protocol):
     """What a seam, a tool body or a waterfall payload may assume about an agent.
 
-    Five read-only facts, and deliberately no more: this is the surface the
+    Six read-only facts, and deliberately no more: this is the surface the
     seams actually read, and it is the surface `ph.testing.StubAgent` has, so a
     test can stand in an agent without standing up a loop. A Protocol rather than
     the driver class for two reasons that reinforce each other: two
     implementations exist (the loop and the stub), and the driver imports this
     module, so naming it here would be a cycle.
+
+    **`signal` is the sixth, and it is here because two seams already reached
+    for it.** `AgentDriver.cancel` is the verb; the token it trips is the fact,
+    and a row that *asks a human* has to know whether the work is still wanted
+    before it puts a question on someone's screen. `ph_stabilize.permissions_fs`
+    and the RLM harness both wrote `getattr(agent, "signal", None)` for it — no
+    agent had the attribute, so the default answered every call.
+
+    `Cancellation`, not `CancelToken`: a seam may ask whether the work is still
+    wanted and may not end it. Non-optional because every driver owns one —
+    `_Phase.token` is built at construction and is what `session/cancel` trips,
+    through the verb the TUI and RPC share.
 
     **`status` is a fact, not a verb**, which is why it is here and not on
     `AgentDriver` beside `cancel`. It was on the driver, so a seam holding a
@@ -72,6 +85,8 @@ class AgentHandle(Protocol):
     def options(self) -> AgentOptions: ...
     @property
     def status(self) -> AgentStatus: ...
+    @property
+    def signal(self) -> Cancellation: ...
 
 
 class AgentDriver(AgentHandle, Protocol):

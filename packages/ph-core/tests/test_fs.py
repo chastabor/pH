@@ -140,8 +140,12 @@ async def test_an_allowed_write_reaches_disk_and_announces_itself(tmp_path: Path
     changed: list[Path] = []
     root.on("fs/changed", lambda path: changed.append(path))
     written = await fs.write("notes/deep.txt", "hello", scope=DEPLOYMENT)
-    assert written.read_text() == "hello"
-    assert changed == [written]
+    assert written.path.read_text() == "hello"
+    assert changed == [written.path]
+    # What the seam reports rather than what the caller re-derives: `created` is
+    # the `creating` the intent was gated on, and `bytes` is the encode that
+    # actually happened.
+    assert (written.created, written.bytes) == (True, 5)
 
 
 async def test_reads_record_an_observation(tmp_path: Path) -> None:

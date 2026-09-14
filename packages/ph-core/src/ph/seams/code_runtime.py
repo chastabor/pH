@@ -215,7 +215,8 @@ class CodeRuntime(Protocol):
 
     `language`, `isolation` and `persistence` are read-only descriptors a
     consumer branches on; `declares_kernel_snapshots` is the promise the seam
-    checks.
+    checks — declared here rather than probed for, so a typed runtime that
+    forgets it is caught at `register`, not at the first persistent cell.
 
     **Properties, because "read-only descriptor" has to be said in the type
     too.** Declared as plain attributes they were *settable*, which a checker
@@ -232,6 +233,8 @@ class CodeRuntime(Protocol):
     def isolation(self) -> Isolation: ...
     @property
     def persistence(self) -> Persistence: ...
+    @property
+    def declares_kernel_snapshots(self) -> bool: ...
 
     async def run(self, request: CodeRunRequest) -> CodeRunResult: ...
 
@@ -257,6 +260,9 @@ class CodeRuntimeSeam:
         persistence = provider.persistence
         if (
             persistence == "namespace"
+            # Still a probe, and deliberately: the Protocol is structural, so an
+            # untyped provider reaches here without the attribute at all, and
+            # `False` is what the error below is written to say about it.
             and getattr(provider, "declares_kernel_snapshots", False) is not True
         ):
             raise PersistenceObligationError(

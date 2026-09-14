@@ -16,12 +16,17 @@ because the projection's layout is the service's own.
 
 from __future__ import annotations
 
-from typing import Any
+from collections.abc import Iterable
+from typing import TYPE_CHECKING
 
 from ph.cordis import Context, plugin
 from ph.seams.invariants import Invariant, contribute, contribute_fold_cache
 
 from ..keys import HARNESS
+
+if TYPE_CHECKING:
+    from ph.session import Session
+
 
 __all__ = ["apply", "stale_folds", "violations"]
 
@@ -32,7 +37,7 @@ def violations(ctx: Context) -> list[str]:
     return [] if harness is None else list(harness.stale_projections())
 
 
-def stale_folds(ctx: Context, sessions: Any) -> list[str]:  # noqa: ANN401
+def stale_folds(ctx: Context, sessions: Iterable[Session]) -> list[str]:
     """Every cached local state that no longer equals the fold behind it.
 
     The layer under `violations`: that one compares the *file* to the fold, this

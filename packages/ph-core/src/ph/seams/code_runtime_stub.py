@@ -33,6 +33,9 @@ class StubCodeRuntime:
     language: str = "python"
     isolation: Isolation = "in-process"
     persistence: Persistence = "none"
+    declares_kernel_snapshots: bool = False
+    """Honest for `persistence="none"`: with no namespace to keep, there is no
+    cross-call state a `kernel/snapshot` would have to make visible."""
     programs: dict[str, Callable[..., Any]] = field(default_factory=dict)
     logs: list[str] = field(default_factory=list)
 

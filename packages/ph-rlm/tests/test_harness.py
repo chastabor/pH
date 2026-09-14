@@ -322,6 +322,28 @@ async def test_deleting_an_entry_that_is_not_there_is_refused(harnessed: Harness
 # ------------------------------------------------------------------- H3 --
 
 
+async def test_h3_a_cancelled_turn_is_not_prompted_for_a_global_edit(
+    harnessed: Harnessed,
+) -> None:
+    """H3 asks a human, so a turn the human already stopped is not asked.
+
+    `ApprovalService.request` defaults its cancellation to the agent's own token,
+    so every prompt inherits the rule rather than each caller restating it.
+    """
+    ctx, session, agent = await harnessed()
+    asked = _allow(ctx)
+    agent.signal.cancel("the user stopped the turn")
+
+    with pytest.raises(RefinementRefused):
+        await ctx.require(HARNESS).apply(
+            RefinementProposal(summary="everyone", edits=[note_edit("shared")]),
+            scope="global",
+            session=session,
+            agent=agent,
+        )
+    assert asked == [], "a cancelled turn must not reach the answerer"
+
+
 async def test_h3_a_global_edit_prompts_and_a_local_one_does_not(harnessed: Harnessed) -> None:
     """A global entry is injected into every future session, including other
     projects, so the human is asked. A local one is this session's business."""

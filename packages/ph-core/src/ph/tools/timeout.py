@@ -32,9 +32,13 @@ async def apply(ctx: Context, config: None) -> None:
         next_: Next[ToolExecutionResult],
     ) -> ToolExecutionResult:
         definition = ctx.require(TOOLS).get(execution.name, scope=execution.scope)
-        budget = getattr(definition, "timeout_ms", None)
-        if budget is None:
+        # Two different `None`s, and the `getattr` this replaces answered for both
+        # with one: a tool this scope cannot see, and a tool that declared no
+        # budget. Unbounded is the right answer to each — but only the second is
+        # a decision, and the first is a dispatch that is about to fail anyway.
+        if definition is None or definition.timeout_ms is None:
             return await next_()
+        budget = definition.timeout_ms
         # The body observes the same cancellation the pipeline does, narrowed:
         # a child token can be cancelled by the timeout or by anything above it,
         # but cannot outlive its parent's cancellation.

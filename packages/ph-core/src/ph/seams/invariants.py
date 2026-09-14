@@ -41,9 +41,9 @@ into it is a separate row.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING
 
 from ..cordis import Context, Disposer, Running, plugin, running
 from ..keys import INVARIANTS, SESSIONS
@@ -51,6 +51,10 @@ from ._names import require_slug
 from ._registry import claim_key, contribute_item
 from .diagnostics import ORDER_SELF_ASSESSMENT, Diagnostic
 from .diagnostics import contribute as contribute_diagnostic
+
+if TYPE_CHECKING:
+    from ..session import Session
+
 
 __all__ = [
     "ID_MAX",
@@ -224,7 +228,7 @@ explains a drifting fold over it while the reverse is not true.
 
 
 def contribute_fold_cache(
-    ctx: Context, *, id: str, subject: str, stale: Callable[[Any], Sequence[str]]
+    ctx: Context, *, id: str, subject: str, stale: Callable[[Iterable[Session]], Sequence[str]]
 ) -> None:
     """Declare that one consumer's `SessionFoldCache` still equals its fold (I6).
 

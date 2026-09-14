@@ -73,6 +73,7 @@ __all__ = [
     "WalkDecision",
     "WalkScreen",
     "WriteIntent",
+    "Written",
     "apply",
     "matches_glob",
     "read_before_edit",
@@ -202,6 +203,15 @@ class ReadIntent:
     path: Path
     scope: Context
     agent: AgentHandle | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class Written:
+    """What one write did, for a caller that has to report it."""
+
+    path: Path
+    created: bool
+    bytes: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -592,8 +602,14 @@ class FsService:
         scope: Boundary,
         agent: AgentHandle | None = None,
         session: Session | None = None,
-    ) -> Path:
-        """Write a whole file, after `fs/write-intent` allows it."""
+    ) -> Written:
+        """Write a whole file, after `fs/write-intent` allows it.
+
+        Reports what it did, the way `edit` reports its replacement count: the
+        caller wanted `created` and a byte count, and was re-deriving both — a
+        second `exists()` syscall on the event loop for a fact `creating` already
+        holds, and a second encode of the content for a length.
+        """
         target = self.resolve(path, agent=agent)
         intent = WriteIntent(
             path=target,
@@ -603,10 +619,10 @@ class FsService:
             scope=boundary_of(scope, self.ctx),
         )
         await self._gate("fs/write-intent", intent)
-        await anyio.to_thread.run_sync(_write_text, target, content)
+        written = await anyio.to_thread.run_sync(_write_text, target, content)
         self._observe(target, session)
         self.ctx.emit("fs/changed", target, contained=True)
-        return target
+        return Written(path=target, created=intent.creating, bytes=written)
 
     async def edit(
         self,
@@ -957,9 +973,17 @@ def _greppable(path: Path) -> bool:
         return False
 
 
-def _write_text(target: Path, content: str) -> None:
+def _write_text(target: Path, content: str) -> int:
+    """Write the file and report its size in bytes.
+
+    Encoded here rather than by `write_text`, because the caller wants the byte
+    count and `write_text` returns *characters* — so the count was a second full
+    encode of the same string, 30 µs on a megabyte. One pass, on this thread.
+    """
+    data = content.encode("utf-8")
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(content, encoding="utf-8")
+    target.write_bytes(data)
+    return len(data)
 
 
 _IGNORED_PARTS: tuple[str, ...] = (

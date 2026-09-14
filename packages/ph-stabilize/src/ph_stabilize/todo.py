@@ -52,7 +52,7 @@ from ph.cordis import Context, Next, plugin
 from ph.json import as_int, as_seq, as_str, thaw_json
 from ph.keys import SYSTEM_PROMPT, TOOLS
 from ph.llm.types import ToolCallBlock
-from ph.session import Session, derive_event_message
+from ph.session import Session, SessionEvent, derive_event_message
 from ph.system_prompt.assembly import (
     ORDER_TOOL_GUIDANCE,
     AssembleContext,
@@ -540,7 +540,7 @@ def _requires(entry: Mapping[str, Any]) -> list[str]:
     return [as_str(name) for name in as_seq(entry.get("requires"))]
 
 
-def _recorded(previous: Any) -> list[Mapping[str, Any]]:  # noqa: ANN401
+def _recorded(previous: SessionEvent | None) -> list[Mapping[str, Any]]:
     """The entries the last `todo/write` holds, read **frozen**.
 
     The one read both rules take. `todos_of` would deep-copy the whole previous
@@ -602,7 +602,7 @@ def _carried(
 
 def _witnessed(
     session: Session,
-    previous: Any,  # noqa: ANN401
+    previous: SessionEvent | None,
     recorded: list[Mapping[str, Any]],
     todos: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:

@@ -39,6 +39,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from ..cancel import Cancellation, is_cancelled
 from ..cordis import Context, Disposer, events, plugin, settled_or_none
 from ..json import as_str
 from ..keys import USER_QUESTIONS
@@ -177,8 +178,19 @@ class UserQuestionService:
         """Whether some registered answerer says it can reach a person."""
         return any(probe() for probe in self._reachable)
 
-    async def ask(self, question: UserQuestion, *, session: Session | None = None) -> str | None:
+    async def ask(
+        self,
+        question: UserQuestion,
+        *,
+        session: Session | None = None,
+        cancel: Cancellation | None = None,
+    ) -> str | None:
         """Ask, and return the answer or `None` when nobody could answer.
+
+        `cancel` is the caller's cancellation, and a cancelled ask is not put to
+        anybody — the rule `ApprovalService.request` states for the other seam
+        that interrupts a person. Not recorded either: this seam already only
+        logs a question that was *delivered*, and an abandoned one never was.
 
         `session` is optional and its absence means "do not record", which is the
         right default for a caller that is not part of a conversation. When it is
@@ -189,7 +201,7 @@ class UserQuestionService:
         beside it, so there is one place a caller can put it and one place every
         route — the log record, the wire frame, a re-posed ask — reads it from.
         """
-        if not self.attended:
+        if is_cancelled(cancel) or not self.attended:
             return None
         # Minted only when the caller had no natural key of its own. `ask_user`
         # passes the tool call id, which is the string the rest of the log

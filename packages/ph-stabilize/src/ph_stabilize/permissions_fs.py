@@ -670,7 +670,7 @@ def _gate(
 async def _ask(
     ctx: Context,
     permissions: FsPermissions,
-    intent: Any,  # noqa: ANN401
+    intent: FsIntent,
     rule: Rule,
     operation: Operation,
 ) -> str | None:
@@ -696,7 +696,6 @@ async def _ask(
         agent=intent.agent,
         tool_name=f"fs.{operation}",
         reason=permissions.prompt(rule, operation, intent.path, intent.agent),
-        cancel=getattr(intent.agent, "signal", None),
         allowed_decisions=("approve", "reject"),
     )
     return None if outcome == "allowed-once" else denial_reason(outcome, subject)

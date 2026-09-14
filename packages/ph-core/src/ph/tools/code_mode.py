@@ -392,7 +392,7 @@ async def apply(ctx: Context, config: Config) -> None:
         runtime = ctx.require(CODE_RUNTIME).provider
         if runtime is None:
             return ""
-        language = getattr(runtime, "language", "python")
+        language = runtime.language
         renderer = ctx.require(CODE_RUNTIME).sdk_renderer(language)
         if renderer is None:
             raise RuntimeError(

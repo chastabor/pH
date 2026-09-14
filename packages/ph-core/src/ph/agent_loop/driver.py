@@ -215,6 +215,11 @@ class ReactLoopAgent:
         """
         self.send(message, "next-step" if self._phase.kind != "idle" else "next-turn", True)
 
+    @property
+    def signal(self) -> CancelToken:
+        """The live cancellation view — the same token `cancel` below trips."""
+        return self._phase.token
+
     def cancel(self, cause: AgentCancelCause, *, keep_inbox: bool = False) -> None:
         if not keep_inbox:
             self.inbox.clear()

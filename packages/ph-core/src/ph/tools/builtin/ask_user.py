@@ -96,6 +96,7 @@ async def apply(ctx: Context, config: None) -> None:
                 ask_id=run.call_id,
             ),
             session=run.session,
+            cancel=run.signal,
         )
         return {"answer": answer, "answered": answer is not None}
 

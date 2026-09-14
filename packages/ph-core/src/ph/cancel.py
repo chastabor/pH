@@ -21,8 +21,9 @@ a scope only acts on it.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Protocol
 
-__all__ = ["CancelToken", "Cancelled", "is_cancelled"]
+__all__ = ["CancelToken", "Cancellation", "Cancelled", "is_cancelled"]
 
 
 class Cancelled(Exception):
@@ -31,6 +32,24 @@ class Cancelled(Exception):
     def __init__(self, reason: str) -> None:
         super().__init__(reason)
         self.reason = reason
+
+
+class Cancellation(Protocol):
+    """What a *reader* needs of a cancellation: whether, and why.
+
+    `CancelToken` satisfies it. Declared because most holders only ask — and
+    `AgentDriver`'s docstring makes the argument about the verb it withholds:
+    "a seam that could reach `cancel` through a parameter typed for reading is a
+    seam that will, eventually." `cancel()` and `child()` belong to whoever owns
+    the lifetime; `AgentHandle.signal` hands out this instead, so a row that
+    prompts can ask whether the work is still wanted and cannot end it.
+    """
+
+    @property
+    def cancelled(self) -> bool: ...
+    @property
+    def cancel_reason(self) -> str | None: ...
+    def raise_if_cancelled(self) -> None: ...
 
 
 @dataclass(slots=True)
@@ -72,6 +91,6 @@ class CancelToken:
             raise Cancelled(reason)
 
 
-def is_cancelled(token: CancelToken | None) -> bool:
+def is_cancelled(token: Cancellation | None) -> bool:
     """`False` for no token — the one place that rule is spelled out."""
     return token is not None and token.cancelled

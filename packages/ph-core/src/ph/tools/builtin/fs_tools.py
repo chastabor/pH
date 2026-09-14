@@ -159,17 +159,19 @@ async def apply(ctx: Context, config: None) -> None:
         return window.model_dump()
 
     async def write(args: WriteArgs, run: ToolRunContext) -> dict[str, Any]:
-        target = fs.resolve(args.path, agent=run.agent)
-        existed = target.exists()
-        await fs.write(
-            args.path, args.content, agent=run.agent, scope=run.scope, session=run.session
+        written = await fs.write(
+            args.path,
+            args.content,
+            agent=run.agent,
+            scope=run.scope,
+            session=run.session,
         )
         return {
             # The name the workspace knows it by, never the machine's — see
             # `FsService.named`.
-            "path": fs.named(target, agent=run.agent),
-            "bytes": len(args.content.encode("utf-8")),
-            "created": not existed,
+            "path": fs.named(written.path, agent=run.agent),
+            "bytes": written.bytes,
+            "created": written.created,
         }
 
     async def edit(args: EditArgs, run: ToolRunContext) -> dict[str, Any]:

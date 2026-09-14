@@ -612,7 +612,11 @@ async def test_a_persistent_runtime_must_promise_to_snapshot() -> None:
         async def run(self, request: object) -> Any: ...  # noqa: ANN401
 
     with pytest.raises(PersistenceObligationError) as caught:
-        seam.register(Forgetful())
+        # The omission *is* the subject, so this no longer type-checks — which is
+        # the point: `CodeRuntime` declares `declares_kernel_snapshots`, and a
+        # typed runtime that forgets it is caught at `register`. The runtime
+        # refusal below is what still catches an untyped one.
+        seam.register(Forgetful())  # type: ignore[arg-type]
     # Checked at registration, not the first time someone forks and discovers
     # the state was never durable (D6/D17).
     assert "kernel/snapshot" in str(caught.value)
@@ -631,6 +635,7 @@ async def test_a_stateless_runtime_registers_freely() -> None:
         language = "python"
         isolation: ClassVar[Literal["process"]] = "process"
         persistence: ClassVar[Literal["none"]] = "none"
+        declares_kernel_snapshots = False
 
         async def run(self, request: object) -> Any: ...  # noqa: ANN401
 

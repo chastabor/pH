@@ -26,6 +26,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
@@ -81,7 +82,7 @@ class _Response:
         self._chunks = chunks
         self.status_code = 200
 
-    async def aiter_text(self) -> Any:  # noqa: ANN401
+    async def aiter_text(self) -> AsyncIterator[str]:
         for chunk in self._chunks:
             yield chunk
 
