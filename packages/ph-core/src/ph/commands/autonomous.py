@@ -41,7 +41,7 @@ from ..cordis import Context, plugin
 from ..keys import COMMANDS, GOALS, SHELL, WORKSPACE
 from ..llm.types import PluginSource, create_user_message
 from ..seams.commands import CommandContext, CommandDefinition
-from ..seams.goals import Goal, GoalService, GoalState
+from ..seams.goals import Budget, Goal, GoalService, GoalState
 from ..seams.workspace import workspace_of
 from ..session import Session, now_ms
 from ..wire import WireModel
@@ -105,8 +105,15 @@ async def run_gates(
 async def apply(ctx: Context, config: Config) -> None:
     """Register `/autonomous`, and the turn-stopping policy that drives it."""
 
-    def budget_of() -> dict[str, int]:
-        return config.model_dump()
+    def budget_of() -> Budget:
+        """The row's budgets, as the model a `Goal` actually carries.
+
+        `Config` and `Budget` declare the same four fields for different reasons
+        — one is what a deployment addresses by row id, the other what a goal
+        records — so this re-validates rather than maps. Returning the dump
+        instead would let the two drift with nothing to say so.
+        """
+        return Budget.model_validate(config.model_dump())
 
     async def keep_going(agent: AgentDriver, turn: int) -> None:
         """The driver: decide whether this turn is allowed to be the last one."""
@@ -175,7 +182,7 @@ async def apply(ctx: Context, config: Config) -> None:
                 id=f"goal-{secrets.token_hex(4)}",
                 objective=objective,
                 gates=[part.strip() for part in gate_text.split(";") if part.strip()],
-                budget=budget_of(),  # type: ignore[arg-type]
+                budget=budget_of(),
             ),
         )
         return _status(goals.states(session)[goal.id])

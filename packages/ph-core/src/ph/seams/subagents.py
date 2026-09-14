@@ -31,7 +31,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from typing import Any, Literal, Protocol, TypeAlias, cast, runtime_checkable
+from typing import Any, Literal, Protocol, TypeAlias, runtime_checkable
 
 from pydantic import Field
 
@@ -42,7 +42,7 @@ from ..keys import AGENTS, SESSIONS, SKILLS, SUBAGENT_PRESETS, SUBAGENTS, SYSTEM
 from ..session import Session, SessionEvent, SessionFoldCache
 from ..system_prompt.assembly import PromptSection
 from ..tools.registry import ToolRestriction
-from ..wire import WireForm, WireModel
+from ..wire import WireForm, WireModel, literal_lookup
 from ._registry import claim_entry, claim_key
 from .invariants import contribute_fold_cache
 from .skills import ORDER_SKILLS, SkillRestriction, SkillService
@@ -105,6 +105,17 @@ _ROSTER_TYPES = frozenset({ADMITTED, DELETED, STATUS, USAGE})
 
 Access: TypeAlias = Literal["read", "write"]
 """What a child asks of the parent's workspace. `read` is the default (E4)."""
+
+ACCESS_LEVELS: Mapping[str, Access] = literal_lookup(Access)
+"""Every `Access` by its own spelling — the read-side check for a value that
+arrived as a `str`. See `literal_lookup`.
+
+The value it guards comes off the **log**: `_readmit_one` rebuilds a child's
+request from `subagent/admitted`, and `admission_payload` records the narrowing
+precisely because "a restart re-derives the ceiling from this record and nothing
+else". A `cast` stood here, which asserts rather than checks — and what this one
+feeds is `_take_workspace`'s `access`, the difference between a child getting a
+writable checkout of the project and a read-only one."""
 
 SubagentStatus: TypeAlias = Literal["queued", "running", "done", "error", "cancelled"]
 
@@ -1022,7 +1033,7 @@ class SubagentService:
                 provider=_optional(row, "modelProvider"),
                 model=_optional(row, "model"),
                 reasoning_effort=_optional(row, "reasoningEffort"),
-                access=cast(Access, row.get("requestedAccess") or "read"),
+                access=ACCESS_LEVELS.get(as_str(row.get("requestedAccess")), "read"),
                 preset=_optional(row, "preset"),
                 # `None` inherits everything, which is what an absent key means —
                 # and what a log written before the narrowing was recorded says.

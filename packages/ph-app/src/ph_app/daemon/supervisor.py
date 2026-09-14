@@ -1230,12 +1230,14 @@ class Supervisor:
             root.wake.send_nowait(None)
         return root
 
-    async def shell(self, root_id: str, shell: ShellService, command: str) -> ShellReply:
+    async def shell(
+        self, root_id: str, shell: ShellService, command: str, *, surface: bool = False
+    ) -> ShellReply:
         """Run a person's own shell command in the session's workspace (P7-10).
 
         **In the root, not the client.** `ctx.shell` resolves the working
-        directory and the containment tier from the agent, so `!!` lands where
-        the session lives and is bounded the way the session is. A browser tab
+        directory and the containment tier from the agent, so the command lands
+        where the session lives and is bounded the way the session is. A browser tab
         has no shell, and "the session's shell" is the honest meaning of the
         verb in both front ends.
 
@@ -1245,7 +1247,7 @@ class Supervisor:
         key — see `shell_of`.
         """
         root = await self.start(root_id)
-        result = await run_shell(shell, root.session, root.agent, command)
+        result = await run_shell(shell, root.session, root.agent, command, surface=surface)
         return ShellReply(session_id=root.id, exit_code=result.exit_code)
 
     def describe(self) -> list[RootDescription]:

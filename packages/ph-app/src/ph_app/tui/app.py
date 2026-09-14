@@ -435,6 +435,13 @@ class PHTuiApp(App[str | None]):
             # in the session, so every attached UI renders it from the event.
             self.run_worker(self._shell(front, message.text[2:].strip()), group="shell")
             return
+        if message.text.startswith("!"):
+            # Tested after `!!` so the longer prefix wins — `!!ls` must not read
+            # as `!` of `!ls`. What `surface` then means is `ph_app.shell`'s.
+            self.run_worker(
+                self._shell(front, message.text[1:].strip(), surface=True), group="shell"
+            )
+            return
         if message.text.startswith("/"):
             # A command is the human's verb. Sending it as a prompt would spend
             # a turn and make the log say the model chose it.
@@ -447,18 +454,23 @@ class PHTuiApp(App[str | None]):
             return
         self._run_turn(message.text)
 
-    async def _shell(self, front: FrontSession, command: str) -> None:
-        """Run `!!<command>` and let the log do the rendering.
+    async def _shell(self, front: FrontSession, command: str, *, surface: bool = False) -> None:
+        """Run `!<command>` or `!!<command>` and let the log do the rendering.
 
         Nothing is drawn here: the command and its output arrive as `shell/*`
         events like everything else, which is what keeps `TuiState` entirely
-        event-derived and lets the browser and the terminal share one fold.
+        event-derived and lets the browser and the terminal share one fold. That
+        holds for `!` too — its splice is a further event, never a draw.
         """
         if not command:
-            self.notify("type `!!<command>` to run a shell command", title="shell", markup=False)
+            self.notify(
+                "type `!!<command>` to run one, or `!<command>` to show the model",
+                title="shell",
+                markup=False,
+            )
             return
         try:
-            await front.shell(command)
+            await front.shell(command, surface=surface)
         except Exception as error:
             log.exception("ph_app.tui: a shell command failed to start")
             self.notify(str(error), title="shell", severity="error", markup=False)

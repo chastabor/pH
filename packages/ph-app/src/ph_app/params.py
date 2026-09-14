@@ -149,6 +149,10 @@ class ShellParams(MutationParams):
     """`session/shell`: the person's own command, in the session's workspace."""
 
     command: str = ""
+    surface: bool = False
+    """Whether the model is told. `!` sets it, `!!` does not — the one difference
+    between the two, carried on the wire so a browser tab and the terminal mean
+    the same thing by each."""
 
 
 class PresetParams(MutationParams):

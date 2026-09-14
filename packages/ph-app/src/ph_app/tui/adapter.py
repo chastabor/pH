@@ -465,6 +465,12 @@ class TuiEventAdapter:
         draws, so `!!ls` looks like what it is in both front ends — and keyed by
         the event's own seq, because a person may run the same command twice and
         two cards is the truthful account of that.
+
+        **The title names which of the two ran.** A `!` puts its output in front
+        of the model and a `!!` never does, and that difference is invisible in
+        the command, the output and the exit code — the only three things the
+        card otherwise shows. A person who cannot tell them apart on screen
+        cannot tell whether the agent is about to read what they just ran.
         """
         command = as_str(event.data.get("command"))
         self._card_row(
@@ -472,7 +478,7 @@ class TuiEventAdapter:
                 call_id=f"shell-{event.seq}",
                 name="shell",
                 arguments="",
-                title="Shell",
+                title="Shell → agent" if as_bool(event.data.get("surface")) else "Shell",
                 subtitle=command,
                 card="terminal",
                 input_text=command,
@@ -952,9 +958,29 @@ class TuiEventAdapter:
         )
 
     def _on_agent_inbox_spliced(self, event: SessionEvent, frame: Frame) -> None:
+        """The footer's queue depth, and a row when pending input is thrown away.
+
+        **`outcome` is read here because nothing else reads it.** `InboxSplice`
+        writes `"canceled"` precisely to distinguish input that was *dropped*
+        from input that was *claimed* — both remove messages, and on replay the
+        key is the only thing that still knows which. Without it the footer's
+        count fell silently from 1 to 0 and a person's queued prompt, or the
+        output of a `!` they ran, was gone with nothing on screen having said so.
+
+        Esc is the common way in: `AgentDriver.cancel` clears the inbox unless
+        the caller asks it not to, so interrupting a turn discards everything
+        waiting behind it. That is the intended behaviour — the notice is not a
+        veto on it, it is the account of it.
+
+        The count and not the content, because the splice event carries neither:
+        it records coordinates, and the messages it removed are recoverable only
+        by an observer synchronous with the mutation (`Inbox._mutate` says so).
+        """
         inserted = len(as_seq(event.data.get("inserted")))
         removed = as_int(event.data.get("removedCount"))
         self.state.queued = max(0, self.state.queued + inserted - removed)
+        if removed and as_str(event.data.get("outcome")) == "canceled":
+            self._row("inbox", "notice", f"{count_of(removed, 'pending message')} cancelled", event)
 
 
 Handler = Callable[[TuiEventAdapter, SessionEvent, Frame], None]

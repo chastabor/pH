@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Mapping, Sequence
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field, replace
 from functools import partial
 from typing import Any, ClassVar, Literal
@@ -463,7 +464,7 @@ def _tools_namespace(
     tools: ToolRuntime,
     scope: Context,
     bridge: DispatchBridge | None,
-    presented: set[str] = frozenset(),  # type: ignore[assignment]
+    presented: AbstractSet[str] = frozenset(),
 ) -> CodeBindingNamespace:
     """The `tools` namespace: every visible tool, as a governed binding.
 
@@ -481,7 +482,9 @@ def _tools_namespace(
         # A tool another namespace already presents (`rlm.run` for `rlm_run`),
         # as declared by that namespace's own bindings. Still dispatchable and
         # still addressable by policy — just not offered twice, under two names,
-        # in one SDK block.
+        # in one SDK block. `AbstractSet` and not `Container` on the parameter
+        # because this is one membership test per visible tool: a `list` would
+        # satisfy `Container` and quietly make the loop O(n·m).
         if name in presented:
             continue
         definition = view.visible[name]

@@ -1,4 +1,5 @@
-"""`!!<command>` — a person's own shell, run where the session lives (P7-10).
+"""`!<command>` and `!!<command>` — a person's own shell, run where the session
+lives (P7-10).
 
 The counterpart to `attach.py`, and here for the same reason that one exists:
 **two front ends run this and there must be one author.** In process the TUI
@@ -12,9 +13,13 @@ child starts, so a command that hangs — or that takes the daemon down with it 
 still says in the log what was started, which is exactly the command worth
 knowing about. One event on completion would lose it.
 
-**Neither type is surface-eligible**, which is what keeps `!!` out of the model's
-context: see `SURFACE_EVENT_TYPES` in `ph.session.events`. It is not a filter
-anybody has to remember, and it is not expressible as one.
+**Both forms log in full; only `!` is spoken.** Neither event type is
+surface-eligible — see `SURFACE_EVENT_TYPES` in `ph.session.events` — so no
+`shell/*` event can reach the model by having been logged. That is what makes
+`!!` private by construction rather than by a filter anybody has to remember,
+and it is not expressible as one. `!` therefore cannot widen that whitelist to
+say its piece: it appends a *separate* user message, at its own budget
+(`SURFACE_OUTPUT`), which makes the one door visible on the log as a door.
 
 **The event carries facts, not a rendering.** `stdout`, `stderr` and `exitCode`
 stay apart on the log the way `BashValue` keeps them apart for the model, because
@@ -28,18 +33,19 @@ side.
 
 from __future__ import annotations
 
-from ph.agent.types import AgentHandle
+from ph.agent.types import AgentDriver
 from ph.cordis import Context
 from ph.json import JsonObject, as_int, as_str
 from ph.keys import SHELL
+from ph.llm.types import PluginSource, TextBlock, create_user_message
 from ph.seams.shell import ShellResult, ShellService
 from ph.session import Session
-from ph.text import truncation_marker
+from ph.text import NO_OUTPUT, truncation_marker
 from ph.tools.builtin.bash_tool import TIMED_OUT
 
 from .protocol import SeamAbsent
 
-__all__ = ["SHELL_OUTPUT", "run_shell", "shell_body", "shell_of"]
+__all__ = ["SHELL_OUTPUT", "SURFACE_OUTPUT", "run_shell", "shell_body", "shell_message", "shell_of"]
 
 SHELL_OUTPUT = 64 * 1024
 """How much of one stream the log keeps.
@@ -55,6 +61,18 @@ bounded; this decides how much of it a durable log should carry, which is a much
 smaller number and a different question. Both can apply to one command, and the
 event records them apart: `dropped` is what the seam threw away, `clipped` is
 what this kept back.
+"""
+
+
+SURFACE_OUTPUT = 4 * 1024
+"""How much of that a `!` puts in front of the model.
+
+Much smaller than `SHELL_OUTPUT`, because the two bounds protect different
+payers. The log's is a file written once; this one guards a **prompt prefix
+re-sent on every step until compaction**, so a single `!find /` at the log's cap
+would be ~32k tokens paid again each turn — for output the person ran to read
+themselves. The full text is on the log either way: `!` chooses what the model
+reads, never what is kept, and a person who wants the rest can scroll.
 """
 
 
@@ -88,6 +106,24 @@ def shell_body(data: JsonObject) -> str:
     return "\n".join(parts)
 
 
+def shell_message(command: str, data: JsonObject) -> str:
+    """What a `!` says to the model: the command, then what it printed.
+
+    Composed here, beside `shell_body` and from the same event, so the splice
+    cannot describe the command differently than the card does. The command line
+    is the half that is not recoverable from the streams — output alone, spliced
+    into a conversation, is text from nowhere.
+
+    Clipped against `SURFACE_OUTPUT` and *said so*, in `truncation_marker`'s one
+    sentence: a model reading a prefix has to be told it is a prefix or it will
+    reason from a file it thinks it has seen the end of.
+    """
+    body = shell_body(data) or NO_OUTPUT
+    if len(body) > SURFACE_OUTPUT:
+        body = body[:SURFACE_OUTPUT] + truncation_marker(len(body) - SURFACE_OUTPUT, SURFACE_OUTPUT)
+    return f"$ {command}\n{body}"
+
+
 def shell_of(ctx: Context) -> ShellService:
     """The shell seam, or the refusal for its absence.
 
@@ -103,9 +139,28 @@ def shell_of(ctx: Context) -> ShellService:
 
 
 async def run_shell(
-    shell: ShellService, session: Session, agent: AgentHandle, command: str
+    shell: ShellService,
+    session: Session,
+    agent: AgentDriver,
+    command: str,
+    *,
+    surface: bool = False,
 ) -> ShellResult:
     """Append, run, append. Returns what ran, for a caller that must reply.
+
+    **`surface` is the difference between `!` and `!!`.** Both run the person's
+    command in the session's workspace and log it in full; only `!` puts the
+    result into the conversation. It is spliced as a **user message**, which
+    `ph.session.events` prescribes — a `tool/result` with no `tool_use` block to
+    pair with is an orphan several providers reject — and delivered by `inject`,
+    so it waits for the agent's next step rather than starting a turn: a person
+    running a command is telling the model something, not asking it to act.
+
+    An `AgentDriver` rather than the handle, because the splice is composed from
+    the event *this function just appended* and so cannot disagree with it. The
+    caller holds the driver too, and could do it there — at the price of
+    re-deriving the rendering from `ShellResult`, which is the same second
+    derivation the `cwd` paragraph below refuses for the same reason.
 
     `cwd` comes back *from the seam* rather than being derived here: `run`
     resolves the working directory from the agent and honours a workspace
@@ -113,9 +168,19 @@ async def run_shell(
     to record. It is written on the result event, once the child has actually
     run somewhere.
     """
-    started = session.append("shell/command", {"command": command})
+    # `surface` on the *command* event, not the result: it is what the person
+    # asked for, it is known before the child starts, and a front end draws the
+    # card from this event. Without it `!make` and `!!make` render identically
+    # and nobody can see which one is about to put output in front of the model.
+    #
+    # Written on every command, `False` included, rather than only when true.
+    # `InboxSplice` argues the opposite for `removedCount` — but that argument is
+    # about not changing the shape of logs already written, and it does not reach
+    # here: one shape for every `shell/command` means no reader has to know that
+    # an absent key encodes the quiet half.
+    started = session.append("shell/command", {"command": command, "surface": surface})
     result = await shell.run(command, agent=agent)
-    session.append(
+    settled = session.append(
         "shell/result",
         {
             # The command this settles, so a fold can pair them and a front end
@@ -141,4 +206,16 @@ async def run_shell(
             "clipped": len(result.stdout) > SHELL_OUTPUT or len(result.stderr) > SHELL_OUTPUT,
         },
     )
+    if surface:
+        agent.inject(
+            create_user_message(
+                content=[TextBlock(text=shell_message(command, settled.data))],
+                # `relay`, never an untagged user message: the person typed
+                # `!make`, they did not type 4 KiB of compiler output.
+                # `tool-attach` states the rule, and `ph_app.tui.trajectory` and
+                # `transcript_mode` both route on `source` — untagged, a
+                # machine's stdout is replayed as the person's own words.
+                source=PluginSource(plugin="ph-app.shell", form="relay"),
+            )
+        )
     return result

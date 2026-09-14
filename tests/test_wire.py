@@ -38,9 +38,12 @@ rest are held to.
 
 from __future__ import annotations
 
+import functools
 import importlib
 import inspect
 import pkgutil
+from collections.abc import Mapping
+from types import ModuleType
 from typing import Any
 
 import pytest
@@ -64,6 +67,22 @@ def _workspace_packages() -> list[str]:
     return [package.name for package in workspace_packages()]
 
 
+@functools.cache
+def _modules_in(package: str) -> tuple[ModuleType, ...]:
+    """Every module a package contains, imported, the package itself included.
+
+    Shared because two gates in this file walk the same workspace for different
+    shapes, and `walk_packages` *imports*: a second walk is a second import of
+    every module in `ph` for no new information. Cached for the same reason at
+    the package level, since `_all_ph_models` and `_lookups` each ask for all of
+    them. Modules are immutable enough for a process's life that the cache is
+    the whole story.
+    """
+    root = importlib.import_module(package)
+    walked = pkgutil.walk_packages(root.__path__, prefix=f"{package}.")
+    return (root, *(importlib.import_module(info.name) for info in walked))
+
+
 def _models_in(package: str) -> dict[str, type[BaseModel]]:
     """Every pydantic model one package defines, by qualified name.
 
@@ -77,10 +96,8 @@ def _models_in(package: str) -> dict[str, type[BaseModel]]:
     """
     from ph.tools.definition import ToolModel
 
-    root = importlib.import_module(package)
     found: dict[str, type[BaseModel]] = {}
-    for info in pkgutil.walk_packages(root.__path__, prefix=f"{package}."):
-        module = importlib.import_module(info.name)
+    for module in _modules_in(package):
         for _, obj in inspect.getmembers(module, inspect.isclass):
             if (
                 issubclass(obj, BaseModel)
@@ -297,3 +314,56 @@ def test_wire_alias_is_the_single_alias_function() -> None:
     assert wire_alias("source_event_seqs") == "sourceEventSeqs"
     assert wire_alias("tool_call_id") == "toolCallId"
     assert wire_alias("max_log_bytes") == "maxLogBytes"
+
+
+# ------------------------------------------------ the read side of Q2 --
+
+
+def _lookups() -> dict[str, Mapping[str, str]]:
+    """Every `literal_lookup` result bound at module level, found by its shape.
+
+    Self-keyed and all-string *is* what `literal_lookup` builds, so the discovery
+    rule is the constructor's own postcondition rather than a list of the call
+    sites — the same reason `test_agent_vocabulary` reads its facts off the
+    Protocol instead of naming them.
+
+    `vars`, not `getmembers` with a `__module__` test the way `_models_in`
+    narrows: a mapping carries no defining module, so a lookup imported into a
+    second module is found under both names. Both are true names for it, and a
+    failure that points at two files beats one that guesses.
+    """
+    found: dict[str, Mapping[str, str]] = {}
+    for package in _workspace_packages():
+        for module in _modules_in(package):
+            for name, value in vars(module).items():
+                if not isinstance(value, Mapping) or not value:
+                    continue
+                if all(isinstance(k, str) and k == v for k, v in value.items()):
+                    found[f"{module.__name__}.{name}"] = value
+    return found
+
+
+def test_a_literal_lookup_refuses_a_string_that_is_not_a_member() -> None:
+    """The lookup *is* the check — which is the whole reason it replaced a `cast`.
+
+    `literal_lookup`'s docstring makes the argument: `raw in get_args(X)` does not
+    narrow, "which is why every such site carried a `cast` beside it asserting
+    what the test had just established". A `cast` asserts; `.get` answers. The
+    property worth pinning is therefore the refusal, and it had no test at all:
+    every such mapping was trusted to be one nobody had checked.
+
+    Sabotage: add `"ADMIN": "ADMIN"` to any lookup and this names it.
+
+    **What it does not reach**, because the discovery rule is the shape: a
+    mapping whose keys stop equalling its values is no longer recognised as a
+    lookup and drops out of the set silently rather than failing. That is the
+    honest limit of finding them by postcondition instead of by call site — the
+    alias binding is not recoverable from the mapping — and it is the reason this
+    asserts the *reader's* property rather than membership.
+    """
+    lookups = _lookups()
+    assert lookups, "no literal lookups found; the discovery rule has drifted"
+    for name, lookup in lookups.items():
+        for junk in ("", "  ", "ADMIN", next(iter(lookup)) + " ", "*"):
+            assert lookup.get(junk) is None, f"{name} admitted {junk!r}"
+            assert lookup.get(junk, "fallback") == "fallback", f"{name} shadowed the default"

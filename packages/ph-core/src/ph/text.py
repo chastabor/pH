@@ -11,7 +11,17 @@ a half, in the one place among four that had inlined the ternary by hand.
 
 from __future__ import annotations
 
-__all__ = ["block_marker", "count_of", "thousands", "truncation_marker"]
+__all__ = ["NO_OUTPUT", "block_marker", "count_of", "thousands", "truncation_marker"]
+
+NO_OUTPUT = "(no output)"
+"""What stands in for a command that printed nothing.
+
+Named for the same reason `truncation_marker` is: `!` and `tool-bash` render
+the same child process, and a reader comparing a transcript to a log must not
+find two sentences for one event (D4). The TUI's shell card is a third answer
+and deliberately a different one — an empty card body already reads as "it
+said nothing", and a card need not say in words what its own emptiness says.
+"""
 
 
 def block_marker(kind: str) -> str:

@@ -691,7 +691,7 @@ class _Connection:
         same event as everybody else.
         """
         shell, command = prepared
-        return await self.server.supervisor.shell(root.id, shell, command)
+        return await self.server.supervisor.shell(root.id, shell, command, surface=params.surface)
 
     async def _prepare_preset(self, root: Root, params: PresetParams) -> PermissionPresetService:
         presets = root.ctx.get(PERMISSION_PRESETS)

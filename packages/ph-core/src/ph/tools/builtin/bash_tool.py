@@ -20,7 +20,7 @@ from ...cordis import Context, plugin
 from ...json import JsonObject, as_str
 from ...keys import SHELL, TOOLS
 from ...llm.types import ContentBlock
-from ...text import truncation_marker
+from ...text import NO_OUTPUT, truncation_marker
 from ..definition import ToolModel, ToolOutput, ToolRunContext, define_tool, text_content
 from ..presentation import ToolCallView, ToolResultView
 
@@ -77,7 +77,7 @@ def _render(_args: JsonObject, value: Any) -> list[ContentBlock]:  # noqa: ANN40
         parts.append(truncation_marker(value["dropped"], value["cap"]).strip())
     if value["exit_code"] != 0:
         parts.append(f"[exit {value['exit_code']}]")
-    return text_content("\n".join(parts) if parts else "(no output)")
+    return text_content("\n".join(parts) if parts else NO_OUTPUT)
 
 
 @plugin("tool-bash", inject=[TOOLS, SHELL])

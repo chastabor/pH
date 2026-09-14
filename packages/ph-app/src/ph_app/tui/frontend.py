@@ -122,8 +122,10 @@ class FrontSession(Protocol):
 
     async def run_command(self, line: str) -> str | None: ...
 
-    async def shell(self, command: str) -> None:
+    async def shell(self, command: str, *, surface: bool = False) -> None:
         """Run the person's own shell command in the session's workspace.
+
+        `surface` is `!` rather than `!!` (`ph_app.shell` has the difference).
 
         Nothing is returned: the command and its output reach every attached
         front end as `shell/*` events, so the person who typed it reads it back

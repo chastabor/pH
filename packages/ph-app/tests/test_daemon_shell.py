@@ -1,7 +1,7 @@
-"""P7-10 — `!!<command>`: the person's own shell, logged and never sent.
+"""P7-10 — `!<command>` and `!!<command>`: the person's own shell, always logged.
 
-Ported from tau with one narrowing: tau ships a pair — `!` splices the output
-into the model's context, `!!` does not — and pH takes only the quiet one.
+Ported from tau, which ships the pair: `!!` runs and stays out of the model's
+context, `!` runs and splices the output in.
 
 **The filter is the type, not a rule somebody remembered.** `_surface_op_of`
 makes surface membership a property of the event type: an ineligible type may not
@@ -9,6 +9,10 @@ carry a `surfaceOp`, so `derive_messages` cannot see it. "Log it as a
 `tool/result` and filter it out of the context" is not expressible — `SurfaceError`
 refuses it — and would be wrong anyway, since a tool result with no `tool_use`
 block to pair with is an orphan several providers reject.
+
+That is also why `!` is not the same mechanism with the filter relaxed. Neither
+`shell/*` type is eligible in either form; `!` appends a *separate* user message,
+so the two tests below differ in what is on the log, never in who was filtering.
 
 **Everyone sees it, though.** The private-composer rule is about text you have
 not sent; pressing enter on `!!ls` is an act in the session. So there is one
@@ -29,17 +33,21 @@ from daemon_helpers import running, until
 from ph.bundles import BASE, HEADLESS
 from ph.cordis import Profile, load_profile_documents
 from ph.json import as_str
+from ph.llm.types import text_of
 from ph.testing import not_none
+from ph.text import NO_OUTPUT
 from ph_app.daemon.client import DaemonClient
 from ph_app.daemon.supervisor import Root
 from ph_app.protocol import DaemonError
-from ph_app.shell import shell_body
+from ph_app.shell import SHELL_OUTPUT, SURFACE_OUTPUT, shell_body, shell_message
 
 pytestmark = pytest.mark.anyio
 
 
-async def _run(client: DaemonClient, root: Root, command: str) -> dict[str, Any]:
-    reply = await client.call("session/shell", sessionId=root.id, command=command)
+async def _run(
+    client: DaemonClient, root: Root, command: str, *, surface: bool = False
+) -> dict[str, Any]:
+    reply = await client.call("session/shell", sessionId=root.id, command=command, surface=surface)
     await until(
         lambda: root.session.latest("shell/result") is not None, what="the command to finish"
     )
@@ -65,6 +73,61 @@ async def test_a_shell_command_is_logged_and_never_reaches_the_model(tmp_path: P
         assert [one.to_wire() for one in root.session.derive_messages()] == before
         types = [one.type for one in root.session.events]
         assert types == ["shell/command", "shell/result"], "logged, in full, in order"
+
+
+async def test_a_surfaced_command_reaches_the_model_as_a_user_message(tmp_path: Path) -> None:
+    """`!` is `!!` plus the model, and the splice is a *user message*.
+
+    `ph.session.events` prescribes the shape: a `tool/result` with no `tool_use`
+    block to pair with is an orphan several providers reject, so the output joins
+    the conversation the way a person's own text does. Delivered by `inject`, so
+    it waits for the next step instead of starting a turn — running a command is
+    telling the agent something, not asking it to act.
+
+    The paired test above is the other half: without `surface`, the model's view
+    is byte-identical across the command.
+    """
+    async with running(tmp_path) as daemon:
+        root = await daemon.root("shown")
+        client = await daemon.client()
+        before = [one.to_wire() for one in root.session.derive_messages()]
+
+        await _run(client, root, "echo hello-from-the-person", surface=True)
+
+        # Still logged in full, exactly as `!!` is — plus the splice itself, which
+        # is what makes the pending output survive a restart rather than living
+        # only in a process's inbox.
+        types = [one.type for one in root.session.events]
+        assert types == ["shell/command", "shell/result", "agent/inbox/spliced"]
+        assert [one.to_wire() for one in root.session.derive_messages()] == before, (
+            "the inbox holds it until the next step; the log is not rewritten"
+        )
+
+        pending = root.agent.inbox.next_step
+        assert len(pending) == 1, "one splice, waiting for the next step"
+        shown = text_of(pending[0].content)
+        assert "$ echo hello-from-the-person" in shown, "the command, so the model reads a run"
+        assert "hello-from-the-person" in shown, "and what it printed"
+
+
+def test_the_splice_is_clipped_far_shorter_than_the_log_keeps() -> None:
+    """Two bounds, and the model's is the small one.
+
+    `SHELL_OUTPUT` guards a file written once; `SURFACE_OUTPUT` guards a prompt
+    prefix **re-sent on every step until compaction**, so a `!` at the log's cap
+    would cost ~32k tokens per turn, forever, for output a person ran to read
+    themselves. The clip is not a nicety, and neither is saying so: a model
+    handed a prefix with no marker reasons from a file it thinks it finished.
+
+    Sabotage: render against `SHELL_OUTPUT` and the length assertion names it.
+    """
+    shown = shell_message("yes", {"stdout": "x" * (4 * SHELL_OUTPUT), "exitCode": 0})
+    assert SURFACE_OUTPUT < SHELL_OUTPUT, "the model's budget is the smaller one"
+    assert len(shown) < 2 * SURFACE_OUTPUT, "clipped, not merely capped at the log's bound"
+    assert "truncated" in shown, "and the model is told it is reading a prefix"
+    assert shell_message("true", {"stdout": "", "exitCode": 0}).endswith(NO_OUTPUT), (
+        "a command that printed nothing still says so, in `tool-bash`'s words"
+    )
 
 
 async def test_the_command_is_logged_before_it_runs(tmp_path: Path) -> None:

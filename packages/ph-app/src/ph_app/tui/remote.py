@@ -453,8 +453,8 @@ class DaemonSession:
                 return shown or None
         raise KeyError(f'unknown command "/{name}"')
 
-    async def shell(self, command: str) -> None:
-        """`!!` in the session's workspace — the daemon's shell, not this one.
+    async def shell(self, command: str, *, surface: bool = False) -> None:
+        """`!`/`!!` in the session's workspace — the daemon's shell, not this one.
 
         A browser tab has no shell, and "the session's shell" is the honest
         meaning either way. Nothing is returned because the command and its
@@ -462,7 +462,8 @@ class DaemonSession:
         back off the same log as everybody else.
         """
         await self.client.mutate(
-            verbs.SESSION_SHELL, ShellParams(session_id=self.session_id, command=command)
+            verbs.SESSION_SHELL,
+            ShellParams(session_id=self.session_id, command=command, surface=surface),
         )
 
     async def attach(self, paths: Sequence[str]) -> list[AttachmentRef]:

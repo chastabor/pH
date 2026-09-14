@@ -17,6 +17,7 @@ from typing import Any
 
 import pytest
 
+from ph.agent.inbox import Inbox, InboxNotifications
 from ph.agent.types import AgentOptions
 from ph.cordis import Context
 from ph.keys import AGENTS, LLM, SESSIONS, TOOLS
@@ -27,11 +28,13 @@ from ph.llm.types import (
     Finish,
     FinishReason,
     GenerateOptions,
+    PluginSource,
     TextBlock,
     TextDelta,
     TokenUsage,
     ToolCallBlock,
     UsageChunk,
+    create_user_message,
 )
 from ph.session import Session, SessionEvent, SurfaceIntent, SurfaceReplace
 from ph.session.known_event_types import KNOWN_SESSION_EVENT_TYPES
@@ -390,6 +393,78 @@ async def test_a_declined_compaction_is_a_notice(mount: MountProfile) -> None:
 
     (row,) = [item for item in adapter.state.visible_items() if item.role == "notice"]
     assert "the summarize call failed" in row.text
+
+
+async def test_a_surfaced_shell_command_is_marked_apart_from_a_quiet_one(
+    mount: MountProfile,
+) -> None:
+    """`!` and `!!` must not draw the same card.
+
+    The two differ in exactly one consequence — whether the agent reads the
+    output — and in none of the three things a shell card otherwise shows: the
+    command, what it printed, the exit code. A person who cannot tell them apart
+    on screen cannot tell whether they just handed the model 4 KiB of build log.
+
+    Read off the event, so a resumed session marks it the same way it was drawn
+    live — the P2-01 claim this file exists for, applied to the one field that
+    says where a command's output went.
+    """
+    ctx: Context = await mount()
+    session = ctx.require(SESSIONS).create("tui-shell-mark")
+    session.append("shell/command", {"command": "make", "surface": True})
+    session.append("shell/command", {"command": "make", "surface": False})
+
+    titles = [item.tool.title for item in _replay(session).visible_items() if item.tool]
+    assert titles == ["Shell → agent", "Shell"], "the loud one is named and the quiet one is not"
+
+
+async def test_cancelled_pending_input_leaves_a_row_and_not_a_falling_count(
+    mount: MountProfile,
+) -> None:
+    """Esc throws the inbox away, and the transcript has to say so.
+
+    `AgentDriver.cancel` clears every pending message unless the caller asks it
+    not to — the intended behaviour, and until now an entirely silent one: the
+    footer's "1 queued" fell to nothing and a queued prompt, or the output of a
+    `!` waiting for the next step, was gone with no account of it anywhere on
+    screen. The account is the point, not a veto on the clearing.
+
+    Driven through the real `Inbox` rather than a hand-written payload, because
+    what is being pinned is that the adapter reads the `outcome` key `_mutate`
+    actually writes — the one thing that still tells a dropped message from a
+    claimed one once both are only a `removedCount` on the log.
+
+    Sabotage: drop the `outcome` test in the handler and a *claimed* batch —
+    which removes messages too — starts reporting itself as a cancellation.
+    """
+    ctx: Context = await mount()
+    session = ctx.require(SESSIONS).create("tui-inbox-drop")
+    quiet = InboxNotifications(
+        inserted=lambda _message: None,
+        discarded=lambda _message: None,
+        claimed=lambda _message, _turn: None,
+    )
+    inbox = Inbox(session, quiet)
+    # The shape a `!` actually splices, so the row under test is the row a
+    # person would lose: a relayed plugin message, not something they typed.
+    relay = PluginSource(plugin="ph-app.shell", form="relay")
+    inbox.append("next-step", create_user_message(content=[TextBlock(text="$ make")], source=relay))
+
+    state = _replay(session)
+    assert state.queued == 1, "waiting, and the footer says so"
+    assert not [item for item in state.visible_items() if item.role == "notice"]
+
+    inbox.clear()
+
+    state = _replay(session)
+    assert state.queued == 0
+    (row,) = [item for item in state.visible_items() if item.role == "notice"]
+    assert row.text == "1 pending message cancelled"
+
+    # A claim removes messages too, and is not a loss: the model got them.
+    inbox.append("next-step", create_user_message(content=[TextBlock(text="second")], source=relay))
+    assert inbox.claim("next-step", 1), "consumed, not dropped"
+    assert len([item for item in _replay(session).visible_items() if item.role == "notice"]) == 1
 
 
 async def test_a_plugins_replacement_is_not_called_a_compaction(mount: MountProfile) -> None:
