@@ -46,6 +46,48 @@ jobs:
         with:
           enable-cache: true
 
+      # **`jj` is a Rust binary, so nothing the workspace installs can supply
+      # it.** There is no PyPI distribution that is Jujutsu — a lookalike name
+      # would be somebody else's package — and `cargo install jj-cli` compiles
+      # from source for minutes. The published release tarball is 11 MB and
+      # holds a static-pie binary with no runtime dependencies, so it is the
+      # cheapest of the three by a wide margin.
+      #
+      # **Without it 56 tests skip rather than run**, and the skip is not free:
+      # the `needs_jj` tier is `ph.seams.workspace_jj` and the text index's
+      # change detection, none of which has ever executed on any machine but a
+      # developer's. It also costs about 2.2 points of `ph-core` coverage, which
+      # is what put the `fail_under = 93` gate out of reach here — the ratchet's
+      # own history records 91.21 %, and that is exactly this suite's number
+      # with jj absent.
+      #
+      # Pinned rather than latest: a jj release that changed behaviour should
+      # break on a commit that bumps this line, not on whichever unrelated push
+      # happened to land first. The tests configure `user.name`/`user.email`
+      # per repo themselves, so nothing else is needed here.
+      #
+      # The archive stores its members as `./jj`, so `tar … jj` does not match
+      # one — extract the whole thing rather than selecting.
+      - name: Install jj
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=0.45.1
+          case "${{ runner.os }}-${{ runner.arch }}" in
+            Linux-X64)   target=x86_64-unknown-linux-musl ;;
+            Linux-ARM64) target=aarch64-unknown-linux-musl ;;
+            macOS-ARM64) target=aarch64-apple-darwin ;;
+            macOS-X64)   target=x86_64-apple-darwin ;;
+            *) echo "no published jj build for ${{ runner.os }}-${{ runner.arch }}" >&2; exit 1 ;;
+          esac
+          mkdir -p "$HOME/.local/jj"
+          curl -fsSL --retry 3 \
+            "https://github.com/jj-vcs/jj/releases/download/v${version}/jj-v${version}-${target}.tar.gz" \
+            | tar -xz -C "$HOME/.local/jj"
+          echo "$HOME/.local/jj" >> "$GITHUB_PATH"
+          # `GITHUB_PATH` reaches the *next* step, so this one checks by path.
+          "$HOME/.local/jj/jj" --version
+
       - name: Sync the workspace
         run: uv sync --python ${{ matrix.python }}
 
