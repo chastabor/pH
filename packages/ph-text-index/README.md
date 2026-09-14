@@ -8,7 +8,7 @@ back the `path:start-end` it came from, so the model can answer from the passage
 or `read` the file around it.
 
 ```bash
-ph --profile llama --provider llama --model <model> \
+phern --profile llama --provider llama --model <model> \
    --patch '{insert: [{id: text-index, name: text-index},
                       {id: text-index-local, name: text-index-local}]}' \
    -p "index docs/ then tell me how the workspace seam decides a containment tier"
@@ -136,7 +136,7 @@ listing, so these arrive as `await tools.text_index(...)` and
 this bundle and `ph-code-graph`'s:
 
 ```bash
-ph --profile rlm-indexed --provider llama --model <model> --mode tui
+phern --profile rlm-indexed --provider llama --model <model> --mode tui
 ```
 
 This package registers a `ph.bundles` entry point so that profile is *hidden*
@@ -255,7 +255,7 @@ provisioning **loads** the model rather than fetching it — see below.
 `$PH_CACHE/models`, set by the row (`cache:` overrides it). Left to
 `sentence-transformers` they would go to `$HF_HOME` or `~/.cache/huggingface` —
 outside all three of pH's roots, so a gigabyte of weights would sit somewhere
-`ph doctor` never mentions and `rm -rf $PH_CACHE` would not reclaim. Rebuildable
+`phern doctor` never mentions and `rm -rf $PH_CACHE` would not reclaim. Rebuildable
 and large is the lifecycle `$PH_CACHE` names (Q1), and the runtime venv is there
 for the same reason.
 
@@ -269,10 +269,10 @@ for the same reason.
 
 A **command**, not a tool: a person asks the harness to do this, and routing it
 through a model turn would put the model in the log as having decided it. It
-costs no turn. `ph doctor` answers the same question without mounting an agent —
+costs no turn. `phern doctor` answers the same question without mounting an agent —
 the section reports `model: not loaded — /text-index install`.
 
-For an **unattended** run — a daemon, a scheduled tick, `ph -p` in CI — there is
+For an **unattended** run — a daemon, a scheduled tick, `phern -p` in CI — there is
 nobody to type either:
 
 ```yaml

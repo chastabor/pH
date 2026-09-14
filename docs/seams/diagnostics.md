@@ -1,7 +1,7 @@
-# `ctx.diagnostics` — what a row wants `ph doctor` to say about it
+# `ctx.diagnostics` — what a row wants `phern doctor` to say about it
 
 **Module:** `ph/seams/diagnostics.py` · **Row:** `diagnostics` · **Consumer:**
-`ph doctor`
+`phern doctor`
 
 ## Why it exists
 
@@ -9,7 +9,8 @@ Four rows in three packages arrived at this one by one: the containment tier, th
 workspace kind and `repo_writable` per agent, a permission row's honest reach, and
 the worker model.
 
-`ph-app` **cannot import** `ph-stabilize` or `ph-rlm`. So without a seam, each of
+`ph_app` **cannot import** `ph_stabilize` or `ph_rlm` — the `phern` distribution
+depends on both wheels, but the module may not name them. So without a seam, each of
 them lands as a bespoke `ctx.<name>` the consumer has to know by heart — and the
 consumer is *the one command whose entire job is to be complete*.
 
@@ -28,7 +29,7 @@ expensive would take the footer down with it.
 
 ## Rows, not a sentence
 
-`read()` returns `(label, value)` pairs — the shape a `ph doctor` section takes.
+`read()` returns `(label, value)` pairs — the shape a `phern doctor` section takes.
 
 An **empty list keeps the section off the page entirely**, which is what lets a
 healthy store contribute nothing: a section that appears on every run saying
@@ -62,14 +63,14 @@ This is where §5 rule 6 lands most often: a section that describes a tier is th
 one place a person looks to check exactly what it bounds, so a diagnostic that
 overstates is the single failure E1 exists to prevent.
 
-`ph doctor` prints the retained-tree count **even when it is none**, because the
+`phern doctor` prints the retained-tree count **even when it is none**, because the
 assumption a reader makes in the absence of a row is that nothing is
 accumulating — which is precisely the assumption worth checking.
 
 ## What it does not do
 
 * It does not fix anything, and it does not exit non-zero for a finding —
-  `ph doctor` reports; a profile that will not *mount* is the separate loud
+  `phern doctor` reports; a profile that will not *mount* is the separate loud
   failure.
 * It does not run on a timer.
 * It does not know about a terminal. `(label, value)` pairs render wherever.

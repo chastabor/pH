@@ -16,7 +16,7 @@ not have to rediscover it.
 | P0-01 | `uv` workspace (`ph-core`, `ph-app`, `ph-rlm`, `ph-stabilize`), ruff (line 100), `mypy --strict` on `ph-core`, pytest + anyio, CI on Linux/macOS/Windows × 3.12/3.13, `ph.plugins` entry-point group reserved | `pyproject.toml`, `.github/workflows/ci.yml` |
 | P0-02 | `Context`: `plugin`/`inject`/`provide`/`__getattr__`/`effect`/`scope`/`dispose` | `ph/cordis/context.py` |
 | P0-03 | `emit` · `bail` · `serial` · `parallel` · `waterfall`; `prepend`, `global_`, scope filtering | `ph/cordis/context.py` |
-| P0-04 | `events.declare(name, mode)`; wrong-mode dispatch raises; producer/consumer matrix | `ph/cordis/events.py`, `ph events` |
+| P0-04 | `events.declare(name, mode)`; wrong-mode dispatch raises; producer/consumer matrix | `ph/cordis/events.py`, `phern events` |
 | P0-05 | YAML rows in file order, id-addressed patches, `${env:VAR:-default}`, `disabled:` predicates, entry-point discovery, **no code evaluation** | `ph/cordis/loader.py` |
 | P0-06 | `WireModel` (`alias_generator=to_camel`, `populate_by_name=True`), round-trip property, "no un-aliased field" assertion | `ph/wire.py`, `tests/test_wire.py` |
 | P0-07 | `SessionEvent` frozen `dataclass(slots=True)`, `to_wire`/`from_wire`, pin test | `ph/session/events.py` |
@@ -29,10 +29,10 @@ not have to rediscover it.
 | P0-14 | Runtime invariant `messages == derive_messages()` | `ph/agent_loop/invariant.py` |
 | P0-15 | JSONL persistence, `session/flush` (parallel), buffered writer, checkpoint policy | `ph/persistence/` |
 | P0-16 | `$PH_HOME` / `$PH_CACHE` / `$PH_RUNTIME` with the three-tier resolution and the `/tmp` ownership check | `ph/paths.py` |
-| P0-17 | `ph -p`, `--dump-config`, `ph doctor`, `ph events` | `ph_app/` |
+| P0-17 | `phern -p`, `--dump-config`, `phern doctor`, `phern events` | `ph_app/` |
 
 **Definition of done, met:** P0-14's invariant fires on a bypassed request; the
-wire round-trip property passes; `ph doctor` prints three resolved roots; a
+wire round-trip property passes; `phern doctor` prints three resolved roots; a
 print-mode run writes a JSONL whose envelopes are dsh's, field for field.
 
 ---

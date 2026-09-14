@@ -29,7 +29,7 @@ broken.
 sentence a person reads, not a colour they learn to skip.
 
 **Not enforced (§5 rule 6): a poll has content only in a live process.** The one
-caller of `ctx.diagnostics.report()` today is `ph doctor`, which mounts a fresh
+caller of `ctx.diagnostics.report()` today is `phern doctor`, which mounts a fresh
 profile — no session created, no view cached, no scope disposed — so "holds"
 there says the checks run, not that the deployment's live state passed them. The
 daemon is where the same report has something to look at, and wiring the poll
@@ -187,10 +187,10 @@ class InvariantRegistry:
         ]
 
     def describe(self) -> list[tuple[str, str]]:
-        """The `ph doctor` rows: one per invariant, answer first.
+        """The `phern doctor` rows: one per invariant, answer first.
 
         Checks run here rather than being cached from somewhere earlier, because
-        the question a person is asking by typing `ph doctor` is about now.
+        the question a person is asking by typing `phern doctor` is about now.
         `diagnostics` permits the cost — that is the whole distinction it draws
         against `tui_status`, which is read on every spinner frame.
         """
@@ -277,7 +277,7 @@ async def apply(ctx: Context, config: None) -> None:
             id="invariants",
             title="Invariants",
             read=registry.describe,
-            # Last: a person scanning `ph doctor` for what is wrong should meet
+            # Last: a person scanning `phern doctor` for what is wrong should meet
             # the deployment's own account of itself before its self-assessment.
             order=ORDER_SELF_ASSESSMENT,
         ),

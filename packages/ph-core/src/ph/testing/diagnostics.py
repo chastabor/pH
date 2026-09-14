@@ -1,4 +1,4 @@
-"""Reading one section out of `ph doctor`'s report.
+"""Reading one section out of `phern doctor`'s report.
 
 `report()` returns `list[(title, rows)]` — a shape three test modules in three
 packages were unwrapping by hand, two of them raising a bare `KeyError` when a

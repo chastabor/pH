@@ -43,7 +43,7 @@ ctx.credentials.provide_value(...)   # for a test, or a non-env source
 ```
 
 A `CredentialRef` carries `name`, `source` and `description` — enough for
-`ph doctor` to say *which variable* is missing without ever reading one.
+`phern doctor` to say *which variable* is missing without ever reading one.
 
 ## Failing
 

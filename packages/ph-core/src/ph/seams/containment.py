@@ -75,7 +75,7 @@ class TierDescription:
     """One rung of §4.8's table: what it bounds, what it does not, what it buys.
 
     Three columns and no severity, which is §12 Q10's own instruction for
-    `ph doctor` — *"prints the same three columns rather than a severity
+    `phern doctor` — *"prints the same three columns rather than a severity
     colour"*. A colour invites a reader to skip the sentence, and the sentence is
     the entire point of E1: the failure being prevented is a **tier name**
     overstating what the tier does, and only prose can correct that.
@@ -94,7 +94,7 @@ class DescribingProvider(Protocol):
     is keyed by rung, so every provider at `worktree` inherited "buys: collision
     isolation and revertibility (fan-out safety, per-run checkpoints, /revert)" —
     true of a checkout and false of an overlay, which has no git tree to hash and
-    therefore never writes a restore point. `ph doctor` was advertising a
+    therefore never writes a restore point. `phern doctor` was advertising a
     mechanism the mounted tier does not have, in the one place a person looks to
     check exactly that, which is the single failure E1 exists to prevent.
 
@@ -123,7 +123,7 @@ TIERS: dict[ContainmentTier, TierDescription] = {
     ),
     "sandbox": TierDescription(
         bounds="every write, absolute paths included, refused at the kernel; and "
-        "network egress, to whatever `ph doctor`'s Sandbox allowances section reports "
+        "network egress, to whatever `phern doctor`'s Sandbox allowances section reports "
         "as in force",
         does_not_bound="what an allowed request does at the far end — an artifact "
         "published or a message sent to a reachable host is not taken back",
@@ -134,9 +134,9 @@ TIERS: dict[ContainmentTier, TierDescription] = {
 
 E1's gate is a docs test asserting no tier is described as bounding writes it
 does not bound (P6-06). That is only worth running against a single home: a
-table in prose and a second copy in `ph doctor` would drift, and the drift would
+table in prose and a second copy in `phern doctor` would drift, and the drift would
 be invisible precisely because each copy looks right on its own. So the
-sentences live here, `ph doctor` prints them verbatim, and the docs row when it
+sentences live here, `phern doctor` prints them verbatim, and the docs row when it
 lands has one thing to check rather than two things to reconcile.
 """
 
@@ -148,7 +148,7 @@ class ContainmentUnavailableError(MountRefusal):
     first call that would have been unconfined: by then the agent is running and
     "refuse to start" has already been disobeyed. A `MountRefusal`, so every
     command that mounts prints it as the sentence it is — it was a bare
-    `RuntimeError`, and `ph -p` under `strict` answered with a traceback while
+    `RuntimeError`, and `phern -p` under `strict` answered with a traceback while
     only doctor caught it (P4-12).
     """
 
@@ -189,7 +189,7 @@ class ContainmentService:
         return (self.child_tier or self.tier) if child else self.tier
 
     def describe(self) -> list[tuple[str, str]]:
-        """What `ph doctor` prints about this deployment (E1, E10).
+        """What `phern doctor` prints about this deployment (E1, E10).
 
         Three claims, and each one is a defect this row could otherwise hide.
 
@@ -266,7 +266,7 @@ class ContainmentService:
         A clause, not the whole refusal: the "here are your two ways out"
         paragraph only makes sense when refusing to start, and stitching it on
         at each branch is three places one sentence could drift from the one it
-        wraps. `ph doctor` wants the clause; `verify` wants both.
+        wraps. `phern doctor` wants the clause; `verify` wants both.
         """
         if not self.strict:
             return None

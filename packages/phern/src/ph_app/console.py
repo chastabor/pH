@@ -1,0 +1,181 @@
+"""Where `phern` writes, how it refuses, and how it lays a report out (P5-10).
+
+Two consoles, one refusal and one section renderer, in one module, because there
+are now two command modules — `cli.py` and `agents.py` — and `cli.py` imports
+`agents.py`, so neither can own them without the other importing a command table
+to get at a `Console`. A pair per module meant any console setting applied to
+half the CLI, and the same argument decided `section` after three copies of it
+had accumulated: `phern doctor`'s contributed sections, `phern agents status`/`doctor`,
+and P5-11's socket lifetime. Every one of them is a title and a list of pairs,
+and they were already drifting apart in style.
+
+**Data does not go through a console.** `--dump-config` writes YAML and `ph
+events --json` writes JSON, both meant to be piped; Rich colourizes a plain
+string it is asked to print, so with `FORCE_COLOR` set in the environment — as
+CI images and many shells do — those two commands emitted ANSI escapes into
+their own machine-readable output and `yaml.safe_load` refused it with
+"unacceptable character #x001b". `emit` is the plain-bytes path for anything a
+program reads; `console` is for anything a person does.
+
+@module ph_app.console
+"""
+
+from __future__ import annotations
+
+from collections.abc import Iterable, Sequence
+from typing import Annotated, NoReturn, TypeAlias
+
+import typer
+from rich.console import Console
+from rich.markup import escape
+from rich.table import Table
+
+from ph.selectors import Scheme, Selector, SelectorError, parse_all
+
+__all__ = [
+    "TypeOption",
+    "console",
+    "detail",
+    "emit",
+    "err",
+    "fail",
+    "fail_unmounted",
+    "section",
+    "selectors_or_exit",
+]
+
+console = Console(highlight=False, soft_wrap=True)
+err = Console(stderr=True, highlight=False, soft_wrap=True)
+"""Two settings, on **both** consoles, which is the whole reason the pair is
+declared here rather than per module: a console setting applied to half the CLI
+is how the two halves come to disagree about what a line looks like.
+
+`highlight=False`: Rich's automatic highlighter re-colours whatever in a plain
+string *looks* like a number, a path or a UUID, which in a CLI's prose is an
+arbitrary word coloured for looking like data — `scheduled sch-1 · interval
+3600000` came out with the interval in cyan and nothing else. Explicit markup
+still works; only the guessing is off. It is also a third of the cost of
+printing a line, and `phern agents attach` prints one per log event.
+
+`soft_wrap=True`: this CLI's lines *name things* — a profile path, a session id,
+a socket, a `loginctl` command to run — and Rich's default folds at the console
+width with a hard newline, **inside a word** when the word is longer than what is
+left of the line. A path broken across two lines cannot be copied and cannot be
+grepped. Under a test runner the width is 80, and a macOS temp path is a dozen
+characters longer than the same path on Linux, which is exactly the margin by
+which `broken.yaml` stopped appearing in its own refusal there. The terminal
+still wraps what does not fit; it just no longer edits the sentence to do it.
+
+**It does not reach `section()` below.** `soft_wrap` is a print-time setting and
+a `Table` folds inside its own cells, so a path printed as a table *value* — `ph
+doctor`'s roots, `RuntimeLifetime.describe()`'s rows — still breaks. Stated
+rather than left to be discovered, because this module owns both the consoles
+and the table and is therefore the only place that could make "a path this CLI
+prints is copyable" true everywhere; today it is true of every line and not of
+table cells."""
+
+
+def section(title: str, rows: Iterable[tuple[str, str]]) -> Table:
+    """A report section: a borderless two-column table of label/value pairs.
+
+    The one shape every diagnostic in this CLI has. `PathRoots.describe()`,
+    `RuntimeLifetime.describe()`, `DiagnosticsRegistry.report()`'s per-section
+    rows and `phern agents status` all produce `list[tuple[str, str]]` already, so
+    the renderer is the only thing that was ever per-command — and being
+    per-command is exactly how `phern doctor` and `phern agents doctor` came to draw
+    the same kind of answer with different titles and, briefly, different styles.
+    """
+    table = Table(show_header=False, title=title, title_justify="left")
+    table.add_column(style="bold")
+    table.add_column()
+    for label, value in rows:
+        table.add_row(label, value)
+    return table
+
+
+def emit(text: str) -> None:
+    """Write machine-readable output, unstyled and unwrapped.
+
+    `print` rather than `console.print`: a console decides colour from the
+    environment and width from the terminal, and both are wrong for a document
+    another program parses. The one thing this must never do is be clever.
+    """
+    print(text)
+
+
+def detail(text: object) -> str:
+    """A message from somewhere else, made safe to interpolate into markup.
+
+    **Rich reads `[...]` in a plain string as a style tag and renders nothing.**
+    Every refusal in this CLI is an f-string mixing markup this module wrote
+    (`[red]`) with a sentence it did not (an exception's text), and the second
+    half is written by rows in six other distributions — which have no reason to
+    know that a square bracket is syntax here, and every reason to use one: an
+    *extra* is spelled `phern[local]`, and naming what to install is exactly what
+    those messages exist for.
+
+    So `--mode web` without its extra used to advise `pip install 'phern'`, which
+    is the command the person had already run, and `text-index-local` refused by
+    naming `ph-text-index` rather than `ph-text-index[local]`. Both printed the
+    one word that mattered as the empty string, in the sentence whose whole job
+    was to carry it.
+
+    Applied at the interpolation rather than inside `fail`, because `fail`'s own
+    argument *is* markup and escaping it would print `[red]` at people.
+    """
+    return escape(str(text))
+
+
+def fail(message: str, *, code: int = 1, cause: BaseException | None = None) -> NoReturn:
+    """Print a refusal on stderr and exit with it.
+
+    One user-facing sentence and one exit code, in one place, rather than a pair to
+    keep in step at every refusal in both command modules. `cause` keeps the
+    chaining, because a traceback that lost the original is the thing `--pdb` was
+    going to be used for.
+
+    The no-fold property is the console's, not this function's — see `err` above.
+    """
+    err.print(message)
+    raise typer.Exit(code=code) from cause
+
+
+def fail_unmounted(profile: str, error: BaseException) -> NoReturn:
+    """The refusal every command that mounts a profile owes.
+
+    Three commands had written this sentence — `phern doctor`, `phern workspaces gc`,
+    `phern attachments gc` — each copying the last, which is the count this module's
+    own docstring gives for extracting `section`. The argument is the same one at
+    all three: a profile that refuses to mount is the most important thing the
+    command can report, and a person who ran it *because* something is wrong is
+    owed the sentence rather than a traceback.
+    """
+    fail(f"[red]profile {profile!r} does not mount:[/red] {detail(error)}", cause=error)
+
+
+TypeOption: TypeAlias = Annotated[
+    list[str],
+    typer.Option("--type", help="Namespace selector, repeatable: workspace, workspace/acquired."),
+]
+"""Declared once, for `ProfileOption`'s reason one module over: two commands that
+spell their own `--type` can come to disagree about what it means.
+
+Here rather than in `cli.py` because `cli.py` imports the sub-apps, so a sub-app
+that wanted the alias would have to import back into it — the cycle this module
+was carved out to avoid, and which `profile_or_exit` already sits below.
+"""
+
+
+def selectors_or_exit(patterns: Sequence[str], *, vocabulary: Scheme) -> list[Selector]:
+    """Parse `--type` for one command, or exit 2 saying what was wrong.
+
+    The refusal is the command's, not the parser's: `parse_all` raises a
+    `SelectorError` that already names the offending selector and the vocabulary
+    this surface serves, and every caller wants that sentence on stderr under the
+    same exit code — `profile_or_exit`'s argument, applied to the other thing a
+    command parses before it can do anything.
+    """
+    try:
+        return parse_all(patterns, vocabulary=vocabulary)
+    except SelectorError as error:
+        fail(f"[red]{detail(error)}[/red]", code=2, cause=error)

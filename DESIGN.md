@@ -23,9 +23,9 @@ and any of them can be replaced without forking anything else.
 **Two axes organise everything below, and dsh's notes name them: space and
 time.** *Space* is the topology — the `Context` tree, what is mounted, which
 service each plugin resolved, which realm an agent runs in. cordis owns it, and
-`ph doctor` reports it. *Time* is the session log — the immutable, append-only
+`phern doctor` reports it. *Time* is the session log — the immutable, append-only
 order in which state changed and results arrived. The persistence rows own it,
-and `ph --mode trajectory` reads it. The agent loop sits between the two: it
+and `phern --mode trajectory` reads it. The agent loop sits between the two: it
 reads the log to build a request (I3) and acts through the topology to run a
 tool. Neither axis is allowed to stand in for the other, which is I4 in one
 sentence — the log is never rewritten, and what the model sees is a projection
@@ -33,7 +33,7 @@ of it.
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────┐
-│ ph-app          CLI (Typer) · TUI (Textual) · daemon · 6 output modes    │
+│ phern           CLI (Typer) · TUI (Textual) · daemon · 6 output modes    │
 │                 consumes session/event + agent/* ; drives ctx.agents     │
 ├──────────────────────────────────────────────────────────────────────────┤
 │ plugin bundles  (YAML rows; each row = one plugin module + config)       │
@@ -59,7 +59,7 @@ of it.
 
 | | |
 |---|---|
-| Packages | 5 (`ph-core`, `ph-app`, `ph-rlm`, `ph-stabilize`, `ph-runtime-guest`) |
+| Packages | 7 (`phern`, `ph-core`, `ph-rlm`, `ph-runtime-guest`, `ph-stabilize`, `ph-text-index`, `ph-code-graph`) |
 | Source | ~48 000 lines |
 | Tests | 1 796 (one skipped without a provider key) |
 | Registered plugins | 90 across the `ph.plugins` entry-point group |
@@ -74,10 +74,10 @@ of it.
 **`ph-core`** — cordis, the session log, the LLM vocabulary, the tool pipeline,
 the agent loop, and every capability seam. Nothing here knows about a terminal.
 
-**`ph-app`** — the `ph` command, the Textual TUI, the daemon and its wire
+**`phern`** — the `phern` command, the Textual TUI, the daemon and its wire
 protocol, and the provider adapters (Anthropic, OpenAI-compatible). Depends on
 `ph-core` and on neither bundle: bundles reach it through the `ph.bundles`
-entry-point group, so `ph-app` need not import `ph-rlm` to offer the `rlm`
+entry-point group, so `ph_app` need not import `ph_rlm` to offer the `rlm`
 profile (`ph_app/profiles.py`).
 
 **`ph-rlm`** — Prime Agent's design as plugins. The model's surface is Code Mode:
@@ -130,8 +130,8 @@ in one place" (`loader.py`).
 
 **Three layers, and the third is reachable from the command line.** dsh's notes
 name them — bundle, profile, patch — and for six phases pH had the third only as
-a file, `$PH_HOME/profiles/<name>.yaml`. `--patch` on `ph`, `ph doctor` and
-`ph events` takes a patch entry as YAML and composes it last, as the `cli`
+a file, `$PH_HOME/profiles/<name>.yaml`. `--patch` on `phern`, `phern doctor` and
+`phern events` takes a patch entry as YAML and composes it last, as the `cli`
 layer, so `--dump-config` prints `layer: cli` beside what it changed and
 `doctor`'s topology says `by cli`. It is the *same grammar* as a document,
 deliberately: a second spelling for "change this row" is how a flag and a file
@@ -184,7 +184,7 @@ reader arriving from dsh can find the thing it names.
 `inject` key (`loader.py`). `Mount.topology()` renders that per row —
 `active`, `activating`, `waiting on <key>`, `unwound · waiting on <key>`,
 `unmounted`, or `disabled · by <layer>` — with what each injects and which layer
-put it there, into `ph doctor`'s **Topology** section: the live half that
+put it there, into `phern doctor`'s **Topology** section: the live half that
 `--dump-config` deliberately does not show. dsh's rule is that the dump must show what *is* running, because once
 structure comes from configuration the static code no longer says; for one
 round pH had the answer in `inactive()` and nothing called it.
@@ -195,7 +195,7 @@ The section reaches the report as **a row like any other** (`seams/topology.py`,
 cannot file the report itself. A hand-appended section cost a misdiagnosis — a
 raise in the reader came out of `doctor`'s broad catch as *"profile does not
 mount"*, about a profile that had mounted — and put this one section out of reach
-of `ph agents doctor`, which relays `DiagnosticsRegistry.report()`'s shape
+of `phern agents doctor`, which relays `DiagnosticsRegistry.report()`'s shape
 verbatim.
 
 ### 2.4 Services and realms
@@ -242,7 +242,7 @@ nothing on any platform, which is why the crash-recovery layer (paired events,
 reconciliation) exists separately.
 
 > **Not currently wired.** `install_lifecycle` has no production caller —
-> `ph daemon` calls bare `anyio.run(...)`. Signals are handled only by default
+> `phern daemon` calls bare `anyio.run(...)`. Signals are handled only by default
 > cancellation, and the daemon's shielded 10-second `finally` is what makes that
 > survivable. See §8.
 
@@ -270,14 +270,14 @@ Each mode is a method of the same name on `Context` (`cordis/context.py`).
 fixes an event's dispatch mode as part of its contract: re-declaring with a
 different mode raises, dispatching through the wrong mode raises
 (`events.py`), and listening to an undeclared name raises
-(`events.py`). `note_consumer` records who listens, so `ph events` renders
+(`events.py`). `note_consumer` records who listens, so `phern events` renders
 a producer/consumer matrix from the registry rather than a hand-kept list
 (`events.py`).
 
 **The consumer half needs a mount, and did not work until P6-02.** A `declare`
 runs at import, so producers are knowable from the import alone; `ctx.on` runs
 when a row *activates*, so who listens is a property of the profile rather than
-of the code — which is why `ph events` now takes `--profile` and mounts one.
+of the code — which is why `phern events` now takes `--profile` and mounts one.
 Before that it printed a producer matrix under a producer/consumer heading:
 `note_consumer` guards on `if module`, `Context._module` was only ever set by
 `Context.scope`, and nothing in the mount path set it, so every scope inherited
@@ -553,7 +553,7 @@ repositories (`seams/workspace.py`):
 
 None is fatal; all three fall back to `shared` and record what happened on
 `workspace/acquired`. `DeclineReason` is a `Literal`, "a code rather than prose",
-because `ph doctor` prints it and "a durable event carrying an English sentence
+because `phern doctor` prints it and "a durable event carrying an English sentence
 is unparseable by the consumer that has to branch on it"
 (`seams/workspace.py`).
 
@@ -568,46 +568,46 @@ and returns the process root.
 
 ---
 
-## 4. The `ph` command surface
+## 4. The `phern` command surface
 
 ### 4.1 Commands
 
 ```
-ph [--print P] [--profile P] [--provider P] [--model M] [--session ID]
-   [--mode MODE] [--attach PATH ...] [--resume ID] [--dump-config]
-   [--no-spawn]                                  # tui/web: refuse to start a daemon
-   [--keep-daemon]                               # tui/web: start a service one, not ephemeral
-   [--host H] [--port N] [--open]                # web: bind, and the token URL
+phern [--print P] [--profile P] [--provider P] [--model M] [--session ID]
+      [--mode MODE] [--attach PATH ...] [--resume ID] [--dump-config]
+      [--no-spawn]                                  # tui/web: refuse to start a daemon
+      [--keep-daemon]                               # tui/web: start a service one, not ephemeral
+      [--host H] [--port N] [--open]                # web: bind, and the token URL
 
-ph doctor      [--profile]
-ph daemon      [--profile] [--provider] [--model] [--passivate-after off|MIN]
-               [--ephemeral]                     # exit once nothing needs it
-ph events      [--json]
+phern doctor      [--profile]
+phern daemon      [--profile] [--provider] [--model] [--passivate-after off|MIN]
+                  [--ephemeral]                     # exit once nothing needs it
+phern events      [--json]
 
-ph agents                                     # list running roots
-ph agents send      <session> <prompt>
-ph agents attach    <session> [--since N] [--until-idle] [--all]
-ph agents schedule  <session> [--prompt P] [--at MS|--every MS|--cron X|--cancel ID]
-ph agents status    <session>
-ph agents doctor
-ph agents shutdown
+phern agents                                     # list running roots
+phern agents send      <session> <prompt>
+phern agents attach    <session> [--since N] [--until-idle] [--all]
+phern agents schedule  <session> [--prompt P] [--at MS|--every MS|--cron X|--cancel ID]
+phern agents status    <session>
+phern agents doctor
+phern agents shutdown
 
-ph workspaces gc [--profile] [--older-than DAYS] [--remove] [--session ID]
+phern workspaces gc [--profile] [--older-than DAYS] [--remove] [--session ID]
 ```
 
-`ph doctor` prints the three path roots, platform, daemon socket lifetime,
+`phern doctor` prints the three path roots, platform, daemon socket lifetime,
 non-guarantees, available profiles — then **mounts** the profile and prints every
 `ctx.diagnostics` section. If the profile refuses to start (a strict containment
 posture with no sandbox backend), that is the most important thing it can say, so
 it reports a sentence and exits 1 rather than a traceback (`cli.py`).
 
-`ph agents` is the client half of the daemon. Every command goes through one
+`phern agents` is the client half of the daemon. Every command goes through one
 `_ask()` spine, which is what keeps "no daemon is running" one sentence rather
 than seven, and which distinguishes an **absent** socket (nothing was started)
 from a **present but refusing** one (something crashed and left its path behind)
 — opposite next steps (`agents.py`).
 
-`ph workspaces gc` **reports by default; removing is the flag** — the opposite
+`phern workspaces gc` **reports by default; removing is the flag** — the opposite
 way round from most `gc`, because the person who most needs it is the one who
 just found the disk full and does not yet know what these directories are
 (`workspaces.py`).
@@ -624,7 +624,7 @@ Everything exits **1** on refusal, except argument errors under
 | `transcript` | Reads `session.transcript()`, **not** `derive_messages()`, so compaction does not erase what the human saw |
 | `rpc` | JSON-RPC over stdio. Takes no `--print` — the peer drives |
 | `tui` | Textual, imported lazily. **A daemon client** (P5-14): it attaches, and closing it detaches rather than ending the turn. Silently starts an ephemeral daemon when no socket answers — `--keep-daemon` makes the one it starts a service instead, and `--no-spawn` refuses to start one at all |
-| `web` | The same `tui` in a browser tab, over `textual-serve` — one subprocess per tab, so each tab is one more front end on the one daemon, and **all tabs of a launch share one session** (the multiplex: private composers, one log). Drop a file on the page to attach it. Needs the `ph-app[web]` extra; `--mode web` without it prints the install line. Binds `127.0.0.1` unless `--host` says otherwise, and every request needs the per-launch token from the URL |
+| `web` | The same `tui` in a browser tab, over `textual-serve` — one subprocess per tab, so each tab is one more front end on the one daemon, and **all tabs of a launch share one session** (the multiplex: private composers, one log). Drop a file on the page to attach it. Needs the `phern[web]` extra; `--mode web` without it prints the install line. Binds `127.0.0.1` unless `--host` says otherwise, and every request needs the per-launch token from the URL |
 | `trajectory` | **Mounts nothing** — no agent, provider, answerers, or plugins. A fold over a stored file |
 
 ### 4.3 Slash commands
@@ -831,7 +831,7 @@ root **and each is flushed**, because the way out has stopped being reliable and
 the likely next action is `kill`. It is *not* reported as `failed`: that would put
 the recovery ladder to work climbing over a socket.
 
-**The lease is daemon-against-daemon and no further.** A `ph -p --session x` run
+**The lease is daemon-against-daemon and no further.** A `phern -p --session x` run
 against a daemon-held session still opens it, because the lease is not in the
 store (`supervisor.py`). `thread_local=False` is load-bearing and its
 absence is silent: filelock's re-entrancy counter is thread-local, so a lease
@@ -855,7 +855,7 @@ success, and it refuses *one tool call* rather than ending a turn.
 **There is no global turn or request timeout**, no max-steps in the driver, no
 health check, no max-roots cap, and no per-root memory cap. `NON_GUARANTEES`
 (`supervisor.py`) states this rather than leaving it to be discovered, and
-`ph doctor` prints it — including that **after a restart roots are not
+`phern doctor` prints it — including that **after a restart roots are not
 re-mounted, so a schedule does not fire until something touches its root**.
 
 ---
@@ -1053,7 +1053,7 @@ readable and writable nowhere. The second depends on the first and says so — t
 row claims the rung only when a backend is mounted and enforcing, because
 `repo_writable=False` without one is E1's failure in the field E1 is about.
 
-`ph doctor` prints both, which is why `describe()` carries a separate **"confined
+`phern doctor` prints both, which is why `describe()` carries a separate **"confined
 commands"** row: a reader must not have to reconcile "bounds: nothing" in the
 workspace section with a kernel that is in fact refusing the write.
 
@@ -1062,7 +1062,7 @@ The rule, verbatim (the module docstring of `seams/workspace.py`):
 > **`repo_writable` records which guarantee was obtained, never which was
 > requested.** A caller asking `access="read"` gets the strongest kind the
 > mounted tier can actually provide; `False` means a tier is enforcing it. Any
-> wording here, in `ph doctor`, or in a config comment that blurs request and
+> wording here, in `phern doctor`, or in a config comment that blurs request and
 > guarantee is a defect (§12 Q10).
 
 The reasoning that used to sit in that docstring — an absolute-path `open()`
@@ -1135,7 +1135,7 @@ one by id.
 answer `None` (`persistence/protocol.py`). That is I1 paying for itself: a
 second backend was addable without breaking four call sites.
 
-**Where it is imperfect.** `ph-app` is not a plugin — the CLI, the TUI and the
+**Where it is imperfect.** `phern` is not a plugin — the CLI, the TUI and the
 daemon are a host. The invariant is about the *harness*, not the shell around it.
 
 ### I2 — Registrations *and acquired resources* are effects that unwind
@@ -1202,7 +1202,7 @@ fires on the next step.
 says.** Every invariant here is enforced by a *row*, and every row is optional —
 so "pH enforces I3" was never true of pH, only of a deployment that mounted
 `agent-loop-invariant`, and nothing said which those were. P6-01's registry
-(`seams/invariants.py`) makes the enforced set enumerable and gives `ph doctor` a
+(`seams/invariants.py`) makes the enforced set enumerable and gives `phern doctor` a
 section for it, so a deployment promising less than this document is
 distinguishable from one promising all of it. It draws one distinction the
 report depends on: an invariant enforced *inline* (I3, which refuses on the path
@@ -1436,12 +1436,12 @@ Stated here rather than left to be discovered, per the codebase's own rule.
 | Gap | Status |
 |---|---|
 | `sandbox-local` ships `bwrap` and Seatbelt, both verified against a real kernel — the blind Seatbelt profile was wrong in four places a Mac found (P6-40). Landlock is unwritten | P6-04, P6-40; Landlock open |
-| `install_lifecycle` (signal handling, grace period, self-`SIGKILL`) has **no production caller**; `ph daemon` calls bare `anyio.run` | unwired |
+| `install_lifecycle` (signal handling, grace period, self-`SIGKILL`) has **no production caller**; `phern daemon` calls bare `anyio.run` | unwired |
 | `AgentCancelCause.kind` declares `hook` and `legacy`; neither is ever constructed | dead vocabulary |
 | `TurnEndReason(kind="interrupted")` is never constructed as a dataclass — it reaches logs only as repair's wire payload | dead vocabulary |
 | `SubagentRun.dispose` has no production caller; a model `delete()` leaves the parent-scope effect registered (it no-ops via re-entry) | dead handle |
 | `Session.first_live_seq` is written and read only by a test | unused |
-| `ph attachments gc` is cited as precedent in two docstrings but **does not exist** | doc drift |
+| `phern attachments gc` is cited as precedent in two docstrings but **does not exist** | doc drift |
 | `DowngradeReason` has one member and one producer; tier-driven narrowing records none (§6.6) | incomplete |
 | `_enforce`'s containment refusal (a scope outside the parent's) has **no test**; the no-scope branch does | untested |
 | Tool-call limit with `exit: "error"` — the "one failed `tool/result`, not a turn stop" reading is traced, not tested | untested |
@@ -1485,7 +1485,7 @@ Stated here rather than left to be discovered, per the codebase's own rule.
   were removed wholesale rather than repaired. Where the surrounding prose does
   not already name what is being pointed at, name it: `family_reach` in
   `seams/subagents.py` still finds it after the function has moved twice.
-- **`ph events`** prints the live producer/consumer matrix.
-- **`ph doctor --profile <name>`** mounts a profile and reports what it actually
+- **`phern events`** prints the live producer/consumer matrix.
+- **`phern doctor --profile <name>`** mounts a profile and reports what it actually
   composed — the effective containment tier, what the file rules reach, what runs
   model code.

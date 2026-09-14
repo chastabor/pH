@@ -1,15 +1,36 @@
 [build-system]
-requires = ["hatchling>=1.26"]
+requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [project]
 name = "ph-rlm"
-version = "0.0.1"
+version = "0.1.0"
 description = "pH RLM bundle: the CPython fd-3 code runtime, bindings, subagents and the Continual Harness."
 readme = "README.md"
 requires-python = ">=3.12"
 license = "MIT"
-dependencies = ["ph-core", "ph-runtime-guest", "dill>=0.3.8", "filelock>=3.15"]
+license-files = ["LICENSE"]
+authors = [{ name = "Charles Tabor" }]
+keywords = ["agent", "llm", "code-mode", "rlm", "sandbox", "subagents"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Topic :: Software Development",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Typing :: Typed",
+]
+dependencies = ["ph-core==0.1.0", "ph-runtime-guest==0.1.0", "dill>=0.3.8", "filelock>=3.15"]
+
+[project.urls]
+Homepage = "https://github.com/chastabor/pH"
+Repository = "https://github.com/chastabor/pH"
+Documentation = "https://github.com/chastabor/pH/blob/main/docs/README.md"
+Issues = "https://github.com/chastabor/pH/issues"
 
 [project.entry-points."ph.bundles"]
 rlm = "ph_rlm:BUNDLE"

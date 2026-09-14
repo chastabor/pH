@@ -181,7 +181,7 @@ class CodeGraphSeam:
         different line numbers, so sharing one index would hand out pointers
         that are quietly stale. The cost is that under a profile whose children
         run in worktrees, every throwaway tree leaves a database behind, and
-        `ph doctor` names only the current one. Stated here rather than left to
+        `phern doctor` names only the current one. Stated here rather than left to
         be discovered, which is this codebase's rule for a cache nothing
         collects (`ph.seams.uploads` says the same about attachments): deleting
         `$PH_CACHE/code-graph` reclaims all of them and costs a re-index.
@@ -195,7 +195,7 @@ class CodeGraphSeam:
         return self._lock
 
     def report(self) -> list[tuple[str, str]]:
-        """`ph doctor`'s section."""
+        """`phern doctor`'s section."""
         import tree_sitter
 
         # No `hasattr` guard: the row declares `inject=[FS]`, so `ctx.fs` is

@@ -1,7 +1,7 @@
 """Naming one event vocabulary or the other, and one namespace within it (P6-33).
 
 pH has two unrelated event vocabularies that share a `namespace/name` spelling:
-the **cordis bus** (in-process pub/sub between plugins, listed by `ph events`)
+the **cordis bus** (in-process pub/sub between plugins, listed by `phern events`)
 and the **session log** (durable, frozen-JSON, append-only). A selector names
 vocabulary and namespace at once:
 

@@ -218,7 +218,7 @@ def next_at(state: ScheduleState, *, now: int) -> int | None:
     The forward-looking twin of `due_at`, and deliberately a second function
     rather than a sign on the first: `due_at` answers "should this fire *now*,
     and for which missed moment", which is what the tick needs and the opposite
-    of what a person reading `ph agents schedule` wants. One function answering
+    of what a person reading `phern agents schedule` wants. One function answering
     both would have every caller branching on which question it got back.
 
     An overdue schedule answers with the moment it is overdue *for*, not with a
@@ -284,7 +284,7 @@ def _last_cron_before(spec: str, *, after: int, now: int) -> int | None:
 
     `croniter` is imported here rather than at module scope: `schedule` is a
     `base.yaml` row, so the module loads in every host, and the import is paid on
-    every `ph -p` and every TUI start that never sees a cron expression.
+    every `phern -p` and every TUI start that never sees a cron expression.
     """
     from croniter import croniter
 
@@ -328,7 +328,7 @@ class ScheduleService:
 
     `index` is how an appointment survives the *process* rather than only the log
     (P6-23). Optional, and absent is the shipped behaviour of every mode but the
-    daemon: a `ph -p` run with no `$PH_HOME` index still schedules, it simply
+    daemon: a `phern -p` run with no `$PH_HOME` index still schedules, it simply
     leaves nothing for a later daemon to find. When it is present every write here
     updates it, because the seam is the only party that knows the moment an
     appointment changes.
@@ -369,7 +369,7 @@ class ScheduleService:
         already cancelled — the fold keeps cancelled schedules visible
         (`subagent_roster`'s reason), so the second case would otherwise report
         success and append a redundant `schedule/cancelled` on every retry. To a
-        person running `ph agents schedule --cancel` twice, "cancelled" the
+        person running `phern agents schedule --cancel` twice, "cancelled" the
         second time is a claim about work that was already stopped.
         """
         state = self.states(session).get(schedule_id)

@@ -798,7 +798,7 @@ async def test_reading_a_log_nobody_writes_does_not_hold_it_open(tmp_path: Path)
     `forget` runs only for sessions this store *buffers* — so a log read by
     something that does not write it stayed open, with its `-wal` and `-shm`
     sidecars, for the life of the process. `read` guarded its chained walk and
-    `stored` guarded its header peeks; the fold behind `ph attachments gc` reads
+    `stored` guarded its header peeks; the fold behind `phern attachments gc` reads
     one database per stored session at a limit of 100 000 and had neither.
 
     A rule two callers had to remember was going to be forgotten by the third, so
@@ -933,7 +933,7 @@ def test_the_survey_and_the_reader_agree_on_how_deep_is_too_deep() -> None:
     `materialise` refuses past `MAX_DEPTH`; the survey has to call those chains
     unreadable or it goes quiet on exactly the shape `roll` manufactures — one
     generation per segment, so a long-running segmented session reaches the bound
-    by ordinary use, and `ph doctor` would report a healthy store while every
+    by ordinary use, and `phern doctor` would report a healthy store while every
     read of the newest segment raised.
     """
 
@@ -976,7 +976,7 @@ async def test_a_claimed_session_refuses_a_second_writer_until_released(
     same — a second process appending its own `seq` sequence to one log, which
     `_readmit` then refuses outright. The second claimant is refused by *name*,
     and the release is the first scope's disposal: what lets a passivated root or
-    a finished `ph -p` hand the session on with no lock file left behind.
+    a finished `phern -p` hand the session on with no lock file left behind.
     """
     assert isinstance(store, ClaimingStore), "both shipped backends can claim"
     first, second = Context(), Context()

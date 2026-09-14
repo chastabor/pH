@@ -214,7 +214,7 @@ async def test_the_provider_gets_the_whole_request(tmp_path: Path) -> None:
 
 
 async def test_the_effective_tier_is_reported_not_the_configured_one(tmp_path: Path) -> None:
-    """What `ph doctor` has to print. Configured-vs-effective is the whole
+    """What `phern doctor` has to print. Configured-vs-effective is the whole
     distinction: a `worktree` row over a non-repository declines on every
     acquire, and a doctor reading config would report containment nobody has."""
     seam = workspace_seam(tmp_path / "scratch")
@@ -253,7 +253,7 @@ async def test_acquire_and_dispose_bracket_each_other_in_the_log(tmp_path: Path)
 async def test_disposal_runs_the_providers_teardown_and_forgets_the_agent(
     tmp_path: Path,
 ) -> None:
-    """`of()` is how the prompt line and `ph doctor` ask what an agent holds, so
+    """`of()` is how the prompt line and `phern doctor` ask what an agent holds, so
     an entry outliving its agent would report a workspace that is gone."""
     released: list[str] = []
 
@@ -359,7 +359,7 @@ async def test_re_acquiring_does_not_let_the_old_handle_evict_the_new_one(
     put there, not whatever currently occupies the key.
 
     An unconditional removal would leave `of()` answering `None` for a live
-    workspace, which the prompt line and `ph doctor` would then repeat.
+    workspace, which the prompt line and `phern doctor` would then repeat.
     """
     seam = workspace_seam(tmp_path / "scratch")
     first_scope = seam.ctx.scope("first")
@@ -432,7 +432,7 @@ def test_every_kind_is_classified_the_same_way_by_all_three_predicates() -> None
     predicates is one a mistake in is expensive:
 
     * `project_access` is what a spawn records as `granted_access` and what
-      `ph doctor` prints per agent, so a wrong answer misreports containment.
+      `phern doctor` prints per agent, so a wrong answer misreports containment.
     * `fresh_root` gates provisioning. A `True` for `shared` would copy `.env`
       onto itself — destroying the file the provisioning exists to provide.
     * `discards_writes` is what the retention policy keys on, so a wrong `False`

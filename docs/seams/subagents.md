@@ -164,7 +164,7 @@ That per-parent number is a **fair share**, not a bound on the host: ten roots a
 four apiece is forty children. What the machine can carry is the work seam's
 `concurrency` config. The `rlm` bundle sets `subagent: 8` beside its per-parent
 number, so the two figures an operator compares sit in one file; `ph-core` ships
-no default naming a kind it does not produce. `ph daemon
+no default naming a kind it does not produce. `phern daemon
 --max-concurrent-children` overrides it, and both apply, the parent's first.
 
 ## Across a restart

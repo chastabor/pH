@@ -191,5 +191,5 @@ async def test_a_profile_that_cannot_honour_strict_does_not_start(mount: MountPr
 def test_the_strict_refusal_is_a_mount_refusal() -> None:
     """The type the run path maps to a sentence (P4-12). Pinned because the
     cheapest regression is a new refusal subclassing `RuntimeError` directly and
-    reaching `ph -p` as a traceback again."""
+    reaching `phern -p` as a traceback again."""
     assert issubclass(ContainmentUnavailableError, MountRefusal)

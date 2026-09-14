@@ -105,7 +105,7 @@ read and base64-encoded and then discarded by the renderer — the wire payload
 shrank and nothing else did, while a 5.5 MB string sat in the encode cache for
 the life of the process. Uploading is supposed to remove that work, not move it.
 
-## Pruned by `ph attachments gc`
+## Pruned by `phern attachments gc`
 
 Off the same reference set as the blobs, because the question is the same one —
 *does any stored session still point at this digest* — and answering it twice

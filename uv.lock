@@ -10,14 +10,28 @@ resolution-markers = [
 
 [manifest]
 members = [
-    "ph-app",
     "ph-code-graph",
     "ph-core",
     "ph-rlm",
     "ph-runtime-guest",
     "ph-stabilize",
     "ph-text-index",
-    "ph-workspace",
+    "phern",
+]
+
+[manifest.dependency-groups]
+dev = [
+    { name = "anyio", specifier = ">=4.4,<5" },
+    { name = "mypy", specifier = ">=1.11" },
+    { name = "ph-core", extras = ["otel"], editable = "packages/ph-core" },
+    { name = "ph-text-index", extras = ["local"], editable = "packages/ph-text-index" },
+    { name = "phern", extras = ["web"], editable = "packages/phern" },
+    { name = "pytest", specifier = ">=8.0" },
+    { name = "pytest-cov", specifier = ">=5.0" },
+    { name = "pytest-textual-snapshot", specifier = ">=1.0" },
+    { name = "ruff", specifier = ">=0.6" },
+    { name = "types-croniter", specifier = ">=3.0" },
+    { name = "types-pyyaml", specifier = ">=6.0" },
 ]
 
 [[package]]
@@ -1373,40 +1387,8 @@ wheels = [
 ]
 
 [[package]]
-name = "ph-app"
-version = "0.0.1"
-source = { editable = "packages/ph-app" }
-dependencies = [
-    { name = "anyio" },
-    { name = "filelock" },
-    { name = "httpx" },
-    { name = "ph-core" },
-    { name = "rich" },
-    { name = "textual" },
-    { name = "typer" },
-]
-
-[package.optional-dependencies]
-web = [
-    { name = "textual-serve" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "anyio", specifier = ">=4.4,<5" },
-    { name = "filelock", specifier = ">=3.15" },
-    { name = "httpx", specifier = ">=0.27" },
-    { name = "ph-core", editable = "packages/ph-core" },
-    { name = "rich", specifier = ">=13.0" },
-    { name = "textual", specifier = ">=8.2.5,<9" },
-    { name = "textual-serve", marker = "extra == 'web'", specifier = ">=1.1.3" },
-    { name = "typer", specifier = ">=0.12" },
-]
-provides-extras = ["web"]
-
-[[package]]
 name = "ph-code-graph"
-version = "0.0.1"
+version = "0.1.0"
 source = { editable = "packages/ph-code-graph" }
 dependencies = [
     { name = "ph-core" },
@@ -1423,7 +1405,7 @@ requires-dist = [
 
 [[package]]
 name = "ph-core"
-version = "0.0.1"
+version = "0.1.0"
 source = { editable = "packages/ph-core" }
 dependencies = [
     { name = "anyio" },
@@ -1455,7 +1437,7 @@ provides-extras = ["otel"]
 
 [[package]]
 name = "ph-rlm"
-version = "0.0.1"
+version = "0.1.0"
 source = { editable = "packages/ph-rlm" }
 dependencies = [
     { name = "dill" },
@@ -1474,7 +1456,7 @@ requires-dist = [
 
 [[package]]
 name = "ph-runtime-guest"
-version = "0.0.1"
+version = "0.1.0"
 source = { editable = "packages/ph-runtime-guest" }
 dependencies = [
     { name = "dill" },
@@ -1485,7 +1467,7 @@ requires-dist = [{ name = "dill", specifier = ">=0.3.8" }]
 
 [[package]]
 name = "ph-stabilize"
-version = "0.0.1"
+version = "0.1.0"
 source = { editable = "packages/ph-stabilize" }
 dependencies = [
     { name = "ph-core" },
@@ -1496,20 +1478,25 @@ requires-dist = [{ name = "ph-core", editable = "packages/ph-core" }]
 
 [[package]]
 name = "ph-text-index"
-version = "0.0.1"
+version = "0.1.0"
 source = { editable = "packages/ph-text-index" }
 dependencies = [
     { name = "numpy" },
     { name = "ph-core" },
-    { name = "sentence-transformers" },
-    { name = "torch", version = "2.14.0", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform == 'darwin'" },
-    { name = "torch", version = "2.14.0+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform != 'darwin'" },
     { name = "turbovec" },
 ]
 
 [package.optional-dependencies]
+local = [
+    { name = "sentence-transformers" },
+    { name = "torch", version = "2.14.0", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform == 'darwin'" },
+    { name = "torch", version = "2.14.0+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform != 'darwin'" },
+]
 nomic = [
     { name = "einops" },
+    { name = "sentence-transformers" },
+    { name = "torch", version = "2.14.0", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform == 'darwin'" },
+    { name = "torch", version = "2.14.0+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform != 'darwin'" },
 ]
 
 [package.metadata]
@@ -1517,64 +1504,62 @@ requires-dist = [
     { name = "einops", marker = "extra == 'nomic'", specifier = ">=0.7" },
     { name = "numpy", specifier = ">=1.20" },
     { name = "ph-core", editable = "packages/ph-core" },
-    { name = "sentence-transformers", specifier = ">=3.0" },
-    { name = "torch", specifier = ">=2.2", index = "https://download.pytorch.org/whl/cpu" },
+    { name = "ph-text-index", extras = ["local"], marker = "extra == 'nomic'", editable = "packages/ph-text-index" },
+    { name = "sentence-transformers", marker = "extra == 'local'", specifier = ">=3.0" },
+    { name = "torch", marker = "extra == 'local'", specifier = ">=2.2", index = "https://download.pytorch.org/whl/cpu" },
     { name = "turbovec", specifier = ">=1.0" },
 ]
-provides-extras = ["nomic"]
+provides-extras = ["local", "nomic"]
 
 [[package]]
-name = "ph-workspace"
-version = "0.0.0"
-source = { editable = "." }
+name = "phern"
+version = "0.1.0"
+source = { editable = "packages/phern" }
 dependencies = [
-    { name = "ph-app" },
+    { name = "anyio" },
+    { name = "filelock" },
+    { name = "httpx" },
     { name = "ph-code-graph" },
     { name = "ph-core" },
     { name = "ph-rlm" },
     { name = "ph-runtime-guest" },
     { name = "ph-stabilize" },
     { name = "ph-text-index" },
+    { name = "rich" },
+    { name = "textual" },
+    { name = "typer" },
 ]
 
-[package.dev-dependencies]
-dev = [
-    { name = "anyio" },
-    { name = "mypy" },
-    { name = "ph-app", extra = ["web"] },
+[package.optional-dependencies]
+local = [
+    { name = "ph-text-index", extra = ["local"] },
+]
+otel = [
     { name = "ph-core", extra = ["otel"] },
-    { name = "pytest" },
-    { name = "pytest-cov" },
-    { name = "pytest-textual-snapshot" },
-    { name = "ruff" },
-    { name = "types-croniter" },
-    { name = "types-pyyaml" },
+]
+web = [
+    { name = "textual-serve" },
 ]
 
 [package.metadata]
 requires-dist = [
-    { name = "ph-app", editable = "packages/ph-app" },
+    { name = "anyio", specifier = ">=4.4,<5" },
+    { name = "filelock", specifier = ">=3.15" },
+    { name = "httpx", specifier = ">=0.27" },
     { name = "ph-code-graph", editable = "packages/ph-code-graph" },
     { name = "ph-core", editable = "packages/ph-core" },
+    { name = "ph-core", extras = ["otel"], marker = "extra == 'otel'", editable = "packages/ph-core" },
     { name = "ph-rlm", editable = "packages/ph-rlm" },
     { name = "ph-runtime-guest", editable = "packages/ph-runtime-guest" },
     { name = "ph-stabilize", editable = "packages/ph-stabilize" },
     { name = "ph-text-index", editable = "packages/ph-text-index" },
+    { name = "ph-text-index", extras = ["local"], marker = "extra == 'local'", editable = "packages/ph-text-index" },
+    { name = "rich", specifier = ">=13.0" },
+    { name = "textual", specifier = ">=8.2.5,<9" },
+    { name = "textual-serve", marker = "extra == 'web'", specifier = ">=1.1.3" },
+    { name = "typer", specifier = ">=0.12" },
 ]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "anyio", specifier = ">=4.4,<5" },
-    { name = "mypy", specifier = ">=1.11" },
-    { name = "ph-app", extras = ["web"], editable = "packages/ph-app" },
-    { name = "ph-core", extras = ["otel"], editable = "packages/ph-core" },
-    { name = "pytest", specifier = ">=8.0" },
-    { name = "pytest-cov", specifier = ">=5.0" },
-    { name = "pytest-textual-snapshot", specifier = ">=1.0" },
-    { name = "ruff", specifier = ">=0.6" },
-    { name = "types-croniter", specifier = ">=3.0" },
-    { name = "types-pyyaml", specifier = ">=6.0" },
-]
+provides-extras = ["web", "local", "otel"]
 
 [[package]]
 name = "platformdirs"

@@ -22,7 +22,7 @@ keys on `session.seq`, so every read between appends is a dict hit: **104 ns, a
 
 **`croniter` is imported lazily** because `schedule` is a `base.yaml` row and so
 loads in every host: the import measured **25.4 ms**, about what pydantic costs,
-paid on every `ph -p` and every TUI start that never sees a cron expression.
+paid on every `phern -p` and every TUI start that never sees a cron expression.
 
 ## The bug that made `_local` a function
 
@@ -30,7 +30,7 @@ paid on every `ph -p` and every TUI start that never sees a cron expression.
 "nine in the morning" got four in the morning, and nothing said so. croniter
 works in UTC when handed a float and in the machine's zone when handed a naive
 datetime — an accident of the library rather than a decision. What made it visible
-was `ph agents schedule` printing the next fire time.
+was `phern agents schedule` printing the next fire time.
 
 ## Why every numeric field on the wire is milliseconds
 

@@ -35,7 +35,7 @@ through to the host. The probe writes a canary through a throwaway overlay and
 registers only if the host copy is untouched.
 
 **Nothing is ever installed.** A missing binary or an unavailable backend is a
-decline that says so, in `ph doctor`, through the diagnostics seam.
+decline that says so, in `phern doctor`, through the diagnostics seam.
 
 @module ph.seams.workspace_agentfs
 """
@@ -306,7 +306,7 @@ class AgentFsProvider:
     An overlay bounds exactly what a worktree bounds — writes that resolve against cwd
     — and misses exactly what a worktree misses, an absolute-path raw write. The rung
     between `worktree` and `sandbox` belongs to something that confines the process;
-    naming it here would make `ph doctor` overstate this.
+    naming it here would make `phern doctor` overstate this.
     """
 
     def describe_tier(self) -> TierDescription:
@@ -510,7 +510,7 @@ async def apply(ctx: Context, config: Config) -> None:
     `shared`, which is advisory, so a deployment that asked for *more* isolation
     would silently end up with none.
 
-    The result reaches `ph doctor` either way, because "why am I on worktrees" is
+    The result reaches `phern doctor` either way, because "why am I on worktrees" is
     a question a person asks of the tool rather than of the source, and a row that
     declined without saying so is indistinguishable from a row nobody mounted.
     """

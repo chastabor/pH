@@ -262,7 +262,7 @@ class Kernel:
     applied_limits: dict[str, Any] = field(default_factory=dict)
     """What the guest reported it could actually apply, from `boot-ack`.
 
-    **Stored because `ph doctor` reports it, and it is not always the request.**
+    **Stored because `phern doctor` reports it, and it is not always the request.**
     `KernelLimits` is what the host *asked* for; macOS refuses `RLIMIT_AS`
     outright, so a limit named in the request can simply not be in force. Printing
     the request there would claim a bound nothing enforces, which is E1's failure
@@ -1028,7 +1028,7 @@ class PythonCodeRuntime:
     _resolve_lock: anyio.Lock = field(default_factory=anyio.Lock)
 
     def describe(self) -> list[tuple[str, str]]:
-        """What `ph doctor` prints about the workers that run model code (I-2).
+        """What `phern doctor` prints about the workers that run model code (I-2).
 
         **Nothing here resolves the interpreter.** `environment()` shells out to
         `uv` to build the managed venv, and a diagnostic that took thirty
@@ -1059,7 +1059,7 @@ class PythonCodeRuntime:
         and for `_confinement`'s reason: the request is what the host asked for, and
         on a platform that refuses `RLIMIT_AS` — macOS does, with `ValueError:
         current limit exceeds maximum limit` — the number in force is not the number
-        configured. Printing the request would be `ph doctor` claiming a bound
+        configured. Printing the request would be `phern doctor` claiming a bound
         nothing holds, which is the shape E1 forbids one level up in the tier table.
 
         The weakest live kernel wins, again as `_confinement` does: one child that
@@ -1081,7 +1081,7 @@ class PythonCodeRuntime:
     def _confinement(self) -> str:
         """Whether authored code is bounded at the kernel, and by what.
 
-        Its own row in `ph doctor` because it is the difference between a cell that
+        Its own row in `phern doctor` because it is the difference between a cell that
         can write `/etc` and one that cannot, and because it is *conditional* — on a
         backend, and on the agent having a workspace. Read from the kernels that are
         actually running where there are any, so this reports what is true rather
@@ -1107,7 +1107,7 @@ class PythonCodeRuntime:
         """Resolve the interpreter once, on first use.
 
         Lazily, and in a worker thread: building the managed venv shells out to
-        `uv`, and neither `ph --dump-config` nor a session that runs no cells
+        `uv`, and neither `phern --dump-config` nor a session that runs no cells
         should pay for it.
         """
         async with self._resolve_lock:
@@ -1189,7 +1189,7 @@ class PythonCodeRuntime:
         same boundary from the same `workspace_policy`, and a deployment cannot end
         up with `tool-bash` confined and `run_code` not. It is *not* gated on the
         containment tier for the same reason: `ctx.shell` confines at every rung
-        where a backend exists, and `ph doctor`'s containment section already says
+        where a backend exists, and `phern doctor`'s containment section already says
         so in the sentence about commands the harness wraps.
 
         `None` when there is no backend, none that enforces, or no workspace to be

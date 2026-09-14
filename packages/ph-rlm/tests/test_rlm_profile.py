@@ -1,7 +1,7 @@
 """The `rlm` profile: it composes, it boots, and a turn runs through it (P3-20).
 
 `test_bundle.py` asserts things about the bundle *document*. This is about the
-**profile** — `ph --profile rlm` — which is a different claim with a different
+**profile** — `phern --profile rlm` — which is a different claim with a different
 failure mode: a bundle can be perfectly well-formed and still not be reachable,
 because nothing wired it to a name a person can type.
 
@@ -93,7 +93,7 @@ async def test_a_turn_runs_end_to_end_on_the_composed_profile(mount: MountProfil
     """P3-20's gate: the profile boots and a turn goes through it.
 
     Mounted from `resolve_profile("rlm")` through the shared `mount` fixture, so
-    what boots here is what `ph --profile rlm` composes — including the `tui`
+    what boots here is what `phern --profile rlm` composes — including the `tui`
     layer, which the bundle-level fixtures do not carry — and the session root
     is redirected rather than the developer's own. The interpreter is pinned to
     the host's, because building the managed venv shells out to `uv` and reaches

@@ -205,7 +205,7 @@ async def test_a_seam_with_nowhere_to_journal_still_spawns(
 
     A read-only `$PH_RUNTIME` is a deployment fact, and refusing to run `git`
     over it would trade a working harness for a tidier one. The hole is open
-    again in that deployment, which `ph doctor` says out loud — see `_describe`.
+    again in that deployment, which `phern doctor` says out loud — see `_describe`.
     """
     ctx: Context = await mount()
     seam = ctx.require(SUBPROCESS)

@@ -1,7 +1,7 @@
 # `ctx.invariants` — which invariants this deployment enforces, and whether they hold
 
 **Module:** `ph/seams/invariants.py` · **Row:** `invariants` · **Consumers:**
-`ph doctor`, the invariant rows themselves
+`phern doctor`, the invariant rows themselves
 
 ## The gap this closes
 
@@ -35,7 +35,7 @@ So an `Invariant` carries `id`, `statement`, `order`, and a `check` that is
 ```text
 ctx.invariants.register(invariant, *, scope=None)   -> Disposer
 ctx.invariants.enforced()        # what this profile actually mounts
-ctx.invariants.describe()        # for ph doctor
+ctx.invariants.describe()        # for phern doctor
 await ctx.invariants.verify()    # run every pollable check
 ```
 

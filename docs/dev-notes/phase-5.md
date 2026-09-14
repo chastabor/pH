@@ -4,7 +4,7 @@
 
 **Gate:** `ruff` + `ruff format` + `mypy --strict` across all five packages + 1 984 tests, green.
 
-Every mode before this phase ties an agent's life to a connection. `ph -p` exits
+Every mode before this phase ties an agent's life to a connection. `phern -p` exits
 with the turn, the TUI's root dies with the terminal, `--mode rpc` lives as long
 as stdin. Phase 5 is the inversion: **a run that takes an hour must not stop
 because a laptop lid closed.**
@@ -31,7 +31,7 @@ shape, and the last one is still open — deliberately, and printed.
 | P5-07 | Autonomous goals, and the three ways a run is allowed to end | `ph/seams/goals.py`, `ph/commands/autonomous.py` |
 | P5-08 | `SessionPersistence` as a Protocol, and Turso behind it | `ph/persistence/{protocol,turso}.py` |
 | P5-09 | OTLP as a *sink*, downstream of the redaction waterfall | `ph/seams/telemetry_otel.py` |
-| P5-10 | `ph agents` — seven commands, every one a real exchange | `ph_app/agents.py` |
+| P5-10 | `phern agents` — seven commands, every one a real exchange | `ph_app/agents.py` |
 | P5-11 | Lingering detection: the socket that logout takes with it (I-6) | `ph/lingering.py`, `DaemonServer.check_reachable` |
 | P5-12 | The non-guarantees, printed rather than documented (N5, I-2); these notes | `Supervisor.NON_GUARANTEES` |
 | P5-13 | The ask direction: one `Peer` at both ends, `AskDesk` fanning one ask to every front end | `ph_app/daemon/{duplex,frontend}.py` |
@@ -106,7 +106,7 @@ answered.
 
 ### 4. What the phase does not promise, and why that is printed
 
-`ph doctor` and `ph agents doctor` both print an **isolation** section, because
+`phern doctor` and `phern agents doctor` both print an **isolation** section, because
 rule 6 says a caveat only in the docs is a defect and the assumption being
 corrected is made by the reply itself: `daemon/status` says "roots: 7" a few
 rows above it, and seven roots reads as seven things that cannot hurt each
@@ -136,7 +136,7 @@ what is on record — but a `StoredSession` cannot say whether a log holds an
 appointment, so choosing which roots to wake means reading every log; mounting a
 root is a whole profile, workspace and lease, which is the cost P5-05 exists to
 *release*; and a daemon that auto-mounted every stored root would hold every
-session's lease and refuse the `ph -p` its owner runs next. The shape that
+session's lease and refuse the `phern -p` its owner runs next. The shape that
 answers all three is an index of live schedules rather than a scan. Until then it
 is asserted — `test_non_guarantees.py` fails the day somebody adds rehydration,
 which is the correct way for a non-guarantee to end.

@@ -14,7 +14,7 @@ module constant: a test that had to write to `/var/lib/systemd/linger` could not
 run at all, and one that skipped itself on the strength of the real host's
 answer would prove whatever that host happened to say. The `reaped_host` fixture
 in the repo-root `conftest.py` is where that redirection lives, once — reachable
-from both packages' suites, which `packages/ph-app/tests/daemon_helpers.py` is
+from both packages' suites, which `packages/phern/tests/daemon_helpers.py` is
 not.
 """
 

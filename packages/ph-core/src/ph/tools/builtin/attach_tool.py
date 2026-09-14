@@ -184,7 +184,7 @@ async def apply(ctx: Context, config: Config) -> None:
             # rather than merely safe: the blob lands in `$PH_HOME/attachments`,
             # which a workspace restore does not undo and *must not* — the log
             # references it, so collecting it would make the session unresumable
-            # (`ph attachments gc` is the only thing allowed to, and only for a
+            # (`phern attachments gc` is the only thing allowed to, and only for a
             # digest no session mentions). `/revert` listing it as uncovered is
             # therefore the true statement, not the cautious one.
             is_concurrency_safe=True,

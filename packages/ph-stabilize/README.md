@@ -12,7 +12,7 @@ there — which is the whole integration thesis (D12), and the reason a deployme
 that wants the plain harness gets the plain harness.
 
 ```bash
-ph --profile rlm-stable --provider llama --model <model> --mode tui
+phern --profile rlm-stable --provider llama --model <model> --mode tui
 ```
 
 The package registers the `stabilize` **bundle** (`src/ph_stabilize/bundle.yaml`),
@@ -24,7 +24,7 @@ bundle: an install without this distribution composes the same profiles and
 simply never compacts. Compaction is the row that earns that, because a session
 that grows until the provider refuses it is a defect in any posture; the rest
 come along because a bundle is the unit a profile can name, and they are inert
-until configured. `ph doctor` reports which of them actually activated.
+until configured. `phern doctor` reports which of them actually activated.
 
 ## The rows
 
@@ -56,7 +56,7 @@ tool.
 The one row that is **not** inert on arrival is `permissions-fs`: it ships a
 rule sending writes outside the agent's workspace to `interrupt`. That is E6's
 intended default rather than an oversight, but it is a behaviour change a
-deployment should know it inherited — `ph config --row permissions-fs` prints
+deployment should know it inherited — `phern config --row permissions-fs` prints
 what is in force.
 
 ## The tool, and the command
@@ -86,7 +86,7 @@ that names the bundle, insert the rows you want by name — they are ordinary
 plugin entry points, so this works against any profile:
 
 ```bash
-ph --patch '{insert: [{id: tool-result-offload, name: tool-result-offload}]}' \
+phern --patch '{insert: [{id: tool-result-offload, name: tool-result-offload}]}' \
    --profile llama -p "…"
 ```
 

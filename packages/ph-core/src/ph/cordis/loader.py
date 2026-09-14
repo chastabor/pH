@@ -328,7 +328,7 @@ def _check_isolation(rows: Sequence[Row]) -> None:
     """Every `isolate:` names a row that exists, is enabled, and is not itself.
 
     Checked once the layers are composed rather than at mount, so `--dump-config`
-    refuses the same profile `ph` would — a private copy of a row a later layer
+    refuses the same profile `phern` would — a private copy of a row a later layer
     removed is a mount that fails after the person has read a dump that looked
     fine.
     """
@@ -436,7 +436,7 @@ def _entry_point_targets(group: str = ENTRY_POINT_GROUP) -> dict[str, str]:
 def _state(fork: ForkScope) -> str:
     """One fork's state, as `Mount.topology` prints it.
 
-    Five, and the middle three are what a *live* reader sees — `ph doctor` reads
+    Five, and the middle three are what a *live* reader sees — `phern doctor` reads
     after the fixpoint and meets only the first and the fourth. `activating`:
     every key is met and `reconcile` has not reached it yet. `unwound · waiting
     on <key>`: it was active and a key it injects went away — a provider swap took
@@ -461,7 +461,7 @@ def import_plugin_modules() -> list[ModuleType]:
     """Import the module behind every registered plugin, in name order.
 
     Event declarations live in the modules that own them, so a tool that wants
-    the complete registry — `ph events` — imports the plugin surface rather
+    the complete registry — `phern events` — imports the plugin surface rather
     than a hand-kept list. Third-party wheels are covered by the same call.
     """
     modules: list[ModuleType] = []
@@ -736,7 +736,7 @@ class Mount:
         Disabled rows are listed too — "this was turned off by `rlm-stable.yaml`"
         is what a person asking "why isn't X running" needs, and omitting it would
         make a disabled row indistinguishable from an absent one. Then the
-        isolated realms under the root: none at `ph doctor` time, since an agent's
+        isolated realms under the root: none at `phern doctor` time, since an agent's
         scope is created when it runs, and that absence is stated rather than left
         as a missing line.
         """

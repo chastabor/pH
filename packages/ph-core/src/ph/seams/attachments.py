@@ -17,7 +17,7 @@ sessions attaching the same photo share one file, and a fork references exactly
 the digests its parent does rather than a directory the parent owns — which is
 what stops deleting a parent session from breaking its children. The cost is
 that collection needs a fold over *every* session, so nothing here collects
-automatically; that is an explicit operation (P7-01's `ph attachments gc`),
+automatically; that is an explicit operation (P7-01's `phern attachments gc`),
 deliberately unlike the spill store's per-owner sweep.
 
 **Reading a path is the caller's business, not this store's** (I-9). The store
@@ -313,7 +313,7 @@ async def apply(ctx: Context, config: Config) -> None:
 
 # ------------------------------------------------------------- collection --
 #
-# `ph attachments gc` (P7-01). Here rather than in the command for
+# `phern attachments gc` (P7-01). Here rather than in the command for
 # `stored_survivors`' reason: the fold is the part with rules, the command is a
 # way to ask for it, and a second asker — a diagnostic, a daemon sweep somebody
 # later wants — must not re-derive which blobs are safe to remove.

@@ -249,7 +249,7 @@ def test_a_parked_user_question_is_settled_too() -> None:
 
     `pending_questions` is `pending_approvals` with different nouns — asked,
     never answered, log is the pending state — and it had the identical bug.
-    Fixing only the approval half would have left `ph doctor` declaring the gap
+    Fixing only the approval half would have left `phern doctor` declaring the gap
     that remained while the one that closed went unmentioned, and a resumed log
     keeping a ghost question that "what needs your attention" lists forever.
 

@@ -19,7 +19,7 @@ row without them gets a refusal naming what to install rather than an
 `ImportError` from the loader.
 
 **Nothing here half-mounts**: either the row can export or it refuses. Building a
-provider with no exporter would have `ph doctor` report a healthy telemetry sink
+provider with no exporter would have `phern doctor` report a healthy telemetry sink
 shipping to nowhere.
 
 @module ph.seams.telemetry_otel

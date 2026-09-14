@@ -552,7 +552,7 @@ def test_the_bundle_ships_the_provider_beside_the_seam() -> None:
     This seam registers no tools until an embedder is claimed, so a bundle
     carrying only `text-index` would mount a service and advertise nothing —
     and nothing would fail. The profile would compose, the row would activate,
-    `ph doctor` would show the section, and the model would simply never be
+    `phern doctor` would show the section, and the model would simply never be
     offered `text_search`. Both rows, or the bundle means nothing.
     """
     from ph.cordis import Profile
@@ -816,7 +816,7 @@ async def test_preload_refuses_the_mount_rather_than_failing_mid_turn(
 ) -> None:
     """The cookbook's rule, and the whole reason `preload` exists.
 
-    An unattended run — a daemon, a scheduled tick, `ph -p` in CI — has nobody
+    An unattended run — a daemon, a scheduled tick, `phern -p` in CI — has nobody
     to type `/text-index install`, so without this the first thing it learns
     about an unreachable model is a failed tool call inside somebody's turn.
     `MountRefusal` is what every command that mounts a profile turns into a
@@ -878,7 +878,7 @@ async def test_the_weights_land_under_the_cache_root(
     """Not `~/.cache/huggingface`, which no pH root covers.
 
     Left to `sentence-transformers` a gigabyte of weights would sit somewhere
-    `ph doctor` never mentions and `rm -rf $PH_CACHE` would not reclaim.
+    `phern doctor` never mentions and `rm -rf $PH_CACHE` would not reclaim.
     """
     from ph_text_index import LocalConfig
     from ph_text_index._embed import SentenceTransformerEmbedder

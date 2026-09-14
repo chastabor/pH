@@ -3,7 +3,7 @@
 Every other workspace module tests a *mechanism*: `test_workspace_git.py` drives
 real `git worktree`, `test_workspace_lifecycle.py` pins who acquires and when,
 `test_containment.py` pins which rung a role gets, `test_diagnostics.py` pins
-what `ph doctor` renders. This module tests the **claims** — §4.8's `bounds`,
+what `phern doctor` renders. This module tests the **claims** — §4.8's `bounds`,
 `does NOT bound` and `buys` — because those are what a person reads before
 deciding what they are protected from, and a claim is the one part of a design
 that rots without any code changing.
@@ -90,14 +90,14 @@ async def test_a_relative_raw_write_is_bounded_by_the_tree(
 async def test_an_absolute_raw_write_escapes_the_tree(mount: MountProfile, tmp_path: Path) -> None:
     """E13, asserted so the table cannot regress.
 
-    This is the test that keeps `ph doctor` honest. A raw write to an absolute
+    This is the test that keeps `phern doctor` honest. A raw write to an absolute
     path never consults a cwd, so it lands where it was told to. Asserting the
     escape — rather than leaving it undocumented, or asserting a bound that is
     not there — is what makes that column a checked claim instead of a hopeful
     sentence.
 
     If this ever fails because the write was *contained*, the fix is not to
-    delete it: something now confines at this rung, and the table, `ph doctor`
+    delete it: something now confines at this rung, and the table, `phern doctor`
     and E13 all have to say so.
 
     The target is under `tmp_path` and outside the worktree, which is as far
@@ -111,7 +111,7 @@ async def test_an_absolute_raw_write_escapes_the_tree(mount: MountProfile, tmp_p
     assert code == 0, output
     assert outside.read_text(encoding="utf-8") == "written", (
         "the worktree tier contained an absolute-path write — if that is now "
-        "true, the tier table and ph doctor are wrong and E13 must be revised"
+        "true, the tier table and phern doctor are wrong and E13 must be revised"
     )
 
 
@@ -163,7 +163,7 @@ async def test_an_ephemeral_tree_is_discarded_with_its_work(
 def test_the_table_says_what_the_two_writes_above_showed() -> None:
     """The prose and the behaviour, pinned to each other.
 
-    `TIERS` is what `ph doctor` renders verbatim and what P6-06's docs test will
+    `TIERS` is what `phern doctor` renders verbatim and what P6-06's docs test will
     check, so this is the tripwire for a reword that quietly promises more than
     the rung delivers. Positive claims only: a *negative* substring check would
     trip on a rewording that made the sentence more honest and pass one that

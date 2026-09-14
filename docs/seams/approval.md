@@ -122,7 +122,7 @@ Two rules from the pipeline that matter here:
 
 No config. The seam is mounted everywhere; what varies is whether an answerer is
 registered, and a profile with no front end simply denies — which is the correct
-posture for `ph -p`, a scheduled tick or a sandboxed run.
+posture for `phern -p`, a scheduled tick or a sandboxed run.
 
 ## What it does not do
 

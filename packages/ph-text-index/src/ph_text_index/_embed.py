@@ -109,7 +109,7 @@ class SentenceTransformerEmbedder:
     """A local `sentence-transformers` model, loaded on first use.
 
     **Not at mount.** The first load downloads weights, and a harness that
-    stalled for a few hundred megabytes before it could answer `ph doctor` would
+    stalled for a few hundred megabytes before it could answer `phern doctor` would
     be paying for a capability the session may never call. The refusal that
     belongs at mount is the one about the *package* being absent, which is
     cheap; the model itself is acquired when something asks for a vector.
@@ -125,7 +125,7 @@ class SentenceTransformerEmbedder:
     The row passes `$PH_CACHE/models`, and that is the point: left alone,
     `sentence-transformers` writes to `$HF_HOME` or `~/.cache/huggingface` —
     **outside all three of pH's roots**, so a gigabyte of weights would sit
-    somewhere `ph doctor` never mentions and deleting `$PH_CACHE` would not
+    somewhere `phern doctor` never mentions and deleting `$PH_CACHE` would not
     reclaim. Rebuildable and large is exactly the lifecycle `$PH_CACHE` names
     (Q1), and it is where the runtime venv lives for the same reason.
 

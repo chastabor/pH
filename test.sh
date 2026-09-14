@@ -80,7 +80,7 @@ NEW_FAILURES=0
 # pytest has added `pytest-of-<user>/pytest-<n>/<test-name>0/`; a representative
 # daemon socket lands at **126 bytes** and the bind fails with `AF_UNIX path too
 # long`. Measured: that single cause accounts for ~170 failures and ~53 errors
-# across `packages/ph-app` — the daemon, TUI, web and agents-CLI suites — none of
+# across `packages/phern` — the daemon, TUI, web and agents-CLI suites — none of
 # which are real. With a short TMPDIR the same path is 87 bytes and every one of
 # them passes.
 #
@@ -386,7 +386,7 @@ EOF
 # `baseUrl` in it, and matching the example instead of the setting would be the
 # same bug one layer down.
 SMOKE_TESTS="tests/test_local_server.py"
-SMOKE_PROFILE="packages/ph-app/src/ph_app/profiles/llama.yaml"
+SMOKE_PROFILE="packages/phern/src/ph_app/profiles/llama.yaml"
 
 profile_base_url() {
   grep -v '^[[:space:]]*#' "$SMOKE_PROFILE" 2>/dev/null |

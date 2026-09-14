@@ -519,7 +519,7 @@ async def test_an_empty_rule_set_attaches_nothing(mount: MountProfile, tmp_path:
     Not "allowing everything through a predicate that says yes": `hide` is
     consulted once per file a walk visits, so a `grep` over a repository would
     pay a Python call per candidate to answer a question nobody asked. The
-    service is still published, because "no rules" is an answer `ph doctor`
+    service is still published, because "no rules" is an answer `phern doctor`
     wants to be able to give.
     """
     (tmp_path / "secret.env").write_text("TOKEN=1\n", encoding="utf-8")
@@ -573,7 +573,7 @@ async def test_the_reading_reaches_doctor_even_with_no_rules(
 
 
 async def test_the_reading_names_each_rule(mount: MountProfile, tmp_path: Path) -> None:
-    """A person reading `ph doctor` is asking "what is refused here", and a
+    """A person reading `phern doctor` is asking "what is refused here", and a
     count answers a different question than the one they asked."""
     ctx = await _mounted(mount, tmp_path, {"paths": ["*.env"], "mode": "deny"})
 

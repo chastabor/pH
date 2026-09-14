@@ -10,8 +10,8 @@ the runtime. `ph_rlm.kernel` is pH's own CPython subprocess and
 [`ph-runtime-guest`](../ph-runtime-guest/) is its other half.
 
 ```bash
-ph --profile rlm --provider llama --model <model> --mode tui
-ph --profile rlm-stable --provider llama --model <model> --mode tui   # gates on
+phern --profile rlm --provider llama --model <model> --mode tui
+phern --profile rlm-stable --provider llama --model <model> --mode tui   # gates on
 ```
 
 The package registers a **bundle**, so `ph-app` composes the `rlm` profiles
@@ -94,7 +94,7 @@ rows both bundles ship off. To layer it onto something else, name the bundle —
 or patch a single row:
 
 ```bash
-ph --patch '{id: code-runtime-python, config: {python: host}}' --profile rlm -p "…"
+phern --patch '{id: code-runtime-python, config: {python: host}}' --profile rlm -p "…"
 ```
 
 ```yaml

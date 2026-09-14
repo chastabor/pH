@@ -216,14 +216,14 @@ class Config(WireModel):
     legitimate turn, while five identical failures in a row is not a long task
     but a stuck one. A deployment that wants a ceiling says so.
 
-    The four options nest, so `ph config` shows each as one line with its
+    The four options nest, so `phern config` shows each as one line with its
     sub-fields in the default — the per-field reasoning lives on those fields
     (`CallBudget.turn_limit` is the one with a consequence worth reading before
     setting it).
     """
 
     # No docstrings here, deliberately: each of these *is* another config model,
-    # and `ph config` takes an option's summary from the model that defines it
+    # and `phern config` takes an option's summary from the model that defines it
     # when the field says nothing (`catalog._nested_doc`). A paragraph here would
     # paraphrase the four classes below and go stale against them first, in the
     # one command whose claim is that it cannot drift from the code.

@@ -28,18 +28,18 @@ from ph.testing import ReapedHost
 pytest_plugins = ["app_fixtures", "rlm_fixtures"]
 """The two per-package fixture sets, registered from the **one** conftest.
 
-They were `packages/ph-app/tests/conftest.py` and
+They were `packages/phern/tests/conftest.py` and
 `packages/ph-rlm/tests/conftest.py`, which is what kept the test trees out
 of mypy: two modules named `conftest` are a duplicate mypy refuses, and no
 flag fixes it because the unique name it would need —
-`packages.ph-app.tests.conftest` — is not an identifier (issue 32).
+`packages.ph-rlm.tests.conftest` — is not an identifier (issue 32).
 
 Registering them here rather than merging their bodies into this file keeps
 each set beside the tests it serves, and `pythonpath` in `pyproject.toml` is
 what makes them importable by name at startup. It also fixed a latent bug
 the trees had documented in five separate comments: `from conftest import
 ROW` resolved to whichever conftest won the name under full collection, so
-ph-rlm's row constants were reachable from ph-app's tree and vice versa.
+ph-rlm's row constants were reachable from the app's tree and vice versa.
 `pytest_plugins` is only honoured in a *root* conftest, which is the other
 reason the registration lives here."""
 
@@ -247,7 +247,7 @@ def reaped_host(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> ReapedHost:
     variable is how a rule comes to be half applied.
 
     Here rather than in either package's tests because it is needed from both,
-    and `packages/ph-app/tests/daemon_helpers.py` is out of reach of the ph-core
+    and `packages/phern/tests/daemon_helpers.py` is out of reach of the ph-core
     suite. It is the same argument `_isolated_home` above makes at greater
     length, and the same hazard: this patches a **module global**
     (`ph.lingering.LINGER_DIR`), so a copy that got missed after a rename would

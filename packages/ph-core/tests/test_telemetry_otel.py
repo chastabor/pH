@@ -9,7 +9,7 @@ and that the severity table it writes out by hand still matches OTel's scale.
 
 An earlier draft treated the two optional distributions differently: it refused
 without the SDK, but built a provider **with no exporter** when only the OTLP half
-was missing. That is the silent no-op reached through the other door — `ph doctor`
+was missing. That is the silent no-op reached through the other door — `phern doctor`
 would have reported a healthy telemetry sink shipping to nowhere. Either the row
 can export or it refuses.
 
@@ -98,7 +98,7 @@ async def test_the_row_refuses_rather_than_shipping_nowhere(
 
     The SDK brings the provider; the OTLP *distribution* brings a transport. An
     earlier draft refused for the first and quietly no-opped for the second, so
-    a deployment with `opentelemetry-sdk` alone got a `ph doctor` reporting a
+    a deployment with `opentelemetry-sdk` alone got a `phern doctor` reporting a
     healthy telemetry sink that shipped nothing. Blocking the import is how CI
     reaches a branch the dev group otherwise makes unreachable — the extra is
     installed for every other test in this file.

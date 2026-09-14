@@ -53,7 +53,7 @@ async def apply(ctx: Context, config: Allowances) -> None:
 
 
 def describe(seam: SandboxSeam) -> list[tuple[str, str]]:
-    """What `ph doctor` prints — and what `/sandbox` prints, from the same function.
+    """What `phern doctor` prints — and what `/sandbox` prints, from the same function.
 
     Read live rather than at mount: the row can be re-applied, and the egress
     bridge that decides whether `allowlist` means anything is another row's.

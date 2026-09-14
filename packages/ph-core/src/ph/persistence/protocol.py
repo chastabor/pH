@@ -65,7 +65,7 @@ class StoredSession:
     A listing consumer finally needed it, which is the bar the notes below set
     for adding a field. `read_own` takes `family` and says it is *not* a hint:
     with it a log is a path, without it a directory search. A fold over every
-    stored session — `ph attachments gc` — read one log per row and paid that
+    stored session — `phern attachments gc` — read one log per row and paid that
     search on each, so listing 4 000 sessions across 1 000 families cost a scan
     per session on top of the listing's own.
 
@@ -122,7 +122,7 @@ class SessionArchive(Protocol):
     once and a real backend satisfies both.
 
     `read` and `read_own` are not interchangeable, and the folds pick deliberately:
-    `ph attachments gc` wants `read_own`, because a chained read fails when an
+    `phern attachments gc` wants `read_own`, because a chained read fails when an
     ancestor is missing and would refuse a collection that is safe to make;
     `stored_survivors` wants `read`, because a tree is only accounted for by the
     whole lineage that built it.
@@ -223,8 +223,8 @@ class ClaimingStore(Protocol):
 
     **Optional, and its own Protocol rather than a `locate() is not None` probe.**
     The lease used to be the daemon's: it asked the store for a path and locked
-    beside it, so only daemons were refused and `ph -p --session x` appended to
-    a log a daemon held — or to one another `ph -p` had just written, which was
+    beside it, so only daemons were refused and `phern -p --session x` appended to
+    a log a daemon held — or to one another `phern -p` had just written, which was
     enough on its own to make the session unopenable. The writer is the store,
     so the claim is the store's, and every host reaches it through one
     `open_session`.
@@ -253,7 +253,7 @@ def lineage_faults_of(
     cannot explain — an unreadable ancestor silently drops a whole subtree from
     its count — and a resume, or a future collector, wants the same question
     before it acts. Trapped inside a `Diagnostic`, the survey was reachable only
-    by running `ph doctor`; here the diagnostic is one presentation of it.
+    by running `phern doctor`; here the diagnostic is one presentation of it.
 
     Backend-neutral on purpose, and so not a `SessionPersistence` method: it
     needs only the listing and `exists`, both already on the Protocol, and every

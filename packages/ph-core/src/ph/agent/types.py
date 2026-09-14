@@ -5,7 +5,7 @@ The waterfall payloads are frozen dataclasses rather than string-keyed dicts so
 a listener's signature *is* the contract: the limits and permissions plugins
 (Phase 4) that own `agent/pre-step`, and the retry plugin on
 `agent/request-error`, read fields the type checker knows about, and
-`ph events` can name the payload beside the event.
+`phern events` can name the payload beside the event.
 
 @module ph.agent.types
 """

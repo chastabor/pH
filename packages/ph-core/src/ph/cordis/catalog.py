@@ -2,7 +2,7 @@
 
 A profile is a list of rows and a blob of config per row, and until now the only
 way to learn what a row accepted was to open its module and read the `Config`
-class. That is the same failure `ph events` exists to fix one registry over: a
+class. That is the same failure `phern events` exists to fix one registry over: a
 hand-kept table of options drifts from the code the moment somebody adds a field,
 and the person it drifts under is the one editing a YAML file with no schema.
 
@@ -106,7 +106,7 @@ def _nested_doc(annotation: object) -> str:
     line in the table and its sub-fields live inside the rendered default. Left
     to itself that line says *nothing*, and the obvious repair — a docstring on
     the field restating the model — is the copy this catalog exists to avoid:
-    `ph config`'s whole claim is that it cannot drift from the code, and a
+    `phern config`'s whole claim is that it cannot drift from the code, and a
     hand-written paragraph next to the prose it paraphrases drifts first.
 
     So a field with nothing of its own to say borrows the definition's summary.
@@ -152,7 +152,7 @@ def config_catalog(*, group: str = ENTRY_POINT_GROUP) -> list[dict[str, Any]]:
     choosing between when they go looking.
 
     A row that cannot be imported is reported with its error rather than
-    skipped, for the reason `ph doctor` reports a failing section in place: the
+    skipped, for the reason `phern doctor` reports a failing section in place: the
     catalog is consulted when something is already confusing, and a row that
     silently vanished from it is the least helpful possible response.
     """

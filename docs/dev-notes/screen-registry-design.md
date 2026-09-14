@@ -14,7 +14,7 @@ Three asks, one mechanism:
 1. **Plugin screens.** A row should be able to contribute a screen to the TUI
    the way it already contributes a tool, a command or a prompt section.
 2. **The trajectory, reachable from the chat.** P3-25's view opens only via
-   `ph --mode trajectory`; there is no route from a running session.
+   `phern --mode trajectory`; there is no route from a running session.
 3. **Cross-navigation by `sourceSeq`.** The join is stored on both sides and
    read by neither.
 
@@ -167,7 +167,7 @@ dsh does not do it either: its trajectory is a tab in `conversation.view`.
 - the trajectory opens over a live chat and `escape` returns to it with the
   transcript's scroll and focus intact;
 - a record jumps to its transcript row, and a transcript row to its record;
-- `ph --mode trajectory` still mounts nothing — asserted as today, by reading a
+- `phern --mode trajectory` still mounts nothing — asserted as today, by reading a
   file with no context in the test.
 
 ---

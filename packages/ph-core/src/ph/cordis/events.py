@@ -3,7 +3,7 @@
 dsh checks every dispatch site against an `@mode`-tagged catalog at build time.
 Python has no such tag, so pH declares events at import time instead: an event
 name carries exactly one dispatch mode, and dispatching it through a different
-method raises. The same registry backs `ph events`, the producer/consumer
+method raises. The same registry backs `phern events`, the producer/consumer
 matrix (P0-04).
 
 @module ph.cordis.events
@@ -102,7 +102,7 @@ class EventRegistry:
     def matrix(self) -> list[dict[str, Any]]:
         """The producer/consumer matrix, as data.
 
-        dsh generates `event-producer-consumer.md` from its catalog; `ph events`
+        dsh generates `event-producer-consumer.md` from its catalog; `phern events`
         renders this list instead.
         """
         return [

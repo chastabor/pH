@@ -305,7 +305,7 @@ class JjWorkspaceProvider:
         `worktree add` onward.
 
         Declines by raising, like every tier, so the reason survives to
-        `workspace/acquired` and `ph doctor` rather than becoming an unexplained
+        `workspace/acquired` and `phern doctor` rather than becoming an unexplained
         `shared` (E15).
         """
         managed = await self._managed(base)
@@ -1015,7 +1015,7 @@ async def apply(ctx: Context, config: Config) -> None:
     directory, which is not where agents work.
 
     **Nothing is ever installed, and no repository is ever converted.** A missing
-    binary is a decline that says so, in `ph doctor`, through the diagnostics
+    binary is a decline that says so, in `phern doctor`, through the diagnostics
     seam — the standing provisioning rule, and the reason this row is safe to
     layer in a profile that runs on hosts without jj.
     """

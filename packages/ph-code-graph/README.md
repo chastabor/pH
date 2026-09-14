@@ -7,7 +7,7 @@ One row, `code-graph`, registering two tools. No Node, no Rust toolchain, no
 submodule — tree-sitter through a Python wheel, the graph in stdlib `sqlite3`.
 
 ```bash
-ph --patch '{insert: [{id: code-graph, name: code-graph}]}' --profile llama \
+phern --patch '{insert: [{id: code-graph, name: code-graph}]}' --profile llama \
    -p "index packages/ph-core, then tell me what breaks if I change claim_slot"
 ```
 
@@ -59,7 +59,7 @@ Mode work in this package at all. The `rlm-indexed` profile is `rlm-stable` plus
 this bundle and `ph-text-index`'s:
 
 ```bash
-ph --profile rlm-indexed --provider llama --model <model> --mode tui
+phern --profile rlm-indexed --provider llama --model <model> --mode tui
 ```
 
 This package registers a `ph.bundles` entry point, which is what lets `ph-app`
@@ -208,7 +208,7 @@ Provision it on purpose rather than during someone's turn:
 ```
 
 A **command**, not a tool — a person asks the harness to provision, and it costs
-no model turn. `ph doctor` reports the same path and the index's state without
+no model turn. `phern doctor` reports the same path and the index's state without
 mounting an agent. It matters less here than for `ph-text-index`, whose model is
 a download rather than an unpack, but the question should have one answer per
 plugin asked the same way.

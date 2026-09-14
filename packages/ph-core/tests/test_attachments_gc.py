@@ -1,4 +1,4 @@
-"""P7-01's collection rule — the fold behind `ph attachments gc`.
+"""P7-01's collection rule — the fold behind `phern attachments gc`.
 
 The rule was written into the plan before anything implemented it: **a blob any
 stored log still references must not be collected, however old it is.** Age is

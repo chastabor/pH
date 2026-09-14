@@ -62,7 +62,7 @@ A `Job` carries `id`, `kind`, `label`, `state`, `token`, `result`, `error` and
 `release`.
 
 `bind` is how the seam gets a task group to run in. **Without one bound, a job
-runs inline** — which is what makes `ctx.jobs` usable in a one-shot `ph -p` run
+runs inline** — which is what makes `ctx.jobs` usable in a one-shot `phern -p` run
 where there is no supervisor, and is also why `Context.detach()` exists: an
 admission path that started a job inline would block on the very work it was
 trying to detach.
@@ -127,7 +127,7 @@ acquires in that same order.
 
 A kind that is absent from the table is uncapped, which is why the shipped
 default names only `subagent`: a sweeper or a watcher queued behind a fan-out of
-children is a housekeeping pass that stops happening. `ph daemon
+children is a housekeeping pass that stops happening. `phern daemon
 --max-concurrent-children` overrides the one kind people meet, and does it by
 patching this row so `--dump-config` reports the number actually in force.
 

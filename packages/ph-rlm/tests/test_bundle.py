@@ -194,7 +194,7 @@ async def test_the_runtime_tells_doctor_what_runs_model_code(
 ) -> None:
     """I-2's reading, contributed rather than imported (P4-12).
 
-    `ph-app` cannot import this package, so the worker model reaches `ph doctor`
+    `ph-app` cannot import this package, so the worker model reaches `phern doctor`
     through `ctx.diagnostics` — and the assertion that matters is the last one:
     **reading it must not resolve the interpreter**, because `environment()`
     shells out to `uv` and a diagnostic that builds a venv the first time

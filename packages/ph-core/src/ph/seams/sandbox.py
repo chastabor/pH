@@ -146,7 +146,7 @@ Package indexes and the places their documentation lives — an agent that canno
 `uv add` or read `docs.rs` is one somebody switches the sandbox off for, and a
 sandbox switched off bounds nothing. **A starting point, not a judgement**: the
 row it seeds is the user's to trim or extend, from the profile or from `/sandbox`,
-and `ph doctor` prints what is in force.
+and `phern doctor` prints what is in force.
 
 Exact hosts, with one wildcard. `*.githubusercontent.com` is the one because
 GitHub serves raw files, release assets and avatars from a family of
@@ -382,7 +382,7 @@ class Denial:
 
     def record(self, agent: str | None) -> dict[str, JsonValue]:
         """The `sandbox/denied` payload. Carries the sentence, so every reader —
-        the TUI, the trajectory, `ph agents attach` — prints one account."""
+        the TUI, the trajectory, `phern agents attach` — prints one account."""
         data: dict[str, JsonValue] = {
             "kind": self.kind,
             "via": self.via,
@@ -528,7 +528,7 @@ class SandboxSeam:
 
         `network_posture` keeps its own `None` branch deliberately — "no
         sandbox-allow row is mounted" is a different sentence from "the row says
-        off", and a person reading `ph doctor` needs to be able to tell them apart.
+        off", and a person reading `phern doctor` needs to be able to tell them apart.
         """
         return self.allowances if self.allowances is not None else NOTHING
 
@@ -658,7 +658,7 @@ class SandboxSeam:
                 return host_allowed(network.hosts, host, port)
 
     def network_posture(self) -> str:
-        """One sentence on what confined commands can reach, for `ph doctor` and
+        """One sentence on what confined commands can reach, for `phern doctor` and
         `/sandbox` — written once so the two cannot disagree."""
         if self.allowances is None:
             return "off — no sandbox-allow row is mounted, so a confined command has no network"

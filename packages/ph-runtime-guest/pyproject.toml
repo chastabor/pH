@@ -1,20 +1,41 @@
 [build-system]
-requires = ["hatchling>=1.26"]
+requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [project]
 name = "ph-runtime-guest"
-version = "0.0.1"
+version = "0.1.0"
 description = "The guest half of pH's code runtime: the fd-3 protocol, the run loop, and the binding proxies a cell awaits."
 readme = "README.md"
 requires-python = ">=3.12"
 license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Charles Tabor" }]
+keywords = ["agent", "code-mode", "runtime", "sandbox"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Topic :: Software Development",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Typing :: Typed",
+]
 # Deliberately almost dependency-free. This package is installed into
 # `$PH_CACHE/runtime-venv`, a venv that executes model-written code; every
 # dependency there is another import that code can reach and another thing that
 # can break a session the host cannot repair. `dill` is the one exception and it
 # is imported lazily, so a venv without it runs cells and forgoes snapshots.
 dependencies = ["dill>=0.3.8"]
+
+[project.urls]
+Homepage = "https://github.com/chastabor/pH"
+Repository = "https://github.com/chastabor/pH"
+Documentation = "https://github.com/chastabor/pH/blob/main/docs/README.md"
+Issues = "https://github.com/chastabor/pH/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/ph_runtime"]

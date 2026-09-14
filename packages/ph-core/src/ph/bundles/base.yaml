@@ -40,7 +40,7 @@
 - id: tools-timeout
   name: tools-timeout
 
-# What `ph doctor` says about this deployment (P4-12). `ctx.tui_status` minus
+# What `phern doctor` says about this deployment (P4-12). `ctx.tui_status` minus
 # the `Session`: a row hands the report a reading, so the one command whose job
 # is to be complete does not have to import three packages to be it. A
 # contributor offers its section through `diagnostics.contribute`, which waits
@@ -70,7 +70,7 @@
 
 # The backend (P6-04): bwrap on Linux, Seatbelt on macOS. Mounted here rather
 # than left to a profile, so a host that can confine does — out of the box — and
-# a host that cannot says so in `ph doctor` and declines rather than pretending.
+# a host that cannot says so in `phern doctor` and declines rather than pretending.
 # Two probes at mount, each claimed only when it held: a write outside the
 # workspace must fail, and a `CONNECT` through the egress shim must reach the
 # proxy and be refused.
@@ -80,7 +80,7 @@
 # What a confined command may reach beyond its workspace (P6-38): directories
 # writable outside it, and the network posture. No `config:` here because the
 # seam's defaults are the shipped answer — `network.mode: allowlist` over the
-# package indexes and documentation hosts in `DEFAULT_HOSTS`; `ph doctor` and
+# package indexes and documentation hosts in `DEFAULT_HOSTS`; `phern doctor` and
 # `/sandbox` print them. A profile that spells `config:` replaces the whole
 # statement, so write the list you want rather than the difference:
 #
@@ -98,7 +98,7 @@
 
 # The human half of the row above: `/sandbox` shows the posture in force and
 # edits it, and the footer counts the refusals this session. Beside
-# `sandbox-allow` rather than in a TUI profile because `ph -p` can print it too.
+# `sandbox-allow` rather than in a TUI profile because `phern -p` can print it too.
 - id: sandbox-commands
   name: sandbox-commands
 
@@ -257,7 +257,7 @@
 
 # Asking the person a question (P7-09). `disabled` here and enabled by `tui.yaml`
 # — the `tool-todo` idiom — because a row that stops the work to wait for a human
-# has no meaning in a posture with no human: headless, `ph -p`, a scheduled tick.
+# has no meaning in a posture with no human: headless, `phern -p`, a scheduled tick.
 # Disabled rather than merely unanswerable, so an unattended run pays nothing for
 # it at all: the model is never offered the tool, so no turn is spent calling it
 # and no prompt tokens describe it. `--patch '{id: tool-ask-user, disabled: false}'`
@@ -315,7 +315,7 @@
 # Checked at runtime, not only in tests: a harness that can only prove these in
 # CI cannot prove them about your session. The registry is what makes the set
 # *visible* — every one of these rows is optional, so "pH enforces I3" was only
-# ever true of a profile, and `ph doctor` now says which.
+# ever true of a profile, and `phern doctor` now says which.
 - id: invariants
   name: invariants
 

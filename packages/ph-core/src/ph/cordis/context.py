@@ -366,7 +366,7 @@ class _Dependent:
 
     A plugin's, stamped by `ForkScope` from its `apply`. It reaches
     `Context._module`, which is what `ctx.on` reports to `note_consumer` — so
-    this field is the whole reason `ph events` can name who listens to an event
+    this field is the whole reason `phern events` can name who listens to an event
     rather than printing an empty column. Blank for an `inject` callback, which
     is code the calling row already owns and which therefore inherits it."""
     active: bool = False
@@ -384,7 +384,7 @@ class _Dependent:
     def missing(self) -> list[str]:
         """The inject keys not yet provided at this dependent's own scope.
 
-        One predicate for `ready`, for the loader's refusal, and for `ph doctor`'s
+        One predicate for `ready`, for the loader's refusal, and for `phern doctor`'s
         `waiting on …` — asked against `self.ctx`, which for a private copy in a
         realm is the realm. Two callers had spelled it against two different
         scopes."""
@@ -599,7 +599,7 @@ def chain_label(chain: Sequence[Context | None]) -> str:
     were possible, which is the shape neither caller could handle anyway.
 
     Here rather than in either caller because both chain-keyed caches — the tool
-    view and the skill reach — print this in the same `ph doctor` section, and
+    view and the skill reach — print this in the same `phern doctor` section, and
     two spellings of one ordering invariant is how the two rows come to disagree
     about which scope an entry belongs to.
     """
@@ -1014,7 +1014,7 @@ class Context:
         The one tree walk, for `Mount.topology` and `scope_invariant` alike. The
         guard matters for the second caller: a tampered tree is exactly what a
         health check is asked to report on, and a walk that hung there would
-        take `ph doctor` down with it.
+        take `phern doctor` down with it.
         """
         seen: set[int] = set()
         pending = [self]
@@ -1438,7 +1438,7 @@ class Context:
         unreachable from anything — unlinked from its parent, holding services it
         has dropped — which is exactly why a stranded lease or worktree used to
         be invisible to everything but a log nobody was reading. `scope_invariant`
-        turns the ledger into a pollable invariant, so `ph doctor` and the
+        turns the ledger into a pollable invariant, so `phern doctor` and the
         daemon's own poll both report it without either learning what an effect
         is.
 

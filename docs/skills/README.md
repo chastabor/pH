@@ -51,7 +51,7 @@ profile arms them.
 Or, without editing a profile:
 
 ```
-ph -p "…" \
+phern -p "…" \
   --patch '{id: tool-todo, disabled: false}' \
   --patch '{id: skill-steps, disabled: false}' \
   --patch '{id: skills-progressive, config: {paths: [~/.ph/skills]}}'
@@ -61,7 +61,7 @@ ph -p "…" \
 can keep a turn going.** A row that spends model calls on the deployment's behalf
 is a posture a profile chooses rather than one it inherits by mounting a bundle.
 
-Check what you got with `ph --dump-config`, and what the model was offered with
+Check what you got with `phern --dump-config`, and what the model was offered with
 the deployment's `tools/list`.
 
 ---
@@ -364,11 +364,11 @@ model's view are one projection rather than two that can disagree (A11).
 
 ```
 # the skill loaded at all
-ph --dump-config | grep -A3 skills-progressive
+phern --dump-config | grep -A3 skills-progressive
 # …and watch the log for `ph.seams.skills` warnings if it did not
 
 # end to end
-ph --mode tui --patch '{id: tool-todo, disabled: false}' \
+phern --mode tui --patch '{id: tool-todo, disabled: false}' \
                --patch '{id: skill-steps, disabled: false}'
 ```
 

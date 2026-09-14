@@ -529,7 +529,7 @@ async def test_a_stranded_effect_reaches_the_report(mount: MountProfile) -> None
     This is the half `scope_invariant` used to declare unenforced: a cancelled
     unwind leaves effects nobody will run, and the only account of it was a
     `log.warning` no shipped entry point installed a handler for. A lease or a
-    worktree stranded that way was invisible to `ph doctor`.
+    worktree stranded that way was invisible to `phern doctor`.
 
     Driven through the seam rather than by reading `ctx.abandoned`, because the
     claim is that the ledger *reaches a reader*: the unit tests in

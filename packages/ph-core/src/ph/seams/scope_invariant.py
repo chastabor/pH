@@ -40,11 +40,11 @@ worktree stranded by a cancelled teardown was reported by a `log.warning` no
 shipped entry point installed a handler for, and is now a finding the daemon's
 own poll records.
 
-**Not `ph doctor`, and the distinction is the seam's own.** `ph doctor` mounts a
+**Not `phern doctor`, and the distinction is the seam's own.** `phern doctor` mounts a
 fresh profile in its own process — no scope disposed, so nothing abandoned —
 which `ph.seams.invariants` already states as the limit of a poll. The ledger
 lives on `_Runtime`, so only the process that did the abandoning can read it.
-That process is the daemon, which polls itself; `ph doctor` will print this row
+That process is the daemon, which polls itself; `phern doctor` will print this row
 as holding, truthfully, about a deployment it has just built.
 
 **Outstanding, not abandoned.** The ledger keeps the effects rather than their

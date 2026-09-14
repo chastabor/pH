@@ -360,7 +360,7 @@ class SkillService:
         boundary was not "no skills", it was all of them. P6-31 left that
         deliberately, because with `Context | None` there was no way for the
         callers who legitimately mean the deployment (the prompt catalog, a
-        `ph doctor` probe) to say so, and making the seam refuse would have
+        `phern doctor` probe) to say so, and making the seam refuse would have
         refused them too. `DEPLOYMENT` is that way, so the ambiguity is gone and
         the default can come off: a caller that states nothing now fails mypy.
         """

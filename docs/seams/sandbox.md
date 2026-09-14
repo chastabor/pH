@@ -73,7 +73,7 @@ one host; `*.example.com` is every host under it and not the apex. An entry may
 carry `:port`. `read-only` mode takes no extra directories: that mode is the
 session saying nothing is writable, and a deployment's cache is not an exception
 to a posture a person chose. A directory that does not exist is skipped rather
-than bound — `bwrap` refuses to start over a missing bind source — and `ph doctor`
+than bound — `bwrap` refuses to start over a missing bind source — and `phern doctor`
 marks it `missing`.
 
 **A caller can only ever narrow.** `SandboxPolicy.refuse_network` is the veto —
@@ -247,7 +247,7 @@ Everything the harness spawns for an agent, from one policy:
 Both build `workspace_policy(workspace)`, so a deployment cannot end up with one
 confined and the other not, and both decline the same way — no backend, or no
 workspace to be the writable root, means no confinement rather than a passthrough.
-Neither is gated on the containment tier: `ph doctor`'s containment section says
+Neither is gated on the containment tier: `phern doctor`'s containment section says
 so in its own row, because the tree an agent works in and the commands the harness
 wraps are genuinely different boundaries.
 
@@ -276,7 +276,7 @@ Two consequences worth knowing:
   as junk and every start waited out `boot_timeout`. The guest now reports `None`
   for a limit it could not apply and the host faults on an unreadable first frame
   (`test_boot_report.py`). The address-space limit itself is unenforceable on
-  macOS, so `ph doctor`'s per-child limits row is read from the guests that
+  macOS, so `phern doctor`'s per-child limits row is read from the guests that
   actually started and says "address space not applied" rather than repeating the
   number the host asked for — E1's rule, one layer down from the tier table.
 

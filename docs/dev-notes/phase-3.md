@@ -1025,7 +1025,7 @@ parent's log 16 times to resolve one `receiver_name`.
 
 The roster folds status last-write-wins, so a woken child that was *actively
 working* read as `rehydrated` rather than `running` — losing "it is busy" for
-every future consumer that branches on `"running"` (the P3-19 panel, `ph trace`,
+every future consumer that branches on `"running"` (the P3-19 panel, `phern trace`,
 `_render_roster`). It is now `{status: "running", cause: "rehydrated"}`: the
 lifecycle stays a lifecycle and the provenance rides beside it. Free to change
 because nothing branches on `SubagentStatus` yet — which is exactly why it was
@@ -1941,7 +1941,7 @@ made it visible, and the card is this row's to own.
 
 ## P3-20: the profile needed a mechanism, not a table entry
 
-`ph --profile rlm` looks like one line in `BUILTIN_PROFILES`. It could not be
+`phern --profile rlm` looks like one line in `BUILTIN_PROFILES`. It could not be
 one, because **ph-app does not depend on ph-rlm** — the same rule that lets the
 app fold `subagent/*` events without importing the row that emits them, and the
 reason those event names live in `ph.seams.subagents` rather than in the bundle.
@@ -1955,7 +1955,7 @@ answer and only the caller has the context to word it — which `resolve_profile
 then does, naming the package to install.
 
 `available_profiles()` follows from the same fact: a profile whose distribution
-is absent is left out of the list rather than offered and then failing. `ph
+is absent is left out of the list rather than offered and then failing. `phern
 --help`'s profile line and the unknown-profile error both read from it, so what
 a person is offered is what the install can actually compose.
 
@@ -2382,7 +2382,7 @@ The plan describes `App.MODES` with chat and trajectory as co-equal views. What
 landed is a separate `App`, and the reason is the plan's own argument: shape (b)
 exists because the view must run with **nothing mounted**, and sharing
 `PHTuiApp` means sharing its mount, its trust prompt and its agent. Splitting at
-the process boundary instead makes `ph --mode trajectory --session <id|path>`
+the process boundary instead makes `phern --mode trajectory --session <id|path>`
 fall out with no conditional — which is what §5.5 says the entry point should
 cost.
 

@@ -805,7 +805,7 @@ class RlmChildProvider:
             # regardless, so retaining those would grow the pile without saving
             # anything from it.
             #
-            # The pile this creates is bounded by `ph workspaces gc`, which is
+            # The pile this creates is bounded by `phern workspaces gc`, which is
             # not a note about future work: this policy was held back until that
             # command existed, because inverting `worktree-ephemeral`'s promise
             # with no collector is a worse trade than the lost evidence it fixes.

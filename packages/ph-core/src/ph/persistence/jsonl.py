@@ -424,7 +424,7 @@ async def resume_session(ctx: Context, session_id: str) -> Session:
     # from anything else in the log: a session that was reopened and one that
     # ran straight through look identical afterwards. It matters most where
     # nobody is watching, which is the daemon and a cron-started agent, and it
-    # is what lets `ph doctor`, a trajectory reader or a person scrolling back
+    # is what lets `phern doctor`, a trajectory reader or a person scrolling back
     # find the seam. One event per reopen, not per turn.
     session.append(
         "session/resumed",

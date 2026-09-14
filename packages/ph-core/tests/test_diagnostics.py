@@ -1,4 +1,4 @@
-"""P4-12 — `ph doctor`, and the seam that lets a row answer it (E1, E9, E10).
+"""P4-12 — `phern doctor`, and the seam that lets a row answer it (E1, E9, E10).
 
 Two claims, and the second is the one the gate names.
 
@@ -55,7 +55,7 @@ async def test_a_section_with_nothing_to_say_is_omitted() -> None:
 
 
 async def test_a_failing_section_does_not_take_the_report_down() -> None:
-    """`ph doctor` is what a person runs *because* something is wrong, so the
+    """`phern doctor` is what a person runs *because* something is wrong, so the
     one section that cannot read is the worst possible moment to lose the rest —
     and it says so in place rather than vanishing."""
     registry = DiagnosticsRegistry(ctx=Context())
@@ -213,11 +213,11 @@ async def test_an_agent_that_holds_nothing_is_not_described(mount: MountProfile)
 async def test_the_topology_section_is_a_row_like_every_other_section(mount: MountProfile) -> None:
     """It reaches the report through the registry, which is the whole change.
 
-    `ph doctor` built this section by hand and appended it after
+    `phern doctor` built this section by hand and appended it after
     `report()` — reasonable-looking, because it is *about* the rows rather than
     from one of them, and only the loader knows which activated. What that cost
     is asserted in the next two tests; what it cost immediately is that the
-    second surface rendering these sections, `ph agents doctor`, relays
+    second surface rendering these sections, `phern agents doctor`, relays
     `report()` verbatim and so could not have this one at all.
 
     Between the readings and `Invariants`, by declared `order` rather than by
@@ -243,7 +243,7 @@ async def test_the_topology_names_what_activated_and_the_realms(mount: MountProf
 
     assert rows["diagnostics"].startswith("active ·")
     assert "from bundles/base.yaml" in rows["diagnostics"]
-    # Stated rather than left as a missing line: at `ph doctor` time there are
+    # Stated rather than left as a missing line: at `phern doctor` time there are
     # none, because an agent's scope is created when it runs.
     assert "none" in rows["isolated realms"]
 

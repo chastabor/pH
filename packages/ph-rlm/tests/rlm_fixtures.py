@@ -173,7 +173,7 @@ def shipped_profile(mount: MountProfile) -> ShippedProfile:
     whole, and nothing says so.
 
     `profile` is what to layer. The default is the bundle document; a caller that
-    wants the *composed* profile — what `ph --profile rlm` resolves, `tui` layer
+    wants the *composed* profile — what `phern --profile rlm` resolves, `tui` layer
     and all — passes `resolve_profile("rlm")`. It goes through here rather than
     through `mount` directly so that merging rule keeps applying: three call
     sites had re-spelled the pin as a raw patch, which is the bypass this

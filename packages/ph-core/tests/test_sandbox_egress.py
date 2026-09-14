@@ -388,7 +388,7 @@ async def test_a_command_that_ignores_the_proxy_reaches_nothing_and_says_so(
 
 
 async def test_the_bridge_is_claimed_only_after_its_probe(mount: MountProfile) -> None:
-    """`ph doctor` says the bridge is up because a confined command reached it
+    """`phern doctor` says the bridge is up because a confined command reached it
     through the door, not because a proxy was started."""
     ctx = await _bridged(mount)
     section = report_section(ctx, "Local confinement")

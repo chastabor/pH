@@ -10,7 +10,7 @@ Invariants this seam holds:
 * **`repo_writable` records which guarantee was obtained, never which was
   requested.** A caller asking `access="read"` gets the strongest kind the
   mounted tier can actually provide; `False` means a tier is enforcing it. Any
-  wording here, in `ph doctor`, or in a config comment that blurs request and
+  wording here, in `phern doctor`, or in a config comment that blurs request and
   guarantee is a defect (§12 Q10).
 * **There is always a workspace.** `acquire` never fails and never returns
   `None`. A provider that cannot serve a request *declines*, and the seam falls
@@ -120,7 +120,7 @@ __all__ = [
 log = logging.getLogger("ph.seams.workspace")
 
 ContainmentTier: TypeAlias = Literal["advisory", "worktree", "sandbox"]
-"""The ladder, named once: `ph doctor` prints it (P4-12) and `containment.tier`
+"""The ladder, named once: `phern doctor` prints it (P4-12) and `containment.tier`
 selects it (P4-11).
 """
 
@@ -163,7 +163,7 @@ def project_access(kind: WorkspaceKind) -> WorkspaceAccess:
 
     Not of the directory: `worktree-ephemeral` may be written freely and merges
     nothing, so what its holder was granted of the project is `read`. Recorded by a
-    spawn as `granted_access` and printed per agent by `ph doctor`.
+    spawn as `granted_access` and printed per agent by `phern doctor`.
     """
     match kind:
         case "shared" | "worktree" | "overlay":
@@ -432,7 +432,7 @@ DeclineReason: TypeAlias = Literal[
 ]
 """Why a tier could not serve a request, as a code rather than prose.
 
-`ph doctor` prints it (P4-12). An operator who set `worktree` and got `shared`
+`phern doctor` prints it (P4-12). An operator who set `worktree` and got `shared`
 is owed the reason, and a durable event carrying an English sentence is
 unparseable by the consumer that has to branch on it.
 """
@@ -814,7 +814,7 @@ class WorkspaceSeam:
     _held: dict[str, _Held] = field(default_factory=dict)
     """Live workspaces by agent id — keyed by id because the question is asked by
     things that have an agent id and no agent object (the prompt's workspace line,
-    `ph doctor`'s per-agent report). Emptied by the effect disposer, so an entry
+    `phern doctor`'s per-agent report). Emptied by the effect disposer, so an entry
     surviving its agent is the same leak `workspace/acquired` without a `disposed`
     records durably.
     """
@@ -900,7 +900,7 @@ class WorkspaceSeam:
         return self.provider.tier
 
     def describe(self) -> list[tuple[str, str]]:
-        """What `ph doctor` prints about workspaces (E10).
+        """What `phern doctor` prints about workspaces (E10).
 
         **Per agent, not per profile**: since P4-11 there is no single answer — the
         shipped `rlm` posture puts the person's own agent in their checkout and its
@@ -956,7 +956,7 @@ class WorkspaceSeam:
         # wraps at 80 columns reads as a stray.
         return (
             f"{len(found)} across {sessions} of the {len(touched)} most recent session(s)\n"
-            "collect them with `ph workspaces gc`"
+            "collect them with `phern workspaces gc`"
         )
 
     async def acquire(
@@ -1189,7 +1189,7 @@ class WorkspaceSeam:
         if declined is not None:
             # Only when a tier was asked and could not serve: absent means
             # "no tier configured", which is a different fact and the one
-            # `ph doctor` must not confuse it with (E15).
+            # `phern doctor` must not confuse it with (E15).
             data["declined"] = declined
         session.append(ACQUIRED, data)
         if workspace.provision_failures:
@@ -1640,7 +1640,7 @@ class Collectable:
 
     A verdict per record rather than a filtered list, because the refusals are the
     useful half: "nothing to collect" and "three trees, all still held by live
-    sessions" are very different answers to `ph workspaces gc`.
+    sessions" are very different answers to `phern workspaces gc`.
     """
 
     record: WorkspaceRecord
@@ -1802,7 +1802,7 @@ def stored_survivors(
     """Every tree the *store* can still account for, and when each log was written.
 
     The deployment-wide half of the fold, where `family_survivors` is the per-parent
-    one. Both consumers — `ph doctor`'s count and the collector — need the same two
+    one. Both consumers — `phern doctor`'s count and the collector — need the same two
     things, and a second loop over `stored()` is where a listing limit and a
     tolerance rule quietly diverge.
 
@@ -1812,7 +1812,7 @@ def stored_survivors(
     store that cannot read most of what it listed is a real problem wearing a small
     number. Since reference-forking there are two ways a log will not read, and a
     *good* file whose ancestor was removed takes every descendant with it — so this
-    count can fall by more than the number of damaged files. `ph doctor`'s "Session
+    count can fall by more than the number of damaged files. `phern doctor`'s "Session
     lineage" section is what answers which.
 
     `family` narrows the answer to one agent and its descendants, through

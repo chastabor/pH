@@ -278,7 +278,7 @@ def test_the_bus_vocabulary_is_selectable_without_cordis_knowing_about_selectors
     One was written and removed: it was the **only** upward import in the whole
     of `ph/cordis/`, which is a port of a standalone meta-framework — and it
     dragged the name `"log"`, a vocabulary cordis has no business knowing exists,
-    into it. Nothing called it either; `ph events` filters the matrix with
+    into it. Nothing called it either; `phern events` filters the matrix with
     `matches_any` directly, which is one comprehension and keeps the dependency
     pointing the way every other module in this package points it.
 

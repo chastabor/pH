@@ -126,7 +126,7 @@ class _Sandbox:
             lines.append(
                 f"confinement: {type(seam.provider).__name__} (enforces {seam.enforcement})"
             )
-        # `describe` is the row's own rendering, which `ph doctor` prints — and
+        # `describe` is the row's own rendering, which `phern doctor` prints — and
         # which its docstring already claimed this command shared. It did not: this
         # re-derived the same three rows and had drifted on the empty-host wording.
         lines += [f"{label}: {value}" for label, value in describe(seam)]

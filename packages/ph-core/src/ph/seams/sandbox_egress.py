@@ -253,7 +253,7 @@ class EgressProxy:
     `0700` directory does not allow and this does. Off by default, so a `bwrap`
     host (whose sandboxes cannot reach it anyway) opens no port."""
     denied: int = 0
-    """How many connections this proxy has refused, for `ph doctor`."""
+    """How many connections this proxy has refused, for `phern doctor`."""
     _server: asyncio.AbstractServer | None = field(default=None, repr=False)
     _tcp: asyncio.Server | None = field(default=None, repr=False)
     """`Server`, not `AbstractServer`: `tcp_port` reads `.sockets`, which only the

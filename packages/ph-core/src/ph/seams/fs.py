@@ -305,7 +305,7 @@ class FsService:
     ctx: Context
     root: Path
     """Where relative paths resolve for an agent that holds no workspace — the
-    process's own directory, and the answer `ph doctor` and a bare CLI probe
+    process's own directory, and the answer `phern doctor` and a bare CLI probe
     get."""
     _observed: dict[Path, float] = field(default_factory=dict)
     """Last-read mtime per path — the state read-before-edit consults."""

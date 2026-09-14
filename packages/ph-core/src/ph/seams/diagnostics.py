@@ -1,9 +1,9 @@
-"""`ctx.diagnostics` — what a row wants `ph doctor` to say about it.
+"""`ctx.diagnostics` — what a row wants `phern doctor` to say about it.
 
 Four rows in three packages arrived at this one by one: the containment tier
 (P4-11), the workspace kind and `repo_writable` per agent (P4-07), a permission
 row's honest reach (P4-06, which said out loud that it was "the fourth row
-wanting to hand `ph doctor` a reading... which is `ctx.tui_status`' problem
+wanting to hand `phern doctor` a reading... which is `ctx.tui_status`' problem
 again"), and the worker model. `ph-app` cannot import `ph-stabilize` or
 `ph-rlm`, so without a seam each of them lands as a bespoke `ctx.<name>` the
 consumer has to know by heart — and the consumer is the one command whose entire
@@ -23,7 +23,7 @@ contributor that has several things to say (a kind and a `repo_writable` per
 agent) says them as rows rather than by inventing a delimiter the printer has to
 learn.
 
-**No severity.** §12 Q10 is explicit that `ph doctor` prints the tier's three
+**No severity.** §12 Q10 is explicit that `phern doctor` prints the tier's three
 columns "rather than a severity colour", because a colour invites a reader to
 skip the sentence — and the sentence is the entire point of E1. So there is no
 `level` here, deliberately, where `tui_status` has one.
@@ -68,7 +68,7 @@ to that boundary names the constant rather than a number two files away."""
 
 @dataclass(frozen=True, slots=True)
 class Diagnostic:
-    """A row's contribution to `ph doctor`.
+    """A row's contribution to `phern doctor`.
 
     `read` returns no rows when there is nothing to report, and the section is
     omitted rather than printed empty — the same reason `StatusField.read`
@@ -117,7 +117,7 @@ class DiagnosticsRegistry:
         """Every section that has something to say, in `order` then id order.
 
         A contributor that raises is dropped with its traceback rather than
-        taking the report down: `ph doctor` is what a person runs *because*
+        taking the report down: `phern doctor` is what a person runs *because*
         something is wrong, and the one section that fails is the least
         acceptable moment to lose the other five.
         """
@@ -129,7 +129,7 @@ class DiagnosticsRegistry:
             diagnostic = entry.diagnostic
             try:
                 # As the row that contributed it (P6-29); no target, for the same
-                # reason `tui_status.readings` has none — `ph doctor` describes a
+                # reason `tui_status.readings` has none — `phern doctor` describes a
                 # deployment, not an agent.
                 with running(entry.by):
                     rows = list(diagnostic.read())

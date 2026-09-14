@@ -43,7 +43,7 @@ stable listing rather than one that depends on mount order.
 ## What a non-Textual client gets
 
 `build()` returns a Textual object, which cannot travel — so a third-party row's
-screen is currently **invisible to a browser tab or a `ph agents` client**, and
+screen is currently **invisible to a browser tab or a `phern agents` client**, and
 `ctx.tui_screens`' own gate says so.
 
 The half that would fix it is a declarative body — a row contributing a panel as

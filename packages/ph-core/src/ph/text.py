@@ -53,7 +53,7 @@ def brief_value(value: JsonValue, *, nested: bool = False) -> str:
     payload value is correct for a scalar and garbage for anything else — it
     emits the Python literal — and two readers in two packages both did it:
     `ph_app.wire.describe`, which renders 56 event types for the auditor view and
-    `ph agents attach`, and `ph.commands.revert._clip`, which names the calls a
+    `phern agents attach`, and `ph.commands.revert._clip`, which names the calls a
     restore did *not* undo in the one report a person reads while deciding
     whether the restore was enough. The first rendered a whole `Message` — uuid,
     role, nested content blocks — truncated mid-token.

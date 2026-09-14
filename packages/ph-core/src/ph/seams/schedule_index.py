@@ -14,7 +14,7 @@ folding the whole log — 500 reads before the daemon answers a connection, to f
 the three that matter. Mounting is not cheap: a root is a whole profile, a
 workspace, possibly a kernel, which is the cost P5-05 exists to *release*. And
 `Supervisor.start` takes P5-03's **lease**, so auto-mounting everything claims
-every session on the machine and the next `ph -p` over any of them is refused with
+every session on the machine and the next `phern -p` over any of them is refused with
 `session_already_active` — a strictly worse failure, because it is loud,
 immediate, and hits sessions with no schedule at all.
 

@@ -18,7 +18,7 @@ line rather than raising a `ConnectError` inside a fixture.
 What this covers that nothing else does:
 
 * **that the route is hooked up at all.** Every other adapter test drives a fake
-  `HttpClient` and asserts request *shape*; `ph doctor` mounts the profile and
+  `HttpClient` and asserts request *shape*; `phern doctor` mounts the profile and
   deliberately makes no provider call. Between them, a `baseUrl` pointing at
   nothing passes the whole suite.
 * **that the prefix cache is actually read, by a real one.**
@@ -491,7 +491,7 @@ async def test_the_model_sees_the_cat(mount: MountProfile, route: str) -> None:
 
     ctx = await mount(profile=resolve_profile("llama"))
     session = ctx.require(SESSIONS).create("local-vision")
-    # The human door (I-9), which is what `ph -p --attach` uses: `ingest` reads
+    # The human door (I-9), which is what `phern -p --attach` uses: `ingest` reads
     # the path with the harness's own permissions, and `prompt_message` is the
     # message `prompted` builds — text first, then the media.
     refs = await ingest(ctx, [CAT])

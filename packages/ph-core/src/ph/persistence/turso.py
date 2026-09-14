@@ -345,7 +345,7 @@ class TursoSessionStore:
         stays open, with its `-wal` and `-shm` sidecars, for the life of the
         process. That leak was guarded twice and differently: `read` wrapped its
         chained walk, `stored` wrapped its header peeks, and the third reader to
-        arrive — a fold over *every* stored session (`ph attachments gc`) at a
+        arrive — a fold over *every* stored session (`phern attachments gc`) at a
         limit of 100 000 — inherited neither. Two hand-rolled guards is how the
         third caller comes to have none, so both were replaced by this.
 

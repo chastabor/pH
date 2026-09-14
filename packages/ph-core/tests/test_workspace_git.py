@@ -412,7 +412,7 @@ def test_ref_components_are_an_allow_list(raw: str, expected: str) -> None:
 
 
 async def test_mounting_the_row_claims_the_tier(mount: MountProfile) -> None:
-    """P4-08's mounted form: the row is the tier, so `ph doctor` reports
+    """P4-08's mounted form: the row is the tier, so `phern doctor` reports
     `worktree` from the moment a profile layers it — and `advisory` when one
     does not, which is P4-07's gate and still holds."""
     ctx = await mount(TIER_ROW)
@@ -572,7 +572,7 @@ async def test_a_material_that_does_not_arrive_reaches_the_agent(
 
 async def test_a_decline_says_which_one_it_was(mount: MountProfile, tmp_path: Path) -> None:
     """E15. A fallback that cannot say *why* is indistinguishable from "no tier
-    configured", which is the confusion `ph doctor` exists to remove: an operator
+    configured", which is the confusion `phern doctor` exists to remove: an operator
     who set `worktree` and got `shared` is owed the reason."""
     ctx = await mount(TIER_ROW)
     base = tmp_path / "plain"

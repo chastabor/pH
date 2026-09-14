@@ -226,7 +226,7 @@ async def test_the_sandbox_rung_is_now_reachable_end_to_end(mount: MountProfile)
     that tier, so the top rung of §4.8's table was a row nothing could produce and
     `containment.strict` with `tier: sandbox` had nothing to satisfy it on the
     workspace side. Both halves are checked here because the tier and the kind are
-    separate claims — one is what `ph doctor` prints per role, the other is what
+    separate claims — one is what `phern doctor` prints per role, the other is what
     the agent is actually handed.
     """
     ctx = await mount(ROW)

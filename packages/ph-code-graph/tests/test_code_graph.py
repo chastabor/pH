@@ -798,7 +798,7 @@ def test_the_bundles_row_is_enabled() -> None:
 
 
 async def test_the_rlm_indexed_profile_layers_this_bundle() -> None:
-    """The wiring a person can type: `ph --profile rlm-indexed`.
+    """The wiring a person can type: `phern --profile rlm-indexed`.
 
     Asserted here rather than only in `ph-app`, because the *reason* the profile
     exists is this package — and `available_profiles()` gating on bundle
@@ -997,7 +997,7 @@ async def test_a_grammar_that_is_not_on_disk_is_named(
 async def test_the_grammars_are_cached_under_a_ph_root(
     mount: MountProfile, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Not `$XDG_CACHE_HOME`, which no pH root covers and no `ph doctor` names.
+    """Not `$XDG_CACHE_HOME`, which no pH root covers and no `phern doctor` names.
 
     The pack unpacks even its *bundled* grammars into this directory on first
     use, so where it points is not housekeeping — it is whether the row works

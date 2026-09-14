@@ -2,7 +2,7 @@
 
 ## Context
 
-Today `ph --mode tui` **hosts** the harness: `open_harness` (`packages/ph-app/src/ph_app/tui/frontend.py`)
+Today `ph --mode tui` **hosts** the harness: `open_harness` (`packages/phern/src/ph_app/tui/frontend.py`)
 mounts the profile in-process, creates the session and agent, and registers the three
 front-end listeners — `session.observe` → `TuiEventAdapter`, `approval.register_answerer`,
 `user_questions.register_answerer`. Close the terminal and the harness dies. Separately,
@@ -913,7 +913,7 @@ in that figure. Widening the source is P6-02's debt, not this row's.
   extra" inside `test_web.py`; the real rule is that importing `ph_app.cli` drags
   in nothing heavy or extra-only, and `cli.py` had made that promise about
   **textual** since P5-14 with nothing testing it. Now
-  `packages/ph-app/tests/test_app_layering.py` — the app layer's half of
+  `packages/phern/tests/test_app_layering.py` — the app layer's half of
   ph-core's `FORBIDDEN` — covers textual, textual_serve, aiohttp, jinja2 and
   opentelemetry in one subprocess. Sabotage confirms it catches the textual case.
 * **ph-core's `FORBIDDEN` rationale was wrong.** I wrote that those libraries are

@@ -36,7 +36,7 @@ reaching for one would make the harness's own imports depend on how somebody
 chose to look at it. `aiohttp`, `textual_serve` and `jinja2` joined with P7-05.
 
 Whether the *app* layer may import them is a different question with a different
-answer, asked by `packages/ph-app/tests/test_app_layering.py`."""
+answer, asked by `packages/phern/tests/test_app_layering.py`."""
 
 
 def _core_modules() -> list[pathlib.Path]:

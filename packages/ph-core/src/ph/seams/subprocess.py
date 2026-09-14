@@ -416,7 +416,7 @@ class SubprocessService:
     **Optional, because a deployment may have nowhere to write it** — a
     read-only `$PH_RUNTIME`, a test with no roots — and a seam that refused to
     spawn over a diagnostic would be trading a working harness for a tidier one.
-    `None` means the hole this closes is open again, which `ph doctor` says out
+    `None` means the hole this closes is open again, which `phern doctor` says out
     loud rather than the seam pretending otherwise.
     """
     max_output: int = MAX_OUTPUT

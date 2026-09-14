@@ -75,9 +75,9 @@ several routes.
 Layer it onto a shipped profile rather than editing one:
 
 ```bash
-ph --profile headless --patch '{insert: [{id: greeter, name: greeter}]}'
-ph --dump-config --profile headless      # what actually composed, in order
-ph config                                # every row's config model, with prose
+phern --profile headless --patch '{insert: [{id: greeter, name: greeter}]}'
+phern --dump-config --profile headless      # what actually composed, in order
+phern config                                # every row's config model, with prose
 ```
 
 `--patch` is the CLI layer, applied last. `{id: x, disabled: true}` removes a row,
@@ -124,8 +124,8 @@ examples (E8). Refuse at mount, not at first use: by then the agent is running a
 ## Checklist
 
 - [ ] `inject` lists what you use, and nothing more
-- [ ] a deliberate refusal raises `MountRefusal`, so `ph -p` prints a sentence
-- [ ] config is a `WireModel` with per-field docstrings (`ph config` prints them)
+- [ ] a deliberate refusal raises `MountRefusal`, so `phern -p` prints a sentence
+- [ ] config is a `WireModel` with per-field docstrings (`phern config` prints them)
 - [ ] artifacts acquired through `ctx.effect`
 - [ ] the row is in a profile, and `--dump-config` shows it where you expect
 - [ ] a test that mounts a profile, not one that calls `apply` directly

@@ -231,7 +231,7 @@ def lineage_faults(
     backends fill `StoredSession.parent` from a one-line header peek they were
     already paying for — so a whole store is surveyed without opening a log.
 
-    Rows are `(session_id, what is wrong)`, the shape a `ph doctor` section
+    Rows are `(session_id, what is wrong)`, the shape a `phern doctor` section
     takes, and an empty list keeps the section off the page entirely.
 
     Three faults are decidable from here and a fourth is not:

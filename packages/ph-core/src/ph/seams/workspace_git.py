@@ -8,7 +8,7 @@ cheap, and points `ctx.fs`'s root and `ctx.subprocess`'s cwd at it.
 raw write, because both resolve against the agent's cwd. **Not**
 `open("/etc/passwd", "w")`, which never consults a cwd — only the `sandbox` tier
 refuses that, at the kernel. The property bought here is **collision isolation
-and revertibility**, not confinement, and any sentence here, in `ph doctor`, or in
+and revertibility**, not confinement, and any sentence here, in `phern doctor`, or in
 a config comment that blurs the two is a defect (§12 Q10, E13).
 
 **`access="read"` is a different kind, not a different permission.** "Read-only"
@@ -181,7 +181,7 @@ class GitWorktreeProvider:
         Declining is the normal answer for half the directories a person runs pH
         in, and the seam's fallback makes it a notice rather than a refusal to
         start. It declines by *raising* `WorkspaceDeclined` rather than returning
-        `None`, so the reason survives to `workspace/acquired` and to `ph doctor`
+        `None`, so the reason survives to `workspace/acquired` and to `phern doctor`
         — a fallback that cannot say why is indistinguishable from no tier at
         all, which is the confusion E15 exists to remove.
         """

@@ -40,7 +40,7 @@ them from another session, or forget them; that shows up as a failure *mid-turn*
 which `invalidate_handle` plus the retry waterfall turns into one more attempt
 rather than a lost turn.
 
-**Pruned by `ph attachments gc`, off the same reference set as the blobs.** An
+**Pruned by `phern attachments gc`, off the same reference set as the blobs.** An
 entry is written per `(provider, digest)` ever uploaded and stays after the
 provider has forgotten the file, so without a sweep the directory grows with the
 number of distinct attachments a deployment has ever sent. It is swept there
@@ -278,7 +278,7 @@ class UploadRegistry:
     def stale(self, referenced: Container[str]) -> tuple[Path, ...]:
         """Cache entries for digests nothing points at any more (P7-01).
 
-        The half of `ph attachments gc` that is this seam's, held here because the
+        The half of `phern attachments gc` that is this seam's, held here because the
         layout is: `path_for` decides that an entry is `<provider>/<digest>.json`,
         and a collector that reconstructed that rule from the outside would keep
         reporting zero — silently, and with nothing failing — the day the scheme

@@ -146,7 +146,7 @@ class TextIndex:
         It was a field read from the sidecar and then immediately overwritten
         from `self._index.dim` whenever an index file existed — two values that
         had to agree, one of which could be stale in exactly the state `stats()`
-        reports to `ph doctor`.
+        reports to `phern doctor`.
         """
         return None if self._index is None else int(self._index.dim)
 

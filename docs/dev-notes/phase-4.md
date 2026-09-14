@@ -31,7 +31,7 @@ version of it.
 | P4-09 | Per-run checkpoints and `/revert` | `ph/seams/workspace_git.py`, `ph/commands/revert.py` |
 | P4-10 | The default write scope, as a `permissions-fs` rule field (E6) | `ph_stabilize/permissions_fs.py` |
 | P4-11 | The containment selector and `strict` (E1, E8) | `ph/seams/containment.py` |
-| P4-12 | `ctx.diagnostics` and a `ph doctor` that mounts (E9, E10) | `ph/seams/diagnostics.py`, `ph_app/cli.py` |
+| P4-12 | `ctx.diagnostics` and a `phern doctor` that mounts (E9, E10) | `ph/seams/diagnostics.py`, `ph_app/cli.py` |
 | P4-13 | Memory after the cache, progressive skills, blocking delegation (G8, G9) | `ph/system_prompt/memory.py`, `ph/seams/skills.py`, `ph/tools/builtin/subagent_task.py` |
 | P4-13b | Per-agent skills and tools, bounded by the parent (I7, B7) | `ph/seams/{skills,subagents}.py` |
 | P4-14 | Paired-event reconciliation at session open (F6) | `ph/seams/workspace.py` |
@@ -53,7 +53,7 @@ does not bound `open("/etc/passwd", "w")`, which never consults a cwd at all.
 What it buys is **collision isolation and revertibility** — eight children
 writing one tree concurrently is the case the tier exists for — and that is
 worth having on its own. What it does not buy is confinement, which only the
-sandbox rung can claim. `ph doctor` prints the three columns rather than a
+sandbox rung can claim. `phern doctor` prints the three columns rather than a
 severity colour precisely because a colour invites a reader to skip the
 sentence, and the sentence is the whole point.
 

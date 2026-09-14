@@ -66,7 +66,7 @@ def test_core_declares_every_event_the_loop_dispatches() -> None:
     """A dispatch site with no declaration would fail at runtime, not at import.
 
     Declarations live in the plugin modules that own them, so the complete
-    registry is reached the way `ph events` reaches it: by importing every
+    registry is reached the way `phern events` reaches it: by importing every
     registered plugin.
     """
     import_plugin_modules()

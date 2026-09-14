@@ -238,7 +238,7 @@ async def test_topology_reports_what_the_mount_became_not_what_was_written() -> 
 
 
 async def test_topology_follows_a_fiber_through_a_provider_swap() -> None:
-    """The states a *live* reader sees, and `ph doctor` never does.
+    """The states a *live* reader sees, and `phern doctor` never does.
 
     `doctor` reads after the fixpoint, so it meets `active`, `waiting on`, and
     `disabled`. A running daemon is asked mid-life: a provider swaps its service
@@ -430,7 +430,7 @@ async def test_isolate_with_a_mapping_overrides_the_private_copy_s_config() -> N
 def test_isolate_is_checked_when_the_layers_compose_not_when_they_mount(
     row: str, site: str, match: str
 ) -> None:
-    """`--dump-config` must refuse the same profile `ph` would.
+    """`--dump-config` must refuse the same profile `phern` would.
 
     Four shapes a person can write that cannot mean anything: a row that is not
     there, a row isolating itself, a private copy of a row a later layer turned

@@ -101,7 +101,7 @@ async def apply(ctx: Context, config: None) -> None:
 
 
 def _describe(ctx: Context) -> list[tuple[str, str]]:
-    """What `ph doctor` prints, read when it is asked rather than at mount.
+    """What `phern doctor` prints, read when it is asked rather than at mount.
 
     Only the reason the rung is *not* held: whether it is, and what the backend
     enforces, are already the Containment section's two rows, and a fact stated

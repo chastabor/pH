@@ -83,7 +83,7 @@ events.declare(
 ```
 
 The mode is fixed at declaration — `emit`, `waterfall`, `parallel`, `serial` —
-and `ctx.<mode>` raises on a mismatch. `ph events --profile <name>` prints the
+and `ctx.<mode>` raises on a mismatch. `phern events --profile <name>` prints the
 producer/consumer matrix, which is why `owner` and `doc` are worth writing.
 
 Name events for the *fact*, not for who consumes them. `ctx.subagents` emits

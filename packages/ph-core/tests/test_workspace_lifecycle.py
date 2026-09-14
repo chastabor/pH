@@ -234,7 +234,7 @@ async def test_two_agents_resolve_to_two_different_trees(
 async def test_an_agent_with_no_workspace_still_reads_the_process_root(
     mount: MountProfile,
 ) -> None:
-    """`ph doctor`, a CLI probe, a test — callers with no agent at all are real
+    """`phern doctor`, a CLI probe, a test — callers with no agent at all are real
     and must not be the ones that raise."""
     ctx = await mount()
 

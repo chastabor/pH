@@ -1,56 +1,20 @@
-# **The root is a buildable, empty distribution.** Not because anything here
-# needs compiling — there is no `src/` at the root and the wheel ships zero
-# modules — but because `uv tool install` installs a *package*, and a workspace
-# root without a build backend is not one ("does not support being built").
-# Building nothing is the point: this distribution is its dependency list, so
-# `uv tool install .` resolves the seven members and their transitive pins into
-# one tool environment, and `uv tool upgrade`/`uninstall` address the whole
-# deployment under a single name.
-[build-system]
-requires = ["hatchling>=1.26"]
-build-backend = "hatchling.build"
-
-[project]
-name = "ph-workspace"
-version = "0.0.0"
-description = "pH — a Python agent harness ported from DeepSeek Harness (workspace root)."
-requires-python = ">=3.12"
-dependencies = [
-    "ph-core",
-    "ph-app",
-    "ph-rlm",
-    "ph-runtime-guest",
-    "ph-stabilize",
-    "ph-text-index",
-    "ph-code-graph",
-]
-
-# **The same entry point `ph-app` already declares, restated.** `uv tool
-# install` links only the executables of the package it was asked for, not of
-# its dependencies — a root with no `[project.scripts]` installs the whole
-# harness and then reports that it provides no commands. Redeclaring is safe
-# rather than a conflict: both wheels generate the identical launcher (`from
-# ph_app.cli import main`), so whichever is written second is the same file.
-# `ph-app` keeps its own copy so `pip install ph-app` still gives you a `ph`.
-[project.scripts]
-ph = "ph_app.cli:main"
-
-# Nothing to select: `bypass-selection` is how hatchling is told that a wheel
-# with no packages and no modules is intended, instead of guessing at a
-# directory named after the project and failing when it finds none.
-[tool.hatch.build.targets.wheel]
-bypass-selection = true
-
-# The sdist has to be told separately, because `bypass-selection` governs the
-# wheel alone and hatchling's default sdist is "everything git does not ignore":
-# measured here at 15 MB across 558 files — `packages/`, `plans/`, `docs/`,
-# `uv.lock` and `.codegraph/`, the whole repository — wrapped around a wheel
-# that is 2 KB of metadata. This distribution *is* its dependency list, so the
-# manifest that carries the list is the only file that belongs in it.
-[tool.hatch.build.targets.sdist]
-only-include = ["pyproject.toml"]
-
-# **torch from the CPU wheel index.** `ph-text-index` depends on
+# **The root builds nothing, and is not a distribution.** There is no `src/`
+# here and nothing to compile, and unlike the arrangement this replaced there is
+# no longer an empty wheel pretending otherwise: `phern` — the thing a person
+# installs and the command they get — is `packages/phern`, a real package with
+# real modules, and it carries the dependency list that used to live up here.
+#
+# What that deleted is worth naming, because it was all workaround: a
+# `[build-system]` for a wheel with no code, `bypass-selection` to tell
+# hatchling the emptiness was deliberate, an sdist `only-include` to stop it
+# shipping the whole repository around 2 KB of metadata, a second copy of
+# `[project.scripts]` because `uv tool install` links only the executables of
+# the package it was *asked* for — and a test holding the two copies together,
+# because nothing else would have noticed them drifting.
+#
+# uv calls what is left a *virtual* workspace root: members, tooling
+# configuration, the dev group, and no `[project]` table at all.
+# **torch from the CPU wheel index.** `ph-text-index[local]` depends on
 # `sentence-transformers`, which depends on `torch`, whose default wheels bundle
 # CUDA: measured here as 2.6 GB of `nvidia-*` plus 398 MB of `triton` beside a
 # 770 MB torch, in a 4.2 GB environment. The embedding model runs on the CPU —
@@ -63,6 +27,18 @@ only-include = ["pyproject.toml"]
 #
 # A deployment that does want GPU embedding deletes these two blocks; nothing
 # else references them, and `ph-text-index` is unchanged either way.
+#
+# **This governs the checkout and the lockfile, and nothing a PyPI user gets.**
+# `[tool.uv.index]` and `[tool.uv.sources]` are uv's configuration, not PEP 621
+# metadata, so neither survives into a published wheel. It reaches a consumer
+# only if they ask for `[local]`, and when they do, `pip` takes the CUDA wheels
+# from PyPI — so the line worth documenting for them is
+#
+#   pip install "phern[local]" --extra-index-url https://download.pytorch.org/whl/cpu
+#
+# Expressing that *in the metadata* would need an environment marker no index
+# selection can carry. Leaving it to the installer is the same decision the
+# extra itself makes, one layer down.
 [[tool.uv.index]]
 name = "pytorch-cpu"
 url = "https://download.pytorch.org/whl/cpu"
@@ -73,7 +49,7 @@ members = ["packages/*"]
 
 [tool.uv.sources]
 ph-core = { workspace = true }
-ph-app = { workspace = true }
+phern = { workspace = true }
 ph-rlm = { workspace = true }
 ph-runtime-guest = { workspace = true }
 ph-stabilize = { workspace = true }
@@ -93,7 +69,8 @@ dev = [
     # The extras themselves, not their contents: pinning the distributions here
     # too would let CI green on a version the package does not allow.
     "ph-core[otel]",
-    "ph-app[web]",
+    "phern[web]",
+    "ph-text-index[local]",
 ]
 
 # ---------------------------------------------------------------- tooling ----
@@ -107,7 +84,7 @@ target-version = "py312"
 extend-exclude = ["plans", "sources", ".venv"]
 src = [
     "packages/ph-core/src",
-    "packages/ph-app/src",
+    "packages/phern/src",
     "packages/ph-rlm/src",
     "packages/ph-runtime-guest/src",
     "packages/ph-stabilize/src",
@@ -140,8 +117,10 @@ strict = true
 # a flag** (issue 32). They were excluded because two of them held a module
 # named `conftest` and mypy refuses duplicates — its own suggestion, an
 # `__init__.py` in each tree, does not help: with `explicit_package_bases` the
-# module name would have to be `packages.ph-app.tests.conftest`, and `ph-app`
+# module name would have to be `packages.ph-rlm.tests.conftest`, and `ph-rlm`
 # is not an identifier, so both collapse to `tests.conftest` again (checked).
+# (`packages/phern` would survive that test; `packages/ph-rlm` is the one that
+# proves the rule, and a rule that held for only some members is not one.)
 # The fix was to stop having two: the per-package fixture modules are now
 # `app_fixtures` and `rlm_fixtures`, registered from the one root `conftest.py`
 # through `pytest_plugins`. That also retired a latent bug the trees had
@@ -152,14 +131,14 @@ strict = true
 # does below: `daemon_helpers`, `tui_helpers`, `rlm_fixtures` and friends are
 # top-level modules that tests import by name, and both tools have to find them
 # in the same place.
-mypy_path = "packages/ph-core/src:packages/ph-app/src:packages/ph-rlm/src:packages/ph-runtime-guest/src:packages/ph-stabilize/src:packages/ph-text-index/src:packages/ph-code-graph/src:packages/ph-app/tests:packages/ph-rlm/tests:packages/ph-stabilize/tests:packages/ph-core/tests:tests"
+mypy_path = "packages/ph-core/src:packages/phern/src:packages/ph-rlm/src:packages/ph-runtime-guest/src:packages/ph-stabilize/src:packages/ph-text-index/src:packages/ph-code-graph/src:packages/phern/tests:packages/ph-rlm/tests:packages/ph-stabilize/tests:packages/ph-core/tests:tests"
 # One list, because mypy takes `packages` or `files` and not both. The `src`
 # entries are the seven shipped packages, reached by path so `mypy_path` above
 # supplies the base that makes their module names come out as `ph`, `ph_app`
 # and so on rather than as the directories they sit in.
 files = [
     "packages/ph-core/src/ph",
-    "packages/ph-app/src/ph_app",
+    "packages/phern/src/ph_app",
     "packages/ph-rlm/src/ph_rlm",
     "packages/ph-runtime-guest/src/ph_runtime",
     "packages/ph-stabilize/src/ph_stabilize",
@@ -167,7 +146,7 @@ files = [
     "packages/ph-code-graph/src/ph_code_graph",
     "conftest.py",
     "packages/ph-core/tests",
-    "packages/ph-app/tests",
+    "packages/phern/tests",
     "packages/ph-rlm/tests",
     "packages/ph-stabilize/tests",
     "packages/ph-text-index/tests",
@@ -188,7 +167,7 @@ explicit_package_bases = true
 # one root `conftest.py` register two of them as plugins.
 pythonpath = [
     "tests",
-    "packages/ph-app/tests",
+    "packages/phern/tests",
     "packages/ph-rlm/tests",
     "packages/ph-stabilize/tests",
     "packages/ph-core/tests",
@@ -196,7 +175,7 @@ pythonpath = [
 
 testpaths = [
     "packages/ph-core/tests",
-    "packages/ph-app/tests",
+    "packages/phern/tests",
     "packages/ph-rlm/tests",
     "packages/ph-stabilize/tests",
     "packages/ph-text-index/tests",

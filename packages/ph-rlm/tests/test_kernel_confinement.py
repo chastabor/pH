@@ -227,7 +227,7 @@ async def test_a_cell_cannot_write_an_absolute_path_outside_its_workspace(
 async def test_a_confined_kernel_reports_the_backend_that_bounds_it(
     mounted_runtime: MountedRuntime, tmp_path: Path
 ) -> None:
-    """`ph doctor` names it, read from the kernels actually running rather than
+    """`phern doctor` names it, read from the kernels actually running rather than
     from what would be true."""
     ctx, agent, _workspace = await _confined(mounted_runtime, tmp_path)
 

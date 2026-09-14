@@ -1,7 +1,7 @@
 # `ctx.containment` — which rung of the ladder this deployment asked for
 
 **Module:** `ph/seams/containment.py` · **Row:** `containment` · **Consumers:**
-`ctx.workspace`, `ph doctor`
+`ctx.workspace`, `phern doctor`
 
 §4.8's ladder is `advisory` → `worktree` → `sandbox`. Every rung is built; **none
 of it is in force until something chooses**, and this is the choosing.
@@ -65,7 +65,7 @@ isolation and revertibility (fan-out safety, per-run checkpoints, /revert)"* —
 true of a checkout and false of an overlay, which has no git tree to hash and
 therefore never writes a restore point.
 
-`ph doctor` was advertising a mechanism the mounted tier does not have, in the one
+`phern doctor` was advertising a mechanism the mounted tier does not have, in the one
 place a person looks to check exactly that — the single failure E1 exists to
 prevent. So `DescribingProvider` is optional: a provider whose bargain *is* its
 rung's says nothing and gets the stock row; one that differs describes itself,
@@ -75,7 +75,7 @@ describes.
 ## The rule this seam exists to keep
 
 **No tier is described as bounding writes it does not bound.** The tier table,
-the permission row's validation, `ph doctor`, `/revert`'s output and the first-run
+the permission row's validation, `phern doctor`, `/revert`'s output and the first-run
 notice each carry their own caveat, because a caveat only in the docs is a defect
 (§5 rule 6).
 

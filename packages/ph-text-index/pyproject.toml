@@ -1,47 +1,83 @@
 [build-system]
-requires = ["hatchling>=1.26"]
+requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [project]
 name = "ph-text-index"
-version = "0.0.1"
+version = "0.1.0"
 description = "pH plugin: `text_index` and `text_search`, semantic retrieval over documents on a turbovec index."
 readme = "README.md"
 requires-python = ">=3.12"
 license = "MIT"
-# All three are hard dependencies, deliberately: **installing this plugin is how
-# a deployment gets the embedder**, so an install that left the model out would
-# leave `text-index-local` refusing to mount and the tools unregistered — a
-# package whose only two rows do nothing.
+license-files = ["LICENSE"]
+authors = [{ name = "Charles Tabor" }]
+keywords = ["agent", "llm", "embeddings", "semantic-search", "retrieval"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Topic :: Software Development",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Typing :: Typed",
+]
+# **The seam and the tools, and not the model that fills them.** `turbovec` is
+# the index and `numpy` is how a vector is spelled at the boundary, so both are
+# what this package *is*; `sentence-transformers` is one provider for one row,
+# and it brings torch — measured at 4.2 GB with the CUDA wheels. A dependency
+# that large is a decision, and a decision belongs to whoever is installing.
 #
-# It is the expensive choice and worth naming: `sentence-transformers` brings
-# torch, which is most of a gigabyte, and it lands in every environment that
-# resolves this package including CI. The alternative is one line — move it to
-# an `[project.optional-dependencies] local = [...]` extra, as `ph-core` does
-# with `otel` — and the cost of *that* is that `pip install ph-text-index` no
-# longer gives you a working index. The seam/provider split is what keeps the
-# choice cheap either way: nothing but `text-index-local` imports it, and the
-# tests run against a stub embedder rather than a model.
+# So the base install gives you `text_index` and `text_search` over an index you
+# supply vectors for, and `[local]` adds the row that computes them. The cost is
+# stated plainly because it is real and it is new: **`pip install
+# ph-text-index` no longer gives you a working index out of the box.**
+# Without the extra, `text-index-local` refuses to mount with a message naming
+# it, `text_index` and `text_search` are still registered, and a deployment with
+# an embeddings *endpoint* — llama.cpp's `/v1/embeddings`, a provider's API —
+# registers its own embedder on `ctx.text_index` and never wanted torch.
+#
+# The seam/provider split is what makes this cheap rather than a rewrite:
+# nothing but `text-index-local` imports the model, `_embed.py` imports
+# `sentence_transformers` inside `load()` rather than at module scope, and the
+# suite exercises the real turbovec index against a deterministic stub. None of
+# those three were built for this change; they are why it is one line.
 dependencies = [
-    "ph-core",
+    "ph-core==0.1.0",
     "turbovec>=1.0",
     "numpy>=1.20",
-    "sentence-transformers>=3.0",
-    # **Named directly, though `sentence-transformers` already requires it.** A
-    # `[tool.uv.sources]` entry only redirects a dependency the *declaring*
-    # project names, and torch reaches us transitively — so without this line
-    # the CPU-index pin below is silently ignored and the CUDA wheels come back.
-    "torch>=2.2",
 ]
 
-# What a model with an `auto_map` needs beyond the base install. `einops` is
-# pure Python and small; it is an extra rather than a dependency because only
-# some models' remote code imports it — and because the failure without it is
-# the one that proves pre-provisioning has to *load* the model rather than just
-# fetch it: nomic downloads its weights and its code successfully, then raises
-# `ImportError: ... not found in your environment: einops` at load.
 [project.optional-dependencies]
-nomic = ["einops>=0.7"]
+# The local embedder: what `text-index-local` needs to mount.
+#
+# **`torch` is named directly although `sentence-transformers` already requires
+# it.** A `[tool.uv.sources]` entry only redirects a dependency the *declaring*
+# project names, and torch would otherwise reach us transitively — so without
+# this line the CPU-index pin below is silently ignored and the CUDA wheels come
+# back. It has to be named in the same table as the thing that drags it in,
+# which is why it moved into the extra rather than staying above.
+local = ["sentence-transformers>=3.0", "torch>=2.2"]
+
+# What a model with an `auto_map` needs beyond the local embedder. `einops` is
+# pure Python and small; it is an extra of its own because only some models'
+# remote code imports it — and because the failure without it is the one that
+# proves pre-provisioning has to *load* the model rather than just fetch it:
+# nomic downloads its weights and its code successfully, then raises
+# `ImportError: ... not found in your environment: einops` at load.
+#
+# It pulls `[local]` in rather than standing beside it: `einops` without the
+# model it is remote code *for* is a set of packages that cannot embed anything,
+# and `ph-text-index[nomic]` should mean what it sounds like.
+nomic = ["ph-text-index[local]", "einops>=0.7"]
+
+[project.urls]
+Homepage = "https://github.com/chastabor/pH"
+Repository = "https://github.com/chastabor/pH"
+Documentation = "https://github.com/chastabor/pH/blob/main/docs/README.md"
+Issues = "https://github.com/chastabor/pH/issues"
 
 [project.entry-points."ph.bundles"]
 text-index = "ph_text_index:BUNDLE"
@@ -62,7 +98,9 @@ ph-core = { workspace = true }
 # it serves only the names that ask for it by hand — an index that answered for
 # everything would shadow PyPI for any name it happened to carry.
 #
-# A deployment that wants GPU embedding drops this line and re-locks.
+# A deployment that wants GPU embedding drops this line and re-locks. It only
+# ever applies to an install that asked for `[local]`; without the extra there
+# is no torch in the resolution for it to redirect.
 torch = { index = "pytorch-cpu" }
 
 [tool.hatch.build.targets.wheel]

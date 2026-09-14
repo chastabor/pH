@@ -854,7 +854,7 @@ async def apply(ctx: Context, config: Config) -> None:
     nobody inside can reach is not a door, and registering it would make
     `allowlist` promise a network the command does not have.
 
-    The result reaches `ph doctor` either way: "why is strict refusing to start"
+    The result reaches `phern doctor` either way: "why is strict refusing to start"
     is a question asked of the tool, and a row that declined in silence is
     indistinguishable from one nobody mounted.
     """

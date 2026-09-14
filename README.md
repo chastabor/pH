@@ -36,42 +36,82 @@ to extend it.
 
 ## Install
 
+**From PyPI**, to use it — after this, `phern` is a command like any other:
+
+```bash
+uv tool install phern
+```
+
+That is the whole harness: one name, every profile. `phern` is the distribution
+a person installs and the command they get; the six libraries it is assembled
+from publish under their own names — `ph-core`, `ph-rlm`, `ph-runtime-guest`,
+`ph-stabilize`, `ph-text-index`, `ph-code-graph` — because each is usable on its
+own. A front end of your own over `ph-core`, or a deployment that wants
+`ph-code-graph`'s two tools and nothing else, installs exactly that and never
+sees this package.
+
+The *import* names are a third namespace again, and unchanged: `ph`, `ph_app`,
+`ph_rlm`, `ph_runtime`. A distribution name, a module name and a directory name
+are allowed to differ, and here all three do — `packages/ph-core/src/ph` builds
+`ph-core`, and `packages/phern/src/ph_app` builds `phern`.
+
 **In the checkout**, to work on it:
 
 ```bash
-uv sync                 # the workspace (packages/*) plus the dev group
-uv run ph --help
+uv sync                                       # every member plus the dev group
+uv run phern --help
+uv tool install ./packages/phern              # a PATH `phern` from this checkout
+uv tool install --editable ./packages/phern   # ...that tracks it
 ```
 
-**On your PATH**, to use it — after this, `ph` is a command like any other and
-needs neither the checkout nor `uv run`:
+The repository root is a *virtual* workspace root — members and tooling
+configuration, no distribution of its own — so it is `./packages/phern` that
+gets installed rather than `.`, and there is no longer an empty wheel in the
+middle holding a dependency list.
 
-```bash
-uv tool install .                        # every member: all ten profiles
-uv tool install ./packages/ph-app        # the CLI and core alone: seven of them
-uv tool install --editable .             # a PATH `ph` that tracks the checkout
-```
-
-uv prints where it put `ph` — `~/.local/bin` by default — and `uv tool
+uv prints where it put `phern` — `~/.local/bin` by default — and `uv tool
 update-shell` fixes a PATH that misses it. Afterwards the deployment answers to
-the distribution's name, so `uv tool upgrade ph-workspace` and `uv tool
-uninstall ph-workspace` address it (`ph-app` for the lean target). `--editable`
-reaches all seven members, not just the root, so a `git pull` is the whole
+its own name: `uv tool upgrade phern`, `uv tool uninstall phern`. `--editable`
+reaches every member through the workspace, so a `git pull` is the whole
 upgrade.
 
-Which target is a size question, and `ph doctor` reports what you got. The
-workspace root is every member, so it brings the optional plugins' third-party
-dependencies — `sentence-transformers`, and torch behind it — for about 600 MB
-that composes every profile including `rlm-indexed`. `packages/ph-app` is about
-60 MB and composes `anthropic`, `base`, `deepseek`, `google`, `headless`,
-`llama` and `tui`; the `rlm*` profiles need `ph-rlm`, which it does not carry.
+`phern doctor` reports what you actually got — which rows mounted, which
+profiles this install can compose, and why any of them refused.
 
-`--mode web` needs the web extra either way — `uv tool install --with
-"ph-app[web]" .`, or `uv tool install "./packages/ph-app[web]"` for the lean
-target.
+### The extras are yours to decide
 
-Python 3.12 or newer. Every example below says `ph`: literal after a tool
-install, `uv run ph` in the checkout.
+Three things this harness can do are large enough, or specific enough, that
+installing them is a choice rather than a default. None of them is a feature
+flag — each is a *row* that either mounts or does not, and `phern doctor`
+reports which ones actually activated.
+
+| extra | what it adds | what it costs |
+|---|---|---|
+| `phern[local]` | the local embedding model, so `text-index-local` mounts and `rlm-indexed` composes | `sentence-transformers` and torch — about 4.2 GB with the default CUDA wheels |
+| `phern[web]` | `--mode web`, the browser tab | `textual-serve`, with aiohttp and jinja2 behind it |
+| `phern[otel]` | exporting the session log to an OpenTelemetry collector | the OTel SDK and its OTLP exporter |
+
+**The embedder is the one worth thinking about.** Without `[local]`,
+`text_index` and `text_search` are still registered and the index still works —
+you supply the vectors. What is missing is the row that *computes* them, and it
+refuses to mount with a message naming the extra. A deployment that embeds
+through an endpoint instead — llama.cpp's `/v1/embeddings`, a provider's API —
+registers its own embedder on `ctx.text_index` and never wants torch at all.
+That is why it is not a dependency: a gigabyte for one provider of one seam is
+not a cost this package gets to impose on everyone who installs it.
+
+If you do want it and have no GPU, the CPU wheels are a third of the size:
+
+```bash
+pip install "phern[local]" --extra-index-url https://download.pytorch.org/whl/cpu
+```
+
+The checkout picks that index up on its own, from `[[tool.uv.index]]` in the
+root `pyproject.toml` — uv configuration, which is why it cannot travel in the
+published metadata and has to be a flag you pass.
+
+Python 3.12 or newer. Every example below says `phern`: literal after a tool
+install, `uv run phern` in the checkout.
 
 ## Point it at a model
 
@@ -89,7 +129,7 @@ event, or a child process.
 | `tui` | `headless` plus a writable workspace: a person is present to answer approvals | — |
 | `rlm` · `rlm-stable` | Code Mode, and Code Mode with the stabilization gates on | — |
 
-`ph doctor` prints the list this install can actually compose. Profiles compose,
+`phern doctor` prints the list this install can actually compose. Profiles compose,
 so `--profile llama` is `base` plus the llama route; the interactive profiles
 layer `headless` and then their own rows.
 
@@ -98,13 +138,13 @@ at 85% of the window rather than growing until the provider refuses it, and
 `/compact` is there to do it by hand. That layer is *optional*: an install
 without the distribution composes the same profiles and simply never compacts —
 which is the one place a profile's behaviour depends on what is installed, and
-`ph doctor` reports what actually activated.
+`phern doctor` reports what actually activated.
 
 ## One prompt
 
 ```bash
 export LLAMA_API_KEY=local
-ph --profile llama --provider llama --model "$(the model llama-server loaded)" \
+phern --profile llama --provider llama --model "$(the model llama-server loaded)" \
    -p "what is in this repo?"
 ```
 
@@ -116,21 +156,21 @@ ph --profile llama --provider llama --model "$(the model llama-server loaded)" \
 ## The TUI
 
 ```bash
-ph --profile tui --provider llama --model <model> --mode tui       # new session
-ph --mode tui --resume 20260908T041607-1c5576                      # reopen one
-ph --mode tui --no-spawn                                           # refuse rather than start a daemon
-ph --mode tui --keep-daemon                                        # the daemon it starts is a service
+phern --profile tui --provider llama --model <model> --mode tui       # new session
+phern --mode tui --resume 20260908T041607-1c5576                      # reopen one
+phern --mode tui --no-spawn                                           # refuse rather than start a daemon
+phern --mode tui --keep-daemon                                        # the daemon it starts is a service
 ```
 
 The front end talks to a daemon and starts an ephemeral one if nothing is
 listening, so closing the TUI does not end the turn — the root keeps working and
-`ph agents attach` will show it to you again.
+`phern agents attach` will show it to you again.
 
 ## The browser UI, on localhost
 
 ```bash
-ph --mode web --provider llama --model <model>            # 127.0.0.1:8000
-ph --mode web --port 8080 --open
+phern --mode web --provider llama --model <model>            # 127.0.0.1:8000
+phern --mode web --port 8080 --open
 ```
 
 It prints, before it binds:
@@ -146,17 +186,17 @@ Three things that line says, spelled out:
 - **The token in the URL is the whole authentication story** — no TLS, no users.
   Treat the URL like the terminal it came from.
 - **Every tab of one launch shares one session.** A second tab joins the
-  conversation; a second `ph --mode web` is a new one.
+  conversation; a second `phern --mode web` is a new one.
 - `--host` anything other than loopback prints a further warning, because that
   authority then reaches anyone who can route to the port.
 
 ## The daemon
 
 ```bash
-ph daemon --profile tui --provider llama --model <model>
-ph daemon --max-concurrent-children 6      # across every root; the rest queue
-ph daemon --passivate-after 30             # minutes of quiet before a root is released, or `off`
-ph daemon --ephemeral                      # exit once no client, root or appointment needs it
+phern daemon --profile tui --provider llama --model <model>
+phern daemon --max-concurrent-children 6      # across every root; the rest queue
+phern daemon --passivate-after 30             # minutes of quiet before a root is released, or `off`
+phern daemon --ephemeral                      # exit once no client, root or appointment needs it
 ```
 
 The socket is `$PH_RUNTIME/daemon.sock`, per boot and per user. A stale socket
@@ -165,18 +205,18 @@ from a crashed daemon is cleared; a live one is refused rather than stolen.
 ## What is running, and stopping it
 
 ```bash
-ph agents                                  # the roots this daemon is running
-ph agents status <session>                 # what one root is doing, and a --since cursor
-ph agents attach <session>                 # its history, then everything as it happens
-ph agents attach <session> --until-idle    # exits 1 if the turn it stopped on errored
-ph agents send <session> "carry on"        # queue a turn, starting or resuming the root
-ph agents schedule <session> --every 3600000 --prompt "check the build"
-ph agents doctor                           # socket, pid, uptime, provider, roots, capabilities
-ph agents shutdown                         # stop it, and wait until it is actually gone
+phern agents                                  # the roots this daemon is running
+phern agents status <session>                 # what one root is doing, and a --since cursor
+phern agents attach <session>                 # its history, then everything as it happens
+phern agents attach <session> --until-idle    # exits 1 if the turn it stopped on errored
+phern agents send <session> "carry on"        # queue a turn, starting or resuming the root
+phern agents schedule <session> --every 3600000 --prompt "check the build"
+phern agents doctor                           # socket, pid, uptime, provider, roots, capabilities
+phern agents shutdown                         # stop it, and wait until it is actually gone
 ```
 
-Attaching neither starts nor stops the work, so leaving is free. `ph agents
-doctor` reports what is **in force** in the running process, unlike `ph doctor`,
+Attaching neither starts nor stops the work, so leaving is free. `phern agents
+doctor` reports what is **in force** in the running process, unlike `phern doctor`,
 which reports what this invocation's flags and environment would produce.
 
 ## Configuring
@@ -184,17 +224,17 @@ which reports what this invocation's flags and environment would produce.
 Three layers, applied in this order:
 
 1. the shipped bundle documents — `ph-core/src/ph/bundles/*.yaml` and
-   `ph-app/src/ph_app/profiles/*.yaml`;
+   `packages/phern/src/ph_app/profiles/*.yaml`;
 2. **your overlay**, `$PH_HOME/profiles/<name>.yaml`, which patches a row by id
    without forking a bundle;
 3. `--patch`, this run only, same grammar as a profile document.
 
 ```bash
-ph config --profile llama                            # every knob every row accepts
-ph config --row autonomous --profile tui             # one row, by the name it is registered under
-ph --dump-config --profile llama                     # the mount as written, in order
-ph doctor --profile llama                            # what actually activated
-ph --patch '{id: fs, config: {root: /tmp/scratch}}' --profile tui --mode tui
+phern config --profile llama                            # every knob every row accepts
+phern config --row autonomous --profile tui             # one row, by the name it is registered under
+phern --dump-config --profile llama                     # the mount as written, in order
+phern doctor --profile llama                            # what actually activated
+phern --patch '{id: fs, config: {root: /tmp/scratch}}' --profile tui --mode tui
 ```
 
 A patch entry is `{id: …, config: {…}}` to reconfigure, `{id: …, disabled:
@@ -205,7 +245,7 @@ the whole route entry, or it inherits that field's default.
 
 Three roots, each overridable by its variable: `PH_HOME` (`~/.ph` — sessions,
 attachments, your profile overlays), `PH_CACHE` (`~/.cache/ph` — safe to delete
-wholesale) and `PH_RUNTIME` (the daemon socket). `ph doctor` prints where all
+wholesale) and `PH_RUNTIME` (the daemon socket). `phern doctor` prints where all
 three resolved, and which tier `PH_RUNTIME` landed in.
 
 ## Optional plugins
@@ -226,25 +266,25 @@ and `await tools.text_search(...)`, because every registered tool is in the
 generated SDK listing:
 
 ```bash
-ph --profile rlm-indexed --provider llama --model <model> --mode tui
+phern --profile rlm-indexed --provider llama --model <model> --mode tui
 ```
 
 An install missing either distribution is simply not offered that profile —
-`ph doctor` lists what this install can compose — rather than being offered one
+`phern doctor` lists what this install can compose — rather than being offered one
 that fails at mount. Layer one on its own with `--patch`:
 
 ```bash
-ph --patch '{insert: [{id: code-graph, name: code-graph}]}' --profile llama -p "..."
+phern --patch '{insert: [{id: code-graph, name: code-graph}]}' --profile llama -p "..."
 ```
 
-`ph config --row code-graph` prints what each row accepts, and all of them
-report to `ph doctor`. Each package's README is the honest account of what its
+`phern config --row code-graph` prints what each row accepts, and all of them
+report to `phern doctor`. Each package's README is the honest account of what its
 dependencies can and cannot do — worth reading before relying on one.
 
 **Provision before an agent needs it.** Both plugins fetch something on first
 use — grammars, an embedding model — and finding that out mid-turn is the wrong
 time. Each ships a command a person triggers, and reports readiness to
-`ph doctor`:
+`phern doctor`:
 
 ```bash
 /code-graph status     /code-graph install      # tree-sitter grammars
@@ -258,7 +298,7 @@ where nobody is present to type either command. Both plugins also install a
 needs it.
 
 Anything either plugin caches lives under `$PH_CACHE` — grammars, the model
-weights, the indexes — so `ph doctor` can name it and deleting that root
+weights, the indexes — so `phern doctor` can name it and deleting that root
 reclaims it.
 
 **Neither plugin watches the filesystem.** An index changes when its tool runs,
@@ -272,13 +312,13 @@ content hashing and is merely slower.
 ## Diagnostics
 
 ```bash
-ph doctor                                  # roots, platform, available profiles
-ph doctor --profile rlm-stable             # then mount it and let every row report
-ph events                                  # the event producer/consumer matrix
-ph --mode trajectory --session <id|path>   # audit a log, mounting nothing
+phern doctor                                  # roots, platform, available profiles
+phern doctor --profile rlm-stable             # then mount it and let every row report
+phern events                                  # the event producer/consumer matrix
+phern --mode trajectory --session <id|path>   # audit a log, mounting nothing
 ```
 
-`ph doctor` is the topology answered by the rows themselves — which containment
+`phern doctor` is the topology answered by the rows themselves — which containment
 rung is in force, what the file rules reach, what runs model code, which
 invariants hold. It creates nothing: no session, no agent, no provider call. A
 profile that refuses to start is reported as a sentence rather than a traceback,
@@ -287,8 +327,8 @@ which is the case it exists for.
 Housekeeping, both of which report by default and collect only with `--remove`:
 
 ```bash
-ph workspaces gc          # the git trees agents left behind, across every stored session
-ph attachments gc         # media no stored session references
+phern workspaces gc          # the git trees agents left behind, across every stored session
+phern attachments gc         # media no stored session references
 ```
 
 ## Tests

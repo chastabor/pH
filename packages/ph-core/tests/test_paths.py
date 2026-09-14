@@ -19,7 +19,7 @@ P5-11 first answered "which variable did the runtime tier come from" with a
 `{tier: variable}` table in its own module — a second copy of a decision
 `_resolve_runtime` had already made. It had drifted (naming `LOCALAPPDATA` for a
 Windows tier that falls back to `$XDG_CACHE_HOME` or `~/.cache`) and raised
-`KeyError` inside `ph doctor` for a tier added in `paths.py` and not there.
+`KeyError` inside `phern doctor` for a tier added in `paths.py` and not there.
 """
 
 from __future__ import annotations
@@ -98,7 +98,7 @@ def test_resolution_creates_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     monkeypatch.setenv("PH_HOME", str(tmp_path / "home"))
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "xdg"))
     roots = resolve_roots()
-    # `ph doctor` must be able to report without side effects.
+    # `phern doctor` must be able to report without side effects.
     assert not roots.home.exists()
     assert not roots.runtime.exists()
 
@@ -326,7 +326,7 @@ def test_a_windows_host_with_neither_variable_still_resolves(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """`~` is the last resort, and it names no variable rather than naming one it
-    did not read — which is what `ph doctor` prints under "source"."""
+    did not read — which is what `phern doctor` prints under "source"."""
     from ph.paths import _default_cache, _default_home, _resolve_runtime
 
     _on_windows(monkeypatch)

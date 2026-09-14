@@ -1,14 +1,29 @@
 [build-system]
-requires = ["hatchling>=1.26"]
+requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [project]
 name = "ph-core"
-version = "0.0.1"
+version = "0.1.0"
 description = "pH core: the cordis plugin subset, the session log, the LLM vocabulary, and the agent loop."
 readme = "README.md"
 requires-python = ">=3.12"
 license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Charles Tabor" }]
+keywords = ["agent", "llm", "harness", "plugin", "session-log", "react"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Topic :: Software Development",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Typing :: Typed",
+]
 dependencies = [
     # Ceilinged, and the ceiling is load-bearing. `ph_app.daemon.cancelsafe`
     # is keyed to how anyio registers a socket readiness wait — a bound
@@ -28,6 +43,12 @@ dependencies = [
 # message naming this extra rather than failing to import. Both distributions,
 # because the row needs the provider *and* a transport and refuses without
 # either — half of the extra is a sink that ships nowhere.
+[project.urls]
+Homepage = "https://github.com/chastabor/pH"
+Repository = "https://github.com/chastabor/pH"
+Documentation = "https://github.com/chastabor/pH/blob/main/docs/README.md"
+Issues = "https://github.com/chastabor/pH/issues"
+
 [project.optional-dependencies]
 otel = ["opentelemetry-sdk>=1.27", "opentelemetry-exporter-otlp-proto-http>=1.27"]
 

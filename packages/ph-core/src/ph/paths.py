@@ -130,7 +130,7 @@ class PathRoots:
         return self
 
     def describe(self) -> list[tuple[str, str]]:
-        """The rows `ph doctor` prints."""
+        """The rows `phern doctor` prints."""
         return [
             ("PH_HOME", str(self.home)),
             ("PH_CACHE", str(self.cache)),
@@ -310,7 +310,7 @@ def default_cache_path(configured: str | None, *fallback: str) -> Path:
     being written per row: the two indexing rows arrived a week apart, one
     applied `canonical` to the operator's spelling and the other did not, so a
     configured path reached through a symlink gave one of them two spellings for
-    one index — every other reader resolving to a different one, and `ph doctor`
+    one index — every other reader resolving to a different one, and `phern doctor`
     printing the unresolved one. `canonical`'s own docstring is the argument.
 
     Takes the fallback in segments because a cache root is rarely just a name:

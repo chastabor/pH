@@ -1,6 +1,6 @@
 """P6-02 — the config catalog, generated from the rows rather than written down.
 
-A profile is two things: a list of rows, and a blob of config per row. `ph events`
+A profile is two things: a list of rows, and a blob of config per row. `phern events`
 made the first half enumerable years before the second, and the asymmetry showed
 — the only way to learn what a row accepted was to open its module and read the
 `Config` class, which is exactly the position a person is in when they are
@@ -97,7 +97,7 @@ def test_types_render_the_way_a_profile_would_write_them(annotation: object, ren
 def test_the_catalog_reports_a_row_that_cannot_be_imported_rather_than_dropping_it() -> None:
     """A row that vanished from the catalog is the least helpful possible answer.
 
-    `ph doctor` prints a failing section in place for the same reason: the
+    `phern doctor` prints a failing section in place for the same reason: the
     report is read *because* something is wrong, and silence about the broken
     row is indistinguishable from silence about a row that does not exist.
     """

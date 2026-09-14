@@ -95,7 +95,7 @@ async def test_a_missing_projection_is_not_a_violation(harnessed: Harnessed) -> 
 
     Nothing requires a session to have projected — `write_projection` is called
     where a human might look, not on every refinement — so a deployment that
-    simply never wrote one would report a violation on every `ph doctor`. An
+    simply never wrote one would report a violation on every `phern doctor`. An
     alarm that fires loudest where the feature is used least is one people learn
     to ignore, which costs the alarm that matters.
     """

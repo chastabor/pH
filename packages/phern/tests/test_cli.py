@@ -1,0 +1,1097 @@
+"""P0-17 — the command line.
+
+Gate: *a one-shot Q&A against the fake adapter writes an inspectable JSONL.*
+
+"Inspectable" means readable by dsh tooling, not just by pH: the log is the
+trace (§8), so the first thing the CLI has to earn is a file someone else can
+read without a converter.
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+from typing import Any
+
+import pytest
+import yaml
+from filelock import FileLock
+from typer.testing import CliRunner
+
+import ph_app
+from ph import bundles
+from ph.bundles import BASE, HEADLESS, resolve_bundle
+from ph.json import as_obj
+from ph.paths import resolve_roots
+from ph.testing import ReapedHost, not_none, stored_log
+from ph_app import profiles
+from ph_app.cli import app
+from ph_app.profiles import (
+    PROFILE_DIR,
+    available_profiles,
+    compose_profile,
+    profile_file,
+    profile_name,
+    profile_or_exit,
+    resolve_profile,
+)
+
+runner = CliRunner()
+
+
+def test_dump_config_shows_the_composed_rows() -> None:
+    result = runner.invoke(app, ["--dump-config", "--profile", "headless"])
+    assert result.exit_code == 0, result.output
+    rows = yaml.safe_load(result.stdout)
+    ids = [row["id"] for row in rows]
+    assert ids[0] == "llm"
+    assert "llm-fake" in ids
+    # Every row names the layer it came from, so a surprising value is
+    # traceable to the file that set it.
+    assert all(row["layer"].endswith(".yaml") for row in rows)
+    fake = next(row for row in rows if row["id"] == "llm-fake")
+    assert fake["config"]["providers"] == ["fake"]
+    assert fake["layer"].endswith("headless.yaml")
+
+
+def test_machine_readable_output_stays_parseable_under_force_color(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`--dump-config` and `phern events --json` are documents, not prose.
+
+    Rich decides colour from the environment, and `FORCE_COLOR` is set by CI
+    images and by plenty of shells — so both commands were emitting ANSI escapes
+    into their own machine-readable output, and `yaml.safe_load` refused it with
+    "unacceptable character #x001b". A person piping `phern --dump-config` into a
+    parser got that, not a diagnosis.
+    """
+    monkeypatch.setenv("FORCE_COLOR", "3")
+    dumped = runner.invoke(app, ["--dump-config", "--profile", "headless"])
+    assert dumped.exit_code == 0, dumped.output
+    assert "\x1b" not in dumped.stdout
+    assert yaml.safe_load(dumped.stdout)
+
+    matrix = runner.invoke(app, ["events", "--json"])
+    assert matrix.exit_code == 0, matrix.output
+    assert "\x1b" not in matrix.stdout
+    assert json.loads(matrix.stdout)
+
+
+def test_unknown_profile_is_refused() -> None:
+    result = runner.invoke(app, ["--dump-config", "--profile", "nonesuch"])
+    assert result.exit_code == 2
+    assert "unknown profile" in result.output
+
+
+def test_doctor_prints_three_roots(roots: Path) -> None:
+    result = runner.invoke(app, ["doctor"])
+    assert result.exit_code == 0, result.output
+    for name in ("PH_HOME", "PH_CACHE", "PH_RUNTIME"):
+        assert name in result.stdout
+
+
+def test_doctor_says_whether_the_daemon_socket_survives_logout(
+    tmp_path: Path, reaped_host: ReapedHost
+) -> None:
+    """P5-11's static half, printed with the roots and before any mount.
+
+    It needs no profile, and a profile that refuses to start is exactly when a
+    person wants it — so it sits above the section that can fail rather than
+    inside it. Printed on a good host too: rule 6 says to state what is not
+    enforced next to where it would be assumed, and "`phern daemon` runs until I
+    stop it" is assumed by everyone who never sees a warning.
+    """
+    reaped_host()
+    markers = tmp_path / "linger"
+
+    reaped = runner.invoke(app, ["doctor"])
+    assert reaped.exit_code == 0, reaped.output
+    assert "daemon socket lifetime" in reaped.stdout
+    assert "logind removes" in reaped.stdout
+    assert "loginctl enable-linger someone" in reaped.stdout
+
+    (markers / "someone").touch()
+    lingering_host = runner.invoke(app, ["doctor"])
+    assert lingering_host.exit_code == 0, lingering_host.output
+    assert "daemon socket lifetime" in lingering_host.stdout
+    assert "loginctl" not in lingering_host.stdout, "nothing left to advise"
+
+
+def test_starting_a_daemon_that_will_not_outlive_logout_says_so_first(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reaped_host: ReapedHost
+) -> None:
+    """The row's own wording: *names `enable-linger` when a daemon is configured
+    without it* — and this is the moment it is being configured.
+
+    Said here as well as in `phern doctor` because the two have different readers.
+    Doctor is run by somebody already debugging; this line is read by somebody
+    who is not, ten seconds before they close the terminal it was printed in.
+
+    The bind is made to fail on `AF_UNIX`'s 107-byte path limit so the command
+    returns instead of blocking — the same refusal `serve` names explicitly, and
+    the only way to observe a startup notice from a process whose next act is to
+    run forever.
+    """
+    reaped_host()
+    # Still inside `$XDG_RUNTIME_DIR`, so still reaped — just deep enough that
+    # the bind fails on the 107-byte limit instead of blocking forever.
+    monkeypatch.setenv("PH_RUNTIME", str(tmp_path / "xdg" / ("d" * 90) / ("e" * 90)))
+
+    result = runner.invoke(app, ["daemon", "--profile", "headless"])
+
+    assert result.exit_code == 1, result.output
+    assert "does not survive logout" in result.output
+    assert "loginctl enable-linger someone" in result.output
+    # Before the bind, not after it: a daemon that failed to start for an
+    # unrelated reason still told the person what would have happened if it had.
+    assert result.output.index("enable-linger") < result.output.index("cannot listen")
+
+
+def test_doctor_mounts_the_profile_and_prints_the_tier_table(roots: Path) -> None:
+    """P4-12's own gate. Doctor answered from `resolve_roots()` alone until this
+    row, so it could say where the log would go and nothing about what the
+    process would be — and every question worth running it for is a row's."""
+
+    result = runner.invoke(app, ["doctor", "--profile", "headless"])
+
+    assert result.exit_code == 0, result.output
+    assert "tier (effective)" in result.stdout
+    # §4.8's third column, which is the one a tier name cannot be trusted to
+    # convey on its own (E1).
+    assert "does NOT bound" in result.stdout
+
+
+def test_doctor_reports_the_live_topology_not_only_the_composition(roots: Path) -> None:
+    """dsh's rule, which pH had only half of: the dump must show what *is* running.
+
+    `--dump-config` prints the composed rows before anything runs, and says so.
+    But a row that mounted and never activated — an unmet `inject` key — looks
+    identical there to one that runs. `Loader.inactive()` knew the difference
+    and nothing called it, so a reader of the YAML had no way to learn which
+    they had. `doctor` now ends with the loader's own account of the mount: per
+    row, whether it activated, on what, and from which layer; then the isolated
+    realms, which are none at doctor time and are said to be none rather than
+    left as a missing line.
+    """
+    result = runner.invoke(app, ["doctor", "--profile", "headless"])
+
+    assert result.exit_code == 0, result.output
+    assert "Topology" in result.stdout
+    assert "active · injects" in result.stdout
+    # Provenance is the last two path components, because every bundle file is
+    # `bundle.yaml` and its directory is the name that tells them apart.
+    assert "bundles/base.yaml" in result.stdout
+    assert "an agent's scope is created when it runs" in result.stdout
+
+
+def test_a_row_contributes_a_reading_without_ph_app_importing_it(
+    tmp_path: Path, roots: Path
+) -> None:
+    """The other half of the gate: `permissions-fs` lives in ph-stabilize, which
+    this package must never import (P3-20's rule, and the reason the reading is
+    a seam rather than four `ctx.<name>` lookups doctor would have to know).
+
+    With no rules configured, deliberately: a deployment that wrote nothing has
+    a *wider* reach than one that wrote a deny list, and E9's sentence is most
+    worth printing exactly there.
+    """
+    profile = tmp_path / "reach.yaml"
+    profile.write_text(
+        yaml.safe_dump(
+            [
+                {"id": "diagnostics", "name": "diagnostics"},
+                {"id": "fs", "name": "fs-local", "config": {"root": str(tmp_path)}},
+                {"id": "permissions-fs", "name": "permissions-fs"},
+            ]
+        )
+    )
+
+    result = runner.invoke(app, ["doctor", "--profile", str(profile)])
+
+    assert result.exit_code == 0, result.output
+    assert "File permissions" in result.stdout
+    assert "not covered" in result.stdout
+
+
+def _strict_profile(tmp_path: Path) -> Path:
+    """A profile that cannot mount: `containment.strict` with no sandbox backend.
+
+    One composition, two doors — doctor and the run path — because the pair's
+    whole claim is that both report the *same* refusal. Written out twice, an
+    edit to one is two tests exercising different profiles and both still green.
+    """
+    path = tmp_path / "strict.yaml"
+    path.write_text(
+        yaml.safe_dump(
+            [
+                {
+                    "id": "containment",
+                    "name": "containment",
+                    "config": {"tier": "sandbox", "strict": True},
+                }
+            ]
+        )
+    )
+    return path
+
+
+def test_doctor_reports_a_profile_that_refuses_to_start(tmp_path: Path, roots: Path) -> None:
+    """E8's refusal reaches the person as a sentence, not a traceback: doctor is
+    what someone runs *because* the process will not start, and the exit code
+    still says it failed."""
+    profile = _strict_profile(tmp_path)
+
+    result = runner.invoke(app, ["doctor", "--profile", str(profile)])
+
+    assert result.exit_code == 1
+    assert "no sandbox backend is mounted" in result.output
+
+
+def test_print_mode_reports_a_profile_that_refuses_to_start(tmp_path: Path, roots: Path) -> None:
+    """The same refusal doctor prints, from the path a person actually runs.
+
+    `ContainmentUnavailableError` was a bare `RuntimeError`, so `phern -p` under
+    `containment.strict` answered a 191-line traceback while doctor alone caught
+    broadly. A deliberate refusal is now a `MountRefusal`, and the run path maps
+    it the way doctor does (P4-12, E8).
+    """
+    profile = _strict_profile(tmp_path)
+
+    result = runner.invoke(app, ["-p", "hello", "--profile", str(profile)])
+
+    assert result.exit_code == 1, result.output
+    assert "does not mount" in result.output
+    assert "no sandbox backend is mounted" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_doctor_refuses_an_unknown_profile_with_the_same_code(roots: Path) -> None:
+    """Exit 2, as `--dump-config` gives, not the exit 1 a mount failure gives.
+
+    Worth pinning because `typer.Exit` subclasses `RuntimeError`: resolved
+    inside doctor's broad mount-failure catch, an unknown profile came out as
+    "does not mount" under the wrong code, having already printed the right
+    sentence.
+    """
+
+    result = runner.invoke(app, ["doctor", "--profile", "nonesuch"])
+
+    assert result.exit_code == 2
+    assert "unknown profile" in result.output
+    assert "does not mount" not in result.output
+
+
+def test_a_patch_from_the_command_line_composes_as_the_last_layer() -> None:
+    """dsh's third layer — bundle, profile, *patch from the CLI* — which pH had
+    only as a file.
+
+    Same grammar as a profile document, on purpose: a second spelling for "change
+    this row" is how a flag and a file come to accept different things. The
+    provenance is what proves it composed rather than being applied some other
+    way — `layer: cli`, printed beside the change, in the same dump every other
+    layer appears in.
+    """
+    result = runner.invoke(
+        app,
+        ["--dump-config", "--profile", "headless", "--patch", "{id: llm-fake, disabled: true}"],
+    )
+    assert result.exit_code == 0, result.output
+    rows = {row["id"]: row for row in yaml.safe_load(result.stdout)}
+    assert rows["llm-fake"]["disabled"] is True
+    assert rows["llm-fake"]["layer"] == "cli"
+    # Untouched rows keep their own provenance: the cli layer is one more
+    # document, not a rewrite of the composition.
+    assert rows["llm"]["layer"].endswith("base.yaml")
+
+
+def test_two_patches_compose_in_order_and_reach_the_live_topology() -> None:
+    """Repeatable, and visible where it matters — in what the mount *became*.
+
+    `isolate:` and `disabled:` are both patch verbs, so both are reachable from
+    the flag; and `doctor` names `cli` as the layer that flipped a row, which is
+    the answer to "why isn't X running" when the reason was typed a moment ago.
+    """
+    result = runner.invoke(
+        app,
+        [
+            "doctor",
+            "--profile",
+            "headless",
+            "--patch",
+            "{id: skills-invariant, disabled: true}",
+            "--patch",
+            "{id: tools-invariant, disabled: true}",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "skills-invariant" in result.stdout and "disabled · by cli" in result.stdout
+    assert "skill-reach-cache" not in result.stdout, "a disabled row's invariant was still reported"
+
+
+def test_a_malformed_patch_is_refused_with_the_command_s_exit_code() -> None:
+    """The refusal is the command's, under the same exit code an unknown profile gets.
+
+    Three shapes a person can type that cannot mean anything: not YAML, a scalar
+    where a mapping is needed, and — the one that matters — a code tag. The
+    argument that a `!!js`-style value in a profile is refused at parse time is
+    worth nothing if the command line is a way around it.
+    """
+    for bad, expect in (
+        ("{id: llm-fake, disabled: [", "--patch"),
+        ("just-a-word", "expected a mapping"),
+        ("{id: llm-fake, config: !!python/object:os.system {}}", "--patch"),
+        # The loader's own refusals, not the flag's: a row that does not exist
+        # and an unknown key. A first draft checked two shapes in the CLI and let
+        # these reach the loader uncaught, so `--dump-config` printed a traceback
+        # for a typo in a row id.
+        ("{id: nope, disabled: true}", 'no row with id "nope"'),
+        ("{id: llm-fake, bogus: 1}", "unknown keys"),
+    ):
+        # Both commands, because they used to disagree: `doctor` composed inside
+        # its broad mount-failure catch and reported the same bad row as
+        # "profile does not mount" under exit 1. `profile_or_exit` composes
+        # now, so the grammar is one refusal wherever it is met.
+        for command in (["--dump-config"], ["doctor"]):
+            result = runner.invoke(app, [*command, "--profile", "headless", "--patch", bad])
+            assert result.exit_code == 2, (command, bad, result.output)
+            assert expect in result.output, (command, bad, result.output)
+            assert "does not mount" not in result.output, (command, bad)
+
+
+def test_a_profile_that_will_not_parse_is_refused_before_anything_mounts(
+    tmp_path: Path,
+) -> None:
+    """Every command, exit 2, the parser's sentence — and never "does not mount".
+
+    `profile_or_exit` resolves *and reads*, so a mode is handed a profile or
+    nothing. While it handed over paths, "that file is not YAML" surfaced at
+    whichever compose point the mode reached: exit 2 for `phern -p`, which maps
+    `LoaderError`, and — one step from the truth — `doctor`'s broad catch
+    reporting a profile that *parsed* nowhere as one that refused to *start*.
+
+    All three commands, because the point is that the refusal is the boundary's
+    rather than each command's: a fourth mode inherits it without writing
+    anything.
+    """
+    profile = tmp_path / "broken.yaml"
+    profile.write_text("- id: fs\n  name: [\n", encoding="utf-8")
+
+    for argv in (["doctor"], ["--dump-config"], ["--print", "hello"]):
+        result = runner.invoke(app, [*argv, "--profile", str(profile)])
+
+        assert result.exit_code == 2, (argv, result.output)
+        assert "broken.yaml" in result.output, (argv, result.output)
+        assert "does not mount" not in result.output, (argv, result.output)
+
+
+def test_doctor_says_when_no_row_can_report(tmp_path: Path) -> None:
+    """Rule 6, in the seam's place.
+
+    Every section `doctor` prints after the mount arrives through
+    `ctx.diagnostics` — Topology included, since it became a row. A profile that
+    mounts no `diagnostics` row has nothing to report *through*, and a report
+    that was simply empty would read as "nothing wrong", the one thing it cannot
+    mean. The hand-appended Topology used to print regardless; this is what
+    replaced that accident of construction with a sentence.
+    """
+    profile = tmp_path / "bare.yaml"
+    profile.write_text(
+        yaml.safe_dump([{"id": "fs", "name": "fs-local", "config": {"root": str(tmp_path)}}]),
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(app, ["doctor", "--profile", str(profile)])
+
+    assert result.exit_code == 0, result.output
+    assert "`diagnostics` row" in result.output
+    assert "Topology" not in result.output
+
+
+def test_events_matrix_is_generated_from_the_registry() -> None:
+    result = runner.invoke(app, ["events", "--json"])
+    assert result.exit_code == 0, result.output
+    matrix = json.loads(result.stdout)
+    by_name = {row["name"]: row for row in matrix}
+    assert by_name["agent/pre-step"]["mode"] == "waterfall"
+    assert by_name["agent/pre-step"]["payload"] == "PreStepRequest"
+    assert by_name["session/flush"]["mode"] == "parallel"
+    assert by_name["session/event"]["mode"] == "emit"
+
+
+def test_the_matrix_names_consumers_not_only_producers() -> None:
+    """The half a producer/consumer matrix is named for, and it was empty.
+
+    Two defects, one behind the other. The rendered table had no consumers
+    column at all — `matrix()` carried the field, so `--json` looked complete.
+    And the field itself was *always* empty: `note_consumer` guards on
+    `if module`, `Context._module` was only ever set by `Context.scope`, and
+    nothing in the mount path set it — so every scope inherited the root's empty
+    string and no listener was ever recorded, in any profile. `ForkScope` now
+    stamps the plugin's own `apply.__module__`.
+
+    Consumers are also why this command mounts. A `declare` runs at import, so
+    producers are knowable without one; `ctx.on` runs when a row *activates*, so
+    consumers are a property of the profile and not of the code.
+
+    `llm/stream` is asserted because it is the one every deployment listens to
+    for a reason worth noticing — the I3 invariant prepends itself there — so an
+    empty answer here means the mechanism is broken rather than the profile
+    being quiet.
+    """
+    result = runner.invoke(app, ["events", "--json"])
+    assert result.exit_code == 0, result.output
+    by_name = {row["name"]: row for row in json.loads(result.stdout)}
+
+    assert "ph.agent_loop.invariant" in by_name["llm/stream"]["consumers"], (
+        "no listener was recorded, so the consumer half of the matrix is dead"
+    )
+    assert by_name["llm/stream"]["producer"] != "", "a producer went missing"
+    assert "consumers" in runner.invoke(app, ["events", "--type", "llm"]).output
+
+
+def test_events_refuses_an_unknown_profile_rather_than_answering_without_one() -> None:
+    """The failure mode a broad `except` introduced, caught once and pinned here.
+
+    Mounting is what fills the consumer half, and a profile that will not mount
+    is reported rather than fatal — the declarations are still worth printing.
+    But `profile_or_exit` reports an *unknown* profile by raising
+    `typer.Exit`, which is an `Exception`, so guarding the resolve turned "no
+    such profile" into a complete-looking matrix and exit 0: the answer that
+    looks most like success, for the input most likely to be a typo. The resolve
+    now happens outside the guard, and `doctor`'s exit code is the one to match.
+    """
+    result = runner.invoke(app, ["events", "--profile", "nosuchprofile"])
+    assert result.exit_code == 2
+    assert "unknown profile" in result.output
+
+
+def test_the_config_catalog_is_generated_from_each_row_s_own_model() -> None:
+    """P6-02's other half: a profile is rows *and* their config, and only the
+    rows were enumerable.
+
+    Generated from `PluginSpec.config_model`, so a field added to a row appears
+    here without anybody remembering to write it down — the argument `phern events`
+    makes about declarations, applied to configuration. The assertions below name
+    a real row's real field, so a catalog that stopped reading the models would
+    fail rather than print an empty shell.
+    """
+    result = runner.invoke(app, ["config", "--json"])
+    assert result.exit_code == 0, result.output
+    catalog = json.loads(result.stdout)
+    by_name = {entry["name"]: entry for entry in catalog}
+
+    assert not [entry for entry in catalog if "error" in entry], "a row failed to resolve"
+    worktree = by_name["workspace-git-worktree"]
+    assert worktree["injects"] == ["workspace", "subprocess"]
+    ((option,),) = (worktree["config"],)
+    assert (option["name"], option["type"], option["default"]) == ("root", "str | null", "None")
+    assert "outside the repository on purpose" in option["doc"], (
+        "the field's own prose was not read off the source"
+    )
+    # A row with no `Config` is a fact, not an absence: it is listed with an
+    # empty option set rather than omitted, so "no options" and "not found"
+    # stay distinguishable.
+    assert by_name["diagnostics"]["config"] == []
+
+
+def _config(*args: str) -> Any:  # noqa: ANN401
+    """`phern config …` rendered wide enough to assert on.
+
+    Rich wraps to 80 columns off a terminal, and a wrapped cell is a substring
+    that is present and unfindable — `test_agents_cli`'s own runner says the
+    same thing about the same trap.
+    """
+    result = runner.invoke(
+        app,
+        ["config", *args],
+        env={"COLUMNS": "220", "FORCE_COLOR": None, "NO_COLOR": "1", "TERM": "dumb"},
+    )
+    assert result.exit_code == 0, result.output
+    return result
+
+
+def test_the_catalog_says_what_the_profile_sets_not_only_what_the_code_defaults() -> None:
+    """`phern config` answers "what would a run use", which is a deployment's
+    question and not the code's.
+
+    Three states, and they are genuinely different: a row this profile does not
+    mount (nothing here applies), one it mounts without setting the option (the
+    default stands), and one it sets (that is what runs). Composed, never
+    mounted — no agent is started and no session opened to answer it.
+    """
+    # `rlm-harness` and not `limits`: every shipped profile carries the stabilize
+    # bundle now, so `limits` *is* mounted everywhere and stopped being an
+    # example of the state this asserts. It has to be a row with options of its
+    # own — a row that takes no configuration is omitted from this catalog
+    # entirely, which is "no row matched" and a fourth state, not this one.
+    absent = _config("--row", "rlm-harness", "--profile", "headless")
+    assert "row not mounted" in absent.output, "headless ships no RLM row"
+
+    # A row a profile switches *off* is not mounted either, and a dump keeps it
+    # — reading that as "mounted, the default stands" was the third state told
+    # wrong. `rlm` ships this one `disabled: true`.
+    switched_off = _config("--row", "rlm-context-loader", "--profile", "rlm")
+    assert "row not mounted" in switched_off.output
+
+    # Mounted with no config of its own is the *middle* state, and shares no
+    # sentinel with the first: `row.config` is `None` for both.
+    mounted = _config("--row", "limits", "--profile", "rlm-stable")
+    assert "row not mounted" not in mounted.output
+    assert "turn_limit=None" in mounted.output, "the code's answer stays visible"
+
+    configured = _config(
+        "--row",
+        "limits",
+        "--profile",
+        "rlm-stable",
+        "--patch",
+        "{id: limits, config: {modelCalls: {turnLimit: 40}}}",
+    )
+    assert "40" in configured.output, "a ceiling a run would actually hit"
+
+
+def test_every_option_of_the_limits_row_says_what_it_does() -> None:
+    """The column was blank for this row: four options, none of them nested-doc'd.
+
+    Asserted as "every option has one" rather than by quoting the prose. The
+    failure this catches is a *new* option arriving with nothing said about it,
+    and a test naming four fixed substrings could not see that — while going red
+    on any rewording, which is the opposite of what it is for.
+    """
+    entry = json.loads(_config("--row", "limits", "--json").output)[0]
+    assert {field["name"] for field in entry["config"]} == {
+        "modelCalls",
+        "toolCalls",
+        "children",
+        "breaker",
+    }
+    undocumented = [field["name"] for field in entry["config"] if not field["doc"]]
+    assert undocumented == [], f"an option arrived with nothing said about it: {undocumented}"
+
+
+def test_a_nested_option_is_documented_by_the_model_that_defines_it() -> None:
+    """And the prose is not copied to get there.
+
+    Every option on this row *is* another config model, so the summary comes from
+    that class rather than from a paragraph beside the field — `phern config`'s
+    claim is that it cannot drift from the code, and a hand-written paraphrase
+    drifts first.
+    """
+    from ph_stabilize.limits import ChildLimits
+
+    entry = json.loads(_config("--row", "limits", "--json").output)[0]
+    children = next(field for field in entry["config"] if field["name"] == "children")
+
+    assert children["doc"].startswith("How many children an agent may spawn")
+    assert children["doc"] in " ".join((ChildLimits.__doc__ or "").split())
+
+
+def test_the_catalog_refuses_an_unknown_row_rather_than_printing_nothing() -> None:
+    """An empty table answers "no such row" and "that row has no options"
+    identically, and the person typing it meant one of them."""
+    result = runner.invoke(app, ["config", "--row", "workspace-git-worktree", "--row", "nope"])
+    assert result.exit_code == 2
+    assert "nope" in result.output and "workspace-git-worktree" not in result.output
+
+
+def resolve_profile_config(patches: list[str]) -> Any:  # noqa: ANN401
+    """The `jobs` row's config as the headless profile composes it, patches and all."""
+    rows = profile_or_exit("headless", patches).dump()
+    return next(row for row in rows if row.get("id") == "jobs").get("config")
+
+
+def test_the_children_cap_reaches_the_row_as_a_patch() -> None:
+    """A deployment-wide bound, overridable from the command line (P4-04).
+
+    Through the profile rather than past it, so `--dump-config` and `phern doctor`
+    report the number actually in force. Unset patches *nothing*, which is what
+    lets the number live once in the bundle that ships a subagent provider — and
+    keeps a plain `phern daemon` working on a profile with no `jobs` row, since a
+    patch names a row the loader refuses when it is absent.
+    """
+    from ph_app.cli import _children_cap
+
+    assert _children_cap(None) == []
+    assert resolve_profile_config([]) is None, "headless caps nothing of its own"
+    assert resolve_profile_config(_children_cap(3)) == {"concurrency": {"subagent": 3}}
+
+
+def test_the_rlm_bundle_caps_the_kind_it_produces() -> None:
+    """The number lives with the producer, not with the seam (P4-04).
+
+    `ph-core`'s jobs seam treats `kind` as a free string everywhere else, and
+    `ph-base` ships no subagent provider — so a default there naming `subagent`
+    would be a definition knowing one bundle's vocabulary.
+    """
+    rows = profile_or_exit("rlm").dump()
+    jobs = next(row for row in rows if row.get("id") == "jobs")
+    assert as_obj(as_obj(jobs["config"])["concurrency"]) == {"subagent": 8}
+
+
+def test_the_children_cap_refuses_a_number_that_bounds_nothing() -> None:
+    """Zero children is not a cap, it is a stopped deployment."""
+    result = runner.invoke(app, ["daemon", "--max-concurrent-children", "0"])
+    assert result.exit_code == 2
+    assert "positive number of children" in result.output
+
+
+def test_print_mode_refuses_a_session_another_process_holds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One sentence and exit 2, not a traceback — the daemon's own refusal (P5-03)."""
+    monkeypatch.setenv("PH_HOME", str(tmp_path))
+    log_path = tmp_path / "sessions" / "held" / "held.jsonl"
+    holder = FileLock(f"{log_path}.lock", thread_local=False)
+    holder.acquire()
+    try:
+        result = runner.invoke(app, ["-p", "hello", "--session", "held"])
+    finally:
+        holder.release()
+    assert result.exit_code == 2, result.output
+    assert 'session "held" is already active in another process' in result.output
+    assert "Traceback" not in result.output
+    assert not log_path.exists(), "a refused run writes nothing"
+
+
+def test_print_mode_answers_and_writes_a_readable_log(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PH_HOME", str(tmp_path))
+    result = runner.invoke(app, ["-p", "what is a session log?", "--session", "demo"])
+    assert result.exit_code == 0, result.output
+    assert "ok" in result.stdout
+
+    path = stored_log(tmp_path / "sessions", "demo")
+    records = [json.loads(line) for line in path.read_text().splitlines()]
+    assert records[0]["type"] == "session/header"
+    assert records[0]["header"]["version"] == 0
+
+    events = records[1:]
+    # dsh's envelope, byte-for-byte: `{type, seq, time, data}` plus the optional
+    # camelCase surface fields (D2, Q2).
+    assert [event["seq"] for event in events] == list(range(len(events)))
+    for event in events:
+        assert set(event) <= {
+            "type",
+            "seq",
+            "time",
+            "data",
+            "ignorable",
+            "sourceEventSeqs",
+            "surfaceOp",
+        }
+    user = next(e for e in events if e["type"] == "user/message")
+    assert user["surfaceOp"] == "append"
+    assert user["data"]["content"][0]["text"] == "what is a session log?"
+
+    # And the harness can read its own log back into the same conversation.
+    from ph.persistence.jsonl import read_session
+    from ph.session import Session
+
+    header, restored = read_session(path)
+    assert header.id == "demo"
+    session = Session("demo", seed=restored, header=header)
+    assert [m.role for m in session.derive_messages()] == ["user", "assistant"]
+
+
+def test_each_mode_is_reachable_from_the_command_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PH_HOME", str(tmp_path))
+
+    text = runner.invoke(app, ["-p", "hello"])
+    assert text.exit_code == 0, text.output
+    assert "ok" in text.stdout
+
+    transcript = runner.invoke(app, ["-p", "hello", "--mode", "transcript"])
+    assert transcript.exit_code == 0, transcript.output
+    assert "you: hello" in transcript.stdout
+    assert "pH: ok" in transcript.stdout
+
+    stream = runner.invoke(app, ["-p", "hello", "--mode", "json"])
+    assert stream.exit_code == 0, stream.output
+    lines = [json.loads(line) for line in stream.stdout.splitlines() if line.startswith("{")]
+    assert lines[0]["type"] == "session/header"
+    # The log's own envelopes, not a rendering (I-7).
+    assert any(event.get("type") == "turn/end" for event in lines)
+
+
+def test_an_unknown_mode_is_refused() -> None:
+    result = runner.invoke(app, ["-p", "hi", "--mode", "nonsense"])
+    assert result.exit_code != 0
+
+
+def test_bare_invocation_prints_help() -> None:
+    result = runner.invoke(app, [])
+    assert result.exit_code == 0
+    assert "Usage" in result.output
+
+
+def test_profiles_resolve_to_bundle_documents() -> None:
+    documents = resolve_profile("headless")
+    # By resolved path, not by basename: two bundles in this workspace are both
+    # called `bundle.yaml`, so a name comparison would pass for either.
+    assert documents == [BASE, HEADLESS, resolve_bundle("stabilize")]
+    with pytest.raises(ValueError):
+        resolve_profile("nope")
+
+
+def test_every_shipped_profile_carries_the_stabilize_layer() -> None:
+    """Context management is not a posture — it is in every profile pH offers.
+
+    Asserted over the whole table rather than for the one profile somebody had
+    in mind, because the failure this prevents is a *new* profile added without
+    it: a session that grows until the provider refuses is a defect in any
+    posture, and the table is where that is decided.
+    """
+    stabilize = resolve_bundle("stabilize")
+    assert stabilize is not None, "this workspace installs ph-stabilize"
+    for name in available_profiles():
+        assert stabilize in resolve_profile(name), f"{name} composes without compaction"
+
+
+def test_the_stabilize_layer_is_composed_once_however_often_it_is_named() -> None:
+    """`rlm-stable` names it required *and* inherits the optional one.
+
+    Layering a document twice is not a harmless repeat — its rows are appended,
+    so the second `compaction-summarize` claims a slot the first already holds
+    and the mount fails. The gate is the count, because the symptom is a
+    `phern doctor` that refuses a profile this table says is fine.
+    """
+    documents = resolve_profile("rlm-stable")
+    stabilize = not_none(resolve_bundle("stabilize"))
+
+    assert documents.count(stabilize) == 1
+    assert len(documents) == len(set(documents)), "no layer is composed twice"
+
+
+def test_an_optional_bundle_that_is_absent_costs_the_profile_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The lean install: `ph-app` alone, with no `ph-stabilize` to resolve.
+
+    The whole reason the layer is optional. `available_profiles` gates on
+    bundles resolving, so a *required* stabilize would have taken `--profile
+    tui` away from an install that had it — trading a working profile for a
+    feature, which is the deal `rlm-indexed`'s own comment refuses.
+    """
+    installed = bundles.resolve_bundle
+    monkeypatch.setattr(
+        profiles,
+        "resolve_bundle",
+        lambda name: None if name == "stabilize" else installed(name),
+    )
+
+    assert "tui" in available_profiles(), "the profile survives its absence"
+    assert "llama" in available_profiles()
+    assert resolve_profile("tui") == [BASE, HEADLESS, PROFILE_DIR / "tui.yaml"]
+
+    # The same bundle, named *required* one profile over, is still refused and
+    # still names the distribution to install — which is the whole distinction
+    # the flag draws, and it is drawn here against one bundle so the test cannot
+    # pass by two bundles behaving differently for some other reason.
+    assert "rlm-stable" not in available_profiles()
+    with pytest.raises(ValueError, match="ph-stabilize"):
+        resolve_profile("rlm-stable")
+
+
+def test_an_unknown_profile_names_what_is_available() -> None:
+    """The error is a person's next step, so it lists what this install can
+    actually compose — a bundle profile whose distribution is missing is not
+    offered rather than offered and then failing (P3-20)."""
+    result = runner.invoke(app, ["--dump-config", "--profile", "nonesuch"])
+    assert result.exit_code != 0
+    # The literal built-ins, not `available_profiles()` — an expectation built
+    # from the function under test passes even when both are empty.
+    for name in ("base", "headless", "tui", "deepseek", "anthropic"):
+        assert name in result.output
+
+
+def test_the_tui_profile_layers_onto_headless() -> None:
+    documents = resolve_profile("tui")
+    stabilize = not_none(resolve_bundle("stabilize"))
+    assert documents == [BASE, HEADLESS, stabilize, PROFILE_DIR / "tui.yaml"]
+    # The bundle before the profile's own document, so `tui.yaml` — and a user
+    # overlay after it — can address a stabilize row by id.
+    assert documents.index(stabilize) < documents.index(PROFILE_DIR / "tui.yaml")
+
+
+def test_the_tui_profile_makes_the_workspace_writable() -> None:
+    """The first of the rows that differ, and the reason a `tui` profile exists.
+
+    `read-only` is right unattended — nothing can answer an approval prompt. In
+    the TUI a person is present, so the workspace is writable and everything
+    outside it still asks.
+    """
+    result = runner.invoke(app, ["--dump-config", "--profile", "tui"])
+    assert result.exit_code == 0, result.output
+    rows = yaml.safe_load(result.stdout)
+    sandbox = next(row for row in rows if row["id"] == "sandbox")
+    assert sandbox["config"]["defaultMode"] == "workspace-write"
+    assert sandbox["layer"].endswith("tui.yaml")
+
+    headless = runner.invoke(app, ["--dump-config", "--profile", "headless"])
+    rows = yaml.safe_load(headless.stdout)
+    unattended = next(row for row in rows if row["id"] == "sandbox")
+    assert unattended["config"]["defaultMode"] == "read-only"
+
+
+def test_only_a_profile_with_a_screen_offers_the_model_ask_user() -> None:
+    """The same fact as above from the other side: somebody is there to *ask*.
+
+    Read off `--dump-config` rather than off a mounted context, because the claim
+    is about what a *deployment* composes: `phern -p --profile headless` must never
+    put a question tool in the prompt, and the only thing standing between it and
+    one is which layer last spoke about this row. The layer is asserted too — a
+    row that came out enabled because somebody deleted it from `base.yaml` would
+    satisfy the flag and lose the disarmed default everywhere else.
+
+    Sabotage: drop the patch from `tui.yaml`, and an interactive session can no
+    longer ask; drop `disabled: true` from `base.yaml`, and every headless run
+    starts paying for a tool whose only possible answer is "nobody is there".
+    """
+    headless = yaml.safe_load(runner.invoke(app, ["--dump-config", "--profile", "headless"]).stdout)
+    tui = yaml.safe_load(runner.invoke(app, ["--dump-config", "--profile", "tui"]).stdout)
+
+    unattended = next(row for row in headless if row["id"] == "tool-ask-user")
+    assert unattended["disabled"] is True
+    assert unattended["layer"].endswith("base.yaml")
+    attended = next(row for row in tui if row["id"] == "tool-ask-user")
+    assert not attended.get("disabled")
+    assert attended["layer"].endswith("tui.yaml"), "the profile with a modal is what arms it"
+
+
+def test_tui_is_an_accepted_mode() -> None:
+    """`--mode tui` is offered and takes no `--print`.
+
+    Only the wiring is asserted here — the TUI itself is covered by the pilot
+    and snapshot tests, which drive it without a terminal.
+    """
+    from ph_app.cli import _MODES
+
+    help_text = runner.invoke(app, ["--help"]).output
+    assert "tui" in help_text
+    # The one-shot table is for modes that answer a prompt and exit; the TUI
+    # has its own entry point because the prompt *is* the interface.
+    assert "tui" not in _MODES
+
+
+def test_passivate_after_accepts_minutes_or_off() -> None:
+    """`--passivate-after` is minutes or `"off"`, and nothing else (P5-05).
+
+    Refused rather than defaulted when it is neither: a typo in a duration is a
+    daemon that silently keeps every root it ever started, and this is the one
+    process where that goes unnoticed for a week.
+    """
+    import typer
+
+    from ph_app.cli import _passivation
+
+    assert _passivation("90") == 90 * 60.0
+    assert _passivation("0.5") == 30.0
+    assert _passivation("off") is None
+    assert _passivation(" OFF ") is None
+
+    for bad in ("ninety", "", "-5", "0"):
+        with pytest.raises(typer.BadParameter):
+            _passivation(bad)
+
+
+def test_every_public_command_is_registered_and_nothing_private_leaked() -> None:
+    """The command table is a fact about the module, not about its source order.
+
+    P5-05 inserted a module-level helper directly beneath an `@app.command()`
+    decorator, which silently rebound it: `phern daemon` stopped existing (exit 2)
+    and a `-passivation` command appeared in `--help`. The whole suite stayed
+    green, because nothing anywhere asserted that a command is registered — the
+    CLI's commands were only ever invoked through `CliRunner`, which is a
+    different question from whether they are reachable.
+
+    Named explicitly rather than counted: a list that grows when a command is
+    added is a list that notices when one disappears.
+    """
+    from ph_app.cli import app
+
+    registered = {
+        command.name or not_none(command.callback).__name__ for command in app.registered_commands
+    }
+    assert {"daemon", "doctor"} <= registered, f"a command stopped being registered: {registered}"
+    private = {name for name in registered if name.startswith("_")}
+    assert not private, f"a helper was captured by an @app.command() decorator: {private}"
+
+
+# ------------------------------------------------ P6-33: `phern events --type` --
+
+
+def test_events_filters_to_a_namespace_and_drills_into_one() -> None:
+    """The bus half of the selector, through the command that prints it."""
+    listed = runner.invoke(app, ["events", "--type", "tools", "--json"])
+    assert listed.exit_code == 0, listed.output
+    names = [row["name"] for row in json.loads(listed.stdout)]
+    assert names and all(name.startswith("tools/") for name in names)
+
+    one = runner.invoke(app, ["events", "--type", "tools/execute", "--json"])
+    assert [row["name"] for row in json.loads(one.stdout)] == ["tools/execute"]
+
+
+def test_events_does_not_answer_with_the_session_logs_near_miss() -> None:
+    """`tool` is a *session-log* namespace; this registry holds `tools/*`. The two
+    differ by one letter, which is exactly what a substring filter gets wrong —
+    so the honest answer is "nothing here", not four `tool/*` rows."""
+    result = runner.invoke(app, ["events", "--type", "tool"])
+    assert result.exit_code == 2
+    assert "no declared event matches" in result.output
+
+
+def test_events_refuses_the_other_vocabulary_rather_than_answering_emptily() -> None:
+    """A person asking a bus registry for log types has the wrong surface, and an
+    empty table would let them conclude the namespace is quiet."""
+    result = runner.invoke(app, ["events", "--type", "log:workspace"])
+    assert result.exit_code == 2
+    assert "does not serve" in result.output
+
+
+def test_events_unfiltered_is_unchanged() -> None:
+    """No `--type` is no filter — the default must not have become a query."""
+    everything = json.loads(runner.invoke(app, ["events", "--json"]).stdout)
+    assert len(everything) > 20
+
+
+def test_pH_reinvokes_itself_one_way() -> None:
+    """Both processes pH starts are built by one function.
+
+    The daemon a UI spawns and the terminal a browser tab runs differ only in
+    their leading verb; the composition tail — profile, provider, model, and
+    every `--patch` — is the same argv every time. It was written twice, and only
+    the daemon's copy was pinned, so a renamed option would have surfaced in a
+    browser tab.
+
+    **Asserted through `tab_command`, not through a composition this test
+    writes.** The first version called `reinvoke` itself and passed for a web
+    branch that had since grown `--session` and `--keep-daemon` — a gate marking
+    its own homework rather than the caller's.
+    """
+    from ph_app.cli import spawn_command, tab_command
+
+    tab = tab_command(session="s1", profile="tui", provider="p", model="m", spawn=False)
+    daemon = spawn_command(profile="tui", provider="p", model="m", patch=["{id: x}"])
+
+    assert tab[:3] == [sys.executable, "-m", "ph_app"]
+    assert daemon[:3] == tab[:3], "one prefix, one rule"
+    assert tab[3:5] == ["--mode", "tui"]
+    assert tab[tab.index("--session") + 1] == "s1", "every tab, or an upload has no home"
+    assert "--no-spawn" in tab
+    assert daemon[3:5] == ["daemon", "--ephemeral"]
+    for argv in (tab, daemon):
+        assert argv[argv.index("--profile") + 1] == "tui"
+        assert argv[argv.index("--provider") + 1] == "p"
+    assert daemon[-2:] == ["--patch", "{id: x}"], "a patch reaches whoever composes"
+
+
+def test_a_launchs_lifetime_choice_reaches_its_tabs() -> None:
+    """`--keep-daemon` is the launch's decision, and a tab is where it lands.
+
+    The web process spawns no daemon — its *tabs* do, one of which wins the race
+    in `ensure_daemon` — so the flag has to travel in the argv every tab shares.
+    Sabotage: drop it from `tab_command`, and a person who asked for a service
+    daemon gets an ephemeral one that leaves when they close the browser.
+    """
+    from ph_app.cli import tab_command
+
+    kept = tab_command(session="s", profile="tui", provider="p", model="m", keep=True)
+    plain = tab_command(session="s", profile="tui", provider="p", model="m")
+
+    assert "--keep-daemon" in kept
+    assert "--keep-daemon" not in plain
+    assert "--no-spawn" not in plain, "spawning is the default; refusing is the flag"
+
+
+def test_drop_ins_compose_after_the_overlay(roots: Path) -> None:
+    """P6-38: what pH wrote on the person's behalf layers over what they wrote,
+    in name order — and a file profile has no name to write under."""
+    profiles_dir = resolve_roots().profiles_dir()
+    (profiles_dir / "headless.yaml").parent.mkdir(parents=True, exist_ok=True)
+    (profiles_dir / "headless.yaml").write_text("[]", encoding="utf-8")
+    dropins = resolve_roots().profile_dropins("headless")
+    dropins.mkdir()
+    (dropins / "sandbox.yaml").write_text("[]", encoding="utf-8")
+    (dropins / "a-first.yaml").write_text("[]", encoding="utf-8")
+    (dropins / "notes.txt").write_text("ignored", encoding="utf-8")
+
+    documents = resolve_profile("headless")
+
+    assert documents == [
+        BASE,
+        HEADLESS,
+        not_none(resolve_bundle("stabilize")),
+        # The person's own overlay, which shares a basename with the bundle it
+        # layers over — the reason this compares resolved paths.
+        profiles_dir / "headless.yaml",
+        dropins / "a-first.yaml",
+        dropins / "sandbox.yaml",
+    ]
+    assert profile_name("headless") == "headless"
+    assert compose_profile("headless").name == "headless"
+    # One predicate for "name or path", shared with `resolve_profile`: a `.yaml`
+    # that exists is a file profile with no name to write a drop-in under, and one
+    # that does not exist is a name — which then fails resolution by that name
+    # rather than resolving here and refusing there.
+    written = profiles_dir / "ad-hoc.yaml"
+    written.write_text("[]", encoding="utf-8")
+    assert profile_file(str(written)) == written
+    assert profile_name(str(written)) == ""
+    assert profile_file("some/missing.yaml") is None
+    assert profile_name("some/missing.yaml") == "some/missing.yaml"
+
+
+# ---------------------------------------------------------------------------
+# Rich reads `[...]` as a style tag, and an *extra* is spelled `phern[local]`.
+
+
+def test_a_refusal_naming_an_extra_prints_the_brackets(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The one word the sentence exists to carry must survive being printed.
+
+    Both halves of this were real. `--mode web` without its extra advised `pip
+    install 'phern'` — the command the person had just run — and
+    `text-index-local` refused by naming `ph-text-index` rather than
+    `ph-text-index[local]`, because Rich rendered the tag as nothing. The
+    refusals looked correct in the source and were wrong on the terminal, which
+    is the failure mode no amount of reading the string catches.
+    """
+    from ph_app.console import detail, err
+
+    err.print(f"[red]needs:[/red] {detail('pip install ph-text-index[local]')}")
+
+    printed = capsys.readouterr().err
+    assert "ph-text-index[local]" in printed, printed
+
+
+def test_every_rich_refusal_escapes_the_message_it_did_not_write() -> None:
+    """The rule, over the modules that print refusals, rather than one example.
+
+    A new `fail(f"[red]{error}[/red]")` is the way this regresses: it reads
+    exactly like the nine beside it and silently eats any bracket the message
+    carried. The walk is cheap and the alternative is noticing on a terminal.
+    """
+    import re
+
+    sources = [
+        Path(ph_app.__file__).parent / name
+        for name in ("cli.py", "agents.py", "console.py", "profiles.py")
+    ]
+    # An interpolation of a bare name into a string that also carries markup.
+    bare = re.compile(r"\[/?(?:red|yellow|green|dim|bold)\][^\"]*\{(error|refused)\}")
+
+    offenders = [
+        f"{source.name}:{number}: {line.strip()}"
+        for source in sources
+        for number, line in enumerate(source.read_text(encoding="utf-8").splitlines(), 1)
+        if bare.search(line)
+    ]
+    assert not offenders, (
+        "these interpolate a message this package did not write into Rich markup "
+        f"without `detail()`, so any `[extra]` in it prints as nothing: {offenders}"
+    )

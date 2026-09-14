@@ -5,7 +5,7 @@ argument in `paths.py` is that **the OS owns that directory's properties** —
 mode, owner, tmpfs, and *removal at session end*. Every one of those is a
 reason to prefer it, and the last one is what Phase 5 walks into.
 
-`ph daemon` exists so a run that takes an hour does not stop because a laptop
+`phern daemon` exists so a run that takes an hour does not stop because a laptop
 lid closed. But logind reaps `/run/user/$UID` when a user's last session ends
 unless that user is *lingering*, so a daemon started from an ordinary login
 session meets one of two ends at logout, and `loginctl enable-linger` is the
@@ -21,7 +21,7 @@ one fix for both:
   running" promised either.
 
 That first case is the silent failure this module exists to make loud, and it
-has two readers. `ph doctor` and `ph daemon` ask *before*: is this deployment
+has two readers. `phern doctor` and `phern daemon` ask *before*: is this deployment
 one where the socket will survive? The daemon asks *after*, on a cadence, of
 its own socket — `socket_identity` — because by then no new client can connect
 to be told anything, and the only surfaces left are the daemon's log and the
@@ -131,7 +131,7 @@ def username() -> str:
 def linger_state(user: str = "") -> LingerState:
     """Whether logind keeps this user's processes and runtime dir after logout.
 
-    Never raises: this is read by `ph doctor`, which a person runs *because*
+    Never raises: this is read by `phern doctor`, which a person runs *because*
     something is broken, and an unreadable `/var/lib/systemd` is a fact to
     report rather than a traceback to replace the rest of the report with.
     """
@@ -153,7 +153,7 @@ def logind_present() -> bool:
     the platform name.
 
     One `stat` of `SYSTEMD_RUN_DIR`, which is what `sd_booted(3)` does. Never
-    raises, for `linger_state`'s reason: this is read by `ph doctor`.
+    raises, for `linger_state`'s reason: this is read by `phern doctor`.
 
     The three answers stay distinct downstream, and each earns a different
     sentence: no logind is `not-applicable` and advises nothing; logind but no
@@ -235,7 +235,7 @@ class RuntimeLifetime:
         """Why the answer is what it is, with no answer in front of it.
 
         Split from `verdict` because it has a reader that is not answering that
-        question. `ph agents` reaches this when a *connect* failed, where the
+        question. `phern agents` reaches this when a *connect* failed, where the
         thing on screen above it is "no daemon socket at …" — and a next line
         beginning "no —" reads as a refusal of something nobody asked.
         """
@@ -302,7 +302,7 @@ class RuntimeLifetime:
     def verdict(self) -> str:
         """The `survives logout` row: the answer, then why.
 
-        `ph daemon` prints it at startup — one line, no table, before it blocks —
+        `phern daemon` prints it at startup — one line, no table, before it blocks —
         and taking it from here rather than writing a second sentence is what
         keeps the warning a person reads at 09:00 and the report they run at
         17:00 from disagreeing about what is wrong.
@@ -311,7 +311,7 @@ class RuntimeLifetime:
         return f"{answer} — {self.explanation}"
 
     def describe(self) -> list[tuple[str, str]]:
-        """The rows `ph doctor` and `ph agents doctor` print.
+        """The rows `phern doctor` and `phern agents doctor` print.
 
         `(label, value)` pairs, which is `PathRoots.describe()`'s shape and
         `ctx.diagnostics`' — so this reads as one more section rather than as a
@@ -344,7 +344,7 @@ class RuntimeLifetime:
 def lifetime(path: Path | None = None, *, roots: PathRoots | None = None) -> RuntimeLifetime:
     """Read the environment and answer for one path. Creates nothing.
 
-    `path` defaults to the runtime root, which is what `ph doctor` asks about
+    `path` defaults to the runtime root, which is what `phern doctor` asks about
     before any daemon exists. A daemon passes **its own socket**: `serve()`
     accepts an explicit path, so the socket a daemon bound and the root
     `resolve_roots()` derives are not always the same file, and a daemon that
@@ -377,7 +377,7 @@ def socket_identity(path: Path) -> tuple[int, int] | None:
     socket has **two** ways of stopping being the daemon's socket and only one
     of them is an absence. Logout reaps the directory, which is the removal;
     then the person logs back in, logind makes `/run/user/$UID` again, and
-    `ph daemon` — following the advice a client just printed — binds a *new*
+    `phern daemon` — following the advice a client just printed — binds a *new*
     socket at the same path. From then on the path exists and answers, while
     the first daemon still holds every lease the second one will be refused.
     An existence check calls that recovery. The inode says it is the worse

@@ -207,7 +207,7 @@ async def test_doctor_states_what_an_overlay_bounds_not_what_its_rung_sells(
     `TIERS` is keyed by rung, so every provider at `worktree` inherited "buys:
     collision isolation and revertibility (fan-out safety, per-run checkpoints,
     /revert)". An overlay has none of that second half — `write-tree` against a
-    FUSE mountpoint has nothing to hash — so `ph doctor` was advertising a
+    FUSE mountpoint has nothing to hash — so `phern doctor` was advertising a
     mechanism the mounted tier does not have. The columns belong to whoever
     occupies the rung, not to its name.
     """
@@ -590,7 +590,7 @@ async def test_a_crashed_agents_overlay_is_reclaimed(mount: MountProfile, tmp_pa
     not a folder. Before this the seam found the pair, asked
     `isinstance(provider, ReclaimingProvider)`, got `False`, and logged "no
     mounted tier can reclaim" — leaving the pair open for every future session to
-    report again and `ph workspaces gc` collecting nothing.
+    report again and `phern workspaces gc` collecting nothing.
     """
     ctx = await _overlaid(mount, tmp_path)
     base = tmp_path / "tree"

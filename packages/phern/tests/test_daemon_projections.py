@@ -1,0 +1,752 @@
+"""P5-14 — what a front end reads off a root it cannot reach into.
+
+`PHTuiApp` resolved nine seams out of `ctx` because the harness was in its own
+process. Over a socket none of that is reachable, so each one becomes a method
+here — and the risk this file exists for is **a projection that quietly says
+less than the seam does.** A dropped field is invisible: the UI renders, the
+palette fills, and one command is missing from it, or a footer reading that only
+appears under load never appears at all.
+
+So every gate below compares the projection against the *seam's own answer* in
+the same mount rather than against a literal. A literal passes for a projection
+that has been out of date since somebody added a field to `CommandDefinition`.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any
+
+import pytest
+from daemon_helpers import Daemon, running, until
+
+from ph.bundles import BASE, HEADLESS
+from ph.cordis import DEPLOYMENT, Profile, load_profile_documents
+from ph.keys import (
+    COMMANDS,
+    FS,
+    LLM,
+    PERMISSION_PRESETS,
+    SANDBOX,
+    SKILLS,
+    TOOLS,
+    TUI_STATUS,
+)
+from ph.seams.commands import CommandDefinition
+from ph.seams.skills import Skill
+from ph.seams.tui_status import StatusField, StatusReading
+from ph.session import SessionEvent
+from ph.testing import RecordedStep, ReplayAdapter, simple_tool, text_chunks, tool_call_chunks
+from ph.tools import ToolCallView, ToolResultView
+from ph_app.daemon.projections import credentials_named
+from ph_app.daemon.supervisor import Root
+from ph_app.payloads import ConfigRow
+from ph_app.protocol import DaemonError
+from ph_app.trust import TrustStore, trust_path
+from ph_app.tui.adapter import Frame, TuiEventAdapter
+from ph_app.wire import view_of
+
+pytestmark = pytest.mark.anyio
+
+
+async def _furnished(daemon: Daemon, session_id: str = "projected") -> Root:
+    """A root with one status field and one command registered into it.
+
+    Registered here rather than relied on from the profile, and that is the
+    point: these gates are about the *projection*, so they must not pass or fail
+    on which rows the daemon's profile happens to mount. A field contributed by
+    hand also lets the comparison be non-vacuous — an empty list equals an empty
+    list, and proves nothing about either.
+    """
+    root = await daemon.root(session_id)
+    root.ctx.require(TUI_STATUS).register(
+        StatusField(id="probe", read=lambda session: StatusReading(text="probe", level="warning"))
+    )
+    root.ctx.require(COMMANDS).register(
+        CommandDefinition(
+            name="probe",
+            summary="a command registered by the test",
+            run=lambda argument, ctx: f"ran with {argument!r}",
+            argument_hint="<thing>",
+        )
+    )
+    return root
+
+
+# ------------------------------------------------------------- the footer --
+
+
+async def test_status_readings_over_the_wire_equal_the_seams_readings(
+    tmp_path: Path,
+) -> None:
+    """The gate this increment is named for.
+
+    Against `ctx.tui_status` in the same mount, so a field a row contributes and
+    the projection does not carry is a failure here rather than a footer that is
+    silently shorter in the browser than in the terminal.
+
+    Sabotage: drop `level` from the projection — every reading renders `normal`,
+    and a warning stops looking like a warning.
+    """
+    async with running(tmp_path) as daemon:
+        root = await _furnished(daemon)
+        client = await daemon.client()
+
+        reply = await client.call("session/readings", sessionId=root.id)
+
+        seam = root.ctx.get("tui_status").readings(root.session)
+        assert reply["readings"] == [one.to_wire() for one in seam]
+        assert {"id": "probe", "slot": "line", "text": "probe", "level": "warning"} in reply[
+            "readings"
+        ], "the contributed field must survive the projection, id and level included"
+
+
+async def test_readings_ride_the_status_notification(tmp_path: Path) -> None:
+    """Pushed when the agent moves, because that is when they can have changed.
+
+    A reading is a fold of the log, so the moment worth recomputing is an append
+    — not the TUI's 30 Hz tick, which exists for the spinner and would ask this
+    thirty times a second to get the same answer.
+
+    Sabotage: send `session.status` without `readings`, and a browser tab shows a
+    footer frozen at whatever it held when it attached.
+    """
+    async with running(tmp_path) as daemon:
+        seen: list[dict[str, Any]] = []
+        client = await daemon.client(
+            on_notify=lambda method, params: (
+                seen.append(params) if method == "session.status" else None
+            )
+        )
+        root = await _furnished(daemon, "pushed")
+        await client.call("session/attach", sessionId=root.id)
+
+        await daemon.running.supervisor.prompt(root.id, "hello")
+        # The turn runs in the root's own task, so the notification arrives on
+        # its schedule rather than this one's. Waiting on the fact beats sleeping
+        # for a guess.
+        # Waits for a frame that *carries* readings, not merely for a frame.
+        # Not every `session.status` does: `passivated`, `retry` and
+        # `recovered` are the root announcing something about itself rather than
+        # the agent moving, and they have no footer to send. Waiting on `seen`
+        # alone therefore raced — one of those arriving first satisfied the wait
+        # and then failed the assertion, which is a flake that only shows under
+        # a slow run.
+        await until(
+            lambda: any("readings" in one for one in seen), what="a status frame with readings"
+        )
+        with_readings = [one for one in seen if "readings" in one]
+
+        assert with_readings, "no status notification carried readings"
+        assert all(
+            {"id": "probe", "slot": "line", "text": "probe", "level": "warning"} in one["readings"]
+            for one in with_readings
+        ), "the id is stamped by the registry, so it rides every frame the reading does"
+
+
+# ------------------------------------------------------- the palette et al --
+
+
+async def test_the_command_list_is_the_registrys_own(tmp_path: Path) -> None:
+    """Every command, and the hint a person needs to type one.
+
+    `run` is deliberately absent — it is a callable, and the client's job is to
+    offer the command and send the line back. Asserting the *names* against the
+    registry is what catches a projection that filtered or truncated.
+    """
+    async with running(tmp_path) as daemon:
+        root = await _furnished(daemon)
+        client = await daemon.client()
+
+        reply = await client.call("commands/list", sessionId=root.id)
+
+        registry = root.ctx.get("commands").list()
+        assert reply["commands"] == [one.schema().to_wire() for one in registry]
+        assert {
+            "name": "probe",
+            "summary": "a command registered by the test",
+            "argumentHint": "<thing>",
+        } in reply["commands"], "every field a palette shows must survive"
+        assert all("run" not in one for one in reply["commands"]), "a callable cannot travel"
+
+
+async def test_the_screen_list_carries_what_a_palette_needs_and_no_body(
+    tmp_path: Path,
+) -> None:
+    """`build` stays in the client; the rest is what orders and labels an entry.
+
+    Saying so is the point: a projection that silently dropped `build` would look
+    complete, and P5-15's declarative body is deferred to P7-07 rather than
+    absent by oversight.
+    """
+    async with running(tmp_path) as daemon:
+        root = await daemon.root("projected")
+        client = await daemon.client()
+
+        reply = await client.call("screens/list", sessionId=root.id)
+
+        registry = root.ctx.get("tui_screens").list()
+        # Against the seam's own wire form, not a re-spelled dict: what makes
+        # that form *complete* is `test_wire_forms.py`, and what this pins is
+        # that the daemon sends it rather than something of its own.
+        assert reply["screens"] == [one.schema().to_wire() for one in registry]
+        assert all("build" not in one for one in reply["screens"]), "a callable cannot travel"
+
+
+async def test_the_tool_list_matches_what_the_deployment_offers(tmp_path: Path) -> None:
+    """The same answer `--mode rpc` gives, against the same scope.
+
+    `DEPLOYMENT` and not an agent's view: a front end is asking what this
+    deployment can do, not what one agent was narrowed to.
+    """
+    async with running(tmp_path) as daemon:
+        root = await daemon.root("projected")
+        client = await daemon.client()
+
+        reply = await client.call("tools/list", sessionId=root.id)
+
+        schemas = root.ctx.require(TOOLS).schemas(scope=DEPLOYMENT)
+        assert [one["name"] for one in reply["tools"]] == [one.name for one in schemas]
+
+
+async def test_the_skill_list_matches_the_catalog_the_model_is_given(tmp_path: Path) -> None:
+    """The same set the prompt's catalog renders from, against the same scope.
+
+    `tools/list`'s argument one gate up, for the other half of what a request is
+    charged for: a sidebar that disagreed with the model's own catalog would be
+    a second account of what this deployment installs, and the one a person
+    reads would be the one nothing checks.
+
+    Registered by hand for `_furnished`'s reason — the gate must not pass or
+    fail on which skills the test profile happens to ship, and an empty list
+    equal to an empty list proves nothing about either side.
+    """
+    async with running(tmp_path) as daemon:
+        root = await daemon.root("projected")
+        root.ctx.require(SKILLS).register(
+            Skill(name="code-review", description="a skill registered by the test")
+        )
+        client = await daemon.client()
+
+        reply = await client.call("skills/list", sessionId=root.id)
+
+        installed = root.ctx.require(SKILLS).list(DEPLOYMENT)
+        assert [one["name"] for one in reply["skills"]] == [one.name for one in installed]
+        assert "code-review" in [one["name"] for one in reply["skills"]]
+        assert [one["description"] for one in reply["skills"]] == [
+            one.description for one in installed
+        ], "the description travels, because that is what /skills prints"
+
+
+async def test_the_config_rows_are_the_composed_profile(tmp_path: Path) -> None:
+    """A property of the daemon, not of any root: every root mounts this."""
+    async with running(tmp_path) as daemon:
+        client = await daemon.client()
+
+        reply = await client.call("daemon/config")
+
+        assert reply["rows"] == list(daemon.running.supervisor.profile.dump())
+        assert reply["rows"], "an empty profile would make this vacuous"
+
+
+def test_the_credential_names_come_from_the_composed_rows() -> None:
+    """Read from the configuration, not from a list kept in a front end (I7).
+
+    The key is nested inside a provider profile in the real rows, so the walk
+    has to go all the way down rather than checking the row's top level.
+
+    Daemon-side, which is the point of the move: this ran in a TUI modal, which
+    meant every attached front end was sent the whole composed profile so it
+    could be walked there.
+    """
+    rows: list[ConfigRow] = [
+        {"id": "llm", "config": None},
+        {"id": "llm-anthropic", "config": {"apiKeyEnv": "ANTHROPIC_API_KEY"}},
+        {
+            "id": "llm-openai-compatible",
+            "config": {
+                "profiles": [
+                    {"provider": "deepseek", "apiKeyEnv": "DEEPSEEK_API_KEY"},
+                    {"provider": "other", "apiKeyEnv": "OTHER_KEY"},
+                ]
+            },
+        },
+        {"id": "duplicate", "config": {"apiKeyEnv": "ANTHROPIC_API_KEY"}},
+    ]
+
+    assert credentials_named(rows) == ["ANTHROPIC_API_KEY", "DEEPSEEK_API_KEY", "OTHER_KEY"]
+
+
+async def test_a_credential_held_but_named_in_no_row_is_still_listed(tmp_path: Path) -> None:
+    """The login screen takes free text, so held and named are different sets.
+
+    Listing only what the profile names would drop a credential from the picker
+    at the moment somebody set it — which is the one moment they are looking at
+    it. `CredentialService.provided` is what makes the union askable.
+    """
+    async with running(tmp_path) as daemon:
+        root = await _furnished(daemon)
+        client = await daemon.client()
+
+        before = await client.call("credentials/held", sessionId=root.id)
+        assert "PH_TYPED_BY_HAND" not in before["held"]
+
+        await client.call(
+            "credentials/store", sessionId=root.id, name="PH_TYPED_BY_HAND", value="s3cret"
+        )
+        after = await client.call("credentials/held", sessionId=root.id)
+
+        assert after["held"]["PH_TYPED_BY_HAND"] is True
+        assert "s3cret" not in json.dumps(after), "the value must never cross the socket"
+
+
+# ------------------------------------------------------------ acting on it --
+
+
+async def test_a_command_runs_in_the_root_and_lands_in_its_log(tmp_path: Path) -> None:
+    """Run by the daemon, because that is where the seams a body reaches are.
+
+    And recorded in *this session's* log, so every other attached UI sees that
+    somebody ran it — the same rule the composer follows.
+    """
+    async with running(tmp_path) as daemon:
+        root = await _furnished(daemon)
+        client = await daemon.client()
+
+        shown = await client.call("session/command", sessionId=root.id, line="/probe here")
+
+        assert shown["shown"] == "ran with 'here'", "the body ran, in the root's own context"
+
+        assert [one.type for one in root.session.events].count("command/run") == 1
+
+
+async def test_running_a_command_twice_with_one_id_runs_it_once(tmp_path: Path) -> None:
+    """Idempotent through `root.remember`, the way `session/prompt` is.
+
+    A client that reconnects and retries cannot tell whether its first call
+    landed, and `/compact` is not a verb to run twice on a guess.
+
+    Sabotage: drop the `accepted` check, and the log shows two runs.
+    """
+    async with running(tmp_path) as daemon:
+        root = await _furnished(daemon)
+        client = await daemon.client()
+        once = {"sessionId": root.id, "line": "/probe", "clientId": "c", "commandId": "1"}
+
+        first = await client.call("session/command", **once)
+        again = await client.call("session/command", **once)
+
+        assert first.get("repeated") is not True
+        assert again["repeated"] is True
+        assert [one.type for one in root.session.events].count("command/run") == 1
+
+
+async def test_a_credential_is_stored_without_its_value_reaching_the_log_or_the_reply(
+    tmp_path: Path,
+) -> None:
+    """The secret is used and not kept — anywhere a reader could reach it.
+
+    Both halves are asserted because they fail independently: a value echoed in
+    the reply leaks to whoever holds the socket, and a value in the log leaks to
+    everyone who ever reads the session, forever.
+    """
+    async with running(tmp_path) as daemon:
+        root = await daemon.root("projected")
+        client = await daemon.client()
+        secret = "sk-do-not-log-me"
+
+        reply = await client.call(
+            "credentials/store", sessionId=root.id, name="ANTHROPIC_API_KEY", value=secret
+        )
+
+        assert reply == {"sessionId": root.id, "name": "ANTHROPIC_API_KEY", "stored": True}
+        assert secret not in repr([one.to_wire() for one in root.session.events])
+        held = await client.call("credentials/held", sessionId=root.id)
+        assert held["held"]["ANTHROPIC_API_KEY"] is True
+        assert secret not in json.dumps(held)
+
+
+async def test_a_new_session_records_the_clients_cwd_in_its_header(tmp_path: Path) -> None:
+    """Where the person is, not where the daemon is.
+
+    The daemon's own working directory is somewhere neither the person nor their
+    files are, so a session that inherited it would be labelled with a lie. The
+    header validates that the path is absolute, which is why the client sends a
+    resolved one.
+    """
+    async with running(tmp_path) as daemon:
+        client = await daemon.client()
+
+        # `trust="once"`: the daemon refuses a `cwd` nobody has vouched for
+        # (P5-14), and this test's subject is the header rather than the gate.
+        await client.call("session/new", sessionId="homed", cwd=str(tmp_path), trust="once")
+
+        root = daemon.running.supervisor.roots["homed"]
+        assert root.session.header.cwd == str(tmp_path)
+
+
+async def test_a_relative_cwd_is_refused_rather_than_resolved(tmp_path: Path) -> None:
+    """Resolving it would resolve it against the *daemon's* directory.
+
+    Which is the one directory that is certainly wrong. `SessionHeader` already
+    holds this rule; the gate is that the wire does not route around it.
+    """
+    async with running(tmp_path) as daemon:
+        client = await daemon.client()
+
+        with pytest.raises(DaemonError):
+            await client.call("session/new", sessionId="relative", cwd="./somewhere")
+
+
+# ----------------------------------------------------------- the card views --
+
+
+async def _with_a_card(daemon: Daemon, session_id: str) -> Root:
+    """A root that has run one tool call, through the real loop.
+
+    Through the loop and not by hand, because the thing under test is the
+    *link*: `tool/result` finds its call through `source_event_seqs`, which only
+    the real append path sets. A hand-built pair would pass while the daemon
+    could not render a single real result.
+    """
+    root = await daemon.root(session_id)
+    # The shipped replay adapter rather than a hand-rolled streamer: the chunk
+    # protocol has one statement in `ph.testing`, and a third copy of it is a
+    # third thing to fix when it moves. Registered under `fake`, which is the
+    # provider the daemon gives every root, so it shadows it for this one.
+    root.ctx.require(LLM).register_adapter(
+        ("fake",),
+        ReplayAdapter(
+            steps=[
+                RecordedStep(turn=1, step=1, chunks=tool_call_chunks("c1", "ping", "{}")),
+                RecordedStep(turn=1, step=2, chunks=text_chunks("done")),
+            ]
+        ),
+    )
+    root.ctx.require(TOOLS).register(
+        simple_tool(
+            "ping",
+            lambda _args, _run: "pong",
+            present_call=lambda args: ToolCallView(card="terminal", title="Ping", input="ping!"),
+            present_result=lambda args, result: ToolResultView(
+                card="terminal", title="Ping", subtitle="pong"
+            ),
+        )
+    )
+    return root
+
+
+async def test_a_relayed_tool_call_carries_the_view_the_tool_would_have_rendered(
+    tmp_path: Path,
+) -> None:
+    """The one thing the adapter needed `ctx.tools` for, sent instead.
+
+    A front end over a socket has no registry to ask, so without this every card
+    renders `generic` with its raw arguments — a visibly worse terminal for being
+    remote, which is the split this plan exists to close.
+
+    Sabotage: stop attaching `presentation` in `relay`, and the frames arrive
+    with events and nothing to title them by.
+    """
+    async with running(tmp_path) as daemon:
+        frames: list[dict[str, Any]] = []
+        client = await daemon.client(
+            on_notify=lambda method, params: (
+                frames.append(params) if method == "session.event" else None
+            )
+        )
+        root = await _with_a_card(daemon, "carded")
+        await client.call("session/attach", sessionId=root.id)
+
+        await root.agent.prompt("go")
+        await until(
+            lambda: any(one["event"]["type"] == "tool/result" for one in frames),
+            what="the tool result to be relayed",
+        )
+
+        called = next(one for one in frames if one["event"]["type"] == "tool/call")
+        settled = next(one for one in frames if one["event"]["type"] == "tool/result")
+        assert called["presentation"] == {"card": "terminal", "title": "Ping", "input": "ping!"}
+        # The result view is the harder half: `present_result` takes the *call\'s*
+        # arguments, and only the linked `tool/call` event carries them.
+        assert settled["presentation"] == {
+            "card": "terminal",
+            "title": "Ping",
+            "subtitle": "pong",
+            "isError": False,
+        }
+
+
+async def test_a_snapshot_page_carries_the_same_views_as_the_live_stream(
+    tmp_path: Path,
+) -> None:
+    """A transcript must not look different on replay than it did live.
+
+    One client attached before the turn and one paging in afterwards see one
+    session; a card that titled itself differently between them would be the
+    multiplex design failing at the only place a person would notice.
+    """
+    async with running(tmp_path) as daemon:
+        root = await _with_a_card(daemon, "paged")
+        await root.agent.prompt("go")
+        client = await daemon.client()
+
+        page = await client.call("session/snapshot", sessionId=root.id)
+
+        # Sparse and keyed by seq: a page is 2048 events and a turn contributes
+        # a handful of cards, so a positional list would be mostly `null`.
+        views = {
+            event["type"]: page["presentations"][str(event["seq"])]
+            for event in page["events"]
+            if str(event["seq"]) in page["presentations"]
+        }
+        assert views["tool/call"]["title"] == "Ping"
+        assert views["tool/result"]["subtitle"] == "pong"
+        assert set(views) == {"tool/call", "tool/result"}, "nothing else carries a view"
+
+
+async def test_an_event_that_is_not_a_card_carries_no_view(tmp_path: Path) -> None:
+    """Most events are not tool calls, and the relay must not pay for them.
+
+    Also the honest reading of "derived, never appended": a view renders a call,
+    so an event that is not one has nothing to render and says so with `None`
+    rather than an empty object a client would have to distinguish.
+    """
+    async with running(tmp_path) as daemon:
+        root = await _with_a_card(daemon, "plain")
+        await root.agent.prompt("go")
+        client = await daemon.client()
+
+        page = await client.call("session/snapshot", sessionId=root.id)
+
+        keyed = {int(seq) for seq in page["presentations"]}
+        cards = {
+            one["seq"] for one in page["events"] if one["type"] in ("tool/call", "tool/result")
+        }
+        assert keyed == cards and len(cards) == 2, "only cards are keyed, and the turn made two"
+
+
+def test_the_adapter_prefers_the_daemons_view_and_falls_back_to_the_tool() -> None:
+    """The two sources never compete, and the fallback still works.
+
+    A sidecar arrives exactly when there is no registry to ask, so precedence is
+    not really a contest — but stating it as one is what keeps a remote front end
+    from silently rendering the generic card if a registry is ever present too.
+    Validated rather than trusted: a sidecar that does not parse falls back
+    rather than drawing a wrong card.
+    """
+    event = SessionEvent.from_wire(
+        {
+            "type": "tool/call",
+            "seq": 0,
+            "time": 0,
+            "data": {"callId": "c1", "name": "ping", "arguments": "{}"},
+        }
+    )
+
+    rendered = TuiEventAdapter()
+    rendered.apply(
+        event,
+        Frame(
+            live=False, view=view_of("tool/call", {"title": "From the daemon", "card": "terminal"})
+        ),
+    )
+    junk = TuiEventAdapter()
+    junk.apply(
+        event, Frame(live=False, view=view_of("tool/call", {"title": 17, "unexpected": True}))
+    )
+
+    card = next(item.tool for item in rendered.state.items if item.tool is not None)
+    assert card.title == "From the daemon" and card.card == "terminal"
+    fallback = next(item.tool for item in junk.state.items if item.tool is not None)
+    assert fallback.title == "ping", "an unparseable view renders the plain card, not a wrong one"
+
+
+async def test_a_preset_switch_is_applied_and_recorded(tmp_path: Path) -> None:
+    """The permission posture, changed from a UI that is not in this process.
+
+    Recorded in the log rather than held on the connection, so every other
+    attached front end sees the switch and a resume comes back to it — the same
+    rule the composer and `!!` follow.
+    """
+    async with running(tmp_path) as daemon:
+        root = await daemon.root("presets")
+        client = await daemon.client()
+
+        reply = await client.call("session/preset", sessionId=root.id, preset="workspace-write")
+
+        assert reply["preset"] == "workspace-write"
+        assert [one.type for one in root.session.events].count("permission/preset") == 1
+
+
+async def test_the_posture_reaches_a_front_end_as_readings_not_as_fields(
+    tmp_path: Path,
+) -> None:
+    """The posture, carried by the mechanism that already carries the footer.
+
+    Both facts were bespoke fields on `RootDescription` — seven coordinated
+    edits each, and a `describe()` that had to know two seams by name. They are
+    `StatusField`s now: the row that owns the fact contributes it, the existing
+    readings projection carries it, and `StatusReading.id` is what lets a front
+    end place one somewhere particular.
+
+    Against the seams' own answers in the same mount, which is this module's
+    rule — and both halves of the sandbox precedence, because only the daemon
+    holds either: the mounted row's default is not in the log, and the log's
+    override is not in the row.
+    """
+    async with running(tmp_path) as daemon:
+        root = await daemon.root("postured")
+        client = await daemon.client()
+        sandbox = root.ctx.require(SANDBOX)
+        presets = root.ctx.require(PERMISSION_PRESETS)
+
+        fresh = await client.call("session/attach", sessionId=root.id)
+        readings = {one["id"]: one["text"] for one in fresh["readings"]}
+
+        assert readings["sandbox-mode"] == f"sandbox {sandbox.resolve_mode(root.session)}"
+        assert readings["sandbox-mode"] == f"sandbox {sandbox.default_mode}", (
+            "with nothing in the log the reading is the mounted row's default"
+        )
+        assert readings["posture"] == f"{presets.resolve(root.session).name} accepted"
+
+        # A preset moves both, because a preset *is* both — and the reply says
+        # so without either being a field anybody had to add.
+        await client.call("session/preset", sessionId=root.id, preset="workspace-write")
+        moved = await client.call("session/attach", sessionId=root.id)
+        after = {one["id"]: one["text"] for one in moved["readings"]}
+
+        assert after["posture"] == "workspace-write accepted"
+        # Against the reading taken *before* the switch, so the `!=` compares two
+        # of the same thing. It used to compare this text to `sandbox.default_mode`
+        # — a bare mode name against a prefixed reading, never equal, so the clause
+        # was true whatever the preset did. mypy's `--strict-equality` says so, and
+        # only ever got the chance once `daemon.root()` stopped returning `Any`.
+        assert after["sandbox-mode"] == "sandbox workspace-write" != readings["sandbox-mode"]
+
+
+async def test_a_method_whose_seam_is_absent_says_so_and_is_not_unknown(
+    tmp_path: Path,
+) -> None:
+    """ "This deployment does not do that" is not "this daemon is too old".
+
+    Two different sentences with two different client responses: `unknown_method`
+    means disable the feature everywhere, `seam_absent` means grey out one button
+    for one root. The read-side projections already answer absence with an empty
+    list; this is the act side agreeing.
+
+    Sabotage: raise `UnknownMethod` for a missing seam, and a client that met one
+    root without credentials stops offering login for every other root too.
+    """
+    # A deployment that never mounted the seam, which is the only honest way to
+    # reach the branch: a mounted root cannot have one taken away, because
+    # `ctx.provide` refuses a second claim in the same realm.
+    bare = Profile.from_documents(
+        [
+            *load_profile_documents([BASE, HEADLESS]),
+            ("test", [{"id": "credentials", "remove": True}]),
+        ]
+    )
+    async with running(tmp_path, profile=bare) as daemon:
+        root = await daemon.root("bare")
+        client = await daemon.client()
+
+        with pytest.raises(DaemonError) as refused:
+            await client.call(
+                "credentials/store", sessionId=root.id, name="ANTHROPIC_API_KEY", value="x"
+            )
+
+        assert refused.value.reason == "seam_absent", (
+            "the client must be able to branch on this without matching message text"
+        )
+        assert refused.value.reason != "unknown_method"
+
+
+async def test_the_daemon_refuses_to_mount_an_untrusted_project(tmp_path: Path) -> None:
+    """The daemon mounts, so the daemon enforces (P5-14) — `ph_app.trust` says why.
+
+    Sabotage: enforce it client-side only, and `phern agents send` naming a new
+    session in a checkout nobody has vouched for loads it silently.
+    """
+    async with running(tmp_path) as daemon:
+        client = await daemon.client()
+        project = tmp_path / "somebody-elses-repo"
+        project.mkdir()
+
+        with pytest.raises(DaemonError) as raised:
+            await client.call("session/new", sessionId="untrusted", cwd=str(project))
+
+        assert raised.value.reason == "untrusted_project"
+        assert "untrusted" not in daemon.running.supervisor.roots
+
+        # Answered, and it mounts — and `always` is the answer that is recorded,
+        # so the next client is not asked again.
+        await client.call("session/new", sessionId="untrusted", cwd=str(project), trust="always")
+        assert "untrusted" in daemon.running.supervisor.roots
+        assert TrustStore(path=trust_path()).trusted(project)
+
+
+# ------------------------------------------------ a root works in its own repo --
+
+
+async def test_a_root_works_in_the_directory_its_session_names(tmp_path: Path) -> None:
+    """One daemon, many repositories — each root mounted in its own (P5-14).
+
+    The daemon is per *user*, not per repository: one socket under `$PH_RUNTIME`,
+    many roots, and a root's working directory is whatever its own session says.
+    Before this the fs seam rooted every mount at `Path.cwd()` — the *daemon's*
+    directory — so two sessions in two checkouts read and wrote the same tree
+    and the header that recorded where each belonged was decoration. It was
+    right by accident while the terminal was the harness, because then the
+    process really was in the repo.
+
+    Sabotage: drop `project=` from the mount and both roots land in the daemon's
+    own directory, which is neither person's repository.
+    """
+    one, two = tmp_path / "repo-one", tmp_path / "repo-two"
+    for repo in (one, two):
+        repo.mkdir()
+    async with running(tmp_path) as daemon:
+        client = await daemon.client()
+
+        await client.call("session/new", sessionId="a", cwd=str(one), trust="once")
+        await client.call("session/new", sessionId="b", cwd=str(two), trust="once")
+
+        first, second = daemon.held("a"), daemon.held("b")
+        assert first.ctx.require(FS).root_for(first.agent) == one
+        assert second.ctx.require(FS).root_for(second.agent) == two
+        # And a relative path — the only kind a tool should be asked for —
+        # resolves inside the right one.
+        assert first.ctx.require(FS).resolve("x.py", agent=first.agent) == one / "x.py"
+
+
+async def test_a_resumed_root_returns_to_its_own_repo(tmp_path: Path) -> None:
+    """Read off the *header*, because there is no client to ask on a resume.
+
+    A session picked from the list — or woken by its own schedule with nobody
+    attached — is mounted by the daemon alone, and the only record of where it
+    belongs is the header its log carries. So the directory is resolved from
+    disk before the mount: the fs seam fixes its root while applying, and
+    `workspace-lifecycle` reads that root there to discover the project's
+    provisioning, so a root mounted first and moved afterwards has already
+    branched from the wrong tree.
+
+    Sabotage: resolve the directory only from the client's parameter, and every
+    resumed session lands in the daemon's own cwd.
+    """
+    repo = tmp_path / "somewhere"
+    repo.mkdir()
+    async with running(tmp_path) as daemon:
+        client = await daemon.client()
+        await client.call("session/new", sessionId="c", cwd=str(repo), trust="once")
+        await daemon.running.supervisor._flush(daemon.held("c"))
+        await daemon.sweep()
+        assert not daemon.holds("c")
+
+        # Resumed with no `cwd` at all, which is what `session/attach` sends.
+        await client.call("session/attach", sessionId="c")
+
+        root = daemon.held("c")
+        assert root.session.header.cwd == str(repo)
+        assert root.ctx.require(FS).root_for(root.agent) == repo

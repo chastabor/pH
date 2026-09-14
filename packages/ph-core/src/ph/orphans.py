@@ -102,7 +102,7 @@ def process_start_token(pid: int) -> str | None:
 
 @dataclass(frozen=True, slots=True)
 class SweepReport:
-    """What one sweep did, so `ph doctor` can say it out loud."""
+    """What one sweep did, so `phern doctor` can say it out loud."""
 
     killed: tuple[int, ...] = ()
     stale: tuple[int, ...] = ()
@@ -198,7 +198,7 @@ class OrphanJournal:
         # compacting it away would hide the child from the sweep that runs after
         # that owner finally dies.
         keep = [live[pid] for pid in sorted(unverifiable + held)]
-        # Nothing read, nothing owed: every `ph` invocation otherwise wrote a
+        # Nothing read, nothing owed: every `phern` invocation otherwise wrote a
         # temp file and renamed it over a journal that was absent or unchanged.
         if live or self.path.exists():
             self._rewrite(keep)

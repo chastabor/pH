@@ -607,7 +607,7 @@ class CodeGraphStore:
             )
 
     def stats(self) -> dict[str, Any]:
-        """What `ph doctor` and every result's header report."""
+        """What `phern doctor` and every result's header report."""
         if not self.exists():
             return dict(EMPTY_STATS)
         with self._open() as connection:

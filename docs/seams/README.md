@@ -106,7 +106,7 @@ caller's own content hash.
 |---|---|---|
 | [`ctx.tui_screens`](tui_screens.md) | `seams/tui_screens.py` | The front end's registration seam (P4-17). |
 | [`ctx.tui_status`](tui_status.md) | `seams/tui_status.py` | A live reading in the footer, contributed by a row. |
-| [`ctx.diagnostics`](diagnostics.md) | `seams/diagnostics.py` | What a row wants `ph doctor` to say about it. |
+| [`ctx.diagnostics`](diagnostics.md) | `seams/diagnostics.py` | What a row wants `phern doctor` to say about it. |
 
 `seams/topology.py` contributes doctor's Topology section: what the mount *became*.
 

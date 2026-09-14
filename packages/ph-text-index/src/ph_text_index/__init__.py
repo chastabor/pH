@@ -98,10 +98,19 @@ MISSING_TURBOVEC = (
     "install it (`uv sync`, or `pip install turbovec`) or remove the row"
 )
 MISSING_MODEL = (
-    "the text-index-local row needs `sentence-transformers`, which ph-text-index "
-    "depends on; install it (`uv sync`) or replace the row with an embedder of "
-    "your own registered on `ctx.text_index`"
+    "the text-index-local row needs `sentence-transformers`, which is an extra: "
+    "install `ph-text-index[local]` (or `phern[local]` for the whole harness), "
+    "or replace the row with an embedder of your own registered on `ctx.text_index`"
 )
+"""Why the local embedder refused, and the two ways out.
+
+The extra rather than a dependency is the point (`ph-text-index[local]`): the
+model is most of a gigabyte and the seam it fills has other providers, so a
+deployment that embeds through an *endpoint* should be able to install this
+package and never resolve torch. That makes this message the one thing standing
+between "I installed the plugin" and "the tools are there but one row is not",
+which is why it names the extra exactly as a person would have to type it.
+"""
 
 INDEX_DESCRIPTION = """Add documents to the searchable text index.
 
@@ -219,7 +228,7 @@ class LocalConfig(WireModel):
     """Where the weights land. Defaults to `$PH_CACHE/models`.
 
     Under a pH root on purpose: left to `sentence-transformers` the weights go
-    to `$HF_HOME` or `~/.cache/huggingface`, which no `ph doctor` mentions and
+    to `$HF_HOME` or `~/.cache/huggingface`, which no `phern doctor` mentions and
     no `rm -rf $PH_CACHE` reclaims. Rebuildable and large is the lifecycle
     `$PH_CACHE` names (Q1), and the runtime venv is there for the same reason."""
     preload: bool = False
@@ -227,7 +236,7 @@ class LocalConfig(WireModel):
 
     Off by default because a person at a TUI would rather the harness start now
     and pay for the model when they use it. On for an **unattended** run — a
-    daemon, a scheduled tick, `ph -p` in CI — where the alternative is finding
+    daemon, a scheduled tick, `phern -p` in CI — where the alternative is finding
     out mid-turn that the weights cannot be fetched, and where nobody is present
     to type `/text-index install`.
 
@@ -355,7 +364,7 @@ class TextIndexSeam:
         return self._lock
 
     def report(self) -> list[tuple[str, str]]:
-        """`ph doctor`'s section: what is indexed, and by what."""
+        """`phern doctor`'s section: what is indexed, and by what."""
         if self.provider is None:
             return [("embedder", "none registered — text_index is not offered")]
         rows = [

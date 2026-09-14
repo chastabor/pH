@@ -31,7 +31,7 @@ checker without answering its question. A ruff rule cannot be configured for
 this; an AST walk can, and this is it.
 
 This is the same shape as `test_layering.py` (ph-core may not import Textual) and
-`packages/ph-app/tests/test_tui_screens.py` (the terminal may only touch what
+`packages/phern/tests/test_tui_screens.py` (the terminal may only touch what
 `FrontSession` declares): a rule that is cheap to state, expensive to discover by
 hand, and silent when broken.
 

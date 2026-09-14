@@ -100,7 +100,7 @@ CHILDREN_KIND = "subagent"
 """The job kind a subagent drive runs under, and the one a deployment usually caps.
 
 **Named here so a host can spell the cap without importing a bundle**, which is
-the whole of what this constant is for — `ph daemon --max-concurrent-children`
+the whole of what this constant is for — `phern daemon --max-concurrent-children`
 needs a key, and reaching into `ph-rlm` for it from `ph-app` would be worse than
 one string in the seam that defines what a job kind is. The *number* is not here:
 see `Config.concurrency`."""

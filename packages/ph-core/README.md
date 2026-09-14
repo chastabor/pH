@@ -12,9 +12,9 @@ a row. The session store is a row. The filesystem is a row. So is the tool
 registry that decides whether a tool call is even allowed to happen.
 
 ```bash
-ph --profile headless -p "hello"                 # ph-base + the fake adapter
-ph config --profile base                         # every knob every row accepts
-ph doctor --profile base                         # what actually activated
+phern --profile headless -p "hello"                 # ph-base + the fake adapter
+phern config --profile base                         # every knob every row accepts
+phern doctor --profile base                         # what actually activated
 ```
 
 `ph-core` is a dependency of every other package in this workspace and depends
@@ -100,10 +100,10 @@ false}` to arm a row a bundle ships off, `{id: …, remove: true}` to drop one, 
 an overlay restating one field of a route must restate the whole route entry.
 
 ```bash
-ph --patch '{id: fs, config: {root: /tmp/scratch}}' --profile tui --mode tui
-ph --patch '{id: tool-ask-user, disabled: false}' --profile headless -p "..."
-ph --dump-config --profile llama          # the composition, before anything runs
-ph config --row containment --profile tui # one row's knobs, defaults and what the profile set
+phern --patch '{id: fs, config: {root: /tmp/scratch}}' --profile tui --mode tui
+phern --patch '{id: tool-ask-user, disabled: false}' --profile headless -p "..."
+phern --dump-config --profile llama          # the composition, before anything runs
+phern config --row containment --profile tui # one row's knobs, defaults and what the profile set
 ```
 
 ### The knobs most deployments touch
@@ -177,7 +177,7 @@ never runs code. That is the plain harness, and it is a supported posture.
 - **`sandbox-local` is Linux (bwrap) and macOS (Seatbelt).** It probes both
   claims at mount — a write outside the workspace must fail, and a `CONNECT`
   through the egress shim must reach the proxy and be refused — and on a host
-  that cannot confine it says so in `ph doctor` and declines rather than
+  that cannot confine it says so in `phern doctor` and declines rather than
   pretending.
 - **`permissions-fs`-style path rules are not here** — they are `ph-stabilize`,
   and they bound *seam-mediated* access only. A model-authored `open(path, "w")`
@@ -202,4 +202,4 @@ about, because they enforce rules rather than behaviour:
 - the invariant rows (`agent-loop-invariant`, `session-invariant`,
   `tools-invariant`, `skills-invariant`, `scope-invariant`) are checked *at
   runtime*, not only in CI — a harness that can only prove these in a test
-  cannot prove them about your session, and `ph doctor` reports which hold.
+  cannot prove them about your session, and `phern doctor` reports which hold.

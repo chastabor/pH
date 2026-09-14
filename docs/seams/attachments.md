@@ -29,7 +29,7 @@ parent owns — which is what stops deleting a parent session from breaking its
 children.
 
 The cost is that collection needs a fold over *every* session, so nothing here
-collects automatically. That is `ph attachments gc`, deliberately unlike the
+collects automatically. That is `phern attachments gc`, deliberately unlike the
 spill store's per-owner sweep, and the rule it obeys was written down before it
 existed: **a blob any stored log still references must not be collected, however
 old it is.**
@@ -98,7 +98,7 @@ still open.
 
 ## Collection
 
-`ph attachments gc` folds **every** stored session for referenced digests. Three
+`phern attachments gc` folds **every** stored session for referenced digests. Three
 rules make it safe:
 
 * references are matched by the **digest's shape**, not a list of key names —

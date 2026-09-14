@@ -120,7 +120,7 @@ def test_a_removed_tree_is_not_a_survivor() -> None:
 
     The fold's whole value is that it describes what is *on disk*; a record for a
     tree the disposal policy removed would have the collector chasing paths that
-    do not exist and `ph doctor` reporting a pile nobody has.
+    do not exist and `phern doctor` reporting a pile nobody has.
     """
     session = _log(_acquired("a", "/trees/a"), _disposed("a", kept=False))
 
@@ -368,7 +368,7 @@ async def test_the_three_refusals(tmp_path: Path) -> None:
 
     A verdict per record rather than a filtered list, because "nothing to
     collect" and "three trees, all still held by a live agent" are very
-    different answers to `ph workspaces gc`.
+    different answers to `phern workspaces gc`.
 
     `held` comes from a real acquire rather than from a set the caller hands in.
     A second, id-keyed "the caller says this session is live" was drafted and
@@ -494,7 +494,7 @@ class _Store:
 def test_the_store_fold_skips_a_log_it_cannot_read() -> None:
     """The direction is the safe one in both consumers.
 
-    An unreadable log contributes no records, so `ph doctor` under-counts and the
+    An unreadable log contributes no records, so `phern doctor` under-counts and the
     collector removes nothing — which is what you want from a half-written file.
     """
     good = _log(

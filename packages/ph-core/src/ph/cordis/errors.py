@@ -62,7 +62,7 @@ class MountRefusal(CordisError, RuntimeError):
     `code` because the CLI is not the only host that mounts: the daemon mounts a
     profile per root, and `respond` reads `code` off any raised instance to put
     it in `data.reason` — so without one a profile that refuses reaches a TUI or
-    an `ph agents` client as a generic failure it cannot tell from a mistyped
+    an `phern agents` client as a generic failure it cannot tell from a mistyped
     method. `ph.persistence.lease.SessionBusy` names itself for the same reason.
     """
 

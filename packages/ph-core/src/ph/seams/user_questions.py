@@ -11,7 +11,7 @@ is the one rule here that is not obvious, and it follows from the failure mode
 above rather than from tidiness: since "nobody could answer" resolves instantly
 to `None`, appending around it would write a question-and-refusal pair into the
 log of every unattended run — an `/autonomous` turn inside an interactive
-profile, a `ph -p` against a profile that armed the row — for an exchange that
+profile, a `phern -p` against a profile that armed the row — for an exchange that
 never happened. The log would then say a person was asked and declined, which is
 a different and false claim.
 

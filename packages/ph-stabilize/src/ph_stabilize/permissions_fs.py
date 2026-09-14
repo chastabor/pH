@@ -40,7 +40,7 @@ nothing delivered.
 `confined` below is `enforcement_of(ctx) == "full"`; the kernel is confined when a
 backend is *available* and the acting agent has a workspace. So a `partial`
 backend, or an agent with no workspace, is a deployment where one is true and the
-other is not. `ph doctor`'s Code runtime section reports what is actually in force
+other is not. `phern doctor`'s Code runtime section reports what is actually in force
 per kernel; this row speaks only for these rules.
 
 When no confining provider is mounted the row says so at mount
@@ -189,7 +189,7 @@ class FsPermissions:
     Provided rather than kept in a closure because the reach sentence is only
     worth anything if something can read it back, and `ph-app` cannot import this
     package. Being the fourth row to want that is what bought `ctx.diagnostics`
-    (P4-12) — `ctx.tui_status`' shape, minus the `Session` — so `ph doctor`
+    (P4-12) — `ctx.tui_status`' shape, minus the `Session` — so `phern doctor`
     prints `reach` without knowing this module exists. The name stays published
     as well: `describe` is for a person reading a report, and `objection` is for
     the three callers that need a verdict.
@@ -242,7 +242,7 @@ class FsPermissions:
         return BOUNDED_REACH if self.confined else UNBOUNDED_REACH
 
     def describe(self) -> list[tuple[str, str]]:
-        """What `ph doctor` prints about file permissions (E9).
+        """What `phern doctor` prints about file permissions (E9).
 
         **The reach sentence even when there are no rules**, which is the
         counter-intuitive half: a deployment that wrote nothing has a *wider*
@@ -617,12 +617,12 @@ async def apply(ctx: Context, config: Config) -> None:
         # would return False. `hide` is consulted once per file a walk visits,
         # and a `grep` over a repository should not pay a Python call per
         # candidate for a rule set nobody wrote. The service is still published,
-        # because "no rules" is an answer `ph doctor` wants to be able to give.
+        # because "no rules" is an answer `phern doctor` wants to be able to give.
         return
     if not permissions.confined:
         # Said at mount, and only when there are rules to be wrong about: an
         # operator who wrote a deny list deserves to be told what it does not
-        # reach before they rely on it rather than after. `ph doctor` (P4-12)
+        # reach before they rely on it rather than after. `phern doctor` (P4-12)
         # asks `ctx.fs_permissions.reach` for the same sentence on demand.
         log.warning("ph_stabilize.permissions_fs: %s", permissions.reach)
 

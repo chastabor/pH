@@ -1,15 +1,36 @@
 [build-system]
-requires = ["hatchling>=1.26"]
+requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [project]
 name = "ph-stabilize"
-version = "0.0.1"
+version = "0.1.0"
 description = "pH stabilization bundle: todo, offload, compaction, limits, HITL and permissions."
 readme = "README.md"
 requires-python = ">=3.12"
 license = "MIT"
-dependencies = ["ph-core"]
+license-files = ["LICENSE"]
+authors = [{ name = "Charles Tabor" }]
+keywords = ["agent", "llm", "compaction", "todo", "hitl", "permissions"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Topic :: Software Development",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Typing :: Typed",
+]
+dependencies = ["ph-core==0.1.0"]
+
+[project.urls]
+Homepage = "https://github.com/chastabor/pH"
+Repository = "https://github.com/chastabor/pH"
+Documentation = "https://github.com/chastabor/pH/blob/main/docs/README.md"
+Issues = "https://github.com/chastabor/pH/issues"
 
 [project.entry-points."ph.bundles"]
 stabilize = "ph_stabilize:BUNDLE"

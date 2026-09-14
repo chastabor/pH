@@ -1,0 +1,139 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "phern"
+version = "0.1.0"
+description = "pH — a Python agent harness with no privileged core: every part is a row in a profile."
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Charles Tabor" }]
+keywords = ["agent", "llm", "harness", "plugin", "cli", "tui", "code-mode", "react"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Topic :: Software Development",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Typing :: Typed",
+]
+dependencies = [
+    # **This distribution is the deployment, not just the front end.** `phern` is
+    # what a person installs and `phern` is the command they get, so its
+    # dependency list is the answer to "what does pH consist of" — which is why
+    # the four optional bundles are named here rather than left to the installer
+    # to assemble from seven PyPI names.
+    #
+    # **Naming them is not importing them, and the difference is the whole
+    # architecture.** `ph_app` may not `import ph_rlm`, `ph_stabilize`,
+    # `ph_text_index` or `ph_code_graph` — `test_app_layering.py` walks the AST
+    # and fails if it ever does — because every one of them reaches the app the
+    # same way a *third-party* wheel would: through the `ph.bundles` entry-point
+    # group, resolved at `--profile` time by `available_profiles()`. Depending
+    # on the wheels changes which ones are present by default; it does not give
+    # the app a name it may write down.
+    #
+    # So the gating stays load-bearing after this change, for the case it was
+    # actually drawn for: a bundle nobody here ships. A wheel that registers
+    # `ph.bundles` composes a profile on an install of this package, and one
+    # uninstalled from an install of this package takes its profiles out of
+    # `phern doctor` rather than breaking the six that remain.
+    "ph-core==0.1.0",
+    "ph-rlm==0.1.0",
+    "ph-stabilize==0.1.0",
+    "ph-text-index==0.1.0",
+    "ph-code-graph==0.1.0",
+    # Reached through `ph-rlm` already; pinned here too because `ph_rlm.kernel`
+    # installs it *by name* into `$PH_CACHE/runtime-venv`, so the version this
+    # deployment resolves is the version a cell runs against.
+    "ph-runtime-guest==0.1.0",
+    # Declared although `ph-core` already requires it: `ph_app.daemon` imports
+    # `anyio` directly at 20-odd sites and `cancelsafe` is keyed to its
+    # internals, so arriving here transitively understated the coupling.
+    "anyio>=4.4,<5",
+    "filelock>=3.15",
+    "typer>=0.12",
+    "rich>=13.0",
+    "httpx>=0.27",
+    # Bounded at both ends, and both ends are load-bearing.
+    #
+    # The ceiling: `PHTuiApp.add_binding` writes into Textual's
+    # `BindingsMap.key_to_bindings` through the private `app._bindings`, because
+    # the public `bind()` drops the `id` that `apply_keymap` matches on — and
+    # that id is what makes a contributed screen's key rebindable in `tui.json`
+    # like every other (P4-17). A major release that renames it should be a
+    # decision someone makes, not one a resolver makes for them; without a
+    # ceiling the breakage lands as an `AttributeError` at plugin load, and only
+    # for users who have a screen-registering row installed.
+    #
+    # The floor: what the suite actually passes on, measured rather than
+    # guessed. `>=1.0` was untrue — `MarkdownStream` (the transcript's streaming
+    # append) does not exist before 5 and `Widget.release_anchor` not before 4,
+    # so `ph_app.tui.widgets.transcript` cannot even import there. The committed
+    # SVG snapshots then narrow it further: 8.2.4 fails `test_the_full_app_shell`
+    # and 8.2.5 is the first release every gate passes on.
+    "textual>=8.2.5,<9",
+]
+
+[project.urls]
+Homepage = "https://github.com/chastabor/pH"
+Repository = "https://github.com/chastabor/pH"
+Documentation = "https://github.com/chastabor/pH/blob/main/docs/README.md"
+Issues = "https://github.com/chastabor/pH/issues"
+
+[project.optional-dependencies]
+# The browser front end (P7-05). An extra rather than a dependency: `phern -p` in a
+# script, `phern daemon` under systemd and `phern --mode tui` all run without a web
+# server, and `textual-serve` brings aiohttp and jinja2 with it. `--mode web`
+# without the extra fails with the install line rather than an ImportError.
+web = ["textual-serve>=1.1.3"]
+
+# The local embedding model, passed straight through to the member that owns it.
+# Here as well as there because `phern` is the name a person installs: someone
+# who wants `rlm-indexed` should be able to ask for it without first learning
+# that the embedder lives in a distribution called `ph-text-index`.
+#
+# **It is the one part of this harness that is opt-in by size rather than by
+# design.** Everything else `phern` pulls is a bundle whose cost is measured in
+# megabytes; this is `sentence-transformers` and torch, about 4.2 GB with the
+# default CUDA wheels. Without it `text_index` and `text_search` still register
+# and still search an index you supply vectors for — what refuses to mount is
+# the row that *computes* them, with a message naming this extra.
+local = ["ph-text-index[local]==0.1.0"]
+
+# Exporting the session log to an OTel collector, passed through for the same
+# reason `local` is: `ph-core` owns the row and the refusal message, but `phern`
+# is the name a person installs, so all three of this deployment's extras should
+# be reachable without first learning which member implements which.
+otel = ["ph-core[otel]==0.1.0"]
+
+[project.entry-points."ph.plugins"]
+llm-openai-compatible = "ph_app.adapters.openai_compatible:apply"
+llm-anthropic = "ph_app.adapters.anthropic:apply"
+llm-google = "ph_app.adapters.google:apply"
+tui-screen-trajectory = "ph_app.tui.trajectory_screen:apply"
+
+[project.scripts]
+phern = "ph_app.cli:main"
+
+[tool.uv.sources]
+ph-core = { workspace = true }
+ph-rlm = { workspace = true }
+ph-runtime-guest = { workspace = true }
+ph-stabilize = { workspace = true }
+ph-text-index = { workspace = true }
+ph-code-graph = { workspace = true }
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ph_app"]
+
+# No force-include: `packages` already ships every file under `src/ph_app`,
+# data files included, and naming the profiles again made the wheel build fail
+# outright ("a second file is being added at the same path").

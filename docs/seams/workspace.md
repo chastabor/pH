@@ -17,7 +17,7 @@ requested.**
 A caller asks for `access="write"` or `"read"`. That is a *request*. What comes
 back is a `kind` and a `repo_writable`, and `repo_writable is False` **only when
 a tier is enforcing it** — never as a statement of intent, never inferred from
-the request. Wording anywhere — here, in `ph doctor`, in a config comment — that
+the request. Wording anywhere — here, in `phern doctor`, in a config comment — that
 blurs request and guarantee is a defect (§12 Q10).
 
 The practical form: asking for `read` on a deployment with no confining tier gets
@@ -218,8 +218,8 @@ provider cannot half-implement the lifecycle.
 A settled child's tree is what a parent needs to diagnose a failed run, so
 `retain(agent_id, reason)` keeps one past disposal and records
 `workspace/retained`. What that buys is evidence; what it sells is an unbounded
-pile of checkouts. `ph workspaces gc` closes that trade — and **never
-automatically**, on `ph attachments gc`'s precedent: sweeping retained trees at
+pile of checkouts. `phern workspaces gc` closes that trade — and **never
+automatically**, on `phern attachments gc`'s precedent: sweeping retained trees at
 startup would delete last night's failure exactly as somebody sat down to read it.
 
 `reconcile(session)` runs at session open and is the crash half of cleanup: a

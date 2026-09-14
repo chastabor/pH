@@ -17,7 +17,7 @@ That is the headline, and it is why this file exists rather than a `skipif`:
 Twice during this work a list of "known macOS failures" was written down with a
 plausible reason beside each entry. Both lists were later deleted in full, because
 investigating the reasons found defects instead — including one in shipped product
-behaviour (`ph agents attach --until-idle` printed a different thing depending on
+behaviour (`phern agents attach --until-idle` printed a different thing depending on
 which side of a race it landed on). The allowlist was not neutral bookkeeping. It
 was hiding bugs.
 
@@ -246,4 +246,4 @@ adding one is a mechanism of the kind the fourteen turned out not to have.
 
 `test.sh` · `docs/seams/sandbox.md` (the two backends and their doors) ·
 `docs/seams/workspace.md` (canonical roots) · `packages/ph-rlm/tests/test_boot_report.py`
-· `packages/ph-app/tests/test_daemon_framing.py` · plan rows P6-40, P6-41
+· `packages/phern/tests/test_daemon_framing.py` · plan rows P6-40, P6-41
