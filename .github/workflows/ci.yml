@@ -88,6 +88,41 @@ jobs:
           # `GITHUB_PATH` reaches the *next* step, so this one checks by path.
           "$HOME/.local/jj/jj" --version
 
+      # **`bubblewrap` is the Linux confinement backend**, and without it the
+      # sandbox seam registers no provider: `ph.seams.sandbox_local` probes
+      # `shutil.which("bwrap")`, finds nothing, and sixteen tests across
+      # `test_sandbox_local`, `test_sandbox_egress`, `test_sandbox_allow`,
+      # `test_workspace_scratch` and `ph-rlm`'s `test_kernel_confinement` skip —
+      # every test this repo has of the mechanism that contains model-written
+      # code. Measured here, it is also 0.56 points of ph-core coverage.
+      #
+      # `socat` comes with it because the egress tier needs a *second* binary:
+      # `bwrap` binds `/` read-only, so the shim that bridges the sandbox to the
+      # proxy is the host's own `socat` running inside. Without it the backend
+      # mounts and `egress_unavailable` refuses, which is a different skip for
+      # the same reason.
+      #
+      # macOS needs neither: `sandbox-exec` ships with the OS, and its egress
+      # door is a loopback port rather than a shim — `test.sh` says so at the
+      # point where it checks.
+      #
+      # The sysctl is Ubuntu 24.04's AppArmor restriction on unprivileged user
+      # namespaces, which `bwrap` needs and which the runner image may or may
+      # not already permit. `|| true` because a runner that does not have the
+      # knob is not a failure — the probe below reports what was actually got.
+      - name: Install bubblewrap
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends bubblewrap socat
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          bwrap --version
+          # Proof it can actually build a namespace here, not just that it exists.
+          bwrap --ro-bind / / --dev /dev --unshare-all -- /bin/true \
+            && echo "bwrap confines on this runner" \
+            || echo "::warning::bwrap is installed but cannot unshare; its tier will skip"
+
       - name: Sync the workspace
         run: uv sync --python ${{ matrix.python }}
 

@@ -134,6 +134,50 @@ def _guest_coverage_parts() -> list[Path]:
     return sorted(REPO.glob(f"{GUEST_COVERAGE_DATA.name}.*"))
 
 
+def _short_tmpdir() -> None:
+    """Move `TMPDIR` somewhere an `AF_UNIX` path still fits, before anything uses it.
+
+    **A unix socket path is capped at 104 bytes on macOS and 108 on Linux**, and
+    the daemon's socket is built under `tmp_path`. On a macOS runner the default
+    `TMPDIR` is `/var/folders/<2>/<28>/T/`, so pytest's own
+    `pytest-of-runner/pytest-0/<test name>/` leaves nothing for `run/daemon.sock`:
+
+        /private/var/folders/36/tjdph…/T/pytest-of-runner/pytest-0/
+            test_the_same_bytes_dropped_tw0/run/daemon.sock   → 130 bytes, refused
+
+    That is 188 failures on the macOS leg and none on Linux, whose `/tmp` is
+    short enough that the same suite never notices.
+
+    **`test.sh` has fixed this since before CI had a macOS leg, and CI does not
+    run `test.sh`** — it invokes `uv run pytest` directly, so `prepare_tmpdir`
+    never executed and the fix has been sitting one caller away from the job
+    that needed it. The constraint belongs to the *suite*, not to one runner, so
+    it is stated here: CI gets it, `test.sh` gets it, and so does a bare
+    `uv run pytest` or a run started from an editor.
+
+    `tempfile.tempdir` is reset because `gettempdir()` caches its answer on first
+    call and pytest may already have asked. Setting the variable without
+    clearing the cache is a fix that looks applied and is not.
+
+    0700 and `realpath` for the two reasons `test.sh` gives at length: a shared
+    `/tmp` directory somebody else can write is not one to adopt, and
+    `ph.paths.canonical` resolves every root, so a symlinked `TMPDIR` would have
+    the suite comparing two spellings of one directory.
+    """
+    import tempfile
+
+    short = Path(f"/tmp/ph-test-{os.getuid()}")
+    try:
+        short.mkdir(parents=True, exist_ok=True)
+        short.chmod(0o700)
+    except OSError:
+        # A host where this is not writable keeps whatever it had; the suite
+        # still runs, and only the socket tests suffer.
+        return
+    os.environ["TMPDIR"] = str(short.resolve())
+    tempfile.tempdir = None
+
+
 def _arm_guest_coverage(config: pytest.Config) -> None:
     """Arm the subprocess collector, if this run is measuring coverage at all.
 
@@ -215,6 +259,7 @@ def pytest_configure(config: pytest.Config) -> None:
     re-adding for the hunt and removing again after; leaving it armed is the
     part that was not worth it.
     """
+    _short_tmpdir()
     _arm_guest_coverage(config)
     from anyio._backends._asyncio import TestRunner
 

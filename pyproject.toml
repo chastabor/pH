@@ -214,6 +214,39 @@ branch = true
 #
 #   91 — 91.21 %, 9 987 statements, 656 uncovered, 44 of 120 files at 100 %
 #   93 — 93.51 %, 11 142 statements, 539 uncovered, 51 files at 100 %
+#   91 — back down; 93 was never reachable by CI (below)
+#
+# **A percentage is a property of a host, not of a checkout**, and that is what
+# the 93 step got wrong. Three tiers of this suite skip when their binary is
+# absent, and a skip removes covered lines while leaving the statements in the
+# denominator. Measured here one PATH at a time, on a single commit:
+#
+#   no jj, no bwrap, no agentfs    91.21 %   (exactly the 91 row above)
+#   + jj                           91.98 %
+#   + bwrap                        92.54 %
+#   + agentfs                      93.36 %   ← a developer workstation
+#
+# 93 was taken on a workstation with all three. CI had none of them and could
+# never reproduce it, which is why the gate was red on every push rather than
+# measuring anything. `jj`, `bubblewrap` and `socat` are installed in the
+# workflow now, but `agentfs` is not published anywhere a runner can fetch, so
+# the overlay tier's ~12 tests skip there permanently and the ~0.8 points they
+# carry are out of reach of any gate CI runs.
+#
+# **91 rather than 92, deliberately, and the margin is the point.** 92.54 % is
+# what a runner holds when `bwrap` can actually unshare — and Ubuntu restricts
+# unprivileged user namespaces, so that is a property of the runner image rather
+# than of this repository. A floor at 92 bets the whole gate on a sysctl: if the
+# image stops permitting it, coverage drops to 91.98 % and every push goes red
+# for a reason nobody caused. 91 holds either way, and holds on the macOS leg
+# too, which has `sandbox-exec` but no `agentfs` and which nothing here has
+# measured.
+#
+# That is the same argument the top of this comment makes about a gate set at
+# 100: the number has to be one CI can hold on its worst good day, or it stops
+# being read. Raising it means making `agentfs` fetchable, or earning the points
+# somewhere that does not depend on what the host has installed — not
+# re-measuring on a laptop.
 #
 # The second step came from the four modules the row named as worst
 # (`tools/json_schema.py` 45.5 → 99, `resources.py` 38.8 → 92, `paths.py` 68.2 →
@@ -225,6 +258,6 @@ branch = true
 # The number is a floor and not a ceiling: it is set to the whole percent below
 # what is measured, so an unrelated refactor that shifts a few branches does not
 # turn a green push red for a reason nobody caused.
-fail_under = 93
+fail_under = 91
 show_missing = true
 skip_covered = true
