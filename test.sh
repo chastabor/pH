@@ -215,7 +215,8 @@ report_env() {
   if have jj; then ok "jj — the Jujutsu workspace tier"
   else
     warn "jj is missing — its tier's tests skip; the run counts them"
-    note "macOS: brew install jj   ·   Linux: cargo install --locked jj-cli"
+    note "brew install jj, or the prebuilt binary CI uses:"
+    note "  github.com/jj-vcs/jj/releases — see .github/workflows/ci.yml"
   fi
   if have agentfs; then ok "agentfs — the copy-on-write overlay tier"
   else

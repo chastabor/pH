@@ -1089,7 +1089,6 @@ async def test_the_calls_that_must_see_the_tree_still_do(
 # --------------------------------------------------- the seam's own materials --
 
 
-@pytest.mark.needs_jj
 async def test_a_provisioned_material_stays_out_of_what_an_agent_contributes(
     mount: MountProfile, tmp_path: Path
 ) -> None:

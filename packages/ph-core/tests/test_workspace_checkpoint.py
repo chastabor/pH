@@ -151,7 +151,6 @@ async def test_the_pin_and_the_event_name_each_other(mount: MountProfile, tmp_pa
     assert resolved.strip() == event.data["tree"]
 
 
-@pytest.mark.needs_git
 async def test_a_shared_workspace_is_never_checkpointed(
     mount: MountProfile, tmp_path: Path
 ) -> None:

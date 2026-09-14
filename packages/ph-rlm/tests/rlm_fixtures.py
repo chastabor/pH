@@ -127,8 +127,13 @@ here address the transport by its reserved name."""
 
 
 @pytest.fixture
-async def make_kernel(tmp_path: Path) -> AsyncIterator[MakeKernel]:
+async def make_kernel(tmp_path: Path, guest_coverage: None) -> AsyncIterator[MakeKernel]:
     """`await make_kernel(**limits)` → a started kernel, closed after the test.
+
+    `guest_coverage` is requested rather than used: a kernel is a guest
+    subprocess, and that fixture is what makes the guest's own coverage
+    collectible. Declaring it here is how the instrument finds the tests that
+    start guests without anybody maintaining a list of them.
 
     Namespaces are passed as `CodeBindingNamespace`s and declared here, so a
     caller does not hold the same list in two shapes.
@@ -160,7 +165,7 @@ async def make_kernel(tmp_path: Path) -> AsyncIterator[MakeKernel]:
 
 
 @pytest.fixture
-def shipped_profile(mount: MountProfile) -> ShippedProfile:
+def shipped_profile(mount: MountProfile, guest_coverage: None) -> ShippedProfile:
     """`await shipped_profile()` → `(ctx, session, agent)` on the real `rlm` bundle.
 
     `ph-base` + `headless` + `rlm/bundle.yaml` through the loader, so a row
@@ -200,7 +205,7 @@ def shipped_profile(mount: MountProfile) -> ShippedProfile:
 
 
 @pytest.fixture
-def mounted_runtime(mount: MountProfile) -> MountedRuntime:
+def mounted_runtime(mount: MountProfile, guest_coverage: None) -> MountedRuntime:
     """`await mounted_runtime(...)` → `(ctx, session, agent)` on the real profile.
 
     `snapshots=False` mounts the runtime *without* the snapshot policy, which is

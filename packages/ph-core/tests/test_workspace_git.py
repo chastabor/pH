@@ -545,7 +545,6 @@ async def test_nothing_is_provisioned_into_a_shared_workspace(
     assert workspace.provision_failures == ()
 
 
-@pytest.mark.needs_git
 async def test_a_material_that_does_not_arrive_reaches_the_agent(
     mount: MountProfile, tmp_path: Path
 ) -> None:
@@ -649,7 +648,6 @@ async def test_a_workspace_with_no_checkout_has_no_fingerprint(
     assert await tree_hash(ctx, workspace) is None
 
 
-@pytest.mark.needs_git
 async def test_a_workspace_inside_someone_elses_repository_is_not_hashed_into_it(
     mount: MountProfile, tmp_path: Path
 ) -> None:
@@ -891,7 +889,6 @@ async def test_disposal_leaves_the_collector_nothing_to_collect(
     assert row.verdict == "collect"
 
 
-@pytest.mark.needs_git
 async def test_a_provisioned_secret_is_not_committed_to_the_branch(
     mount: MountProfile, tmp_path: Path
 ) -> None:

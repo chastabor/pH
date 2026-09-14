@@ -37,6 +37,11 @@ DEPLOYMENT = REPO / "packages" / "phern" / "pyproject.toml"
 """The distribution a person installs, and the only one that names the others."""
 
 
+def manifest_of(directory: str) -> Path:
+    """The manifest of one `packages/` directory."""
+    return REPO / "packages" / directory / "pyproject.toml"
+
+
 def project_of(pyproject: Path) -> dict[str, object]:
     """The `[project]` table of one manifest."""
     table = tomllib.loads(pyproject.read_text(encoding="utf-8"))["project"]
@@ -82,7 +87,7 @@ def test_every_suite_is_type_checked_and_collected() -> None:
 def test_every_distribution_is_released_in_lockstep() -> None:
     versions: dict[str, str] = {}
     for directory in WORKSPACE_MEMBERS:
-        member = project_of(REPO / "packages" / directory / "pyproject.toml")
+        member = project_of(manifest_of(directory))
         versions[str(member["name"])] = str(member["version"])
 
     assert len(versions) == len(WORKSPACE_MEMBERS), (
@@ -116,7 +121,7 @@ def test_the_deployment_pins_every_other_member_at_the_version_it_is() -> None:
     pins = {str(entry) for entry in dependencies if str(entry).startswith("ph-")}
 
     expected = {
-        f"{project_of(REPO / 'packages' / directory / 'pyproject.toml')['name']}=={release}"
+        f"{project_of(manifest_of(directory))['name']}=={release}"
         for directory in WORKSPACE_MEMBERS
         if directory != "phern"
     }
@@ -137,7 +142,7 @@ def test_the_deployment_owns_the_only_console_script() -> None:
     """
     scripts: dict[str, dict[str, str]] = {}
     for directory in WORKSPACE_MEMBERS:
-        declared = project_of(REPO / "packages" / directory / "pyproject.toml").get("scripts")
+        declared = project_of(manifest_of(directory)).get("scripts")
         if declared:
             assert isinstance(declared, dict)
             scripts[directory] = declared
@@ -168,7 +173,7 @@ def test_the_core_module_reports_the_version_its_manifest_declares() -> None:
     """
     from ph import __version__
 
-    assert __version__ == project_of(REPO / "packages" / "ph-core" / "pyproject.toml")["version"]
+    assert __version__ == project_of(manifest_of("ph-core"))["version"]
 
 
 def test_every_distribution_ships_the_marker_that_makes_its_types_visible() -> None:
@@ -180,7 +185,7 @@ def test_every_distribution_ships_the_marker_that_makes_its_types_visible() -> N
     checkout is what puts it in the wheel.
     """
     for directory in WORKSPACE_MEMBERS:
-        manifest = REPO / "packages" / directory / "pyproject.toml"
+        manifest = manifest_of(directory)
         config = tomllib.loads(manifest.read_text(encoding="utf-8"))
         included = config["tool"]["hatch"]["build"]["targets"]["wheel"]["packages"]
         for relative in included:

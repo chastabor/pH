@@ -39,3 +39,47 @@ Issues = "https://github.com/chastabor/pH/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/ph_runtime"]
+
+# ---------------------------------------------------------------- coverage ----
+# **The guest runs in a subprocess, so the parent's collector records none of
+# it.** Every cell is a fresh `python -m ph_runtime`, which read as `runner.py`
+# at 0 % while twenty-six kernel tests were driving cells through it, and as
+# 26.1 % for this package against a true 84.1 %.
+#
+# `conftest.guest_coverage` points `COVERAGE_PROCESS_START` at this file for the
+# tests that start guests; `coverage`'s own `.pth` hook reads that variable at
+# interpreter startup and starts a collector in the child. It survives
+# `ph.seams.subprocess.scrub_env` because that is a credential denylist rather
+# than an allowlist, so nothing needs a hole poked in the scrub.
+#
+# **Here rather than the workspace gate, and that split is deliberate.** The gate
+# is `--cov=ph` against `fail_under = 93` in the root manifest, measuring
+# `ph-core` alone. Folding `ph_runtime` into that `source` would change the
+# denominator the ratchet was measured against — 683 statements at ~84 % beside
+# 16 821 at ~93 % lands the total just under the floor — so a package getting
+# *measured* for the first time would read as one that had regressed. Two
+# questions, two numbers.
+[tool.coverage.run]
+source = ["ph_runtime"]
+branch = true
+
+# One data file per process, merged afterwards: every cell is a fresh
+# interpreter, and without this they would overwrite each other and the report
+# would describe whichever guest exited last.
+parallel = true
+
+# **Absolute, from the environment, because the guest's cwd is not the repo.** A
+# kernel spawns it in the session's workspace — a `tmp_path` that pytest deletes
+# — so a relative `data_file` writes the measurements into a directory that is
+# gone before anything can combine them. That is one of the two reasons this
+# collection silently produced nothing for so long; the other is that nothing
+# set `COVERAGE_PROCESS_START` at all.
+data_file = "${PH_GUEST_COVERAGE_DATA}"
+
+[tool.coverage.report]
+# No `fail_under` yet, deliberately. The subprocess baseline is 84.1 %, and this
+# number does *not* include this package's own in-process unit tests — those are
+# measured by neither report. A floor belongs here once it means "every way
+# `ph_runtime` is exercised"; the root manifest's own comment makes the argument
+# about a number set from one measurement.
+show_missing = true

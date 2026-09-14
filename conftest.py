@@ -20,6 +20,7 @@ from typing import Any
 
 import pytest
 from _pytest.terminal import TerminalReporter
+from workspace_layout import REPO
 
 from ph.bundles import BASE, HEADLESS
 from ph.cordis import Context, Profile, load_profile_documents
@@ -100,10 +101,7 @@ so check it before looking anywhere else.
 Any *other* callback is a new one, and the name above is the lead."""
 
 
-REPO = Path(__file__).resolve().parent
-"""The checkout root — this file sits in it."""
-
-GUEST_COVERAGE_RC = REPO / "packages" / "ph-runtime-guest" / ".coveragerc"
+GUEST_COVERAGE_RC = REPO / "packages" / "ph-runtime-guest" / "pyproject.toml"
 GUEST_COVERAGE_DATA = REPO / ".coverage-guest"
 """Where the guest's own coverage is configured, and where it lands.
 
@@ -170,9 +168,10 @@ def pytest_terminal_summary(terminalreporter: TerminalReporter) -> None:
     try:
         from coverage import Coverage
 
-        coverage = Coverage(data_file=str(GUEST_COVERAGE_DATA), config_file=str(GUEST_COVERAGE_RC))
+        # The config resolves `data_file` from the same variable `_arm_guest_coverage`
+        # set, and `combine()` leaves the merged data loaded.
+        coverage = Coverage(config_file=str(GUEST_COVERAGE_RC))
         coverage.combine(strict=False, keep=False)
-        coverage.load()
         with open(os.devnull, "w", encoding="utf-8") as quiet:
             percent = coverage.report(file=quiet)
     except Exception as error:  # pragma: no cover — reporting must not fail a run
@@ -181,7 +180,7 @@ def pytest_terminal_summary(terminalreporter: TerminalReporter) -> None:
     terminalreporter.write_line(
         f"ph-runtime-guest (subprocess) coverage: {percent:.1f}% "
         f"from {len(parts)} guest processes — `coverage report "
-        f"--data-file={GUEST_COVERAGE_DATA.name}` for the detail"
+        f"--rcfile={GUEST_COVERAGE_RC.relative_to(REPO)}` for the detail"
     )
 
 
@@ -257,9 +256,9 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
                 item.add_marker(skip)
 
 
-@pytest.fixture(autouse=True)
-def _guest_coverage(request: pytest.FixtureRequest) -> Iterator[None]:
-    """Arm the subprocess collector around the tests that actually spawn a guest.
+@pytest.fixture
+def guest_coverage() -> Iterator[None]:
+    """Arm the subprocess collector, for a test that is about to start a guest.
 
     **`COVERAGE_PROCESS_START` is inherited by every descendant, not by the one
     we meant.** Setting it for the whole session put a collector inside each of
@@ -267,24 +266,33 @@ def _guest_coverage(request: pytest.FixtureRequest) -> Iterator[None]:
     to the host path the config names — so it exited with an `Exception ignored
     in atexit callback` traceback on its output. Three `ph-core` sandbox tests
     parse a confined command's printed number, and `int()` was handed a
-    traceback (`test_the_namespaces_are_real` and two beside it).
+    traceback. The instrument had become the thing under test, which is the
+    failure mode this whole exercise is about.
 
-    The instrument had become the thing under test, which is the failure mode
-    this whole exercise is about: a measurement that changes what it measures.
+    **Requested, not autouse, and that is the whole design.** The first fix
+    asked *where the test file lives* — `"ph-rlm" in str(request.node.path)` —
+    to answer *does this test start a guest*, and a location is a poor proxy for
+    a behaviour twice over: `node.path` is absolute, so a checkout at
+    `~/src/ph-rlm/` armed the whole session and re-broke the three sandbox tests
+    this exists to protect; and `packages/ph-app` became `packages/phern` in this
+    very branch, so the same rename on `ph-rlm` would have disarmed the
+    instrument silently, with nothing to report it but the number quietly
+    reverting to a third of the truth.
 
-    So it is armed only while a test under `packages/ph-rlm/tests` runs — the
-    suite that owns the kernel and is the only one that starts guests. Every
-    other subprocess the session spawns is left alone, which is both correct and
-    the cheaper half: there is nothing to collect in them.
+    The fixtures in `rlm_fixtures` that build kernels know they are building
+    one. They request this, and nothing else in the session is armed.
+
+    `MonkeyPatch.context()` rather than `os.environ` by hand, for the reason
+    `_isolated_home` below gives at length: `pop()` *destroys* rather than
+    restores, so a developer or CI box that already exported this variable would
+    lose it after the first guest test.
     """
-    if not os.environ.get("PH_GUEST_COVERAGE_DATA") or "ph-rlm" not in str(request.node.path):
+    if not os.environ.get("PH_GUEST_COVERAGE_DATA"):
         yield
         return
-    os.environ["COVERAGE_PROCESS_START"] = str(GUEST_COVERAGE_RC)
-    try:
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setenv("COVERAGE_PROCESS_START", str(GUEST_COVERAGE_RC))
         yield
-    finally:
-        os.environ.pop("COVERAGE_PROCESS_START", None)
 
 
 @pytest.fixture(autouse=True)

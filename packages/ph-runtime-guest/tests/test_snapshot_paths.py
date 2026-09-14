@@ -29,17 +29,17 @@ import pytest
 
 from ph_runtime.snapshot import NamespaceSnapshotter, restore, serializable_names
 
-pytestmark = pytest.mark.anyio
-
 CAP = 1 << 20
 """A megabyte: large enough that nothing here trips the size refusal by accident."""
 
 
-def records_for(namespace: dict[str, Any], snapshotter: NamespaceSnapshotter) -> dict[str, Any]:
+def records_for(
+    namespace: dict[str, Any], snapshotter: NamespaceSnapshotter, *, cap: int = CAP
+) -> dict[str, Any]:
     """`changed()` keyed by variable name, which is how every assertion reads it."""
     return {
         record["var"]: record
-        for record in snapshotter.changed(namespace, protected=set(), max_value_bytes=CAP)
+        for record in snapshotter.changed(namespace, protected=set(), max_value_bytes=cap)
     }
 
 
@@ -74,8 +74,8 @@ def test_a_variable_that_becomes_unpicklable_for_a_new_reason_speaks_up_again() 
 
     # Picklable, but past the cap: a new reason for the same name.
     namespace["value"] = "x" * 4096
-    again = snapshotter.changed(namespace, protected=set(), max_value_bytes=64)
-    assert {record["var"]: record["skipped"] for record in again} == {"value": "too-large"}
+    again = records_for(namespace, snapshotter, cap=64)
+    assert again["value"]["skipped"] == "too-large"
 
 
 def test_a_deleted_variable_is_reported_rather_than_omitted() -> None:
@@ -88,7 +88,6 @@ def test_a_deleted_variable_is_reported_rather_than_omitted() -> None:
     after = records_for(namespace, snapshotter)
 
     assert after["goes"]["skipped"] == "deleted"
-    assert "kept" not in after, "an unchanged immutable is not re-emitted"
 
 
 def test_an_unchanged_immutable_is_not_re_emitted() -> None:

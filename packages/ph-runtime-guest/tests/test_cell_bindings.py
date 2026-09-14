@@ -85,8 +85,9 @@ BINDINGS: list[tuple[str, str, set[str]]] = [
     [pytest.param(source, expected, id=label) for label, source, expected in BINDINGS],
 )
 def test_a_binding_form_is_seen(source: str, expected: set[str]) -> None:
-    assert expected <= names_in(source), (
-        f"these names would not survive to the next cell: {sorted(expected - names_in(source))}"
+    found = names_in(source)
+    assert expected <= found, (
+        f"these names would not survive to the next cell: {sorted(expected - found)}"
     )
 
 
