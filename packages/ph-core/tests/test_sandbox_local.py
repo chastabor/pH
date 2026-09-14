@@ -298,7 +298,12 @@ async def test_the_verdict_reaches_ph_doctor_either_way(mount: MountProfile) -> 
 
 
 async def _run(ctx: Context, argv: tuple[str, ...], cwd: Path) -> tuple[int, str]:
-    """One confined argv, run. Code plus output, so a failure says why."""
+    """One confined argv, run. Code plus **both** streams, so a failure says why.
+
+    Merged on purpose, unlike `_said` below: every caller here uses this string as
+    the message on an exit-code assertion, so the interpreter's complaint is the
+    part worth having and nothing parses it.
+    """
     outcome = await ctx.require(SUBPROCESS).run(
         SubprocessSpawnSpec(argv=argv, cwd=cwd, env=scrub_env())
     )
@@ -379,22 +384,45 @@ PIDS = "import os;print(len([p for p in os.listdir('/proc') if p.isdigit()]))"
 
 
 async def _said(ctx: Context, workspace: Path, script: str, **extra: Any) -> str:  # noqa: ANN401
-    """What one confined `python -c` printed, run through the **seam** so the
-    deployment's allowances are merged in — which is what makes `refuse_network=` a
-    request rather than the resolved fact a backend reads.
+    """What one confined `python -c` printed **on stdout**, run through the **seam**
+    so the deployment's allowances are merged in — which is what makes
+    `refuse_network=` a request rather than the resolved fact a backend reads.
 
-    The two questions below differ only in how they read this string, so they share
-    the three lines that produce it.
+    **stdout alone, and the merge this replaced read a working sandbox as a broken
+    one.** It used to return `stdout + stderr`. Python 3.13 prints the offending
+    source line in a traceback from `-c`, which 3.12 does not, so a connection the
+    kernel *refused* came back carrying an echo of the script that attempted it —
+    `print('reached')` and all — and `_isolated` below, which asks whether that
+    word appears, read the refusal as a success. Two tests failed on 3.13 and
+    passed on 3.12 on both backends at once: the shape of a test reading its own
+    script back, not of a containment bug.
+
+    The streams answer different questions and only one of them is what the script
+    *said*. A `print` goes to stdout; an interpreter's complaint about the print
+    goes to stderr. `_run` still merges them, deliberately, because there the pair
+    is an assertion message rather than a value anything parses.
+
+    The guard is the matrix: these tests skip without an enforcing backend, and CI
+    installs one and runs 3.13, so a merge reintroduced here fails there.
     """
     policy = SandboxPolicy(mode="workspace-write", workspace_root=str(workspace), **extra)
     argv = ctx.require(SANDBOX).confine((sys.executable, "-c", script), policy).argv
-    _, out = await _run(ctx, argv, workspace)
-    return out
+    outcome = await ctx.require(SUBPROCESS).run(
+        SubprocessSpawnSpec(argv=argv, cwd=workspace, env=scrub_env())
+    )
+    return outcome.stdout
 
 
 async def _count(ctx: Context, workspace: Path, script: str, **extra: object) -> int:
-    """A confined command's printed number — the Linux namespace counts."""
-    return int((await _said(ctx, workspace, script, **extra)).strip())
+    """A confined command's printed number — the Linux namespace counts.
+
+    Asserted rather than parsed straight, because stdout is empty when the command
+    did not run and `int("")` raises a `ValueError` naming neither the script nor
+    the reason.
+    """
+    printed = (await _said(ctx, workspace, script, **extra)).strip()
+    assert printed.isdigit(), f"the confined command printed no count: {printed!r}"
+    return int(printed)
 
 
 async def _isolated(ctx: Context, workspace: Path, **extra: object) -> bool:
