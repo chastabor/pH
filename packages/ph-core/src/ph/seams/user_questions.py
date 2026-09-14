@@ -35,7 +35,7 @@ from __future__ import annotations
 
 import logging
 import secrets
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -43,7 +43,7 @@ from ..cancel import Cancellation, is_cancelled
 from ..cordis import Context, Disposer, events, plugin, settled_or_none
 from ..json import as_str
 from ..keys import USER_QUESTIONS
-from ..session import Session
+from ..session import Session, SessionEvent
 from ..wire import WireModel
 from ._registry import claim_entry
 
@@ -104,16 +104,19 @@ class PendingQuestion:
         return self.question.ask_id or ""
 
 
-def pending_questions(session: Session) -> list[PendingQuestion]:
+def pending_questions(events: Sequence[SessionEvent]) -> list[PendingQuestion]:
     """Questions this log put to a person and never recorded an answer for.
 
     Derived rather than tracked, for the reason `pending_approvals` is: the log
     *is* the pending state, so a crash between the two events cannot lose the
-    question. Nothing re-poses these across a restart yet — see the module note
-    in `ph_app.daemon.frontend` — but the fold is what that will read.
+    question.
+
+    **Events rather than a `Session`**, for `pending_approvals`' reason: repair
+    is the caller that has no session, and it settles these on resume so the
+    fold stops reporting a question nobody can answer.
     """
     asked: dict[str, PendingQuestion] = {}
-    for event in session.events:
+    for event in events:
         ask_id = as_str(event.data.get("askId"))
         if event.type == "question/asked":
             # `model_validate` off the event data, the way `RequestContext` and

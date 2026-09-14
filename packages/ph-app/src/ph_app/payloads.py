@@ -371,6 +371,13 @@ class DaemonStatusReply(CapabilityBlock):
     sweep_every: float
     heartbeat_every: float
     watch_every: float
+    invariants_every: float = 0.0
+    """How often the pollable invariants are checked, or `0` for off (I6).
+
+    Defaulted rather than required, unlike the four above it: a daemon built
+    before this cadence existed reports no field, and `0` is what that daemon was
+    actually doing. The other four have never been optional and gain nothing by
+    becoming so."""
     unreachable_since: int | None = None
     """Set only once the socket stopped being this daemon's (P5-11). Absent is
     the normal answer, which is why the row it feeds is absent too."""

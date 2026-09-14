@@ -31,10 +31,10 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal, TypeAlias
 
-from ph.json import as_int, as_obj, as_str
+from ph.json import as_int, as_obj, as_seq, as_str
 from ph.session import Session, SessionEvent, fork_boundaries, is_replacement_surface_event
 from ph.session.request_header import parse_request_header
-from ph.text import block_marker
+from ph.text import block_marker, count_of
 
 from ..wire import describe, message_of, one_line, result_block, source_of, text_of_wire
 
@@ -342,6 +342,40 @@ def _on_turn_end(builder: _Builder, event: SessionEvent) -> None:
     builder.on_event(event, "turn end", f"turn {builder.turn} — {reason}")
 
 
+def _on_supervisor_violated(builder: _Builder, event: SessionEvent) -> None:
+    """Invariants stopped holding, or started again (I6).
+
+    **One type, two opposite facts**, which is what the generic reading cannot
+    carry. `verify_invariants` records the clearing as the same type with an
+    empty list, so `_describe` rendered the good news as `violations=[], pid=9` —
+    a reader has no way to tell that is reassurance, and the bad news arrived as
+    a Python dict repr in a document a person reads.
+
+    The second renderer of this record, and the reason it needed its own entry
+    rather than the fallback: `ph_app.tui.adapter` draws the same two
+    transitions for the terminal, and a transcript that disagrees with the
+    session it transcribes is the failure `ph.text` exists to prevent.
+
+    Ids in the summary, details in the `detail` line: the auditor's view is
+    where the node counts belong, and they are the half a reader chasing the
+    drift actually needs.
+    """
+    violations = [as_obj(one) for one in as_seq(event.data.get("violations"))]
+    broken = [as_str(one.get("invariant")) for one in violations]
+    if not broken:
+        builder.on_event(event, "invariants", "hold again")
+        return
+    builder.add(
+        kind="event",
+        source_seq=event.seq,
+        title="invariants",
+        summary=f"{count_of(len(broken), 'invariant')} violated: {', '.join(broken)}",
+        detail="\n".join(f"{one.get('invariant')}: {one.get('detail')}" for one in violations),
+        source=SourceRef(kind="harness", name=event.type),
+        turn=builder.turn,
+    )
+
+
 def _on_harness_event(builder: _Builder, event: SessionEvent) -> None:
     """A harness fact with no conversational kind, rendered from its payload."""
     builder.on_event(event, event.type, _describe(event))
@@ -394,6 +428,7 @@ HANDLERS: Mapping[str, Handler] = {
     "supervisor/recovered": _on_harness_event,
     "supervisor/passivated": _on_harness_event,
     "supervisor/unreachable": _on_harness_event,
+    "supervisor/violated": _on_supervisor_violated,
     "schedule/created": _on_harness_event,
     "schedule/cancelled": _on_harness_event,
     "schedule/tick": _on_harness_event,

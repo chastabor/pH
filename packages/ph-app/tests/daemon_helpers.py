@@ -199,6 +199,11 @@ async def running(
         # and a test that did not ask about passivation should not have one
         # racing its assertions. P5-05's own tests opt in.
         options.setdefault("passivate_after", None)
+        # Off for the same reason, and one sharper: a poll that found drift would
+        # append `supervisor/violated` into a root, so a test asserting on event
+        # types would fail for a reason that has nothing to do with its subject.
+        # The suite whose subject *is* the poll turns it on.
+        options.setdefault("invariants_every", 0)
         tasks.start_soon(
             lambda: serve(
                 profile or PROFILE, path=socket, ready=ready, started=started.append, **options

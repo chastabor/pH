@@ -21,7 +21,7 @@ back to the human.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal, TypeAlias
 
@@ -32,12 +32,13 @@ from ..cancel import Cancellation, is_cancelled
 from ..cordis import Context, Disposer, events, plugin
 from ..json import JsonValue, as_str
 from ..keys import APPROVAL
-from ..session import Session
+from ..session import Session, SessionEvent
 from ..wire import WireModel, literal_lookup
 
 __all__ = [
     "APPROVAL_OUTCOMES",
     "DENIAL_REASONS",
+    "INTERRUPTED",
     "ApprovalAnswer",
     "ApprovalDecisionName",
     "ApprovalOutcome",
@@ -57,8 +58,26 @@ __all__ = [
 
 log = logging.getLogger("ph.seams.approval")
 
-ApprovalOutcome: TypeAlias = Literal["allowed-once", "rejected", "cancelled", "unavailable"]
+ApprovalOutcome: TypeAlias = Literal[
+    "allowed-once", "rejected", "cancelled", "unavailable", "interrupted"
+]
 """The four answers that carry no data. Only `allowed-once` proceeds (B3)."""
+
+INTERRUPTED: ApprovalOutcome = "interrupted"
+"""The process died while a person was being asked (P5-13).
+
+**Written only by repair, never by an answerer**, which is what separates it from
+the four beside it. Those four say what happened when the question was *put*:
+somebody allowed it, somebody refused, the work was cancelled, or nobody could
+be asked. This one says the question was never resolved at all, because the
+process holding it stopped existing — and it is recorded on resume so that
+`pending_approvals` stops reporting a question no one can answer.
+
+Not `cancelled`, which claims somebody stopped the work; not `unavailable`,
+which is the live answer when no front end takes the prompt and is a *denial* a
+turn continues from. Naming it apart is the point: a person reading a transcript
+can tell "I was asked and the daemon died" from "I was asked and said no".
+"""
 
 APPROVAL_OUTCOMES: Mapping[str, ApprovalOutcome] = literal_lookup(ApprovalOutcome)
 """Every `ApprovalOutcome` by its own spelling — the read-side check. See
@@ -255,14 +274,21 @@ class PendingApproval:
     reason: str | None
 
 
-def pending_approvals(session: Session) -> list[PendingApproval]:
+def pending_approvals(events: Sequence[SessionEvent]) -> list[PendingApproval]:
     """Approvals this log asked and never recorded an answer for.
 
     Derived, not tracked: the log is the pending state, so a crash between the
     two events cannot lose the question.
+
+    **Events rather than a `Session`**, so `ph.persistence.repair` can call it
+    with the raw sequence it is handed. Repair is the one caller that has no
+    session — it runs while the log is being rebuilt — and it needs *this* rule,
+    not a copy of it: it writes the `approval/decided` that makes a pending ask
+    stop being pending, so a second spelling of the key here is a second
+    spelling of what repair must settle.
     """
     asked: dict[str, PendingApproval] = {}
-    for event in session.events:
+    for event in events:
         if event.type == "approval/asked":
             key = as_str(event.data.get("callId") or event.data.get("toolName"))
             call_id, reason = event.data.get("callId"), event.data.get("reason")

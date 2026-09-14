@@ -281,6 +281,43 @@ def test_a_compaction_is_its_own_kind() -> None:
     assert kinds(build_trajectory(session)) == ["user", "compacted"]
 
 
+def test_both_invariant_transitions_read_as_themselves() -> None:
+    """One event type, two opposite facts, and the generic reading carries neither.
+
+    `verify_invariants` records a clearing as `supervisor/violated` with an empty
+    list, so the fallback renderer printed the good news as `violations=[],
+    pid=9` — nothing a reader could recognise as reassurance — and the bad news
+    as a Python dict repr in a document a person reads.
+
+    **This is the second renderer of that record**, which is why it needed its
+    own entry rather than the fallback: `ph_app.tui.adapter` draws the same two
+    transitions for the terminal, and a transcript that disagrees with the
+    session it transcribes is the failure `ph.text` exists to prevent.
+    """
+    session = Session("invariants")
+    session.append(
+        "supervisor/violated",
+        {
+            "violations": [
+                {"invariant": "session-log", "detail": "derive_messages holds 0 where 1"},
+                {"invariant": "tools-view", "detail": "differs from a rebuild"},
+            ],
+            "pid": 9,
+        },
+    )
+    session.append("supervisor/violated", {"violations": [], "pid": 9})
+
+    broke, cleared = by_kind(build_trajectory(session), "event")
+
+    assert "2 invariants violated" in broke.summary
+    assert "session-log" in broke.summary and "tools-view" in broke.summary
+    assert "derive_messages holds 0 where 1" in broke.detail, "the counts an auditor came for"
+    assert "violations=" not in broke.summary, "never the raw payload"
+
+    assert cleared.summary == "hold again"
+    assert "violated" not in cleared.summary, "the clearing must not read as a violation"
+
+
 def test_a_code_mode_sub_dispatch_is_a_subtool() -> None:
     """C2's records, in the view whose job is showing them: one cell, many calls."""
     session = Session("subtool")

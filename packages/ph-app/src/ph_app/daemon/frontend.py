@@ -18,13 +18,19 @@ it: a front end only decides.
 it, and `join` re-poses it to whoever turns up. A gate that became a denial
 because a terminal closed would lose the human's actual answer.
 
-Not enforced (§5 rule 6): that re-posing is **in-memory, and so lasts as long as
-the daemon does**. The log holds the question either way — an `approval/asked`
-with no `approval/decided` *is* the pending state, and `pending_approvals` folds
-it — but nothing reads that fold yet, so an ask does not survive a restart. The
-turn does not resume and re-ask by itself; P5-13's repair half is what closes
-that, and until it lands this is a delay bounded by the process rather than by
-the log.
+That re-posing is **in-memory, and so lasts as long as the daemon does** — which
+is the whole of what it promises, and no longer a silent edge. A restart cannot
+carry the ask across, because what was waiting on it was a coroutine inside a
+turn, and both are gone. What it does instead is **settle** it: repair writes the
+`approval/decided` the crash never got to (P5-13), so `pending_approvals` stops
+reporting a question nobody can answer and the transcript says the person was
+still being asked when the harness stopped.
+
+So the guarantee is bounded and stated rather than absent. Within one daemon, an
+ask outlives every front end and waits for whoever turns up. Across a restart it
+does not survive; it is closed honestly, nothing ran, and the work resumes the
+way every interrupted turn does — the model reads `TOOL_NOT_STARTED` and asks
+again, to whoever is attached by then.
 
 **A slow front end is dropped, not waited on.** `_Connection.ask` queues into a
 bounded outbox; a client that cannot keep up raises rather than blocking the

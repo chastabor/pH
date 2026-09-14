@@ -157,6 +157,24 @@ and a minute of slack on "run at 09:00" is a minute somebody notices."""
 SWEEP_EVERY = 60.0
 """How often the passivation sweep runs. A coarse tick, not a second timeout."""
 
+INVARIANTS_EVERY = 5 * 60.0
+"""How often each live root is asked whether its pollable invariants hold (I6).
+
+**A fifth cadence rather than a ride on the sweep**, which is the same argument
+`sweep` makes for carrying two halves: one cadence per *question*. The sweep's
+two halves both ask "is anyone still using this"; this asks whether the
+deployment is still telling the truth about itself, and folding it in would mean
+the answer to one question decided how often the other was asked.
+
+Five minutes, and slow on purpose. A check is O(events) in every live root's log
+and will almost always pass — it exists to catch a writer that bypassed
+`Session.append`, which is a bug nobody has on a schedule. Fast enough to name
+the drift inside a working session, slow enough that the refold is not a tax
+anybody would later be tempted to remove.
+
+`0` turns it off, matching the other four.
+"""
+
 WATCH_EVERY = 30.0
 """How often the daemon checks that the socket at its path is still its own (P5-11).
 
@@ -1087,7 +1105,8 @@ class DaemonServer:
     sweep_every: float = SWEEP_EVERY
     heartbeat_every: float = HEARTBEAT_EVERY
     watch_every: float = WATCH_EVERY
-    """The four cadences, named rather than a tuple: `serve` already threads
+    invariants_every: float = INVARIANTS_EVERY
+    """The five cadences, named rather than a tuple: `serve` already threads
     them past each other positionally into `start_soon`, and this is the one
     place they are read back by a person."""
     started: int = field(default_factory=now_ms)
@@ -1131,6 +1150,7 @@ class DaemonServer:
             sweep_every=self.sweep_every,
             heartbeat_every=self.heartbeat_every,
             watch_every=self.watch_every,
+            invariants_every=self.invariants_every,
             unreachable_since=self.unreachable_since,
             # `report()`'s shape as models — a list of sections, each a title
             # and `(label, value)` rows — carrying one built-in section today
@@ -1343,6 +1363,7 @@ async def serve(
     tick_every: float = TICK_EVERY,
     heartbeat_every: float = HEARTBEAT_EVERY,
     watch_every: float = WATCH_EVERY,
+    invariants_every: float = INVARIANTS_EVERY,
     path: Path | None = None,
     ready: anyio.Event | None = None,
     started: Callable[[DaemonServer], None] | None = None,
@@ -1391,6 +1412,7 @@ async def serve(
                 sweep_every=sweep_every,
                 heartbeat_every=heartbeat_every,
                 watch_every=watch_every,
+                invariants_every=invariants_every,
                 ephemeral=ephemeral,
                 # Taken here, immediately after the bind and before anything can
                 # have replaced it — the one moment at which "the socket at this
@@ -1429,6 +1451,18 @@ async def serve(
                 # door.
                 tasks.start_soon(
                     _every, watch_every, server.stop, server.check_reachable, "the socket watch"
+                )
+            if invariants_every > 0:
+                # Its own `if` for the socket watch's reason, and one more: this
+                # is the cadence a benchmark or a long soak would want to turn
+                # off, and it must be turnable off without also silencing the
+                # scheduler or the passivation sweep.
+                tasks.start_soon(
+                    _every,
+                    invariants_every,
+                    server.stop,
+                    supervisor.verify_invariants,
+                    "the invariant poll",
                 )
             if started is not None:
                 # Handed out rather than reachable through the socket: a test

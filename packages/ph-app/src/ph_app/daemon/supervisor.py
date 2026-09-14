@@ -26,6 +26,7 @@ journaling (P5-02), leases against a second daemon (P5-03), crash retries
 from __future__ import annotations
 
 import logging
+import os
 from collections.abc import Callable, Sequence
 from contextlib import AsyncExitStack, suppress
 from dataclasses import dataclass, field, replace
@@ -38,9 +39,10 @@ from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStre
 
 from ph.agent.types import AgentDriver, AgentOptions
 from ph.cordis import Context, Profile
-from ph.json import as_obj, as_str
+from ph.json import as_obj, as_seq, as_str
 from ph.keys import (
     AGENTS,
+    INVARIANTS,
     SCHEDULE,
     SESSION_PERSISTENCE,
     SESSIONS,
@@ -51,6 +53,7 @@ from ph.keys import (
 from ph.llm.types import AttachmentRef
 from ph.paths import resolve_roots
 from ph.persistence import resumption_of
+from ph.seams.invariants import Violation
 from ph.seams.schedule import Schedule, ScheduleService, ScheduleState, state_to_wire
 from ph.seams.schedule_index import Appointment, ScheduleIndex
 from ph.seams.shell import ShellService
@@ -86,6 +89,7 @@ from .recovery import (
     RECOVERED,
     RETRY,
     UNREACHABLE,
+    VIOLATED,
     WAKE_WITHIN,
     Recovery,
     recovery_of,
@@ -167,11 +171,11 @@ NON_GUARANTEES: tuple[tuple[str, str], ...] = (
     (
         "a question a person walked away from",
         "re-posed only while this daemon runs. `AskDesk` holds an open ask in memory "
-        "and puts it to whoever attaches next; the log keeps the question either way "
-        "(`question/asked` with no `question/answered`, which `pending_questions` "
-        "folds), but nothing reads that fold on resume yet — so a daemon that stopped "
-        "mid-question does not re-ask by itself, and the turn that was waiting is gone "
-        "(P7-09)",
+        "and puts it to whoever attaches next; across a restart it is not re-asked, "
+        "because the turn that was waiting is gone (P7-09). The log is not left "
+        "half-written, though: repair settles an unanswered `question/asked` on "
+        "resume, so `pending_questions` stops reporting a question nobody can answer "
+        "and the transcript says it was interrupted rather than declined",
     ),
     (
         "per user",
@@ -487,6 +491,19 @@ class Root:
         """
         self.session.append(UNREACHABLE, note)
 
+    def violated(self, note: dict[str, Any]) -> None:
+        """Record that a pollable invariant did not hold for this root (I6).
+
+        An append and nothing else, for `unreachable`'s reason: `relay` observes
+        this session's own feed, so the frame goes out on the same append.
+
+        **Not a status change**, also for `unreachable`'s reason and more
+        pointedly. A stale projection says the root's bookkeeping is wrong, not
+        that its work is — and routing it to the recovery ladder would restart a
+        root over a cache, losing the in-flight turn *and* the evidence.
+        """
+        self.session.append(VIOLATED, note)
+
     def give_up(self, reason: str, *, attempts: int) -> None:
         """Record that the ladder is spent, and tell whoever is watching.
 
@@ -539,6 +556,36 @@ class Root:
             attempts=self.recovery.attempts,
             failed=self.recovery.failed,
         )
+
+
+def _recorded_violations(session: Session) -> set[str]:
+    """Which invariants this root's log already says are not holding, by id.
+
+    The comparison `verify_invariants` records a *change* against. Read off the
+    log rather than remembered, so a root passivated overnight and woken this
+    morning compares against what its own transcript says rather than against an
+    empty memory — which would re-announce a condition already on the record.
+
+    **Ids, deliberately not the details.** A detail is the sentence a check
+    builds, and `Session.stale()` builds it out of *counts*: "derive_messages
+    holds 3 message(s) where a fresh derivation gives 4". Those numbers move
+    every time the session grows, so comparing them would make a root that is
+    both drifting and still busy — the only interesting case — differ from its
+    own last record on every poll, and re-append every five minutes. That is
+    exactly the flood this comparison exists to prevent, and keying on the
+    detail would have reintroduced it in the one case that matters.
+
+    What broke is the invariant; the detail is how it looked at one moment. The
+    record carries the detail, and the identity gates the record.
+
+    An empty set for a root that has never violated *and* for one whose last
+    record said it holds again. Those are the same fact: nothing is currently on
+    the record as broken.
+    """
+    event = session.latest(VIOLATED)
+    if event is None:
+        return set()
+    return {as_str(as_obj(one).get("invariant")) for one in as_seq(event.data.get("violations"))}
 
 
 @dataclass(slots=True)
@@ -1091,6 +1138,109 @@ class Supervisor:
             if live:
                 root.ctx.require(SCHEDULE).heartbeat(root.session, now=stamp, live=len(live))
                 await self._flush(root)
+
+    async def verify_invariants(self) -> dict[str, list[Violation]]:
+        """Poll every live root's pollable invariants; record what does not hold.
+
+        **The gap this closes.** `ph.seams.invariants` splits invariants into
+        inline ones — I3 refuses on the path it governs — and *pollable* ones,
+        which carry a `check` because a projection either equals its fold right
+        now or it does not. Every pollable check in the tree existed and nothing
+        called it: `ph doctor` mounts a fresh profile, so it reports that the
+        checks run, never that this deployment's live state passed them. The
+        caches those checks exist to catch drifting — the surface, the
+        derivation, `ToolRuntime`'s views, six `SessionFoldCache`s — only drift
+        in a process that has been up a while, which is precisely the process
+        `ph doctor` cannot look at.
+
+        **Per root, because the mount is per root.** `start` is explicit that two
+        roots are two deployments as far as every seam is concerned, so there is
+        no one registry to ask; each root's own answer is about its own caches.
+        A root whose profile mounts no `invariants` row is skipped rather than
+        reported as holding — an unmounted invariant is absent from the report,
+        which is the seam's own rule.
+
+        **On the event loop, deliberately not threaded.** The checks refold live
+        session state, and that state is mutated only from this loop. Off-thread
+        they would race an append and report a torn read as a violation — the
+        worst possible failure for a check whose entire job is to be believed.
+        The cost is why the cadence is slow rather than why the work moves.
+
+        Flushed, for `announce_unreachable`'s reason applied one turn harder:
+        this is a finding about bookkeeping owned by the same process, so leaving
+        it in that process's buffer is the one place it must not sit.
+
+        **What it returns and what it records are different questions**, and the
+        difference is deliberate. The return is a *sample*: everything violating
+        right now, whether or not it is news. The record is a *change*: written
+        only when the set of broken invariants differs from what this root's log
+        already says. A caller wanting "is this deployment healthy" reads the
+        return; the log answers "what happened, and when".
+        """
+        found: dict[str, list[Violation]] = {}
+        for root in list(self.roots.values()):
+            # **A checkpoint per root, not per pass.** One `verify()` is 12 ms on
+            # a 25k-event log and 161 ms on a 500k one — it refolds the whole
+            # surface and re-derives every message — and nothing else here
+            # awaits, so ten roots ran back to back for up to 1.6 s with the loop
+            # blocked: no relay frames, no socket reads, the 5 s tick slipping.
+            # Yielding *between* roots caps the stall at one root and costs
+            # nothing that matters. It does not weaken the reason this is not
+            # threaded: that argument is about tearing *inside* one `verify`,
+            # which is still atomic with respect to the loop.
+            await anyio.lowlevel.checkpoint()
+            registry = root.ctx.get(INVARIANTS)
+            if registry is None:
+                continue
+            # `verify` contains a raising check itself, turning it into a finding
+            # rather than dropping it — so there is nothing to guard here, and a
+            # guard would swallow the one outcome this is for.
+            current = registry.verify()
+            if current:
+                found[root.id] = current
+            # **A change, not a sample**, which is the difference between a
+            # record and a leak. A drifted cache does not repair itself, so a
+            # poll that appended what it saw would write the same finding every
+            # five minutes for the life of the daemon — 288 identical records a
+            # day, in the log a person opens *because* something is wrong.
+            #
+            # Not a latch either, the way `unreachable_since` is: that transition
+            # is one-way by construction and this one is not. A generation bump
+            # rebuilds the derivation, so a cache can start holding again — and a
+            # latch would then miss the next drift, which is the one failure this
+            # cadence exists to catch.
+            #
+            # Read back off the log rather than held on `Root`, so the comparison
+            # survives passivation and resume: a root released overnight and
+            # restarted must not re-announce what its own transcript already
+            # says. `latest` is an incremental fold, so this costs nothing.
+            if {one.invariant for one in current} == _recorded_violations(root.session):
+                continue
+            if current:
+                log.error(
+                    "ph_app.daemon: root %s violates %d invariant(s): %s",
+                    root.id,
+                    len(current),
+                    "; ".join(f"{one.invariant}: {one.detail}" for one in current),
+                )
+            else:
+                # The clearing is news too. A transcript that says "violated" and
+                # then goes quiet leaves a reader unable to tell a fixed cache
+                # from a daemon that stopped looking — which is `supervisor/
+                # passivated`'s argument about unexplained gaps.
+                log.info("ph_app.daemon: root %s holds its invariants again", root.id)
+            root.violated(
+                {
+                    "violations": [
+                        {"invariant": one.invariant, "detail": one.detail} for one in current
+                    ],
+                    # The pid for `announce_unreachable`'s reason: ten roots in
+                    # one incident are correlatable afterwards.
+                    "pid": os.getpid(),
+                }
+            )
+            await self._flush(root)
+        return found
 
     async def announce_unreachable(self, note: dict[str, Any]) -> None:
         """Write the "nobody can reach me" record into every root, and flush it.

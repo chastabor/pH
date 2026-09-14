@@ -467,6 +467,60 @@ async def test_cancelled_pending_input_leaves_a_row_and_not_a_falling_count(
     assert len([item for item in _replay(session).visible_items() if item.role == "notice"]) == 1
 
 
+async def test_a_violated_invariant_is_a_notice_in_the_conversation(mount: MountProfile) -> None:
+    """The person reading the transcript is this record's reader (I6).
+
+    `supervisor/unreachable` draws a row because its reader arrives *afterwards*,
+    when nothing could connect. This one is the inversion: what drifted is a
+    projection of the log, so the reader who needs telling is the one looking at
+    the transcript right now — the thing they are reading may no longer be what
+    the model was sent.
+
+    The invariant ids and not the details: an id names which promise broke and
+    fits on a row, while "derive_messages holds 0 message(s) where a fresh
+    derivation gives 1" is a sentence about node counts that belongs in the log
+    the row points at.
+    """
+    ctx: Context = await mount()
+    session = ctx.require(SESSIONS).create("tui-violated")
+    session.append(
+        "supervisor/violated",
+        {
+            "violations": [
+                {"invariant": "session-log", "detail": "derive_messages holds 0 where 1"},
+                {"invariant": "tools-view", "detail": "differs from a rebuild"},
+            ],
+            "count": 2,
+            "pid": 123,
+        },
+    )
+
+    (row,) = [item for item in _replay(session).visible_items() if item.role == "notice"]
+    assert "session-log" in row.text and "tools-view" in row.text, "which promises broke"
+    assert "2 invariants" in row.text, "how many"
+    assert "123" not in row.text, "the pid is for correlating logs, not for the transcript"
+
+
+async def test_a_cleared_invariant_is_good_news_and_reads_like_it(mount: MountProfile) -> None:
+    """The same event type carries both transitions, and they are opposite facts.
+
+    `verify_invariants` records the clearing too — a transcript that says
+    "violated" and then goes quiet leaves a reader unable to tell a repaired
+    cache from a daemon that stopped looking. But it writes it as the *same*
+    type with an empty list, so a renderer that reads only the type says the
+    alarming thing about the reassuring event. This one did: "stopped holding 1
+    invariant (an unnamed invariant)", from two `or` fallbacks that looked like
+    defensive dead code and were the only branch firing on half the traffic.
+    """
+    ctx: Context = await mount()
+    session = ctx.require(SESSIONS).create("tui-cleared")
+    session.append("supervisor/violated", {"violations": [], "pid": 123})
+
+    (row,) = [item for item in _replay(session).visible_items() if item.role == "notice"]
+    assert "holds its invariants again" in row.text
+    assert "stopped holding" not in row.text, "the clearing must not read as a violation"
+
+
 async def test_a_plugins_replacement_is_not_called_a_compaction(mount: MountProfile) -> None:
     """A surface `replace` is a mechanism, not a cause (P4-02).
 

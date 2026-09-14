@@ -18,6 +18,29 @@ Two failure shapes, and the difference is the whole point of having two codes:
   semantics rather than retry blindly, because a blind retry of a non-idempotent
   operation is how one crash becomes two side effects.
 
+**Dangling asks, settled here for the same reason** (P5-13). An `approval/asked`
+with no `approval/decided` — and a `question/asked` with no `question/answered` —
+is a question put to a person that the process stopped existing before
+answering. Without a closer those pairs stay half-written *forever*: every future
+reader of a resumed log is told a decision is outstanding when nothing is waiting
+for one, and the transcript never says what became of the person's question.
+
+**Through the seams' own folds, never a copy of their keying.** `pending_approvals`
+and `pending_questions` take a `Sequence[SessionEvent]` precisely so this module
+can call them: repair writes the record that makes an ask stop being pending, so
+a second spelling of "what counts as pending" here is a second spelling of what
+repair must settle — and the two would drift silently, in the one direction
+nothing fails. Both seams are imported rather than dispatched through a registry:
+there are two ask-shaped pairs in the vocabulary, and a registry for two is
+indirection with no second reader.
+
+The turn is still closed `interrupted` and the tool result is still synthesized
+`TOOL_NOT_STARTED` — nothing about that changes, and it is what keeps the
+rebuilt log something a provider will accept. What changes is that the question
+is now *settled* rather than left hanging. The work resumes the way the harness
+resumes any interrupted work: the model reads "not started" and asks again, to
+whoever is attached then.
+
 Ported from dsh `packages/core/session/src/repair.ts`, message texts included:
 this vocabulary is what a resumed model reads, and paraphrasing it would change
 behaviour that was tuned deliberately.
@@ -32,6 +55,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..json import as_int, as_obj, as_seq, as_str
+from ..seams.approval import INTERRUPTED, pending_approvals
+from ..seams.user_questions import pending_questions
 from ..session import SessionEvent
 from ..session.json import freeze_json_value
 
@@ -59,6 +84,45 @@ _OUTCOME_UNKNOWN_TEXT = (
     "have side effects, first verify external state or ask the user. Do not retry "
     "blindly."
 )
+
+
+def _settled_asks(events: Sequence[SessionEvent]) -> list[dict[str, Any]]:
+    """The closers for every ask this log put to a person and never answered.
+
+    Both vocabularies in one place because they are one rule wearing two
+    spellings: asked, never answered, process gone. Each seam owns *what counts
+    as pending* — this owns only what settling it looks like.
+
+    `automatic` on the approval is the same flag a policy of `never` sets: the
+    field separating a decision no person made from one somebody did, which is
+    the whole question a reader has here. The question's closer says
+    `interrupted` and pointedly **not** `declined`: `user_questions` is explicit
+    that declined means "somebody was there and declined", and claiming that of a
+    person who was never reached is the false statement that module opens by
+    refusing to make.
+    """
+    settled: list[dict[str, Any]] = [
+        {
+            "type": "approval/decided",
+            "data": freeze_json_value(
+                {
+                    "toolName": one.tool_name,
+                    **({"callId": one.call_id} if one.call_id is not None else {}),
+                    "outcome": INTERRUPTED,
+                    "automatic": True,
+                }
+            ),
+        }
+        for one in pending_approvals(events)
+    ]
+    settled.extend(
+        {
+            "type": "question/answered",
+            "data": freeze_json_value({"askId": one.ask_id, "interrupted": True}),
+        }
+        for one in pending_questions(events)
+    )
+    return settled
 
 
 @dataclass(slots=True)
@@ -111,6 +175,18 @@ def interrupted_turn_closers(events: Sequence[SessionEvent]) -> list[SessionEven
     next_seq = last.seq + 1
     time = last.time
     closers: list[SessionEvent] = []
+
+    # Asks settle before the call they were gating. Nothing downstream depends on
+    # the order — neither closer is surface-eligible, so neither derives a message
+    # or moves the provider-facing sequence — but the log reads in the order
+    # things happened, and the ask came first.
+    #
+    # No `source_event_seqs` back to the ask on either, tempting as the symmetry
+    # with the tool closer below is: `SURFACE_EVENT_TYPES` permits that field only
+    # on the three types that carry a `surfaceOp`, and neither of these is one.
+    for settled in _settled_asks(events):
+        closers.append(SessionEvent(seq=next_seq, time=time, **settled))
+        next_seq += 1
 
     # Calls close before their step: a provider rejects a dangling assistant
     # call, and insertion order preserves the transcript order the model saw.

@@ -208,7 +208,7 @@ async def test_a_declined_question_is_recorded_and_stops_being_pending(
     assert text_of(result.content) == UNATTENDED
     answered = session.latest("question/answered")
     assert answered is not None and answered.data.get("declined") is True
-    assert pending_questions(session) == []
+    assert pending_questions(session.events) == []
 
 
 # ------------------------------------------------------------- the pending --
@@ -243,7 +243,7 @@ async def test_a_question_cancelled_mid_answer_stays_pending(mount: MountProfile
         await posed.wait()
         tasks.cancel_scope.cancel()
 
-    pending = pending_questions(session)
+    pending = pending_questions(session.events)
 
     assert [one.question.question for one in pending] == ["which port?"]
     assert pending[0].question.options == ["8080"]

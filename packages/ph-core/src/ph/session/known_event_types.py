@@ -67,6 +67,12 @@ KNOWN_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         # survives — a run that went quiet at 18:04 says here that its
         # supervisor lost its socket at 18:04, and names the fix.
         "supervisor/unreachable",
+        # A pollable invariant did not hold when the supervisor last asked (I6).
+        # In the log rather than in the daemon's stderr because the finding is
+        # about bookkeeping the same process owns: a projection that no longer
+        # equals its fold is exactly the condition under which that process's
+        # own account of itself is the thing in doubt.
+        "supervisor/violated",
         # Future work a root will do, and the claim that it is doing it (P5-06).
         # `schedule/tick` is appended *before* delivery: a tick recorded and
         # lost to a crash costs one skipped run, while a tick delivered and lost
@@ -313,6 +319,7 @@ IGNORABLE_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         "supervisor/recovered",
         "supervisor/passivated",
         "supervisor/unreachable",
+        "supervisor/violated",
         # Scheduler bookkeeping: a reader skipping these loses *why* a turn
         # started at 3am, which is accounting rather than the conversation —
         # the prompt the tick delivered is a `user/message` either way.

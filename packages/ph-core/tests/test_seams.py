@@ -172,12 +172,12 @@ async def test_the_ask_does_not_carry_the_arguments_it_shows() -> None:
 async def test_an_asked_approval_with_no_decision_is_pending_on_resume() -> None:
     session = Session("s")
     session.append("approval/asked", {"toolName": "edit", "callId": "c1"})
-    (pending,) = pending_approvals(session)
+    (pending,) = pending_approvals(session.events)
     assert pending.tool_name == "edit"
 
     session.append("approval/decided", {"toolName": "edit", "callId": "c1", "outcome": "rejected"})
     # Derived from the log, so a crash between the two cannot lose the question.
-    assert pending_approvals(session) == []
+    assert pending_approvals(session.events) == []
 
 
 async def test_a_never_policy_answers_without_asking_anyone() -> None:

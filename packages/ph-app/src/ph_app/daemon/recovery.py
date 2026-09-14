@@ -48,6 +48,7 @@ __all__ = [
     "RETRY",
     "RETRY_DELAYS",
     "UNREACHABLE",
+    "VIOLATED",
     "Recovery",
     "recovery_of",
 ]
@@ -187,6 +188,27 @@ each root's own transcript, which is where somebody eventually looks.
 Not a reason to stop. The roots keep working, which is P5-01's whole inversion —
 their tasks hold no reference to a connection — and killing them because the
 front door fell off would lose an hour of in-flight work to a socket problem.
+"""
+
+VIOLATED = "supervisor/violated"
+"""A pollable invariant did not hold when the daemon last asked (I6).
+
+Here for `UNREACHABLE`'s reason and with the same odd subject: the supervisor's
+record about *itself*, written into the root it concerns. The difference is who
+it is for. An unreachable socket is read afterwards by whoever opens the
+transcript; this is read by whoever is looking at the session right now, because
+a projection that has stopped equalling its fold means the thing they are reading
+may not be what the model saw.
+
+**Recorded rather than only logged**, which is the whole reason this constant
+exists. `ph.seams.invariants` is explicit that a check is "at best unknown and at
+worst the failure itself", and a finding that lives only in a process's stderr is
+lost exactly when the process is the suspect. The log is the surface that
+survives the thing it is reporting on.
+
+Not a reason to stop, again like `UNREACHABLE`: a stale projection is a serious
+bug and still not grounds for killing an hour of a person's work. The record is
+the alarm; what to do about it is theirs.
 """
 
 PASSIVATE_AFTER = 90 * 60.0

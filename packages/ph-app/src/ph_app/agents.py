@@ -161,6 +161,19 @@ def _when(moment: object) -> str:
     return datetime.fromtimestamp(moment / 1000).strftime("%Y-%m-%d %H:%M:%S")
 
 
+def _cadence(seconds: float) -> str:
+    """One of `serve`'s five cadences, in seconds — or `off` for zero.
+
+    **All five read `0` as off**, each behind its own `if x > 0` in `serve`, and
+    for a day only the newest one said so on screen while the other four printed
+    `0s`. `_duration` cannot absorb the rule: zero milliseconds is a real and
+    different answer elsewhere (an uptime, a turn that took no measurable time),
+    where "off" would be a lie. So the convention lives here, once, next to the
+    only four-plus-one readers that share it.
+    """
+    return _duration(seconds * 1000) if seconds > 0 else "off"
+
+
 def _duration(milliseconds: object) -> str:
     """`3d 4h`, `1h 30m`, `12m`, `8s` — the two largest units that are not zero.
 
@@ -659,10 +672,11 @@ def doctor() -> None:
                 ("roots", str(facts.roots)),
                 ("provider", f"{facts.provider} · {facts.model}"),
                 ("passivate after", "off" if passivate is None else _duration(passivate * 1000)),
-                ("tick", _duration(facts.tick_every * 1000)),
-                ("sweep", _duration(facts.sweep_every * 1000)),
-                ("heartbeat", _duration(facts.heartbeat_every * 1000)),
-                ("socket watch", _duration(facts.watch_every * 1000)),
+                ("tick", _cadence(facts.tick_every)),
+                ("sweep", _cadence(facts.sweep_every)),
+                ("heartbeat", _cadence(facts.heartbeat_every)),
+                ("socket watch", _cadence(facts.watch_every)),
+                ("invariant poll", _cadence(facts.invariants_every)),
                 *_reachability(facts),
             ),
         )

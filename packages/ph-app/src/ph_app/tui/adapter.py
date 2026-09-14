@@ -52,6 +52,7 @@ from dataclasses import dataclass, field
 from pydantic import ValidationError
 
 from ph.json import JsonObject, as_bool, as_int, as_obj, as_seq, as_str, thaw_json
+from ph.seams.approval import INTERRUPTED
 from ph.seams.subagents import downgrade_text, fold_subagent_event
 from ph.session import (
     Session,
@@ -437,9 +438,32 @@ class TuiEventAdapter:
         self._row("ask", "notice", f"Approval requested for {event.data.get('toolName')}.", event)
 
     def _on_approval_decided(self, event: SessionEvent, frame: Frame) -> None:
+        """How a request was answered — and, for one outcome, that it was not.
+
+        `INTERRUPTED` gets a sentence of its own because it is the only outcome
+        that is not a decision. The other four say what happened when the
+        question was *put*; this one says repair settled it on resume because the
+        process holding it stopped existing (P5-13). A person who read "edit:
+        interrupted" would reasonably think the edit was interrupted, which is
+        both wrong and the more alarming reading — nothing ran at all.
+
+        A notice, not an error, for the same reason: nothing failed here. The
+        turn it belonged to is separately recorded as interrupted, which is where
+        that news belongs.
+        """
         outcome = as_str(event.data.get("outcome"))
+        tool = as_str(event.data.get("toolName"))
+        if outcome == INTERRUPTED:
+            self._row(
+                "decided",
+                "notice",
+                f"{tool}: you were still being asked when the harness stopped — "
+                "nothing ran, and the question is closed",
+                event,
+            )
+            return
         role: ItemRole = "notice" if outcome == "allowed-once" else "error"
-        self._row("decided", role, f"{event.data.get('toolName')}: {outcome}", event)
+        self._row("decided", role, f"{tool}: {outcome}", event)
 
     def _card_row(self, card: ToolCard, event: SessionEvent) -> ToolCard:
         """Register a card and place its row. The one spelling of that pair.
@@ -650,6 +674,42 @@ class TuiEventAdapter:
             "notice",
             f"The daemon's socket {was} — this session kept running, but clients "
             f"could not reach it{f'. Fix: {advice}' if advice else ''}",
+            event,
+        )
+
+    def _on_supervisor_violated(self, event: SessionEvent, frame: Frame) -> None:
+        """A pollable invariant did not hold when the supervisor last asked (I6).
+
+        A conversation row rather than an auditor-only one, for
+        `_on_supervisor_unreachable`'s reason inverted: that record's reader
+        arrives afterwards, and this one's is *here now*. What has drifted is a
+        projection of the log — the surface, the derivation, a cached fold — so
+        the honest thing to tell the person reading a transcript is that the
+        transcript may no longer be what the model saw.
+
+        **The event carries both transitions**, which is the half a first draft
+        missed: `verify_invariants` writes the same type with an empty list when
+        a root starts holding again, so an empty `violations` is the *good* news
+        and rendering it through the same sentence said "stopped holding 1
+        invariant (an unnamed invariant)" — backwards, and the more alarming
+        reading of the two.
+
+        The invariant ids and not the details: an id names which promise broke
+        and fits a row, while the detail is a sentence about node counts that
+        belongs in the log the row points at.
+        """
+        broken = [
+            as_str(as_obj(one).get("invariant")) for one in as_seq(event.data.get("violations"))
+        ]
+        if not broken:
+            self._row("violated", "notice", "This deployment holds its invariants again", event)
+            return
+        self._row(
+            "violated",
+            "notice",
+            f"This deployment stopped holding {count_of(len(broken), 'invariant')} "
+            f"({', '.join(broken)}) — a projection of the log no longer equals the log; "
+            "what is shown here may not be what the model sees",
             event,
         )
 
@@ -1044,6 +1104,7 @@ RULES: Mapping[str, EventRule] = {
     "supervisor/recovered": EventRule(TuiEventAdapter._on_supervisor_recovered),
     "supervisor/passivated": EventRule(TuiEventAdapter._on_supervisor_passivated),
     "supervisor/unreachable": EventRule(TuiEventAdapter._on_supervisor_unreachable),
+    "supervisor/violated": EventRule(TuiEventAdapter._on_supervisor_violated),
     "schedule/tick": EventRule(TuiEventAdapter._on_schedule_tick),
     "goal/set": EventRule(TuiEventAdapter._on_goal_set),
     "goal/settled": EventRule(TuiEventAdapter._on_goal_settled),
