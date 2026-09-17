@@ -137,7 +137,7 @@ class TrajectoryRecord:
     """The session-log type this projects, verbatim — `workspace/acquired`, not
     `event` (P6-33).
 
-    `kind` is the *view's* eight-value vocabulary and is what a row is coloured
+    `kind` is the *view's* eight-value vocabulary and is what a row is colored
     and grouped by; this is the log's own 63-type one, and the two are not
     interchangeable: forty-odd harness types share the single kind `event`, so a
     reader wanting "just the retained worktrees" cannot ask for it in `kind`.

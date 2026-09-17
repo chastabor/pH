@@ -104,7 +104,7 @@ The host's orphan journal is the backstop for all three.
 
 Nothing here is configured directly. Every knob belongs to `ph-rlm`'s
 `code-runtime-python` row, which spawns this package and sends the `boot` frame
-that parameterises it — and the **host owns every default**, because there are
+that parameterizes it — and the **host owns every default**, because there are
 two definitions of the protocol across the two sides and exactly one owner of
 each value. `boot` carries every limit as a required field, so a guest has
 nothing to guess and a changed default cannot mean two things at once.

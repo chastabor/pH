@@ -161,7 +161,7 @@ async def test_an_ephemeral_tree_is_discarded_with_its_work(
 
 
 def test_the_table_says_what_the_two_writes_above_showed() -> None:
-    """The prose and the behaviour, pinned to each other.
+    """The prose and the behavior, pinned to each other.
 
     `TIERS` is what `phern doctor` renders verbatim and what P6-06's docs test will
     check, so this is the tripwire for a reword that quietly promises more than

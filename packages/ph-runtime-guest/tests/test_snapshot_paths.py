@@ -2,7 +2,7 @@
 
 `NamespaceSnapshotter.changed` is called after every cell, and what it emits is
 the only account the host gets of a variable's fate. Two of its branches are
-about *not* saying things, which is exactly the kind of behaviour a test has to
+about *not* saying things, which is exactly the kind of behavior a test has to
 pin because nothing downstream fails when it breaks:
 
 * a variable that cannot be pickled is reported once and then stays quiet, so a

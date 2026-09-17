@@ -403,7 +403,7 @@ async def test_a_child_without_the_tool_is_not_told_to_use_it(
     assert "`skill` tool" not in prompt, "it was told to call a tool it does not have"
 
 
-# --- P6-27: containment from the tree, not from a materialised grant --------
+# --- P6-27: containment from the tree, not from a materialized grant --------
 #
 # `AgentRegistry.create` used to scope every agent under the *registry*, so a
 # parent and its child were siblings and `parent.ctx.reaches(child.ctx)` was

@@ -700,8 +700,8 @@ class SummarizeEngine:
 
         `instructions` is the person saying what the next stretch of work is
         about, so the summary keeps what that will need. It reaches the
-        summarizer labelled as theirs and is recorded on the event, because a
-        summary that emphasises one thing over another should say who asked.
+        summarizer labeled as theirs and is recorded on the event, because a
+        summary that emphasizes one thing over another should say who asked.
         """
         session: Session | None = agent.session
         if session is None:

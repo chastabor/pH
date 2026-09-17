@@ -60,7 +60,7 @@ def test_machine_readable_output_stays_parseable_under_force_color(
 ) -> None:
     """`--dump-config` and `phern events --json` are documents, not prose.
 
-    Rich decides colour from the environment, and `FORCE_COLOR` is set by CI
+    Rich decides color from the environment, and `FORCE_COLOR` is set by CI
     images and by plenty of shells — so both commands were emitting ANSI escapes
     into their own machine-readable output, and `yaml.safe_load` refused it with
     "unacceptable character #x001b". A person piping `phern --dump-config` into a

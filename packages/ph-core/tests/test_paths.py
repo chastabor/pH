@@ -276,7 +276,7 @@ def test_the_tier_three_directory_is_created_private(
 #
 # **`ph.paths`'s own view of `sys`, never the real one.** Patching `sys.platform`
 # for the process made the whole suite intermittently fail somewhere else
-# entirely: asyncio and anyio read it to choose backend behaviour, and a test
+# entirely: asyncio and anyio read it to choose backend behavior, and a test
 # that lied about the platform while an event loop was alive produced an
 # `InvalidStateError` from a callback in an unrelated daemon test. The module
 # reads exactly one attribute, so replacing its `sys` binding says the same thing

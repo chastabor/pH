@@ -122,7 +122,7 @@ def test_a_declared_type_that_declares_nothing_loses_to_the_name() -> None:
     """One ladder for every door, and the browser is the door that needed it.
 
     A browser sends `Content-Type` with every dropped file — and falls back to
-    `application/octet-stream` for any extension *it* does not recognise. So a
+    `application/octet-stream` for any extension *it* does not recognize. So a
     literal "the declared type wins" stores such a browser's `.png` as a
     document: `EXTENSIONS` gives it no suffix and `IMAGE_MIMES` never sees it, so
     the same picture reaches the model as an image through `--attach` and as a

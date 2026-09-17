@@ -7,7 +7,7 @@ context-window overflow into an infinite loop that bills for every attempt.
 So the classification is explicit:
 
 * **transient** (rate limits, 5xx, timeouts, empty responses) → retry with
-  exponential backoff, honouring a provider's own `retry_after` when it sent one,
+  exponential backoff, honoring a provider's own `retry_after` when it sent one,
   because the provider knows better than the backoff curve does;
 * **`FILE_EXPIRED`** → retry, and it is the clearest case in the list: the
   adapter has already dropped the dead handle, so the second attempt is against

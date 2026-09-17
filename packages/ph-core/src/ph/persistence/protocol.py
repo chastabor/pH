@@ -154,10 +154,10 @@ class SessionArchive(Protocol):
         ...
 
     def read(self, session_id: str) -> tuple[SessionHeader, list[SessionEvent]]:
-        """The full log, **materialised**: dense from seq 0, chain followed.
+        """The full log, **materialized**: dense from seq 0, chain followed.
 
         A backend whose file stores only its own run must walk `parent_session`
-        to assemble the rest — `materialise(self.read_own, session_id)` is that
+        to assemble the rest — `materialize(self.read_own, session_id)` is that
         walk, and both backends' `read` is exactly that one line.
         """
         ...
@@ -178,7 +178,7 @@ class SessionPersistence(SessionArchive, Protocol):
         Stated as a slice rather than as "its seed is owed a write", because the
         two stopped meaning the same thing and one backend kept the old reading:
         Turso queued the whole log, so a reference-forked child was written a
-        full copy of its prefix, `materialise` saw a first seq of 0 and called
+        full copy of its prefix, `materialize` saw a first seq of 0 and called
         the file complete, and forking silently stopped being O(1) there with
         every test still green. `durable_length` is what the log holds and this
         store does not — set at construction from a resume's stored length or a
@@ -246,7 +246,7 @@ class ClaimingStore(Protocol):
 def lineage_faults_of(
     store: SessionPersistence, *, limit: int = SURVEY_LIMIT
 ) -> list[tuple[str, str]]:
-    """Which of this store's logs will not materialise, and why.
+    """Which of this store's logs will not materialize, and why.
 
     A module function rather than a closure inside `attach`, because the answer
     has more than one asker. `stored_survivors` already has a shortfall it

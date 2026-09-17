@@ -139,7 +139,7 @@ class WindowProbe(WireModel):
     Measured against a llama.cpp serving Qwen3.8-27B, started `-c 524288
     --parallel 2`: `/props` and both `/slots` entries report 262 144 — the total
     divided, as llama.cpp documents — while `/v1/models` reports `meta.n_ctx`
-    262 144 beside `meta.n_ctx_train` 262 144, its neighbours there being
+    262 144 beside `meta.n_ctx_train` 262 144, its neighbors there being
     `n_vocab`, `n_embd`, `n_params` and `ftype`.
 
     **That server is what settles it.** Its total was 524 288, and the number at
@@ -392,7 +392,7 @@ class OpenAiCompatibleAdapter:
                     yield chunk
         except LlmError as error:
             # A handle this request referenced is gone — expired early, deleted
-            # from another session, or never honoured. Forget it first, then let
+            # from another session, or never honored. Forget it first, then let
             # it retry: `FILE_EXPIRED` is in `TRANSIENT_CODES` precisely because
             # the state that caused it is already cleared by the time the retry
             # runs, so the next attempt re-uploads rather than repeating a request

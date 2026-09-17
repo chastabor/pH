@@ -21,7 +21,7 @@ raises `FILE_EXPIRED`, which `llm-retry` already treats as transient — so the 
 attempt rebuilds the request against a fresh upload.
 
 The provider is simulated: there is no Anthropic key in CI, and a file API that
-returns ids and then stops honouring one is exactly what a test needs to be able
+returns ids and then stops honoring one is exactly what a test needs to be able
 to *cause*. Everything above the wire is real — the seam, its on-disk cache, the
 adapter, the retry row and the agent loop.
 """

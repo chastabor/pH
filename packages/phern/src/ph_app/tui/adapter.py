@@ -138,7 +138,7 @@ class TuiEventAdapter:
         return self.state
 
     def apply(self, event: SessionEvent, frame: Frame = Frame()) -> None:
-        """Fold one event in, with what travelled beside it."""
+        """Fold one event in, with what traveled beside it."""
         rule = RULES.get(event.type)
         if rule is None:
             # Not ours: `RECORDLESS`, or a type this build has never heard of.
@@ -197,7 +197,7 @@ class TuiEventAdapter:
             # stay above it, dimmed.
             # The **op's set**, not the citation. `source_event_seqs` may name
             # more than the replacement shadowed — the chunks a message was
-            # built from — so dimming from it greys rows that are still live.
+            # built from — so dimming from it grays rows that are still live.
             operation = event.surface_op
             self._mark_shadowed(
                 operation.replaces
@@ -209,7 +209,7 @@ class TuiEventAdapter:
             # compacted" would tell the reader their conversation was summarized
             # when a paste was relocated. The discriminator is the log's own
             # attribution: a compaction summary declares `form: compaction`
-            # (P4-03), which is a claim about the surface and not a colour.
+            # (P4-03), which is a claim about the surface and not a color.
             if source.get("form") == "compaction":
                 self._row("compaction", "compaction", text or "(history compacted)", event)
                 return
@@ -1029,7 +1029,7 @@ class TuiEventAdapter:
 
         Esc is the common way in: `AgentDriver.cancel` clears the inbox unless
         the caller asks it not to, so interrupting a turn discards everything
-        waiting behind it. That is the intended behaviour — the notice is not a
+        waiting behind it. That is the intended behavior — the notice is not a
         veto on it, it is the account of it.
 
         The count and not the content, because the splice event carries neither:

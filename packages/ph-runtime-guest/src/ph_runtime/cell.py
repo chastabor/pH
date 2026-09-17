@@ -60,7 +60,7 @@ MAGIC_HINT = (
 The magic was the bypass — one shell command per cell that no `tools/pre-execute`
 listener, no approval and no sandbox `confine()` ever saw. Removing the
 mechanism closes the hole, so the error explains the governed route rather than
-apologising for a missing feature.
+apologizing for a missing feature.
 """
 
 

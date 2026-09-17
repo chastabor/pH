@@ -1252,7 +1252,7 @@ async def test_compact_carries_what_the_user_is_about_to_work_on(mount: MountPro
     dsh refuses arguments here and deepagents' compact tool takes none. But the
     moment someone compacts on purpose is usually the moment they are changing
     subject, and what they are about to do is the one thing the summarizer
-    cannot read off the conversation. It reaches the prompt labelled as the
+    cannot read off the conversation. It reaches the prompt labeled as the
     person's — before `<messages>`, so it is read as an instruction rather than
     as one more message to compress — and lands on the event, because a summary
     weighted towards one thing should say who asked for that.

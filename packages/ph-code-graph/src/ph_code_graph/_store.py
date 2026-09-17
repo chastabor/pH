@@ -595,7 +595,7 @@ class CodeGraphStore:
     def definition_count(self, name: str) -> int:
         """How many places define `name` — the ambiguity a name-based graph owes.
 
-        `COUNT(*)` rather than `len(define(name, 100))`, which materialised up to
+        `COUNT(*)` rather than `len(define(name, 100))`, which materialized up to
         a hundred rows and then reported the *cap* as the count for anything
         past it.
         """

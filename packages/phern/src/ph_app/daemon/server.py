@@ -1090,7 +1090,7 @@ class DaemonServer:
     closed the thing that started it is the kind of accretion nobody attributes
     to the right cause a week later.
 
-    A flag rather than a subclass or a second `serve`: every other behaviour is
+    A flag rather than a subclass or a second `serve`: every other behavior is
     identical, and the difference is one predicate on a cadence that already
     runs."""
     open_connections: int = 0

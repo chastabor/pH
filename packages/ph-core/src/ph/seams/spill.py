@@ -2,7 +2,7 @@
 
 An offloaded tool result is not deleted, it is *relocated*: the model gets a
 preview and a locator, and the locator resolves to the full text. That is what
-makes G2/G3 offloading (Phase 4) an optimisation rather than a lie — the
+makes G2/G3 offloading (Phase 4) an optimization rather than a lie — the
 harness never tells the model something is gone when it is on disk.
 
 `retrieval_hint` exists so the preview can say how to get the rest in the
@@ -136,7 +136,7 @@ class SpillStore:
         """`save_text`, or `None` when the store could not take it.
 
         The **fail-open** spelling, for the callers whose content is an
-        optimisation rather than an obligation: an offload that cannot store the
+        optimization rather than an obligation: an offload that cannot store the
         text must not be the reason the model loses it. Written here because
         three callers were each remembering the rule in their own `try`, and had
         already drifted on which exception counts.

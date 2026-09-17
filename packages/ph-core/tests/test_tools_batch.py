@@ -211,7 +211,7 @@ async def test_a_crashing_body_still_leaves_its_call_and_a_result() -> None:
     result = session_of(agent).events[1]
     assert [event.type for event in session_of(agent).events] == ["tool/call", "tool/result"]
     assert as_obj(as_seq(as_obj(result.data["message"])["content"])[0])["isError"] is True
-    # The kind travels into the log, so a card can colour a failure differently
+    # The kind travels into the log, so a card can color a failure differently
     # from a refusal without re-deriving it.
     assert result.data["failureKind"] == "failed"
 

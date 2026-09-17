@@ -46,7 +46,7 @@ event on a remote front end, `Session(seed=…)`, `resume_session` on every daem
 rehydrate, and `SessionStore.fork`, whose own docstring already says "a fork is
 cheap on disk and not free in memory".
 
-The obvious optimisation is a validation-only pre-walk: check the tree against
+The obvious optimization is a validation-only pre-walk: check the tree against
 every rule above and, when it is already frozen, return the *input* rather than a
 copy. It measured at roughly half the cost. **It is deliberately not built**, and
 the reason is not that it looked hard:
@@ -63,7 +63,7 @@ the reason is not that it looked hard:
 
 So this waits for a design whose correctness is **structural** rather than tested:
 a frozen tree that carries its own proof (a distinct wrapper type the walker can
-recognise by identity, say, so "already frozen" is a type question rather than an
+recognize by identity, say, so "already frozen" is a type question rather than an
 inspection), or a freeze that is idempotent by construction. Until then the copy
 stays, and the cost above is the price of a gate that cannot be walked around.
 See DESIGN.md §8 and plan row P6-44.

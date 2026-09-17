@@ -17,7 +17,7 @@ The real-API smoke test is skipped without a key, per P1-15's gate.
 
 The previous version built branches for four block kinds and **silently omitted
 everything else**, so a message that was only an image reached the wire as an empty
-text block. Nothing is dropped now: a block kind the converter does not recognise
+text block. Nothing is dropped now: a block kind the converter does not recognize
 still arrives.
 """
 
@@ -552,7 +552,7 @@ async def test_the_credential_is_read_only_at_the_edge() -> None:
     )
     headers = adapter._headers()
     assert headers["Authorization"] == "Bearer sk-secret"
-    # And the reference that travelled to get here carries no value.
+    # And the reference that traveled to get here carries no value.
     ref = credentials.reference("PH_TEST_EDGE_KEY")
     assert "sk-secret" not in json.dumps(ref.to_wire())
 

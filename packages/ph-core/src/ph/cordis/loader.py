@@ -284,7 +284,7 @@ def _as_rows(entries: Iterable[JsonValue], layer: str) -> list[Row]:
 def _as_isolate(value: object, layer: str) -> dict[str, JsonValue] | None:
     """`isolate:` as a list of row ids, or a mapping of row id to config override.
 
-    Two spellings for one fact, and both normalise to the mapping: `[fs]` is
+    Two spellings for one fact, and both normalize to the mapping: `[fs]` is
     "a private `fs` with the row's own config", `{fs: {root: /tmp/x}}` is "a
     private `fs` rooted somewhere else" — which is the case the feature exists
     for, since a private copy with identical config is a second instance and

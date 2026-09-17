@@ -1,7 +1,7 @@
 # catppuccin-macchiato — the Catppuccin Macchiato palette, mapped onto pH's roles.
 #
 # `vars` is the palette as its authors publish it, whole: a role is re-pointed by
-# naming a different color below, and the four flavours differ only in this
+# naming a different color below, and the four flavors differ only in this
 # block. Roles are pH's closed set (`TuiTheme`), so a role missing here is a
 # refusal at load rather than a color that silently defaults.
 #

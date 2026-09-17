@@ -340,7 +340,7 @@ class SubprocessHandle:
                     # `aclose`, not `wait`: it closes the child's pipes *and*
                     # reaps. A timeout cancels `pump` mid-read, so the drains let
                     # go of streams nobody then closed — and the transport was
-                    # finalised after the loop had gone, which asyncio reports as
+                    # finalized after the loop had gone, which asyncio reports as
                     # an unraisable `Event loop is closed` from a `__del__` in
                     # whatever test ran next.
                     await self.process.aclose()

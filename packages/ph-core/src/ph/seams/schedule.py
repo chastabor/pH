@@ -108,7 +108,7 @@ class ScheduleState:
     """When `schedule/created` was appended, taken from the event's own `time`.
 
     **From the log rather than from a field on the wire model.** A caller obligation
-    here is one nobody honours: a schedule anchored at epoch 0 is due the moment it
+    here is one nobody honors: a schedule anchored at epoch 0 is due the moment it
     exists, and a cron's first claim walks forward from 1970. The event carries the
     timestamp already, and `last_tick` comes from the same place.
     """
@@ -327,7 +327,7 @@ class ScheduleService:
     never uses is one a test has to lie about to construct.
 
     `index` is how an appointment survives the *process* rather than only the log
-    (P6-23). Optional, and absent is the shipped behaviour of every mode but the
+    (P6-23). Optional, and absent is the shipped behavior of every mode but the
     daemon: a `phern -p` run with no `$PH_HOME` index still schedules, it simply
     leaves nothing for a later daemon to find. When it is present every write here
     updates it, because the seam is the only party that knows the moment an

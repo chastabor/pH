@@ -73,7 +73,7 @@ class Config(WireModel):
     Deliberately thin: the OTel SDK already reads `OTEL_EXPORTER_OTLP_ENDPOINT`
     and friends, and a second place to configure one exporter is a second place
     for them to disagree. Empty is passed straight through — the exporter's own
-    `endpoint or environ.get(...)` gives exactly the unconfigured behaviour, so
+    `endpoint or environ.get(...)` gives exactly the unconfigured behavior, so
     there is nothing for this row to branch on.
     """
 

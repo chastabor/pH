@@ -75,9 +75,9 @@ async def test_only_a_bound_future_set_result_is_recognised() -> None:
     anyio's own hardened `cb` closure included, which already swallows
     `InvalidStateError` for itself and would gain nothing but a frame.
 
-    Recognised by shape rather than identity on purpose: `set_result` on the C
+    Recognized by shape rather than identity on purpose: `set_result` on the C
     accelerator is a `builtin_method` with no `__func__`, so an identity test
-    stops recognising every real anyio wait, and a `Future` subclass that
+    stops recognizing every real anyio wait, and a `Future` subclass that
     overrides `set_result` would slip past as well.
     """
     future = asyncio.get_running_loop().create_future()

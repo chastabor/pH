@@ -40,7 +40,7 @@ of view "nobody has set this" is one condition.
 `load` catches a decode error and answers `{}`.
 
 Defaults are **always a valid answer for a preference**, so a settings file
-somebody hand-edited into invalid JSON costs the person their customisations and
+somebody hand-edited into invalid JSON costs the person their customizations and
 not their session. That is the opposite trade from a *profile*, where a malformed
 document is refused loudly at startup — a deployment's composition is not
 something to guess at, and a preference is.

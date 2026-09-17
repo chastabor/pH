@@ -2,10 +2,10 @@
 
 The row's gate, one test each: *end / continue / error; the breaker trips.*
 
-Two things are worth reading past the behaviours. The counts are a **fold over
+Two things are worth reading past the behaviors. The counts are a **fold over
 the log**, so the first tests here are about a resumed session getting the same
 answer as a live one — a limit that lived in a field would be a limit a restart
-forgets, and nothing about the shipped behaviour would look different until
+forgets, and nothing about the shipped behavior would look different until
 someone resumed a session that had already spent its budget.
 
 The other is that every ceiling is **unset by default**. Layering this bundle

@@ -165,8 +165,8 @@ and the bundle — not the row — picks a number.
   the way a QuickJS heap image is, so per-variable digesting is what actually
   keeps log growth linear. The HMAC tag on a blob is *provenance, not secrecy* —
   it stops a blob from another session being unpickled into this one; it is not
-  a defence against a hostile filesystem writer.
-- **`find_models` is absent.** It would need a model catalogue on `ctx.llm`,
+  a defense against a hostile filesystem writer.
+- **`find_models` is absent.** It would need a model catalog on `ctx.llm`,
   which does not exist; a discovery call that could only answer "I don't know"
   is worse than none. A child with no `model` inherits its parent's.
 - **The message rate limit is backpressure, not policy.** It raises from the

@@ -75,7 +75,7 @@ def children_heading(state: TuiState) -> str:
     fan-out" is a question about the ones still going.
 
     **`child_is_live` decides which those are, rather than a literal here.** The
-    seam counts an *unrecognised* status as live on purpose, so a status this
+    seam counts an *unrecognized* status as live on purpose, so a status this
     package has not heard of lands in `pending` — where a hand-written
     `status in {running, queued}` would have counted it as neither and quietly
     under-reported a fan-out that is still working. Counted off `state.roster`,

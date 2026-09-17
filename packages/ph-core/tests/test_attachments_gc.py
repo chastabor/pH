@@ -86,7 +86,7 @@ class _Store:
         return session.header, list(session.events)
 
     def read(self, session_id: str) -> tuple[SessionHeader, list[SessionEvent]]:
-        """Whole logs in memory, so the materialised read *is* the unchained one.
+        """Whole logs in memory, so the materialized read *is* the unchained one.
         Declared because `SessionArchive` carries both; the fold uses `read_own`."""
         return self.read_own(session_id)
 
@@ -186,7 +186,7 @@ async def test_a_new_blob_is_left_alone(tmp_path: Path) -> None:
 
     A person drops a file on the composer and the bytes are on disk immediately;
     nothing references them until they send the prompt, which may be minutes or an
-    afternoon later. `--min-age` never *authorises* collection — it only refuses —
+    afternoon later. `--min-age` never *authorizes* collection — it only refuses —
     which is why it is not the age bound the rule forbids.
     """
     store, _refs = await _stored(tmp_path, PNG)

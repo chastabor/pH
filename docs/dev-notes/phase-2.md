@@ -137,10 +137,10 @@ editor and one it does not claim is edited as usual. (Its helper is named
 ### 7. `$ph-*` variables always resolve
 
 Textual parses `App.CSS` at startup, before a theme is chosen, and a `$ph-*`
-that resolves nowhere is a hard parse failure — not a default colour. So
+that resolves nowhere is a hard parse failure — not a default color. So
 `get_theme_variable_defaults()` returns the default theme's palette as the
 fallback palette. Switching to one of Textual's own themes now degrades the
-colours instead of crashing the app.
+colors instead of crashing the app.
 
 Themes are data: 19 named roles in a JSON file, and the parser refuses a theme
 that is *missing* a role **or** that names an unknown one. A typo'd role would
@@ -203,7 +203,7 @@ workspace is writable and everything outside it still asks. That is the whole
 difference, it is a row addressed by id, and a deployment that disagrees
 overrides the same id in `$PH_HOME/profiles/tui.yaml`.
 
-### 12. No model catalogue was invented
+### 12. No model catalog was invented
 
 pH has no list of models, because a provider knows its own and Phase 1
 deliberately did not ship a list to go stale. The model picker lists registered

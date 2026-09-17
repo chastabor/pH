@@ -13,7 +13,7 @@ to remove — and reported every agent that finished cleanly as nothing at all.
 The artifact is what should be enumerable; a directory is a resource.
 
 Real `git` throughout, for the same reason the tier's own tests use it: what is
-being pinned is git's behaviour — that `-d` declines an unmerged branch, that a
+being pinned is git's behavior — that `-d` declines an unmerged branch, that a
 removed worktree deregisters — not our arithmetic about it.
 """
 

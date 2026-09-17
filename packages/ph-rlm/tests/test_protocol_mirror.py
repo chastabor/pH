@@ -78,8 +78,8 @@ def test_the_vendored_json_is_byte_identical_to_ph_core_s() -> None:
 
     The guest cannot import ph-core — `dill` is its only dependency and that
     module ships in the ph-core wheel — so it carries a copy. Identity rather
-    than behaviour, which is the stronger assertion and no more work: a
-    behavioural test pins the cases somebody thought to parametrize, and this
+    than behavior, which is the stronger assertion and no more work: a
+    behavioral test pins the cases somebody thought to parametrize, and this
     pins every line, including the ones a future edit adds to `as_str` and
     forgets to bring across.
 

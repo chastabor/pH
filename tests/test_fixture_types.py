@@ -62,7 +62,7 @@ Built-ins only, and every one single-valued: what `tmp_path` is does not depend
 on the suite, so there is nothing here for a test to decide. pH's own fixtures
 are absent because they are typed where they are defined — `ph.testing`'s
 `MountProfile`, `rlm_fixtures`' `MountedRuntime` — and a second list of them here
-would be the thing this file's neighbour calls a list rather than a rule.
+would be the thing this file's neighbor calls a list rather than a rule.
 
 **Names with no site today are kept.** `capfd`, `recwarn` and `pytestconfig`
 match nothing yet. Unlike a stale *exemption*, which makes a gate pass what it

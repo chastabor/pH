@@ -137,7 +137,7 @@ layer `headless` and then their own rows.
 at 85% of the window rather than growing until the provider refuses it, and
 `/compact` is there to do it by hand. That layer is *optional*: an install
 without the distribution composes the same profiles and simply never compacts —
-which is the one place a profile's behaviour depends on what is installed, and
+which is the one place a profile's behavior depends on what is installed, and
 `phern doctor` reports what actually activated.
 
 ## One prompt

@@ -92,7 +92,7 @@ def process_start_token(pid: int) -> str | None:
             raw = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
         except OSError:
             return None
-        # The `comm` field is parenthesised and may itself contain spaces and
+        # The `comm` field is parenthesized and may itself contain spaces and
         # parens, so the fields after it are found from the *last* ')'.
         tail = raw.rpartition(")")[2].split()
         # /proc(5): field 22 overall is `starttime`, which is index 19 after comm.

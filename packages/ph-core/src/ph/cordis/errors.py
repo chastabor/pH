@@ -50,7 +50,7 @@ class MountRefusal(CordisError, RuntimeError):
     """A row declined to apply — on purpose, with a sentence for a person (E8).
 
     Distinct from a *bug* in an `apply`, which stays a traceback. A refusal is a
-    row saying the deployment cannot honour what the profile asked of it:
+    row saying the deployment cannot honor what the profile asked of it:
     `containment.strict` on a host with no sandbox backend, a telemetry exporter
     without its extra. Every host that mounts owes the person that sentence and an
     exit code rather than the stack, and one type is what lets each of them catch

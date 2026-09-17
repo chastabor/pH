@@ -55,7 +55,7 @@ from.
 `TokenBaseline.pressure` is what a policy row and the TUI footer both read, so
 the number a person sees and the number that triggers compaction are the same
 number. A second definition of pressure is how a footer comes to disagree with
-the behaviour it is describing.
+the behavior it is describing.
 
 ## What it does not do
 

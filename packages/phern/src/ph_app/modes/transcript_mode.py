@@ -45,7 +45,7 @@ _SPEAKER: dict[Literal["system", "user", "assistant"], str] = {
 }
 """Keyed on `Message.role`'s own union, so the checker enforces that the table
 covers it. A `.get(role, role)` default here could never fire — the same dead
-defence this round removed one line below."""
+defense this round removed one line below."""
 
 
 def render_transcript(messages: tuple[Message, ...]) -> str:

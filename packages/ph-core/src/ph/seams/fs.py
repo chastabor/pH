@@ -330,7 +330,7 @@ class FsService:
         layering: `ctx.fs` would otherwise have to know which seam owns agent
         state, when what it needs is one path. The row that knows about both
         wires them (`workspace-lifecycle`), and a deployment that mounts no such
-        row keeps exactly today's behaviour.
+        row keeps exactly today's behavior.
         """
         return claim_slot(
             self.ctx.running_for(scope),
@@ -732,7 +732,7 @@ class FsService:
         absolute paths. They had already drifted on the `limit`. A third would
         have copied whichever it read first.
 
-        **`named`, not absolute**, and that is the part worth centralising: an
+        **`named`, not absolute**, and that is the part worth centralizing: an
         absolute path in a stored record or a tool result puts the machine and
         the run into the conversation, so replaying a session against a fresh
         workspace changes every one of them and moves the provider's cached

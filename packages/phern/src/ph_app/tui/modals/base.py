@@ -92,8 +92,8 @@ class ChoicePicker(PhModal[str | None]):
         self.title_text = title
         self.choices = choices
         self.free_text = free_text
-        """When set, an unmatched filter is offered as a literal value labelled
-        `<free_text>, as typed` — a model id or session id pH has no catalogue
+        """When set, an unmatched filter is offered as a literal value labeled
+        `<free_text>, as typed` — a model id or session id pH has no catalog
         for is still something the user can name."""
         self.on_highlight = on_highlight
         """Called with the value under the cursor as it moves, so a theme can be

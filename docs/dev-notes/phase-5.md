@@ -165,7 +165,7 @@ surface-eligible — it produces no `Message` and no provider ever sees it, whic
 an earlier draft of this paragraph got wrong. P7-15 moved that record to after
 the gate, so a parked turn now has no `tool/call` at all and repairs as
 `TOOL_NOT_STARTED` rather than "outcome unknown".) Closing the turn is the honest
-behaviour until the resume half lands.
+behavior until the resume half lands.
 
 The one open gap, as above, is boot-time rehydration. It is printed in both
 doctors and asserted in a test; it is not hidden.

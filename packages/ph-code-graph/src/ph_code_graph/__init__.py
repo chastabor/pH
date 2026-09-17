@@ -498,7 +498,7 @@ async def apply(ctx: Context, config: Config) -> None:
         if importlib.util.find_spec(module) is None:
             raise MountRefusal(MISSING)
 
-    # Before anything parses. The pack materialises even its *bundled* grammars
+    # Before anything parses. The pack materializes even its *bundled* grammars
     # into a writable cache directory and fails hard without one, so the row
     # names a path it can vouch for rather than inheriting whatever `HOME`
     # happens to be — see `use_cache`.
@@ -509,7 +509,7 @@ async def apply(ctx: Context, config: Config) -> None:
         # process-global cache setting unwinds with this row rather than
         # outliving it (§4.9, I2 — see `cache_release`); the thread is because
         # `use_cache` imports `tree_sitter_language_pack`, a 20 ms dlopen that
-        # a profile mounting many rows would otherwise serialise on the loop.
+        # a profile mounting many rows would otherwise serialize on the loop.
         await ctx.effect(
             lambda: anyio.to_thread.run_sync(cache_release, grammar_cache),
             label="tree-sitter-cache",
@@ -581,7 +581,7 @@ async def apply(ctx: Context, config: Config) -> None:
                 if language not in parsers:
                     # **One hop per language, not per file.** The first file of a
                     # language is worth a worker thread — `parseable`
-                    # materialises a grammar out of the wheel, 6.4 s the first
+                    # materializes a grammar out of the wheel, 6.4 s the first
                     # time — and every later file of it is a cached boolean, so
                     # the 60.6 µs hop was the entire cost: 1.2 s across a
                     # 20 000-file tree, which is the whole saving the change
@@ -677,7 +677,7 @@ async def apply(ctx: Context, config: Config) -> None:
         # 2 000-file index).
         indexed = await anyio.to_thread.run_sync(book.file_count)
         name = args.query or ""
-        # `COUNT(*)`, not `len(define(name, 100))`, which materialised a hundred
+        # `COUNT(*)`, not `len(define(name, 100))`, which materialized a hundred
         # rows and then reported the *cap* as the count for anything past it.
         defined = (
             await anyio.to_thread.run_sync(book.definition_count, name)
@@ -811,7 +811,7 @@ def _symbols(rows: list[SymbolRow]) -> list[dict[str, Any]]:
 
 
 def _fts(query: str) -> str:
-    """A model's words as an FTS5 expression, with its syntax neutralised.
+    """A model's words as an FTS5 expression, with its syntax neutralized.
 
     FTS5 reads `-`, `"`, `*`, `(`, `:` and `NEAR` as operators, so a query like
     `read-before-edit` is a syntax error and `foo:bar` is a column filter that

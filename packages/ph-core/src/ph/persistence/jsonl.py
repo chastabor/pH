@@ -221,7 +221,7 @@ class JsonlSessionStore:
     def read(self, session_id: str) -> tuple[SessionHeader, list[SessionEvent]]:
         """The session's full log, following its lineage when it stores a reference.
 
-        `read_own` is this backend's one-file read; `materialise` decides whether
+        `read_own` is this backend's one-file read; `materialize` decides whether
         a chain is owed by looking at the first event's seq. A log that starts at
         0 is complete and is returned unchanged, which is every log written so
         far — so this is a no-op until something writes a reference-fork.
@@ -231,7 +231,7 @@ class JsonlSessionStore:
     def read_own(
         self, session_id: str, upto: int | None = None, family: str | None = None
     ) -> tuple[SessionHeader, list[SessionEvent]]:
-        """This file and nothing else — the unchained read `materialise` walks with."""
+        """This file and nothing else — the unchained read `materialize` walks with."""
         path = (
             session_path(self.root, session_id, family)
             if family is not None

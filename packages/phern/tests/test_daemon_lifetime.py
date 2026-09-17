@@ -61,7 +61,7 @@ def test_the_two_windows_differ_by_intent_not_by_tuning() -> None:
     that the ephemeral window is *far* shorter: left at `PASSIVATE_AFTER`, an
     ephemeral daemon could not reach an empty `roots` — and so could not satisfy
     its own exit predicate — until ninety minutes after the last turn, which
-    would make "ephemeral" a word with no behaviour behind it for an hour and a
+    would make "ephemeral" a word with no behavior behind it for an hour and a
     half.
     """
     assert EPHEMERAL_QUIET < PASSIVATE_AFTER / 10

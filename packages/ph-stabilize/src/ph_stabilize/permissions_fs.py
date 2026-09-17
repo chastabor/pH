@@ -396,7 +396,7 @@ class FsPermissions:
 
         **`honour_scope` is the deliberate difference between the two callers**, a
         parameter rather than a comment in each copy so the asymmetry is visible from
-        both. Enumeration honours `outside-workspace`; a recursive delete does not. A
+        both. Enumeration honors `outside-workspace`; a recursive delete does not. A
         delete may only ever be wrong towards refusal, while enumeration over-refusing
         *hides files a person may see*.
 
@@ -445,7 +445,7 @@ class FsPermissions:
         recursive delete of a directory inside it, because the delete would
         reach paths outside as soon as the tree contains a symlink or the
         workspace boundary moves. The enumeration side, which can be wrong in
-        the direction of hiding a person's own files, honours the scope.
+        the direction of hiding a person's own files, honors the scope.
         """
         if self.objection("write", path, agent) is not None:
             return DENIAL.format(operation="delete", path=path)
@@ -484,7 +484,7 @@ class FsPermissions:
 
         `None` — no workspace — means there is no scope to be outside of, so a
         scoped rule simply does not apply: a profile layering the rule without a
-        containment tier gets today's behaviour rather than a boundary drawn
+        containment tier gets today's behavior rather than a boundary drawn
         around a directory nobody chose.
         """
         workspace = None if self.ctx is None else workspace_of(self.ctx, agent)

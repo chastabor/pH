@@ -17,7 +17,7 @@ earns itself three times over:
 
 `name` is not decoration: it is written into the index's sidecar and compared on
 every open. A vector from one model is meaningless to another, so an index whose
-embedder changed under it must refuse rather than return neighbours computed in
+embedder changed under it must refuse rather than return neighbors computed in
 a space nothing shares.
 
 @module ph_text_index._embed
@@ -40,7 +40,7 @@ if TYPE_CHECKING:
     from numpy.typing import NDArray
 
 Vectors: TypeAlias = "NDArray[np.float32]"
-"""One L2-normalised float32 row per text — `(len(texts), dim)`.
+"""One L2-normalized float32 row per text — `(len(texts), dim)`.
 
 The shape the whole chain moves: `Embedder.encode` produces it, `TextIndexSeam.embed`
 carries it across the worker-thread hop, and `TextIndex.add`/`_maybe_calibrate`/`search`
@@ -65,10 +65,10 @@ class Embedder(Protocol):
         """
 
     def encode(self, texts: Sequence[str], *, query: bool) -> Vectors:
-        """`(len(texts), dim)` float32, L2-normalised.
+        """`(len(texts), dim)` float32, L2-normalized.
 
-        **Blocking**; the seam calls it in a worker thread. Normalised because
-        turbovec scores an inner product, and an inner product over normalised
+        **Blocking**; the seam calls it in a worker thread. Normalized because
+        turbovec scores an inner product, and an inner product over normalized
         vectors is cosine similarity — without that, a long passage outranks a
         relevant one for having a bigger norm.
 
@@ -134,7 +134,7 @@ class SentenceTransformerEmbedder:
     `ctx.subprocess` spawns as well, and this is a decision about one library.
     """
     trust_remote_code: bool = False
-    """Whether to let this model bring its own modelling code.
+    """Whether to let this model bring its own modeling code.
 
     **Off by default, and it is a trust decision rather than a compatibility
     flag.** `True` downloads Python from the model's repository and executes it
@@ -155,7 +155,7 @@ class SentenceTransformerEmbedder:
 
         The prefixes are in the identity because they are part of the function:
         an `e5` index built with `passage: ` and searched without it is a
-        different space, and the failure is quiet — slightly wrong neighbours,
+        different space, and the failure is quiet — slightly wrong neighbors,
         which is worse than an error.
         """
         return f"sentence-transformers:{self.model_name}:{self.query_prefix}|{self.document_prefix}"
@@ -177,7 +177,7 @@ class SentenceTransformerEmbedder:
 
         **The whole point is that it loads rather than downloads.** Fetching the
         weights is not the same check: `nomic-embed-text-v1.5` downloads its
-        config and its remote modelling code successfully and then fails at
+        config and its remote modeling code successfully and then fails at
         import with
 
             ImportError: This modeling file requires the following packages
@@ -189,7 +189,7 @@ class SentenceTransformerEmbedder:
         reads.
         """
         model = self._load()
-        # `get_sentence_embedding_dimension` is deprecated in favour of
+        # `get_sentence_embedding_dimension` is deprecated in favor of
         # `get_embedding_dimension`; both spellings exist across the versions
         # this package allows, so ask for the new one and fall back rather than
         # pinning a floor for a method name.

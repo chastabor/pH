@@ -21,7 +21,7 @@ twice is worth more than the parse it saves.
 
 `ProcessConfig` spans are **0-based**; tree-sitter points are 0-based too, and
 every line number pH puts in front of a model is **1-based**, because that is
-what `read` takes and what an editor shows. Both are normalised on the way out
+what `read` takes and what an editor shows. Both are normalized on the way out
 of this module, once, so nothing downstream has to remember which source a
 number came from. Getting this wrong is a one-line-off pointer, which is the
 kind of error a model stops trusting the tool over rather than reporting.
@@ -176,7 +176,7 @@ def use_cache(directory: Path) -> Path:
     """Point the pack's grammar cache at `directory`. Returns where it landed.
 
     **Not optional, and not only about the download tail.** The 26 bundled
-    languages are shipped inside the wheel as an archive and *materialised into
+    languages are shipped inside the wheel as an archive and *materialized into
     this directory on first use* — so a deployment whose cache directory is not
     writable does not fall back to the wheel, it fails:
 
@@ -224,7 +224,7 @@ def detect_language(path: str) -> str | None:
 
     `None` is the ordinary answer for most of a repository — a `.md`, a lockfile,
     an image — so it is a value and not an error. Markdown and the other prose
-    languages the pack recognises are excluded by the caller, which knows it
+    languages the pack recognizes are excluded by the caller, which knows it
     wants code; this only reports what the extension says.
     """
     try:
@@ -248,7 +248,7 @@ def indexable(language: str) -> bool:
 
     Asking the pack cannot drift and covers all 371. It also costs nothing: the
     answer is cached, and `get_tags_query` reads a string the pack already holds
-    rather than materialising a grammar.
+    rather than materializing a grammar.
     """
     try:
         return bool(_pack().get_tags_query(language))
@@ -280,7 +280,7 @@ def local(language: str) -> bool:
 def parseable(language: str) -> bool:
     """Whether a parser for `language` can be obtained at all.
 
-    Materialising, and that is the point: `get_parser` unpacks a bundled grammar
+    Materializing, and that is the point: `get_parser` unpacks a bundled grammar
     from the wheel — local, and the ordinary case — and only reaches the network
     for the ~345 outside it. The docstring this replaced claimed to be "the
     bundled question" and was not, which mattered because it was also the skip
@@ -522,7 +522,7 @@ def clean_prose(text: str) -> str:
     """The prose without its delimiters — what an FTS index should hold.
 
     A docstring stored with its quotes still attached puts punctuation into
-    every neighbouring search term and shows the model syntax it did not ask
+    every neighboring search term and shows the model syntax it did not ask
     for. Stripped line by line, so a block comment loses its leading `*` too.
     """
     lines: list[str] = []

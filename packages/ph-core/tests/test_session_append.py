@@ -284,7 +284,7 @@ def test_a_projection_answers_with_the_newest_event_it_can_parse() -> None:
 def test_a_projection_parses_only_what_arrived_since_it_last_answered() -> None:
     """The whole reason this is not `for event in reversed(session.events)`.
 
-    The walk it replaced materialised a snapshot of the log to read one field and
+    The walk it replaced materialized a snapshot of the log to read one field and
     grew more expensive the longer a conversation ran — asked, in the meter's
     case, on every pressure check.
     """

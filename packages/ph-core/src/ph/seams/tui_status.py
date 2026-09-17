@@ -12,7 +12,7 @@ the fact; a reading says how close you are to it happening, before. A budget
 that only announces itself on the step it stops you is a budget you cannot plan
 around.
 
-**Semantic level, never a colour.** `level` says a reading is `warning`; what
+**Semantic level, never a color.** `level` says a reading is `warning`; what
 that looks like is the front end's business — the same rule `ContextForm` and
 `CardKind` are held to, and the reason ph-core can own this seam without knowing
 what a terminal is.
@@ -92,8 +92,8 @@ class StatusReading(WireModel):
     A reading used to be an anonymous string on one line, so a front end could
     only render the lot in order. Naming them is what lets a *particular* one be
     placed — the sandbox posture belongs in the sidebar's session panel, beside
-    the directory it bounds — without the fact travelling as a bespoke field on
-    every status frame. A client that does not recognise an id still renders it
+    the directory it bounds — without the fact traveling as a bespoke field on
+    every status frame. A client that does not recognize an id still renders it
     on the line, which is what keeps a new reading additive."""
     text: str
     level: ReadingLevel = "normal"

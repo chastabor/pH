@@ -434,7 +434,7 @@ class TranscriptView(VerticalScroll):
         self._rows: dict[str, RowWidget] = {}
         self._followed = False
         self._mounting = anyio.Lock()
-        """Serialises `sync`, because Textual refuses a mount while one is pending.
+        """Serializes `sync`, because Textual refuses a mount while one is pending.
 
         Two draws can overlap: `_draw` clears its coalescing timer before it
         awaits, so a change arriving mid-draw schedules the next one — and the
@@ -450,7 +450,7 @@ class TranscriptView(VerticalScroll):
     async def sync(self, items: list[ChatItem]) -> None:
         """Bring the view in line with `items`. Idempotent and cheap when nothing changed."""
         async with self._mounting:
-            # **A queued draw may land after this view is gone.** Serialising
+            # **A queued draw may land after this view is gone.** Serializing
             # `sync` means a second one can begin later than it used to — after
             # the app started unmounting, which is the same hazard `on_unmount`
             # stops the timers for. Mounting into a detached node raises, so a

@@ -179,7 +179,7 @@ async def test_a_full_cursor_is_verified_and_a_stale_one_skips_nothing(
 ) -> None:
     """**The hole.** A bare `--since` was the only form, and it was stamped with the
     *current* generation — so a sequence kept from another incarnation of the log
-    was honoured against this one, skipping events this reader had never seen.
+    was honored against this one, skipping events this reader had never seen.
     That is precisely the case `resume_at` exists to refuse, defeated by the
     caller handing it a fresh generation with a stale sequence.
 

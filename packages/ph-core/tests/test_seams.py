@@ -259,7 +259,7 @@ def test_a_broken_config_family_is_dropped_whole_rather_than_half() -> None:
 
     Dropping the family whole is also the safer reading of I-4, not a relaxation:
     `GIT_CONFIG_VALUE_i` is where an injected auth header's value sits, and
-    `VALUE` matches none of the marks — so the old behaviour leaked the half that
+    `VALUE` matches none of the marks — so the old behavior leaked the half that
     holds the secret and broke the half that does not.
     """
     kept = EnvScrub().apply(

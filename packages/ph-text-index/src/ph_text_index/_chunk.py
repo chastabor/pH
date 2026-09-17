@@ -5,7 +5,7 @@ of this row is to hand an agent a pointer it can act on — `read docs/x.md offs
 120` — rather than a wall of prose it must then locate. So every chunk carries
 the 1-based line span it came from, and the boundary rule is chosen to keep that
 span meaningful: cuts land between paragraphs, never mid-sentence, so a span
-names something a person would recognise as a unit.
+names something a person would recognize as a unit.
 
 Paragraphs, not a fixed character stride, for the same reason. A stride is
 simpler and is what most naive indexers do, and it reliably splits the one

@@ -42,7 +42,7 @@ The handle reports both, and they may differ:
 | field | |
 |---|---|
 | `requested_access` | what the parent asked for |
-| `granted_access` | what the available tier could actually honour |
+| `granted_access` | what the available tier could actually honor |
 
 `granted` is what the roster and the child's own prompt report, because a child
 told nothing about its workspace attempts writes and reads the failures as bugs.
@@ -214,7 +214,7 @@ runs while a harness is starting — which is already the wait.
 seam owns the sweep, the fold and the records; how many attempts work is worth is
 policy, and a seam that answered it for a caller who said nothing would be
 choosing one (P6-32's rule). The daemon states it beside the root's own ladder,
-in `ph_app.daemon.recovery`, which is where somebody tuning restart behaviour is
+in `ph_app.daemon.recovery`, which is where somebody tuning restart behavior is
 already looking.
 
 **Progress clears `attempts`**, so the ladder bounds *consecutive* interruptions

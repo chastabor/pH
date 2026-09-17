@@ -187,7 +187,7 @@ def answer_from_wire(raw: object) -> ApprovalAnswer:
     seam's vocabulary, so a second decoder in `ph_app` would be a second opinion
     about what `{"kind": "edited"}` means.
 
-    **Anything unrecognised is `unavailable`**, never a denial and never a pass.
+    **Anything unrecognized is `unavailable`**, never a denial and never a pass.
     The outcomes are distinct on purpose — a model told "the user rejected this"
     can re-plan, one told "there is no approval channel" knows the deployment is
     misconfigured — and a garbled frame is the second of those, not the first.

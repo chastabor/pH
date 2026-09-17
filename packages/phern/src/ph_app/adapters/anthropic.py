@@ -379,7 +379,7 @@ class AnthropicAdapter:
                     yield chunk
         except LlmError as error:
             # A handle this request referenced is gone — expired early, deleted
-            # from another session, or never honoured. **Forget it first, then
+            # from another session, or never honored. **Forget it first, then
             # let it retry**: `FILE_EXPIRED` is in `TRANSIENT_CODES` precisely
             # because the state that caused it is already cleared by the time the
             # retry runs, so the next attempt re-uploads rather than repeating a
@@ -578,7 +578,7 @@ def _to_anthropic(
 
     `media` holds base64 for the attachments this route will take; anything absent
     from it becomes a pointer. **Nothing is dropped** — a block kind this function
-    does not recognise still reaches the wire, rather than a message that was only an
+    does not recognize still reaches the wire, rather than a message that was only an
     image arriving as an empty text block.
     """
     blocks: list[dict[str, Any]] = []

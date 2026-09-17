@@ -3,7 +3,7 @@
 `protocol.py` holds the *stateless* half of the vocabulary — how a request, a
 notification and a reply are shaped — and deliberately imports nothing of the
 daemon's. This is the stateful half: minting ids, remembering what is outstanding, deciding which
-direction an inbound frame is going, serialising what goes out, and waking
+direction an inbound frame is going, serializing what goes out, and waking
 everybody when the socket ends.
 
 **It exists because that half was written twice.** Until P5-13 the protocol only
@@ -102,7 +102,7 @@ def answering[A: SessionAsk](ask: type[A], answer: Callable[[A], Awaitable[WireM
     The client's mirror of the daemon's `parse_params` — literally, not by
     analogy: it *is* `parse_params`, so a bad ask is refused with the same
     named `invalid_params` and the same one-line sentence a bad request gets,
-    whichever direction it was travelling. Written by hand it was
+    whichever direction it was traveling. Written by hand it was
     `ApprovalAsk.model_validate(params)` at the top of each handler, whose bare
     `ValidationError` carries no `code` — so `respond` sent it back as an
     unnamed `-32000` with a multi-line pydantic dump for a message, which is the
@@ -334,7 +334,7 @@ class Peer:
         runs *inline on the read loop* — deliberately, since an observer is
         cheap and spending a task per event is not — so anything it raises
         unwinds `_read`, leaves the task group, and takes the socket with it.
-        The reader is a client's own code parsing a frame it may not recognise:
+        The reader is a client's own code parsing a frame it may not recognize:
         a notice carrying a field this build has never heard of raises out of
         `model_validate`, and before this guard that killed `phern agents attach`
         over a `session.staged` it does not even read.

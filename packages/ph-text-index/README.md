@@ -170,7 +170,7 @@ The index directory is keyed by a digest of the embedder's identity — model
 name **and** both prefixes, because all three move the vector space — so
 switching is safe to try: a new model gets its own index and switching back
 finds the old one intact. Pointing `path:` at a fixed directory and then
-changing the model raises `IndexMismatch` rather than returning neighbours
+changing the model raises `IndexMismatch` rather than returning neighbors
 computed in a space nothing shares.
 
 ### A worked upgrade: `nomic-embed-text-v1.5` — measured

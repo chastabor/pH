@@ -26,10 +26,10 @@ network tests ask their question the same way on both platforms — can a confin
 command reach a listener this process opened on the host's loopback — because
 one backend unshares and the other denies, and only that question is the same.
 
-**Where the time goes, so nobody optimises the wrong end.** Building the argv
+**Where the time goes, so nobody optimizes the wrong end.** Building the argv
 costs **0.83 µs**; wrapping a command in `bwrap` costs **~5.8 ms fixed plus
 ~0.3 ms per writable root**. The Python is **0.024%** of the price, and the best
-possible micro-optimisation of it is **0.004%** — 3 323 confined commands to save
+possible micro-optimization of it is **0.004%** — 3 323 confined commands to save
 one millisecond. `confine` is left exactly as it is on purpose.
 
 **Why the probe asserts isolation rather than availability.** This module has
@@ -672,7 +672,7 @@ def test_the_seatbelt_profile_opens_only_the_door() -> None:
 
 def test_each_backend_owns_its_door_rather_than_the_row_switching_on_it() -> None:
     """The declaration the row reads before it has confined anything, and the two
-    behaviours it must not have to know about. A `Literal` switch read by
+    behaviors it must not have to know about. A `Literal` switch read by
     `probe_egress` meant a third backend edited the probe; these mean it does not.
     """
     bridge = _egress()

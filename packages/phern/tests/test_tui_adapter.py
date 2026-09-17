@@ -424,7 +424,7 @@ async def test_cancelled_pending_input_leaves_a_row_and_not_a_falling_count(
     """Esc throws the inbox away, and the transcript has to say so.
 
     `AgentDriver.cancel` clears every pending message unless the caller asks it
-    not to — the intended behaviour, and until now an entirely silent one: the
+    not to — the intended behavior, and until now an entirely silent one: the
     footer's "1 queued" fell to nothing and a queued prompt, or the output of a
     `!` waiting for the next step, was gone with no account of it anywhere on
     screen. The account is the point, not a veto on the clearing.

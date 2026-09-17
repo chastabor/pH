@@ -190,7 +190,7 @@ def test_an_unknown_namespace_is_reported_separately_from_matching() -> None:
     """`matches` never consults a vocabulary; this does.
 
     A stored log may legitimately carry types this build does not know — that is
-    what `ignorable` is for — so a matcher that refused an unrecognised namespace
+    what `ignorable` is for — so a matcher that refused an unrecognized namespace
     would break reading a log written by a newer harness. Reporting is the opt-in
     half, for a command that would rather say "no such namespace" than return
     nothing and let the reader conclude there is nothing there.

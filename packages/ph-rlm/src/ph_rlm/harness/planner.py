@@ -232,7 +232,7 @@ class RefinementPlanner:
 
     def _state_overview(self, state: HarnessState) -> str:
         """Everything the harness already holds, so the model can update rather
-        than duplicate — labelled by `entry_label`, the same identity the prompt
+        than duplicate — labeled by `entry_label`, the same identity the prompt
         section shows, so "use its exact id" is an instruction both texts obey."""
         lines: list[str] = ["# The harness as it stands"]
         for kind in KINDS:

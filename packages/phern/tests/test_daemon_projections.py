@@ -371,7 +371,7 @@ async def test_a_new_session_records_the_clients_cwd_in_its_header(tmp_path: Pat
     """Where the person is, not where the daemon is.
 
     The daemon's own working directory is somewhere neither the person nor their
-    files are, so a session that inherited it would be labelled with a lie. The
+    files are, so a session that inherited it would be labeled with a lie. The
     header validates that the path is absolute, which is why the client sends a
     resolved one.
     """
@@ -632,7 +632,7 @@ async def test_a_method_whose_seam_is_absent_says_so_and_is_not_unknown(
     """ "This deployment does not do that" is not "this daemon is too old".
 
     Two different sentences with two different client responses: `unknown_method`
-    means disable the feature everywhere, `seam_absent` means grey out one button
+    means disable the feature everywhere, `seam_absent` means gray out one button
     for one root. The read-side projections already answer absence with an empty
     list; this is the act side agreeing.
 

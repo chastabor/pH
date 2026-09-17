@@ -80,7 +80,7 @@ def shell_body(data: JsonObject) -> str:
     """A `shell/result`'s streams as one column, the way a terminal shows them.
 
     **Rendered here, from the event, and not stored on it.** The log keeps the
-    two streams apart so a front end can colour them apart; this is the default
+    two streams apart so a front end can color them apart; this is the default
     a front end that wants one column uses, and it is shared so the terminal and
     the browser cannot disagree. `[stderr]`, `[exit N]`, the timeout line and the
     truncation sentence all follow `tool-bash`'s renderer, so `!!make` and a
@@ -163,7 +163,7 @@ async def run_shell(
     derivation the `cwd` paragraph below refuses for the same reason.
 
     `cwd` comes back *from the seam* rather than being derived here: `run`
-    resolves the working directory from the agent and honours a workspace
+    resolves the working directory from the agent and honors a workspace
     redirection, so a second derivation could disagree with the fact it claims
     to record. It is written on the result event, once the child has actually
     run somewhere.

@@ -40,7 +40,7 @@ def resolve_secret(ctx: Context, env_name: str, provider: str) -> str:
     """Turn a credential *name* into its value — here, at the edge, and nowhere above (I-3).
 
     The value goes into a local that goes out of scope with the request. Nothing
-    that travelled to get here held it.
+    that traveled to get here held it.
     """
     credentials = ctx.get(CREDENTIALS)
     if credentials is None:

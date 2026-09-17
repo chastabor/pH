@@ -214,7 +214,7 @@ class SandboxPolicy(WireModel):
 
     **A request can only ever narrow.** There is deliberately no way to spell "give
     me the network" — §6.5 caps a caller at what the deployment allows, so an
-    asking field would have exactly one reachable behaviour (no effect) and a
+    asking field would have exactly one reachable behavior (no effect) and a
     docstring claiming otherwise. What a caller *can* do is want less, which is
     this.
 
@@ -401,7 +401,7 @@ class Denial:
 
 @runtime_checkable
 class DenialReader(Protocol):
-    """A backend that can recognise its own kernel's refusals in a command's output.
+    """A backend that can recognize its own kernel's refusals in a command's output.
 
     **Optional, and the backend's rather than the seam's**, because every string
     such a reader matches is a fact about one platform: `bwrap` on Linux leaves
@@ -549,12 +549,12 @@ class SandboxSeam:
         """Say what confined commands may reach. One slot: two statements of one
         boundary is a contradiction, and re-applying the row is how it changes.
 
-        **The paths are canonicalised here, because this is where they are minted.**
+        **The paths are canonicalized here, because this is where they are minted.**
         A deployment writes `~/.cache/uv`; the kernel matches the path it resolves,
         and so must the prompt boundary `permissions-fs` draws from the same set
         (E6). Doing it here rather than in `allowed_paths` is the difference between
         once per mount and once per confined command *and* per gated write — the
-        cost the memoised helper this replaced was written to avoid, and it belongs
+        cost the memoized helper this replaced was written to avoid, and it belongs
         at the mint, not behind a cache. `expanduser` comes with it: `~` is a
         spelling too, and a consumer comparing against a literal `~` compares
         against nothing.
@@ -593,7 +593,7 @@ class SandboxSeam:
     def mode_reading(self, session: Session) -> StatusReading:
         """`sandbox workspace-write` — what a confined command may write.
 
-        Labelled, because the preset beside it is *named* for this and the two
+        Labeled, because the preset beside it is *named* for this and the two
         are different questions: a preset says what runs without anybody being
         asked, this says what the kernel will let through at all.
 
@@ -776,7 +776,7 @@ class SandboxSeam:
                 return
 
     def read_denial(self, output: str, *, network: bool) -> Denial | None:
-        """What the mounted backend recognises in a confined command's output.
+        """What the mounted backend recognizes in a confined command's output.
 
         `None` when no backend is mounted or the one that is has not been measured
         on this platform — see `DenialReader`. Asked here rather than by the caller

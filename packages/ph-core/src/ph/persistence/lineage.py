@@ -64,7 +64,7 @@ already.
 """
 
 MAX_DEPTH = 64
-"""How many ancestors one materialisation may walk.
+"""How many ancestors one materialization may walk.
 
 Not a correctness bound — a legal chain of any depth reconstructs correctly, and
 the bytes read are the same either way, since each file contributes a disjoint
@@ -84,7 +84,7 @@ class LineageError(Exception):
 
     **`code` and `session_id` are the parts a caller may branch on**, mirroring
     `SessionForkError`. A daemon meeting `MISSING_ANCESTOR` can offer to re-point
-    or materialise; one meeting `CYCLE` or `GAP` has corruption and should say so.
+    or materialize; one meeting `CYCLE` or `GAP` has corruption and should say so.
     Without a code the only discriminator is the message, and a test matching
     prose is a contract nobody wrote down that every rewording breaks — which is
     the argument `DaemonError.reason` already makes one package over.
@@ -100,7 +100,7 @@ def materialise(read_one: ReadOne, session_id: str) -> tuple[SessionHeader, list
     """One session's full log, following its lineage to a file that starts at 0.
 
     Returns the *child's* header — the lineage supplies events, never identity. A
-    materialised log is what every reader already expects: dense from `seq == 0` and
+    materialized log is what every reader already expects: dense from `seq == 0` and
     contiguous, so `_readmit`, the surface fold, the daemon's cursors and both
     derivations are untouched by any of this.
 
@@ -216,7 +216,7 @@ def _assert_contiguous(events: list[SessionEvent], session_id: str, chain: list[
 def lineage_faults(
     listed: Iterable[tuple[str, str | None]], exists: Callable[[str], bool]
 ) -> list[tuple[str, str]]:
-    """Stored sessions whose lineage will not materialise, and why (§5.4a).
+    """Stored sessions whose lineage will not materialize, and why (§5.4a).
 
     **The cost reference-forking has and copying did not.** A copied child was
     self-contained; a referencing one is readable only while the log it names is
@@ -241,13 +241,13 @@ def lineage_faults(
       present rather than gone. Reporting those would make the check cry wolf on
       every large store.
     * **A cycle**, when it closes inside the listing.
-    * **A chain past `MAX_DEPTH`**, which `materialise` refuses outright. Easy to
+    * **A chain past `MAX_DEPTH`**, which `materialize` refuses outright. Easy to
       miss because forks are shallow — but `roll` adds a generation per segment,
       so a long-running segmented session reaches the bound by ordinary use, and
       a survey that stayed quiet about it would go silent on exactly the failure
       segmentation introduces.
     * **A gap** in the assembled seqs is *not* checked: that needs every event of
-      every ancestor, which is the read this exists to avoid. `materialise`
+      every ancestor, which is the read this exists to avoid. `materialize`
       catches it at the point of use, where the cost is already being paid.
     """
     parents = dict(listed)
@@ -261,7 +261,7 @@ def lineage_faults(
 def _chain_fault(
     session_id: str, parents: dict[str, str | None], exists: Callable[[str], bool]
 ) -> str | None:
-    """Why one session's chain will not materialise, or `None` if it will.
+    """Why one session's chain will not materialize, or `None` if it will.
 
     One chain, one answer — which is why this is a function rather than rows
     appended to a shared list: a session contributes at most one fault, and

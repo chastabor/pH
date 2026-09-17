@@ -115,7 +115,7 @@ WARN_FRACTION = TRIGGER_FRACTION
 """Where the footer's reading turns amber.
 
 *The* compaction threshold, imported rather than restated: two readings on one
-line that turned colour at different fractions would be two things to learn
+line that turned color at different fractions would be two things to learn
 instead of one, and three copies of `0.85` with three comments asserting they
 must stay equal is how they stop being equal."""
 

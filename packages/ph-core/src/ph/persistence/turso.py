@@ -133,7 +133,7 @@ class TursoSessionStore:
         # is already durable *somewhere* — in this database for a resume, in the
         # parent's for a reference-fork — and queueing it anyway is not a
         # harmless rewrite: it writes the child a full copy of the prefix, whose
-        # first event is then at seq 0, which `materialise` reads as "this file
+        # first event is then at seq 0, which `materialize` reads as "this file
         # is complete". Reference-forking becomes a silent no-op on this backend
         # and nothing anywhere fails. This line said `session.events` while the
         # docstring above claimed "JSONL's shape exactly".
@@ -227,7 +227,7 @@ class TursoSessionStore:
         """The session's full log, following its lineage when it stores a reference.
 
         The same walk JSONL uses, over a different one-database read — which is
-        the point of `materialise` taking a callable: the two backends disagree
+        the point of `materialize` taking a callable: the two backends disagree
         about everything below this line and about nothing above it.
         """
         # No release loop here any more: `read_own` closes what it opened, which
@@ -295,7 +295,7 @@ class TursoSessionStore:
     async def claim(self, session_id: str, *, scope: Context) -> None:
         """Hold this database against every other writer for `scope`'s life (I-5).
 
-        The database's own locking serialises *statements*; it does not stop a
+        The database's own locking serializes *statements*; it does not stop a
         second process appending a second log's worth of `seq` to one session,
         which is the hazard, so the lease is the same file lock JSONL takes.
         """

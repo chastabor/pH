@@ -4,7 +4,7 @@ A bundle is the one artifact nothing else tests: every row here has its own unit
 tests, but "these rows, in one profile, on top of base" is a separate claim, and
 the failures it catches are ordering and naming rather than logic.
 
-The behavioural half of that claim lives in `test_governance_gate.py`, which
+The behavioral half of that claim lives in `test_governance_gate.py`, which
 mounts the same profile through the same fixture — so "the gate runs against what
 ships" is true by construction rather than by two copies of one recipe.
 """

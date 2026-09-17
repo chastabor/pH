@@ -33,7 +33,7 @@ frame anyway; doing it twice cost **2.8 ms against 1.2 ms for a 1 MiB result**.
 1M-element list took **40 ms and `repr` another 37 ms — 77 ms to produce 64 KiB**,
 and "end the cell with `df`" is exactly how models write cells.
 
-## Why sends are serialised behind `_send_lock`
+## Why sends are serialized behind `_send_lock`
 
 Without it, contention lands in the `OSError`/`ClosedResourceError` branch as
 `BusyResourceError` and is reported as the child having exited — **eight concurrent

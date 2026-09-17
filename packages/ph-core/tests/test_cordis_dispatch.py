@@ -1,9 +1,9 @@
 """P0-03 — the five dispatch modes.
 
-Gate: *waterfall veto stops built-in behaviour; `next()` ordering; parallel
+Gate: *waterfall veto stops built-in behavior; `next()` ordering; parallel
 aggregates rejections.* The waterfall veto is the load-bearing one — it is how
 every policy plugin in Phase 4 (limits, HITL, permissions) replaces built-in
-behaviour without the built-in knowing it was replaced.
+behavior without the built-in knowing it was replaced.
 """
 
 from __future__ import annotations

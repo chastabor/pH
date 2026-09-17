@@ -25,7 +25,7 @@ seeding and steering work.
 | `graphify` | 3 | Query or rebuild the graphify knowledge graph. |
 | `deploy-ftp` | 4 | Build, diff against the remote, upload what changed. |
 | `pr-ready` | 6 | Sync check, tests, lint, commit, describe, open the PR. |
-| `release` | 6 | Pre-flight, analyse, changelog, bump, validate, tag. |
+| `release` | 6 | Pre-flight, analyze, changelog, bump, validate, tag. |
 | `db-migrate` | 7 | Validate, dry-run, review, staging, smoke, prod, verify. |
 | `incident-response` | 7 | Gather, blast radius, confirm, mitigate, verify, close, write up. |
 
@@ -84,7 +84,7 @@ value lives in the conversation and the later step relies on the model still
 remembering it.
 
 That mostly works, and then stops working precisely where it matters — **after
-compaction**, when a summariser may drop the version string step 4 computed and
+compaction**, when a summarizer may drop the version string step 4 computed and
 step 6 needs. `release` shows the shape: its step 4 says *"say the new version out
 loud — the later steps need it and there is no slot that holds it for you"*, which
 is a workaround, not a fix.

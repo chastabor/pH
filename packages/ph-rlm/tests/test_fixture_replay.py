@@ -171,7 +171,7 @@ def test_the_committed_reduction_still_describes_the_corpus() -> None:
 
     Everything above asserts against `shapes.json`, so everything above is only
     worth having if that file still says what the fixtures say. Re-derived here
-    and compared **byte for byte against the serialiser**, not field by field: a
+    and compared **byte for byte against the serializer**, not field by field: a
     hand-written comparison would be a second encoding of the same reduction and
     would drift from `to_wire` the first time either changed.
 

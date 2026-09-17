@@ -371,7 +371,7 @@ async def test_renaming_the_transport_keeps_what_it_declares_about_itself(
     field.
 
     `rename` uses `dataclasses.replace` and so carries it by construction, which
-    is precisely why this is worth a test: the safe behaviour here is the
+    is precisely why this is worth a test: the safe behavior here is the
     *absence* of an explicit field list, and the natural way to break it is for
     someone to make `rename` construct a `ToolDefinition` by hand. That would
     drop the declaration, raise nothing, and turn the gate off.

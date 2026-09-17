@@ -1,7 +1,7 @@
 """P4-13 — `skills-progressive`: the catalog in the prompt, the body on demand (G9).
 
 The gate is one sentence — *skill body absent until requested* — and it is worth
-saying why that is a design rather than an optimisation. A deployment with
+saying why that is a design rather than an optimization. A deployment with
 twenty skills has twenty bodies of up to 10 MiB each; putting them in the prompt
 would spend the context window on instructions for the nineteen the model is not
 about to use. So the prompt gets names and descriptions, and a `skill` call gets
@@ -573,7 +573,7 @@ async def test_no_paths_scans_nothing(mount: MountProfile) -> None:
 
 
 async def test_the_deployment_wide_answer_has_to_be_asked_for(mount: MountProfile) -> None:
-    """P6-32's behavioural half, on the seam P6-31 named and left.
+    """P6-32's behavioral half, on the seam P6-31 named and left.
 
     `reach` resolved `scope or self.ctx`, and `self.ctx` is the mount — the
     *unrestricted* set. So an unstated boundary was not "no skills", it was all

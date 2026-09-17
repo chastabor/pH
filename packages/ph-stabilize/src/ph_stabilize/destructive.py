@@ -195,7 +195,7 @@ SHELL_RULES: dict[str, tuple[ShellRule, ...]] = {
 """Command name → when it is destructive. Case-sensitive, because the shell is.
 
 A starting point rather than a claim of completeness: what is here is what the
-port plan's own list named plus the neighbours that share its shape. A command
+port plan's own list named plus the neighbors that share its shape. A command
 missing from this table is not gated by the preset, which is what a deployment's
 own `when:` patterns and its `interrupt_on` entries are for.
 

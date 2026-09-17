@@ -108,7 +108,7 @@ class _Untiered:
 class _Seam:
     """The shape `backend_for` reads: the seam, holding a claimed provider slot.
 
-    Modelled rather than mounted because the real `WorkspaceSeam` needs a tier
+    Modeled rather than mounted because the real `WorkspaceSeam` needs a tier
     row and a repository to hand one out, and the question here is only which of
     two answers `backend_for` prefers.
     """
@@ -345,7 +345,7 @@ async def test_jj_vouches_for_nothing_when_the_token_is_unusable(
     """A token predating a rebuilt repository is not an error — just a re-read.
 
     The caller reads everything once and stores a token that works, which is
-    strictly better than a traceback out of an optimisation.
+    strictly better than a traceback out of an optimization.
     """
     ctx = await mount()
     root = await jj_repo(ctx, tmp_path / "repo")

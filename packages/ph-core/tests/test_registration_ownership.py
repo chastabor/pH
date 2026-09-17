@@ -18,7 +18,7 @@ unfalsifiable gate this plan hit at P3-23 and P3-24, so the test here is built t
 be falsifiable in the way those were not: the surface is **discovered by
 introspection**, and a method that is neither exercised nor classified fails.
 
-The behavioural assertion is deliberately generic — *the seam's own context does
+The behavioral assertion is deliberately generic — *the seam's own context does
 not grow an effect* — rather than per-registry. It needs no knowledge of what
 each registry stores, so it holds for a seam this module has never heard of, and
 it is exactly the property that was wrong.
@@ -561,7 +561,7 @@ async def test_a_registration_is_an_effect_of_the_row_that_made_it(
 async def test_a_registration_outside_any_activation_still_lands_on_the_service(
     mount: MountProfile,
 ) -> None:
-    """Today's behaviour, kept — which is what makes the change strictly additive.
+    """Today's behavior, kept — which is what makes the change strictly additive.
 
     A test standing a service up by hand, or a mode wiring one directly, is not
     a row and has no activation scope. `owner_for` falls through to the service,
@@ -700,8 +700,8 @@ def _code_of(source: str) -> str:
     mention is the *opposite* of a call — it is usually there to say the method
     deliberately does not do the thing.
 
-    Tokenising rather than regexing, because "is this token inside a string" is
-    exactly what a tokeniser knows and a regex has to guess. Docstrings come out
+    Tokenizing rather than regexing, because "is this token inside a string" is
+    exactly what a tokenizer knows and a regex has to guess. Docstrings come out
     as `STRING` tokens and go with the comments; an unparseable fragment is
     returned as-is rather than dropped, since a false *positive* here is a
     misfiled name and a false negative is a hole.
@@ -732,11 +732,11 @@ def _code_of(source: str) -> str:
 def _source_of(name: str) -> str:
     """The code of a method plus the same-class helpers it delegates to.
 
-    Memoised: 115 calls over 65 distinct names in one run of this module, and the
+    Memoized: 115 calls over 65 distinct names in one run of this module, and the
     repeats predate the prose-blanking — `SystemPromptService.assemble` is asked
     for four times, `CommandRegistry.dispatch` three. Deterministic within a
     session, keyed by a plain string, over modules imported once. Worth ~20 ms of
-    the module's 0.65 s, most of which is `_code_of` tokenising the same bodies
+    the module's 0.65 s, most of which is `_code_of` tokenizing the same bodies
     again.
 
     Was `_owner_resolution`, which named one *use* of it — grep this for
@@ -786,7 +786,7 @@ def test_the_classification_is_a_check_and_not_a_promise() -> None:
     "these go through `owner_for` like the rest" that nothing verifies, and the
     cheapest way past the gate is to type a name into a set. That is the same
     "remembered rule" this row exists to delete, and the same unfalsifiable-gate
-    shape the module docstring criticises at P3-23 and P3-24.
+    shape the module docstring criticizes at P3-23 and P3-24.
 
     So the claim is checked instead: a registration must *resolve an owner*, and
     a method whose `scope=` is a visibility or dispatch target must not. It found
@@ -990,7 +990,7 @@ async def test_every_dispatch_mode_runs_a_listener_as_its_own_scope(
 ) -> None:
     """Every mode, and **both listener shapes** — which is the axis that mattered.
 
-    Parametrised over `DispatchMode` itself rather than a copied list, so a sixth
+    Parametrized over `DispatchMode` itself rather than a copied list, so a sixth
     member becomes a sixth case with no edit here, and dispatched through
     `getattr(root, mode)` so a member with no dispatch loop raises rather than
     falling into an `else`.
@@ -1234,8 +1234,8 @@ async def test_a_prompt_provider_runs_as_its_row_for_the_scope_being_assembled(
     """Two of the four bindings `assemble` enters, proved one at a time.
 
     This existed because `_row_bodies()` could not see either provider — they sat
-    in an `Any`-typed bucket — so behaviour was the only thing holding them.
-    Parameterising `_Registration[T]` closed that, and both are in `BOUND` now.
+    in an `Any`-typed bucket — so behavior was the only thing holding them.
+    Parameterizing `_Registration[T]` closed that, and both are in `BOUND` now.
     The test does not become redundant, because what the table proves is weaker
     than it reads: `test_a_bound_body_names_an_invoker_that_binds` says so in its
     own docstring — `SystemPromptService.assemble` enters four bindings, so
@@ -1278,7 +1278,7 @@ async def test_a_refused_registration_does_not_reassign_the_survivor(mount: Moun
     """The pair is written only once the mutation it describes is accepted.
 
     `_Layer.by` is a dict parallel to `_Layer.tools`, which is the shape the five
-    sibling registries rejected in favour of a `_Registered(value, by)` record.
+    sibling registries rejected in favor of a `_Registered(value, by)` record.
     It survives in the tools registry for a structural reason — `_claim`'s
     `mutate`/`undo` closures are built before the pair is known — and this is the
     hazard that buys: written *before* `mutate`, a registration that `add` then
@@ -1342,7 +1342,7 @@ def _row_bodies() -> set[str]:
     depth of an annotation: a field that *is* one (`ToolDefinition.execute`), a
     field whose type is a dataclass that has one (`_Registered.definition`, since
     `CommandDefinition.run` is enumerated in its own right), and a container
-    parameterised by one (`list[_Registration[ToolsProvider]]`). That last case
+    parameterized by one (`list[_Registration[ToolsProvider]]`). That last case
     is why `SystemPromptService._tools` and `._variables` are in the tables:
     those two contributions have no class of their own — a bare callable and a
     tuple — so the bucket was the only place their type could be named, and
@@ -1355,7 +1355,7 @@ def _row_bodies() -> set[str]:
     satisfying a Protocol, so `AdapterHandle.adapter: LlmAdapter` names its type
     exactly and mentions no callable anywhere. An earlier version of this
     paragraph claimed the opposite — that a container hides only what it is
-    parameterised *by*, and that `Any` is the one parameterisation naming nothing
+    parameterized *by*, and that `Any` is the one parameterization naming nothing
     — which was a tidy rule and false: two live registries were unbound and
     invisible to every walk here at the moment it was written. `_provider_fields`
     below is the answer, and it discriminates on the Protocol rather than on how
@@ -1619,7 +1619,7 @@ def test_a_bound_body_names_an_invoker_that_binds(name: str) -> None:
     Without this the table is a promise: names under the claim "these run inside
     a binding" that nothing verifies, and the cheapest way past the accounting
     test above is to type one into the bound half. That is the same
-    unfalsifiable-gate shape this module's docstring criticises at P3-23 and
+    unfalsifiable-gate shape this module's docstring criticizes at P3-23 and
     P3-24, and the same reason `test_the_classification_is_a_check_and_not_a_promise`
     exists one surface over.
 
@@ -1631,7 +1631,7 @@ def test_a_bound_body_names_an_invoker_that_binds(name: str) -> None:
     method does turn it red, which is the case that catches a whole invoker
     regressing: `ToolRuntime.finish` → `ToolDefinition.finalize_content`, and
     `SandboxSeam.confine` → its provider, both verified. The per-body guarantee
-    is the behavioural tests' job, and every binding here has one.
+    is the behavioral tests' job, and every binding here has one.
     """
     invoker = BOUND[name]
     source = _invoker_source(invoker)

@@ -25,7 +25,7 @@ each one out.
 
 ## Rules
 
-- Print the exact output of each command before summarising it. A summary with
+- Print the exact output of each command before summarizing it. A summary with
   no output behind it is a claim.
 - If a command exits non-zero, report it and stop.
 - Never overwrite an existing `NOTES.md` or `TODO.md` — read it first and leave

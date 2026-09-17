@@ -43,7 +43,7 @@ whoever is attached then.
 
 Ported from dsh `packages/core/session/src/repair.ts`, message texts included:
 this vocabulary is what a resumed model reads, and paraphrasing it would change
-behaviour that was tuned deliberately.
+behavior that was tuned deliberately.
 
 @module ph.persistence.repair
 """

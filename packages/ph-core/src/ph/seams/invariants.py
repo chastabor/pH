@@ -26,7 +26,7 @@ swallowing it would make the quietest possible report the one where the most is
 broken.
 
 **No severity, for `diagnostics`' reason** (§12 Q10): a violated invariant is a
-sentence a person reads, not a colour they learn to skip.
+sentence a person reads, not a color they learn to skip.
 
 **Not enforced (§5 rule 6): a poll has content only in a live process.** The one
 caller of `ctx.diagnostics.report()` today is `phern doctor`, which mounts a fresh

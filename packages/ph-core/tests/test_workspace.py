@@ -103,7 +103,7 @@ def _worktree(
 async def test_the_shared_provider_hands_back_the_directory_it_was_given(
     tmp_path: Path,
 ) -> None:
-    """Today's behaviour, at zero cost — which is what lets the seam live in
+    """Today's behavior, at zero cost — which is what lets the seam live in
     `ph-base` without changing what any profile does."""
     seam = workspace_seam(tmp_path / "scratch")
     base = tmp_path / "repo"
@@ -554,7 +554,7 @@ async def test_the_seam_hands_out_canonical_roots(tmp_path: Path) -> None:
     symlink into `/private` — so a root spelled the way a caller typed it was refused
     its own writes, and a backend that quietly re-spelled `writable_roots` to fix
     that would have left `permissions-fs` prompting about a different string than
-    the kernel enforced (E6). The seam canonicalises every input it mints from, so
+    the kernel enforced (E6). The seam canonicalizes every input it mints from, so
     what `writable_roots` and `workspace_policy` say is what every consumer reads.
     """
     real = tmp_path / "real"

@@ -551,7 +551,7 @@ class JjWorkspaceProvider:
 
         The name comes back off the path by the same construction `acquire` used to
         build it — `<root>/<session>/<agent>` and `<session>/<agent>` are the same
-        two sanitised components — so nothing is inverted out of a lossy name. A
+        two sanitized components — so nothing is inverted out of a lossy name. A
         path from anywhere but `strays` is refused rather than guessed at.
 
         jj deliberately leaves the directory after `forget`, so removing it is ours
@@ -805,7 +805,7 @@ class JjWorkspaceProvider:
         own checkout.
 
         Skipped when `@` is already empty, and that is the fan-out case rather
-        than an optimisation: the first child of a spawn freezes the parent's
+        than an optimization: the first child of a spawn freezes the parent's
         work, and its siblings find nothing new to freeze and fork from the *same*
         commit. Without the guard, eight children would leave eight empty commits
         stacked in the parent's history and each fork from a different one.

@@ -117,7 +117,7 @@ def test_the_transcript_renderer_labels_every_block_kind() -> None:
     )
     rendered = render_transcript(messages).splitlines()
     assert rendered[0] == "you: do it"
-    # Injected context is labelled as context, not as the user talking.
+    # Injected context is labeled as context, not as the user talking.
     assert rendered[1] == "context: cwd: /x"
     assert rendered[2] == "pH (thinking): considering"
     assert rendered[3] == "pH: on it"

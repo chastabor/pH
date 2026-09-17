@@ -69,7 +69,7 @@ def text_of_wire(
     selects `text` or `reasoning`. `placeholder` names the blocks it skips —
     an auditor wants to see that an image was there; a transcript row does not
     — and mirrors the same argument on `text_of` so the two joins stay one
-    behaviour described twice rather than two behaviours.
+    behavior described twice rather than two behaviors.
     """
     parts: list[str] = []
     for block in as_seq(blocks):

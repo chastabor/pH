@@ -202,7 +202,7 @@ class RlmChildProvider:
         needs the parent's log: the depth is folded from it, the child's header
         cites it, and the concurrency slot is keyed by it. Refused at the door
         rather than asserted, because it is a fact about the *caller*, and
-        admission is where this seam says no (its two neighbours raise the same
+        admission is where this seam says no (its two neighbors raise the same
         error for a depth limit and an empty prompt).
         """
         session = parent.session
@@ -433,7 +433,7 @@ class RlmChildProvider:
                 "a subagent needs a provider and a model; the parent has none to inherit"
             )
         # The preflight that exists: the route must resolve to an adapter. There
-        # is no model *catalogue* on `ctx.llm` yet — `rlm.find_models` needs one
+        # is no model *catalog* on `ctx.llm` yet — `rlm.find_models` needs one
         # and will bring it — so an unknown model name is caught at its first
         # request rather than at admission. What matters either way is that
         # nothing substitutes a different model.
@@ -907,7 +907,7 @@ def _last_assistant_text(session: Session | None) -> str:
     """The child's last non-empty assistant text — its answer, by convention.
 
     An incremental fold rather than a reverse walk of `session.events`, which
-    materialised a snapshot of the child's whole log to read one turn — and this
+    materialized a snapshot of the child's whole log to read one turn — and this
     is asked once per child, at the moment the log is longest.
 
     Scoped to `assistant/message`, which is the only event type

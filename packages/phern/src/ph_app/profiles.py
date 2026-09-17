@@ -62,7 +62,7 @@ class Bundle:
     """Whether a profile naming this bundle is refused without it, or composes
     without it.
 
-    **Required is the old behaviour and stays the default**: `rlm` without the
+    **Required is the old behavior and stays the default**: `rlm` without the
     RLM bundle is not a degraded `rlm`, it is a profile whose documents patch
     rows that do not exist, so it is better not offered. `rlm-stable.yaml` makes
     the point in one line — it arms `tool-todo`, which only the stabilize bundle
@@ -98,7 +98,7 @@ environment, and anybody building on `ph-core` with a front end of their own. A
 *required* layer here would take a working profile away to add a feature, which
 is precisely the trade `rlm-indexed`'s comment refuses further down.
 
-The cost is that a profile's behaviour now depends on what is installed, which
+The cost is that a profile's behavior now depends on what is installed, which
 until now it never did. That is why it is one named layer rather than a habit:
 `phern doctor` reports what actually activated, and there is exactly one bundle
 this is true of."""

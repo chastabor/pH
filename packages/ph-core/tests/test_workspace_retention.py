@@ -486,7 +486,7 @@ class _Store:
     def read_own(
         self, session_id: str, upto: int | None = None, family: str | None = None
     ) -> tuple[SessionHeader, list[SessionEvent]]:
-        """Whole logs in memory, so the unchained read *is* the materialised one.
+        """Whole logs in memory, so the unchained read *is* the materialized one.
         Declared because `SessionArchive` carries both; the fold uses `read`."""
         return self.read(session_id)
 

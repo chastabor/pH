@@ -200,7 +200,7 @@ class Inbox:
 
         The one rule both paths share, so it takes messages rather than a payload:
         `_mutate` is holding the `Message` list it just built and has no reason to
-        serialise it and read the ids back out.
+        serialize it and read the ids back out.
         """
         pending = self._state[target]
         other: InboxTarget = "next-step" if target == "next-turn" else "next-turn"

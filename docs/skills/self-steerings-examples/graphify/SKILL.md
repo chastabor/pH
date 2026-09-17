@@ -1,7 +1,7 @@
 ---
 name: graphify
 version: 1.0.0
-description: Query or rebuild the graphify knowledge graph for this codebase — ask a question of it, trace a path, explain a node, or summarise it.
+description: Query or rebuild the graphify knowledge graph for this codebase — ask a question of it, trace a path, explain a node, or summarize it.
 argument-hint: "<query|path|explain|build|report|visualize> [args]"
 allowed-tools: [bash, read, write_todos]
 parameters:
@@ -17,7 +17,7 @@ parameters:
 steps:
   - "Confirm graphify-out/graph.json exists, and build it first if it does not"
   - "Run the graphify action and show its full output"
-  - "Summarise the key findings for the question that was actually asked"
+  - "Summarize the key findings for the question that was actually asked"
 ---
 
 # Graphify
@@ -48,9 +48,9 @@ The action is `{{parameters.action}}` and its arguments are `{{parameters.args}}
 | `explain` | `graphify explain "{{parameters.args}}"` — type, location, relationships, description |
 | `build` | `graphify update .` — writes `graphify-out/{graph.json,graph.html,GRAPH_REPORT.md}` |
 | `report` | read `graphify-out/GRAPH_REPORT.md` |
-| `visualize` | tell the person to open `graphify-out/graph.html`, then summarise the report |
+| `visualize` | tell the person to open `graphify-out/graph.html`, then summarize the report |
 
-## 3. Summarise
+## 3. Summarize
 
 For `report` and `visualize`, cover the top communities and what they represent,
 the most connected nodes, the isolated ones, and the total node and edge count.

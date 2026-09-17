@@ -144,7 +144,7 @@ async def test_a_log_written_behind_append_trips_the_events_snapshot(mount: Moun
     scenario: the caches exist to be invalidated by `append`, and only a writer
     that bypassed it can leave one stale.
 
-    This was labelled A1 for one draft. It is not: `seq` *is* `len(_log)`
+    This was labeled A1 for one draft. It is not: `seq` *is* `len(_log)`
     (`Session.seq` is a property over it), so A1 holds by construction and a
     check for it would have no content. What can drift is the snapshot, and the
     message now says that rather than asserting a cause it cannot see.
@@ -489,7 +489,7 @@ async def test_the_rows_reach_the_report_through_the_real_mount(mount: MountProf
         "scope-unwind",
         "scope-teardown",
         # One per `SessionFoldCache` in the base bundle. Listed rather than
-        # summarised, so a seam that stops declaring its fold cache fails here
+        # summarized, so a seam that stops declaring its fold cache fails here
         # instead of quietly leaving the property unchecked.
         "goal-fold-cache",
         "schedule-fold-cache",
@@ -607,7 +607,7 @@ async def test_a_row_whose_service_is_gone_reports_nothing_rather_than_holds(
     deployment where it is least earned. An unmet `inject` key means the row
     never activates, so the invariant leaves the report along with its subject.
 
-    `session-invariant` gained the same `inject` and is not parametrised here:
+    `session-invariant` gained the same `inject` and is not parametrized here:
     removing the `session` row makes the profile itself incoherent — three other
     rows require `sessions` — so its overstatement was unreachable rather than
     latent. The guard is consistent, not load-bearing.

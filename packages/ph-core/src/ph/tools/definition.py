@@ -670,7 +670,7 @@ def define_tool[A: BaseModel](
     be inferred from its body, which is `Any`, and is checked exactly as loosely
     as it was declared.
 
-    The value side is deliberately not parameterised; `ToolOutput` argues that.
+    The value side is deliberately not parameterized; `ToolOutput` argues that.
     Which is also why `execute` cannot say "sync or async" the way `CommandBody`
     does: `MaybeAwaitable[Any]` *is* `Any`, so the `Awaitable[Any] | Any` that
     stood here was prose wearing a type. `run` awaits through `maybe_await`.

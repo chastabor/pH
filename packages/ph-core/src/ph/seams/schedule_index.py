@@ -25,14 +25,14 @@ due. A daemon reads one small file and mounts only what is actually due.
 **It is a cache, and the logs stay authoritative (I-6).** Every value here is
 derived from a log that still holds it, so a missing, stale or corrupt index costs
 a late run and never a wrong one: a reader that finds nothing falls back to the
-behaviour that shipped before this existed. The projection is never the source of
+behavior that shipped before this existed. The projection is never the source of
 truth, which is what keeps it from becoming a second answer to "what is
 scheduled" (A11).
 
 **Reconciliation needs no scan, because opening a session is the rebuild.** The
 seam re-derives an entry from the log on every `session/created`, so an index that
 is missing, stale or written by a build that had none corrects itself the moment
-anything touches that session — which is exactly the condition the old behaviour
+anything touches that session — which is exactly the condition the old behavior
 required to fire a schedule at all. A wholesale rebuild would have to read every
 stored log, which is the scan this file exists to avoid.
 
@@ -97,7 +97,7 @@ class ScheduleIndex:
         **Every failure reads as empty**, deliberately: a missing file is the
         ordinary state of a `$PH_HOME` nobody has scheduled in, and a corrupt one
         is a cache that lost its contents. Both mean "this file cannot tell you
-        what is due", and the honest response is the behaviour that shipped
+        what is due", and the honest response is the behavior that shipped
         before the index existed — a late run — rather than an exception on the
         daemon's boot path.
         """

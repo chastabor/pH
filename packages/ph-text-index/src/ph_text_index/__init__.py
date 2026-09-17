@@ -210,12 +210,12 @@ class LocalConfig(WireModel):
     `e5` wants `query: `; `nomic-embed-text` wants `search_query: `. Part of the
     embedder's identity, because an index built with a prefix and searched
     without one is a different space and the failure is quiet — slightly wrong
-    neighbours rather than an error."""
+    neighbors rather than an error."""
     document_prefix: str = ""
     """What it wants in front of a passage (`e5`: `passage: `, nomic:
     `search_document: `)."""
     trust_remote_code: bool = False
-    """Whether the model may bring its own modelling code — see the embedder.
+    """Whether the model may bring its own modeling code — see the embedder.
 
     **A trust decision, not a compatibility flag**: `true` executes Python
     downloaded from the model's repository in this process. Required by
@@ -285,7 +285,7 @@ TEXT_INDEX: ServiceKey[TextIndexSeam] = ServiceKey("text_index")
 class TextIndexSeam:
     """The service published as `ctx.text_index`.
 
-    Holds the one index and the one embedder, and serialises every mutation
+    Holds the one index and the one embedder, and serializes every mutation
     behind a lock. The lock is not defensive tidiness: `text_index` is not
     concurrency-safe precisely *because* of it — two calls that both loaded, both
     mutated and both saved would leave the sidecar describing one of them.
@@ -577,7 +577,7 @@ async def apply(ctx: Context, config: Config) -> None:
             moved = bool(state.token) and state.token != store.token
             if state.token:
                 store.remember(state.token)
-            # Nothing written, nothing to persist. `save` serialises every
+            # Nothing written, nothing to persist. `save` serializes every
             # record — 7.1 MB and 16 ms at 6 000 chunks — plus a turbovec fsync,
             # and a call that proved the whole corpus unchanged is the case this
             # filter exists to make free.

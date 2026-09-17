@@ -253,7 +253,7 @@ ContextForm: TypeAlias = Literal[
 
 Deliberately semantic, never visual: a value says the content is a file's
 instructions or a catalog, and the consumer decides what that looks like.
-Colours, icons and collapse defaults are the consumer's business and must not
+Colors, icons and collapse defaults are the consumer's business and must not
 enter this union.
 
 `compaction` is the one form that is also a *claim about the surface*: this text
@@ -603,7 +603,7 @@ index was a string, and handed it to an assembler that indexes and concatenates.
 
 `extra="ignore"` rather than `WireModel`'s `forbid`: a log is read by builds older
 than the one that wrote it, so a key added later is skipped rather than condemning
-the step. That is the ladder's behaviour, kept.
+the step. That is the ladder's behavior, kept.
 """
 
 
@@ -670,7 +670,7 @@ class GenerateOptions:
     schema's shape, so a route asked for both would have to break one promise;
     callers that want structure ask for it on a call that offers no tools, and
     `structured` refuses the combination rather than letting a provider decide
-    which to honour."""
+    which to honor."""
     session_id: str | None = None
     purpose: Literal["compaction", "session-title", "refine"] | None = None
     """Why an auxiliary call is being made. Ordinary conversation requests leave

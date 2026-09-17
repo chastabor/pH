@@ -56,7 +56,7 @@ class _Transcript(App[None]):
     a drag, and the app would bring a daemon, a socket and a mount with it.
     `get_theme_variable_defaults` is the one thing it must still do — the row's
     CSS names `$ph-*`, and Textual treats an unresolved variable as a parse
-    failure rather than a missing colour.
+    failure rather than a missing color.
     """
 
     def __init__(self, text: str) -> None:

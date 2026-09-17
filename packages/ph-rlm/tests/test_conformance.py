@@ -1,6 +1,6 @@
 """The runtime conformance suite (P3-22): the protocol, exercised whole.
 
-Every property here has a behavioural test elsewhere — `test_kernel.py` drives
+Every property here has a behavioral test elsewhere — `test_kernel.py` drives
 the process boundary, `test_codec.py` fuzzes the decoder, `test_snapshot.py`
 folds the namespace. This module exists for the claim those cannot make:
 **completeness**. It enumerates the protocol's own vocabulary and the shipped

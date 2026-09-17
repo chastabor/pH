@@ -27,7 +27,7 @@ while the returning-client path skips the lock's checkpoint entirely.
 the acquire itself costs** — because a real start is seconds after the last one
 and pays a cold thread plus a cold selector wakeup every time. At `timeout=0` the
 acquire is one `os.open` and a non-blocking `flock`: it cannot wait, so there is
-no blocking to move off the loop. Its neighbours settle it — `path.is_file()` two
+no blocking to move off the loop. Its neighbors settle it — `path.is_file()` two
 lines down and `resume_session`'s whole-log read are both on the loop thread.
 
 **`filelock(thread_local=False)` cost three tests to find**, two of them
@@ -512,7 +512,7 @@ async def test_a_cursor_resumes_reading_exactly_where_it_stopped(tmp_path: Path)
 async def test_a_cursor_from_another_log_reads_from_the_start(tmp_path: Path) -> None:
     """A sequence only means something against the log that counted it.
 
-    Refusing would strand a client that did nothing wrong; honouring it would
+    Refusing would strand a client that did nothing wrong; honoring it would
     skip events it never saw. So a stale generation reads as "you have seen
     nothing of *this* log" — and the reply names the generation it *does* count
     against, which is what a client pages from rather than from the cursor it
@@ -673,7 +673,7 @@ async def test_the_lease_ends_with_the_daemon_that_held_it(tmp_path: Path) -> No
     async with running(tmp_path, name="b") as second:
         client = await second.client()
         # Same id, same `$PH_HOME`, no refusal — and it resumes rather than
-        # starting over, which is the P5-01 behaviour the lease must not break.
+        # starting over, which is the P5-01 behavior the lease must not break.
         assert (await client.call("session/new", sessionId="handover"))["sessionId"] == "handover"
 
 
@@ -910,7 +910,7 @@ async def test_the_ladder_gives_up_after_its_last_attempt_and_reports(
         # give-up is the record that matters most and it was the one
         # write-through missed; a clean shutdown flushes it either way, which is
         # why asserting it here rather than after teardown is what pins the
-        # behaviour. Waited for rather than read once: `status` flips when the
+        # behavior. Waited for rather than read once: `status` flips when the
         # event is *appended*, and the flush that carries it to disk is the next
         # await — so reading immediately raced the very ordering under test,
         # about one run in six. With the flush deleted this waits out its
@@ -1323,7 +1323,7 @@ async def test_a_root_with_a_live_child_is_not_released(tmp_path: Path) -> None:
             root.session.append(*settle)
             assert await supervisor.sweep(after=0) == [label], f"{label}: child never settled"
 
-        # An unrecognised status keeps the parent alive rather than releasing one
+        # An unrecognized status keeps the parent alive rather than releasing one
         # whose child may still be running.
         root = await supervisor.start("unknown")
         root.session.append("subagent/admitted", {"runId": "c"})

@@ -1536,7 +1536,7 @@ class Context:
         """Dispatch synchronously, ignoring listener return values.
 
         A listener that returns a coroutine is scheduled and not awaited, which
-        is cordis's behaviour. A listener that raises stops the dispatch unless
+        is cordis's behavior. A listener that raises stops the dispatch unless
         `contained=True`, which logs the failure and continues — the mode a
         producer uses when the event records something that already happened
         and no listener may un-happen it.
@@ -1612,7 +1612,7 @@ class Context:
         Listeners run outermost-first and receive `(*args, next)`. Calling
         `next()` delegates; returning without calling it vetoes the rest of the
         chain, `inner` included — that veto is how a policy plugin replaces
-        built-in behaviour without the built-in knowing.
+        built-in behavior without the built-in knowing.
 
         `next(*replacement)` additionally hands the rest of the chain different
         arguments. Cordis expects a listener to mutate a shared payload instead,

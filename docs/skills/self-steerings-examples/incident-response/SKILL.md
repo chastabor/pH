@@ -92,7 +92,7 @@ Confirm this summary, then declare the incident closed:
 - What was observed: `{{parameters.description}}`
 - What was done, and what confirmed recovery
 
-Summarise the timeline in three to five bullets, each with its UTC timestamp.
+Summarize the timeline in three to five bullets, each with its UTC timestamp.
 
 ## 7. Postmortem
 

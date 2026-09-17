@@ -8,7 +8,7 @@ machine. `StubWorkspaceProvider` next door carries the same argument for the
 same reason.
 
 The `worktree` tier's tests use real git deliberately: what they pin is git's
-behaviour — that `-d` declines an unmerged branch, that a removed worktree
+behavior — that `-d` declines an unmerged branch, that a removed worktree
 deregisters — not our arithmetic about it.
 
 @module ph.testing.git
@@ -51,7 +51,7 @@ async def worktree_agent(
     The whole tier is mounted, and the repository is built under `tmp_path` and
     never under `ctx.fs.root`: that is the *process's* directory, which for a
     test run is this checkout — a `base` taken from it has every test in the
-    suite initialising git repositories inside pH's own tree and sharing one
+    suite initializing git repositories inside pH's own tree and sharing one
     branch namespace. That mistake has been made once already.
     """
     from ..testing import FAKE_OPTIONS

@@ -1,6 +1,6 @@
 """P7-17 — asking a model for a value, and what happens when it answers prose.
 
-Three claims, and they are deliberately separable because a route may honour one
+Three claims, and they are deliberately separable because a route may honor one
 and not the others.
 
 **The schema rides the request.** A route that supports `response_format` builds

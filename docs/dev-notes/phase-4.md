@@ -54,7 +54,7 @@ What it buys is **collision isolation and revertibility** — eight children
 writing one tree concurrently is the case the tier exists for — and that is
 worth having on its own. What it does not buy is confinement, which only the
 sandbox rung can claim. `phern doctor` prints the three columns rather than a
-severity colour precisely because a colour invites a reader to skip the
+severity color precisely because a color invites a reader to skip the
 sentence, and the sentence is the whole point.
 
 The table has one home (`containment.TIERS`) so the prose and the command

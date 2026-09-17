@@ -193,7 +193,7 @@ def action_command(
 
     The one spelling of that, because there are two sources of verbs — this
     table and `screens.py`'s registered screens — and a command-body contract
-    that had to be honoured in both places is one that will be honoured in one.
+    that had to be honored in both places is one that will be honored in one.
     A body is dispatched on the message pump, so an action that opens a screen
     does so with a callback and returns, the same constraint every key handler
     already lives under.

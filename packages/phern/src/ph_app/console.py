@@ -10,7 +10,7 @@ and P5-11's socket lifetime. Every one of them is a title and a list of pairs,
 and they were already drifting apart in style.
 
 **Data does not go through a console.** `--dump-config` writes YAML and `ph
-events --json` writes JSON, both meant to be piped; Rich colourizes a plain
+events --json` writes JSON, both meant to be piped; Rich colorizes a plain
 string it is asked to print, so with `FORCE_COLOR` set in the environment — as
 CI images and many shells do — those two commands emitted ANSI escapes into
 their own machine-readable output and `yaml.safe_load` refused it with
@@ -50,9 +50,9 @@ err = Console(stderr=True, highlight=False, soft_wrap=True)
 declared here rather than per module: a console setting applied to half the CLI
 is how the two halves come to disagree about what a line looks like.
 
-`highlight=False`: Rich's automatic highlighter re-colours whatever in a plain
+`highlight=False`: Rich's automatic highlighter re-colors whatever in a plain
 string *looks* like a number, a path or a UUID, which in a CLI's prose is an
-arbitrary word coloured for looking like data — `scheduled sch-1 · interval
+arbitrary word colored for looking like data — `scheduled sch-1 · interval
 3600000` came out with the interval in cyan and nothing else. Explicit markup
 still works; only the guessing is off. It is also a third of the cost of
 printing a line, and `phern agents attach` prints one per log event.
@@ -96,7 +96,7 @@ def section(title: str, rows: Iterable[tuple[str, str]]) -> Table:
 def emit(text: str) -> None:
     """Write machine-readable output, unstyled and unwrapped.
 
-    `print` rather than `console.print`: a console decides colour from the
+    `print` rather than `console.print`: a console decides color from the
     environment and width from the terminal, and both are wrong for a document
     another program parses. The one thing this must never do is be clever.
     """

@@ -17,7 +17,7 @@ tallies — in 779 bytes of our own derivation rather than anyone else's source.
 The tests read it always, which is what makes them run on a clean clone and in
 CI; where the vendored checkout *does* exist, `test_fixture_replay` additionally
 re-derives from the raw JSONL and requires the two to agree, so the committed
-reduction cannot drift from the corpus it claims to summarise.
+reduction cannot drift from the corpus it claims to summarize.
 
 That split is the whole point. Before it, every test in this module skipped on
 every runner — `sources/` has no tracked files — so P3-23's claim that "nothing

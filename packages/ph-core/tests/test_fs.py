@@ -475,7 +475,7 @@ async def test_a_global_row_still_reaches_every_agent(tmp_path: Path) -> None:
 async def test_the_walk_yields_the_same_paths_a_relative_to_walk_did(tmp_path: Path) -> None:
     """P6-17's correctness gate: a slice, and `Path.relative_to`, agree.
 
-    The optimisation replaced `path.relative_to(base).as_posix()` — 23.5 µs per
+    The optimization replaced `path.relative_to(base).as_posix()` — 23.5 µs per
     file, 62% of a 430 ms walk — with a prefix slice of the string `os.walk`
     already built. The speedup is only worth having if the answer is identical,
     so this holds the two against each other over a tree with the shapes that
@@ -601,7 +601,7 @@ async def test_a_tool_call_is_judged_in_the_scope_the_caller_states(
     driver holds a child ctx" — and it only exists because P6-27 nested agents.
     The screen is registered on the **child**, which a parent-scoped call must
     not see: `reaches` runs down the tree, so a child's rule does not reach its
-    parent, and the three rows below are only distinguishable if the seam honours
+    parent, and the three rows below are only distinguishable if the seam honors
     the *stated* boundary. Against the pre-row build the third one leaks.
     """
     ctx = await mount()
@@ -684,7 +684,7 @@ async def test_a_read_records_the_workspace_relative_name(
     A record whose path is `/tmp/ph-w-7/src/x.py` describes a directory that
     will not exist the next time this session runs, which is the same argument
     the model-facing paths make — and this one also decides whether
-    read-before-edit still recognises the file after a workspace is rebuilt.
+    read-before-edit still recognizes the file after a workspace is rebuilt.
     """
     project = tmp_path / "repo"
     project.mkdir()

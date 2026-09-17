@@ -2,7 +2,7 @@
 
 Gates: *flush drains; `append` never awaits I/O.*
 
-The second is a property of the whole design, not a micro-optimisation: if
+The second is a property of the whole design, not a micro-optimization: if
 `append` could block, every listener on the post-commit feed would be running
 behind disk latency, and the checkpoint policy would have nothing left to
 decide.
@@ -20,7 +20,7 @@ That is what `locate` exists to replace, and why it is allowed to answer `None`.
 
 ## Why the passivation sweeper uses `last_event` and not `events[-1]`
 
-`events[-1]` materialises a snapshot of the entire log to read one element —
+`events[-1]` materializes a snapshot of the entire log to read one element —
 **4 MB and 4.7 ms at 500 000 events** — and the sweeper asks it of every root on
 every pass.
 """
@@ -306,7 +306,7 @@ async def test_a_broken_lineage_is_reported_by_ph_doctor(
 async def test_segments_each_hold_only_their_own_run(mount: MountProfile, tmp_path: Path) -> None:
     """**Segmentation on disk: three files, one contiguous log (§7 step 6).**
 
-    Each file's events are disjoint from its neighbours' and they tile exactly,
+    Each file's events are disjoint from its neighbors' and they tile exactly,
     which is the same property forking already relies on — a segment *is* a fork
     at the tip, so nothing here is a second mechanism. Reading the newest one
     walks the chain and hands back the whole run.

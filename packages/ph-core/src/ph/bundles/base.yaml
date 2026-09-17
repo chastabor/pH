@@ -106,7 +106,7 @@
   name: shell-local
 
 # Where an agent's writes land (D21, §4.8). Mounted with the shared provider,
-# which returns the session cwd — today's behaviour, no checkout, no cost — so
+# which returns the session cwd — today's behavior, no checkout, no cost — so
 # layering this changes nothing until a profile names a containment tier. The
 # seam is here rather than in a profile because `acquire` must never fail, and a
 # fallback a profile might not have layered is not a fallback.

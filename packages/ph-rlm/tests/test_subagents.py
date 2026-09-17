@@ -1169,7 +1169,7 @@ async def test_a_child_no_provider_can_resume_is_settled_not_left_queued(
 
     It reads as live, so the root can never be passivated, and the parent waits
     on a slot no one will ever give it. Deciding where the capability probe
-    answers is what stops the sweep writing a status it cannot honour — here the
+    answers is what stops the sweep writing a status it cannot honor — here the
     next harness mounts no subagent provider at all.
     """
     ctx, session, parent = await delegating(maxConcurrent=1)

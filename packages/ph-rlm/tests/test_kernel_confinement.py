@@ -292,7 +292,7 @@ async def test_the_signal_route_follows_the_backend_not_whether_it_confined(
     than deriving the decision from "was I confined at all".
 
     The two differ, and the difference is a lost capability rather than a tidiness
-    point: `bwrap` puts a wrapper and a PID namespace in the way, so signalling it
+    point: `bwrap` puts a wrapper and a PID namespace in the way, so signaling it
     destroys the namespace instead of interrupting the cell — but `sandbox-exec`
     execs its target and the test stub wraps nothing, and on those the signal is a
     second cancel route worth keeping.

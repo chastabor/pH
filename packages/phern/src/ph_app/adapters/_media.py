@@ -125,7 +125,7 @@ async def load_handles(
                 )
             except Exception:
                 # Deliberately broad and deliberately not fatal: an upload is an
-                # optimisation, and a route that can take the bytes inline must
+                # optimization, and a route that can take the bytes inline must
                 # not lose a turn because a file API was down.
                 log.warning(
                     "ph_app.adapters: could not upload %s to %s; sending it inline",

@@ -63,7 +63,7 @@ def test_an_absolute_form_request_routes_to_its_origin() -> None:
 
 
 def test_https_in_absolute_form_is_not_carried() -> None:
-    """No client sends it, and honouring it would mean terminating TLS here."""
+    """No client sends it, and honoring it would mean terminating TLS here."""
     request = parse_head(b"GET https://example.com/ HTTP/1.1\r\n\r\n")
     assert request is not None
     assert request.route() is None
@@ -309,7 +309,7 @@ async def _bridged(mount: MountProfile, *rows: dict[str, Any]) -> Context:
 
 def _fetch(url: str) -> str:
     """A shell command that fetches `url` with the interpreter this test runs on —
-    which honours `http_proxy` the way every client does. `json.dumps` for the URL:
+    which honors `http_proxy` the way every client does. `json.dumps` for the URL:
     double quotes inside the single-quoted `-c` argument, which is what `sh` needs
     and what `repr` does not give."""
     fetch = f"urllib.request.urlopen({json.dumps(url)}, timeout=10).read().decode()"

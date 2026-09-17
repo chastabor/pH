@@ -300,7 +300,7 @@ def thaw_json(value: object) -> PlainJsonValue:
 
     The array overload is selected by a `tuple` — the frozen array shape, which
     is covariant — and **not** by a `list[str]` or any other concretely
-    parameterised list, because `list` is invariant and `list[str]` is not a
+    parameterized list, because `list` is invariant and `list[str]` is not a
     `list[object]`. Those fall through to the third overload and get the union.
     No production caller passes a statically typed list, so this is a documented
     limit rather than a gap to close.

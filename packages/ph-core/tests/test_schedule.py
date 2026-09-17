@@ -41,7 +41,7 @@ unit across `grace_ms`, `timeout_ms`, `duration_ms` and this seam's own
 
 ## Why `created_at` comes from the event and not from the wire model
 
-`created_at` was a caller obligation nobody honoured, so **every schedule the
+`created_at` was a caller obligation nobody honored, so **every schedule the
 daemon created anchored at epoch 0** — an hourly interval was due the moment it
 existed, and a cron's first claim walked forward from 1970, measured at **six and a
 half minutes of blocked event loop for `* * * * *`**. The event carries the
@@ -369,7 +369,7 @@ def test_opening_a_session_reconciles_its_entry(tmp_path: Path) -> None:
     A log written by a build with no index, an entry deleted by hand, one left
     stale by a crash between the append and the write — all of them correct
     themselves the moment anything opens that session, which is exactly the
-    condition the old behaviour required to fire a schedule at all. A wholesale
+    condition the old behavior required to fire a schedule at all. A wholesale
     rebuild would have to read every stored log, which is the scan the index
     exists to avoid.
     """
@@ -387,7 +387,7 @@ def test_opening_a_session_reconciles_its_entry(tmp_path: Path) -> None:
 
 def test_a_missing_or_unreadable_index_reads_as_empty(tmp_path: Path) -> None:
     """Every failure is "this file cannot tell you what is due", and the honest
-    answer to that is the behaviour that shipped before the index existed — a late
+    answer to that is the behavior that shipped before the index existed — a late
     run — rather than an exception on a daemon's boot path."""
     assert _index(tmp_path).read() == {}, "missing"
 

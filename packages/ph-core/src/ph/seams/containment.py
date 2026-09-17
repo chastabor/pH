@@ -76,7 +76,7 @@ class TierDescription:
 
     Three columns and no severity, which is §12 Q10's own instruction for
     `phern doctor` — *"prints the same three columns rather than a severity
-    colour"*. A colour invites a reader to skip the sentence, and the sentence is
+    color"*. A color invites a reader to skip the sentence, and the sentence is
     the entire point of E1: the failure being prevented is a **tier name**
     overstating what the tier does, and only prose can correct that.
     """
@@ -142,7 +142,7 @@ lands has one thing to check rather than two things to reconcile.
 
 
 class ContainmentUnavailableError(MountRefusal):
-    """`strict` was set and the deployment cannot honour it.
+    """`strict` was set and the deployment cannot honor it.
 
     A refusal to start, raised where the profile is composed rather than at the
     first call that would have been unconfined: by then the agent is running and
@@ -205,7 +205,7 @@ class ContainmentService:
         reverse, which is worse.
 
         **No severity, by §12 Q10's own instruction.** The three columns *are*
-        the finding; a colour would let a reader skip the sentence, and the
+        the finding; a color would let a reader skip the sentence, and the
         sentence is what stops a tier's name from overstating it (E1).
         """
         workspace = self.ctx.get(WORKSPACE)
@@ -284,7 +284,7 @@ class ContainmentService:
         return None
 
     def verify(self) -> None:
-        """Raise unless this deployment can honour what it asked for.
+        """Raise unless this deployment can honor what it asked for.
 
         Registered on `profile/mounted` rather than run in this row's `apply`: a
         backend may be layered *after* the row that asked for it, so a verdict
@@ -298,7 +298,7 @@ class ContainmentService:
 
 @plugin("containment", config=Config)
 async def apply(ctx: Context, config: Config) -> None:
-    """Publish the chosen rungs, and refuse the run if they cannot be honoured."""
+    """Publish the chosen rungs, and refuse the run if they cannot be honored."""
     containment = ContainmentService(
         ctx=ctx,
         tier=config.tier,

@@ -186,7 +186,7 @@ class TokenMeter:
         """The most recent reported usage in this log.
 
         An incremental fold, not a walk back through `session.events` — which
-        materialised a snapshot of the whole log to read one field, and grew
+        materialized a snapshot of the whole log to read one field, and grew
         more expensive the longer a conversation ran. `baseline` asks on every
         pressure check, so the cost landed exactly where the log was longest.
 

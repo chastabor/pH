@@ -4,7 +4,7 @@ Distinct from `ctx.approval` because the shapes differ: an approval is a
 one-shot yes/no about a *specific pending call* and must fail closed, while a
 question is free-form and its failure mode is "no answer", which a caller
 handles however it likes. Sharing one seam would force one of those two
-behaviours onto the other.
+behaviors onto the other.
 
 **A question is logged only when it is actually put to a person** (P7-09). That
 is the one rule here that is not obvious, and it follows from the failure mode
@@ -77,7 +77,7 @@ class UserQuestion(WireModel):
 
     Carried on the question rather than passed beside it so that every route to
     an answerer keeps them together: the log's `askId`, the wire frame's, and the
-    key a re-posed question is recognised by are then one string by construction
+    key a re-posed question is recognized by are then one string by construction
     rather than three that agree while someone remembers to make them.
 
     `None` for a caller that has no natural key; `ask()` fills it in.

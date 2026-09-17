@@ -17,7 +17,7 @@ That is the headline, and it is why this file exists rather than a `skipif`:
 Twice during this work a list of "known macOS failures" was written down with a
 plausible reason beside each entry. Both lists were later deleted in full, because
 investigating the reasons found defects instead — including one in shipped product
-behaviour (`phern agents attach --until-idle` printed a different thing depending on
+behavior (`phern agents attach --until-idle` printed a different thing depending on
 which side of a race it landed on). The allowlist was not neutral bookkeeping. It
 was hiding bugs.
 
@@ -108,7 +108,7 @@ ask what both must answer alike — can a confined command reach a listener this
 process opened?
 
 **Signals reach the command.** `bwrap` dies of `SIGINT` itself and takes the
-namespace with it, so signalling it *destroys* rather than interrupts.
+namespace with it, so signaling it *destroys* rather than interrupts.
 `sandbox-exec` execs its target, so a signal lands normally. `ConfinedArgv.forwards_signals`
 is declared per backend rather than derived from "was I confined", because deriving
 it would silently drop a working cancel route on macOS.
@@ -130,7 +130,7 @@ the *prompt* boundary that `permissions-fs` draws from the same set stays `/var/
 so a person gets asked about a write the kernel permits. That is the exact drift the
 "one definition of the writable set" rule exists to prevent.
 
-**Fix:** canonicalise where roots are *minted* — `ph.paths.canonical`, applied to the
+**Fix:** canonicalize where roots are *minted* — `ph.paths.canonical`, applied to the
 three `$PH_*` roots, `default_home_path`, the workspace seam's `base` and `scratch`,
 and `sandbox-allow`'s directories. Every consumer then reads one spelling.
 
@@ -152,11 +152,11 @@ written to pin a *named* refusal passed on one kernel while proving the opposite
 the other.
 
 **Fix:** `read_frames` re-checks the length of what it returned.
-`test_daemon_framing.py` parametrises the chunk size so both kernels' behaviour is
+`test_daemon_framing.py` parametrizes the chunk size so both kernels' behavior is
 asserted on either platform.
 
 **Rule:** a limit enforced by a library's scan order is not enforced. If you
-document a bound, test it at the bound — and if the behaviour can turn on a buffer
+document a bound, test it at the bound — and if the behavior can turn on a buffer
 size, make the buffer size a test parameter.
 
 ### 6. Resource limits macOS simply refuses, and a report that could not be read

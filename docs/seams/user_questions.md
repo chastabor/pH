@@ -5,7 +5,7 @@
 
 ## Why this is not `ctx.approval`
 
-The shapes differ, and sharing one seam would force one behaviour onto the other:
+The shapes differ, and sharing one seam would force one behavior onto the other:
 
 | | approval | question |
 |---|---|---|

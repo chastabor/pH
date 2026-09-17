@@ -55,7 +55,7 @@ this index. When a result reports `definitions` greater than 1 the answer may
 mix them — run `mode="define"` to see the candidates and pick, rather than
 assuming the first is yours.
 
-**It is structure, not behaviour.** It cannot tell you what a function does,
+**It is structure, not behavior.** It cannot tell you what a function does,
 whether a branch is reachable, or what a value is at runtime. It tells you where
 to look. When the answer you need is *why*, read the code and its comments.
 

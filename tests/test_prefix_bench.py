@@ -72,7 +72,7 @@ def test_the_committed_record_still_describes_this_benchmark() -> None:
         assert len(one["cachedTokens"]) == len(one["requestTokens"])
 
     # And the report's table *is* this record, rendered. Compared byte-for-byte
-    # against the serialiser rather than field by field, which is P3-23's rule:
+    # against the serializer rather than field by field, which is P3-23's rule:
     # a second encoding of the same reduction drifts from the first the moment
     # either changes.
     rows = [Measurement.from_wire(one) for one in record]

@@ -1,6 +1,6 @@
 """`rlm-bindings` — the `rlm` namespace, as governed tool calls (P3-10, C2/C3).
 
-Prime Agent's `await rlm("task", name=..., model=...)` travelled over a Jupyter
+Prime Agent's `await rlm("task", name=..., model=...)` traveled over a Jupyter
 comm channel as a `host.request`, which meant it was invisible to
 `tools/pre-execute`, to `ctx.approval`, to the call limits and to the offload
 policy. Here the same call is a **binding**: one `call` frame out of the kernel,
@@ -21,7 +21,7 @@ policy row addresses `rlm_run` and means exactly one thing.
 rather than the general dispatch budget, so one approved cell cannot fan out
 past `max_subagent_spawns_per_run` on the strength of that one approval.
 
-`find_models` is deliberately absent: it would need a model *catalogue* on
+`find_models` is deliberately absent: it would need a model *catalog* on
 `ctx.llm`, which does not exist yet. Advertising a discovery call that could only
 answer "I don't know" would be worse than not offering one, and the model already
 inherits the parent's model when it names none.

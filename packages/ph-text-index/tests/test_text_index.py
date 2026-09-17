@@ -10,7 +10,7 @@ first use. A suite that loaded it would be a suite that fails in an airgapped
 CI, takes a minute to prove that paging works, and tests the model rather than
 this row. So these tests register a deterministic hashing embedder and exercise
 **the real turbovec index** through it — which is where the interesting
-behaviour is: quantized scores, an allowlist that raises on empty, incremental
+behavior is: quantized scores, an allowlist that raises on empty, incremental
 `sync`, and a sidecar that has to agree with a binary file.
 
 `HashingEmbedder` is a bag of words over `blake2b` buckets, so similar text
@@ -657,7 +657,7 @@ def test_the_prefixes_are_in_the_identity_but_the_trust_flag_is_not() -> None:
 
     A prefix changes where a vector lands — nomic's `search_document: ` index is
     a different space from the same model's unprefixed one — so it belongs in
-    the identity, and switching gets a fresh index rather than wrong neighbours.
+    the identity, and switching gets a fresh index rather than wrong neighbors.
     `trust_remote_code` changes what may *load*, so an index must not be
     invalidated because an operator granted or revoked it.
     """
@@ -767,7 +767,7 @@ async def test_a_failed_install_says_what_upstream_said(
 ) -> None:
     """**The `einops` case, and why the message is passed through verbatim.**
 
-    `nomic-embed-text-v1.5` downloads its weights and its remote modelling code
+    `nomic-embed-text-v1.5` downloads its weights and its remote modeling code
     successfully and then fails at import with "requires the following packages
     that were not found in your environment: einops" — a transitive dependency
     only the model's own code knows about. That sentence is the useful half, so
@@ -1055,7 +1055,7 @@ async def test_a_document_the_index_never_held_is_not_vouched_for(
 async def test_without_version_control_the_behaviour_is_what_it_was(
     mount: MountProfile, tmp_path: Path
 ) -> None:
-    """The filter is an optimisation, and losing it must cost only speed.
+    """The filter is an optimization, and losing it must cost only speed.
 
     This loop has no content digest, so with no backend an unchanged document is
     re-embedded exactly as it was before — stated as a test rather than left for

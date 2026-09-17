@@ -61,7 +61,7 @@ them carries it. The model never learns a path, and nothing here reads a file.
 **Exposure is a token, and that is all it is** (§5 rule 6). No TLS, no users, no
 revocation: one secret minted per launch, carried in the URL, exchanged for a
 cookie so the page's own websocket and asset URLs — which upstream builds, and
-which cannot carry a query parameter this module chose — are authorised too.
+which cannot carry a query parameter this module chose — are authorized too.
 Anyone holding it has whatever authority the terminal has, which includes
 approving tool calls and running `!!` shell commands. `notices()` is where that
 is said; the command prints it.
@@ -169,7 +169,7 @@ TOKEN_QUERY = "token"
 """The query parameter the launch URL carries the secret in."""
 
 COOKIE = "ph_web_token"
-"""The cookie the first authorised request sets.
+"""The cookie the first authorized request sets.
 
 The page's websocket and static URLs are built by upstream's own template from
 the router, so they cannot carry a query parameter — a query-only gate would
@@ -303,7 +303,7 @@ class WebServer:
         for — but the caller might also be a person with `curl`, and
         `request.multipart()` *asserts* on a body that is not multipart, which
         would reach them as a 500 and an `AssertionError`. The same class of
-        defect as a daemon refusal arriving as one: an authorised person getting
+        defect as a daemon refusal arriving as one: an authorized person getting
         it slightly wrong is not a server error.
 
         **Two ceilings, and both are load-bearing.** `Content-Length` is refused

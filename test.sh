@@ -258,7 +258,7 @@ gate_lint() {
 # gate is binary: clean, or fail with the command that fixes it.
 #
 # (The twelve documentation files this used to excuse were simply formatted. They
-# were pH's own code samples, and normalising them made DESIGN.md's quoted reach
+# were pH's own code samples, and normalizing them made DESIGN.md's quoted reach
 # rule match the shape of the source it cites, rather than a hand-compacted
 # paraphrase of it.)
 gate_format() {

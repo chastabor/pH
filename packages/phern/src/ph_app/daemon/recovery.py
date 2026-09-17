@@ -243,7 +243,7 @@ the cheapest honest thing it can do afterwards is leave.
 **This is the interaction that decides the whole design.** Left at ninety
 minutes, an ephemeral daemon could not reach an empty `roots` — and so could not
 satisfy its own exit predicate — until ninety minutes after the last turn, which
-would make "ephemeral" a word with no behaviour behind it for an hour and a half.
+would make "ephemeral" a word with no behavior behind it for an hour and a half.
 
 Reattaching afterwards costs a mount plus resuming the log, which is why this is
 not smaller: a person flipping between two terminals should not pay a rehydrate

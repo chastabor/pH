@@ -7,7 +7,7 @@ The sibling of [`ctx.tui_screens`](tui_screens.md), for the other thing a row
 wants from a front end: not a whole screen, but **one short reading** beside the
 model name and the context gauge.
 
-The gauge is the shape being generalised — *"the number a user needs to see
+The gauge is the shape being generalized — *"the number a user needs to see
 coming is the one where the harness will act"* — and a limit is exactly that
 number for a different mechanism.
 
@@ -23,7 +23,7 @@ Both are worth having, and they answer different questions:
 A budget that only announces itself on the step it stops you is a budget you
 cannot plan around.
 
-## Semantic level, never a colour
+## Semantic level, never a color
 
 ```text
 StatusReading = text | level
@@ -62,7 +62,7 @@ because that is when they can have changed, rather than on the TUI's 30 Hz tick.
 ## What it does not do
 
 * It does not notify. Something that should interrupt is a notice or a modal.
-* It does not colour, size, or place anything.
+* It does not color, size, or place anything.
 * It does not poll. A reading is computed when the front end asks.
 
 ## See also

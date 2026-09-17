@@ -142,7 +142,7 @@ Four details that are easy to get wrong, each handled once in `_extract` and
 each pinned by a test:
 
 - **`ProcessConfig` spans are 0-based** while tree-sitter points are 0-based and
-  every line pH shows a model is 1-based. Normalised on the way out, so nothing
+  every line pH shows a model is 1-based. Normalized on the way out, so nothing
   downstream has to remember which pass a number came from. Getting this wrong
   is an off-by-one pointer, which is what makes a model stop trusting a tool.
 - **`SymbolInfo.doc` is always `None`.** The pack does not populate it —
@@ -184,7 +184,7 @@ would make `callers` return every place that merely *mentions* a type.
   overrides it.
 - **the grammars**: `$PH_CACHE/tree-sitter`, set by the row at mount.
 
-That second one is not housekeeping. The pack materialises even its *bundled*
+That second one is not housekeeping. The pack materializes even its *bundled*
 grammars into a writable cache on first use — the wheel ships them as an
 archive, not as loadable libraries — and it **fails hard** when that directory
 cannot be created, rather than falling back to the wheel. Its own default is
@@ -197,7 +197,7 @@ sentence — not a `pathlib` traceback — when even that is unwritable.
 spelling is what makes the variable mean anything.
 
 One consequence worth expecting: the **first** index on a cold grammar cache
-pays for materialising the grammar. Measured on `packages/ph-core/src/ph`, that
+pays for materializing the grammar. Measured on `packages/ph-core/src/ph`, that
 is 9 s cold against 2 s warm, and 0.1 s when nothing changed.
 
 Provision it on purpose rather than during someone's turn:

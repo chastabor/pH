@@ -4,7 +4,7 @@ Real `git`, real checkouts, no mocks. A provider whose whole job is to drive
 `git worktree` cannot be tested against a fake that agrees with whatever the
 implementation does: the interesting failures — a branch that already exists, a
 tree that is dirty only because `pytest` ran, a prune that never happened — are
-all git's behaviour, not ours.
+all git's behavior, not ours.
 
 **What these pin is isolation and revertibility, never confinement.** An
 absolute-path write escapes a worktree and is supposed to; only the `sandbox`
@@ -50,7 +50,7 @@ async def _tiered(mount: MountProfile, tmp_path: Path) -> tuple[Any, Path]:
 
     The repository goes under `tmp_path`, never `ctx.fs.root` — that is the
     *process's* directory, which for a test run is this checkout. A `base` taken
-    from it would have every test in this file initialising a repository inside
+    from it would have every test in this file initializing a repository inside
     pH's own tree and sharing one branch namespace.
     """
     ctx = await mount(TIER_ROW)

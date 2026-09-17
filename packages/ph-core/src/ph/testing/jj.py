@@ -5,7 +5,7 @@ is exactly the kind that grows a line in one copy and not the other, and the cop
 that misses it fails only on a contributor's machine.
 
 The jj tier's tests drive the real binary deliberately. What they pin is **jj's**
-behaviour — that a workspace forked from a frozen commit does not go stale when
+behavior — that a workspace forked from a frozen commit does not go stale when
 the parent works on, that a bookmark follows its commit through a snapshot, that
 `git export` from a secondary workspace reaches the colocated repo — none of
 which is arithmetic of ours to stub.

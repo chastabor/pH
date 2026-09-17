@@ -234,7 +234,7 @@ async def test_c_one_oversized_dispatch_is_offloaded_without_its_siblings(
     )
     assert result.is_error is False
     # What the *program* saw: the big read replaced, its sibling intact. That is
-    # the fact C5 is about — an oversized result must not cost its neighbours.
+    # the fact C5 is about — an oversized result must not cost its neighbors.
     assert result.value["value"] == ["[spilled]", "small"]
     assert dispatch_names(session) == ["read", "read"]
     # And the seam fired per dispatch rather than once for the cell, which is the
@@ -318,7 +318,7 @@ async def test_the_shipped_profile_still_refuses_a_native_tool_call(
     Every test above reaches tools *through* the transport, so none would notice
     if the profile stopped being Code Mode at all: `tools.mode: code` is a config
     patch with no `name`, and flipping it to `native` removes C6 while leaving all
-    five behavioural tests green.
+    five behavioral tests green.
 
     Asserted as a property of the mounted profile rather than as a list of row
     names — this one call fails if the mode changed, if the transport was renamed,

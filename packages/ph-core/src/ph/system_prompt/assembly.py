@@ -192,7 +192,7 @@ class _Registration[T]:
     value: T
     """The contribution itself.
 
-    **Parameterised rather than `Any`** — the buckets below are four different
+    **Parameterized rather than `Any`** — the buckets below are four different
     kinds and this is the one type standing in for all of them, so `Any` meant
     `assemble`'s `entry.value.order`, `.name`, `.text` and `.complete` all
     type-checked as nothing. It cost nothing while `_visible` returned the bare

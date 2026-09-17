@@ -333,7 +333,7 @@ def test_both_invariant_transitions_read_as_themselves() -> None:
 
     `verify_invariants` records a clearing as `supervisor/violated` with an empty
     list, so the fallback renderer printed the good news as `violations=[],
-    pid=9` — nothing a reader could recognise as reassurance — and the bad news
+    pid=9` — nothing a reader could recognize as reassurance — and the bad news
     as a Python dict repr in a document a person reads.
 
     **This is the second renderer of that record**, which is why it needed its

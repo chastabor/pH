@@ -27,7 +27,7 @@ keeps growth linear. `SNAPSHOT_KINDS` names `patch` so the vocabulary is ready.
 **The tag is provenance, not secrecy.** HMAC-SHA256 keyed by the session id, so a
 blob from another session or a mangled file fails verification instead of being
 unpickled. Anyone who can write the log can write the tag too — this is not a
-defence against a hostile filesystem writer, it is a defence against the mistake
+defense against a hostile filesystem writer, it is a defense against the mistake
 that actually happens: a blob restored into the wrong session, or a half-written
 file, unpickled into a namespace as if it were sound.
 

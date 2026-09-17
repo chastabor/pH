@@ -205,7 +205,7 @@ for a magic is `MAGIC_HINT`, which names `await tools.bash(...)`.
 The magic *was* the bypass (feature map item 4): one shell command per cell that
 no `tools/pre-execute` listener, no approval and no sandbox `confine()` ever saw.
 Removing the mechanism closes the hole, so the error explains the governed route
-instead of apologising for a missing feature.
+instead of apologizing for a missing feature.
 
 ### 9. Kernels are owned by the agent's scope, not by an event
 
@@ -234,8 +234,8 @@ second failure mode for a gain nobody has measured. `SNAPSHOT_KINDS` names
 HMAC-SHA256 keyed by the session id, so a blob from another session or a mangled
 file fails verification instead of being unpickled — and `dill.loads` on
 arbitrary bytes executes arbitrary code, so "instead of being unpickled" is the
-point. Anyone who can write the log can write the tag too; this is not a defence
-against a hostile filesystem writer. It is a defence against the mistake that
+point. Anyone who can write the log can write the tag too; this is not a defense
+against a hostile filesystem writer. It is a defense against the mistake that
 actually happens: a payload restored into the wrong session, or a half-written
 file read as sound.
 
@@ -364,7 +364,7 @@ three empty lines above a traceback is a puzzle rather than information.
 One thing worth being explicit about: **a cell that raises is not `is_error`.**
 A traceback is the model's to read and act on — that is the whole point of a
 scratchpad — so `is_error` stays reserved for a refused or aborted tool *call*.
-The details payload carries `status: "error"` so the card can still colour it.
+The details payload carries `status: "error"` so the card can still color it.
 
 ### `CodeRunResult` was dropping the display frames
 
@@ -467,7 +467,7 @@ asserts the file is *not* there and that the kernel survives to serve the next
 cell.
 
 The lesson is narrower than "we had a bug": a safety-surface ID that reads as a
-description of behaviour is not the same as a test that the behaviour happens,
+description of behavior is not the same as a test that the behavior happens,
 and the containment argument is exactly where that gap is expensive. C10 says
 the program is a hostile peer; a hostile peer catches your exception.
 
@@ -645,7 +645,7 @@ about the mechanism changed — only that a second legitimate caller can reach i
 ### The "no fallback" model rule has nothing to check yet
 
 The plan specifies a model preflight with no fallback: an explicit selector must
-resolve or the spawn fails. But `ctx.llm` has no model *catalogue* — only
+resolve or the spawn fails. But `ctx.llm` has no model *catalog* — only
 `resolve_model(provider, model)`, which returns an empty `ResolvedModel` rather
 than raising for an unknown name. So what P3-11 can enforce is the *route*: the
 provider must have a registered adapter, checked at admission. An unknown model
@@ -653,7 +653,7 @@ name still fails, at the child's first request rather than at spawn.
 
 The part that matters is intact and tested: **nothing substitutes a different
 model.** An explicit selector is passed through untouched. `rlm.find_models` will
-have to bring the catalogue with it, and it gets the earlier check for free when
+have to bring the catalog with it, and it gets the earlier check for free when
 it does.
 
 ### A `mappingproxy` is not a `dict`
@@ -766,7 +766,7 @@ load-bearing subtlety now lives: the binding handed to the bridge carries the
 ### `ctx.jobs` gained the path that made `detach` unnecessary for callers
 
 `JobService.bind()` has zero callers, so the inline `await body()` branch was the
-only one that had ever executed — a placeholder, not a shipped behaviour. It now
+only one that had ever executed — a placeholder, not a shipped behavior. It now
 falls back to `ctx.detach`, which means `start()` returns immediately either way
 and a job gets an id, a cancel and `job/started`/`job/settled` for free. The
 provider uses `ctx.jobs.start` and `detach` goes back to being the primitive
@@ -881,7 +881,7 @@ that the provider suppresses the notice (asserted in `test_subagents.py`, where
 `mark_replied` can be called before the child settles).
 
 The third failure was not a test bug: **a settled child cannot be steered**,
-because `_quiesce` disposed its agent. That is the correct behaviour today and the
+because `_quiesce` disposed its agent. That is the correct behavior today and the
 plan's answer is passivation/rehydration (P3-13), so the refusal names the
 `agent_observe` route that does work, and a test pins it as the current contract
 rather than a silent gap.
@@ -935,7 +935,7 @@ Renamed to `model_provider`, with `provider` added and stamped by the service at
 `start` (the service is what knows which name the caller asked for). Worth
 recording because the failure mode was a green test, not a red one: a field whose
 name fits two meanings will eventually be read as the wrong one, and the test
-that should have caught it was written against the old behaviour.
+that should have caught it was written against the old behavior.
 
 The shared attach path (`_attach`) came out of this too — a fresh admission and a
 rehydration now wire the usage mirror, the job and the status through one
@@ -1253,7 +1253,7 @@ such rather than left to look like the policy ships.
 
 `FsDenied` is a `PermissionError`, not a `HarnessError`, so an `fs/write-intent`
 veto also reports as `failed` — the same class of gap as `CodeRunFailure`'s, one
-seam over. The gate records the current behaviour instead of asserting a
+seam over. The gate records the current behavior instead of asserting a
 distinction the code does not draw. The row that makes it matter is
 `permissions-fs` (Phase 4), which is where the fix belongs: changing the base
 class now would touch every `except PermissionError` for a distinction nothing
@@ -1355,7 +1355,7 @@ six `name` literals. It could not see `disabled:`, could not see a row that fail
 to activate, silently omitted two of the eight named rows — and could not check
 `- id: tools / config: {mode: code}` at all, because a patch has no `name`.
 Flipping that to `mode: native` deletes C6 from the shipped profile and **all five
-behavioural tests still pass**, because they all reach tools through the
+behavioral tests still pass**, because they all reach tools through the
 transport.
 
 Replaced with one observable property of the *mounted* profile: a top-level native
@@ -1627,7 +1627,7 @@ The fix is at the seam, not in the plugin: `SessionFoldCache` gained an optional
 log. The harness's `extend_session` scans the new slice, hands back the *same
 object* when it holds no refinement, and folds onto a copy when it does — and
 `fold_session` stays a pure function a fork slice can use. The roster fold gets
-the same option for free and keeps its full-refold behaviour until it opts in.
+the same option for free and keeps its full-refold behavior until it opts in.
 
 Same shape one level up: `state()` merged local over global on every read,
 re-copying every entry and the entire refinement history for a byte-identical
@@ -2069,7 +2069,7 @@ per row per frame, and a test that compared a file with itself is gone.
 
 ## P3-22: the suite whose job is knowing what it does not test
 
-Almost every behaviour this row lists was already covered — `test_kernel.py`
+Almost every behavior this row lists was already covered — `test_kernel.py`
 drives the process boundary, `test_codec.py` fuzzes the decoder, `test_snapshot.py`
 folds the namespace, `test_journal.py` sweeps strays, `test_lifecycle.py` kills
 the host. Writing those tests again would have added nothing.
@@ -2096,7 +2096,7 @@ different facts and only a table can tell them apart:
   variable*; P3-17's corpus is the obvious candidate and deliberately is not one,
   because it never enters the kernel.
 
-New behaviour did come out of the enumeration: `fault` had no test, so one now
+New behavior did come out of the enumeration: `fault` had no test, so one now
 drives a guest with a bumped protocol version and asserts it refuses at boot
 naming the fix (D7's "a guest that misreads one frame at a time is worse than a
 guest that will not start"). And the magic check was `%%bash` only, while the
@@ -2124,7 +2124,7 @@ notices they disagree — and that is now an assertion, not a hope.
 One tension it does **not** resolve: the transport's *description* still says
 "Python scratchpad code or `%%bash` shell cells", because P3-09 ports it verbatim
 on purpose — it is the contract the model was trained against, and paraphrasing
-it is a silent behaviour change. The doctrine is the layer that states rules, and
+it is a silent behavior change. The doctrine is the layer that states rules, and
 it now contradicts that phrase deliberately rather than echoing it accidentally.
 
 ### Honest scope
@@ -2241,7 +2241,7 @@ added. The next required field would have left it stale and failed the test for
 the wrong reason, which is the drift the mirror test exists to prevent. It now
 builds the frame with `KernelLimits().to_boot(...)` and `encode()`, spawns with
 `FD_ENV` and `scrub_env` rather than a literal env var and a hard-coded POSIX
-`PATH`, and reads the reply through `decode` instead of a whitespace-normalising
+`PATH`, and reads the reply through `decode` instead of a whitespace-normalizing
 substring dance. It also stopped booting a whole kernel to read
 `environment.python` off it.
 
@@ -2454,9 +2454,9 @@ the old test compared the predicate with itself.
 ### Half the chrome was reimplemented
 
 `TrajectoryApp` called `load_catalog` but not `load_tui_settings`, and hardcoded
-`DEFAULT_THEME` — so it honoured the user's *theme catalog* and ignored the
+`DEFAULT_THEME` — so it honored the user's *theme catalog* and ignored the
 theme they chose, and its bindings carried no `id`, making them unremappable
-while `PHTuiApp`'s neighbours are. Both halves come from `config.py`; one was
+while `PHTuiApp`'s neighbors are. Both halves come from `config.py`; one was
 read and the other rewritten. Fixed with `set_keymap` and `settings.theme`.
 
 `self.notice` prose had become API: the fork test recovered the child session by

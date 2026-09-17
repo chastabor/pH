@@ -127,7 +127,7 @@ What follows for a deployment:
 
 ## What this did not measure
 
-* Any real model's behaviour — the trajectory is authored (see above).
+* Any real model's behavior — the trajectory is authored (see above).
 * `input-offload`, which needs a large pasted *input*; every prompt here is one
   short sentence.
 * Sessions long enough for compaction to run repeatedly under a large window,

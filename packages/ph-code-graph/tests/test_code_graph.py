@@ -104,14 +104,14 @@ def shared(value):
 def _grammar_cache(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Path]:
     """One writable grammar cache for this module, outside every test's `$PH_CACHE`.
 
-    `tree-sitter-language-pack` materialises even its *bundled* grammars into a
+    `tree-sitter-language-pack` materializes even its *bundled* grammars into a
     writable directory on first use — the wheel ships them as an archive, not as
     loadable libraries — and fails hard when it cannot create one. So every test
     that parses needs it, including the ones that call `extract` directly and
     mount no row.
 
     **Module-scoped, and not the row's own path.** The suite's `_isolated_home`
-    pins `$PH_CACHE` per test, so leaving the row to choose would re-materialise
+    pins `$PH_CACHE` per test, so leaving the row to choose would re-materialize
     the grammars for each — the same work tens of times, for isolation nobody
     wanted. Grammars are read-only content keyed by the pack's version.
 
@@ -258,7 +258,7 @@ def test_the_typescript_query_inherits_javascript() -> None:
         ("rust", "fn helper() -> i32 { 1 }\nfn main() { helper(); }\n", "helper"),
         ("go", "package m\nfunc helper() int { return 1 }\nfunc main() { helper() }\n", "helper"),
         ("java", "class A { int helper(){return 1;} void run(){ helper(); } }\n", "helper"),
-        # Parenthesised on purpose: a *bare* Ruby send (`helper` with no
+        # Parenthesized on purpose: a *bare* Ruby send (`helper` with no
         # parens) parses as an identifier, not a `call`, so the language's tags
         # query cannot see it. That is a real limitation of this approach and
         # the README says so rather than this fixture hiding it.
@@ -722,8 +722,8 @@ async def test_an_unwritable_grammar_cache_refuses_with_a_sentence(
 ) -> None:
     """A deployment fact an operator can fix, not a traceback.
 
-    The grammars are materialised into `$PH_CACHE` on first use, so a read-only
-    one is fatal — and pH's contract is that a row which cannot honour its
+    The grammars are materialized into `$PH_CACHE` on first use, so a read-only
+    one is fatal — and pH's contract is that a row which cannot honor its
     configuration raises `MountRefusal`, which every command that mounts a
     profile turns into a sentence and an exit code. Measured inside a sandbox
     that made `~/.cache` read-only, where it arrived as fourteen frames of
@@ -1176,7 +1176,7 @@ async def test_a_reindex_under_jj_never_opens_an_unchanged_file(
 async def test_a_tree_with_no_version_control_still_indexes(
     mount: MountProfile, tmp_path: Path
 ) -> None:
-    """The filter is an optimisation, so losing it must cost nothing but speed.
+    """The filter is an optimization, so losing it must cost nothing but speed.
 
     This is the property that makes it safe to put in front of an indexer at
     all: a caller that ignored `TreeState` entirely would still be correct.

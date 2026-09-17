@@ -416,7 +416,7 @@ def test_both_backends_satisfy_the_protocol(store: SessionPersistence) -> None:
 
     `isinstance` against a Protocol checks that the *names* exist, not their
     signatures — so this catches a backend that forgot a method and nothing
-    else. The suite above is what actually holds them to the same behaviour;
+    else. The suite above is what actually holds them to the same behavior;
     this is here so a missing method fails as "does not satisfy the Protocol"
     rather than as an `AttributeError` three tests later.
     """
@@ -685,9 +685,9 @@ async def test_a_short_ancestor_is_caught_as_a_gap_not_passed_on(
 async def test_a_broken_chain_is_visible_from_the_listing_alone(
     store: SessionPersistence,
 ) -> None:
-    """**The survey `materialise` cannot do.**
+    """**The survey `materialize` cannot do.**
 
-    `materialise` refuses a missing ancestor at the point of use: one session, at
+    `materialize` refuses a missing ancestor at the point of use: one session, at
     resume, long after whatever removed the file. This asks the same question of
     the whole store and costs no reads — both backends fill `StoredSession.parent`
     from the one-line header peek they already pay for, so the answer is a
@@ -725,7 +725,7 @@ async def test_a_seeded_child_writes_only_what_this_store_lacks(
     `_reference_fork` above builds its child with *no* seed, so `track` queues
     the same thing whichever rule it follows — which is exactly why both backends
     passed while Turso was queueing `session.events` whole. Every fork under it
-    got a full copy of its prefix written into the child, `materialise` then read
+    got a full copy of its prefix written into the child, `materialize` then read
     the first seq as 0 and called the file complete, and reference-forking was
     silently not happening on that backend at all.
 
@@ -891,7 +891,7 @@ def test_the_walk_asks_each_ancestor_for_exactly_what_it_still_owes() -> None:
 
 
 def test_a_backend_that_ignores_the_bound_still_reads_correctly() -> None:
-    """**`upto` is a hint, and the walk must not depend on it being honoured.**
+    """**`upto` is a hint, and the walk must not depend on it being honored.**
 
     Making the bound load-bearing would mean a backend that quietly ignored it
     produced a *wrong* log rather than a slow one — which is precisely how
@@ -930,7 +930,7 @@ def _segment(session_id: str) -> tuple[SessionHeader, list[SessionEvent]]:
 def test_the_survey_and_the_reader_agree_on_how_deep_is_too_deep() -> None:
     """One bound, stated twice, pinned to itself.
 
-    `materialise` refuses past `MAX_DEPTH`; the survey has to call those chains
+    `materialize` refuses past `MAX_DEPTH`; the survey has to call those chains
     unreadable or it goes quiet on exactly the shape `roll` manufactures — one
     generation per segment, so a long-running segmented session reaches the bound
     by ordinary use, and `phern doctor` would report a healthy store while every

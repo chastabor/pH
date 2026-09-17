@@ -88,6 +88,7 @@ def theme_choices(active: str, catalog: ThemeCatalog, profile: ThemeProfile) -> 
     so during a preview the dot says "this is what you are looking at" and
     `default` says "this is what you will get next launch".
     """
+
     def detail(name: str) -> str:
         source = "user" if name in catalog.user else "built-in"
         return f"default · {source}" if name == profile.chosen else source

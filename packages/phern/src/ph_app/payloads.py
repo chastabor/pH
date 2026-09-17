@@ -389,7 +389,7 @@ type ConfigRow = JsonObject
 
 Named here, beside the reply that carries it, rather than in the front end that
 reads it: a second front end — or `phern agents` — should not import a TUI module to
-name a shape the daemon serialises. It began in `tui/frontend.py` and restated
+name a shape the daemon serializes. It began in `tui/frontend.py` and restated
 `DaemonConfigReply.rows`' argument almost verbatim, which was the tell.
 
 `JsonObject` and not a hand-written `Mapping[str, JsonValue]`, which was the
@@ -476,7 +476,7 @@ class ShellReply(SessionScoped):
     the only production caller discards this reply, and `tui/adapter.py` reads
     `ok` off the `shell/result` *event*, not from here. So it was a second
     spelling of one fact with no consumer, and `ShellReply(exit_code=1,
-    ok=True)` validated — against the rule this file's neighbours state twice
+    ok=True)` validated — against the rule this file's neighbors state twice
     ("one encoding of one fact, so nothing on the wire can disagree with
     itself"). A `@computed_field` would have kept it on the wire, but
     `extra="forbid"` then refuses the key back on `model_validate`, so a
@@ -569,7 +569,7 @@ class SessionReadingsReply(SessionNotice):
 
     A reply, not a notice, so it declares no `METHOD`: the footer *is* pushed,
     but it rides `session.status` beside the status it belongs to rather than
-    travelling under a name of its own.
+    traveling under a name of its own.
     """
 
     readings: list[StatusReading] = Field(default_factory=list)
@@ -677,7 +677,7 @@ def notice_of(method: str, params: dict[str, Any]) -> SessionNotice | None:
 
 # -------------------------------------------------------------------- asks --
 # The daemon → client direction, which is the only place the daemon is the one
-# building *request* params. Modelled here rather than in `ph_app.params`
+# building *request* params. Modeled here rather than in `ph_app.params`
 # because the client is what validates them.
 
 

@@ -111,7 +111,7 @@ class AgentRegistry:
         """Build an agent and the scope it owns.
 
         **`parent` puts the child's scope inside its parent's** (P6-27), which is what
-        makes containment structural instead of materialised. Three things then stop being
+        makes containment structural instead of materialized. Three things then stop being
         remembered:
 
         * **visibility inherits**, because `isolation_chain` reaches the parent's layers

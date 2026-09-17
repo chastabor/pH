@@ -88,7 +88,7 @@ class ResolvedModel:
     max_image_edge: int | None = None
     """Longest edge in pixels the route will *accept*, when it publishes one.
 
-    This docstring's neighbour used to say a pixel ceiling had to wait for
+    This docstring's neighbor used to say a pixel ceiling had to wait for
     `media-transform` (P7-02) because "declaring one now would be a knob wired to
     nothing". Two things wired it (P7-03): `ph.llm.dimensions` reads an image's
     size from its header with no dependency, and a limit does not need a resizer

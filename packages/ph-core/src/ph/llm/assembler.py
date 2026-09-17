@@ -164,7 +164,7 @@ class BlockAssembler:
             # load-bearing.** `_assemble` raises on a `block_type` outside the
             # four it knows, and `BlockStart.block_type` is a `str` the replay
             # path passes through from the wire — so assembling first would turn
-            # an unrecognised block from an adapter into a raise on the *cancel*
+            # an unrecognized block from an adapter into a raise on the *cancel*
             # path, which is where a raise costs most. It also builds a model per
             # in-flight tool call to discard it: 38 µs against 2 µs at 32 calls.
             #

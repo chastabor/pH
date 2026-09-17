@@ -1,10 +1,10 @@
-"""`tool-bash` — run a command, honestly labelled.
+"""`tool-bash` — run a command, honestly labeled.
 
 The description matters as much as the code. A model told "run a shell command"
 will reach for `cat` and `sed` over `read` and `edit`, and every one of those
 calls escapes the filesystem gates that make `edit` reviewable. So the
 description points back at the specific tools, which is the only lever a
-registry-side design has over model behaviour (C1's "make the registered path
+registry-side design has over model behavior (C1's "make the registered path
 the convenient path").
 
 @module ph.tools.builtin.bash_tool

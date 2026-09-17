@@ -53,7 +53,7 @@ start while it is still starting, and they cannot tell that from the truth.
 
 LOCK_TIMEOUT = SPAWN_TIMEOUT + 5.0
 """How long the loser of a race waits for the winner's spawn — longer than the
-spawn it is serialising against, so one slow start is not two failures."""
+spawn it is serializing against, so one slow start is not two failures."""
 
 
 class DaemonAbsent(Refusal):

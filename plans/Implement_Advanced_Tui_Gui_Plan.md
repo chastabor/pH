@@ -176,7 +176,7 @@ first, with no wire change, and ships alone.
 - `tui/frontend.py`: a `FrontSession` Protocol — `state`, `adapter`, `session_id`,
   `submit(text, attachments=())`, `queue`, `cancel`, `run_command`, `flush`, `close`,
   `status_readings()`, `config_rows`, `commands()`, `screens()`, `providers()`, `set_preset()`,
-  `store_credential()`. `HarnessSession` implements it, behaviour unchanged.
+  `store_credential()`. `HarnessSession` implements it, behavior unchanged.
 - `tui/app.py`, `tui/commands.py`, `tui/screens.py` consume only `FrontSession`.
 - **Gate** `test_the_terminal_never_reaches_past_the_front_session`: AST walk of `tui/app.py` and
   `tui/widgets/` (same shape as `test_layering.py`), asserting every attribute read off `front`
@@ -218,7 +218,7 @@ speculative.
   (`@plugin("tool-ask-user", inject=["tools", "user_questions"])`, `ToolDefinition(name=
   "ask_user", parameters=AskUserArgs, execute=...)`). Arguments mirror `UserQuestion`:
   `question`, `options?`, `header?`, `multiSelect` (comma-joined into the seam's `str`, which is
-  `AskUserModal`'s existing behaviour). Calls `ctx.user_questions.ask(...)` and returns the
+  `AskUserModal`'s existing behavior). Calls `ctx.user_questions.ask(...)` and returns the
   answer.
 - **Shipped `disabled: true` in `base.yaml`; `tui.yaml` enables it.** The same convention
   `rlm-stable` uses for the rows its bundles ship disarmed — one place arms it, and it is the
@@ -256,7 +256,7 @@ speculative.
   records of one exchange — and, more to the point, a minted counter could restart at 1 after a
   resume and answer a question the log was still holding open. It rides on `UserQuestion.ask_id`
   rather than beside the question, so the log's key, the wire frame's and the one a re-posed
-  question would be recognised by cannot drift apart. Export `pending_questions(session)`
+  question would be recognized by cannot drift apart. Export `pending_questions(session)`
   beside `pending_approvals`. `repaired()` was to learn to tell a **parked** turn (open turn +
   pending ask) from an **interrupted** one and leave it open — **not done, deliberately**; see
   below.
@@ -279,7 +279,7 @@ open turn. Worse, the parked case leaves the model's **`tool_use` block unanswer
 *assistant message*, and a message carrying one with no matching `tool_result` is a log several
 providers reject outright — the exact failure `repair.py` exists to prevent. (An earlier draft
 blamed a dangling `tool/call`; that event is not surface-eligible and no provider sees it. P7-15
-moved it to after the gate, so a parked turn has none and repairs as not-started.) Closing it is the honest behaviour until the resume half lands;
+moved it to after the gate, so a parked turn has none and repairs as not-started.) Closing it is the honest behavior until the resume half lands;
 the question is still in the log, `pending_questions` folds it, and the daemon's non-guarantee
 row now says out loud that nothing reads that fold on resume. Re-posing across a *restart* is
 what P5-13's repair half closes.
@@ -288,7 +288,7 @@ what P5-13's repair half closes.
 `question/ask {…, question}`; the client replies in `respond`'s envelope — **reuse `respond` on
 the client verbatim** by giving `DaemonClient` a `handlers: dict[str, Dispatch]`. `askId` is the
 key `pending_approvals` already uses (`callId or toolName`, `approval.py`), so a re-posed ask
-is recognisable.
+is recognizable.
 
 New `ph_app/daemon/frontend.py` (ph-app, because it knows connections; seams stay
 transport-free):
@@ -721,7 +721,7 @@ palette entry and key itself.
   `TrustAnswer` literal shared by both ends, and `always` recorded only after the
   mount succeeds.
 * **A latent Textual bug, surfaced by the new timing.** `TranscriptView.sync`
-  did not serialise its own mounts, so two overlapping draws called `mount()`
+  did not serialize its own mounts, so two overlapping draws called `mount()`
   while one was pending — `MountError`, reproducible only under coverage. Fixed
   in the widget, where the ordering constraint lives, with the companion guard
   that a draw landing after the view is detached renders nothing.
@@ -909,7 +909,7 @@ in that figure. Widening the source is P6-02's debt, not this row's.
   `"127.0.0.1"` literal it did not own. `WebServer.notices()` holds the sentences
   and knows its own host; `cli.py` prints them — the shape `ph daemon` already
   uses for its socket path and linger warning.
-* **The import probe generalised.** It asserted "the CLI does not import the web
+* **The import probe generalized.** It asserted "the CLI does not import the web
   extra" inside `test_web.py`; the real rule is that importing `ph_app.cli` drags
   in nothing heavy or extra-only, and `cli.py` had made that promise about
   **textual** since P5-14 with nothing testing it. Now
@@ -974,7 +974,7 @@ upload cannot be routed to "this tab's session" — the id has to be one the
 *server* knows. Increment 3 had left it unset, which does not avoid the problem:
 it makes each tab a different new session with nothing able to say which one a
 file belongs to. So a launch mints one (or takes `--session`) and every tab is on
-it, which is the plan's own decision 2 realised in a browser — several UIs, one
+it, which is the plan's own decision 2 realized in a browser — several UIs, one
 conversation, private composers. A tab therefore differs from a second terminal,
 which does start a new session; the difference is honest, and the picker still
 moves a tab elsewhere.
@@ -1029,7 +1029,7 @@ whichever machine the front end is on — the server's, for a tab.
 **What the cleanup pass changed, and one more defect the real path found.**
 
 * **A malformed upload was a 500.** `request.multipart()` *asserts* on a body
-  that is not multipart, so an authorised POST with no `-F` reached a person as
+  that is not multipart, so an authorized POST with no `-F` reached a person as
   an `AssertionError` traceback — the same defect as the daemon refusal one
   paragraph up, found the same way (by hand, not by a test). Both guards now
   answer: 415 for a body that is not multipart, 400 for a part named something
@@ -1134,7 +1134,7 @@ source to save a heading.
 a *transport*, and it changed the seam rather than sitting beside it —
 `register_answerer(reachable=)`, because whether anyone is there to ask is no
 longer knowable from the fact that a listener registered, and `answer_to_wire`,
-because an answer has to be serialisable. §4.1/4.2 gain `--keep-daemon`. §8 gains
+because an answer has to be serializable. §4.1/4.2 gain `--keep-daemon`. §8 gains
 four gaps: a staged attachment is not durable, there is no chunked upload, a
 third-party row's screen is invisible to a remote front end, and `repaired()`
 still closes a turn parked on a human as interrupted. `docs/dev-notes/phase-5.md`
@@ -1155,7 +1155,7 @@ phase went next.
   daemon still defaulted to octet-stream, throwing away the name it had on the
   next line. Worse, "the declared type wins" is wrong at the one door that has a
   declaration: **browsers send `application/octet-stream` for any extension they
-  do not recognise**, so a dropped `.png` from such a browser stored as a
+  do not recognize**, so a dropped `.png` from such a browser stored as a
   document, got no suffix out of `EXTENSIONS`, missed `IMAGE_MIMES`, and reached
   the model as a file — the same picture being an image through `--attach` and a
   document through a tab, which is the split the extraction was written to

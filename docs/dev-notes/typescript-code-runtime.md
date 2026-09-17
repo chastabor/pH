@@ -102,7 +102,7 @@ place (D17). Two honest options:
 
 * `persistence = "none"` — fresh context per run, no snapshot obligation, and the
   simplest thing that can ship;
-* `persistence = "namespace"` — then a JS heap has to be serialised into
+* `persistence = "namespace"` — then a JS heap has to be serialized into
   `kernel/snapshot` events the way `ph_rlm.snapshot` does for `dill`, which is a
   second substantial piece of work and should not be smuggled in with the first.
 

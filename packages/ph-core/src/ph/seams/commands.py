@@ -134,7 +134,7 @@ def parse_command_line(line: str) -> tuple[str, str]:
     """`/name the rest` → `("name", "the rest")`. The one spelling of the split.
 
     Exported because a front end that routes a line *before* dispatching it — the
-    TUI over a socket decides which end owns a verb — has to tokenise the same
+    TUI over a socket decides which end owns a verb — has to tokenize the same
     way this registry will, or a leading space and a doubled one read as two
     different commands on the two ends.
     """

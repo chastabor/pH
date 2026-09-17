@@ -57,7 +57,7 @@ rather than covered: its default `ProactorEventLoop` has no `add_reader`, and
 `AF_UNIX` is not the daemon's transport there.
 
 **Interim, with a shelf life.** `test_cancelsafe` fails when anyio stops
-registering the shape this recognises, which is how we would learn the fix had
+registering the shape this recognizes, which is how we would learn the fix had
 landed upstream and this module could go.
 
 @module ph_app.daemon.cancelsafe
@@ -84,8 +84,8 @@ def resolves_a_future(callback: object) -> bool:
     Deliberately a *shape* test and not an identity one. `set_result` on the C
     accelerator is a `builtin_method` with no `__func__`, and a `Future`
     subclass may override it — both of which an identity comparison stops
-    recognising. Anything unrecognised is passed through, so the failure is
-    always to today's behaviour rather than to a changed one.
+    recognizing. Anything unrecognized is passed through, so the failure is
+    always to today's behavior rather than to a changed one.
     """
     return isinstance(getattr(callback, "__self__", None), asyncio.Future) and (
         getattr(callback, "__name__", "") == "set_result"
@@ -131,7 +131,7 @@ def _guarding(original: Callable[..., Any]) -> Callable[..., Any]:
             # but the unbounded one if a deregistration is ever missed.
             #
             # `try`/`except` and not `contextlib.suppress`, same reasoning one
-            # level down: 5.7 ns against 229 ns for identical behaviour, on the
+            # level down: 5.7 ns against 229 ns for identical behavior, on the
             # hottest path the daemon has.
             try:  # noqa: SIM105
                 callback(*args)

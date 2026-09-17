@@ -28,7 +28,7 @@ presenter, its `_Presenter` and `register_tui_commands` went with it.
 its host to show the transcript row for a log seq; `Revealing` is a screen
 accepting the same number on the way in. `RevealHost` is the mirror a screen
 checks before it offers the action at all — structurally, so any shell that can
-answer gets the behaviour and a screen never counts the screen stack to guess
+answer gets the behavior and a screen never counts the screen stack to guess
 where it is. All three read `source_seq`/`seq`, which the log already carries.
 
 @module ph_app.tui.screens

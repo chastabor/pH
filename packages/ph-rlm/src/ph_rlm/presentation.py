@@ -61,7 +61,7 @@ IPYTHON_DESCRIPTION = (
 """Ported verbatim from prime-agent's `src/core/tools/ipython.ts`.
 
 Verbatim on purpose: the description is the contract the model was trained
-against, and paraphrasing it is a silent behaviour change with no test that
+against, and paraphrasing it is a silent behavior change with no test that
 would catch it.
 
 **It says `%%bash` and pH has no magics.** That is a known, deliberate

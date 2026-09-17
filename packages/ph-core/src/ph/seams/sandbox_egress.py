@@ -6,7 +6,7 @@ than a filter, so nothing inside can talk past it. What this module adds is the
 **one door**: a filtering HTTP proxy on the host, listening on a unix socket the
 sandbox can reach through its read-only view of `/`, and inside the sandbox a
 `socat` shim that turns `127.0.0.1:<port>` into that socket so the proxy variables
-every HTTP client honours have something to point at. Where the sandbox is a
+every HTTP client honors have something to point at. Where the sandbox is a
 *deny list* rather than a namespace — Seatbelt on macOS — there is no separate
 loopback to put a shim on, so the same proxy also listens on the host's
 `127.0.0.1:<port>` and the profile allows that one remote and nothing else
@@ -125,7 +125,7 @@ class ProxyRequest:
 
         The backend puts the agent id in the proxy URL's user part (with a fixed
         password, because `urllib` sends the header only when both parts are
-        there), and every client that honours the URL sends it back as Basic
+        there), and every client that honors the URL sends it back as Basic
         credentials. The password is ignored. Best effort: a client that sends
         nothing is an agent the refusal cannot be charged to, and the seam logs
         rather than drops it.
@@ -150,7 +150,7 @@ class ProxyRequest:
 
         `CONNECT host:port` is the HTTPS shape and the ordinary one. An absolute-form
         `GET http://host/path` is the plain-HTTP shape; `https://` in absolute form
-        is refused because no client sends it and honouring it would mean
+        is refused because no client sends it and honoring it would mean
         terminating TLS here.
         """
         if self.method == "CONNECT":
@@ -243,7 +243,7 @@ class EgressProxy:
     macOS shares the host's loopback, so the proxy can be reached there directly
     and the profile allows exactly one remote — `localhost:<tcp_port>` — and refuses
     every other address. Measured 2026-09-07: the allowed port answers, the next
-    port is `Operation not permitted`, DNS is refused, and `curl` honouring
+    port is `Operation not permitted`, DNS is refused, and `curl` honoring
     `HTTPS_PROXY` gets the proxy's own 403.
 
     Nothing the host does not already have is exposed by the listener: it tunnels

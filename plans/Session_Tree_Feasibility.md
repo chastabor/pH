@@ -1,7 +1,7 @@
 # Session log as a tree — feasibility assessment
 
 *Investigating: replace the session log's flat monotonic `seq` with a tree, so
-another process can pick up at any point and start its own branch. Modelled on
+another process can pick up at any point and start its own branch. Modeled on
 `sources/tau`. The monotonic count is to be kept.*
 
 Verified against source and by experiment. Citations are `file:line`.
@@ -14,7 +14,7 @@ Verified against source and by experiment. Citations are `file:line`.
 to do it already exists.**
 
 The design that works is **reference-forking**: a session file records *which
-parent file* and *how many of its leading events to take*, and materialises its
+parent file* and *how many of its leading events to take*, and materializes its
 lineage on load by walking parents to the root. Segmenting one logical session
 across several files is the same mechanism with no divergence.
 
@@ -28,12 +28,12 @@ Measured facts behind that:
 
 2. **A forked child's own work already begins at `seq == seed_length`**, and its
    inherited prefix is byte-for-byte `parent[0:seed_length]`. Verified. So the
-   materialised session is **identical to today's copied one** — this is a pure
+   materialized session is **identical to today's copied one** — this is a pure
    storage-layer change.
 
 3. **Read amplification is 1.00×.** Each file stores only its own contiguous run,
    so the ranges pulled from each ancestor are *disjoint* and their union is
-   exactly the materialised log. The cost is D file opens for chain depth D, not
+   exactly the materialized log. The cost is D file opens for chain depth D, not
    D × filesize. Verified by construction.
 
 4. **Copy-forking is expensive and the measurement is stark.** Ten forks at the
@@ -287,7 +287,7 @@ header: { id, parent_session, seed_length, ... }     # both fields already exist
 events: seq = seed_length, seed_length+1, ...        # this file's own work
 ```
 
-Materialising a session:
+Materializing a session:
 
 ```
 materialise(s) = materialise(s.parent)[0 : s.seed_length]  ++  s.own_events
@@ -306,18 +306,18 @@ needs no separate mechanism.
 
 | Property | Under reference-forking |
 |---|---|
-| `seq == index` in a materialised log | **holds** — ranges are disjoint and consecutive |
+| `seq == index` in a materialized log | **holds** — ranges are disjoint and consecutive |
 | `_readmit`'s contiguity gate | **unchanged** |
-| `SurfaceManager`, `derive_messages` | **unchanged** — they see a materialised list |
+| `SurfaceManager`, `derive_messages` | **unchanged** — they see a materialized list |
 | All 8 `SessionFoldCache` users | **unchanged** — they want length |
-| Daemon paging / cursors | **unchanged** — offsets into a materialised list |
+| Daemon paging / cursors | **unchanged** — offsets into a materialized list |
 | `index_at_or_before`, live/replay dedupe | **unchanged** — one lineage, total order |
 | Repair's `last.seq + 1` | **unchanged** |
 | **Turso schema** | **unchanged** — `seq INTEGER PRIMARY KEY` still dense per file |
 
 `seq` is unique **per lineage**, not per tree. Two siblings forked at boundary
 `b` both start their own work at `b+1`; they live in different files and are never
-materialised into the same list. Verified.
+materialized into the same list. Verified.
 
 Cross-lineage references — a parent citing a subagent's event — are
 `(session_id, seq)`. Both halves already exist. This also repairs
@@ -339,7 +339,7 @@ Plus:
   reference. `_fork_seed`'s validation — the open-turn refusal, the contiguity
   check — is still wanted; only the copy goes.
 - `TursoSessionStore.read` gets the same chain walk.
-- Materialisation wants a cache. `SessionFoldCache` is the right shape and
+- Materialization wants a cache. `SessionFoldCache` is the right shape and
   already carries the purity requirement.
 
 `ph_rlm/kernel/journal.py` and `ph_rlm/harness/state.py` also call
@@ -359,7 +359,7 @@ Mitigations, in order of preference:
   `(id, parent)` pairs, and `stored()` already surfaces `parent` on every
   `StoredSession` from a header peek both backends already pay for. So the check
   is available without new state.
-- **Materialise-on-detach** for archival: collapse a lineage into one
+- **Materialize-on-detach** for archival: collapse a lineage into one
   self-contained file when it is exported or pruned. Reference-forking makes this
   an option, not an obligation.
 - **A broken chain must fail loudly**, naming the missing ancestor. A silent
@@ -367,7 +367,7 @@ Mitigations, in order of preference:
   `_readmit`'s unknown-type refusal exists to prevent.
 
 **(b) Chain depth.** One file open per ancestor. Bytes read are 1.00× the
-materialised size, so the cost is syscalls, not I/O volume. Worth a bound
+materialized size, so the cost is syscalls, not I/O volume. Worth a bound
 (refuse or auto-collapse past depth N) mostly to keep a pathological
 fork-of-fork-of-fork chain from turning one read into hundreds of opens.
 
@@ -379,7 +379,7 @@ to. Specifically it does not support **two writers extending the same lineage** 
 but that is not the goal: a second process that wants to continue from a point
 *branches*, which under this design is a new file and therefore no conflict at
 all. The partial-order problem in §5.4 of the earlier draft disappears, because
-every materialised log is one lineage with one writer and a total order.
+every materialized log is one lineage with one writer and a total order.
 
 The one thing worth taking from tau regardless is in §5.6.
 

@@ -6,7 +6,7 @@ refused line. These tests are about making that recoverable, and about the one
 sentence a user has to be told while it happens: **a restore puts the tree
 back, not the world.**
 
-Real `git` throughout. What is pinned here is git's own behaviour — that a tree
+Real `git` throughout. What is pinned here is git's own behavior — that a tree
 written against a scratch index leaves the agent's staging area alone, that a
 restore leaves an untracked file untracked rather than silently staging it, that
 an ignored path is never in a tree `add -A` built — none of which a fake would

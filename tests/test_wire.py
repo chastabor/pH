@@ -8,7 +8,7 @@ every field name in this plan, so a runtime string conversion would pass its
 tests today and break at the first acronym or digit. Pinning aliases at class
 definition means a name is never reconstructed from a wire string at all.
 
-**"Every model" is now literally every model.** The round-trip was parametrised
+**"Every model" is now literally every model.** The round-trip was parametrized
 over all 75 and *skipped* the ones `_sample` could not build — which is how
 `StatusReading` and `Egress`, both a required field or two away from trivial, came
 to be exempt from the one property this file asserts. A missing sample is a gap in
@@ -355,7 +355,7 @@ def test_a_literal_lookup_refuses_a_string_that_is_not_a_member() -> None:
     Sabotage: add `"ADMIN": "ADMIN"` to any lookup and this names it.
 
     **What it does not reach**, because the discovery rule is the shape: a
-    mapping whose keys stop equalling its values is no longer recognised as a
+    mapping whose keys stop equalling its values is no longer recognized as a
     lookup and drops out of the set silently rather than failing. That is the
     honest limit of finding them by postcondition instead of by call site — the
     alias binding is not recoverable from the mapping — and it is the reason this

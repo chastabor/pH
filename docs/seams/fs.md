@@ -120,7 +120,7 @@ file.
 The seam does not consult `ctx.workspace` itself — that would make `ctx.fs` know
 which seam owns agent state when what it needs is one path. `workspace-lifecycle`
 wires the two, and a deployment mounting no such row keeps exactly today's
-behaviour.
+behavior.
 
 ## The honest scope (N1)
 

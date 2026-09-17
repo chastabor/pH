@@ -39,7 +39,7 @@ Client: TypeAlias = TestClient[web.Request, web.Application]
 pytestmark = pytest.mark.anyio
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
-"""Enough of a header that the store recognises it; the bytes do not matter."""
+"""Enough of a header that the store recognizes it; the bytes do not matter."""
 
 
 def a_server(session: str = "served", **options: Any) -> WebServer:  # noqa: ANN401
@@ -148,7 +148,7 @@ async def test_the_token_is_exchanged_for_a_cookie(
     server: WebServer,
     client: Client,
 ) -> None:
-    """One paste authorises the page *and* everything the page then fetches.
+    """One paste authorizes the page *and* everything the page then fetches.
 
     The websocket and asset URLs come out of upstream's template, so they carry
     no token — the cookie is what makes them work. Asserted end to end: the
@@ -189,7 +189,7 @@ def test_the_launch_url_carries_the_token_and_the_bind() -> None:
     """What `--open` opens, and what a person pastes.
 
     The token has to be *in* the URL: there is nowhere else to put it, since the
-    first request is the one that needs authorising.
+    first request is the one that needs authorizing.
     """
     server = a_server(port=7777)
 

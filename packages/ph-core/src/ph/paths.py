@@ -258,7 +258,7 @@ def canonical(path: Path) -> Path:
 
     Roots that bound nothing are deliberately outside this: `uploads`, the session
     stores and `temporary_directory` mint directories nobody compares against a
-    workspace, and canonicalising them would be ceremony rather than an invariant.
+    workspace, and canonicalizing them would be ceremony rather than an invariant.
     The *candidate* side of a comparison is not canonical either — `FsService.resolve`
     passes an absolute path through as authored — so a caller comparing against these
     roots resolves the candidate itself where the answer would otherwise differ; see
@@ -328,7 +328,7 @@ def is_under(candidate: Path, root: Path) -> bool:
     A separator-aware prefix compare, not `Path.relative_to`, which allocates a
     `Path` per root segment and runs at every gated write. `normcase` because
     `relative_to` folds case on Windows and a naive compare would not, which is the
-    one behaviour worth keeping from it.
+    one behavior worth keeping from it.
 
     **Neither path is resolved.** A caller needing symlink-safety must `resolve()`
     *before* asking: resolving inside would answer a different question than a

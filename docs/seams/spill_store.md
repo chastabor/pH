@@ -6,7 +6,7 @@
 An offloaded tool result is not deleted, it is **relocated**: the model gets a
 preview and a locator, and the locator resolves to the full text.
 
-That is what makes G2/G3 offloading an optimisation rather than a lie — **the
+That is what makes G2/G3 offloading an optimization rather than a lie — **the
 harness never tells the model something is gone when it is on disk.**
 
 ## The surface
@@ -32,7 +32,7 @@ A `SpillRef` is three fields, and the third is the interesting one:
 rather than making the model guess. A locator with no hint is a reference the
 model has to reverse-engineer, and it will reverse-engineer it wrongly.
 
-`try_save_text` is the non-raising form: a spill that fails is an optimisation
+`try_save_text` is the non-raising form: a spill that fails is an optimization
 that did not happen, and the caller keeps the content inline rather than losing
 the turn.
 

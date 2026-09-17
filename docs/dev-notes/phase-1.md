@@ -53,7 +53,7 @@ period.
 ### 1. Guards run **after** approval — the pH plans' tables are wrong
 
 Both `Python_Harness_Port_Plan.md` §4.4 and `Implementation_Plan.md` row B1
-summarise the order as `pre-execute → guards → approval`. dsh does the opposite,
+summarize the order as `pre-execute → guards → approval`. dsh does the opposite,
 in both its documentation and its code:
 
 ```ts
@@ -106,7 +106,7 @@ trace (§8). It would also have made `ph-app` depend on `tau_agent` and
 
 pH therefore ships native adapters over `httpx`: one for the OpenAI-compatible
 wire (covering DeepSeek, including `reasoning_content`) and one for Anthropic.
-Both stream real `tool-call-delta` chunks. The tau-modelled **TUI** (D7) is
+Both stream real `tool-call-delta` chunks. The tau-modeled **TUI** (D7) is
 unaffected and still lands in Phase 2.
 
 ### 4. Two mappings that are easy to get wrong, and one that is not symmetric

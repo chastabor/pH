@@ -113,7 +113,7 @@ a per-agent rule becomes a global one.
 
 ## Refusing to mount
 
-A row that cannot honour its configuration refuses at `apply`, and it refuses with
+A row that cannot honor its configuration refuses at `apply`, and it refuses with
 `MountRefusal` (`ph.cordis`) rather than a bare exception. Every command that
 mounts a profile turns that one type into a sentence and an exit code, and leaves
 anything else as the traceback a bug deserves. `containment.strict` on a host with

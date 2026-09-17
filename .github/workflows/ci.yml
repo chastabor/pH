@@ -61,7 +61,7 @@ jobs:
       # own history records 91.21 %, and that is exactly this suite's number
       # with jj absent.
       #
-      # Pinned rather than latest: a jj release that changed behaviour should
+      # Pinned rather than latest: a jj release that changed behavior should
       # break on a commit that bumps this line, not on whichever unrelated push
       # happened to land first. The tests configure `user.name`/`user.email`
       # per repo themselves, so nothing else is needed here.

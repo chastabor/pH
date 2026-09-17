@@ -66,7 +66,7 @@ async def open_session(
     *created* a second session over the first one's file — the store saw the file,
     skipped the header and appended `seq` from zero — so two plain `phern -p` runs on
     one id, with no daemon and no race, left a log the trajectory reader refuses
-    outright (P5-03). Resuming was the daemon's behaviour and is now everyone's.
+    outright (P5-03). Resuming was the daemon's behavior and is now everyone's.
 
     The claim comes first and comes from the store (`ClaimingStore`): the writer
     owns the lock, so a daemon, an rpc peer and a print run refuse each other with

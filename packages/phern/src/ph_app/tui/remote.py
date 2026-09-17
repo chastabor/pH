@@ -197,7 +197,7 @@ class DaemonSession:
     def diverged(self) -> bool:
         """Whether this mirror has stopped matching the daemon's log.
 
-        Either refusal desynchronises it permanently: a frame that will not rebuild
+        Either refusal desynchronizes it permanently: a frame that will not rebuild
         is skipped, so the next `admit` meets a seq that is no longer next and
         refuses too, and every frame after it. The mirror is then a *prefix* of the
         daemon's log with no way to tell how short.
@@ -440,7 +440,7 @@ class DaemonSession:
 
         One path for both ends: a local definition's `run` dispatches a Textual
         action, a remote one's sends `session/command`. `parse_command_line` is
-        the registry's own split, so a line tokenises the same way here as it
+        the registry's own split, so a line tokenizes the same way here as it
         would on the daemon.
         """
         name, argument = parse_command_line(line)

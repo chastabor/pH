@@ -108,7 +108,7 @@ rules make it safe:
   anyone still need this" is not a smaller answer but a wrong one;
 * a log that will not parse, or a truncated listing, collects **nothing**.
 
-`--min-age` only ever *refuses*; age never authorises collection. It covers the
+`--min-age` only ever *refuses*; age never authorizes collection. It covers the
 window where a person has dropped a file on the composer and nothing references
 it until they send the prompt.
 

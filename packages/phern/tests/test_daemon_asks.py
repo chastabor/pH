@@ -319,7 +319,7 @@ async def test_the_wire_ask_id_is_the_one_the_log_wrote(tmp_path: Path) -> None:
 
     The front end answers a frame keyed by `askId`, and a resume would re-pose
     from a log record keyed by `askId`. If the desk minted its own counter those
-    are different strings, and the re-posed question could never be recognised as
+    are different strings, and the re-posed question could never be recognized as
     the one already open — which is the whole point of holding it in the log.
     """
     async with running(tmp_path) as daemon:

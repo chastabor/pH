@@ -41,7 +41,7 @@ FailureKind: TypeAlias = Literal["denied", "failed", "aborted"]
 
 The fact every consumer branches on and none may infer: policy **denied** the
 call, the tool **failed**, or cancellation **aborted** it. Code Mode ends the run
-on the first, lets the program handle the second, and a UI colours each
+on the first, lets the program handle the second, and a UI colors each
 differently.
 
 Declared here, in the lowest module of the tools package, because it is what an

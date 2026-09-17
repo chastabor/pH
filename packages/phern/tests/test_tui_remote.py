@@ -131,7 +131,7 @@ async def test_the_front_ends_log_is_a_live_mirror_not_a_rebuild(tmp_path: Path)
         # The daemon's own timestamps, not this client's clock.
         assert [e.time for e in front.session.events] == [e.time for e in root.session.events]
         # Keyed to the daemon's generation by `begin`, so a cursor made here is one
-        # `resume_at` will honour rather than treat as another log's.
+        # `resume_at` will honor rather than treat as another log's.
         assert cursor_of(front.session) == cursor_of(root.session)
 
 
@@ -168,7 +168,7 @@ def test_the_generation_is_a_constructor_argument_not_a_later_setter() -> None:
 
 
 def test_a_mirror_that_missed_a_frame_says_so_rather_than_serving_a_prefix() -> None:
-    """Either refusal desynchronises the mirror permanently — a skipped frame makes
+    """Either refusal desynchronizes the mirror permanently — a skipped frame makes
     every later seq non-contiguous — so `diverged` is the fact, and the screen path
     is what must ask. Under the rebuild this replaced, the same skip refused loudly
     at screen-open time; keeping the mirror incrementally moved the refusal earlier,
@@ -558,7 +558,7 @@ async def test_a_turn_started_here_finishes_after_this_front_end_is_gone(
     A prompt is queued, this front end closes *without* waiting, and the root
     goes on working — then a second front end attaches and finds the finished
     turn in the transcript it rebuilds. That is the whole reason the harness moved
-    into the daemon, and it is the one behaviour the in-process front end cannot
+    into the daemon, and it is the one behavior the in-process front end cannot
     have at all.
 
     `close()` detaches and does not flush or shut down: this front end is

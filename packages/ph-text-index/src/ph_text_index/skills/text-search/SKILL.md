@@ -49,7 +49,7 @@ compare hits *within one result*, never as a confidence: a top hit at 0.31 in a
 corpus of unrelated documents may still be the best there is, and a 0.55 may
 still be wrong.
 
-## Three failure shapes worth recognising
+## Three failure shapes worth recognizing
 
 **An empty result may mean nothing was indexed.** The result says how many
 passages it searched — if that is zero, run `text_index` first.

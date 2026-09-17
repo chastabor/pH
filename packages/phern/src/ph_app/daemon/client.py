@@ -147,7 +147,7 @@ class DaemonClient:
 
         `RootDescription` and not `RootDescription | MutationRepeated`, which is
         what this said: `MutationRepeated` subclasses `RootDescription`, so that
-        union normalises to the left side and asked every caller to narrow
+        union normalizes to the left side and asked every caller to narrow
         something the checker had already flattened. The repeat still arrives
         here — it is simply already the type it claims to be, which is the
         property `MutationRepeated`'s own docstring is about.

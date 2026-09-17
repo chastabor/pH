@@ -211,7 +211,7 @@ class SeamAbsent(Refusal):
     Its own code, because `unknown_method` is a different sentence: that one
     means "this daemon is older than you think" and a client responds by
     disabling the feature everywhere. This one means "this deployment does not
-    do that", which is a per-root fact and the right thing to grey out one
+    do that", which is a per-root fact and the right thing to gray out one
     button over.
 
     The read-side projections answer absence with an empty list for the same
@@ -448,8 +448,8 @@ def parse_cursor(text: str, current: object) -> Cursor | None:
 def resume_at(session: Session, cursor: Cursor | None) -> int:
     """The index a cursor asks to resume from, or 0 when it cannot say.
 
-    A cursor from another incarnation of the log is neither honoured nor
-    refused: honouring it would skip events the client never saw, refusing it
+    A cursor from another incarnation of the log is neither honored nor
+    refused: honoring it would skip events the client never saw, refusing it
     would strand a client that did nothing wrong. So a stale generation reads as
     "you have seen nothing of *this* log" — the only safe reading of the two,
     and the reply says where it actually started so the client is not left

@@ -213,7 +213,7 @@ async def test_a_tool_call_comes_back_parsed(
     **Two assertions, because a mismatched parser fails two different ways.**
     Non-streaming, it hands the call back untouched and the markers are in the
     text — the first assertion, which names the flag to fix. Streaming, which is
-    what pH does, it consumes the tags it recognises and discards what it cannot
+    what pH does, it consumes the tags it recognizes and discards what it cannot
     parse, so the answer comes back *empty* and only the missing `tool/call`
     event says anything happened. Measured, both, against the same server.
 

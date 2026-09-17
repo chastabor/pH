@@ -115,7 +115,7 @@ section carrying these rows; P9-08 is where that edit lands.
 
 > **Landed** (2026-09-16). `themes/__init__.py` gained `_decode`, `_palette`,
 > `_color_problem`, `theme_document` and a derived `COLOR_ROLES`; four
-> catppuccin flavours ship as YAML beside the three JSON built-ins.
+> catppuccin flavors ship as YAML beside the three JSON built-ins.
 > `mypy` clean on 442 files, 183 TUI tests green including the ten SVG snapshots.
 >
 > **One deviation, and it removes code rather than adding it: no Rich-keyword
@@ -528,7 +528,7 @@ sentence saying it is no longer the exit's window.
 happens when a turn ends and when a schedule is cancelled — the two other transitions
 that can make a held daemon unheld. The sixty-second sweep keeps calling it, for the
 case nothing else can cover: a linger that expires with no event to notice it. This is
-the plan's own argument for one cadence per question, honoured — the cadence is not a
+the plan's own argument for one cadence per question, honored — the cadence is not a
 new timer, and the prompt path is not a poll.
 
 `DaemonServer.open_connections: int` (`server.py:1096`) becomes

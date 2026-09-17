@@ -144,7 +144,7 @@ def mime_for(declared: str | None, name: str) -> str:
 
     **A declared type wins, except when it is the one that says nothing.** A
     browser sends `Content-Type` with every dropped file and falls back to
-    `application/octet-stream` for any extension *it* does not recognise — so a
+    `application/octet-stream` for any extension *it* does not recognize — so a
     literal "declared wins" stores a `.png` from such a browser as a document,
     gives it the wrong extension out of `EXTENSIONS`, and misses `IMAGE_MIMES`.
     That is exactly the failure `mime_of` exists to prevent, arriving through the
@@ -319,7 +319,7 @@ async def apply(ctx: Context, config: Config) -> None:
 # later wants — must not re-derive which blobs are safe to remove.
 
 DIGEST_TEXT = re.compile(r"sha256:[0-9a-f]{64}")
-"""How an attachment id is recognised **in a log, by its shape**.
+"""How an attachment id is recognized **in a log, by its shape**.
 
 Deliberately not a list of the keys that carry one. Three producers already spell
 it differently — `attachment/uploaded` writes `attachmentId`, the media notices
@@ -340,7 +340,7 @@ MIN_AGE = 86_400.0
 """How long a blob must have been on disk before it may be collected, in seconds.
 
 **Not a retention policy, and the difference is the whole design of this
-command.** Age never *authorises* collection here — a blob a stored log
+command.** Age never *authorizes* collection here — a blob a stored log
 references is kept however old it is, which is the constraint P7-01 wrote down
 before anything was implemented. What this covers is the window between a blob
 being written and the log that mentions it being written: a person can drop a
@@ -386,7 +386,7 @@ class Blob:
 class AttachmentSurvey:
     """What is stored, what still points at it, and what may go.
 
-    Every count is reported rather than summarised into a verdict, because the
+    Every count is reported rather than summarized into a verdict, because the
     person reading it is deciding whether to pass `--remove` and the number that
     decides it — how much of the store was actually read — is the one a summary
     would drop.
@@ -512,9 +512,9 @@ def survey_attachments(
     half of `SessionPersistence`, so a store satisfies it by being one.
 
     **Unchained reads, one log at a time.** `read_own` rather than `read` is not
-    an optimisation, it is the correct primitive for this question twice over: the
+    an optimization, it is the correct primitive for this question twice over: the
     union of references over every stored log is the same set as the union over
-    every materialised chain, so following parents would re-read an ancestor once
+    every materialized chain, so following parents would re-read an ancestor once
     per descendant to learn nothing new — and a chained read *fails* when an
     ancestor is missing, which would turn one damaged log into an unreadable
     subtree and refuse a collection that is perfectly safe to make.

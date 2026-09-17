@@ -92,7 +92,7 @@ The loop knows nothing about any of this — compaction attaches to
 * It does not decide when. That is a policy row reading
   [`ctx.token_meter`](token_meter.md) pressure.
 * It does not touch plugin state. See notes, above.
-* It does not summarise *as an agent*. The summarizer is one model call today;
+* It does not summarize *as an agent*. The summarizer is one model call today;
   making it a full agent turn — able to chunk a long range or read the spilled
   history file — is its own row, deferred because *whose loop*, *whose log* and
   *whose namespace* all have to be settled first.

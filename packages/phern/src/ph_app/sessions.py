@@ -222,7 +222,7 @@ def recorded_cwd(sessions_dir: Path, session_id: str) -> str:
 
     Filesystem-shaped, like `session_summaries` above and for the same reason
     stated there: a backend that keeps sessions elsewhere answers `""` and the
-    root mounts where the deployment's profile says, which is today's behaviour.
+    root mounts where the deployment's profile says, which is today's behavior.
     """
     path = locate_session(sessions_dir, session_id)
     if path is None or not path.is_file():

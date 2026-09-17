@@ -106,7 +106,7 @@ this instead of re-deriving it.
 `slot=` is one caller's fair share. What the *machine* can carry is a different
 question with a different owner, so it is row config rather than an argument a
 producer passes — one a producer could forget to pass, or quote differently from
-its neighbour:
+its neighbor:
 
 ```yaml
 - id: jobs

@@ -193,7 +193,7 @@ never runs code. That is the plain harness, and it is a supported posture.
 ## Tests
 
 `tests/` — 75 modules, the largest suite in the workspace. Three worth knowing
-about, because they enforce rules rather than behaviour:
+about, because they enforce rules rather than behavior:
 
 - `test_layering.py` — the forbidden-import rule above;
 - `test_keys.py` — every `ctx.provide(...)` in this package has a typed key in

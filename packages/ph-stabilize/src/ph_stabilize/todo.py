@@ -525,7 +525,7 @@ def _content(entry: Mapping[str, Any]) -> str:
     `_witnessed`'s `was` map, `_checked`'s edge table — and it was spelled out
     fifteen times in two spellings. One reader, for `_recorded`'s stated reason:
     a key extracted fifteen ways is fifteen places to drift the day it is
-    normalised (`.strip()`) or renamed.
+    normalized (`.strip()`) or renamed.
     """
     return as_str(entry.get("content"))
 
@@ -560,7 +560,7 @@ def _carried(
 
     **The model's arguments never carry `source`.** It is read from the list the
     log already holds and put back here, so a procedure cannot be forged into
-    existence or labelled away — the same shape `worked` uses, and for the same
+    existence or labeled away — the same shape `worked` uses, and for the same
     reason: a claim the claimant issues about itself is not evidence.
 
     Three things are refused: dropping a seeded step, reordering them, and

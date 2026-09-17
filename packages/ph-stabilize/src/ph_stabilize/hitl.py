@@ -210,7 +210,7 @@ async def apply(ctx: Context, config: Config) -> None:
 
         A profile writes `run_code` because that is the *reserved* transport name,
         but the registry renames the transport in place to whatever a presentation
-        row calls it — so a `run_code` entry is also honoured for the presented
+        row calls it — so a `run_code` entry is also honored for the presented
         name, and the lookup is scope-aware because an agent-shadowed registration
         is a different tool with the same name.
         """

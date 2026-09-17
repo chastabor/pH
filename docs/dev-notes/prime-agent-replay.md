@@ -40,7 +40,7 @@ the durable artifact.
 Neither fixture contains a single `ipython` call or an `rlm(...)` spawn. Both are
 prime-agent's coding agent driving four native tools. That reframes the whole
 exercise: the replay is a statement about **surface translation**, not about RLM
-behaviour, and it exercises precisely the surface C1–C3 replaced.
+behavior, and it exercises precisely the surface C1–C3 replaced.
 
 It also means the two fixtures cannot show the RLM-specific diffs. That is
 recorded below rather than glossed, because "the fixture did not exercise it" and
@@ -88,7 +88,7 @@ is what makes it deterministic rather than incidental.
 ### `access-default` — expected, **not observable in these fixtures**
 
 pH gives a child `access="read"` unless it asks otherwise (E4), and records the
-downgrade when no workspace tier can honour a `write`. Prime Agent had no such
+downgrade when no workspace tier can honor a `write`. Prime Agent had no such
 concept. Neither fixture delegates, so neither shows it. The test asserts this
 explicitly — if a future fixture spawns a child, the assertion fails and this
 section needs rewriting rather than quietly becoming stale.

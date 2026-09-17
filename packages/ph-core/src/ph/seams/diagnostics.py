@@ -14,7 +14,7 @@ job is to be complete.
 difference is what it is read *for*: a footer field answers "where am I now" on
 every spinner frame, so it must be cheap; a diagnostic answers "what is this
 deployment" once, at a person's request, so it may spawn a subprocess or stat a
-tree. Two seams rather than one parameterised seam, because a field that quietly
+tree. Two seams rather than one parameterized seam, because a field that quietly
 became expensive would take the footer down with it.
 
 **Rows, not a sentence.** `read()` returns `(label, value)` pairs — the shape
@@ -24,7 +24,7 @@ agent) says them as rows rather than by inventing a delimiter the printer has to
 learn.
 
 **No severity.** §12 Q10 is explicit that `phern doctor` prints the tier's three
-columns "rather than a severity colour", because a colour invites a reader to
+columns "rather than a severity color", because a color invites a reader to
 skip the sentence — and the sentence is the entire point of E1. So there is no
 `level` here, deliberately, where `tui_status` has one.
 
@@ -56,7 +56,7 @@ log = logging.getLogger("ph.seams.diagnostics")
 ID_MAX = 32
 """How long a section id may be.
 
-Per-seam, as `_names` intends — it parameterises the bound precisely so each
+Per-seam, as `_names` intends — it parameterizes the bound precisely so each
 registry states its own. 32 is generous for a heading a person reads down the
 page, and matching the two sibling registries costs nothing here."""
 

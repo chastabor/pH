@@ -93,7 +93,7 @@ def locate(root: Path, *, home: Path) -> list[tuple[Path, str, tuple[int, int]]]
         seen.add(candidate)
         state = _state(candidate)
         if state is not None:
-            # `home` is last, and labelled for what it is: the same file reached
+            # `home` is last, and labeled for what it is: the same file reached
             # both ways is one instruction, not two.
             found.append((candidate, "user" if directory == home else "project", state))
     return found

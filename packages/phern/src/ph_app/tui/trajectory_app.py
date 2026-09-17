@@ -81,7 +81,7 @@ def _lineage_of(path: Path) -> tuple[SessionHeader, list[SessionEvent]]:
     a row's `source_seq` is a position in the whole conversation, not in whatever
     file happened to hold it.
 
-    **Through `materialise`, not through `JsonlSessionStore`**, even though the
+    **Through `materialize`, not through `JsonlSessionStore`**, even though the
     store is where `read` now does this. The store addresses a log as
     `<root>/<id>.jsonl`, and this view deliberately opens *any* path — "a
     fixture, a copy someone sent", per this module's own docstring — so routing

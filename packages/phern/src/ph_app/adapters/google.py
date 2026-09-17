@@ -101,7 +101,7 @@ ACCEPTED_MEDIA: tuple[str, ...] = (
 """The default for `Config.accepts` — what this provider's own models take.
 
 The widest of the three, and video is the entry that matters: it is the format
-that made upload-and-reference a row rather than an optimisation, and until this
+that made upload-and-reference a row rather than an optimization, and until this
 adapter existed no route pH shipped could declare it honestly."""
 
 UPLOADED_MEDIA: tuple[str, ...] = (
@@ -257,7 +257,7 @@ class GoogleAdapter:
     Self-limiting rather than capped: an entry is written only when the readiness
     budget runs out, and removed the moment the file is usable or turns out to be
     gone — so it holds what this process is still waiting on and nothing else. A
-    restart loses it and pays the transfer again, which is exactly the behaviour
+    restart loses it and pays the transfer again, which is exactly the behavior
     this replaced."""
 
     def _headers(self) -> dict[str, str]:
@@ -291,7 +291,7 @@ class GoogleAdapter:
         again. Now the name is remembered and the next attempt polls it.
 
         Failure of any kind here is caught by `load_handles` and the attachment
-        goes inline — so the worst outcome of a slow provider is the behaviour
+        goes inline — so the worst outcome of a slow provider is the behavior
         every route had before the row.
         """
         spent = self._spent.get(ref.attachment_id, 0)

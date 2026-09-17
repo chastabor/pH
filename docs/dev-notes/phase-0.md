@@ -85,7 +85,7 @@ Cordis waterfall listeners rewrite by mutating a shared payload object. pH's
 payloads are frozen values (`GenerateOptions`, `SessionEvent`), so that door is
 closed by design. Instead `next()` optionally takes replacement arguments.
 
-This is a strict superset of cordis's behaviour and it is more legible: a
+This is a strict superset of cordis's behavior and it is more legible: a
 listener that rewrites a request says so at the call site, rather than by
 mutating an argument three frames up. Phase 1's retry and replay adapters both
 need it.
@@ -129,7 +129,7 @@ and accepting it would make two encodings of one meaning.
 ### 8. A loop request is one that names no other purpose
 
 The I3 invariant needs to know which requests it governs. The first draft put a
-`loop_request: bool` on `GenerateOptions` — set by the loop, honoured by the
+`loop_request: bool` on `GenerateOptions` — set by the loop, honored by the
 check — which made the invariant opt-in by the party it polices: a middleware
 that rebuilt the request and left the flag at its default passed untouched.
 
@@ -177,7 +177,7 @@ oversight.
 ## Known sharp edges
 
 * **`emit` with an async listener** schedules a task and does not await it,
-  which is cordis's behaviour. `ctx.drain()` exists for shutdown. Anything that
+  which is cordis's behavior. `ctx.drain()` exists for shutdown. Anything that
   must be awaited belongs on `parallel` or `serial`, not `emit`.
 * **`ctx.reconcile()` is not reentrant** — calling it from inside a plugin's
   `apply` would re-enter the fixpoint loop. Nothing does today.

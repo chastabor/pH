@@ -144,11 +144,11 @@ class _Sandbox:
         """`allow`/`revoke`, which differ by a verb and a set operation and nothing else.
 
         **One path through validation, for both directions**, which is the point of
-        writing it once: `allow host` normalised through `_valid_host` (which
+        writing it once: `allow host` normalized through `_valid_host` (which
         lowercases) while `revoke host` compared the raw argument, so
         `/sandbox allow host GitHub.com` stored `github.com` and
         `/sandbox revoke host GitHub.com` answered that it was never on the list.
-        Whether an entry is normalised is a property of the *kind* of entry, and now
+        Whether an entry is normalized is a property of the *kind* of entry, and now
         it is spelled once per kind.
         """
         kind, _, value = rest.strip().partition(" ")

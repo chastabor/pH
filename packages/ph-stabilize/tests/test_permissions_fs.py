@@ -676,7 +676,7 @@ async def test_a_write_named_through_a_symlink_into_the_workspace_never_asks(
     """**Both sides of the boundary are one spelling, and only one of them is
     canonical by construction.**
 
-    Workspace roots are canonicalised where they are minted (`ph.paths.canonical`),
+    Workspace roots are canonicalized where they are minted (`ph.paths.canonical`),
     because the kernel matches the path it resolves. The *candidate* is not:
     `FsService.resolve` passes an absolute path through as the model authored it,
     deliberately. So a path naming this agent's own tree through a link — which is
@@ -769,7 +769,7 @@ async def test_an_agent_with_no_workspace_is_unaffected(
 ) -> None:
     """No workspace, no scope to be outside of.
 
-    A profile that layers this row without the lifecycle gets today's behaviour
+    A profile that layers this row without the lifecycle gets today's behavior
     rather than a boundary drawn around a directory nobody chose.
     """
     ctx = await _scoped(mount, tmp_path)

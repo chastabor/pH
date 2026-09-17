@@ -171,7 +171,7 @@ def child_is_live(row: Mapping[str, Any]) -> bool:
     `deleted` and leaves `status` alone — so both have to be read, which is the
     other half a hand-written copy got wrong.
 
-    An unrecognised status counts as **live**, deliberately: a caller that
+    An unrecognized status counts as **live**, deliberately: a caller that
     releases a parent on the strength of this must fail towards keeping one
     alive. Getting it backwards abandons a running child; getting it this way
     costs memory until the child settles.
@@ -338,7 +338,7 @@ class SubagentRun(WireForm):
 
     The fields are the admission facts a parent can act on immediately: what to
     call it, where its log is, and which guarantees it actually got. `granted`
-    may differ from what was asked when the available tier cannot honour the
+    may differ from what was asked when the available tier cannot honor the
     request, and it is the value the roster and the child's own prompt report.
     """
 
@@ -930,7 +930,7 @@ class SubagentService:
         a seam that answered it for a caller who said nothing would be choosing
         one. The daemon states it beside the root's own ladder
         (`ph_app.daemon.recovery.CHILD_RETRY_LIMIT`), which is where somebody
-        tuning restart behaviour will already be looking.
+        tuning restart behavior will already be looking.
         """
         session = parent.session
         if session is None:

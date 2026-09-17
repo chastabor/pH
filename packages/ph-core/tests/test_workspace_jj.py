@@ -2,7 +2,7 @@
 
 Real `jj`, real workspaces, no mocks — `test_workspace_git.py`'s argument, and it
 applies harder here. Every interesting thing this provider relies on is jj's own
-behaviour and none of it is obvious from the documentation: that a workspace
+behavior and none of it is obvious from the documentation: that a workspace
 forked from the working-copy commit is *rebased and staled* by the parent's next
 keystroke, that a bookmark follows its commit through a snapshot without being
 told to, that `git export` from a secondary workspace reaches the colocated repo.
@@ -53,7 +53,7 @@ async def _tiered(mount: MountProfile, tmp_path: Path, *extra: dict[str, Any]) -
 
     The repository goes under `tmp_path`, never `ctx.fs.root` — that is the
     *process's* directory, which for a test run is this checkout. A `base` taken
-    from it would have every test here initialising jj inside pH's own tree.
+    from it would have every test here initializing jj inside pH's own tree.
     """
     ctx = await mount(TIER_ROW, *extra)
     return ctx, await jj_repo(ctx, tmp_path / "repo")
@@ -112,7 +112,7 @@ async def test_a_child_starts_from_the_parents_work_in_progress(
 async def test_the_parent_may_keep_working_without_staling_its_children(
     mount: MountProfile, tmp_path: Path
 ) -> None:
-    """The trap `_fork_point` exists to avoid, pinned as behaviour rather than as a
+    """The trap `_fork_point` exists to avoid, pinned as behavior rather than as a
     comment.
 
     Forking a child from the parent's working-copy commit is the obvious reading
@@ -581,7 +581,7 @@ async def test_the_operation_log_keeps_a_restore_point_reachable(
     operation is — so the restore point survives by the same mechanism that lets a
     person undo anything jj did.
 
-    Pinned as behaviour rather than as a comment: a lot of work happens between the
+    Pinned as behavior rather than as a comment: a lot of work happens between the
     capture and the revert, and each step is a jj command rewriting the working-copy
     commit. If reachability depended on being the current commit, the second capture
     alone would have taken the first out.
@@ -1147,7 +1147,7 @@ async def test_a_provisioned_material_stays_out_of_what_an_agent_contributes(
 async def test_a_file_the_base_already_tracks_reaches_children_and_that_is_the_tier(
     mount: MountProfile, tmp_path: Path
 ) -> None:
-    """**The non-guarantee, stated as behaviour so nobody discovers it by merging.**
+    """**The non-guarantee, stated as behavior so nobody discovers it by merging.**
 
     A file sitting untracked in the base is in the base's *working-copy commit*,
     because that is what jj means by a working copy — jj put it there before pH

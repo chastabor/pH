@@ -20,7 +20,7 @@ parameters:
     hint: Do everything except tag, push, or publish.
 steps:
   - "Pre-flight: confirm a clean tree, no merge in progress, and the toolchain present"
-  - "Analyse every commit since the last tag and classify it"
+  - "Analyze every commit since the last tag and classify it"
   - "Write the CHANGELOG entry, and stop for review before continuing"
   - "Bump the version in every file that declares one, and report before and after"
   - "Run the full test suite; abort here if anything fails"
@@ -41,7 +41,7 @@ command you run with its exit code.
 - When `{{parameters.dry-run}}` is true, never push a tag or publish anything.
   Print what would have happened instead.
 - Never commit a secret, `.env`, or `*.pem` as part of the release.
-- Before the final step, summarise **exactly** what approving will do.
+- Before the final step, summarize **exactly** what approving will do.
 
 ## 1. Pre-flight
 
@@ -50,7 +50,7 @@ or rebase is in progress, the branch tracks a remote, and the project's toolchai
 is available. Report each check and its result. If any fails, stop and say which
 one and how to fix it.
 
-## 2. Analyse the changes
+## 2. Analyze the changes
 
 Find the last release tag with `git describe --tags --abbrev=0`; if there is no
 tag, use the first commit (`git rev-list --max-parents=0 HEAD`). List what has

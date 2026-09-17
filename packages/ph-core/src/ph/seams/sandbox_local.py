@@ -169,13 +169,13 @@ about a command that actually failed.
 
 
 # The door — how a confined command reaches the egress proxy — is **split between a
-# declaration and a behaviour**, because the row needs the two at different times.
+# declaration and a behavior**, because the row needs the two at different times.
 #
 # `needs_loopback` is `enforcement`'s shape and `enforcement`'s stated reason: the
 # row must know *before* it has confined anything whether to open a TCP listener,
 # and a property discoverable only by running something is not one a caller can act
 # on beforehand. `egress_blocker` and `egress_probe` are `DenialReader`'s shape:
-# behaviour the backend owns, because what proves a door works is a fact about that
+# behavior the backend owns, because what proves a door works is a fact about that
 # door. A single `Literal["shim", "loopback"]` switch read by the row conflated the
 # two, and adding Landlock meant editing a `Literal` plus every `if` that matched
 # on it with nothing checking you had found them all.
@@ -230,7 +230,7 @@ end-to-end test. The proxy reads the user and ignores this."""
 def proxy_url(egress: Egress) -> str:
     """`http://<agent>:ph@127.0.0.1:<port>` — the agent in the user part.
 
-    Every client that honours the URL sends the user back as Basic credentials
+    Every client that honors the URL sends the user back as Basic credentials
     on each request, which is how the proxy knows whose session a refusal belongs
     in without a side channel. Percent-encoded, because an agent id is a session
     id and a session id is whatever the store made it.
@@ -442,7 +442,7 @@ def seatbelt_profile(policy: SandboxPolicy) -> str:
     The door is **one remote and nothing else**: `(remote ip "localhost:<port>")`,
     the proxy's own loopback listener. Measured: the allowed port answers, the port
     beside it is `Operation not permitted`, DNS is refused, a raw `curl` to an
-    address cannot connect, and `curl` honouring `HTTPS_PROXY` gets the proxy's own
+    address cannot connect, and `curl` honoring `HTTPS_PROXY` gets the proxy's own
     403. `localhost` is the spelling Seatbelt takes — a literal `127.0.0.1:<port>`
     is a syntax error — and it admits `::1` as well, where nothing listens.
 

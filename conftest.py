@@ -42,7 +42,7 @@ what makes them importable by name at startup. It also fixed a latent bug
 the trees had documented in five separate comments: `from conftest import
 ROW` resolved to whichever conftest won the name under full collection, so
 ph-rlm's row constants were reachable from the app's tree and vice versa.
-`pytest_plugins` is only honoured in a *root* conftest, which is the other
+`pytest_plugins` is only honored in a *root* conftest, which is the other
 reason the registration lives here."""
 
 MountProfile = Callable[..., Awaitable[Context]]
@@ -317,7 +317,7 @@ def guest_coverage() -> Iterator[None]:
     **Requested, not autouse, and that is the whole design.** The first fix
     asked *where the test file lives* — `"ph-rlm" in str(request.node.path)` —
     to answer *does this test start a guest*, and a location is a poor proxy for
-    a behaviour twice over: `node.path` is absolute, so a checkout at
+    a behavior twice over: `node.path` is absolute, so a checkout at
     `~/src/ph-rlm/` armed the whole session and re-broke the three sandbox tests
     this exists to protect; and `packages/ph-app` became `packages/phern` in this
     very branch, so the same rename on `ph-rlm` would have disarmed the

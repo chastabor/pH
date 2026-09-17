@@ -81,7 +81,7 @@ this command has no business online, whatever the deployment permits — and
 `SandboxPolicy.network` is the *resolved* fact the backend reads, filled in by
 `effective()`. There is deliberately no way to spell "give me the network": §6.5
 caps a caller at what the deployment allows, so an asking field would have exactly
-one reachable behaviour. `network` defaults to `False`, so a policy handed straight
+one reachable behavior. `network` defaults to `False`, so a policy handed straight
 to a backend without passing through the seam is closed.
 
 ## Network: a namespace, then a door
@@ -101,7 +101,7 @@ macOS shares the host's loopback, there is no PID namespace for a shim to die wi
 proxy also listens on the host's `127.0.0.1:<port>` and the profile allows exactly
 `(remote ip "localhost:<port>")` and nothing else. No shim, no `socat`. Measured:
 the allowed port answers, the port beside it is `Operation not permitted`, DNS is
-refused, and `curl` honouring `HTTPS_PROXY` gets the proxy's own 403. The loopback
+refused, and `curl` honoring `HTTPS_PROXY` gets the proxy's own 403. The loopback
 listener exposes nothing the host does not already have — it tunnels only to hosts
 the deployment allows, which every local process can reach directly — and costs
 attribution only, since a local caller can name any agent in the proxy URL.
@@ -219,7 +219,7 @@ owns its door in three pieces: `needs_loopback`, which the row reads *before* it
 has confined anything to decide whether the proxy opens a TCP listener
 (`enforcement`'s shape, and its reason); and `egress_blocker` plus `egress_probe`,
 the prerequisite and the command that proves the door works (`DenialReader`'s
-shape — behaviour the backend owns). So a third backend adds a door without
+shape — behavior the backend owns). So a third backend adds a door without
 editing the probe.
 
 `sandbox-local` is the shipped one, and **both backends are verified against a

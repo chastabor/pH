@@ -327,7 +327,7 @@ async def test_the_allowed_paths_are_settled_once_where_they_are_registered(
     """**The spelling is the mint's, not the reader's.** `allowed_paths()` runs
     inside `effective`, so on every confined command *and* every gated write; a
     `realpath` there would be a syscall per configured directory per command, which
-    is the cost a memoised helper in the Seatbelt backend used to exist to avoid.
+    is the cost a memoized helper in the Seatbelt backend used to exist to avoid.
     Settling it at registration makes the read a pure `is_dir` filter and still
     hands every consumer the one spelling the kernel matches.
     """

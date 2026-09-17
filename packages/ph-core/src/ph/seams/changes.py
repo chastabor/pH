@@ -254,7 +254,7 @@ async def tree_state(ctx: Context, root: Path, *, since: str = "") -> TreeState:
         if backend == "jj":
             return await _jj_state(ctx, root, since=since)
     except Exception:
-        # Logged, not raised. This is an optimisation: a caller who loses it
+        # Logged, not raised. This is an optimization: a caller who loses it
         # reads every file, which is what it did before this module existed.
         log.warning("ph.seams.changes: %s could not describe %s", backend, root, exc_info=True)
     return TreeState()
@@ -398,7 +398,7 @@ async def _gathered(
     """Await independent VCS calls concurrently, keyed by name.
 
     They do not depend on each other, and each is a process spawn — the git
-    calls measured 3 ms and 9 ms, so serialising them spends the shorter ones'
+    calls measured 3 ms and 9 ms, so serializing them spends the shorter ones'
     latency for nothing.
 
     Keyed by name rather than by position because the caller reads three of them:

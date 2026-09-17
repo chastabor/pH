@@ -203,7 +203,7 @@ async def test_a_video_reaches_a_route_that_accepts_one(
 
     The transport was built and proven a phase ago against a PDF; what could not
     be proven was the case that made upload-and-reference a row rather than an
-    optimisation. The clip goes up through the resumable protocol, the request
+    optimization. The clip goes up through the resumable protocol, the request
     carries a `fileData` part naming it, and the bytes are nowhere in the body.
     """
     ctx: Context = await mount(ROUTE, profile=PROFILE)
@@ -333,7 +333,7 @@ async def test_a_remembered_file_that_is_gone_is_uploaded_again(
     A file deleted from another session, an expiry, a revoked key — each makes the
     remembered name unusable, and each answers on the request that asks about it
     first. Anything other than a readable record drops the entry and pays the
-    transfer, so the worst case is exactly the behaviour this replaced. The same
+    transfer, so the worst case is exactly the behavior this replaced. The same
     is true across a restart, which keeps no memo at all.
     """
     wire.processing = 3

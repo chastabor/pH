@@ -4,7 +4,7 @@ Two claims, and the second is the one the gate names.
 
 **The report prints §4.8's table, not a paraphrase of it.** E1's failure is a
 tier *name* overstating what the tier bounds, so the sentences are asserted
-verbatim against `TIERS` — a doctor that summarised them would be free to drift
+verbatim against `TIERS` — a doctor that summarized them would be free to drift
 into exactly the overstatement the row exists to prevent, and it would look
 tidier while doing it.
 
@@ -167,7 +167,7 @@ async def test_the_effective_tier_is_reported_not_the_configured_one(mount: Moun
 
 
 async def test_strict_reports_whether_it_is_satisfied(mount: MountProfile) -> None:
-    """`strict` that cannot be honoured refuses to start (E8), so a *running*
+    """`strict` that cannot be honored refuses to start (E8), so a *running*
     process reporting `strict: yes` is one where it is satisfied — and saying so
     is what distinguishes "confined" from "asked to be"."""
     ctx = await mount({"id": "containment", "config": {"tier": "sandbox"}})

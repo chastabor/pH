@@ -224,7 +224,7 @@ async def test_doctor_states_what_an_overlay_bounds_not_what_its_rung_sells(
 
 
 async def test_git_checkpointing_declines_an_overlay(mount: MountProfile, tmp_path: Path) -> None:
-    """**The gate, asserted by behaviour rather than by reading the source.**
+    """**The gate, asserted by behavior rather than by reading the source.**
 
     `workspace_git` captures with `write-tree` against a `GIT_INDEX_FILE`, which
     is meaningless over a FUSE mountpoint — a checkpoint that silently captured
@@ -232,7 +232,7 @@ async def test_git_checkpointing_declines_an_overlay(mount: MountProfile, tmp_pa
 
     The first version of this counted a string in `workspace_git.py` through a
     cwd-relative path, which passes for a module that keeps the wording and
-    changes the behaviour, fails for one that refactors the gate while behaving
+    changes the behavior, fails for one that refactors the gate while behaving
     correctly, and errors outright when pytest runs from anywhere but the repo
     root. `tree_hash` answers the same question and is the thing that matters.
     """

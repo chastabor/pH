@@ -177,7 +177,7 @@ class AskDesk:
 
         The ask is keyed by the same string `pending_approvals` uses — the call
         id, or the tool name when there is none — so a question re-posed after a
-        restart is recognisably the one the log is still holding open.
+        restart is recognizably the one the log is still holding open.
         """
         ask_id = request.call_id or request.tool_name
         result = ApprovalAskReply.model_validate(

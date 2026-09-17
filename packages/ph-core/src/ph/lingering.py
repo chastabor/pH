@@ -16,7 +16,7 @@ one fix for both:
   socket at …" and is told to start one, while the first daemon is still
   holding this user's session leases (I-5) and will refuse the second every
   root it already owns. Nothing anywhere says the word "logout".
-* `KillUserProcesses=yes` (systemd's own default) — the daemon is signalled at
+* `KillUserProcesses=yes` (systemd's own default) — the daemon is signaled at
   logout, which is at least a teardown that runs, but is not what "long
   running" promised either.
 
@@ -205,7 +205,7 @@ class RuntimeLifetime:
         # Both sides canonical: `path` comes from `resolve_roots`, which resolves,
         # so comparing it against a raw `$XDG_RUNTIME_DIR` would answer `False` on
         # any host reaching it through a link (`/var/run/user/N` where `/var/run`
-        # is `/run`) — the same spelling drift the roots were canonicalised to end.
+        # is `/run`) — the same spelling drift the roots were canonicalized to end.
         return bool(self.runtime_dir) and is_under(self.path, canonical(Path(self.runtime_dir)))
 
     @property

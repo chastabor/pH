@@ -171,7 +171,7 @@ class _Layer:
     value a registration record and let the same definition be registered twice
     with one of them lying. Written and popped only by `_claim`, and only *after*
     the mutation it describes has been accepted: a parallel dict is the one shape
-    the five sibling registries rejected in favour of a `_Registered(value, by)`
+    the five sibling registries rejected in favor of a `_Registered(value, by)`
     record, and this is the hazard they were avoiding. It survives here because
     `_claim`'s `mutate`/`undo` closures are built before the pair is known, so
     folding the pair into `tools` would mean threading it through all six call

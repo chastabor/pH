@@ -20,7 +20,7 @@ adapter, the tool registry and the session log are not framework internals — t
 are rows in a YAML profile, mounted as plugins into a dependency-injection tree,
 and any of them can be replaced without forking anything else.
 
-**Two axes organise everything below, and dsh's notes name them: space and
+**Two axes organize everything below, and dsh's notes name them: space and
 time.** *Space* is the topology — the `Context` tree, what is mounted, which
 service each plugin resolved, which realm an agent runs in. cordis owns it, and
 `phern doctor` reports it. *Time* is the session log — the immutable, append-only
@@ -452,7 +452,7 @@ routing mechanism" (`seams/approval.py`).
 > takes a **`reachable`** callable, because whether anyone is there to ask is no
 > longer knowable from the fact that a listener registered: the desk is reachable
 > only while a front end is attached, and `user_questions.ask` appends nothing at
-> all when nothing is `attended` (P7-09). And an answer has to be **serialisable** —
+> all when nothing is `attended` (P7-09). And an answer has to be **serializable** —
 > `Edited` and `Responded` are frozen dataclasses, so `answer_to_wire` is the
 > inverse of the decoder the seam already had. With nobody attached, an approval
 > does *not* resolve: the ask parks, which is what the log already described —
@@ -525,7 +525,7 @@ table**. A new seam cannot join unchecked. Highlights:
 - `test_every_scoped_method_is_accounted_for` — every `scope=`-taking
   method is in `RECIPES`, `NOT_A_LIFETIME`, or `NOT_EXERCISED`.
 - `test_a_registration_is_an_effect_of_the_row_that_made_it` — the
-  behavioural gate: row registers, row unmounts, **the seam's own context did not
+  behavioral gate: row registers, row unmounts, **the seam's own context did not
   grow an effect**.
 - `test_a_boundary_parameter_never_has_a_default` — §2.8's durable half,
   covering both parameters and dataclass fields.
@@ -912,7 +912,7 @@ the child it revoked deserves an answer other than silence.
 `SETTLED_STATUSES` is a real constant for a real reason: a hand-written copy was
 once wrong in three of its four members and pinned every parent forever
 (`seams/subagents.py`). `child_is_live` checks the tombstone first and
-treats **an unrecognised status as live** — failing toward keeping a child alive.
+treats **an unrecognized status as live** — failing toward keeping a child alive.
 
 **Depth** is `RLM_MAX_DEPTH = 2` ("depth 0 delegates, depth 1 delegates, depth 2
 does the work"), read from the **typed** header field rather than the wire alias,
@@ -1038,7 +1038,7 @@ child (`tests/test_subagent_grant.py`).
 
 | Tier | Kind handed out | `repo_writable` | Bounds an absolute-path `open()`? |
 |---|---|---|---|
-| `advisory` | `shared` | `True` | no — honoured by *saying so* |
+| `advisory` | `shared` | `True` | no — honored by *saying so* |
 | `worktree` | `worktree` / `worktree-ephemeral` | `True` for both | no |
 | `worktree` | `overlay` / `overlay-ephemeral` | `True` for both | no — a **peer** of the row above, not a rung between it and `sandbox` |
 | `sandbox` | `readonly-scratch` | `False` | yes, at the kernel |
@@ -1162,7 +1162,7 @@ retain-by-default-and-withdraw rather than retain-on-failure.
 
 **How it is enforced, not just intended.** `tests/test_registration_ownership.py`
 walks every module and requires every scoped method and provider slot to be
-classified; the behavioural gate mounts a row, registers through it, unmounts,
+classified; the behavioral gate mounts a row, registers through it, unmounts,
 and asserts **the seam's own context did not grow an effect**. A lint additionally
 refuses `subprocess.Popen` and `tempfile.mkdtemp` outside the seams, "because the
 fiftieth plugin author will not have read §4.9" (`resources.py`).
@@ -1358,7 +1358,7 @@ log does not have. The generation from the `session/new` reply keys the
 mirror at construction, so `cursor_of` gives the same answer on both ends,
 `stale()` runs on the client, and any `SessionFoldCache` consumer can be pointed at
 the mirror unchanged. Because the mirror is kept incrementally, a frame it cannot
-take desynchronises it silently where the rebuild used to refuse loudly — so
+take desynchronizes it silently where the rebuild used to refuse loudly — so
 `diverged` is a fact the screen path asks about rather than a counter that only
 quietens a log line.
 
@@ -1419,7 +1419,7 @@ a *prediction* with an expiry, and an append-only log cannot retract one. So the
 reconstructible from blobs the store still holds — while the *fact* that bytes
 left the machine for a named provider is appended as `attachment/uploaded`,
 because that is what a person auditing their data comes for. A handle the
-provider stops honouring is detected mid-request, forgotten, and raised as
+provider stops honoring is detected mid-request, forgotten, and raised as
 `FILE_EXPIRED`, which `llm-retry` already treats as transient: the retry rebuilds
 against a fresh upload rather than losing the turn.
 
@@ -1450,7 +1450,7 @@ Stated here rather than left to be discovered, per the codebase's own rule.
 | **No chunked upload.** `attachment/put` carries the whole file in one frame, capped at 5 MiB; a larger one is refused by name rather than truncated. Both doors say so — the browser gets a sentence, `/attach` gets `attachment_too_large` | P7-06, stated |
 | **A screen a third-party row contributes is invisible to a remote front end.** `ScreenDefinition.build()` cannot travel, so `screens/list` is intersected with what the client can draw and everything else is silently not offered. Every screen pH ships is drawable; a row's own is not | P5-15, gated by `test_a_screen_this_build_cannot_draw_is_not_offered`; P7-07 closes it |
 | **`repaired()` closes a turn parked on a human as interrupted.** The ask is in the log (`approval/asked` with no decision) and `pending_approvals`/`pending_questions` fold it, but nothing reads that fold on *resume* — only `AskDesk.join` re-poses, across an attach. Leaving the turn open is unsafe until something does, because the model's `tool_use` block is still unanswered — it rides the *assistant message*, and a message carrying one with no matching `tool_result` is a log several providers reject (`tool/call` is not surface-eligible and no provider sees it; since P7-15 it is written after the gate, so a parked turn has none and repairs as `TOOL_NOT_STARTED`) | P5-13, deferred; gated by `test_a_turn_parked_on_a_human_is_closed_as_interrupted` so it cannot go quietly false |
-| **`freeze_json_value` re-copies an already-frozen tree, and the fast path is refused on purpose.** Every container is rebuilt on every pass, so a re-admitted tree pays a second structural copy — 0.95 µs for a streamed chunk, **232 µs for a 500-node tool result**, scaling with node count rather than bytes. Four paths pay it: `Session.admit` per wire event on a remote front end, `Session(seed=…)`, `resume_session` on every rehydrate, and `SessionStore.fork`. A validation-only pre-walk that returns the input when it is already frozen measured at about half the cost. It is **not built**, because this function is where A1 is enforced: a second route through the gate is correct only insofar as its "already frozen?" predicate is, nothing in the type system tells a `MappingProxyType` over a frozen tree from one over a live dict, and a predicate like that can only be validated by enumerating hostile shapes in tests — the wrong kind of guarantee for a gate. Waiting on a design that is **structurally** safe: a frozen tree that carries its own proof (a distinct wrapper the walker recognises by identity), or a freeze idempotent by construction | deferred by decision; measured and documented in `session/json.py`, P6-44 |
+| **`freeze_json_value` re-copies an already-frozen tree, and the fast path is refused on purpose.** Every container is rebuilt on every pass, so a re-admitted tree pays a second structural copy — 0.95 µs for a streamed chunk, **232 µs for a 500-node tool result**, scaling with node count rather than bytes. Four paths pay it: `Session.admit` per wire event on a remote front end, `Session(seed=…)`, `resume_session` on every rehydrate, and `SessionStore.fork`. A validation-only pre-walk that returns the input when it is already frozen measured at about half the cost. It is **not built**, because this function is where A1 is enforced: a second route through the gate is correct only insofar as its "already frozen?" predicate is, nothing in the type system tells a `MappingProxyType` over a frozen tree from one over a live dict, and a predicate like that can only be validated by enumerating hostile shapes in tests — the wrong kind of guarantee for a gate. Waiting on a design that is **structurally** safe: a frozen tree that carries its own proof (a distinct wrapper the walker recognizes by identity), or a freeze idempotent by construction | deferred by decision; measured and documented in `session/json.py`, P6-44 |
 | `LlmRuntime.register_adapter` uses no claiming helper and takes no `scope=` — the one provider slot outside the ownership sweep | documented in place |
 | **Per-service isolation is implemented** (`isolate:` on a row, §2.7 — dsh's `isolate.fs`), but a realm's provider cannot be **swapped mid-session**: dsh's example — "we start processing sensitive data, so we swap the filesystem to read-only and the agent still sees the same filesystem" — has no pH spelling. `fs.rebase` is a `claim_slot`, so the *root* can change under a stable `ctx.fs`; read-only is a `permissions-fs` rule or the `readonly-scratch` workspace kind, both fixed at mount. The mechanism a swap needs (`claim_slot` releasing to a new claimant) exists; no row drives it and nothing has asked for it. **Deferred by decision, not by omission**: it will be built when a use case shows up, and the use case will decide whether the answer is a provider swap, a rule, or a new realm | deferred until a use case |
 
@@ -1467,7 +1467,7 @@ Stated here rather than left to be discovered, per the codebase's own rule.
   invariants it is holding — and stops there. The reasoning this codebase records
   at length — the measurement, the defect that motivated a design, the
   alternative that was rejected and on what grounds — lives in the test that
-  holds the behaviour to account, next to an assertion that fails if the
+  holds the behavior to account, next to an assertion that fails if the
   reasoning stops being true. **The index into that reasoning is the filename,
   not a pointer**: `seams/workspace_git.py` is held by `tests/test_workspace_git.py`,
   and so on throughout. A `src/` docstring does not name its test file, because a

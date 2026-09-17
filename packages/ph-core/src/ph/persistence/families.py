@@ -6,7 +6,7 @@ it *is*. Two implementations whose docstrings have to assert they agree ("JSONL'
 rule exactly") are not a mechanism, and the two copies had already drifted before
 either shipped.
 
-Suffix-parameterised rather than shared by inheritance, because that is the only
+Suffix-parameterized rather than shared by inheritance, because that is the only
 thing the two backends actually differ by here.
 
 @module ph.persistence.families

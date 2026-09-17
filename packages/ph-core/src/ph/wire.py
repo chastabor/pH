@@ -209,7 +209,7 @@ def declarable_fields(dataclass_type: type) -> tuple[str, ...]:
 
 
 def declarable(instance: object) -> dict[str, Any]:
-    """The travelling half of a definition, as the kwargs of its schema.
+    """The traveling half of a definition, as the kwargs of its schema.
 
     A `schema()` built as `Schema.model_validate(declarable(self))` names no
     field, so a field added to the definition is carried without an edit — and,

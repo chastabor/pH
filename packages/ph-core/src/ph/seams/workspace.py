@@ -146,7 +146,7 @@ WorkspaceKind: TypeAlias = Literal[
   at release so the work can be exported onto a branch, `overlay-ephemeral`
   throws it away.
 
-An overlay is **not** a flavour of `worktree-ephemeral`: it contains the tree as
+An overlay is **not** a flavor of `worktree-ephemeral`: it contains the tree as
 it is, untracked and ignored files included, and its history is not git's, so
 `workspace_git` must decline it rather than run `write-tree` against a mountpoint.
 """
@@ -250,7 +250,7 @@ def writable_roots(workspace: Workspace) -> tuple[Path, ...]:
     the path it resolves — Seatbelt refused a workspace spelled `/var/folders/…` its
     own writes, because that is `/private/var/…` to the kernel — and a backend that
     re-spelled the set privately would have made the enforced boundary and the
-    prompted one two different strings. So the seam canonicalises every input it
+    prompted one two different strings. So the seam canonicalizes every input it
     mints roots from (`acquire`), and this returns what the seam handed out.
     """
     return (workspace.root, workspace.scratch)
@@ -749,14 +749,14 @@ class SnapshottingProvider(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class SharedWorkspaceProvider:
-    """`workspace-shared` — today's behaviour, and the floor under every tier.
+    """`workspace-shared` — today's behavior, and the floor under every tier.
 
     Returns `base` itself: mounting the seam changes nothing, no checkout, no copy,
     no cost. It is also the fallback for a provider that declines, which is why it
     lives beside the seam rather than in a row of its own — "there is always a
     workspace" cannot be a promise kept by a row a profile might not layer.
 
-    `access="read"` is honoured by *saying so*: the kind stays `shared` and
+    `access="read"` is honored by *saying so*: the kind stays `shared` and
     `repo_writable` stays `True`, because nothing here enforces anything.
     """
 
@@ -1053,7 +1053,7 @@ class WorkspaceSeam:
                 scratch=scratch,
                 access=access,
             )
-        # Owned *before* provisioning: materialising a dependency directory is
+        # Owned *before* provisioning: materializing a dependency directory is
         # thousands of syscalls, and running it before the `ctx.effect`
         # registration would leave the worktree existing with nothing to unwind
         # it — against I2, in the module that argues I2.
@@ -1610,7 +1610,7 @@ class WorkspaceRecord:
     session_id: str = ""
     """Whose log this came from. Not derivable from `agent_id` — a cross-session reader
     (the family fold, the collector) needs to get back to the log, and inferring it
-    from a sanitised directory name is the lossy round-trip `/workspaces` refuses to
+    from a sanitized directory name is the lossy round-trip `/workspaces` refuses to
     make.
     """
 
@@ -1780,7 +1780,7 @@ def latest_checkpoint(session: Session, agent_id: str) -> str:
     wants one restore point does not need a dict of every restore point, and
     building it copies each payload to discard all but the last — on a crash path
     that runs once per retry. It is not a reverse scan of `session.events`
-    either, which materialised a snapshot of the whole log to read one field;
+    either, which materialized a snapshot of the whole log to read one field;
     `Session.projection` keeps the fold and parses only what has arrived since.
 
     Scoped to the agent, which is the rule `/revert` already states: a restore point
@@ -2030,7 +2030,7 @@ async def lifecycle(ctx: Context, config: LifecycleConfig) -> None:
         return await next_()
 
     # Outermost, so a listener that reads or writes files during the step —
-    # compaction's summariser, a permissions row — sees the agent's own root
+    # compaction's summarizer, a permissions row — sees the agent's own root
     # rather than the process's.
     ctx.on("agent/pre-step", ensure, prepend=True)
 
@@ -2080,7 +2080,7 @@ async def apply(ctx: Context, config: Config) -> None:
     """Mount the seam with the shared provider as its floor.
 
     Named for the provider rather than for the seam, because there is no useful
-    "seam with no behaviour" state here: `sandbox-policy` can mount a seam whose
+    "seam with no behavior" state here: `sandbox-policy` can mount a seam whose
     `confine()` refuses, since refusing is a real answer, but an agent with no
     working directory is not.
     """

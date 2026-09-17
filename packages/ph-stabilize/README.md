@@ -55,7 +55,7 @@ tool.
 
 The one row that is **not** inert on arrival is `permissions-fs`: it ships a
 rule sending writes outside the agent's workspace to `interrupt`. That is E6's
-intended default rather than an oversight, but it is a behaviour change a
+intended default rather than an oversight, but it is a behavior change a
 deployment should know it inherited — `phern config --row permissions-fs` prints
 what is in force.
 

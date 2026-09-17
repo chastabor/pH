@@ -545,7 +545,7 @@ class GitWorktreeProvider:
         directory rather than a day.
 
         **A failure here cancels the removal, not the work.** The caller keeps the
-        tree, which is the pre-branch behaviour and the right fallback: an orphan is
+        tree, which is the pre-branch behavior and the right fallback: an orphan is
         worse than a clean disposal and better than a deletion.
 
         **Staged wide and then narrowed**, rather than by handing `add` the same

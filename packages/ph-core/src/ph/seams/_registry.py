@@ -48,7 +48,7 @@ def claim_key[T](
 ) -> Disposer:
     """Put `value` under `key`; the disposer removes it only while it is still there.
 
-    Parameterised so the value and the table it lands in have to agree. `Any`
+    Parameterized so the value and the table it lands in have to agree. `Any`
     here was the last hop of a chain that is otherwise checked end to end: a
     registry threads its element type through its own bucket and its `_register`,
     and then handed both to a helper that would take either from anywhere. Free
@@ -78,7 +78,7 @@ def claim_key[T](
 def claim_entry[T](owner: Context | Running, entries: list[T], value: T, *, label: str) -> Disposer:
     """Append `value`; the disposer removes **that object**, not one equal to it.
 
-    Parameterised for the reason `claim_key` above is: the type a registry took
+    Parameterized for the reason `claim_key` above is: the type a registry took
     care to thread through its bucket stopped being checked at this boundary.
 
     `list.remove` compares with `==`, which is identity for the closures and

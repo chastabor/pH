@@ -171,12 +171,12 @@ def _covered(ctx: Context, name: str, scope: Boundary) -> bool:
 
 
 def _brief(arguments: JsonValue) -> str:
-    """Enough of the arguments to recognise the call, never the whole payload.
+    """Enough of the arguments to recognize the call, never the whole payload.
 
     `Mapping`, not `dict`: the log freezes payloads into `MappingProxyType`,
     which is a `Mapping` and is *not* a `dict` instance — a `dict` check here
     silently rendered every call as `bash()` with the one detail a person needs
-    to recognise it stripped out. The same trap P4-05 hit reading a frozen
+    to recognize it stripped out. The same trap P4-05 hit reading a frozen
     argument tree.
     """
     if not isinstance(arguments, Mapping):

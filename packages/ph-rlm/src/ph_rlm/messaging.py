@@ -1,6 +1,6 @@
 """`rlm-messaging` — agent-to-agent messages, and the boundary on them (P3-12).
 
-Prime Agent's `agent_message.send` travelled over the comm channel, so the
+Prime Agent's `agent_message.send` traveled over the comm channel, so the
 nuclear-family check lived inside a handler where nothing else could see it.
 Here the send is a governed tool, which lets the boundary be the strongest thing
 the pipeline offers and the rate limit be the weakest — and those are

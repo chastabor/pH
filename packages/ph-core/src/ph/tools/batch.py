@@ -235,7 +235,7 @@ def _append_call(
     the model's own bytes in the ordinary case — re-encoding every call would
     change the log for a formatting difference, and a malformed string the model
     sent is preserved as text so the tool can report it (`parse_arguments`) — or
-    the substitution serialised the way the log serialises everything, since
+    the substitution serialized the way the log serializes everything, since
     there is no model text for it.
     """
     event = session.append(

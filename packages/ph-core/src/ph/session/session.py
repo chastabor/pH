@@ -620,7 +620,7 @@ class Session:
 
         The unfiltered form of `last_event_of`, and the accessor a "when did this session
         last do anything" question wants (P5-05's passivation sweeper). `events[-1]`
-        answers it too, at the cost of materialising a snapshot of the entire log to read
+        answers it too, at the cost of materializing a snapshot of the entire log to read
         one element — and the sweeper asks it of every root on every pass.
         """
         return self._log[-1] if self._log else None
