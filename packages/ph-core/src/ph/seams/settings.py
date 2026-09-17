@@ -18,7 +18,8 @@ from pathlib import Path
 import anyio
 
 from ..cordis import Context, plugin
-from ..json import PlainJsonValue, as_obj, loads, thaw_json
+from ..documents import read_document
+from ..json import PlainJsonValue, as_obj, thaw_json
 from ..keys import SETTINGS
 from ..paths import default_home_path, write_text_under
 from ..wire import WireModel
@@ -47,15 +48,11 @@ class SettingsService:
         list that reads as defaults and raises on the first write.
         """
         if not self._loaded:
-            try:
-                self._values = thaw_json(as_obj(loads(self.path.read_text(encoding="utf-8"))))
-            except FileNotFoundError:
-                self._values = {}
-            except (json.JSONDecodeError, OSError):
-                # A corrupt settings file must not stop the harness starting;
-                # defaults are always a valid answer for a preference.
-                log.warning("ph.seams.settings: %s is unreadable; using defaults", self.path)
-                self._values = {}
+            # A corrupt settings file must not stop the harness starting, which is
+            # `read_document`'s whole policy: absent or unreadable both answer
+            # `None`, and `as_obj` turns that — and a file whose top level is an
+            # array — into the empty tree.
+            self._values = thaw_json(as_obj(read_document(self.path)))
             self._loaded = True
         return self._values
 

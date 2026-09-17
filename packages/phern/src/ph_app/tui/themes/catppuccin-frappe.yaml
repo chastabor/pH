@@ -1,0 +1,57 @@
+# catppuccin-frappe — the Catppuccin Frappe palette, mapped onto pH's roles.
+#
+# `vars` is the palette as its authors publish it, whole: a role is re-pointed by
+# naming a different color below, and the four flavours differ only in this
+# block. Roles are pH's closed set (`TuiTheme`), so a role missing here is a
+# refusal at load rather than a color that silently defaults.
+#
+# Palette: https://github.com/catppuccin/catppuccin
+
+dark: true
+
+vars:
+  rosewater: "#f2d5cf"
+  flamingo:  "#eebebe"
+  pink:      "#f4b8e4"
+  mauve:     "#ca9ee6"
+  red:       "#e78284"
+  maroon:    "#ea999c"
+  peach:     "#ef9f76"
+  yellow:    "#e5c890"
+  green:     "#a6d189"
+  teal:      "#81c8be"
+  sky:       "#99d1db"
+  sapphire:  "#85c1dc"
+  blue:      "#8caaee"
+  lavender:  "#babbf1"
+  text:      "#c6d0f5"
+  subtext1:  "#b5bfe2"
+  subtext0:  "#a5adce"
+  overlay2:  "#949cbb"
+  overlay1:  "#838ba7"
+  overlay0:  "#737994"
+  surface2:  "#626880"
+  surface1:  "#51576d"
+  surface0:  "#414559"
+  base:      "#303446"
+  mantle:    "#292c3c"
+  crust:     "#232634"
+
+# The roles pH draws with, each naming a color from the palette above.
+background:           base
+foreground:           text
+surface:              mantle
+panel:                surface0
+muted:                overlay1
+border:               surface1
+accent:               mauve
+success:              green
+error:                red
+warning:              peach
+user_text:            blue
+assistant_text:       text
+thinking_text:        overlay1
+tool_success:         green
+tool_error:           red
+highlight_background: surface2
+highlight_text:       text

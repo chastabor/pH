@@ -116,7 +116,7 @@ VIEW_USAGE = f"usage: /view {' | '.join(VIEWABLE)}"
 TUI_VERBS: tuple[TuiVerb, ...] = (
     TuiVerb("commands", "Browse every command.", "open_commands", "command_palette"),
     TuiVerb("model", "Choose the provider and model.", "open_models", "model_picker"),
-    TuiVerb("theme", "Choose a colour theme.", "open_themes", "theme_picker"),
+    TuiVerb("theme", "Choose a color theme.", "open_themes", "theme_picker"),
     TuiVerb("sessions", "Reopen a stored session.", "open_sessions", "session_picker"),
     TuiVerb(
         "permissions", "Change what pH may do without asking.", "open_presets", "permission_picker"

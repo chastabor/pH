@@ -36,6 +36,7 @@ from ph_app.tui.modals.approval import ApprovalModal
 from ph_app.tui.modals.ask_user import AskUserModal
 from ph_app.tui.modals.base import Choice, ChoicePicker, ConfirmModal
 from ph_app.tui.modals.trust import plan_review_modal, project_trust_modal
+from ph_app.tui.themes import load_theme_profile
 from ph_app.tui.widgets.prompt import PromptInput
 
 pytestmark = pytest.mark.anyio
@@ -410,8 +411,10 @@ async def test_the_theme_picker_previews_and_applies(make_tui_app: MakeApp, tmp_
         await pilot.press("enter")
         await pilot.pause()
         assert app.theme != before
-        # And remembered: the next launch opens in the chosen theme.
-        assert json.loads((tmp_path / "tui.json").read_text())["theme"] == app.theme
+        # And remembered: the next launch opens in the chosen theme. In
+        # `$PH_HOME/themes/theme-profile.yaml`, which this pick is what creates —
+        # before it there is no theme file at all (P9-02).
+        assert load_theme_profile(tmp_path).chosen == app.theme
 
 
 async def test_dismissing_the_theme_picker_restores_the_setting(make_tui_app: MakeApp) -> None:

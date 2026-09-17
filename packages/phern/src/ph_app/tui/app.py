@@ -77,7 +77,14 @@ from .remote import attach_session
 from .screens import Revealing, RevealSeq
 from .state import CatalogEntry, ChatItem, Surface
 from .terminal import TerminalTitle
-from .themes import ThemeCatalog, fallback_variables, load_catalog
+from .themes import (
+    ThemeCatalog,
+    ThemeProfile,
+    choose_theme,
+    fallback_variables,
+    load_catalog,
+    load_theme_profile,
+)
 from .widgets.prompt import PromptInput
 from .widgets.status import Sidebar, StatusBar
 from .widgets.transcript import TranscriptView
@@ -146,6 +153,12 @@ class PHTuiApp(App[str | None]):
         self.home = home or resolve_roots().home
         self.settings: TuiSettings = load_tui_settings(self.home)
         self.catalog: ThemeCatalog = load_catalog(self.home)
+        self.theme_profile: ThemeProfile = load_theme_profile(self.home)
+        """Which theme to open in, and how `/theme` orders its list.
+
+        Its own file rather than a field on `self.settings`: `_save` writes the
+        whole of `tui.json`, so a theme living there would be rewritten by every
+        `/view` toggle and two files would claim one fact (P9-02)."""
         self.project = Path.cwd()
         self.trust = TrustStore(path=trust_path(self.home))
         self.front: FrontSession | None = None
@@ -245,7 +258,7 @@ class PHTuiApp(App[str | None]):
     async def on_mount(self) -> None:
         self.set_keymap(self.keys.as_map())
         self.catalog.install(self)
-        self.theme = self.catalog.resolve(self.settings.theme).name
+        self.theme = self.catalog.resolve(self.theme_profile.chosen).name
         self._view = self.query_one("#transcript", TranscriptView)
         self._status = self.query_one(StatusBar)
         self._sidebar = self.query_one(Sidebar)
@@ -690,7 +703,7 @@ class PHTuiApp(App[str | None]):
     def action_open_themes(self) -> None:
         self._pick(
             "theme",
-            theme_choices(self.theme, self.catalog),
+            theme_choices(self.theme, self.catalog, self.theme_profile),
             self._set_theme,
             on_highlight=self._preview_theme,
         )
@@ -702,9 +715,12 @@ class PHTuiApp(App[str | None]):
 
     def _set_theme(self, chosen: str | None) -> None:
         if chosen is not None and chosen in self.catalog.themes:
-            self._save(replace(self.settings, theme=chosen))
-        # Chosen or cancelled, the theme in force is the one the settings name.
-        self.theme = self.catalog.resolve(self.settings.theme).name
+            # Into `$PH_HOME/themes/theme-profile.yaml`, which this creates on the
+            # first pick — so a person who has never run `/theme` has no theme
+            # file and needs none.
+            self.theme_profile = choose_theme(self.home, self.theme_profile, chosen)
+        # Chosen or cancelled, the theme in force is the one the profile names.
+        self.theme = self.catalog.resolve(self.theme_profile.chosen).name
 
     async def action_open_presets(self) -> None:
         """Ask the daemon which postures there are, then offer them."""

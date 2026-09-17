@@ -93,18 +93,39 @@ by the time the dispatch checks for it."""
 class SafeRowLoader(yaml.SafeLoader):
     """`yaml.SafeLoader` with every non-scalar implicit conversion removed.
 
-    `SafeLoader` already refuses `!!python/object`. This subclass additionally
+    **Deliberately not libyaml's `CSafeLoader`**, which is 8x faster on a real
+    document and was tried. Subclassed here, with the two customizations below,
+    it makes `Resolver.resolve` answer `None` for *every* node kind — so every
+    tag becomes undefined and the first profile load dies with "could not
+    determine a constructor for the tag None". It reproduces only when this
+    module is imported while `coverage` is tracing, which is to say: under CI's
+    own `--cov` gate, at collection, and not in an ordinary run. Each ingredient
+    is fine alone — a bare `CSafeLoader` subclass built under coverage parses, and
+    so does one carrying the resolver rebuild — so the interaction is not
+    understood and the speed is not worth shipping a loader that fails only where
+    it is measured.
+
+    The base already refuses `!!python/object`. This subclass additionally
     refuses timestamps and sexagesimals, so a row value that looks like a date
     stays the string the author wrote — a config file is data, and a silent
     type change is the same class of surprise as evaluation.
     """
 
 
-for _tag in ("tag:yaml.org,2002:timestamp",):
-    for _first, _resolvers in list(SafeRowLoader.yaml_implicit_resolvers.items()):
-        SafeRowLoader.yaml_implicit_resolvers[_first] = [
-            (tag, regexp) for tag, regexp in _resolvers if tag != _tag
-        ]
+_UNRESOLVED = frozenset({"tag:yaml.org,2002:timestamp"})
+"""Implicit tags this loader declines to apply. See `SafeRowLoader`."""
+
+# **Rebound on the subclass, never item-assigned into the inherited table.**
+# `yaml_implicit_resolvers` is one dict shared by every loader PyYAML defines, so
+# `SafeRowLoader.yaml_implicit_resolvers[first] = ...` — which is what this was —
+# reached through to `Resolver`'s own copy and took timestamps away from
+# `yaml.safe_load` **process-wide**, for pH and for any library sharing the
+# interpreter. PyYAML's own `add_implicit_resolver` copies before it writes for
+# exactly this reason; this is that copy, done once.
+SafeRowLoader.yaml_implicit_resolvers = {
+    first: [(tag, regexp) for tag, regexp in resolvers if tag not in _UNRESOLVED]
+    for first, resolvers in SafeRowLoader.yaml_implicit_resolvers.items()
+}
 
 
 def _reject_unknown_tag(loader: yaml.Loader, suffix: str, node: yaml.Node) -> NoReturn:

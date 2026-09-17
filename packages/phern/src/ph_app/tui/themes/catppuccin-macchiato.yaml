@@ -1,0 +1,57 @@
+# catppuccin-macchiato — the Catppuccin Macchiato palette, mapped onto pH's roles.
+#
+# `vars` is the palette as its authors publish it, whole: a role is re-pointed by
+# naming a different color below, and the four flavours differ only in this
+# block. Roles are pH's closed set (`TuiTheme`), so a role missing here is a
+# refusal at load rather than a color that silently defaults.
+#
+# Palette: https://github.com/catppuccin/catppuccin
+
+dark: true
+
+vars:
+  rosewater: "#f4dbd6"
+  flamingo:  "#f0c6c6"
+  pink:      "#f5bde6"
+  mauve:     "#c6a0f6"
+  red:       "#ed8796"
+  maroon:    "#ee99a0"
+  peach:     "#f5a97f"
+  yellow:    "#eed49f"
+  green:     "#a6da95"
+  teal:      "#8bd5ca"
+  sky:       "#91d7e3"
+  sapphire:  "#7dc4e4"
+  blue:      "#8aadf4"
+  lavender:  "#b7bdf8"
+  text:      "#cad3f5"
+  subtext1:  "#b8c0e0"
+  subtext0:  "#a5adcb"
+  overlay2:  "#939ab7"
+  overlay1:  "#8087a2"
+  overlay0:  "#6e738d"
+  surface2:  "#5b6078"
+  surface1:  "#494d64"
+  surface0:  "#363a4f"
+  base:      "#24273a"
+  mantle:    "#1e2030"
+  crust:     "#181926"
+
+# The roles pH draws with, each naming a color from the palette above.
+background:           base
+foreground:           text
+surface:              mantle
+panel:                surface0
+muted:                overlay1
+border:               surface1
+accent:               mauve
+success:              green
+error:                red
+warning:              peach
+user_text:            blue
+assistant_text:       text
+thinking_text:        overlay1
+tool_success:         green
+tool_error:           red
+highlight_background: surface2
+highlight_text:       text

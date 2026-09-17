@@ -31,7 +31,7 @@ from ph.persistence.jsonl import family_log, locate_session
 from ph.session import Session, SessionEvent, SessionHeader
 
 from .config import TuiSettings, load_tui_settings
-from .themes import ThemeCatalog, fallback_variables, load_catalog
+from .themes import ThemeCatalog, ThemeProfile, fallback_variables, load_catalog, load_theme_profile
 from .trajectory import TrajectoryRecord, build_trajectory
 from .trajectory_screen import TrajectoryScreen
 
@@ -140,6 +140,7 @@ class TrajectoryApp(App[None]):
         self.home = home or resolve_roots().home
         self.settings: TuiSettings = load_tui_settings(self.home)
         self.catalog: ThemeCatalog = load_catalog(self.home)
+        self.theme_profile: ThemeProfile = load_theme_profile(self.home)
         self.trajectory = TrajectoryScreen(records, session_id=session_id, sessions=sessions)
 
     def get_default_screen(self) -> TrajectoryScreen:
@@ -150,12 +151,13 @@ class TrajectoryApp(App[None]):
         return fallback_variables()
 
     def on_mount(self) -> None:
-        # The same chrome the chat app applies, from the same two files: a view
-        # that read the theme catalog but not the settings opened in the default
-        # theme however the user had set it.
+        # The same chrome the chat app applies, from the same files: a view that
+        # read the theme catalog but not the preference opened in the default
+        # theme however the user had set it. Two files now, since the theme moved
+        # out of `tui.json` (P9-02) — the keymap is still the settings'.
         self.set_keymap(self.settings.keybindings.as_map())
         self.catalog.install(self)
-        self.theme = self.catalog.resolve(self.settings.theme).name
+        self.theme = self.catalog.resolve(self.theme_profile.chosen).name
 
 
 async def run_trajectory(target: str, *, home: Path | None = None) -> None:

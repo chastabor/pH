@@ -59,6 +59,12 @@ dependencies = [
     # internals, so arriving here transitively understated the coupling.
     "anyio>=4.4,<5",
     "filelock>=3.15",
+    # Declared although `ph-core` already requires it, for `anyio`'s reason above:
+    # `ph_app` imports `yaml` directly — `cli.py` to print a composed profile, and
+    # `tui.themes` to write `$PH_HOME/themes/theme-profile.yaml` — so arriving here
+    # transitively understated the coupling. Reading YAML still goes through
+    # ph-core's one safe door (`safe_yaml_load`); this is the writing half.
+    "pyyaml>=6.0",
     "typer>=0.12",
     "rich>=13.0",
     "httpx>=0.27",

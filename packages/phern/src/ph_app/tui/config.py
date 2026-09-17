@@ -1,4 +1,4 @@
-"""`$PH_HOME/tui.json` — keybindings, theme, and front-end preferences.
+"""`$PH_HOME/tui.json` — keybindings and front-end preferences.
 
 Two rules, both borrowed deliberately.
 
@@ -10,8 +10,16 @@ would silently ignore the user's setting.
 
 **A broken settings file must not stop the TUI starting.** A preference file is
 not a source of truth for anything the harness needs; if it fails to parse, the
-TUI launches on defaults and says so. Refusing to launch over a typo'd theme
-name would be a worse failure than the typo.
+TUI launches on defaults and says so. Refusing to launch over a typo'd sidebar
+position would be a worse failure than the typo.
+
+**The theme is not here** (P9-02). It lives in `$PH_HOME/themes/theme-profile.yaml`,
+which `/theme` writes and nothing else does. It used to be a field on
+`TuiSettings`, and the reason it could not stay is `save_tui_settings`: it
+persists the *whole* document, so a `/view thinking` toggle would rewrite a theme
+it had no opinion about, and two files would claim one fact. A `theme` key left
+over from before this change is ignored on read by the rule below and gone on the
+next write — which is the whole of the upgrade.
 
 @module ph_app.tui.config
 """
@@ -25,13 +33,11 @@ from dataclasses import asdict, dataclass, field, fields, replace
 from pathlib import Path
 from typing import Any, Literal, TypeAlias
 
+from ph.documents import read_document
 from ph.json import as_bool
 from ph.paths import write_text_under
 
-from .themes import DEFAULT_THEME
-
 __all__ = [
-    "DEFAULT_THEME",
     "SidebarPosition",
     "TuiKeybindings",
     "TuiSettings",
@@ -87,7 +93,6 @@ class TuiSettings:
     """Everything the front-end remembers between runs."""
 
     keybindings: TuiKeybindings = field(default_factory=TuiKeybindings)
-    theme: str = DEFAULT_THEME
     sidebar: SidebarPosition = "right"
     turn_notification: TurnNotification = "bell"
     show_thinking: bool = True
@@ -142,7 +147,6 @@ def tui_settings_from_json(data: object) -> TuiSettings:
         )
     return TuiSettings(
         keybindings=keys,
-        theme=data["theme"] if isinstance(data.get("theme"), str) else DEFAULT_THEME,
         sidebar=_coerce(data.get("sidebar"), ("left", "right", "off"), "right"),  # type: ignore[arg-type]
         turn_notification=_coerce(data.get("turn_notification"), ("off", "bell"), "bell"),  # type: ignore[arg-type]
         show_thinking=as_bool(data.get("show_thinking"), True),
@@ -153,17 +157,15 @@ def tui_settings_from_json(data: object) -> TuiSettings:
 
 
 def load_tui_settings(home: Path) -> TuiSettings:
-    """Read `$PH_HOME/tui.json`, or return defaults."""
-    path = tui_settings_path(home)
-    try:
-        return tui_settings_from_json(json.loads(path.read_text(encoding="utf-8")))
-    except FileNotFoundError:
-        return TuiSettings()
-    except (json.JSONDecodeError, OSError) as error:
-        log.warning("ph_app.tui: %s is unreadable (%s); using defaults", path, error)
-        return TuiSettings()
+    """Read `$PH_HOME/tui.json`, or return defaults.
+
+    `read_document` carries the whole ladder — absent is quiet, unreadable is
+    logged, both answer `None` — and `tui_settings_from_json` already reads a
+    non-mapping as "no settings", so the two compose into one line.
+    """
+    return tui_settings_from_json(read_document(tui_settings_path(home)))
 
 
 def save_tui_settings(home: Path, settings: TuiSettings) -> None:
-    """Write `$PH_HOME/tui.json`. A toggle or a theme pick lands here."""
+    """Write `$PH_HOME/tui.json`. A `/view` toggle or a sidebar move lands here."""
     write_text_under(tui_settings_path(home), json.dumps(settings.to_json(), indent=2) + "\n")

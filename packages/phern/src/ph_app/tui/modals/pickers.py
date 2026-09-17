@@ -25,7 +25,7 @@ from ph.seams.commands import CommandDefinition
 from ph.seams.permission_presets import PresetSchema
 
 from ...sessions import SessionSummary
-from ..themes import ThemeCatalog
+from ..themes import ThemeCatalog, ThemeProfile
 from .base import Choice
 
 __all__ = [
@@ -74,16 +74,27 @@ def preset_choices(presets: Sequence[PresetSchema]) -> list[Choice]:
     ]
 
 
-def theme_choices(active: str, catalog: ThemeCatalog) -> list[Choice]:
-    """Every theme the catalog holds, saying which are the user's own."""
+def theme_choices(active: str, catalog: ThemeCatalog, profile: ThemeProfile) -> list[Choice]:
+    """Every theme the catalog holds, in the person's own order.
+
+    The profile's `order` leads and the rest follow alphabetically. **Position is
+    the only thing that ordering says** — there is no second word for it, because
+    a seven-theme list does not need one and `default` is already taken by the
+    thing the profile actually records.
+
+    So exactly one row says `default`: the one this profile opens in, which on a
+    first run is `DEFAULT_THEME` and after a pick is the pick. It is *not* the same
+    row as the marked one — `marked` follows the cursor while the picker previews,
+    so during a preview the dot says "this is what you are looking at" and
+    `default` says "this is what you will get next launch".
+    """
+    def detail(name: str) -> str:
+        source = "user" if name in catalog.user else "built-in"
+        return f"default · {source}" if name == profile.chosen else source
+
     return [
-        Choice(
-            value=name,
-            label=name,
-            detail="user" if name in catalog.user else "built-in",
-            marked=name == active,
-        )
-        for name in catalog.names
+        Choice(value=name, label=name, detail=detail(name), marked=name == active)
+        for name in profile.ordered(catalog.names)
     ]
 
 
@@ -92,7 +103,7 @@ def model_choices(
 ) -> list[Choice]:
     """The registered providers, the active one carrying its model.
 
-    pH has no model catalogue — a provider knows its own models and Phase 1
+    pH has no model catalog — a provider knows its own models and Phase 1
     deliberately did not invent a list to go stale. So the rows are providers,
     and the picker's free-text entry is how a model is named: typing
     `anthropic/claude-opus-5` offers itself as the value.

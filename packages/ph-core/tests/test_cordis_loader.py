@@ -103,6 +103,26 @@ def test_timestamps_stay_strings() -> None:
     assert parsed == [{"id": "a", "name": "mod.a", "config": {"when": "2026-08-26"}}]
 
 
+def test_the_row_loader_does_not_take_timestamps_from_everyone_else() -> None:
+    """The customization above belongs to `SafeRowLoader`, not to PyYAML.
+
+    `yaml_implicit_resolvers` is one dict shared by every loader PyYAML defines,
+    so stripping a tag by item-assigning into it — which is what this did until
+    the `CSafeLoader` change rebuilt it — reached through to `Resolver`'s own copy
+    and took timestamps away from `yaml.safe_load` **process-wide**, for pH and
+    for any library sharing the interpreter.
+
+    Sabotage: put the `SafeRowLoader.yaml_implicit_resolvers[first] = ...` loop
+    back, and this fails while `test_timestamps_stay_strings` still passes — which
+    is precisely how it went unnoticed.
+    """
+    import datetime
+
+    import yaml
+
+    assert yaml.safe_load("when: 2026-08-26")["when"] == datetime.date(2026, 8, 26)
+
+
 def test_env_interpolation_with_defaults() -> None:
     env = {"PH_TEST_MODEL": "big"}
     assert interpolate("${env:PH_TEST_MODEL}", env) == "big"

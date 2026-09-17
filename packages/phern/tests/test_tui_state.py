@@ -1,4 +1,8 @@
-"""Themes, settings, completion, and session listing — the parts with no app.
+"""Settings, completion, and session listing — the parts with no app.
+
+Themes moved to `test_tui_themes.py` when they grew a second notation and a
+profile file of their own (P9-01, P9-02); what is left here is everything else
+that can be asserted without a terminal.
 
 Kept separate from the pilot tests because these are the pieces a broken
 terminal must not be able to hide: a settings file that stops the TUI starting
@@ -37,8 +41,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import pytest
-
 from ph.persistence.jsonl import session_path
 from ph.testing import write_reference_fork
 from ph_app.sessions import session_summaries
@@ -48,74 +50,13 @@ from ph_app.tui.autocomplete import (
     parse_completion_token,
 )
 from ph_app.tui.config import (
-    DEFAULT_THEME,
+    TuiSettings,
     load_tui_settings,
     save_tui_settings,
     tui_settings_from_json,
 )
 from ph_app.tui.modals.login import credential_choices
 from ph_app.tui.modals.pickers import session_choices
-from ph_app.tui.themes import (
-    BUILTIN_THEME_NAMES,
-    ThemeError,
-    load_catalog,
-    load_user_themes,
-    parse_theme,
-    theme_file,
-)
-
-# --------------------------------------------------------------------- themes --
-
-
-def test_every_builtin_theme_converts_to_textual() -> None:
-    catalog = load_catalog()
-    assert set(catalog.names) == set(BUILTIN_THEME_NAMES)
-    for name in BUILTIN_THEME_NAMES:
-        converted = catalog.themes[name].to_textual()
-        assert converted.name == name
-        # Every role reaches the stylesheet as a `$ph-*` variable, which is what
-        # the widgets are written against.
-        assert converted.variables
-        assert all(key.startswith("ph-") for key in converted.variables)
-
-
-def test_a_user_theme_shadows_a_builtin(tmp_path: Path) -> None:
-    source = _roles()
-    source["accent"] = "#ff00ff"
-    directory = tmp_path / "themes"
-    directory.mkdir()
-    (directory / "ph-dark.json").write_text(json.dumps(source))
-    catalog = load_catalog(tmp_path)
-    assert catalog.themes["ph-dark"].accent == "#ff00ff"
-    # Listed once, as the user's — that is the one that loads.
-    assert catalog.names.count("ph-dark") == 1
-    assert "ph-dark" in catalog.user
-
-
-def test_a_theme_missing_a_role_is_refused(tmp_path: Path) -> None:
-    directory = tmp_path / "themes"
-    directory.mkdir()
-    (directory / "broken.json").write_text(json.dumps({"dark": True, "background": "#000"}))
-    # Skipped rather than fatal: one bad file must not cost the user the others.
-    assert "broken" not in load_user_themes(tmp_path)
-
-
-def test_a_theme_with_an_unknown_role_is_refused() -> None:
-    # A typo'd role would otherwise leave the real one at its default, which
-    # reads as a rendering bug rather than a bad theme file.
-    with pytest.raises(ThemeError):
-        parse_theme("typo", {**_roles(), "acccent": "#fff"})
-
-
-def test_an_unknown_theme_falls_back(tmp_path: Path) -> None:
-    settings = tui_settings_from_json({"theme": "does-not-exist"})
-    assert load_catalog(tmp_path).resolve(settings.theme).name == DEFAULT_THEME
-
-
-def _roles() -> dict[str, object]:
-    data: dict[str, object] = json.loads(theme_file("ph-dark").read_text(encoding="utf-8"))
-    return data
-
 
 # ------------------------------------------------------------------- settings --
 
@@ -123,14 +64,19 @@ def _roles() -> dict[str, object]:
 def test_settings_survive_an_unreadable_file(tmp_path: Path) -> None:
     (tmp_path / "tui.json").write_text("{ not json")
     settings = load_tui_settings(tmp_path)
-    assert settings.theme == DEFAULT_THEME
+    assert settings == TuiSettings(), "defaults, rather than a refusal to start"
 
 
 def test_an_unknown_key_in_settings_is_ignored() -> None:
+    """Including `theme`, which this file wrote until P9-02 moved it.
+
+    The tolerance rule *is* the upgrade path: a key left over from a build that
+    had the field is read past, and gone the next time anything writes the file.
+    """
     settings = tui_settings_from_json(
         {"theme": "ph-light", "somethingFromANewerPH": 3, "keybindings": {"quit": "ctrl+d"}}
     )
-    assert settings.theme == "ph-light"
+    assert settings == TuiSettings(keybindings=settings.keybindings)
     assert settings.keybindings.quit == "ctrl+d"
     # Unnamed bindings keep their defaults rather than becoming unset.
     assert settings.keybindings.cancel
