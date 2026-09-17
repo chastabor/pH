@@ -1,13 +1,35 @@
 """The mirror test (D7, D4): two protocol definitions that must not drift.
 
-`ph_runtime.protocol` and `ph_rlm.kernel.protocol` are written independently on
-purpose — the guest runs in a venv that must not contain the harness — so
-nothing but this file stops them diverging. A field added on one side and
-forgotten on the other would not raise anywhere: the frame would simply be
-ignored, and the feature would be missing in a way no other test can see.
+`ph_runtime.protocol` and `ph_rlm.kernel.protocol` are written independently
+where they have to be — the guest runs in a venv that must not contain the
+harness — so for those parts nothing but this file stops them diverging. A field
+added on one side and forgotten on the other would not raise anywhere: the frame
+would simply be ignored, and the feature would be missing in a way no other test
+can see.
 
-The truncation marker is compared byte for byte because a reader comparing a
-transcript to a log must not find two different sentences for the same event.
+## What is no longer mirrored, and why the rest still is
+
+**The four constants are one declaration.** `PROTOCOL_VERSION`, `PROTOCOL_FD`,
+`FD_ENV` and `NAMESPACE_ENV` are declared in the guest and *imported* by the
+host, which is legal in that direction only and costs nothing: `ph-rlm` already
+depends on `ph-runtime-guest`. They were pure data with no typing benefit, and a
+number held equal by assertion is a number that can be edited on one side.
+
+**The frame tables are not, and should not be.** Since P8-07 the host derives its
+`FieldSpec` table from `TypedDict`s, for `mypy` — and a `TypedDict` cannot be
+derived from a runtime dict, so the host's typed frames are an irreducible second
+declaration. This file is what anchors them to the wire vocabulary; without it
+they would float free of the frames they describe.
+
+**The truncation marker is not, for a different reason.** The host re-exports
+`ph.text.truncation_marker`; the guest keeps a deliberate copy, because it may
+not import ph-core at all. Two implementations, compared byte for byte, because a
+reader comparing a transcript to a log must not find two different sentences for
+the same event — and comparing two *implementations* is the one thing a shared
+declaration could never have done for us.
+
+**None of this makes the two agree at runtime.** They import from different
+venvs; the staleness marker and `boot-ack`'s refusal are what cover that.
 
 ## Why `FRAME_FIELDS` is the only declaration on each side
 
@@ -37,12 +59,45 @@ import pytest
 from ph_rlm.kernel import protocol as host
 from ph_runtime import protocol as guest
 
+SHARED_CONSTANTS = ("PROTOCOL_VERSION", "PROTOCOL_FD", "FD_ENV", "NAMESPACE_ENV")
 
-def test_the_constants_agree() -> None:
-    assert host.PROTOCOL_VERSION == guest.PROTOCOL_VERSION
-    assert host.PROTOCOL_FD == guest.PROTOCOL_FD
-    assert host.FD_ENV == guest.FD_ENV
-    assert host.NAMESPACE_ENV == guest.NAMESPACE_ENV
+
+def test_the_host_imports_the_guests_constants_rather_than_declaring_them() -> None:
+    """The four constants are one declaration now, so this pins the *route*.
+
+    Stated **positively** — the import is there, naming all four — because the
+    negative form is the wrong test twice over. Comparing values cannot see the
+    difference at all: CPython interns small ints and identifier-like strings, so
+    a copied `PROTOCOL_FD = 3` or `FD_ENV = "PH_RUNTIME_FD"` satisfies both `==`
+    and `is` against the guest's. And the re-declaration that source *could* see
+    never reaches pytest — `ruff` refuses it as `F811 Redefinition of unused` and
+    `mypy` as "Cannot redefine an existing name as final" (the guest's four are
+    `Final`), both of which run before the suite in `test.sh`.
+
+    What no gate catches is deleting the import and re-declaring the four in a
+    clean module: nothing conflicts, nothing is redefined. That is the drift this
+    test uniquely covers, and asserting the import is the direct way to say it.
+    Read off `node.module`, so importing the same names from somewhere else fails
+    too.
+
+    Sabotage: delete the `from ph_runtime.protocol import ...` line and re-add
+    `PROTOCOL_FD: Final = 3` beside `HOST_FRAMES`.
+    """
+    # `.body` rather than `ast.walk`: the claim is about this module's own
+    # namespace, and a walk would also fail on a future *local* named `FD_ENV`
+    # inside some function — a source-level negative's usual way of aging badly.
+    module = ast.parse(Path(host.__file__).read_text(encoding="utf-8"))
+    imported = {
+        alias.asname or alias.name
+        for node in module.body
+        if isinstance(node, ast.ImportFrom) and node.module == guest.__name__
+        for alias in node.names
+    }
+    missing = sorted(set(SHARED_CONSTANTS) - imported)
+    assert not missing, f"the host must import {missing} from {guest.__name__}, not declare them"
+    # And they arrive under the names the host's own readers import.
+    for name in SHARED_CONSTANTS:
+        assert getattr(host, name) == getattr(guest, name)
 
 
 def test_the_frame_vocabularies_agree() -> None:

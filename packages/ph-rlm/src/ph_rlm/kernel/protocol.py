@@ -1,8 +1,8 @@
 """The fd-3 frame vocabulary, host side.
 
-The twin of `ph_runtime.protocol`, written separately on purpose — see that
-module for why there is no shared definition, and `test_protocol_mirror.py` for
-what keeps the two honest.
+The twin of `ph_runtime.protocol` — see that module for which parts are shared
+and which are written twice, and `test_protocol_mirror.py` for what keeps the
+twinned half honest.
 
 The split inside this module is deliberate:
 
@@ -46,6 +46,13 @@ from pydantic import BaseModel
 from ph.text import truncation_marker
 from ph.wire import WireModel
 
+# **Imported, not re-spelled.** `ph-rlm` already depends on `ph-runtime-guest`,
+# so the host can read the guest's declarations and the two cannot disagree at
+# all. Re-exported through `__all__` below, so this module stays the complete
+# host-side view and `venv`/`manager` keep importing them from here.
+# `ph_runtime.protocol` owns the reasoning for each, and says what else is shared.
+from ph_runtime.protocol import FD_ENV, NAMESPACE_ENV, PROTOCOL_FD, PROTOCOL_VERSION
+
 __all__ = [
     "FD_ENV",
     "FRAME_FIELDS",
@@ -73,11 +80,6 @@ __all__ = [
     "SnapshotFrame",
     "truncation_marker",
 ]
-
-PROTOCOL_VERSION: Final = 1
-PROTOCOL_FD: Final = 3
-FD_ENV: Final = "PH_RUNTIME_FD"
-NAMESPACE_ENV: Final = "PH_NAMESPACE_ID"
 
 HOST_FRAMES: Final = frozenset({"boot", "run", "reply", "restore", "cancel", "shutdown"})
 GUEST_FRAMES: Final = frozenset({"boot-ack", "call", "log", "display", "snapshot", "done", "fault"})

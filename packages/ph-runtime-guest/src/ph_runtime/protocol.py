@@ -1,12 +1,23 @@
 """The fd-3 frame vocabulary, guest side.
 
-**This module is written twice on purpose.** Its twin is
-`ph_rlm.kernel.protocol`, and neither imports the other: the guest runs in
-`$PH_CACHE/runtime-venv` with almost nothing installed, and making it import the
-host package would put the harness inside the process boundary that exists to keep
-the harness out. What keeps the two in step is `test_protocol_mirror.py`, which
-compares `PROTOCOL_VERSION`, every frame's required and optional field set, and
-the truncation marker byte for byte (D7, D4).
+**This module is written twice on purpose — but not all of it, and the
+asymmetry is the point.** Its twin is `ph_rlm.kernel.protocol`.
+
+The four constants below are declared *here* and **imported** by the host. That
+direction is the only one available: the guest runs in `$PH_CACHE/runtime-venv`
+with almost nothing installed, and making it import the host package would put
+the harness inside the process boundary that exists to keep the harness out. The
+host is under no such restriction — it already depends on this package — so for
+anything that is plain data with no typing to lose, one declaration beats two
+held equal by a test.
+
+Everything else is genuinely twinned, and `test_protocol_mirror.py` is what keeps
+it honest (D7, D4). Two things, for two different reasons: every frame's required
+and optional field set, because the host *derives* its own from `TypedDict`s for
+mypy and a `TypedDict` cannot be derived from a runtime table; and the truncation
+marker byte for byte, because the host re-exports ph-core's copy and this side may
+not import ph-core at all — two implementations, which is the one thing a shared
+declaration could never have reconciled.
 
 **`FRAME_FIELDS` is the *only* declaration of the vocabulary on this side** — a
 second one that no test compares is a copy that drifts, and one already had.
@@ -62,7 +73,14 @@ is dropped and a missing one takes its default.
 
 **Not a cache key**, though `venv._marker` digests it and a bump does force a
 warm guest venv to rebuild. Reaching for it to ship an edit is how a number that
-means "compatibility" ends up meaning "some byte changed"."""
+means "compatibility" ends up meaning "some byte changed".
+
+**Sharing this declaration with the host does not make the two agree at
+runtime**, and nothing about the import should be read as if it did: host and
+guest import from *different* venvs, so they are two installations that can hold
+different versions. What covers that is unchanged and lives elsewhere —
+`kernel/venv.py`'s staleness marker rebuilds a venv whose protocol or guest
+version moved, and `boot-ack` refuses a pairing that still disagrees."""
 
 PROTOCOL_FD: Final = 3
 """Where the channel is by default. fd 0/1/2 stay the program's own, so a cell's
