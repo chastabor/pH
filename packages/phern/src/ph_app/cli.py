@@ -146,6 +146,13 @@ def default(
     resume: Annotated[
         str | None, typer.Option("--resume", help="Session id to reopen (tui and web).")
     ] = None,
+    new: Annotated[
+        bool,
+        typer.Option(
+            "--new",
+            help="Start a fresh session without offering this directory's previous ones (tui).",
+        ),
+    ] = False,
     no_spawn: Annotated[
         bool,
         typer.Option(
@@ -227,6 +234,10 @@ def default(
                 ),
                 session_id=wanted,
                 spawn=not no_spawn,
+                # `--session`/`--resume` already name one, so they skip the offer
+                # by having an answer; `--new` is for the person who never wants
+                # to be asked.
+                offer_sessions=not new,
             )
         )
         return

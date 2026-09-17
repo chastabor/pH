@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Mapping, Sequence
+from hashlib import sha256
 from pathlib import PurePath
 from typing import Literal, TypeAlias, cast
 
@@ -44,7 +45,33 @@ from .request_header import (
 )
 from .surface import SurfaceManager, fold_surface
 
-__all__ = ["Session", "SessionHeader", "SessionObserver"]
+__all__ = ["Session", "SessionHeader", "SessionObserver", "cwd_tag", "family_for"]
+
+CWD_TAG_LENGTH = 6
+"""Hex characters of the cwd digest that tag a lineage directory.
+
+Six — 24 bits — because this is a **filter, not an identity**: it lets a listing
+skip a directory without opening anything in it, and the header's own `cwd` is
+what confirms a match. Two repos that collide cost one extra directory scan and
+no wrong answer, so buying more characters would buy nothing and make every path
+longer.
+"""
+
+
+def cwd_tag(cwd: str) -> str:
+    """The short digest of a working directory, as a lineage directory wears it."""
+    return sha256(cwd.encode("utf-8")).hexdigest()[:CWD_TAG_LENGTH]
+
+
+def family_for(session_id: str, cwd: str | None) -> str:
+    """The lineage directory for a new root: `<cwd-tag>-<id>`, or bare `<id>`.
+
+    **Bare when there is no cwd**, which is the honest answer rather than a
+    placeholder tag: a session that belongs to no directory should not be found
+    by a search for one, and an unfiltered listing still sees it.
+    """
+    return f"{cwd_tag(cwd)}-{session_id}" if cwd else session_id
+
 
 log = logging.getLogger("ph.session")
 
@@ -81,20 +108,32 @@ class SessionHeader(WireModel):
     from child work — a fork otherwise looks like a session that simply started
     with a long conversation.
     """
-    family: str = Field(default_factory=lambda data: data["id"], min_length=1)
-    """Which lineage this log belongs to — the id of the root it descends from.
+    family: str = Field(
+        default_factory=lambda data: family_for(data["id"], data.get("cwd")), min_length=1
+    )
+    """Which lineage this log belongs to, and **where that lineage was worked**.
 
     The directory a log lives in: `sessions/<family>/<id>.jsonl`. Every fork, segment
     and subagent beneath a root inherits its value, so one conversation and everything
     it spawned is one directory — which is what lets "is anything in here orphaned" be
     answered by listing one directory.
 
-    **Never absent.** A root heads its own lineage, so the default *is* the id — a
-    `default_factory` reading the already-validated `id`, covering direct construction
-    and `model_validate` alike. `min_length=1` makes an explicit empty string a
-    refusal rather than something quietly rewritten. Stored rather than derived,
-    because deriving it means walking `parent_session` to the root, and walking needs
-    paths, and the path is what the family is for.
+    **A root's is `<cwd-tag>-<id>`** (format 1). The tag is six hex of the working
+    directory's digest, so "which sessions belong to this repo" is answerable from
+    the *directory names alone* — a listing skips a whole lineage without opening a
+    file, where before it read the header of every log in the store. It is a filter
+    and not an identity: 24 bits collide, and the header's own `cwd` is what confirms
+    a match, so a collision costs a directory scan and never a wrong row.
+
+    The tag is fixed when the root is created and inherited unchanged, which is the
+    only behaviour that keeps a lineage in one place — a session `cd`s nowhere, and
+    a fork of a session worked in `/a` belongs with it even if the person has since
+    moved.
+
+    **Never absent.** `min_length=1` makes an explicit empty string a refusal rather
+    than something quietly rewritten. Stored rather than derived, because deriving it
+    means walking `parent_session` to the root, and walking needs paths, and the path
+    is what the family is for.
     """
 
     kind: SessionKind | None = None

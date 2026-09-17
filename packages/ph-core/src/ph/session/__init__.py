@@ -25,7 +25,14 @@ from .request_header import (
     fold_request_header,
     header_equals,
 )
-from .session import Session, SessionHeader, SessionKind, SessionObserver
+from .session import (
+    Session,
+    SessionHeader,
+    SessionKind,
+    SessionObserver,
+    cwd_tag,
+    family_for,
+)
 from .store import (
     SessionForkError,
     SessionStore,
@@ -71,8 +78,10 @@ __all__ = [
     "SurfaceOp",
     "SurfaceReplace",
     "canonical_header",
+    "cwd_tag",
     "derive_event_message",
     "derive_transcript",
+    "family_for",
     "fold_latest",
     "fold_request_context",
     "fold_request_header",

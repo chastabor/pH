@@ -37,6 +37,7 @@ from typing import Any
 from ph.seams.schedule import Schedule
 
 from .params import (
+    BrowseParams,
     CancelScheduleParams,
     CommandParams,
     CreateScheduleParams,
@@ -140,7 +141,7 @@ id. As a `Verb` that was a convention rather than a rule:
 # --- roots ---------------------------------------------------------------------
 
 SESSIONS_LIST = Verb("sessions/list", NoParams, RootListing)
-SESSIONS_BROWSE = Verb("sessions/browse", NoParams, SessionBrowse)
+SESSIONS_BROWSE = Verb("sessions/browse", BrowseParams, SessionBrowse)
 SESSION_NEW = Verb("session/new", NewSessionParams, RootDescription)
 SESSION_ATTACH = Verb("session/attach", SessionParams, AttachReply)
 SESSION_DETACH = Verb("session/detach", SessionParams, SessionDetached)

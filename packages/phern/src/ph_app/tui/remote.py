@@ -81,6 +81,7 @@ from ..daemon.client import DaemonClient
 from ..daemon.duplex import answering
 from ..daemon.follow import EventFrame, Followed, first_of
 from ..params import (
+    BrowseParams,
     CommandParams,
     NewSessionParams,
     PresetParams,
@@ -103,7 +104,7 @@ from ..payloads import (
     StatusFacts,
     notice_of,
 )
-from ..protocol import DaemonGone, NoParams, SessionParams, Verb
+from ..protocol import DaemonGone, SessionParams, Verb
 from ..sessions import SessionSummary
 from ..wire import view_of
 from .adapter import Frame, TuiEventAdapter
@@ -353,10 +354,9 @@ class DaemonSession:
         front end offers no `/model` choices. In process it lists them."""
         return []
 
-    async def browse_sessions(self) -> list[SessionSummary]:
+    async def browse_sessions(self, *, cwd: str = "") -> list[SessionSummary]:
         """The daemon's own list — stored logs and its live roots, already merged."""
-        reply = await self.client.call(verbs.SESSIONS_BROWSE, NoParams())
-        return list(reply.sessions)
+        return await browse_on(self.client, cwd=cwd)
 
     async def presets(self) -> list[PresetSchema]:
         """The postures this root offers, asked when the picker opens.
@@ -569,6 +569,19 @@ class DaemonSession:
         """
         with suppress(DaemonGone), anyio.move_on_after(2.0):
             await self.client.call(verbs.SESSION_DETACH, SessionParams(session_id=self.session_id))
+
+
+async def browse_on(client: DaemonClient, *, cwd: str = "") -> list[SessionSummary]:
+    """Which sessions this daemon can offer, optionally narrowed to one directory.
+
+    A bare-client function beside `attach_session`, for the same reason that one
+    is: the startup picker asks this *before* there is a session to ask it of, so
+    a method on `FrontSession` — which means "an attached session" — could not
+    answer. Named for the question rather than for that caller's situation, since
+    `DaemonSession.browse_sessions` is the same call and now makes it through here.
+    """
+    reply = await client.call(verbs.SESSIONS_BROWSE, BrowseParams(cwd=cwd))
+    return list(reply.sessions)
 
 
 async def attach_session(

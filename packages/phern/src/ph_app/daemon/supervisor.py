@@ -1044,19 +1044,39 @@ class Supervisor:
         return index.read() if index is not None else {}
 
     def sessions_directory(self) -> Path | None:
-        """Where this daemon's store keeps sessions, or `None` when nothing does.
+        """Where this daemon's store keeps sessions.
 
         Every root mounts the same profile, so any live root's store answers for
-        the daemon; with none mounted there is no store to ask, and `None` is
-        the honest reply rather than a path derived from an environment the
-        store may not have read.
+        the daemon — that is the authoritative reply and it is tried first.
+
+        **With nothing mounted, the daemon answers for itself** rather than
+        `None`. That is a change P9-05 forced and it is worth the sentence: a
+        daemon that has just started holds no roots, so `sessions/browse` before
+        the first attach used to answer with an empty list — which made the
+        startup session picker, whose entire job is to run *before* the first
+        attach, permanently empty in its main case.
+
+        The fallback is the daemon's **own** `$PH_HOME/sessions`, which is not a
+        guess: it is the literal default `session-persistence-jsonl` computes
+        (`resolve_roots().sessions_dir()`, jsonl.py's `apply`), so in any
+        deployment that has not overridden the row it is the same path the store
+        would have named. It is also the daemon's home and never a client's, so
+        the P5-14 rule that the two must not disagree about which `$PH_HOME` they
+        meant is untouched.
+
+        Rule 6, since this is where it would be assumed: a deployment that *did*
+        set `session-persistence-jsonl.root` gets a cold browse of the wrong
+        directory — in practice an absent one, which lists nothing — until its
+        first root mounts and the store's own answer takes over. The alternative
+        was reading a row's config from outside the row, which is a worse trade
+        for a picker.
         """
         for root in self.roots.values():
             store = root.ctx.get(SESSION_PERSISTENCE)
             if store is not None:
                 found: Path | None = store.directory()
                 return found
-        return None
+        return resolve_roots().sessions_dir()
 
     def unwanted(self, *, now: int, after: float) -> bool:
         """Whether nothing this supervisor holds still needs to be held (P7-08).

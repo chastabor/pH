@@ -66,16 +66,18 @@ from .modals.ask_user import AskUserModal
 from .modals.base import Choice, ChoicePicker
 from .modals.login import LoginModal, credential_choices
 from .modals.pickers import (
+    NEW_SESSION,
     command_choices,
+    history_choices,
     model_choices,
     preset_choices,
     session_choices,
     theme_choices,
 )
 from .modals.trust import project_trust_modal
-from .remote import attach_session
+from .remote import attach_session, browse_on
 from .screens import Revealing, RevealSeq
-from .state import CatalogEntry, ChatItem, Surface
+from .state import CatalogEntry, ChatItem, PromptRecord, Surface
 from .terminal import TerminalTitle
 from .themes import (
     ThemeCatalog,
@@ -86,7 +88,7 @@ from .themes import (
     load_theme_profile,
 )
 from .widgets.prompt import PromptInput
-from .widgets.status import Sidebar, StatusBar
+from .widgets.status import Sidebar, StatusBar, shorten_path
 from .widgets.transcript import TranscriptView
 
 __all__ = ["PHTuiApp", "run_tui"]
@@ -127,6 +129,7 @@ class PHTuiApp(App[str | None]):
         session_id: str | None = None,
         home: Path | None = None,
         spawn: bool = True,
+        offer_sessions: bool = True,
     ) -> None:
         super().__init__()
         self.daemon_argv = tuple(daemon_argv)
@@ -142,6 +145,12 @@ class PHTuiApp(App[str | None]):
         `--no-spawn` turns it off, for a deployment running `phern daemon` under an
         init system where a UI-started one would be a second supervisor
         competing for the same session leases."""
+        self.offer_sessions = offer_sessions
+        """Whether to offer this directory's sessions before starting a new one.
+
+        `--new` turns it off. A person who always wants a fresh session should not
+        have to press a key to get one, and a script driving the TUI should not
+        meet a modal it did not ask for."""
         self.session_id = session_id
         """The session to open, or `None` for a new one.
 
@@ -188,6 +197,15 @@ class PHTuiApp(App[str | None]):
         self._status: StatusBar | None = None
         self._sidebar: Sidebar | None = None
         self._prompt: PromptInput | None = None
+        self._history_rows: dict[str, str] = {}
+        """The open history picker's prompts, by seq — its *full* text, which the
+        one-line label has truncated.
+
+        Held because `on_highlight` is handed a `Choice.value` and nothing else.
+        Text rather than whole records: the seq is the key already, so a record
+        would carry a second copy of it. Cleared when the picker closes, so a
+        `--resume` replay — which clears `TuiState.items` in place — cannot leave
+        the previous transcript's prompts pinned here."""
 
     @property
     def keys(self) -> TuiKeybindings:
@@ -250,7 +268,11 @@ class PHTuiApp(App[str | None]):
             with Vertical(id="main"):
                 yield TranscriptView(id="transcript")
                 with Vertical(id="chrome"):
-                    yield PromptInput(self.keys, completion_source=self._completion_source)
+                    yield PromptInput(
+                        self.keys,
+                        completion_source=self._completion_source,
+                        history_source=self._history_source,
+                    )
                     yield StatusBar()
             if self.settings.sidebar != "left":
                 yield Sidebar()
@@ -308,9 +330,10 @@ class PHTuiApp(App[str | None]):
             client = await DaemonClient.connect(started.path)
             self._client = client
             self.run_worker(client.pump(), group="pump", exclusive=False)
+            chosen = await self._offer_sessions(client)
             self.front = await attach_session(
                 client,
-                self.session_id or new_session_id(),
+                self.session_id or chosen or new_session_id(),
                 host=self,
                 cwd=self.project,
                 trust=trust,
@@ -324,6 +347,48 @@ class PHTuiApp(App[str | None]):
         # this list, which is what makes unloading one take all three with it.
         self._command_disposers = self.front.attach_surfaces(self)
         self.state_changed()
+
+    async def _offer_sessions(self, client: DaemonClient) -> str | None:
+        """The session this person picked to resume, or `None` for a fresh one.
+
+        **Answers rather than assigning `self.session_id`**, which it did first:
+        that field is documented as the *CLI's* input, so writing a modal's output
+        into it made what the field meant depend on when you read it.
+
+        **Between the daemon and the attach**, which is the only place it fits:
+        the list is the daemon's to fold, and the attach is what it decides.
+        Trust comes before both — mounting is what reads the project's
+        `AGENTS.md`, its hooks and its configured plugins, so a person who has not
+        trusted the directory is not asked which of its sessions to open.
+
+        Awaiting a modal is legal here because `_open` runs in a worker, which is
+        the rule this whole class is shaped around.
+
+        Silent in the two cases that matter: a directory nobody has worked in, and
+        a run that already knows its session (`--session`, `--resume`, `--new`).
+        A first run must not meet a modal listing nothing.
+        """
+        if self.session_id is not None or not self.offer_sessions:
+            return None
+        try:
+            sessions = await browse_on(client, cwd=str(self.project))
+        except Exception:
+            # A picker is a convenience; failing to build one must not stop the
+            # session it was offering to open.
+            log.warning("ph_app.tui: could not list this directory's sessions", exc_info=True)
+            return None
+        if not sessions:
+            return None
+        chosen = await self.push_screen_wait(
+            ChoicePicker(
+                title=f"sessions in {shorten_path(str(self.project), 48)}",
+                choices=session_choices(sessions, offer_new=True),
+                free_text="session id",
+            )
+        )
+        # `None` is escape and `NEW_SESSION` is the first row: one answer, because
+        # both mean "not one of these".
+        return None if chosen == NEW_SESSION else chosen
 
     async def on_unmount(self) -> None:
         # **Before anything else unwinds.** Both timers call into widgets, and a
@@ -700,6 +765,60 @@ class PHTuiApp(App[str | None]):
         if chosen is not None and (self.front is None or chosen != self.front.session_id):
             self.exit(chosen)
 
+    def action_open_history(self) -> None:
+        """`/history` — the prompts you have sent, and where each one sits.
+
+        The cursor reveals as it moves (`on_highlight`), which is the second half
+        of the ask: the transcript scrolls to the prompt under the cursor through
+        the same `RevealSeq` join a contributed screen uses, so the conversation
+        moves behind the picker while you look for one.
+        """
+        front = self.front
+        if front is None:
+            return
+        if front.diverged:
+            # The same condition `action_open_screen` refuses on, and the same
+            # reason: a mirror that missed a frame is a prefix with no way to
+            # tell how short, so a history folded from it would be quietly
+            # incomplete.
+            self.notify(
+                "this client missed part of the log, so the history folded from it "
+                "would be incomplete — reattach to rebuild it",
+                title="history",
+                severity="warning",
+                markup=False,
+            )
+            return
+        history = front.state.prompt_history()
+        if not history:
+            self.notify("nothing sent yet in this session", title="history", markup=False)
+            return
+        self._history_rows = {str(record.seq): record.text for record in history}
+        self._pick(
+            "history",
+            history_choices(history),
+            self._insert_history,
+            on_highlight=self._reveal_history,
+        )
+
+    def _reveal_history(self, value: str) -> None:
+        """Scroll the transcript to the prompt under the cursor.
+
+        No guard on the seq: `scroll_to_seq` already answers `False` for one it
+        has no row for, which is the same rule written once.
+        """
+        if value in self._history_rows and self._view is not None:
+            self._view.scroll_to_seq(int(value))
+
+    def _insert_history(self, chosen: str | None) -> None:
+        """Put the chosen prompt in the box — to send, or to edit first."""
+        text = self._history_rows.get(chosen or "")
+        self._history_rows = {}  # the picker is gone; so is its data
+        if text is None or self._prompt is None:
+            return
+        self._prompt.replace(text)
+        self._prompt.area.focus()
+
     def action_open_themes(self) -> None:
         self._pick(
             "theme",
@@ -870,6 +989,18 @@ class PHTuiApp(App[str | None]):
 
     # ---------------------------------------------------------- completions --
 
+    def _history_source(self) -> list[PromptRecord]:
+        """Every prompt this person has sent, for the arrow keys and `/history`.
+
+        Empty while the mirror has diverged, so the arrows simply edit rather
+        than offering a history that is a prefix of unknown length. `/history`
+        says so out loud; a key cannot, so it declines quietly.
+        """
+        front = self.front
+        if front is None or front.diverged:
+            return []
+        return front.state.prompt_history()
+
     def _completion_source(self) -> dict[str, Any]:
         front = self.front
         commands: list[tuple[str, str]] = []
@@ -879,7 +1010,11 @@ class PHTuiApp(App[str | None]):
 
 
 async def run_tui(
-    *, daemon_argv: Sequence[str], session_id: str | None = None, spawn: bool = True
+    *,
+    daemon_argv: Sequence[str],
+    session_id: str | None = None,
+    spawn: bool = True,
+    offer_sessions: bool = True,
 ) -> None:
     """Entry point for `--mode tui`.
 
@@ -891,8 +1026,17 @@ async def run_tui(
     sessions in the picker no longer ends the turn you were watching.
     """
     while True:
-        app = PHTuiApp(daemon_argv=daemon_argv, session_id=session_id, spawn=spawn)
+        app = PHTuiApp(
+            daemon_argv=daemon_argv,
+            session_id=session_id,
+            spawn=spawn,
+            offer_sessions=offer_sessions,
+        )
         chosen = await app.run_async()
         if chosen is None:
             return
         session_id = chosen
+        # The picker has done its job once; reopening through `/sessions` is an
+        # explicit choice already, and offering the list again on the way in
+        # would ask the same question twice.
+        offer_sessions = False

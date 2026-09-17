@@ -58,6 +58,8 @@ from ph.session import (
     Session,
     SessionForkError,
     SurfaceIntent,
+    cwd_tag,
+    family_for,
     fork_boundaries,
     is_fork_boundary,
 )
@@ -321,3 +323,32 @@ def test_a_child_inherits_its_parents_lineage_however_it_was_made() -> None:
 
     assert root.header.family == "r", "a root heads its own lineage"
     assert [one.header.family for one in (branch, segment, subagent, grandchild)] == ["r"] * 4
+
+
+def test_a_lineage_keeps_its_working_directory_tag() -> None:
+    """Format 1: the cwd tag is fixed at the root and inherited unchanged.
+
+    A fork and a segment of work done in `/work` stay filed under `/work`, which
+    is what keeps one conversation in one directory — and what lets a listing skip
+    a repo without opening anything in it.
+
+    Fixed at the root, *not* recomputed per child, because a session `cd`s
+    nowhere: it belongs where it began.
+
+    Sabotage: recompute the family in `_branch` and a fork lands in its own
+    directory, which the backend listing gate catches too.
+    """
+    store = _store()
+    root = store.create("r", meta={"cwd": "/work"})
+    assert root.header.family == family_for("r", "/work")
+    assert root.header.family.startswith(f"{cwd_tag('/work')}-")
+
+    branched = store.fork(root, None, "b")
+    rolled = store.roll(root, "s")
+    assert branched.header.family == root.header.family
+    assert rolled.header.family == root.header.family
+
+
+def test_a_session_with_no_working_directory_is_untagged() -> None:
+    """A root with no cwd keeps its bare id, so no directory search finds it."""
+    assert _store().create("bare").header.family == "bare"

@@ -26,6 +26,7 @@ from ph_app import verbs
 from ph_app.daemon import server
 from ph_app.daemon.server import METHODS, MUTATIONS, Announced, Method
 from ph_app.params import (
+    BrowseParams,
     MutationParams,
     NewSessionParams,
     PromptParams,
@@ -346,3 +347,60 @@ async def test_a_mutation_is_keyed_by_the_client_without_the_caller_saying_so(
             commandId="1",
         )
         assert again["repeated"] is True, "the stamp `mutate` applied is the one that guards"
+
+
+# ------------------------------------------------------- browse, by directory --
+
+
+async def test_a_client_that_sends_no_params_still_gets_every_session(tmp_path: Path) -> None:
+    """The compatibility claim, over a real socket.
+
+    `sessions/browse` grew parameters in P9-04 and every one is defaulted, so the
+    bare `{}` that every client sent before behaves exactly as it did — which is
+    why `PROTOCOL_VERSION` did not move for it.
+
+    Sabotage: make `cwd` or `limit` required on `BrowseParams`, and this is
+    refused as `invalid_params`.
+    """
+    async with running(tmp_path) as daemon:
+        client = await daemon.client()
+        await client.call(verbs.SESSION_NEW, NewSessionParams(session_id="browsable"))
+        bare = await client.call("sessions/browse")
+        assert any(row["sessionId"] == "browsable" for row in bare["sessions"])
+
+
+async def test_a_live_root_in_this_directory_is_listed_with_its_status(tmp_path: Path) -> None:
+    """A mounted root is listed by the cwd its header recorded, not by its file.
+
+    The row exists before the log does — a root whose events are still in a write
+    buffer has nothing on disk to scan — so the filter has to read the header the
+    supervisor holds. Sabotage: drop the `cwd` test from `browse_of`'s live-root
+    branch and the filtered listing shows roots from every directory.
+    """
+    async with running(tmp_path) as daemon:
+        client = await daemon.client()
+        here = str(tmp_path / "here")
+        Path(here).mkdir()
+        await client.call(
+            verbs.SESSION_NEW, NewSessionParams(session_id="mounted", cwd=here, trust="always")
+        )
+
+        mine = await client.call(verbs.SESSIONS_BROWSE, BrowseParams(cwd=here))
+        rows = {row.session_id: row for row in mine.sessions}
+        assert "mounted" in rows, "the live root is listed by its recorded cwd"
+        assert rows["mounted"].state != "stored", "and carries the status it is in"
+
+        elsewhere = await client.call(verbs.SESSIONS_BROWSE, BrowseParams(cwd=str(tmp_path / "no")))
+        assert not any(row.session_id == "mounted" for row in elsewhere.sessions)
+
+
+def test_the_daemon_says_it_can_filter_a_browse() -> None:
+    """A client can tell "this daemon filtered" from "there is nothing here".
+
+    Without the capability an empty list is ambiguous: an older daemon ignores
+    `cwd` entirely and answers with everything, which a client would read as "no
+    sessions here" only by accident of the directory being busy.
+    """
+    from ph_app.daemon.server import CAPABILITIES
+
+    assert "browse-cwd" in CAPABILITIES

@@ -35,7 +35,7 @@ import pytest
 
 from ph.keys import AGENTS, SESSION_PERSISTENCE, SESSIONS, TOOLS
 from ph.persistence.jsonl import JsonlSessionStore, read_session
-from ph.session import Session, SessionEvent, SurfaceIntent
+from ph.session import SESSION_FORMAT_VERSION, Session, SessionEvent, SurfaceIntent
 from ph.testing import FAKE_OPTIONS as FAKE
 from ph.testing import MountProfile, stored_log, user_payload, write_reference_fork
 from ph.tools import ToolRunContext
@@ -170,7 +170,8 @@ async def test_a_child_is_never_durable_before_the_prefix_it_references(
 def test_read_session_hands_acceptance_to_the_session(tmp_path: Path) -> None:
     path = tmp_path / "future.jsonl"
     path.write_text(
-        '{"type":"session/header","header":{"version":0,"id":"f","createdAt":1}}\n'
+        f'{{"type":"session/header","header":{{"version":{SESSION_FORMAT_VERSION},'
+        '"id":"f","createdAt":1}}\n'
         '{"type":"quantum/entangle","seq":0,"time":1,"data":{}}\n',
         encoding="utf-8",
     )
@@ -192,7 +193,7 @@ def test_a_log_with_no_header_is_refused(tmp_path: Path) -> None:
 def test_a_wrong_format_version_is_refused(tmp_path: Path) -> None:
     path = tmp_path / "v9.jsonl"
     path.write_text('{"type":"session/header","header":{"version":9,"id":"f","createdAt":1}}\n')
-    with pytest.raises(ValueError, match="version must be 0"):
+    with pytest.raises(ValueError, match=f"version must be {SESSION_FORMAT_VERSION}"):
         read_session(path)
 
 

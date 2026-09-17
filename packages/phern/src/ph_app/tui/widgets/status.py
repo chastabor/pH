@@ -26,7 +26,14 @@ from ph.text import thousands
 
 from ..state import CatalogEntry, TuiState
 
-__all__ = ["COMPACTION_THRESHOLD", "Sidebar", "StatusBar", "children_heading", "render_subagents"]
+__all__ = [
+    "COMPACTION_THRESHOLD",
+    "Sidebar",
+    "StatusBar",
+    "children_heading",
+    "render_subagents",
+    "shorten_path",
+]
 
 COMPACTION_THRESHOLD = 0.85
 """Where Phase 4's `compaction-summarize` triggers. The gauge warns here."""
@@ -245,7 +252,7 @@ class Sidebar(Vertical):
             [
                 f"id      {session_id}",
                 placed or "sandbox -",
-                f"cwd     {_shorten(cwd)}",
+                f"cwd     {shorten_path(cwd)}",
             ]
         )
         todos = "\n".join(_todo_line(todo) for todo in state.todos) or "—"
@@ -363,8 +370,14 @@ def _todo_line(todo: dict[str, Any]) -> str:
     return f"{glyph} {todo.get('content', '')}{NO_WORK_SEEN if bare else ''}"
 
 
-def _shorten(path: str, width: int = Sidebar.WIDTH - 10) -> str:
-    """A path that fits, keeping the end — the part that identifies it."""
+def shorten_path(path: str, width: int = Sidebar.WIDTH - 10) -> str:
+    """A path that fits, keeping the end — the part that identifies it.
+
+    Public because the startup picker's title wants the same rule at a different
+    width: two `~`-substitutions in one package is two answers to "how does pH
+    write a path", and the second one had no width cap at all — so a deep
+    directory overflowed a modal that is 72 columns wide.
+    """
     if path.startswith(_HOME):
         path = f"~{path[len(_HOME) :]}"
     return path if len(path) <= width else f"…{path[-(width - 1) :]}"

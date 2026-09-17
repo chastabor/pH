@@ -69,6 +69,18 @@ class TuiKeybindings:
     accept_completion: str = "tab"
     completion_next: str = "down"
     completion_previous: str = "up"
+    history_previous: str = "up"
+    history_next: str = "down"
+    """The same two keys the completion list uses, and deliberately so.
+
+    They never contend, and `PromptInput._decide` is where that is arranged —
+    stated there rather than restated here, since a claim about another module's
+    branch order goes stale silently. Split fields even so, because they are two
+    *bindings*: somebody who moves history onto `alt+up` to free the arrows for
+    editing must be able to say that, and a single field would move both."""
+    history_search: str = "alt+r"
+    """`ctrl+r` is the session picker, which is older; the shell reflex has to
+    give way to the binding that was already there."""
     toggle_thinking: str = "ctrl+t"
     toggle_tool_results: str = "ctrl+o"
     toggle_sidebar: str = "ctrl+b"

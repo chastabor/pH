@@ -14,6 +14,7 @@ paste per keystroke is unusable.
 
 from __future__ import annotations
 
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -26,6 +27,7 @@ from textual.widgets import ListItem, ListView, Static, TextArea
 
 from ..autocomplete import CompletionState, build_completion_state
 from ..config import TuiKeybindings
+from ..state import PromptRecord
 
 __all__ = ["PromptArea", "PromptInput"]
 
@@ -36,6 +38,25 @@ PASTE_PLACEHOLDER_THRESHOLD = 2_000
 class _Pasted:
     marker: str
     text: str
+
+
+@dataclass(slots=True)
+class _Walk:
+    """A walk through history, and the draft it is standing on.
+
+    Snapshotted when the walk starts rather than read per keypress: a turn that
+    lands mid-walk would otherwise renumber the entries under the cursor, and the
+    next `up` would move somewhere the person did not ask for.
+
+    `draft` is what was in the box before the first `up`. It is also the *filter*
+    — a non-empty draft walks only the prompts that start with it, which is what
+    every shell does and the reason the ask said "search" rather than "cycle".
+    """
+
+    draft: str
+    entries: tuple[PromptRecord, ...]
+    index: int = -1
+    """`-1` is the draft itself; `0` is the newest prompt."""
 
 
 class PromptArea(TextArea):
@@ -94,12 +115,21 @@ class PromptInput(Vertical):
         keybindings: TuiKeybindings,
         *,
         completion_source: Any = None,  # noqa: ANN401
+        history_source: Callable[[], Sequence[PromptRecord]] | None = None,
     ) -> None:
         super().__init__(id="prompt")
         self.keys = keybindings
         self.completion_source = completion_source
+        self.history_source = history_source
+        """Where the prompts come from, asked when a walk begins.
+
+        A callable for `completion_source`'s reason: the widget draws, and what
+        the person has already sent is the app's to fold. Handed the whole list,
+        not a cursor, so the widget owns only the walking."""
         self._pastes: list[_Pasted] = []
         self._completions: CompletionState | None = None
+        self._walk: _Walk | None = None
+        """The walk in progress, or `None` when the box is the person's own."""
 
     def compose(self) -> ComposeResult:
         yield PromptArea(self, id="prompt-input", soft_wrap=True)
@@ -119,9 +149,20 @@ class PromptInput(Vertical):
             text = text.replace(paste.marker, paste.text)
         return text
 
+    def replace(self, text: str) -> None:
+        """Put `text` in the box, cursor at the end — the whole prompt, replaced.
+
+        The public sibling of `text()` and `clear()`. `area.text = …` followed by
+        `move_cursor(document.end)` was written in three places, one of them in
+        `app.py` reaching across the widget boundary to do what the widget owns —
+        and that copy was the one that forgot to close the completion list.
+        """
+        self._show(text)
+
     def clear(self) -> None:
         self.area.text = ""
         self._pastes.clear()
+        self._walk = None
         self._set_completions(None)
 
     async def on_paste(self, event: events.Paste) -> None:
@@ -170,7 +211,10 @@ class PromptInput(Vertical):
                 self.clear()
             return True
         if self._completions is None:
-            return False
+            # **Only here**, which is what lets one key mean two things: with a
+            # list open the branches below move the *list*, and `up` reaches
+            # history only once there is no list to move.
+            return self._walk_history(key)
         if key == keys.accept_completion:
             self._accept_completion()
             return True
@@ -184,7 +228,99 @@ class PromptInput(Vertical):
         return False
 
     async def on_text_area_changed(self, _event: TextArea.Changed) -> None:
+        # Unconditional, because a recall does not reach here at all: `_show`
+        # writes inside `prevent`, so the person typing is the only thing that
+        # posts this. The walk is over — the next `up` starts again from what is
+        # in the box now, which is also the new filter. Editing a recalled prompt
+        # and keeping the walk position would mean `up` jumping from text nobody
+        # can see any more.
+        self._walk = None
         self._refresh_completions()
+
+    # -------------------------------------------------------------- history --
+
+    def _walk_history(self, key: str) -> bool:
+        """Move through what this person has sent. `True` when the key is spent.
+
+        Claimed **only at the edges of the box**: `up` on the first line, `down`
+        on the last. Anywhere else a multi-line draft still navigates, which is
+        the behavior a prompt box cannot give up to gain history.
+        """
+        keys = self.keys
+        area = self.area
+        if key == keys.history_previous and area.cursor_at_first_line:
+            return self._step(1)
+        if key == keys.history_next and area.cursor_at_last_line and self._walk is not None:
+            # Not claimed when no walk is in progress: `down` on the last line of
+            # an untouched box means nothing, and swallowing it would make the
+            # key feel broken.
+            return self._step(-1)
+        return False
+
+    def _step(self, step: int) -> bool:
+        """Move `step` entries through the walk. `False` leaves the key alone.
+
+        **An index delta, not a direction**: `+1` is one entry *older*, because
+        that is the way the list runs (newest first) and naming it the other way
+        made both call sites and the body each invert it once.
+        """
+        walk = self._walk
+        if walk is None:
+            if step < 0:
+                return False  # nothing to come back down from
+            walk = self._begin_walk()
+            if walk is None:
+                return False
+        index = walk.index + step
+        if index >= len(walk.entries):
+            # Already at the oldest. Claimed anyway, so the cursor does not
+            # silently jump out of the box at the end of the walk.
+            return True
+        if index < 0:
+            # Back on the draft: the box is the person's again, and the walk ends
+            # rather than sitting on a sentinel.
+            self._show(walk.draft)
+            self._walk = None
+            return True
+        walk.index = index
+        self._show(walk.entries[index].text)
+        return True
+
+    def _begin_walk(self) -> _Walk | None:
+        """Snapshot the history, filtered by whatever is already typed."""
+        if self.history_source is None:
+            return None
+        draft = self.area.text
+        prefix = draft.strip()
+        entries = tuple(
+            record
+            for record in self.history_source()
+            if not prefix or (record.text.startswith(prefix) and record.text != draft)
+        )
+        if not entries:
+            return None
+        self._walk = _Walk(draft=draft, entries=entries)
+        return self._walk
+
+    def _show(self, text: str) -> None:
+        """Put `text` in the box without ending the walk that asked for it.
+
+        **`prevent` rather than a flag or a remembered value**, which is Textual's
+        own answer to exactly this and is the only one that is not a race: it adds
+        the type to a stack that `post_message` consults *synchronously, at post
+        time*, so the `Changed` message is never queued — where a flag set and
+        cleared around the write is already back by the time a queued handler
+        runs. Its own docstring's example is this line.
+
+        It also makes `_set_completions(None)` mean what it says. Before, the
+        `Changed` handler ran straight afterwards and `_refresh_completions` could
+        re-open a list over a recalled prompt, so a recall had two writers of the
+        completion state and the second one won.
+        """
+        with self.area.prevent(TextArea.Changed):
+            self.area.text = text
+            self.area.move_cursor(self.area.document.end)
+        self._set_completions(None)
 
     # ---------------------------------------------------------- completions --
 
@@ -227,6 +363,4 @@ class PromptInput(Vertical):
         if state is None or listing.index is None or listing.index >= len(state.items):
             return
         chosen = state.items[listing.index]
-        self.area.text = state.replace(chosen)
-        self.area.move_cursor(self.area.document.end)
-        self._set_completions(None)
+        self.replace(state.replace(chosen))

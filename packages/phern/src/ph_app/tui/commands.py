@@ -118,6 +118,7 @@ TUI_VERBS: tuple[TuiVerb, ...] = (
     TuiVerb("model", "Choose the provider and model.", "open_models", "model_picker"),
     TuiVerb("theme", "Choose a color theme.", "open_themes", "theme_picker"),
     TuiVerb("sessions", "Reopen a stored session.", "open_sessions", "session_picker"),
+    TuiVerb("history", "Search the prompts you have sent.", "open_history", "history_search"),
     TuiVerb(
         "permissions", "Change what pH may do without asking.", "open_presets", "permission_picker"
     ),

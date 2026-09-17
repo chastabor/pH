@@ -37,15 +37,23 @@ __all__ = [
     "now_ms",
 ]
 
-SESSION_FORMAT_VERSION = 0
+SESSION_FORMAT_VERSION = 1
 """The on-disk format version, stamped into every header and checked on load.
 
 A single monotonic integer with no major/minor split. Bump exactly when an older
 runtime could no longer read a new log with full semantic correctness — the
 header shape, the envelope, core event semantics, or the surface mechanism.
 Adding an ordinary event type does not bump: `ignorable` covers vocabulary
-growth. While pH is unreleased it is pinned at 0 and incompatible logs are
-rejected rather than migrated.
+growth. While pH is unreleased an incompatible log is rejected rather than
+migrated.
+
+**1 (0.2.0): the lineage directory carries the working directory.** A root's
+`family` — which *is* the directory its log lives in — is now
+`<cwd-tag>-<id>` rather than `<id>`, so a listing can skip a whole repo's
+sessions without opening one of them (`SessionHeader.family`). Nothing about the
+envelope or the event semantics changed; the bump is here because the *layout*
+did, and a 0.1.x log sitting in an undecorated directory would simply stop being
+found by a filtered listing. Refusing it says so.
 """
 
 SURFACE_EVENT_TYPES: frozenset[str] = frozenset(

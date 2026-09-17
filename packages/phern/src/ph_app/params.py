@@ -89,6 +89,29 @@ class InitializeParams(WireModel):
     capabilities: list[str] = Field(default_factory=list)
 
 
+class BrowseParams(WireModel):
+    """`sessions/browse`: which sessions to list.
+
+    **Every field defaulted, which is the compatibility claim.** A client that
+    sends `{}` — every client written before this existed — gets what it got
+    before, so the wire did not move and neither did `PROTOCOL_VERSION`.
+
+    `cwd` is compared against the string a session's header recorded, with no
+    `resolve()`: the daemon may be on another machine and may not have the path
+    at all, and whether two spellings of one checkout are the same directory is
+    the person's business rather than the protocol's. A mismatch costs a row in
+    the picker, and an unfiltered browse still lists everything.
+
+    **No `limit` field**, though the fold has one. Nothing would have set it — both
+    clients send `cwd` alone — and declaring it here put `50` in a third place
+    beside `browse_of` and `session_summaries`, only one of which decides
+    anything. Every field being defaulted is exactly what makes adding it back,
+    for the first client that wants it, the same non-event described above.
+    """
+
+    cwd: str = ""
+
+
 class NewSessionParams(SessionParams):
     """`session/new`. `cwd` is the client's directory, because the daemon mounts."""
 

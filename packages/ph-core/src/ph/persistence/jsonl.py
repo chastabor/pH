@@ -85,9 +85,9 @@ def session_path(root: Path, session_id: str, family: str) -> Path:
     return path_under(root, family, session_id, SUFFIX)
 
 
-def session_logs(root: Path) -> list[tuple[Path, os.stat_result]]:
-    """Every stored log under `root`, newest first."""
-    return logs_under(root, SUFFIX)
+def session_logs(root: Path, *, tag: str = "") -> list[tuple[Path, os.stat_result]]:
+    """Every stored log under `root`, newest first; `tag` narrows it to one cwd."""
+    return logs_under(root, SUFFIX, tag=tag)
 
 
 def locate_session(root: Path, session_id: str) -> Path | None:

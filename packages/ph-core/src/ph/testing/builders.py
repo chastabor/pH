@@ -406,9 +406,13 @@ def reference_fork(
         parent_session=parent,
         seed_length=boundary,
         kind=kind,
-        # A child inherits its parent's lineage. Defaulting to `parent` is right
-        # for the common case — forking a root, whose family is its own id — and
-        # a test chaining segments off a deeper session says which.
+        # A child inherits its parent's lineage, and this helper is only handed
+        # the parent's *id*, so it cannot derive one. The default is therefore
+        # right only for a root created with **no cwd**, whose family is its own
+        # id; since format 1 a root worked in a directory is `<cwd-tag>-<id>` and
+        # a caller forking one has to say so. Getting it wrong files the child in
+        # a directory of its own, which is what `test_a_listing_row_says_the_same
+        # _thing_from_either_backend` asserts against.
         family=family or parent,
     )
     own = [

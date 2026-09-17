@@ -15,6 +15,8 @@ dialog appeared.
 from __future__ import annotations
 
 import json
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
@@ -22,20 +24,26 @@ import pytest
 from daemon_helpers import Daemon
 from daemon_helpers import until as settled
 from textual.binding import Binding
+from textual.pilot import Pilot
 from textual.widgets import Input
 from tui_helpers import MakeApp, root_of, running, turn_done, until
 
 from ph.keys import APPROVAL, COMMANDS, CREDENTIALS, TOOLS
+from ph.persistence.jsonl import HEADER_LINE_TYPE, session_path
 from ph.seams.approval import ApprovalRequest, Edited, Responded
 from ph.seams.commands import CommandDefinition
 from ph.seams.user_questions import UserQuestion
+from ph.session import SessionHeader
 from ph.testing import StubAgent, not_none, simple_tool
 from ph_app.daemon.supervisor import Root
 from ph_app.trust import TrustStore
+from ph_app.tui.app import PHTuiApp
 from ph_app.tui.modals.approval import ApprovalModal
 from ph_app.tui.modals.ask_user import AskUserModal
 from ph_app.tui.modals.base import Choice, ChoicePicker, ConfirmModal
+from ph_app.tui.modals.pickers import NEW_SESSION
 from ph_app.tui.modals.trust import plan_review_modal, project_trust_modal
+from ph_app.tui.state import ChatItem
 from ph_app.tui.themes import load_theme_profile
 from ph_app.tui.widgets.prompt import PromptInput
 
@@ -983,3 +991,302 @@ async def test_two_terminals_on_one_session_share_the_log_and_not_the_composer(
         )
 
         assert second.query_one(PromptInput).area.text == "a draft", "the draft is still theirs"
+
+
+# ------------------------------------------------------------------ history --
+
+
+def _sent(app: PHTuiApp, *prompts: str) -> None:
+    """Put `prompts` in the mirror as sent, oldest first.
+
+    Seeded rather than submitted: history is a fold of the `user` rows, and a
+    turn per entry would spend a model call to produce the one row this reads.
+    What the keystrokes below then drive is the whole real path — the app's
+    source, the widget's walk, the box.
+    """
+    front = not_none(app.front)
+    for index, text in enumerate(prompts):
+        front.state.add(
+            ChatItem(key=f"u{index}", role="user", text=text, seq=index, turn=index + 1)
+        )
+
+
+async def test_up_arrow_recalls_the_previous_prompt(make_tui_app: MakeApp) -> None:
+    async with running(make_tui_app()) as (app, pilot):
+        _sent(app, "the older one", "the newer one")
+        prompt = not_none(app._prompt)
+        await pilot.press(app.keys.history_previous)
+        await pilot.pause()
+        assert prompt.area.text == "the newer one", "newest first"
+        await pilot.press(app.keys.history_previous)
+        await pilot.pause()
+        assert prompt.area.text == "the older one"
+        # And it stops at the oldest rather than emptying the box.
+        await pilot.press(app.keys.history_previous)
+        await pilot.pause()
+        assert prompt.area.text == "the older one"
+
+
+async def test_up_arrow_inside_a_multi_line_draft_still_moves_the_cursor(
+    make_tui_app: MakeApp,
+) -> None:
+    """The behavior a prompt box may not trade away to gain history.
+
+    Sabotage: claim `history_previous` without asking `cursor_at_first_line`, and
+    the draft is replaced instead of navigated.
+    """
+    async with running(make_tui_app()) as (app, pilot):
+        # The sent prompt **starts with** the draft below, so a walk would have
+        # something to recall. Without that the filter alone stops the recall and
+        # this test passes even with the cursor check removed — which it did.
+        _sent(app, "first line\nsecond line and then more")
+        prompt = not_none(app._prompt)
+        # Set rather than typed: `enter` is submit here, so a newline cannot be
+        # keyed into the box at all.
+        prompt.area.text = "first line\nsecond line"
+        prompt.area.move_cursor(prompt.area.document.end)
+        await pilot.pause()
+
+        await pilot.press(app.keys.history_previous)
+        await pilot.pause()
+        assert prompt.area.text == "first line\nsecond line", "the draft is untouched"
+        assert prompt.area.cursor_location[0] == 0, "and the cursor moved up a line"
+
+        # What the *next* press does is not asserted here, and deliberately: the
+        # draft is the filter, so a two-line draft is a prefix of nothing and
+        # recalls nothing. Recall from the first line is
+        # `test_up_arrow_recalls_the_previous_prompt`'s subject; this one is about
+        # the key the editor keeps.
+
+
+async def test_the_draft_survives_a_walk_through_history(make_tui_app: MakeApp) -> None:
+    async with running(make_tui_app()) as (app, pilot):
+        _sent(app, "half a thought, finished")
+        prompt = not_none(app._prompt)
+        await pilot.press(*"half")
+        await pilot.pause()
+        assert prompt.area.text == "half"
+
+        await pilot.press(app.keys.history_previous)
+        await pilot.pause()
+        assert prompt.area.text == "half a thought, finished"
+
+        await pilot.press(app.keys.history_next)
+        await pilot.pause()
+        assert prompt.area.text == "half", "the half-written prompt was not eaten"
+
+
+async def test_a_typed_prefix_filters_the_walk(make_tui_app: MakeApp) -> None:
+    """What makes it a search rather than a cycle."""
+    async with running(make_tui_app()) as (app, pilot):
+        _sent(app, "fix the parser", "run the tests")
+        prompt = not_none(app._prompt)
+        await pilot.press(*"fix")
+        await pilot.pause()
+        await pilot.press(app.keys.history_previous)
+        await pilot.pause()
+        # "run the tests" is newer and would win an unfiltered walk.
+        assert prompt.area.text == "fix the parser"
+
+
+async def test_history_search_reveals_the_chosen_prompt_in_the_transcript(
+    make_tui_app: MakeApp,
+) -> None:
+    """The second half of the ask: the conversation moves behind the picker.
+
+    Sabotage: drop `on_highlight` from `action_open_history` and nothing is
+    revealed as the cursor moves.
+    """
+    async with running(make_tui_app()) as (app, pilot):
+        _sent(app, "the first thing", "the second thing")
+        revealed: list[int] = []
+        view = not_none(app._view)
+        original = view.scroll_to_seq
+
+        def recording(seq: int) -> bool:
+            revealed.append(seq)
+            return original(seq)
+
+        view.scroll_to_seq = recording  # type: ignore[method-assign]
+
+        await pilot.press(app.keys.history_search)
+        await pilot.pause()
+        assert isinstance(app.screen, ChoicePicker)
+        assert revealed, "the row under the cursor is revealed as the picker opens"
+        await pilot.press("down")
+        await pilot.pause()
+        assert len(revealed) > 1, "and again as the cursor moves"
+
+        await pilot.press("enter")
+        await pilot.pause()
+        assert not_none(app._prompt).area.text in ("the first thing", "the second thing")
+
+
+async def test_a_diverged_client_says_so_rather_than_offering_a_short_history(
+    make_tui_app: MakeApp,
+) -> None:
+    """A mirror that missed a frame is a prefix of unknown length.
+
+    The key declines quietly — a keystroke has nowhere to say why — and the verb
+    says it out loud, which is the same split `action_open_screen` already makes.
+    """
+    async with running(make_tui_app()) as (app, pilot):
+        _sent(app, "sent before the gap")
+        front = not_none(app.front)
+        front._unreadable = 1  # type: ignore[attr-defined]
+        assert front.diverged
+
+        await pilot.press(app.keys.history_previous)
+        await pilot.pause()
+        assert not_none(app._prompt).area.text == "", "the arrows fall back to editing"
+
+        await pilot.press(app.keys.history_search)
+        await pilot.pause()
+        assert not isinstance(app.screen, ChoicePicker), "and the picker refuses"
+
+
+async def test_a_rebound_history_key_is_the_one_that_works(
+    make_tui_app: MakeApp, tmp_path: Path
+) -> None:
+    """The rule `prompt.py` exists to enforce, asserted rather than assumed."""
+    (tmp_path / "tui.json").write_text(
+        json.dumps({"keybindings": {"history_previous": "ctrl+up"}}), encoding="utf-8"
+    )
+    async with running(make_tui_app()) as (app, pilot):
+        assert app.keys.history_previous == "ctrl+up"
+        _sent(app, "reachable only by the rebound key")
+        prompt = not_none(app._prompt)
+
+        await pilot.press("up")
+        await pilot.pause()
+        assert prompt.area.text == "", "the default key no longer recalls"
+
+        await pilot.press("ctrl+up")
+        await pilot.pause()
+        assert prompt.area.text == "reachable only by the rebound key"
+
+
+# ------------------------------------------------------- the startup picker --
+
+
+def _stored(home: Path, session_id: str, cwd: str) -> None:
+    """A session on the daemon's disk, in `cwd`.
+
+    **A header and no events**, which is both the shortest valid log and the only
+    one worth hand-writing: the envelope invariants are real — an event needs
+    `seq`, `time`, a log must start at seq 0, and a surface-eligible one needs its
+    `surfaceOp` marker — so a hand-rolled transcript is a race against rules that
+    exist to keep logs readable. A header-only session lists (the picker labels it
+    by id, having no first prompt to quote) and resumes, which is all these tests
+    ask of it.
+    """
+    # Through `SessionHeader` rather than hand-spelled JSON: `createdAt` is
+    # camelCase the model already owns, and — since format 1 — so is the
+    # `<cwd-tag>-<id>` family that decides which *directory* the log lands in.
+    # A fixture that built that name itself would be re-deriving the layout.
+    header = SessionHeader(id=session_id, created_at=0, cwd=cwd)
+    path = session_path(home / "sessions", session_id, header.family)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps({"type": HEADER_LINE_TYPE, "header": header.to_wire()}) + "\n",
+        encoding="utf-8",
+    )
+
+
+@asynccontextmanager
+async def _starting(app: PHTuiApp) -> AsyncIterator[tuple[PHTuiApp, Pilot[str | None]]]:
+    """Drive an app through startup **without** waiting for an attach.
+
+    `running` waits for `app.front`, which the startup picker is deliberately
+    standing in front of — so a test about the picker cannot use it.
+    """
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        yield app, pilot
+
+
+async def test_a_directory_with_no_history_opens_straight_into_a_new_session(
+    make_tui_app: MakeApp, tmp_path: Path
+) -> None:
+    """A first run must not meet a modal listing nothing.
+
+    Sabotage: push the picker without checking that `sessions` is non-empty.
+    """
+    app = make_tui_app(session_id=None, project=tmp_path / "fresh")
+    (tmp_path / "fresh").mkdir()
+    async with running(app) as (app, _pilot):
+        assert not isinstance(app.screen, ChoicePicker)
+        assert not_none(app.front).session_id, "attached without being asked"
+
+
+async def test_enter_on_the_first_row_starts_a_new_session(
+    make_tui_app: MakeApp, tmp_path: Path
+) -> None:
+    """One keystroke gets the behavior a person had before this picker existed."""
+    project = tmp_path / "work"
+    project.mkdir()
+    _stored(tmp_path, "older", str(project))
+    app = make_tui_app(session_id=None, project=project)
+    async with _starting(app) as (app, pilot):
+        await until(pilot, lambda: isinstance(app.screen, ChoicePicker))
+        await pilot.press("enter")
+        await until(pilot, lambda: app.front is not None)
+        assert not_none(app.front).session_id != "older", "a fresh session, not the stored one"
+
+
+async def test_choosing_a_stored_session_attaches_to_it(
+    make_tui_app: MakeApp, tmp_path: Path
+) -> None:
+    project = tmp_path / "work"
+    project.mkdir()
+    _stored(tmp_path, "older", str(project))
+    app = make_tui_app(session_id=None, project=project)
+    async with _starting(app) as (app, pilot):
+        await until(pilot, lambda: isinstance(app.screen, ChoicePicker))
+        await pilot.press("down")
+        await pilot.press("enter")
+        await until(pilot, lambda: app.front is not None)
+        assert not_none(app.front).session_id == "older"
+
+
+async def test_the_picker_lists_only_this_directory(make_tui_app: MakeApp, tmp_path: Path) -> None:
+    """P9-04's filter, seen from the screen it was added for."""
+    project = tmp_path / "work"
+    project.mkdir()
+    _stored(tmp_path, "ours", str(project))
+    _stored(tmp_path, "theirs", str(tmp_path / "elsewhere"))
+    app = make_tui_app(session_id=None, project=project)
+    async with _starting(app) as (app, pilot):
+        await until(pilot, lambda: isinstance(app.screen, ChoicePicker))
+        picker = app.screen
+        assert isinstance(picker, ChoicePicker)
+        values = [choice.value for choice in picker.choices]
+        assert values == [NEW_SESSION, "ours"], "the other directory's session is not offered"
+
+
+async def test_new_skips_the_picker(make_tui_app: MakeApp, tmp_path: Path) -> None:
+    """`--new` is for the person who never wants to be asked."""
+    project = tmp_path / "work"
+    project.mkdir()
+    _stored(tmp_path, "older", str(project))
+    app = make_tui_app(session_id=None, project=project, offer_sessions=False)
+    async with running(app) as (app, _pilot):
+        assert not isinstance(app.screen, ChoicePicker)
+        assert not_none(app.front).session_id != "older"
+
+
+async def test_escape_starts_a_new_session_rather_than_exiting(
+    make_tui_app: MakeApp, tmp_path: Path
+) -> None:
+    """The failure mode worth pinning: a picker that quits the app on escape is a
+    worse first run than no picker at all."""
+    project = tmp_path / "work"
+    project.mkdir()
+    _stored(tmp_path, "older", str(project))
+    app = make_tui_app(session_id=None, project=project)
+    async with _starting(app) as (app, pilot):
+        await until(pilot, lambda: isinstance(app.screen, ChoicePicker))
+        await pilot.press("escape")
+        await until(pilot, lambda: app.front is not None)
+        assert app.is_running, "still here"
+        assert not_none(app.front).session_id != "older"

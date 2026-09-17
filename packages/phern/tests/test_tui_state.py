@@ -39,11 +39,14 @@ the table each time — so the fix is the frequency, not the primitive.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
+import ph_app.sessions as S
 from ph.persistence.jsonl import session_path
+from ph.session import SessionHeader
 from ph.testing import write_reference_fork
-from ph_app.sessions import session_summaries
+from ph_app.sessions import SessionSummary, session_summaries
 from ph_app.tui.autocomplete import (
     PathCompleter,
     build_completion_state,
@@ -146,8 +149,16 @@ def test_path_completion_survives_a_missing_directory(tmp_path: Path) -> None:
 
 
 def _write_session(directory: Path, session_id: str, title: str, **header: object) -> None:
-    family = str(header.get("family") or header.get("parentSession") or session_id)
-    record = {"id": session_id, "createdAt": 0, "cwd": "/work", "family": family, **header}
+    # The family comes from the model, which since format 1 tags it with the
+    # cwd — so a fixture that spelled `family = session_id` would write into a
+    # directory no filtered listing looks in.
+    record = {"id": session_id, "createdAt": 0, "cwd": "/work", **header}
+    if record.get("cwd") is None:
+        record.pop("cwd", None)
+    if "family" not in record and record.get("parentSession"):
+        record["family"] = str(record["parentSession"])
+    family = SessionHeader.model_validate(record).family
+    record["family"] = family
     path = session_path(directory, session_id, family)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
@@ -165,6 +176,94 @@ def _write_session(directory: Path, session_id: str, title: str, **header: objec
         )
         + "\n"
     )
+
+
+def test_browse_filtered_by_cwd_finds_a_session_older_than_the_limit(tmp_path: Path) -> None:
+    """The reason the filter is a parameter of the fold and not a comprehension.
+
+    `limit` takes the newest rows. Filtering what comes *back* would let this
+    directory's own session fall off that window behind newer work elsewhere, so
+    a repo somebody last touched a month ago lists as empty on a busy machine.
+
+    Sabotage: filter the result instead of the scan — `[s for s in
+    session_summaries(d) if s.cwd == "/work"]` — and this finds nothing.
+    """
+    _write_session(tmp_path, "wanted", "the one worked on long ago", cwd="/work")
+    for index in range(60):
+        _write_session(tmp_path, f"other{index}", "newer work elsewhere", cwd="/elsewhere")
+    # Explicit mtimes: the writes above are fast enough to land in the same tick,
+    # and this fold sorts on mtime. "wanted" is the oldest by a clear margin.
+    for path in tmp_path.rglob("*.jsonl"):
+        os.utime(path, (0, 1_000) if path.stem == "wanted" else (0, 2_000_000))
+
+    found = session_summaries(tmp_path, cwd="/work")
+    assert [summary.session_id for summary in found] == ["wanted"]
+    # And it is genuinely past the window an unfiltered listing would show.
+    assert "wanted" not in {summary.session_id for summary in session_summaries(tmp_path)}
+
+
+def test_a_filtered_listing_opens_no_other_directorys_logs(tmp_path: Path) -> None:
+    """The point of tagging the lineage directory (format 1).
+
+    Before it, answering "which sessions are this repo's" meant opening the
+    header of every log in the store. Now the tag on the *directory name* settles
+    it, so the files of another repo are never read — asserted by counting, since
+    the whole value of the change is the reads that do not happen.
+
+    Sabotage: drop the `tag=` argument in `session_summaries` and every log is
+    opened again.
+    """
+    _write_session(tmp_path, "ours", "here", cwd="/work")
+    for index in range(20):
+        _write_session(tmp_path, f"theirs{index}", "elsewhere", cwd=f"/other/{index}")
+
+    opened: list[str] = []
+    real = S._summarize
+
+    def counting(path: Path, modified: float, size: int, *, cwd: str = "") -> SessionSummary | None:
+        opened.append(path.stem)
+        return real(path, modified, size, cwd=cwd)
+
+    S._summarize = counting
+    try:
+        found = session_summaries(tmp_path, cwd="/work")
+    finally:
+        S._summarize = real
+
+    assert [summary.session_id for summary in found] == ["ours"]
+    assert opened == ["ours"], "no other directory's log was opened"
+
+
+def test_a_session_with_no_cwd_belongs_to_no_directory(tmp_path: Path) -> None:
+    """A tagless lineage is found by an unfiltered listing and by no filter.
+
+    The honest answer rather than a placeholder tag: a session that never had a
+    working directory should not turn up in a search for one.
+    """
+    _write_session(tmp_path, "rootless", "no cwd", cwd=None)
+    assert [s.session_id for s in session_summaries(tmp_path)] == ["rootless"]
+    assert session_summaries(tmp_path, cwd="/work") == []
+
+
+def test_an_unfiltered_browse_is_unchanged(tmp_path: Path) -> None:
+    """`cwd=""` is every session, which is what `/sessions` asks for."""
+    _write_session(tmp_path, "here", "one", cwd="/work")
+    _write_session(tmp_path, "there", "two", cwd="/elsewhere")
+    assert {summary.session_id for summary in session_summaries(tmp_path)} == {"here", "there"}
+    assert {summary.session_id for summary in session_summaries(tmp_path, cwd="")} == {
+        "here",
+        "there",
+    }
+
+
+def test_the_limit_counts_matching_sessions(tmp_path: Path) -> None:
+    """Filtering first means `limit` bounds the answer, not the scan."""
+    for index in range(4):
+        _write_session(tmp_path, f"mine{index}", "ours", cwd="/work")
+        _write_session(tmp_path, f"theirs{index}", "not ours", cwd="/elsewhere")
+    found = session_summaries(tmp_path, limit=3, cwd="/work")
+    assert len(found) == 3
+    assert all(summary.cwd == "/work" for summary in found)
 
 
 def test_session_summaries_title_from_the_first_user_message(tmp_path: Path) -> None:

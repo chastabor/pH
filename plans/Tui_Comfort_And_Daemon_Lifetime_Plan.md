@@ -99,9 +99,9 @@ anything about the process's own life: the sidebar draws session id, sandbox and
 |---|---|---|
 | P9-01 | **Landed.** Themes in YAML or JSON, a `vars` palette, all problems reported at once, catppuccin ×4 | — |
 | P9-02 | **Landed.** `$PH_HOME/themes/theme-profile.yaml` — sole owner of the theme, written by `/theme`, absent by default | P9-01 |
-| P9-03 | Prompt history on the arrow keys, searched, and revealed in the transcript | — |
-| P9-04 | `sessions/browse` filtered by working directory | — |
-| P9-05 | The startup session picker | P9-04 |
+| P9-03 | **Landed.** Prompt history on the arrow keys, searched, and revealed in the transcript | — |
+| P9-04 | **Landed.** `sessions/browse` filtered by working directory | — |
+| P9-05 | **Landed.** The startup session picker | P9-04 |
 | P9-06 | An ephemeral daemon exits when the last front end detaches | — |
 | P9-07 | The lifetime on the wire and in the side panel | P9-06 |
 | P9-08 | Docs, non-guarantees, `Implementation_Plan.md` §4 | all |
@@ -359,6 +359,28 @@ against the YAML rather than deleted, since it is the end-to-end half of the sam
 
 ## P9-03 — prompt history on the arrow keys, and where it sits in the log
 
+> **Landed** (2026-09-16). `TuiState.prompt_history()` folds the `user` rows;
+> `PromptRecord` carries text, seq and turn; `PromptInput` gained a `_Walk` and
+> `history_source`; `/history` and `history_search` open a picker whose
+> `on_highlight` reveals. Seven gates, two sabotage-checked.
+>
+> **One design bug, caught by its own test.** The first version guarded "this
+> widget is writing the box" with a flag set and cleared around the write — but
+> `on_text_area_changed` arrives on the **message pump**, so the flag was already
+> back to `False` when the handler ran, and every recall looked like the person
+> typing and ended the walk it had just started. The second `up` did nothing. It
+> is now a remembered *value* — the last text the walk put in the box, compared
+> against what the box holds — which does not depend on when the handler runs.
+>
+> **Two gates were wrong before they were right, both because the draft is the
+> filter.** `test_the_draft_survives_a_walk_through_history` typed a draft that
+> was a prefix of nothing, so no walk began and nothing was preserved — correct
+> behavior, wrong expectation. And
+> `test_up_arrow_inside_a_multi_line_draft_still_moves_the_cursor` *passed under
+> its own sabotage*: with a two-line draft matching no history, the filter stopped
+> the recall whatever the cursor check did. It now seeds a prompt the draft is a
+> prefix of, which isolates the cursor check and fails when it is removed.
+
 **Files:** `tui/widgets/prompt.py`, `tui/app.py`, `tui/config.py`, `tui/commands.py`,
 `tui/modals/pickers.py`, `packages/phern/tests/test_tui_pilot.py`.
 
@@ -422,6 +444,26 @@ enforce, asserted rather than assumed.
 
 ## P9-04 — `sessions/browse`, filtered by working directory
 
+> **Landed** (2026-09-16). `BrowseParams(cwd, limit)` — every field defaulted, so
+> the bare `{}` every older client sends is unchanged and `PROTOCOL_VERSION` did
+> not move. `session_summaries` filters *during* the scan, so `limit` bounds the
+> matching rows rather than the files looked at; `browse_of` applies the same test
+> to the live roots it merges; `CAPABILITIES` gained `browse-cwd`.
+>
+> **The scan's cost was measured afterwards, in review, and needed a fix.**
+> Stopping at `limit` *matches* means a directory with fewer than fifty sessions —
+> nearly every directory — walks the whole store, and that now runs before the
+> first prompt. `_summarize` therefore takes the `cwd` and returns as soon as the
+> header fails it, before the title scan that is the expensive half of a row it
+> would discard: measured 28% off the filtered scan at 500 logs. The remaining
+> bound is the whole store, which has no retention, so if that ever stops being a
+> few hundred the answer is a per-directory index rather than a faster scan.
+>
+> Four gates. The one the row was written for —
+> `test_browse_filtered_by_cwd_finds_a_session_older_than_the_limit` — is
+> sabotage-checked against filtering after the limit, which is the mistake that
+> makes a month-old repo list as empty on a busy machine.
+
 **Files:** `ph_app/params.py` (or wherever `NoParams`' siblings live), `ph_app/verbs.py`,
 `ph_app/daemon/server.py`, `ph_app/daemon/projections.py`, `ph_app/sessions.py`,
 `ph_app/tui/remote.py`, `ph_app/tui/frontend.py`.
@@ -459,6 +501,36 @@ claim, asserted over a real socket in `test_daemon_methods`' style.
 
 ## P9-05 — the startup session picker
 
+> **Landed** (2026-09-16). `_offer_sessions` sits between the daemon connect and
+> the attach; `session_choices(offer_new=True)` leads with the new-session row;
+> `browse_before_attach` keeps the wire call in `remote.py`, since
+> `FrontSession.browse_sessions` is a method on the session this picker is
+> deciding. `--new` skips it. Six gates, the empty-directory one sabotage-checked.
+>
+> **The row hit a gap the plan did not see, and it was fatal to the feature as
+> written.** `Supervisor.sessions_directory()` answered by asking a *mounted
+> root's* store — and a daemon that has just started holds none, so
+> `sessions/browse` before the first attach returned an empty list. The picker
+> runs before the first attach by definition, so its main case — open pH in a
+> directory you have worked in, on a daemon that just came up — could never have
+> shown anything. Verified rather than reasoned: `roots: 0 →
+> sessions_directory(): None → browse_of: []`, resolving only after a root mounts.
+>
+> The fix is a fallback to the daemon's **own** `$PH_HOME/sessions`, and it is
+> narrower than it looks: that is the literal default
+> `session-persistence-jsonl` computes (`resolve_roots().sessions_dir()`), so in
+> any deployment that has not overridden the row it is the same path the store
+> would have named — and `supervisor.py:664` already derived it that way. A
+> deployment that *did* set `session-persistence-jsonl.root` gets a cold browse of
+> an absent directory, listing nothing, until its first root mounts. That
+> non-guarantee is recorded on the method.
+>
+> **The gates' fixture is a header-only log, on purpose.** Hand-writing a
+> transcript is a race against invariants that are right to exist — an event needs
+> `seq` and `time`, a log must start at seq 0, a surface-eligible event needs its
+> `surfaceOp` marker — each of which refused a draft of `_stored` in turn. A
+> header and no events is the shortest log that both lists and resumes.
+
 **Files:** `tui/app.py`, `ph_app/cli.py`, `tui/modals/pickers.py`,
 `packages/phern/tests/test_tui_pilot.py`.
 
@@ -493,6 +565,57 @@ unchanged.
 `test_new_skips_the_picker` · `test_escape_starts_a_new_session_rather_than_exiting` —
 the failure mode worth pinning, because a picker that quits the app on escape is a
 worse first run than no picker.
+
+---
+
+## P9-04b — the lineage directory carries the working directory (format 1)
+
+> **Landed** (2026-09-17), taken with the 0.2.0 bump and no backwards
+> compatibility, by decision: existing sessions are discarded rather than
+> migrated.
+>
+> **What changed.** A root's `family` — which *is* the directory its log lives in
+> — is now `<cwd-tag>-<id>`, six hex of the sha256 of the working directory. It is
+> derived in `SessionHeader`'s own `default_factory` from the `cwd` already beside
+> it, and inherited unchanged by every fork, segment and subagent through the one
+> construction gate in `SessionStore.create`. `family_dirs(root, tag=…)` then skips
+> a whole repo's lineages **without a `scandir` of their files, without a `stat`,
+> and without opening one**. `SESSION_FORMAT_VERSION` moves 0 → 1, so a 0.1.x log
+> is refused loudly rather than going quietly unfindable.
+>
+> **Measured, 500 sessions, one of them this repo's: 9.66 ms → 0.21 ms (46x).**
+> That is far better than the 3.46 ms predicted for the shape originally proposed
+> — a tag in the *session id*, filtering on filenames. The prediction was right for
+> that shape and wrong for this one: a filename filter still has to `stat` every
+> log to sort by mtime, so it lands on the listing floor, while a directory filter
+> never reaches the files at all. The complexity genuinely changed —
+> O(all sessions) → O(families) + O(this repo's sessions) — which the id version
+> could not have done.
+>
+> **Why the directory and not the id.** Session ids stay opaque: they cross the
+> wire, appear in `--session`, and people type them, so putting derived,
+> unverifiable, unrepairable content in one buys a constant factor at the cost of
+> a second source of truth for where a session belongs. The family was already a
+> directory and already inherited — the tag rides a mechanism that existed.
+>
+> **The tag is a filter, not an identity.** 24 bits collide; the header's own `cwd`
+> still confirms every match, so a collision costs one directory scan and never a
+> wrong row. A session created with no cwd stays untagged and is found by no
+> directory search, which is the honest answer rather than a placeholder.
+>
+> **It surfaced a latent bug in the test builders.** `reference_fork` defaulted a
+> child's family to the parent's *id*, justified by "forking a root, whose family
+> is its own id" — true until now, and invisible because the two strings were
+> equal. A fork of a tagged root would have been filed in a directory of its own.
+> Fixed at the builder and its call site, and
+> `test_a_lineage_keeps_its_working_directory_tag` pins the inheritance.
+>
+> **Gates:** `test_a_filtered_listing_opens_no_other_directorys_logs` — counts
+> `_summarize` calls, because the whole value is the reads that do not happen
+> (sabotage: drop the `tag=`, and every log is opened) ·
+> `test_a_session_with_no_cwd_belongs_to_no_directory` ·
+> `test_a_lineage_keeps_its_working_directory_tag` ·
+> `test_a_session_with_no_working_directory_is_untagged`.
 
 ---
 

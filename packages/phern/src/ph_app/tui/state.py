@@ -23,6 +23,7 @@ __all__ = [
     "CatalogEntry",
     "ChatItem",
     "ItemRole",
+    "PromptRecord",
     "SubagentRow",
     "Surface",
     "ToolCard",
@@ -173,6 +174,21 @@ class ChatItem:
         return not self.shadowed
 
 
+@dataclass(frozen=True, slots=True)
+class PromptRecord:
+    """One prompt a person sent, as the history walk and the picker show it.
+
+    A projection of the `user` rows of `TuiState.items` rather than a second
+    store — see `TuiState.prompt_history`. `seq` is what lets a chosen row be
+    *revealed* in the transcript, which is the half of this that a history file
+    could not do; it is `-1` for a row the log has no position for.
+    """
+
+    text: str
+    seq: int = -1
+    turn: int = 0
+
+
 @dataclass(slots=True)
 class TuiState:
     """The whole front-end model: rows and live status.
@@ -298,6 +314,31 @@ class TuiState:
         if not self.context_window:
             return None
         return self.tokens / self.context_window
+
+    def prompt_history(self) -> list[PromptRecord]:
+        """Every prompt this person sent, newest first.
+
+        **The mirror is the history**, which is why nothing is stored: these rows
+        are already here because the transcript is built from them, so the list
+        is correct across a resume and costs nothing to keep. A shell-style
+        history file would be a second copy of the log, and one that could not
+        say *where* in the conversation a prompt sits.
+
+        Consecutive duplicates collapse. Sending the same thing twice in a row is
+        a person retrying, and two identical rows in a walk read as the arrow key
+        having missed.
+
+        `shadowed` rows are kept: compaction hides a prompt from the *model*, and
+        this list is for the person, who still typed it.
+        """
+        history: list[PromptRecord] = []
+        for item in reversed(self.items):
+            if item.role != "user" or not item.text.strip():
+                continue
+            if history and history[-1].text == item.text:
+                continue
+            history.append(PromptRecord(text=item.text, seq=item.seq, turn=item.turn))
+        return history
 
     def visible_items(self, *, thinking: bool = True, tool_results: bool = True) -> list[ChatItem]:
         """The rows a given set of toggles shows."""

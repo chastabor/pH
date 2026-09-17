@@ -106,7 +106,7 @@ from ph.persistence import (
 )
 from ph.persistence.jsonl import JsonlSessionStore
 from ph.persistence.protocol import SessionPersistence, StoredSession
-from ph.session import Session, SessionEvent, SessionHeader, SurfaceIntent
+from ph.session import Session, SessionEvent, SessionHeader, SurfaceIntent, family_for
 from ph.testing import MountProfile, reference_fork, user_payload
 
 pytestmark = pytest.mark.anyio
@@ -781,14 +781,18 @@ async def test_a_listing_row_says_the_same_thing_from_either_backend(
     _append(store, parent, "turn/start", {"turn": 0})
     _append(store, parent, "turn/end", {"turn": 0, "reason": {"kind": "completed"}})
     await store.flush(parent)
-    await store.flush(_reference_fork(store, "c", "p", boundary=2))
+    # The real parent's family, not its id: a root worked in `/work` is filed
+    # under `<cwd-tag>-p`, and a child that guessed `p` would land elsewhere.
+    await store.flush(_reference_fork(store, "c", "p", boundary=2, family=parent.header.family))
 
     rows = {row.session_id: row for row in store.stored()}
     assert rows["p"].parent is None and rows["p"].cwd == "/work"
     assert rows["c"].parent == "p"
-    # A lineage shares one directory, so the child's family is the root's id —
+    # A lineage shares one directory, so the child's family is the root's —
     # which is what lets a reader build the path instead of searching for it.
-    assert rows["p"].family == rows["c"].family == "p"
+    # Since format 1 that name is `<cwd-tag>-<id>`, and the child inherits it
+    # unchanged: a fork of work done in `/work` stays filed under `/work`.
+    assert rows["p"].family == rows["c"].family == family_for("p", "/work")
 
 
 async def test_reading_a_log_nobody_writes_does_not_hold_it_open(tmp_path: Path) -> None:

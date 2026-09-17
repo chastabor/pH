@@ -25,11 +25,15 @@ from ph.seams.commands import CommandDefinition
 from ph.seams.permission_presets import PresetSchema
 
 from ...sessions import SessionSummary
+from ...wire import one_line
+from ..state import PromptRecord
 from ..themes import ThemeCatalog, ThemeProfile
 from .base import Choice
 
 __all__ = [
+    "NEW_SESSION",
     "command_choices",
+    "history_choices",
     "model_choices",
     "preset_choices",
     "session_choices",
@@ -99,6 +103,34 @@ def theme_choices(active: str, catalog: ThemeCatalog, profile: ThemeProfile) -> 
     ]
 
 
+def history_choices(history: Sequence[PromptRecord]) -> list[Choice]:
+    """The prompts this person has sent, newest first.
+
+    The **seq is the value**, not the text, and that is what makes the picker do
+    two jobs: choosing a row inserts its text, and moving the cursor onto it
+    reveals that row in the transcript — which needs a position in the log, and a
+    text would not give one for a prompt sent twice.
+
+    Rule 6, since it is visible: `Choice.matches` searches the value along with
+    the label, so a filter that is only digits can match a row by its seq rather
+    than by anything in the prompt. It adds a row to the list rather than hiding
+    one, which is why it is named here instead of worked around.
+
+    `one_line` is the TUI's own answer for "a person's text, on a row" — used by
+    the tool cards, the trajectory and `phern agents` — so a pasted prompt of three
+    hundred lines renders like every other truncated row, with the ellipsis that
+    says it was cut. The whole text is what gets inserted.
+    """
+    return [
+        Choice(
+            value=str(record.seq),
+            label=one_line(record.text, 72),
+            detail=f"turn {record.turn}" if record.turn else "",
+        )
+        for record in history
+    ]
+
+
 def model_choices(
     providers: Sequence[str], active_provider: str, active_model: str
 ) -> list[Choice]:
@@ -120,7 +152,19 @@ def model_choices(
     ]
 
 
-def session_choices(sessions: Sequence[SessionSummary], *, current: str = "") -> list[Choice]:
+NEW_SESSION = ""
+"""The value of the "start a new session" row, and what a dismissal answers.
+
+Empty on purpose, so the two ways of declining a stored session — choosing the
+first row, or pressing escape — arrive as the same answer and the caller has one
+branch rather than two. It is also unreachable through `free_text`, which offers
+what was *typed* and cannot be typed empty.
+"""
+
+
+def session_choices(
+    sessions: Sequence[SessionSummary], *, current: str = "", offer_new: bool = False
+) -> list[Choice]:
     """Stored sessions, newest first, **branches** indented under their parent.
 
     Two kinds of parent link reach this list and they must not render alike. A
@@ -138,6 +182,10 @@ def session_choices(sessions: Sequence[SessionSummary], *, current: str = "") ->
     Takes rows rather than anything to read them from: `sessions/browse` folds
     them on the harness — stored logs and live roots in one list, each row
     carrying the `state` the daemon calls it — so this function only arranges.
+    Set `offer_new` where declining is a real answer — the startup picker, where
+    the first row starts a fresh session and is what `enter` lands on.
+    `/sessions` leaves it off: there the question is which session to *switch
+    to*, and a row that means "stay here" is what escape already says.
     """
     summaries = {summary.session_id: summary for summary in sessions}
     under = _contract_segments(summaries)
@@ -153,6 +201,17 @@ def session_choices(sessions: Sequence[SessionSummary], *, current: str = "") ->
             children.setdefault(parent, []).append(session_id)
 
     rows: list[Choice] = []
+    if offer_new:
+        # First, and therefore pre-selected: `ChoicePicker` lands on the first
+        # row when nothing is marked, so `enter` is the behavior a person had
+        # before this picker existed.
+        rows.append(
+            Choice(
+                value=NEW_SESSION,
+                label="start a new session",
+                detail="or pick one below to carry on",
+            )
+        )
 
     def walk(session_id: str, depth: int) -> None:
         summary = summaries[session_id]

@@ -240,7 +240,7 @@ def _walk(value: JsonValue) -> Iterable[str]:
             yield from _walk(item)
 
 
-def browse_of(supervisor: Supervisor) -> list[SessionSummary]:
+def browse_of(supervisor: Supervisor, *, cwd: str = "") -> list[SessionSummary]:
     """Every session a person could open, stored and live, folded here (P5-14).
 
     **One list from the one process that can see both halves.** The logs are on
@@ -260,7 +260,7 @@ def browse_of(supervisor: Supervisor) -> list[SessionSummary]:
     `cwd`, so the repo it belongs to is on the row even before the file exists.
     """
     directory = supervisor.sessions_directory()
-    stored = session_summaries(directory) if directory is not None else []
+    stored = session_summaries(directory, cwd=cwd) if directory is not None else []
     held = {root.id: root for root in supervisor.roots.values()}
     rows = [
         summary.model_copy(update={"state": held[summary.session_id].status})
@@ -278,6 +278,6 @@ def browse_of(supervisor: Supervisor) -> list[SessionSummary]:
             state=root.status,
         )
         for root_id, root in sorted(held.items())
-        if root_id not in known
+        if root_id not in known and (not cwd or root.session.header.cwd == cwd)
     )
     return list(rows)

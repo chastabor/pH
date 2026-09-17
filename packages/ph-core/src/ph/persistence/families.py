@@ -25,22 +25,39 @@ def path_under(root: Path, family: str, name: str, suffix: str) -> Path:
     return root / family / f"{name}{suffix}"
 
 
-def family_dirs(root: Path) -> list[str]:
+def family_dirs(root: Path, *, tag: str = "") -> list[str]:
     """The lineage directories under `root`, or nothing if it cannot be read.
 
     A missing or unreadable sessions root is an empty store, not an error: every
     caller here is answering "what is on record", and a listing that raised would
     turn an empty deployment into a crash.
+
+    `tag` keeps only the lineages worked in one directory — the `<cwd-tag>-` a
+    root's `family` carries (format 1). **This is where a filtered listing gets
+    cheap**: a repo's sessions are skipped here, without a `scandir` of their
+    files, without a `stat` on any of them, and without opening one. `""` is
+    every lineage, which is what an unfiltered listing asks for.
+
+    A *tagless* directory — a session created with no cwd — is not matched by any
+    tag, which is the honest answer: it belongs to no working directory.
     """
+    prefix = f"{tag}-" if tag else ""
     try:
         with os.scandir(root) as entries:
-            return [entry.path for entry in entries if entry.is_dir()]
+            return [
+                entry.path
+                for entry in entries
+                if entry.is_dir() and (not prefix or entry.name.startswith(prefix))
+            ]
     except OSError:
         return []
 
 
-def logs_under(root: Path, suffix: str) -> list[tuple[Path, os.stat_result]]:
+def logs_under(root: Path, suffix: str, *, tag: str = "") -> list[tuple[Path, os.stat_result]]:
     """Every stored log, **newest first**, one family directory at a time.
+
+    `tag` narrows it to one working directory's lineages — see `family_dirs`,
+    which is where the skipping happens and why it costs nothing per file.
 
     One level deep and no deeper: a family is flat inside, so this is not a walk
     and cannot wander into a workspace someone parked in the sessions root.
@@ -50,7 +67,7 @@ def logs_under(root: Path, suffix: str) -> list[tuple[Path, os.stat_result]]:
     is really two.
     """
     found: list[tuple[Path, os.stat_result]] = []
-    for family in family_dirs(root):
+    for family in family_dirs(root, tag=tag):
         try:
             with os.scandir(family) as logs:
                 found.extend(

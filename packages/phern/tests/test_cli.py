@@ -24,6 +24,7 @@ from ph import bundles
 from ph.bundles import BASE, HEADLESS, resolve_bundle
 from ph.json import as_obj
 from ph.paths import resolve_roots
+from ph.session import SESSION_FORMAT_VERSION
 from ph.testing import ReapedHost, not_none, stored_log
 from ph_app import profiles
 from ph_app.cli import app
@@ -665,7 +666,7 @@ def test_print_mode_answers_and_writes_a_readable_log(
     path = stored_log(tmp_path / "sessions", "demo")
     records = [json.loads(line) for line in path.read_text().splitlines()]
     assert records[0]["type"] == "session/header"
-    assert records[0]["header"]["version"] == 0
+    assert records[0]["header"]["version"] == SESSION_FORMAT_VERSION
 
     events = records[1:]
     # dsh's envelope, byte-for-byte: `{type, seq, time, data}` plus the optional

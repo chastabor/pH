@@ -173,8 +173,13 @@ class FrontSession(Protocol):
         """The model routes this deployment can reach, by provider name."""
         ...
 
-    async def browse_sessions(self) -> list[SessionSummary]:
+    async def browse_sessions(self, *, cwd: str = "") -> list[SessionSummary]:
         """Every session a person could open here — stored and live, in one list.
+
+        `cwd` narrows it to the sessions whose header recorded that directory;
+        `""` is everything, which is what `/sessions` asks for. The filter runs on
+        the harness, before its own row limit, so a directory worked in long ago
+        is still found on a machine with newer work elsewhere.
 
         Folded by the harness, which is the only place that can see both halves:
         the logs are its disk and which roots are mounted is its own state. A

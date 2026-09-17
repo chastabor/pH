@@ -51,6 +51,7 @@ from ph.wire import WireModel
 
 from .. import verbs
 from ..params import (
+    BrowseParams,
     CancelScheduleParams,
     CommandParams,
     CreateScheduleParams,
@@ -286,6 +287,7 @@ CAPABILITIES = (
     "snapshots",
     "asks",
     "browse",
+    "browse-cwd",
     "projections",
     "attachments",
     "staging",
@@ -524,11 +526,11 @@ class _Connection:
         root.agent.cancel(AgentCancelCause(kind="user"), keep_inbox=True)
         return root.describe()
 
-    async def _sessions_browse(self, _params: NoParams) -> SessionBrowse:
+    async def _sessions_browse(self, params: BrowseParams) -> SessionBrowse:
         # Daemon-level, not a `PROJECTIONS` row: it is not about one root.
         # Every root mounts the same profile and so the same store, and which
         # roots are held is the supervisor's own answer.
-        return SessionBrowse(sessions=browse_of(self.server.supervisor))
+        return SessionBrowse(sessions=browse_of(self.server.supervisor, cwd=params.cwd))
 
     async def _daemon_config(self, _params: NoParams) -> DaemonConfigReply:
         # The composed profile, which is a property of the *daemon* and not
