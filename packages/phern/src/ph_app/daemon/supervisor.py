@@ -148,6 +148,24 @@ NON_GUARANTEES: tuple[tuple[str, str], ...] = (
         "schedules inside a conversation and does not replace them",
     ),
     (
+        "an auto-started daemon",
+        "leaves when nothing needs it. One a UI spawned exits on the last detach unless a "
+        "turn is running, a schedule is on the books, or a `--keep-alive` window was asked "
+        "for — so an indexed appointment keeps it resident and a schedule still fires. What "
+        "it does not survive is the process ending: a `kill -9`, a logout reap or a reboot "
+        "takes the daemon and the appointment with it until a UI opens again, which is the "
+        "row above seen from the other side. Timely work on a machine that reboots wants a "
+        "systemd or launchd unit owning `phern daemon`",
+    ),
+    (
+        "`--keep-alive`",
+        "a floor on how long the process stays, not a ceiling. It is how long a daemon waits "
+        "*after the last client leaves* before going; a turn, a schedule or another client "
+        "that outruns it keeps it up, which is the point. It is also the client's argv and "
+        "not a daemon-side setting — a daemon may not read a front end's preferences, and "
+        "after P5-14 may not share a filesystem with it",
+    ),
+    (
         "what `!!` puts in the log",
         "whatever the command printed. The environment is scrubbed — `ctx.shell` drops every "
         "name matching KEY|SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL, and pH reads provider keys "

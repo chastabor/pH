@@ -58,6 +58,8 @@ CLAIMED = {
     "CPU": "shared",
     "restart": "not rolling",
     "while the daemon is down": "nothing fires",
+    "an auto-started daemon": "leaves when nothing needs it",
+    "`--keep-alive`": "a floor on how long the process stays, not a ceiling",
     "what `!!` puts in the log": "whatever the command printed",
     "how long `!!` may run": "without limit",
     "who may run `!!`": "anyone holding the web token",

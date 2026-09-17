@@ -577,11 +577,13 @@ phern [--print P] [--profile P] [--provider P] [--model M] [--session ID]
       [--mode MODE] [--attach PATH ...] [--resume ID] [--dump-config]
       [--no-spawn]                                  # tui/web: refuse to start a daemon
       [--keep-daemon]                               # tui/web: start a service one, not ephemeral
+      [--keep-alive D]                              # tui/web: how long the one it starts waits
       [--host H] [--port N] [--open]                # web: bind, and the token URL
 
 phern doctor      [--profile]
 phern daemon      [--profile] [--provider] [--model] [--passivate-after off|MIN]
                   [--ephemeral]                     # exit once nothing needs it
+                  [--keep-alive D]                  # "30s", "5m" — implies --ephemeral
 phern events      [--json]
 
 phern agents                                     # list running roots
@@ -607,6 +609,19 @@ than seven, and which distinguishes an **absent** socket (nothing was started)
 from a **present but refusing** one (something crashed and left its path behind)
 — opposite next steps (`agents.py`).
 
+**A daemon's lifetime is decided by who started it, and that is the whole rule
+(P7-08, P9-06).** `phern daemon` is a service: somebody chose to run a supervisor,
+and one that exits when idle is one that is not there when the next client
+arrives. A daemon a UI spawned because the socket was absent was nobody's
+decision, so it leaves when the last front end detaches — *at once*, unless a turn
+is in flight, a schedule is on the books, or a `--keep-alive` window was asked
+for. Which of those is holding it is not a thing to guess at: the side panel says
+`daemon  held · task`, and `phern agents doctor` prints the same four facts from
+the same builder. `--keep-alive` is a **floor, not a ceiling** — work that outruns
+it keeps the daemon up — and it is the *client's* argv rather than a daemon-side
+setting, because a daemon may not read a front end's preferences and after P5-14
+may not share a filesystem with it (`daemon/server.py`, `cli.py`).
+
 `phern workspaces gc` **reports by default; removing is the flag** — the opposite
 way round from most `gc`, because the person who most needs it is the one who
 just found the disk full and does not yet know what these directories are
@@ -623,7 +638,7 @@ Everything exits **1** on refusal, except argument errors under
 | `json` | **Not a rendering** — the session log's *own* camelCase envelopes, emitted as each commits, so a pipe consumer and the stored JSONL parse one format |
 | `transcript` | Reads `session.transcript()`, **not** `derive_messages()`, so compaction does not erase what the human saw |
 | `rpc` | JSON-RPC over stdio. Takes no `--print` — the peer drives |
-| `tui` | Textual, imported lazily. **A daemon client** (P5-14): it attaches, and closing it detaches rather than ending the turn. Silently starts an ephemeral daemon when no socket answers — `--keep-daemon` makes the one it starts a service instead, and `--no-spawn` refuses to start one at all |
+| `tui` | Textual, imported lazily. **A daemon client** (P5-14): it attaches, and closing it detaches rather than ending the turn. Silently starts an ephemeral daemon when no socket answers — `--keep-daemon` makes the one it starts a service instead, `--keep-alive` says how long it waits after the last detach, and `--no-spawn` refuses to start one at all. Opening it in a directory offers the sessions worked there before attaching (P9-05) |
 | `web` | The same `tui` in a browser tab, over `textual-serve` — one subprocess per tab, so each tab is one more front end on the one daemon, and **all tabs of a launch share one session** (the multiplex: private composers, one log). Drop a file on the page to attach it. Needs the `phern[web]` extra; `--mode web` without it prints the install line. Binds `127.0.0.1` unless `--host` says otherwise, and every request needs the per-launch token from the URL |
 | `trajectory` | **Mounts nothing** — no agent, provider, answerers, or plugins. A fold over a stored file |
 
@@ -643,11 +658,33 @@ and never opens a `turn/*` — because the human decided it, not the model
 | `/compact [what you are about to work on]` | `command-compact` | rlm-stable |
 
 The TUI registers its own verbs at runtime rather than through a profile row —
-`/commands`, `/model`, `/theme`, `/sessions`, `/permissions`, `/login`,
-`/thinking`, `/tools`, `/sidebar`, `/quit` — each reachable three ways (slash
-command, Textual action, key binding), so adding one is a table row plus a method
-(`tui/commands.py`). A contributed screen gets the same three routes;
+`/commands`, `/model`, `/theme`, `/sessions`, `/history`, `/permissions`,
+`/login`, `/view`, `/tools`, `/skills`, `/attach`, `/quit` — each reachable three ways
+(slash command, Textual action, key binding), so adding one is a table row plus a
+method (`tui/commands.py`). A contributed screen gets the same three routes;
 `/trajectory` (F2) is the one that ships.
+
+### 4.4 Themes, and why they are not a profile row
+
+A theme is a file in `$PH_HOME/themes`, YAML or JSON, naming Textual's palette
+fields; a `vars` block holds a palette the fields interpolate, so a person writes
+each color once. Every fault in a file is reported **at once** rather than the
+first — fixing a palette one launch per line is not fixing it. Four catppuccin
+themes ship, and a user file shadowing a built-in wins.
+
+`$PH_HOME/themes/theme-profile.yaml` names the one to open in and the order
+`/theme` lists them, and `/theme` is the only writer. **It is deliberately not a
+`cordis` row.** A profile row is part of a *deployment* — which seams mount, what
+the model may touch — and a theme is a fact about the person at one terminal. In
+the profile it would compose, layer, be overridable by a drop-in somebody
+installed, and have to be carried by the **daemon**, which composes the profile
+and after P5-14 may not be on the same machine as the terminal whose colors these
+are. The same line separates `tui.json` (what a person prefers) from `tui.yaml`
+(what a deployment is), and conflating them is how a color choice ends up
+deciding which tools mount (`tui/themes/__init__.py`).
+
+Read at start and never again: editing a theme while pH runs changes nothing until
+the next launch, and there is no watcher (rule 6, stated on `ThemeCatalog`).
 
 ---
 

@@ -123,6 +123,16 @@ def session_summaries(
     a few hundred, the answer is a per-directory index rather than a faster scan;
     a scan *cap* is the one thing it must not be, since "a repo touched a month
     ago still lists" is the property this filter exists to provide.
+
+    **Not enforced (§5 rule 6): `cwd` matches the string a header recorded, not
+    the directory it names.** Nothing is resolved or canonicalized on either
+    side, so one checkout reached through two paths — a symlink, `/tmp` against
+    `/private/tmp`, a mount under another name — lists as two directories with
+    two sets of sessions. Resolving would be the wrong fix rather than a missing
+    one: the header records where a session *said* it was working, and a picker
+    that silently merged two paths would show sessions whose workspaces were
+    provisioned somewhere else. `/sessions` lists the store without the filter,
+    which is how the other set is found.
     """
     # **The tag filters whole lineages before a single file is touched** — see
     # `family_dirs`. What reaches the loop below is already this directory's

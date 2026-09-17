@@ -343,6 +343,15 @@ class TuiState:
 
         `shadowed` rows are kept: compaction hides a prompt from the *model*, and
         this list is for the person, who still typed it.
+
+        **Not enforced (§5 rule 6): this is *this session's* history, not this
+        person's.** It is a fold over the mirror, so it holds exactly what the
+        mirror holds — a resume gets that session's prompts back, and a
+        reference-forked child gets only its own, because such a child holds only
+        its own events. That is the same fact `ph_app.sessions` works around when
+        a forked row would otherwise render with no title. A history spanning
+        every session would be the second copy of the log this docstring opens by
+        refusing.
         """
         history: list[PromptRecord] = []
         for item in reversed(self.items):

@@ -104,7 +104,7 @@ anything about the process's own life: the sidebar draws session id, sandbox and
 | P9-05 | **Landed.** The startup session picker | P9-04 |
 | P9-06 | **Landed.** An ephemeral daemon exits when the last front end detaches | — |
 | P9-07 | **Landed.** The lifetime on the wire and in the side panel | P9-06 |
-| P9-08 | Docs, non-guarantees, `Implementation_Plan.md` §4 | all |
+| P9-08 | **Landed.** Docs, non-guarantees, `Implementation_Plan.md` §4 | all |
 
 `plans/Implementation_Plan.md` §4 gains a **Phase 9 — the front end a person lives in**
 section carrying these rows; P9-08 is where that edit lands.
@@ -884,6 +884,28 @@ the new family · `test_the_doctor_prints_the_same_holds_the_sidebar_does`.
 ---
 
 ## P9-08 — docs and bookkeeping
+
+> **Landed** (2026-09-17). `docs/dev-notes/phase-9.md` in the series' shape;
+> `Implementation_Plan.md` §4 gains the Phase 9 section and §6 its done-when row;
+> `DESIGN.md` §4.1 gains the flags and the lifetime paragraph, §4.2's `tui` row
+> the spawn behavior, and a new §4.4 the theme notation and why it is not a
+> profile row. Its stale TUI verb list was corrected against `tui/commands.py`
+> at the same time, since that is the section being edited.
+>
+> **Two of the six non-guarantees are printed, not documented**, which is where
+> rule 6 puts the ones a daemon can state about itself: `an auto-started daemon`
+> and `` `--keep-alive` `` are `NON_GUARANTEES` rows, claimed in
+> `test_non_guarantees` by the restated-phrase gate that exists so a row cannot
+> be softened. The other three belong to the front end and are stated on the
+> members that would imply them — `ThemeCatalog` (read once, no watcher),
+> `TuiState.prompt_history` (this session's), `session_summaries` (a `cwd`
+> string, not a directory).
+>
+> **One plan bullet was obsolete and is recorded rather than written.** The
+> `dark`/`light` pair it names was removed from the theme profile before P9-02
+> landed — nothing read it, and a field carried but never read is the shape rule
+> 6 forbids. `TuiTheme.dark`, which Textual reads per theme, is the only `dark`
+> left.
 
 * `docs/dev-notes/phase-9.md` — what was traded, in the series' shape. Three things
   belong in it: why the theme profile is not a pH profile row, why history is the

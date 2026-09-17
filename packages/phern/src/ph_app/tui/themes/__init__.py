@@ -343,6 +343,12 @@ class ThemeCatalog:
     The app builds a catalog at start and hands it to whatever lists, resolves
     or describes a theme. Before this existed each of those re-read
     `$PH_HOME/themes`, so startup scanned the directory once per theme name.
+
+    **Not enforced (§5 rule 6): a theme file is read at start and never again.**
+    Editing one while pH is running changes nothing until the next launch, and
+    there is no watcher — which is the cost of the sentence above rather than an
+    oversight. `/theme` re-reads nothing either; it picks from this catalog. A
+    person iterating on a palette restarts, and that is the whole of it.
     """
 
     themes: Mapping[str, TuiTheme]
