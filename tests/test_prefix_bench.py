@@ -129,7 +129,7 @@ def test_with_a_large_window_stabilization_costs_slightly_more(
 
     assert sum(stable.request_tokens) > sum(plain.request_tokens)
     assert sum(stable.request_tokens) < sum(plain.request_tokens) * 1.05, (
-        "the gap is meant to be the added prompt sections, not a behaviour change"
+        "the gap is meant to be the added prompt sections, not a behavior change"
     )
     assert stable.hit_rate > 0.70, "nothing rewrote history, so the prefix still extends"
 

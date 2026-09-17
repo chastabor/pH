@@ -68,7 +68,7 @@ import pytest
 
 from ph.json import as_int
 from ph.seams.schedule import (
-    CANCELLED,
+    CANCELED,
     TICK,
     Schedule,
     ScheduleKind,
@@ -245,7 +245,7 @@ def test_a_cron_moment_is_never_claimed_twice() -> None:
     assert _last_due(session) == base + MINUTE
 
 
-def test_a_cancelled_schedule_stops_firing_and_stays_visible() -> None:
+def test_a_canceled_schedule_stops_firing_and_stays_visible() -> None:
     """Kept as a record, for `subagent_roster`'s reason.
 
     A caller asking what happened to the schedule it revoked deserves an answer
@@ -256,12 +256,12 @@ def test_a_cancelled_schedule_stops_firing_and_stays_visible() -> None:
     assert service.cancel(session, "s1") is True
     assert service.claim(session, now=made + HOUR) == []
     assert service.live(session) == []
-    assert schedules(session)["s1"].cancelled is True
-    assert [event.type for event in session.events_from(0)].count(CANCELLED) == 1
+    assert schedules(session)["s1"].canceled is True
+    assert [event.type for event in session.events_from(0)].count(CANCELED) == 1
 
     assert service.cancel(session, "never-existed") is False
-    # And cancelling twice is not a second cancellation: the fold keeps a
-    # cancelled schedule visible, so a membership test alone would report
+    # And canceling twice is not a second cancellation: the fold keeps a
+    # canceled schedule visible, so a membership test alone would report
     # success and append a redundant record on every retry.
     before = session.seq
     assert service.cancel(session, "s1") is False
@@ -347,7 +347,7 @@ def test_an_appointment_is_recorded_and_withdrawn_with_the_schedule(tmp_path: Pa
     assert "s1" in index.read()
 
     service.cancel(session, "a")
-    assert index.read() == {}, "a cancelled schedule leaves nothing to wake for"
+    assert index.read() == {}, "a canceled schedule leaves nothing to wake for"
 
 
 def test_the_entry_names_the_earliest_of_a_sessions_appointments(tmp_path: Path) -> None:

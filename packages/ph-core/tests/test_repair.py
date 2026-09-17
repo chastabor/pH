@@ -194,7 +194,7 @@ def test_a_turn_parked_on_a_human_settles_the_question_it_was_parked_on() -> Non
     ], "the question settles before the call it was gating"
 
     decided = closers[0]
-    assert decided.data["outcome"] == INTERRUPTED, "and not `cancelled`, which claims a person"
+    assert decided.data["outcome"] == INTERRUPTED, "and not `canceled`, which claims a person"
     assert decided.data["automatic"] is True, "nobody decided this"
     assert decided.data["callId"] == "c1" and decided.data["toolName"] == "edit"
     assert decided.surface_op is None and decided.source_event_seqs is None, (

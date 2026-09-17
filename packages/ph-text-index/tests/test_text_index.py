@@ -1052,7 +1052,7 @@ async def test_a_document_the_index_never_held_is_not_vouched_for(
     )
 
 
-async def test_without_version_control_the_behaviour_is_what_it_was(
+async def test_without_version_control_the_behavior_is_what_it_was(
     mount: MountProfile, tmp_path: Path
 ) -> None:
     """The filter is an optimization, and losing it must cost only speed.

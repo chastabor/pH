@@ -253,7 +253,7 @@ async def connected[T](path: Path, work: Exchange[T]) -> T:
     replies and notifications arrive on the same stream: a caller that read its
     own reply directly would consume a `session.event` it had no way to hand
     back. Closing the stream is what ends the pump, so there is no cancel here —
-    a teardown that cancelled would race the last frame it asked for.
+    a teardown that canceled would race the last frame it asked for.
 
     Here rather than in `phern agents`, because a one-shot exchange is not a CLI
     shape: `ph_app.web.serve` stages a browser's upload this way too, and the

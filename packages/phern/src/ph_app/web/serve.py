@@ -422,7 +422,7 @@ class WebServer:
 
 
 async def run_web(server: WebServer, *, open_browser: bool = False) -> None:
-    """Serve the terminal over HTTP until cancelled.
+    """Serve the terminal over HTTP until canceled.
 
     Under anyio, like every other mode: `cli.py` has one shape for "go do the
     thing", and `web.run_app` would be a second — it installs its own signal

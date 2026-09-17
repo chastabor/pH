@@ -78,11 +78,28 @@ __all__ = [
     "served",
 ]
 
-PROTOCOL_VERSION = 1
+PROTOCOL_VERSION = 2
 """One number, in one place.
 
 It was declared twice — once per transport — which is how two servers come to
-claim the same version for two different vocabularies.
+claim the same version for two different vocabularies. Not to be confused with
+`ph_rlm.kernel.protocol.PROTOCOL_VERSION`, which numbers the fd-3 kernel
+protocol and moves on its own.
+
+**2 (0.2.0): `cancelled` became `canceled` on the wire.** The `schedule/cancel`
+reply carries `canceled` where it carried `cancelled`, and every status value a
+client folds — a job's, a subagent's, an approval's — is spelled the American
+way. A 0.1.x client reading a 0.2.x daemon sees an absent field and an unknown
+status rather than an error.
+
+**Nothing refuses on this number, and that is worth saying where it is
+declared.** It is reported in `daemon/hello`'s capability block and printed by
+`phern agents doctor`; no client compares it and hangs up. So it documents a
+skew rather than preventing one — and the skew is reachable, because
+`ensure_daemon` connects to whatever is already listening, so an upgraded client
+can meet a daemon still running from before the upgrade. The fix for that is to
+restart the daemon, which `phern agents shutdown` does; a refusal here would be a
+policy decision rather than a number, and is not one this row took.
 """
 
 SNAPSHOT_EVENTS = 2048

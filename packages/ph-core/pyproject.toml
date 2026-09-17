@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ph-core"
-version = "0.1.0"
+version = "0.2.0"
 description = "pH core: the cordis plugin subset, the session log, the LLM vocabulary, and the agent loop."
 readme = "README.md"
 requires-python = ">=3.12"

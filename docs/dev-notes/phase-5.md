@@ -67,7 +67,7 @@ held on the supervisor — because a daemon that crashed mid-ladder and came bac
 would otherwise start from zero and retry a failing turn for as long as the
 process lives. Idle time is measured from the log's own last event rather than a
 timer, so it means "nothing has happened" and survives a restart. Schedules are
-`schedule/created` until a matching `schedule/cancelled`, in the log, so an
+`schedule/created` until a matching `schedule/canceled`, in the log, so an
 appointment outlives the process holding it.
 
 The counter-pressure is real and was measured: a whole-log scan per read is

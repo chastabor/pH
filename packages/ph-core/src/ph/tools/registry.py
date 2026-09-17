@@ -26,7 +26,7 @@ from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from typing import Any, Literal, Never, NoReturn
 
-from ..cancel import Cancelled, is_cancelled
+from ..cancel import Canceled, is_canceled
 from ..cordis import (
     DEPLOYMENT,
     Boundary,
@@ -859,7 +859,7 @@ class ToolRuntime:
             return PreparedCall(run=placeholder, result=_failure(error), needs_post=False)
 
         execution = run.execution
-        if is_cancelled(execution.signal):
+        if is_canceled(execution.signal):
             return PreparedCall(run=run, result=aborted_result(started=False))
 
         try:
@@ -895,7 +895,7 @@ class ToolRuntime:
                 # the call the model actually made.
                 execution.arguments = freeze_json_value(gate.arguments, frozen_input=True)
                 execution.substituted = True
-            if is_cancelled(execution.signal):
+            if is_canceled(execution.signal):
                 return PreparedCall(run=run, result=aborted_result(started=False))
             # Guards run last and only on an allow: a denial already decided,
             # and asking a guard to confirm it would invite a re-permit.
@@ -1083,7 +1083,7 @@ def _failure(error: object, *, started: bool = False) -> ToolExecutionResult:
     model needs the failure in the same shape as every other result. The
     failure's `kind` comes from the error class that knows it.
     """
-    if isinstance(error, Cancelled):
+    if isinstance(error, Canceled):
         return aborted_result(started=started)
     # The error's own answer, not a mapping this function keeps: a boolean here
     # collapsed three kinds into two and silently reported an abort as a failure.

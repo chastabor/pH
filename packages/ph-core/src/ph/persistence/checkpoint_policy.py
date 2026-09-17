@@ -31,7 +31,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 
 from ..agent.types import PreStepDecision, PreStepRequest
-from ..cancel import is_cancelled
+from ..cancel import is_canceled
 from ..cordis import Context, Next, plugin
 from ..keys import SESSIONS
 from ..llm.types import GenerateOptions, StreamChunk
@@ -64,7 +64,7 @@ async def apply(ctx: Context, config: None) -> None:
             # A nested dispatch is already covered by its outer call's barrier.
             return await next_()
         await ctx.require(SESSIONS).flush(execution.session)
-        if is_cancelled(execution.signal):
+        if is_canceled(execution.signal):
             return aborted_result(started=False)
         return await next_()
 

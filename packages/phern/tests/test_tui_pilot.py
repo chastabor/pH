@@ -96,7 +96,7 @@ async def test_a_large_paste_becomes_a_placeholder(make_tui_app: MakeApp) -> Non
         assert prompt.text() == pasted
 
 
-async def test_a_rebound_key_is_honoured(make_tui_app: MakeApp, tmp_path: Path) -> None:
+async def test_a_rebound_key_is_honored(make_tui_app: MakeApp, tmp_path: Path) -> None:
     """No widget compares a key literally, and one keymap rebinds the app."""
     (tmp_path / "tui.json").write_text(
         json.dumps({"keybindings": {"submit": "ctrl+s", "command_palette": "ctrl+j"}})

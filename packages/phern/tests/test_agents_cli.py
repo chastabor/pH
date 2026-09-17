@@ -45,7 +45,7 @@ from ph.testing import ReapedHost
 from ph_app.cli import app
 from ph_app.daemon.client import DaemonClient
 from ph_app.payloads import DaemonStatusReply
-from ph_app.protocol import Cursor
+from ph_app.protocol import PROTOCOL_VERSION, Cursor
 
 pytestmark = pytest.mark.anyio
 
@@ -171,7 +171,7 @@ async def test_since_skips_the_history_a_client_already_has(
         assert rest.exit_code == 0, rest.output
         assert "the second thing" in rest.output
         assert "the first thing" not in rest.output
-        assert "history starts at" not in rest.output, "honoured, so nothing to report"
+        assert "history starts at" not in rest.output, "honored, so nothing to report"
 
 
 async def test_a_full_cursor_is_verified_and_a_stale_one_skips_nothing(
@@ -633,8 +633,11 @@ def test_the_daemon_status_reply_is_json_and_says_what_it_is(
     # this pins is that the *frame* it becomes still round-trips.
     wire = json.loads(json.dumps(facts.to_wire()))
     assert wire["socket"].endswith("daemon.sock")
-    assert wire["protocolVersion"] == 1
-    assert facts.protocol_version == 1
+    # Against the constant, not a literal: what this pins is the wire *key* and
+    # the round trip, and a literal here made a protocol bump a search for the
+    # places that had written the number down.
+    assert wire["protocolVersion"] == PROTOCOL_VERSION
+    assert facts.protocol_version == PROTOCOL_VERSION
     assert set(facts.capabilities) >= {"sessions", "streaming", "roots", "attach"}
     assert facts.roots == 0
     assert facts.uptime_ms >= 0

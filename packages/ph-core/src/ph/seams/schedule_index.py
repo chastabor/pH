@@ -19,7 +19,7 @@ every session on the machine and the next `phern -p` over any of them is refused
 immediate, and hits sessions with no schedule at all.
 
 So this is an **index**: the seam knows the moment an appointment is created,
-cancelled or fired, so it records which sessions have one and when each is next
+canceled or fired, so it records which sessions have one and when each is next
 due. A daemon reads one small file and mounts only what is actually due.
 
 **It is a cache, and the logs stay authoritative (I-6).** Every value here is

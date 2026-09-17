@@ -526,7 +526,7 @@ async def test_a_drifted_fold_cache_is_reported_by_the_row_that_owns_it(
 async def test_a_stranded_effect_reaches_the_report(mount: MountProfile) -> None:
     """The abandoned-teardown ledger, end to end through a real mount.
 
-    This is the half `scope_invariant` used to declare unenforced: a cancelled
+    This is the half `scope_invariant` used to declare unenforced: a canceled
     unwind leaves effects nobody will run, and the only account of it was a
     `log.warning` no shipped entry point installed a handler for. A lease or a
     worktree stranded that way was invisible to `phern doctor`.
@@ -538,7 +538,7 @@ async def test_a_stranded_effect_reaches_the_report(mount: MountProfile) -> None
     ctx = await mount()
     scope = ctx.scope("doomed")
     scope.add_disposer(lambda: None, label="a-worktree")
-    scope.add_disposer(raising(asyncio.CancelledError()), label="cancelled-here")
+    scope.add_disposer(raising(asyncio.CancelledError()), label="canceled-here")
 
     with pytest.raises(asyncio.CancelledError):
         await scope.dispose()
@@ -568,9 +568,9 @@ async def test_a_released_effect_stops_being_reported_and_a_stranded_one_does_no
     scope = ctx.scope("doomed")
     release = scope.add_disposer(lambda: None, label="a-worktree")
     # Both are owed after this: the one never reached, and the one that raised
-    # partway. Nothing can tell "raised immediately" from "cancelled halfway
+    # partway. Nothing can tell "raised immediately" from "canceled halfway
     # through unmounting", so both are reported and both have to be settled.
-    settle = scope.add_disposer(raising(asyncio.CancelledError()), label="cancelled-here")
+    settle = scope.add_disposer(raising(asyncio.CancelledError()), label="canceled-here")
 
     with pytest.raises(asyncio.CancelledError):
         await scope.dispose()
@@ -584,7 +584,7 @@ async def test_a_released_effect_stops_being_reported_and_a_stranded_one_does_no
     assert settle() is None, "a claimed effect cannot be retried by its holder"
     (still,) = ctx.require(INVARIANTS).verify()
     assert "a-worktree" not in still.detail, "the one that could be released was"
-    assert "nothing can now release" in still.detail and "cancelled-here" in still.detail
+    assert "nothing can now release" in still.detail and "canceled-here" in still.detail
 
 
 @pytest.mark.parametrize(

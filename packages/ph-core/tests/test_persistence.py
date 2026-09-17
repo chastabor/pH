@@ -334,7 +334,7 @@ async def test_segments_each_hold_only_their_own_run(mount: MountProfile, tmp_pa
     }
     assert held == {"s0": [0, 1, 2, 3, 4], "s1": [4, 5, 6, 7, 8, 9], "s2": [9, 10, 11]}, (
         "the shared seqs are the parent's marker against the child's end-seed: "
-        "different events in different lineages, never both in one materialised log"
+        "different events in different lineages, never both in one materialized log"
     )
 
     _, whole = ctx.require(SESSION_PERSISTENCE).read("s2")

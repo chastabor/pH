@@ -300,7 +300,7 @@ class EgressProxy:
 
         `server.close()` stops the listener but leaves the connections it already
         spawned running, which for a tunnel means until the far end hangs up — so
-        the in-flight ones are cancelled here rather than outliving the row.
+        the in-flight ones are canceled here rather than outliving the row.
         """
         servers = [server for server in (self._server, self._tcp) if server is not None]
         # Cleared before the close, so `tcp_port` reads `None` from the moment the
@@ -460,8 +460,8 @@ async def _tunnel(
             await asyncio.wait(pending, timeout=LINGER_AFTER_EOF)
     finally:
         # The one cancellation point, and it covers whatever the deadline left
-        # running — a second loop over `pending` beforehand cancelled the same
-        # tasks and read as though it cancelled different ones.
+        # running — a second loop over `pending` beforehand canceled the same
+        # tasks and read as though it canceled different ones.
         for task in (up, down):
             task.cancel()
         await asyncio.wait({up, down})

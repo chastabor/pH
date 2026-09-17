@@ -86,7 +86,7 @@ class PromptInput(Vertical):
             self.text = text
             self.queue = queue
 
-    class Cancelled(Message):
+    class Canceled(Message):
         """The user asked to interrupt the running turn."""
 
     def __init__(
@@ -158,7 +158,7 @@ class PromptInput(Vertical):
             if self._completions is not None:
                 self._set_completions(None)
             else:
-                self.post_message(self.Cancelled())
+                self.post_message(self.Canceled())
             return True
         if key == keys.submit and self._completions is not None:
             self._accept_completion()

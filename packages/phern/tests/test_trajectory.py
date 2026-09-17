@@ -92,7 +92,7 @@ def test_the_auditor_renders_what_the_transcript_does_not() -> None:
     Record-less in the *conversation* view on purpose — they are not transcript
     defects — and rendering them is the whole reason this projection is
     separate. Stated as the names rather than as a set difference with
-    `RECORDLESS` subtracted from both sides, which cancelled two of them and
+    `RECORDLESS` subtracted from both sides, which canceled two of them and
     read as six.
 
     `compaction/summarized` is the newest of them and the clearest case: the
@@ -120,12 +120,12 @@ def test_the_auditor_renders_what_the_transcript_does_not() -> None:
         # failure left behind, and the reason is the only thing that separates
         # evidence somebody kept from a directory nobody meant to leave.
         "workspace/retained",
-        # P5-06: creating, cancelling and heartbeating a schedule are not
+        # P5-06: creating, canceling and heartbeating a schedule are not
         # conversation — the *tick* is, and it has a transcript row. An auditor
         # asking "why did this wake at 3am, and was anything watching between
         # runs" wants all four.
         "schedule/created",
-        "schedule/cancelled",
+        "schedule/canceled",
         "schedule/heartbeat",
         "goal/continued",
         "goal/gate",

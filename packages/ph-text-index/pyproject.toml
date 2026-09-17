@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ph-text-index"
-version = "0.1.0"
+version = "0.2.0"
 description = "pH plugin: `text_index` and `text_search`, semantic retrieval over documents on a turbovec index."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -45,7 +45,7 @@ classifiers = [
 # suite exercises the real turbovec index against a deterministic stub. None of
 # those three were built for this change; they are why it is one line.
 dependencies = [
-    "ph-core==0.1.0",
+    "ph-core==0.2.0",
     "turbovec>=1.0",
     "numpy>=1.20",
 ]

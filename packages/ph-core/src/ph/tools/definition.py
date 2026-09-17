@@ -202,11 +202,11 @@ def aborted_result(*, started: bool) -> ToolExecutionResult:
     """
     if started:
         return error_result(
-            "tool call aborted", {"name": "Cancelled", "code": TOOL_ABORTED}, kind="aborted"
+            "tool call aborted", {"name": "Canceled", "code": TOOL_ABORTED}, kind="aborted"
         )
     return error_result(
         "tool call aborted before dispatch",
-        {"name": "Cancelled", "code": TOOL_ABORTED_BEFORE_DISPATCH},
+        {"name": "Canceled", "code": TOOL_ABORTED_BEFORE_DISPATCH},
         kind="aborted",
     )
 
@@ -355,10 +355,10 @@ class ToolRunContext:
         """Mark a successful result as terminal for this turn."""
         self._concluded = True
 
-    def raise_if_cancelled(self) -> None:
-        """Bail out of a long body when the call was cancelled."""
+    def raise_if_canceled(self) -> None:
+        """Bail out of a long body when the call was canceled."""
         if self.execution.signal is not None:
-            self.execution.signal.raise_if_cancelled()
+            self.execution.signal.raise_if_canceled()
 
 
 @dataclass(frozen=True, slots=True)

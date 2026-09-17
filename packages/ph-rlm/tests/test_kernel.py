@@ -511,7 +511,7 @@ async def test_a_running_cell_never_interrupts_the_frame_read(
     """The reason the stop ladder's clock is a sibling task.
 
     `_pump` used to sit in `move_on_after(_CANCEL_POLL_SECONDS)` so it could ask
-    between reads whether the caller had cancelled. The cost was not one scope
+    between reads whether the caller had canceled. The cost was not one scope
     per socket read but **one per frame**: `_recv_line` returns straight out of
     its buffer whenever a frame is already there, and a 64 KiB read of a chatty
     cell carries many. Measured at 37.5 ms against 13.8 ms over 3,000 `log`
@@ -524,14 +524,14 @@ async def test_a_running_cell_never_interrupts_the_frame_read(
     **Not a guard against issue 58**, which is what this was first written as.
     The mechanism there — `_RawSocketMixin._wait_until_readable` registering
     `f.set_result` as the reader callback and removing the reader in a
-    done-callback a loop iteration later, so a cancelled wait can still be
-    fired on a cancelled future — belongs to `UNIXSocketStream` and
+    done-callback a loop iteration later, so a canceled wait can still be
+    fired on a canceled future — belongs to `UNIXSocketStream` and
     `connect_unix`, i.e. the daemon socket. `_recv_line` calls the *free*
     `anyio.wait_readable`, a different implementation that catches
     `InvalidStateError` and removes the reader synchronously inside the
-    callback. Cancelling it was always safe.
+    callback. Canceling it was always safe.
 
-    Sabotage: put the `move_on_after` back around the read, and `cancelled`
+    Sabotage: put the `move_on_after` back around the read, and `canceled`
     counts roughly `duration / _CANCEL_POLL_SECONDS`.
     """
     import anyio
@@ -539,16 +539,16 @@ async def test_a_running_cell_never_interrupts_the_frame_read(
     from ph_rlm.kernel.manager import _CANCEL_POLL_SECONDS
 
     original = anyio.wait_readable
-    cancelled = 0
+    canceled = 0
     waits = 0
 
     async def counting(obj: Any) -> Any:  # noqa: ANN401
-        nonlocal cancelled, waits
+        nonlocal canceled, waits
         waits += 1
         try:
             return await original(obj)
         except anyio.get_cancelled_exc_class():
-            cancelled += 1
+            canceled += 1
             raise
 
     monkeypatch.setattr(anyio, "wait_readable", counting)
@@ -559,12 +559,12 @@ async def test_a_running_cell_never_interrupts_the_frame_read(
     result = await kernel.run(f"import asyncio\nawait asyncio.sleep({slept})\n'done'", (), None)
 
     assert result.value == "done", result.error
-    # The positive control: `cancelled == 0` also passes if the patch is never
+    # The positive control: `canceled == 0` also passes if the patch is never
     # reached at all, which is what a future move of `_recv_line` onto a stream
     # would do silently.
     assert waits > 0, "the patched readiness wait was never reached; the test proves nothing"
-    assert cancelled == 0, (
-        f"the frame read was interrupted {cancelled} times during one run; "
+    assert canceled == 0, (
+        f"the frame read was interrupted {canceled} times during one run; "
         "the poll is back on the read path and the per-frame scope with it"
     )
 

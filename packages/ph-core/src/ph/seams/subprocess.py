@@ -306,7 +306,7 @@ class SubprocessHandle:
                         sink.extend(chunk[:room])
                     dropped += len(chunk) - max(room, 0)
             finally:
-                # Once, not per chunk, and in a `finally` so a cancelled drain
+                # Once, not per chunk, and in a `finally` so a canceled drain
                 # still reports what it had already thrown away.
                 self.dropped += dropped
 

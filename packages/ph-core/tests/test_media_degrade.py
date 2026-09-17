@@ -221,7 +221,7 @@ def test_an_image_larger_than_the_route_uses_is_sent_and_flagged() -> None:
     )
     (notice,) = notices
     assert (notice["width"], notice["height"], notice["usableEdge"]) == (4000, 3000, 1568)
-    assert notice["name"] == "shot.png", "and names the file a person would recognise"
+    assert notice["name"] == "shot.png", "and names the file a person would recognize"
 
 
 async def test_the_oversized_notice_lands_once_and_names_the_picture(

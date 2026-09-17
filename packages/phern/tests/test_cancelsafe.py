@@ -1,4 +1,4 @@
-"""The cancelled-readiness-wait guard, and what keeps it honest (issue 58).
+"""The canceled-readiness-wait guard, and what keeps it honest (issue 58).
 
 Driven **deterministically** rather than by racing. The defect is a window
 between the event loop queueing a ready handle and running it, so a test that
@@ -9,9 +9,9 @@ was roughly 2 occurrences in 30 full-suite runs.
 is the reason the drive below is spelled out rather than staged through a real
 listener. The first watched the ordering through `add_done_callback`, which is
 itself `call_soon`'d and so reads the selector an iteration *after* resolution,
-by which time every ordering looks identical. The second cancelled a listener's
+by which time every ordering looks identical. The second canceled a listener's
 `accept()` after connecting to it — but `await connect_unix(...)` yields, so the
-queued accept callback had already resolved and the wait being cancelled was a
+queued accept callback had already resolved and the wait being canceled was a
 fresh one on an idle fd. It never entered the window at all: 0 failures in 25
 runs with the guard on, with it off, and under the sabotage its own docstring
 named.
@@ -68,7 +68,7 @@ def test_the_guard_is_in_force_from_importing_the_daemon_package() -> None:
     assert apply_cancel_safe_socket_waits() is False, "a second apply re-patched"
 
 
-async def test_only_a_bound_future_set_result_is_recognised() -> None:
+async def test_only_a_bound_future_set_result_is_recognized() -> None:
     """The predicate that keeps the blast radius benign.
 
     Any callback that is *not* the failing shape must pass through untouched —
@@ -132,14 +132,14 @@ def test_anyio_still_registers_the_shape_the_guard_exists_for(
     )
 
 
-async def test_a_wait_cancelled_after_the_loop_committed_to_firing_it_is_swallowed() -> None:
+async def test_a_wait_canceled_after_the_loop_committed_to_firing_it_is_swallowed() -> None:
     """The defect itself, driven rather than raced.
 
     `fired` is the positive control, and it is the half a green result needs:
     `raised == []` also passes when the guard is never reached, which is how
     both earlier drafts of this file came to pass at HEAD. Recording
-    `self.cancelled()` from inside `set_result` proves the loop really did fire
-    a wait that had already been cancelled — the window was entered — and
+    `self.canceled()` from inside `set_result` proves the loop really did fire
+    a wait that had already been canceled — the window was entered — and
     `raised` then says the guard absorbed it.
 
     Sabotage: delete the `except asyncio.InvalidStateError` from
@@ -158,7 +158,7 @@ async def test_a_wait_cancelled_after_the_loop_committed_to_firing_it_is_swallow
     )
 
     class Counting(asyncio.Future[None]):
-        """Records whether it was already cancelled when the loop fired on it."""
+        """Records whether it was already canceled when the loop fired on it."""
 
         def set_result(self, value: None, /) -> None:
             fired.append(self.cancelled())
@@ -179,8 +179,8 @@ async def test_a_wait_cancelled_after_the_loop_committed_to_firing_it_is_swallow
             await future
         await asyncio.sleep(0.05)
 
-        assert fired == [True], f"the loop never fired a cancelled wait: {fired}"
-        assert raised == [], f"a cancelled wait reached the loop handler: {raised}"
+        assert fired == [True], f"the loop never fired a canceled wait: {fired}"
+        assert raised == [], f"a canceled wait reached the loop handler: {raised}"
     finally:
         loop.set_exception_handler(previous)
         left.close()
@@ -191,11 +191,11 @@ async def test_a_second_firing_on_an_already_resolved_future_is_absorbed_too() -
     """The other state `set_result` refuses, and the reason the check is `done()`.
 
     `InvalidStateError` has two causes, reached by different paths: the wait was
-    **cancelled** (issue 58's race), or the future was **already resolved** and
+    **canceled** (issue 58's race), or the future was **already resolved** and
     the fd fired again before anything deregistered it. They matter separately
-    because a pre-check spelled `if not future.cancelled()` — the obvious
+    because a pre-check spelled `if not future.canceled()` — the obvious
     reading, and the one asked about — passes the second straight through:
-    a resolved future reports `cancelled() is False`.
+    a resolved future reports `canceled() is False`.
 
     Under anyio's own shape the done-callback wins and this fires once, so this
     drives the unbounded case directly by registering no removal at all. That
@@ -252,7 +252,7 @@ async def test_the_guard_leaves_the_fd_for_anyio_to_deregister() -> None:
     never removes twice. Removing here made anyio's own done-callback a *miss* —
     `selectors` raises `KeyError` twice, nested, and formats a `repr(socket)`
     that costs `getsockname` and `getpeername` — on every wait rather than only
-    cancelled ones: measured at **+16.8 µs on every daemon round trip, +9.9%**,
+    canceled ones: measured at **+16.8 µs on every daemon round trip, +9.9%**,
     against +1.0% for swallowing alone.
 
     Sabotage: put `loop.remove_reader(fd)` back at the top of

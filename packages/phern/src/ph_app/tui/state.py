@@ -115,7 +115,7 @@ STATUS_GLYPHS: dict[str, str] = {
     "running": "◐",
     "done": "●",
     "error": "✗",
-    "cancelled": "⊘",
+    "canceled": "⊘",
 }
 
 

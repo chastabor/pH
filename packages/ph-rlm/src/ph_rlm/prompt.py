@@ -110,7 +110,7 @@ CHILD_DOCTRINE = f"""\
 # You are a child agent
 
 You were spawned by another agent to do one task. A task from your parent arrives
-labelled `{TASK_PREFIX}`.
+labeled `{TASK_PREFIX}`.
 
 When you have an answer, **send it**:
 

@@ -39,7 +39,7 @@ from typing import TypeAlias
 
 from ..session import SessionEvent, SessionHeader
 
-__all__ = ["MAX_DEPTH", "LineageError", "ReadOne", "lineage_faults", "materialise"]
+__all__ = ["MAX_DEPTH", "LineageError", "ReadOne", "lineage_faults", "materialize"]
 
 ReadOne: TypeAlias = Callable[
     [str, int | None, str | None], tuple[SessionHeader, list[SessionEvent]]
@@ -96,7 +96,7 @@ class LineageError(Exception):
         self.session_id = session_id
 
 
-def materialise(read_one: ReadOne, session_id: str) -> tuple[SessionHeader, list[SessionEvent]]:
+def materialize(read_one: ReadOne, session_id: str) -> tuple[SessionHeader, list[SessionEvent]]:
     """One session's full log, following its lineage to a file that starts at 0.
 
     Returns the *child's* header — the lineage supplies events, never identity. A

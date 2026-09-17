@@ -88,7 +88,7 @@ class _Daemon:
 
         Recorded, because a test that opened one is not thereby the thing that
         has to remember to close it: teardown does, and until it did the pumps
-        were cancelled mid-read (see `close_clients`).
+        were canceled mid-read (see `close_clients`).
         """
         client = await DaemonClient.connect(self.path, on_notify)
         self.tasks.start_soon(client.pump)
@@ -102,8 +102,8 @@ class _Daemon:
 
         **`DaemonClient.connected`'s rule, which this helper was breaking**:
         "closing the stream is what ends the pump, so there is no cancel here — a
-        teardown that cancelled would race the last frame it asked for." Teardown
-        cancelled the task group with the pumps still reading, and that race
+        teardown that canceled would race the last frame it asked for." Teardown
+        canceled the task group with the pumps still reading, and that race
         surfaced as an `InvalidStateError` from a stray loop callback — collected
         by the *session-wide* anyio loop and re-raised inside whichever test came
         next, which is why it looked like a flake in an unrelated one.

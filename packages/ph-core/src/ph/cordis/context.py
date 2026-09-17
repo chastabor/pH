@@ -1309,7 +1309,7 @@ class Context:
         `ph_rlm.subagents._release`, which is exactly that shape.
 
         **Leaving the tree is guaranteed, whatever the unwind does** (I2). Every
-        `await` below can be cancelled, and `CancelledError` is a `BaseException`
+        `await` below can be canceled, and `CancelledError` is a `BaseException`
         that the effect loop's `except Exception` deliberately does not catch — so
         without the `finally` a cancellation partway through left this scope
         `_active=False`, still in its parent's `_children`, still holding its

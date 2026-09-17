@@ -165,7 +165,7 @@ record could not be written is worse than one that did not happen.
 The pipeline has to distinguish "aborted before dispatch" (the call had no
 effect) from "aborted" (the body ran) at points where no `await` is pending. A
 scope only *acts* on cancellation; a token can be **asked**. A child token is
-cancelled by itself or by any ancestor, which makes dsh's "the registry fuses
+canceled by itself or by any ancestor, which makes dsh's "the registry fuses
 every replacement with the captured caller signal" structural instead of
 something each `tools/execute` wrapper must remember.
 

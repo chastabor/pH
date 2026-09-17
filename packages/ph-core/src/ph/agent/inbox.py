@@ -68,7 +68,7 @@ class InboxSplice(WireModel):
     inserted: list[Message]
     removed_count: int | None = None
     outcome: Literal["canceled"] | None = None
-    """Whether the removed messages were cancelled or consumed. Written and not
+    """Whether the removed messages were canceled or consumed. Written and not
     yet read back: live, the difference is `_notify.discarded` against
     `_notify.claimed`, and on replay this key is the only thing that still knows
     which happened."""
@@ -132,7 +132,7 @@ class Inbox:
     def splice(
         self, target: InboxTarget, start: int, delete_count: int, inserted: Sequence[Message]
     ) -> list[Message]:
-        """Standard splice semantics, durably recorded; removed messages are cancelled."""
+        """Standard splice semantics, durably recorded; removed messages are canceled."""
         return self._mutate(target, start, delete_count, list(inserted), True)
 
     # ------------------------------------------------------------- internals --

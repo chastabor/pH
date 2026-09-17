@@ -300,7 +300,7 @@ async def test_the_signal_route_follows_the_backend_not_whether_it_confined(
     Driven through `_interrupt` rather than asserted on the flag, because the flag
     having the right value proves nothing about the branch that reads it.
     """
-    signalled: list[int] = []
+    signaled: list[int] = []
     # Built rather than started: `_interrupt` needs a process to signal and a
     # confinement result to consult, and starting a real guest to replace its
     # process with a fake would leak the one it spawned.
@@ -310,27 +310,27 @@ async def test_the_signal_route_follows_the_backend_not_whether_it_confined(
         limits=KernelLimits(),
         journal=OrphanJournal(path=tmp_path / "processes.jsonl"),
     )
-    setattr(kernel, "_process", _FakeProcess(signalled))  # noqa: B010
+    setattr(kernel, "_process", _FakeProcess(signaled))  # noqa: B010
     kernel.confined = ConfinedArgv(
         argv=("python",), enforcement="full", backend="stub", forwards_signals=forwards
     )
 
     await kernel._interrupt(run_id=1)
 
-    assert bool(signalled) is forwards
+    assert bool(signaled) is forwards
     if forwards:
-        assert signalled == [signal.SIGINT]
+        assert signaled == [signal.SIGINT]
 
 
 @dataclass
 class _FakeProcess:
     """Just enough process for `_interrupt`: it is alive, and it records signals."""
 
-    signalled: list[int]
+    signaled: list[int]
     returncode: None = None
 
     def send_signal(self, number: int) -> None:
-        self.signalled.append(number)
+        self.signaled.append(number)
 
 
 def test_the_backends_declare_whether_a_signal_reaches_what_they_wrap() -> None:

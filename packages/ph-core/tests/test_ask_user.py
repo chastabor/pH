@@ -214,10 +214,10 @@ async def test_a_declined_question_is_recorded_and_stops_being_pending(
 # ------------------------------------------------------------- the pending --
 
 
-async def test_a_question_cancelled_mid_answer_stays_pending(mount: MountProfile) -> None:
+async def test_a_question_canceled_mid_answer_stays_pending(mount: MountProfile) -> None:
     """The pending state is the log, not a table somebody remembered to keep.
 
-    A real interruption, not a doctored log: the turn is cancelled while a person
+    A real interruption, not a doctored log: the turn is canceled while a person
     is still looking at the question — which is precisely what an ephemeral
     daemon passivating a root parked on a human does. The ask is already
     committed, the answer half never runs, and the fold reports the question.

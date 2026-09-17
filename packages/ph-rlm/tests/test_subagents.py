@@ -142,7 +142,7 @@ async def test_eight_children_are_all_admitted_without_waiting(delegating: Mount
     assert len(ctx.require(SUBAGENTS).list(parent_id=parent.id)) == 8
 
 
-async def test_the_child_gets_the_task_labelled_as_the_parents(delegating: MountedRuntime) -> None:
+async def test_the_child_gets_the_task_labeled_as_the_parents(delegating: MountedRuntime) -> None:
     """`[task from parent]` is what the child's own prompt recognizes."""
     ctx, _session, parent = await delegating()
     run = await _spawn(ctx, parent, "count the files")
@@ -457,7 +457,7 @@ async def test_deleting_a_child_leaves_a_tombstone(delegating: MountedRuntime) -
     assert roster[run.id]["deletedReason"] == "user"
     # A revoked child has a terminal state, not merely an absence — a panel that
     # knew only `deleted` could not say whether it had ever run.
-    assert roster[run.id]["status"] == "cancelled"
+    assert roster[run.id]["status"] == "canceled"
     # The child's log is still there — a tombstone is not a deletion.
     assert ctx.require(SESSIONS).get(run.session_id) is not None
 
@@ -646,7 +646,7 @@ async def test_a_child_is_retained_from_the_moment_its_tree_exists(
     the tree does, and a clean finish withdraws it.
     """
     ctx, _session, parent = await delegating()
-    run = await _tiered_child(ctx, parent, tmp_path, "get cancelled")
+    run = await _tiered_child(ctx, parent, tmp_path, "get canceled")
 
     assert _marks(ctx, run) == ["the child has not settled cleanly"]
     (record,) = workspace_survivors(
@@ -682,7 +682,7 @@ async def test_a_clean_child_leaves_nothing_behind(
     assert record.reason == ""
 
 
-async def test_a_cancelled_child_keeps_its_evidence(
+async def test_a_canceled_child_keeps_its_evidence(
     delegating: MountedRuntime, tmp_path: Path
 ) -> None:
     """The case the row was written for, through the path that cannot mark.
@@ -901,7 +901,7 @@ async def test_a_child_that_failed_frees_its_slot(
 async def test_deleting_a_queued_child_stops_its_wait_and_takes_no_slot(
     delegating: MountedRuntime, gate: _Gate
 ) -> None:
-    """A child revoked before it ran is cancelled where it waits, and the slot it
+    """A child revoked before it ran is canceled where it waits, and the slot it
     never held is not leaked — the next child still gets it."""
     ctx, session, parent = await delegating(maxConcurrent=1)
     provider = ctx.require(RLM_CHILDREN)
@@ -910,7 +910,7 @@ async def test_deleting_a_queued_child_stops_its_wait_and_takes_no_slot(
     await _until(lambda: gate.arrived == 1, "the first child to reach the model")
 
     assert await provider.delete(session, second.id, reason="user") is True
-    assert _statuses(session, second.id) == ["queued", "cancelled"]
+    assert _statuses(session, second.id) == ["queued", "canceled"]
 
     third = await _spawn(ctx, parent, "third")
     gate.release_one()

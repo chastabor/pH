@@ -6,7 +6,7 @@ that is told "the user rejected this" can re-plan, while one told "there is no
 approval channel" knows the deployment is misconfigured rather than that a human
 said no. Collapsing them would make a missing UI look like a decision.
 
-**Fail closed** is the whole design. No answerer, an unmounted seam, a cancelled
+**Fail closed** is the whole design. No answerer, an unmounted seam, a canceled
 prompt, an exception inside an answerer — every one of them denies. A permission
 system whose failure mode is "allow" is not a permission system.
 
@@ -28,7 +28,7 @@ from typing import Any, Literal, TypeAlias
 from pydantic import Field
 
 from ..agent.types import AgentHandle
-from ..cancel import Cancellation, is_cancelled
+from ..cancel import Cancellation, is_canceled
 from ..cordis import Context, Disposer, events, plugin
 from ..json import JsonValue, as_str
 from ..keys import APPROVAL
@@ -59,7 +59,7 @@ __all__ = [
 log = logging.getLogger("ph.seams.approval")
 
 ApprovalOutcome: TypeAlias = Literal[
-    "allowed-once", "rejected", "cancelled", "unavailable", "interrupted"
+    "allowed-once", "rejected", "canceled", "unavailable", "interrupted"
 ]
 """The four answers that carry no data. Only `allowed-once` proceeds (B3)."""
 
@@ -68,12 +68,12 @@ INTERRUPTED: ApprovalOutcome = "interrupted"
 
 **Written only by repair, never by an answerer**, which is what separates it from
 the four beside it. Those four say what happened when the question was *put*:
-somebody allowed it, somebody refused, the work was cancelled, or nobody could
+somebody allowed it, somebody refused, the work was canceled, or nobody could
 be asked. This one says the question was never resolved at all, because the
 process holding it stopped existing — and it is recorded on resume so that
 `pending_approvals` stops reporting a question no one can answer.
 
-Not `cancelled`, which claims somebody stopped the work; not `unavailable`,
+Not `canceled`, which claims somebody stopped the work; not `unavailable`,
 which is the live answer when no front end takes the prompt and is a *denial* a
 turn continues from. Naming it apart is the point: a person reading a transcript
 can tell "I was asked and the daemon died" from "I was asked and said no".
@@ -92,7 +92,7 @@ ApprovalPolicy: TypeAlias = Literal["ask", "never"]
 
 DENIAL_REASONS: dict[str, str] = {
     "rejected": "the user rejected {subject}",
-    "cancelled": "approval for {subject} was cancelled",
+    "canceled": "approval for {subject} was canceled",
     "unavailable": "{subject} requires approval, but no approval channel is available",
 }
 """What a consumer tells the model when an ask did not grant.
@@ -133,7 +133,7 @@ _ANSWER_DECISIONS: dict[str, ApprovalDecisionName] = {
 }
 """Which answers a restricted ask has to check. `rejected` is absent because
 refusing is always available — a row that withheld every button would still be
-refused by a dismissal — and `cancelled`/`unavailable` are failures rather than
+refused by a dismissal — and `canceled`/`unavailable` are failures rather than
 decisions."""
 
 
@@ -374,8 +374,8 @@ class ApprovalService:
         return outcome
 
     async def _route(self, request: ApprovalRequest, cancel: Cancellation | None) -> ApprovalAnswer:
-        if is_cancelled(cancel):
-            return "cancelled"
+        if is_canceled(cancel):
+            return "canceled"
 
         # `ApprovalAnswer`, not `ApprovalOutcome`: `waterfall` reads the chain's
         # type from here, and an answerer may return an `Edited` or a `Responded`

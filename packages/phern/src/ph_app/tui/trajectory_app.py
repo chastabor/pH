@@ -26,7 +26,7 @@ from textual.app import App
 from textual.binding import Binding, BindingType
 
 from ph.paths import resolve_roots
-from ph.persistence import materialise, read_session, repaired
+from ph.persistence import materialize, read_session, repaired
 from ph.persistence.jsonl import family_log, locate_session
 from ph.session import Session, SessionEvent, SessionHeader
 
@@ -106,7 +106,7 @@ def _lineage_of(path: Path) -> tuple[SessionHeader, list[SessionEvent]]:
             return header, events
         return read_session(family_log(path.parent, session_id), upto=upto)
 
-    return materialise(read_one, header.id)
+    return materialize(read_one, header.id)
 
 
 class TrajectoryApp(App[None]):

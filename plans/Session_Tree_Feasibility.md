@@ -290,7 +290,7 @@ events: seq = seed_length, seed_length+1, ...        # this file's own work
 Materializing a session:
 
 ```
-materialise(s) = materialise(s.parent)[0 : s.seed_length]  ++  s.own_events
+materialize(s) = materialize(s.parent)[0 : s.seed_length]  ++  s.own_events
 ```
 
 Recursion ends at a root (`parent_session is None`, `seed_length is None`).

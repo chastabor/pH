@@ -33,10 +33,10 @@ that reintroduces the state — a smaller subject, and an honest one.
 
 **So this row carries two invariants, and the second is the one with content
 now.** The state the first was written to observe is prevented rather than rare;
-the state that replaced it — a cancelled unwind that left effects nobody will
+the state that replaced it — a canceled unwind that left effects nobody will
 run — is what `scope-teardown` reports, off the ledger `Context._leave_tree`
 writes. That closes the half this module used to declare unenforced: a lease or a
-worktree stranded by a cancelled teardown was reported by a `log.warning` no
+worktree stranded by a canceled teardown was reported by a `log.warning` no
 shipped entry point installed a handler for, and is now a finding the daemon's
 own poll records.
 
@@ -109,7 +109,7 @@ def abandoned(root: Context) -> list[str]:
         if outstanding := one.outstanding:
             found.append(
                 f"{one.path} left {count_of(len(outstanding), 'effect')} undisposed "
-                f"after a cancelled unwind: {', '.join(outstanding)}"
+                f"after a canceled unwind: {', '.join(outstanding)}"
             )
         if stranded := one.unreclaimable:
             found.append(

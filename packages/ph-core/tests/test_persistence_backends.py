@@ -102,7 +102,7 @@ from ph.persistence import (
     LineageError,
     SessionBusy,
     lineage_faults,
-    materialise,
+    materialize,
 )
 from ph.persistence.jsonl import JsonlSessionStore
 from ph.persistence.protocol import SessionPersistence, StoredSession
@@ -498,7 +498,7 @@ async def test_a_log_that_starts_at_zero_is_read_unchanged(store: SessionPersist
     assert [event.seq for event in events] == [0, 1]
 
 
-async def test_a_child_holding_only_its_own_events_materialises_its_lineage(
+async def test_a_child_holding_only_its_own_events_materializes_its_lineage(
     store: SessionPersistence,
 ) -> None:
     """The mechanism: a file that begins above 0 is owed exactly that many events.
@@ -884,7 +884,7 @@ def test_the_walk_asks_each_ancestor_for_exactly_what_it_still_owes() -> None:
         asked.append((session_id, upto))
         return _segment(session_id)
 
-    materialise(read_one, "c")
+    materialize(read_one, "c")
     assert asked == [("c", None), ("b", 6), ("a", 3)], (
         "the target whole, then each ancestor bounded by what remained"
     )
@@ -904,7 +904,7 @@ def test_a_backend_that_ignores_the_bound_still_reads_correctly() -> None:
     ) -> tuple[SessionHeader, list[SessionEvent]]:
         return _segment(session_id)  # every event it has, bound or no bound
 
-    header, events = materialise(ignores_the_bound, "c")
+    header, events = materialize(ignores_the_bound, "c")
     assert header.id == "c"
     assert [event.seq for event in events] == list(range(9))
 
@@ -996,7 +996,7 @@ async def test_a_claimed_session_refuses_a_second_writer_until_released(
 async def test_a_flush_that_does_not_happen_still_owes_its_events(
     store: SessionPersistence,
 ) -> None:
-    """A cancelled flush must not consume what it failed to write.
+    """A canceled flush must not consume what it failed to write.
 
     Both backends emptied the queue *before* awaiting the write, so a
     cancellation delivered as the flush entered the thread pool — which is
@@ -1007,7 +1007,7 @@ async def test_a_flush_that_does_not_happen_still_owes_its_events(
 
     `move_on_after(0)` is the honest trigger rather than a patched writer:
     `anyio.to_thread.run_sync` checkpoints before it queues the work, so a
-    scope that is already cancelled raises there with nothing written — the
+    scope that is already canceled raises there with nothing written — the
     exact window the bug lived in.
 
     Sabotage: drop the `except` that restores `pending`, and this reads back a
@@ -1026,7 +1026,7 @@ async def test_a_flush_that_does_not_happen_still_owes_its_events(
 
     _header, events = store.read("owed")
     assert [event.seq for event in events] == list(range(len(session.events))), (
-        "the log came back with a hole where the cancelled flush had been"
+        "the log came back with a hole where the canceled flush had been"
     )
     Session("owed", seed=list(events), header=_header)  # the resume `_readmit` refuses
 

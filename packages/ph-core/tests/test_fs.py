@@ -284,7 +284,7 @@ async def test_collect_deduplicates_overlapping_arguments(tmp_path: Path) -> Non
     assert found == ["pkg/a.py"]
 
 
-async def test_collect_honours_the_screens(tmp_path: Path) -> None:
+async def test_collect_honors_the_screens(tmp_path: Path) -> None:
     """It walks through `glob`, so a policy row's screen still decides.
 
     The property that makes a bulk reader a tool rather than an exfiltration

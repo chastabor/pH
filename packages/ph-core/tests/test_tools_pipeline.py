@@ -277,7 +277,7 @@ async def test_ask_with_no_agent_denies_for_lack_of_anywhere_to_ask() -> None:
     ("outcome", "fragment"),
     [
         ("rejected", "the user rejected"),
-        ("cancelled", "was cancelled"),
+        ("canceled", "was canceled"),
         ("unavailable", "no approval channel"),
     ],
 )

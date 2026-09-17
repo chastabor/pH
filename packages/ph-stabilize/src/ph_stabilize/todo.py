@@ -773,6 +773,6 @@ def _counts(todos: list[dict[str, Any]], *, bare: int = 0) -> str:
     # helper is for. It was `list(args.get("todos") or ())` and this guard was
     # load-bearing then.
     tally = Counter(as_str(todo.get("status")) for todo in todos)
-    labelled = (("completed", "done"), ("in_progress", "doing"), ("pending", "to do"))
-    line = " · ".join(f"{tally[status]} {label}" for status, label in labelled)
+    labeled = (("completed", "done"), ("in_progress", "doing"), ("pending", "to do"))
+    line = " · ".join(f"{tally[status]} {label}" for status, label in labeled)
     return f"{line} · {bare} unevidenced" if bare else line

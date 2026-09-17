@@ -112,7 +112,7 @@ class AgentDriver(AgentHandle, Protocol):
 
 @dataclass(frozen=True, slots=True)
 class AgentCancelCause(WireDataclass):
-    """Why an active driver was cancelled."""
+    """Why an active driver was canceled."""
 
     kind: Literal["user", "parent", "hook", "disposed", "legacy"]
     reason: str | None = None

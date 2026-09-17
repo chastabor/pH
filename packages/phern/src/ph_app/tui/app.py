@@ -522,7 +522,7 @@ class PHTuiApp(App[str | None]):
         self.notify(f"staged for the next prompt: {named}", title="attach", markup=False)
         self.state_changed()
 
-    async def on_prompt_input_cancelled(self, _message: PromptInput.Cancelled) -> None:
+    async def on_prompt_input_canceled(self, _message: PromptInput.Canceled) -> None:
         if self.front is not None and self.front.state.busy:
             self.front.cancel()
 
@@ -719,7 +719,7 @@ class PHTuiApp(App[str | None]):
             # first pick — so a person who has never run `/theme` has no theme
             # file and needs none.
             self.theme_profile = choose_theme(self.home, self.theme_profile, chosen)
-        # Chosen or cancelled, the theme in force is the one the profile names.
+        # Chosen or canceled, the theme in force is the one the profile names.
         self.theme = self.catalog.resolve(self.theme_profile.chosen).name
 
     async def action_open_presets(self) -> None:

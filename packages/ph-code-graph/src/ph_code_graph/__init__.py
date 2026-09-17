@@ -524,7 +524,7 @@ async def apply(ctx: Context, config: Config) -> None:
         # fourteen frames of `pathlib`.
         raise MountRefusal(
             f"code-graph cannot write the tree-sitter grammar cache at {error.filename}: "
-            f"{error.strerror}. The grammars are materialised there on first use, so this "
+            f"{error.strerror}. The grammars are materialized there on first use, so this "
             "path must be writable — point $PH_CACHE somewhere it is, or set "
             "TREE_SITTER_LANGUAGE_PACK_CACHE_DIR."
         ) from error
@@ -568,7 +568,7 @@ async def apply(ctx: Context, config: Config) -> None:
             stored_token = await anyio.to_thread.run_sync(book.token)
             state = await tree_state(ctx, fs.root_for(run.agent), since=stored_token)
             for path in paths:
-                run.raise_if_cancelled()
+                run.raise_if_canceled()
                 language = detect_language(path)
                 # Derived from the pack rather than checked against a name
                 # list: `.txt`, `.ini`, `.proto` and a dozen others are

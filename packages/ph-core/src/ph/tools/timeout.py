@@ -40,7 +40,7 @@ async def apply(ctx: Context, config: None) -> None:
             return await next_()
         budget = definition.timeout_ms
         # The body observes the same cancellation the pipeline does, narrowed:
-        # a child token can be cancelled by the timeout or by anything above it,
+        # a child token can be canceled by the timeout or by anything above it,
         # but cannot outlive its parent's cancellation.
         child = execution.signal.child() if execution.signal is not None else None
         with anyio.move_on_after(budget / 1000) as scope:

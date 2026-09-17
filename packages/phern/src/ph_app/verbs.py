@@ -62,7 +62,7 @@ from .payloads import (
     RootDescription,
     RootListing,
     RootStatusReply,
-    ScheduleCancelled,
+    ScheduleCanceled,
     SessionBrowse,
     SessionCommandsNotice,
     SessionDetached,
@@ -167,7 +167,7 @@ CREDENTIALS_HELD = Verb("credentials/held", SessionParams, CredentialsHeldReply)
 # --- the schedule seam over the wire (P5-06, P5-10) ----------------------------
 
 SCHEDULE_CREATE = Verb("schedule/create", CreateScheduleParams, Schedule)
-SCHEDULE_CANCEL = Verb("schedule/cancel", CancelScheduleParams, ScheduleCancelled)
+SCHEDULE_CANCEL = Verb("schedule/cancel", CancelScheduleParams, ScheduleCanceled)
 SCHEDULE_LIST = Verb("schedule/list", SessionParams, SessionSchedulesReply)
 
 # --- the mutations -------------------------------------------------------------

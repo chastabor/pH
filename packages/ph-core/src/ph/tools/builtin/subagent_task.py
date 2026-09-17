@@ -171,7 +171,7 @@ async def apply(ctx: Context, config: Config) -> None:
             )
         outcome = await handle.result()
         if outcome.status != "done":
-            # A failure, not a value with a sad field: a child that was cancelled
+            # A failure, not a value with a sad field: a child that was canceled
             # or fell over did not answer the question, and a parent reading
             # `answer: ""` as an answer is the misreading this prevents.
             raise ValueError(

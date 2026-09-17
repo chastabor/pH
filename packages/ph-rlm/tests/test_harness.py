@@ -322,7 +322,7 @@ async def test_deleting_an_entry_that_is_not_there_is_refused(harnessed: Harness
 # ------------------------------------------------------------------- H3 --
 
 
-async def test_h3_a_cancelled_turn_is_not_prompted_for_a_global_edit(
+async def test_h3_a_canceled_turn_is_not_prompted_for_a_global_edit(
     harnessed: Harnessed,
 ) -> None:
     """H3 asks a human, so a turn the human already stopped is not asked.
@@ -341,7 +341,7 @@ async def test_h3_a_cancelled_turn_is_not_prompted_for_a_global_edit(
             session=session,
             agent=agent,
         )
-    assert asked == [], "a cancelled turn must not reach the answerer"
+    assert asked == [], "a canceled turn must not reach the answerer"
 
 
 async def test_h3_a_global_edit_prompts_and_a_local_one_does_not(harnessed: Harnessed) -> None:

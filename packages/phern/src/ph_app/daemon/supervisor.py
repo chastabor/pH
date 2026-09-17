@@ -947,10 +947,10 @@ class Supervisor:
     async def unschedule(self, root_id: str, schedule_id: str) -> bool:
         """Cancel a schedule. `False` when this log never knew that id."""
         root = await self.start(root_id)
-        cancelled: bool = self._schedule_seam(root).cancel(root.session, schedule_id)
-        if cancelled:
+        canceled: bool = self._schedule_seam(root).cancel(root.session, schedule_id)
+        if canceled:
             await self._flush(root)
-        return cancelled
+        return canceled
 
     def scheduled(self, root: Root) -> list[dict[str, Any]]:
         """What is still going to fire on this root, and when.
@@ -1484,7 +1484,7 @@ class Supervisor:
         disposes the mounted `Context` and with it the P5-03 lease, so a passivated
         session is one another process may legitimately open — the point rather than an
         oversight. The wake channel closes first so the root's task leaves its own loop
-        instead of being cancelled mid-turn.
+        instead of being canceled mid-turn.
         """
         async with self._starting:
             # The same lock `start` orders itself with, and for the mirror-image
@@ -1520,7 +1520,7 @@ class Supervisor:
         """Close every root's wake channel and unwind its context.
 
         Channels first, so each task leaves its own loop rather than being
-        cancelled mid-turn. Then per root, because one root's teardown failing
+        canceled mid-turn. Then per root, because one root's teardown failing
         must not strand the others (I2) — and each is flushed *before* it
         unwinds, since disposal appends events of its own and a session lost on
         exit is the worst way to learn that.

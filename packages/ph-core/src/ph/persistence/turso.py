@@ -52,7 +52,7 @@ from ..session import Session, SessionEvent, SessionHeader
 from ..wire import WireModel
 from .families import locate_under, logs_under, path_under
 from .lease import claim_file
-from .lineage import materialise
+from .lineage import materialize
 from .protocol import SessionPersistence, StoredSession, attach, stored_row
 
 __all__ = ["TursoSessionStore", "apply"]
@@ -233,7 +233,7 @@ class TursoSessionStore:
         # No release loop here any more: `read_own` closes what it opened, which
         # is where the rule belongs — this walk is not the only caller that reads
         # a database it does not own. See `read_own`.
-        return materialise(self.read_own, session_id)
+        return materialize(self.read_own, session_id)
 
     def read_own(
         self, session_id: str, upto: int | None = None, family: str | None = None

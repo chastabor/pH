@@ -95,7 +95,7 @@ async def test_a_stale_projection_is_recorded_in_the_root_it_concerns(tmp_path: 
         assert as_str(violation.get("detail")), "and how it looked when it was caught"
 
         assert VIOLATED not in [one.type for one in second.session.events], (
-            "the healthy root is not accused of its neighbour's drift"
+            "the healthy root is not accused of its neighbor's drift"
         )
 
 

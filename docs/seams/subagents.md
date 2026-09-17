@@ -151,7 +151,7 @@ many of one parent's children run at once (`maxConcurrent`, four in the shipped
 `rlm` bundle), and the rest wait in admission order rather than being refused:
 the parent asked for them, and a refusal answers a question about resources with
 one about intent. A queued child is live to the roster, so a parent is not
-passivated while it waits, and a slot is freed on `done`, `error` or `cancelled`
+passivated while it waits, and a slot is freed on `done`, `error` or `canceled`
 alike. Deleting a queued child cancels its wait and takes no slot.
 
 **The queue itself is [`ctx.jobs`](jobs.md)**, not this provider's — `slot=` on

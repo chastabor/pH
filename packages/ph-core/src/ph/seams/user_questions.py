@@ -39,7 +39,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..cancel import Cancellation, is_cancelled
+from ..cancel import Cancellation, is_canceled
 from ..cordis import Context, Disposer, events, plugin, settled_or_none
 from ..json import as_str
 from ..keys import USER_QUESTIONS
@@ -190,7 +190,7 @@ class UserQuestionService:
     ) -> str | None:
         """Ask, and return the answer or `None` when nobody could answer.
 
-        `cancel` is the caller's cancellation, and a cancelled ask is not put to
+        `cancel` is the caller's cancellation, and a canceled ask is not put to
         anybody — the rule `ApprovalService.request` states for the other seam
         that interrupts a person. Not recorded either: this seam already only
         logs a question that was *delivered*, and an abandoned one never was.
@@ -204,7 +204,7 @@ class UserQuestionService:
         beside it, so there is one place a caller can put it and one place every
         route — the log record, the wire frame, a re-posed ask — reads it from.
         """
-        if is_cancelled(cancel) or not self.attended:
+        if is_canceled(cancel) or not self.attended:
             return None
         # Minted only when the caller had no natural key of its own. `ask_user`
         # passes the tool call id, which is the string the rest of the log

@@ -79,7 +79,7 @@ KNOWN_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         # costs a repeated one — and repeating a scheduled prompt bills twice
         # and confuses the transcript.
         "schedule/created",
-        "schedule/cancelled",
+        "schedule/canceled",
         "schedule/tick",
         "schedule/heartbeat",
         # An autonomous run's objective, its spend, its quality gates and how it
@@ -324,7 +324,7 @@ IGNORABLE_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         # started at 3am, which is accounting rather than the conversation —
         # the prompt the tick delivered is a `user/message` either way.
         "schedule/created",
-        "schedule/cancelled",
+        "schedule/canceled",
         "schedule/tick",
         "schedule/heartbeat",
         # What a person poked at from the composer. Ignorable: a reader skipping

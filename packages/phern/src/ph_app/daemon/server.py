@@ -81,7 +81,7 @@ from ..payloads import (
     RootDescription,
     RootListing,
     RootStatusReply,
-    ScheduleCancelled,
+    ScheduleCanceled,
     SessionBrowse,
     SessionDetached,
     SessionNotice,
@@ -558,12 +558,12 @@ class _Connection:
     async def _schedule_create(self, params: CreateScheduleParams) -> Schedule:
         return await self.server.supervisor.schedule(params.session_id, params.to_schedule())
 
-    async def _schedule_cancel(self, params: CancelScheduleParams) -> ScheduleCancelled:
-        cancelled = await self.server.supervisor.unschedule(params.session_id, params.schedule_id)
-        return ScheduleCancelled(
+    async def _schedule_cancel(self, params: CancelScheduleParams) -> ScheduleCanceled:
+        canceled = await self.server.supervisor.unschedule(params.session_id, params.schedule_id)
+        return ScheduleCanceled(
             session_id=params.session_id,
             schedule_id=params.schedule_id,
-            cancelled=cancelled,
+            canceled=canceled,
         )
 
     async def _schedule_list(self, params: SessionParams) -> SessionSchedulesReply:

@@ -5,7 +5,7 @@ dsh threads an `AbortSignal` through the tool pipeline: the caller owns one, a
 a timeout policy works), and the registry fuses every replacement with the
 captured caller signal so a wrapper can narrow the lifetime but never widen it.
 
-`CancelToken` is that contract. A child is cancelled when it is cancelled *or
+`CancelToken` is that contract. A child is canceled when it is canceled *or
 when any ancestor is*, which makes the fusion structural rather than something
 each wrapper has to remember.
 
@@ -23,11 +23,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol
 
-__all__ = ["CancelToken", "Cancellation", "Cancelled", "is_cancelled"]
+__all__ = ["CancelToken", "Canceled", "Cancellation", "is_canceled"]
 
 
-class Cancelled(Exception):
-    """Raised by `raise_if_cancelled()`; carries the reason for the record."""
+class Canceled(Exception):
+    """Raised by `raise_if_canceled()`; carries the reason for the record."""
 
     def __init__(self, reason: str) -> None:
         super().__init__(reason)
@@ -46,10 +46,10 @@ class Cancellation(Protocol):
     """
 
     @property
-    def cancelled(self) -> bool: ...
+    def canceled(self) -> bool: ...
     @property
     def cancel_reason(self) -> str | None: ...
-    def raise_if_cancelled(self) -> None: ...
+    def raise_if_canceled(self) -> None: ...
 
 
 @dataclass(slots=True)
@@ -60,7 +60,7 @@ class CancelToken:
     parent: CancelToken | None = None
 
     @property
-    def cancelled(self) -> bool:
+    def canceled(self) -> bool:
         node: CancelToken | None = self
         while node is not None:
             if node.reason is not None:
@@ -77,20 +77,20 @@ class CancelToken:
             node = node.parent
         return None
 
-    def cancel(self, reason: str = "cancelled") -> None:
+    def cancel(self, reason: str = "canceled") -> None:
         if self.reason is None:
             self.reason = reason
 
     def child(self, reason: str | None = None) -> CancelToken:
-        """A narrower token: cancelled by itself or by anything above it."""
+        """A narrower token: canceled by itself or by anything above it."""
         return CancelToken(reason=reason, parent=self)
 
-    def raise_if_cancelled(self) -> None:
+    def raise_if_canceled(self) -> None:
         reason = self.cancel_reason
         if reason is not None:
-            raise Cancelled(reason)
+            raise Canceled(reason)
 
 
-def is_cancelled(token: Cancellation | None) -> bool:
+def is_canceled(token: Cancellation | None) -> bool:
     """`False` for no token — the one place that rule is spelled out."""
-    return token is not None and token.cancelled
+    return token is not None and token.canceled

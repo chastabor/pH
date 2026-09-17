@@ -289,7 +289,7 @@ async def test_git_answers_in_the_asked_about_trees_spelling(
 
     assert "README.md" in after.suspect
     assert not after.vouches_for("README.md", after.id_for("README.md"))
-    assert after.vouches_for("kept.py", after.id_for("kept.py")), "its neighbour is still clean"
+    assert after.vouches_for("kept.py", after.id_for("kept.py")), "its neighbor is still clean"
 
 
 # ---------------------------------------------------------------- against jj ----

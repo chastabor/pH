@@ -198,7 +198,7 @@ async def test_activation_scopes_are_transparent_and_agent_scopes_isolate() -> N
 # ------------------------------------------------- cancellation mid-dispose --
 
 
-async def test_a_cancelled_dispose_still_leaves_the_tree(caplog: pytest.LogCaptureFixture) -> None:
+async def test_a_canceled_dispose_still_leaves_the_tree(caplog: pytest.LogCaptureFixture) -> None:
     """I2's structural half, held at the one path a live process can break it by.
 
     `CancelledError` is a `BaseException`, so the effect loop's `except Exception`
@@ -218,7 +218,7 @@ async def test_a_cancelled_dispose_still_leaves_the_tree(caplog: pytest.LogCaptu
     ran: list[str] = []
 
     child.add_disposer(lambda: ran.append("stranded"), label="stranded")
-    child.add_disposer(raising(asyncio.CancelledError()), label="cancelled-here")
+    child.add_disposer(raising(asyncio.CancelledError()), label="canceled-here")
     child.add_disposer(lambda: ran.append("first"), label="first")
 
     with (
@@ -403,7 +403,7 @@ async def test_a_cut_short_unwind_is_recorded_where_something_can_read_it() -> N
     root = Context()
     child = root.scope("child")
     child.add_disposer(lambda: None, label="stranded-lease")
-    child.add_disposer(raising(asyncio.CancelledError()), label="cancelled-here")
+    child.add_disposer(raising(asyncio.CancelledError()), label="canceled-here")
 
     with pytest.raises(asyncio.CancelledError):
         await child.dispose()
@@ -411,10 +411,10 @@ async def test_a_cut_short_unwind_is_recorded_where_something_can_read_it() -> N
     (entry,) = root.abandoned
     assert entry.path == "root/child"
     # The two kinds, split by whether anybody can still act. `stranded-lease` was
-    # never claimed, so its holder can run it; `cancelled-here` was claimed and
+    # never claimed, so its holder can run it; `canceled-here` was claimed and
     # never finished, which `release` refuses on the `done` guard.
     assert entry.outstanding == ("stranded-lease",)
-    assert entry.unreclaimable == ("cancelled-here",)
+    assert entry.unreclaimable == ("canceled-here",)
     assert child not in root.children, "the scope itself is still gone from the tree"
 
 
@@ -431,7 +431,7 @@ async def test_an_effect_released_afterwards_stops_being_reported() -> None:
     child = root.scope("child")
     ran: list[str] = []
     release = child.add_disposer(lambda: ran.append("late"), label="stranded-lease")
-    child.add_disposer(raising(asyncio.CancelledError()), label="cancelled-here")
+    child.add_disposer(raising(asyncio.CancelledError()), label="canceled-here")
 
     with pytest.raises(asyncio.CancelledError):
         await child.dispose()
@@ -461,7 +461,7 @@ async def test_the_ledger_does_not_pin_what_it_reports_on() -> None:
     root = Context()
     child = root.scope("child")
     child.provide("thing", object())
-    child.add_disposer(raising(asyncio.CancelledError()), label="cancelled-here")
+    child.add_disposer(raising(asyncio.CancelledError()), label="canceled-here")
     watch = weakref.ref(child)
 
     with pytest.raises(asyncio.CancelledError):
@@ -486,7 +486,7 @@ async def test_an_effect_nothing_can_release_is_reported_as_such() -> None:
     root = Context()
     child = root.scope("child")
     release = child.add_disposer(lambda: None, label="a-worktree")
-    child.add_disposer(raising(asyncio.CancelledError()), label="cancelled-here")
+    child.add_disposer(raising(asyncio.CancelledError()), label="canceled-here")
 
     with pytest.raises(asyncio.CancelledError):
         await child.dispose()
@@ -518,7 +518,7 @@ async def test_the_ledger_is_bounded_and_says_what_it_dropped() -> None:
     for index in range(ABANDONED_LEDGER + 3):
         child = root.scope(f"child-{index}")
         child.add_disposer(lambda: None, label="stranded")
-        child.add_disposer(raising(asyncio.CancelledError()), label="cancelled-here")
+        child.add_disposer(raising(asyncio.CancelledError()), label="canceled-here")
         with pytest.raises(asyncio.CancelledError):
             await child.dispose()
 
@@ -528,10 +528,10 @@ async def test_the_ledger_is_bounded_and_says_what_it_dropped() -> None:
     assert root.abandoned[-1].path.endswith(f"child-{ABANDONED_LEDGER + 2}")
 
 
-async def test_a_cancelled_child_does_not_strand_its_parent() -> None:
+async def test_a_canceled_child_does_not_strand_its_parent() -> None:
     """The cascade, which is where the leak is largest.
 
-    `dispose` unwinds children before its own effects, so a child cancelled
+    `dispose` unwinds children before its own effects, so a child canceled
     partway through propagates out of the *parent's* loop too. Both must leave
     the tree: a parent that stayed linked would keep the whole subtree — its
     services and everything they close over — reachable for as long as the root
@@ -545,7 +545,7 @@ async def test_a_cancelled_child_does_not_strand_its_parent() -> None:
     root = Context()
     parent = root.scope("parent")
     child = parent.scope("child")
-    child.add_disposer(raising(asyncio.CancelledError()), label="cancelled-here")
+    child.add_disposer(raising(asyncio.CancelledError()), label="canceled-here")
 
     with pytest.raises(asyncio.CancelledError):
         await parent.dispose()

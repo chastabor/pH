@@ -133,7 +133,7 @@ async def _run_group(
     call_seqs: list[int] = [-1] * len(group)
     committed = 0
     started = 0
-    aborted = token.cancelled
+    aborted = token.canceled
     concluded = False
     in_flight: set[int] = set()
     failure: BaseException | None = None
@@ -208,7 +208,7 @@ async def _run_group(
             index = await settled_recv.receive()
             in_flight.discard(index)
             await commit_ready()
-            aborted = aborted or token.cancelled
+            aborted = aborted or token.canceled
             if failure is not None:
                 # Stop replenishing; the task group still drains what started.
                 break
@@ -219,7 +219,7 @@ async def _run_group(
     await commit_ready()
     if failure is not None:
         raise failure
-    if aborted or token.cancelled:
+    if aborted or token.canceled:
         for skipped in group[started:]:
             _append_skipped(session, turn, step, skipped.block)
         return _GroupOutcome(consumed=len(group), aborted=True, concluded=concluded)

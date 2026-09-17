@@ -324,7 +324,7 @@ class Runner:
                 cell = self.globals.pop(CELL_FUNCTION)
                 value = await cell()
         except asyncio.CancelledError:
-            error = {"kind": "aborted", "message": "the run was cancelled"}
+            error = {"kind": "aborted", "message": "the run was canceled"}
         except KeyboardInterrupt:
             error = {"kind": "aborted", "message": "the run was interrupted"}
         except CpuBudgetExceeded as exceeded:

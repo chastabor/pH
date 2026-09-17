@@ -326,7 +326,7 @@ async def test_turn_stopping_listener_can_keep_the_turn_alive(mount: MountProfil
     assert types.count("step/start") == 2
 
 
-async def test_cancelling_ends_the_turn_as_aborted(mount: MountProfile) -> None:
+async def test_canceling_ends_the_turn_as_aborted(mount: MountProfile) -> None:
     ctx = await mount()
     session = ctx.require(SESSIONS).create("s")
     agent = ctx.require(AGENTS).create(session, FAKE)

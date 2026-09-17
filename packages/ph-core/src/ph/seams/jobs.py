@@ -18,7 +18,7 @@ Two halves of "this job is over", deliberately distinct:
   Cancel it, then forget it.
 * **released** (`forget`) — the owner knows the work is finished and wants the
   entry gone. Forget it, cancel nothing. A job whose own body triggers its
-  owner's teardown would otherwise report `cancelled` for work that completed.
+  owner's teardown would otherwise report `canceled` for work that completed.
 
 Cancellation is cooperative: `Job.cancel()` sets a token, and a body that never
 reads it will run to completion regardless — `ctx.drain()` still waits for it.
@@ -67,7 +67,7 @@ __all__ = [
 
 log = logging.getLogger("ph.seams.jobs")
 
-JobState: TypeAlias = Literal["queued", "running", "done", "failed", "cancelled"]
+JobState: TypeAlias = Literal["queued", "running", "done", "failed", "canceled"]
 """`queued` is admitted but waiting for a slot — see `JobService.start`'s `slot=`.
 
 A state rather than an absence, because "not started yet" and "not started at
@@ -134,7 +134,7 @@ class Job:
 
     def cancel(self) -> None:
         """Stop this job, whether it is running or still waiting for a slot."""
-        self.token.cancel("job cancelled")
+        self.token.cancel("job canceled")
         if self.waiting is not None:
             self.waiting.cancel()
 
@@ -196,14 +196,14 @@ class JobService:
         """Start one background job, owned by `scope` (default: this seam's).
 
         `scope` is what bounds the job's lifetime: the delegation, the session,
-        the process. Disposing it abandons the job — cancelled if still running,
+        the process. Disposing it abandons the job — canceled if still running,
         and dropped from the table either way.
 
         **`slot=(key, limit)` queues instead of refusing.** `start` still returns
         at once and the handle is real — what waits is the *body*, so a producer's
         admission, its record and its identity are untouched by how busy it is. A
         job waiting for a slot is `queued`; it takes one in admission order, and
-        frees it on every ending — done, failed or cancelled — so one failure
+        frees it on every ending — done, failed or canceled — so one failure
         cannot wedge the queue behind it. The first caller of a key fixes that
         key's limit; a later `(key, other)` joins the existing queue rather than
         resizing it, because two producers disagreeing about a bound is not
@@ -225,7 +225,7 @@ class JobService:
             def abandon() -> None:
                 # The entry's presence *is* the "still owned" flag: `forget` pops
                 # it before deregistering, so an owner that released a finished
-                # job cannot have it reported as cancelled here.
+                # job cannot have it reported as canceled here.
                 if self._jobs.pop(job.id, None) is None:
                     return
                 # **`queued` counts as owed, not just `running`.** A job still
@@ -246,16 +246,16 @@ class JobService:
                 if waits:
                     holds = await self._take(job, waits, on_queued)
                     if not holds:
-                        # Cancelled where it waited. It never ran, which is what
-                        # `cancelled` says and why the work below is not entered.
-                        job.state = "cancelled"
+                        # Canceled where it waited. It never ran, which is what
+                        # `canceled` says and why the work below is not entered.
+                        job.state = "canceled"
                         return
-                if job.token.cancelled:
-                    job.state = "cancelled"
+                if job.token.canceled:
+                    job.state = "canceled"
                     return
                 job.state = "running"
                 job.result = await maybe_await(run(job))
-                job.state = "cancelled" if job.token.cancelled else "done"
+                job.state = "canceled" if job.token.canceled else "done"
             except Exception as error:
                 job.state = "failed"
                 job.error = error
@@ -318,10 +318,10 @@ class JobService:
     async def _take(
         self, job: Job, waits: Sequence[_Queue], on_queued: Callable[[], None] | None
     ) -> bool:
-        """Wait for a place in every queue. `False` if cancelled while waiting.
+        """Wait for a place in every queue. `False` if canceled while waiting.
 
-        The wait is its own cancel scope, not the body's: a job cancelled while
-        queued must stop waiting, while one cancelled while *running* is stopped
+        The wait is its own cancel scope, not the body's: a job canceled while
+        queued must stop waiting, while one canceled while *running* is stopped
         through its token — and a single scope over both would cancel the work
         mid-flight, which is the opposite of cooperative.
 
@@ -365,7 +365,7 @@ class JobService:
         return True
 
     def forget(self, job_id: str) -> bool:
-        """Drop a finished job's entry without cancelling it.
+        """Drop a finished job's entry without canceling it.
 
         For an owner that knows the work is done — a delegation whose child has
         settled — so the table does not hold one entry per unit of past work for

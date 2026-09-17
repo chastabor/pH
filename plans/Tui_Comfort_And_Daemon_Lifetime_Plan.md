@@ -525,7 +525,7 @@ sentence saying it is no longer the exit's window.
 **Evaluated on the event, with the sweep as backstop.** `_handle`'s `finally`
 (`server.py:1299`) already runs when a connection ends; it calls a new
 `check_lifetime()` which either sets `stop` or arms the linger deadline. The same call
-happens when a turn ends and when a schedule is cancelled — the two other transitions
+happens when a turn ends and when a schedule is canceled — the two other transitions
 that can make a held daemon unheld. The sixty-second sweep keeps calling it, for the
 case nothing else can cover: a linger that expires with no event to notice it. This is
 the plan's own argument for one cadence per question, honored — the cadence is not a

@@ -11,7 +11,7 @@ process holding it.
 
 ## Everything is in the log, including the claim
 
-A schedule is `schedule/created` until a matching `schedule/cancelled`. A firing
+A schedule is `schedule/created` until a matching `schedule/canceled`. A firing
 is `schedule/tick`, appended **before** the work is delivered.
 
 That ordering is A10's write-ahead applied to time, and the asymmetry is the
@@ -80,7 +80,7 @@ schedule, because the schedule itself is in the session's log.
 | event | |
 |---|---|
 | `schedule/created` | with its kind and spec |
-| `schedule/cancelled` | the matching end |
+| `schedule/canceled` | the matching end |
 | `schedule/tick` | **before** the work is delivered |
 | `schedule/heartbeat` | the cadence is alive |
 

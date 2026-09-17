@@ -466,7 +466,7 @@ def attach(
     Idle is how a root that answered and a root whose last answer failed both
     look, so a script chaining on this had no way to tell them apart and read the
     second as success (P5-04). Only `error` — the kind the loop records when a
-    turn could not be completed. A turn a person cancelled, or one a limit ended,
+    turn could not be completed. A turn a person canceled, or one a limit ended,
     exits 0 and says so on its own line: those are outcomes somebody already
     knows about, and turning them into a failed command would make the ordinary
     way of stopping an agent look like a fault.
@@ -566,9 +566,9 @@ def schedule(
                 CancelScheduleParams(session_id=session, schedule_id=cancel),
             )
         )
-        if not outcome.cancelled:
+        if not outcome.canceled:
             fail(f"[red]no schedule {cancel!r} on {session}[/red]")
-        console.print(f"[dim]cancelled {cancel}[/dim]")
+        console.print(f"[dim]canceled {cancel}[/dim]")
         return
 
     if len(timings) > 1:

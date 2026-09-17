@@ -82,11 +82,11 @@ async def test_a_reference_resolves_without_a_directory_scan(tmp_path: Path) -> 
     store = _store(tmp_path)
     ref = await store.save_bytes(content=PNG, mime="image/png", name="shot.png")
 
-    travelled = AttachmentRef.model_validate(ref.to_wire())
+    traveled = AttachmentRef.model_validate(ref.to_wire())
 
-    assert store.path_for(travelled) == store.path_for(ref)
-    assert store.path_for(travelled).suffix == ".png"
-    assert await store.load_bytes(travelled) == PNG
+    assert store.path_for(traveled) == store.path_for(ref)
+    assert store.path_for(traveled).suffix == ".png"
+    assert await store.load_bytes(traveled) == PNG
 
 
 async def test_a_missing_blob_is_a_question_that_can_be_asked(tmp_path: Path) -> None:

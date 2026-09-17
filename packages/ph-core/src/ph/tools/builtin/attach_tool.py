@@ -144,7 +144,7 @@ async def apply(ctx: Context, config: Config) -> None:
             # the same ordering `UNKNOWN_TOOL` has ahead of policy (C6). An
             # unclassifiable extension reads as "no type", which is more useful
             # than the literal `application/octet-stream`.
-            named = "no recognisable type" if mime == OCTET_STREAM else mime
+            named = "no recognizable type" if mime == OCTET_STREAM else mime
             raise HarnessError(f"{args.path} is {named}. {REACH_FOR_READ}", "NOT_ATTACHABLE")
         content = await fs.read_bytes(
             args.path,

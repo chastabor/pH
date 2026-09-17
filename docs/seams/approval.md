@@ -8,7 +8,7 @@ proceeds** (B3).
 
 ## Fail closed is the whole design
 
-No answerer, an unmounted seam, a cancelled prompt, an exception inside an
+No answerer, an unmounted seam, a canceled prompt, an exception inside an
 answerer — every one of them denies. A permission system whose failure mode is
 "allow" is not a permission system.
 
@@ -18,7 +18,7 @@ safe. What you do need is to distinguish *why* it did not grant.
 ## The four outcomes, and why they are four
 
 ```text
-ApprovalOutcome = "allowed-once" | "rejected" | "cancelled" | "unavailable"
+ApprovalOutcome = "allowed-once" | "rejected" | "canceled" | "unavailable"
 ```
 
 Only the first proceeds; the other three are distinct **on purpose**. A model
@@ -53,7 +53,7 @@ replies a front end may return instead:
 | answer | meaning |
 |---|---|
 | `allowed-once` | proceed, this once |
-| `rejected` / `cancelled` / `unavailable` | do not proceed; see `denial_reason` |
+| `rejected` / `canceled` / `unavailable` | do not proceed; see `denial_reason` |
 | `Edited(arguments)` | proceed, but with *these* arguments — the human changed the call |
 | `Responded(text)` | do not proceed; the human answered in words instead |
 

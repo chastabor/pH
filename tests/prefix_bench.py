@@ -277,7 +277,7 @@ async def run_profile(
         session = ctx.require(SESSIONS).create(f"bench-{profile}")
         agent = ctx.require(AGENTS).create(session, OPTIONS)
         for path in files:
-            await agent.prompt(f"Summarise {path.name}.")
+            await agent.prompt(f"Summarize {path.name}.")
         return measure(
             profile, context_window, ctx.require(LLM_REPLAY).requests, ctx.require(TOKEN_METER)
         )

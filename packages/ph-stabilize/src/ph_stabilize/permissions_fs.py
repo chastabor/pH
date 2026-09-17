@@ -373,7 +373,7 @@ class FsPermissions:
         return (
             "prune"
             if self._refuses_under(
-                spellings, "read", path, agent, honour_scope=True, require_head=True
+                spellings, "read", path, agent, honor_scope=True, require_head=True
             )
             else "yield"
         )
@@ -385,7 +385,7 @@ class FsPermissions:
         path: str,
         agent: AgentHandle | None,
         *,
-        honour_scope: bool,
+        honor_scope: bool,
         require_head: bool,
     ) -> bool:
         """Whether a non-allow rule could match *something inside* this directory.
@@ -394,7 +394,7 @@ class FsPermissions:
         operating system, not by this module — so a rule matching one file inside a
         directory applies to it without ever naming it.
 
-        **`honour_scope` is the deliberate difference between the two callers**, a
+        **`honor_scope` is the deliberate difference between the two callers**, a
         parameter rather than a comment in each copy so the asymmetry is visible from
         both. Enumeration honors `outside-workspace`; a recursive delete does not. A
         delete may only ever be wrong towards refusal, while enumeration over-refusing
@@ -412,7 +412,7 @@ class FsPermissions:
         for rule in self.rules:
             if rule.mode == "allow" or operation not in rule.operations:
                 continue
-            if honour_scope and rule.scope == "outside-workspace":
+            if honor_scope and rule.scope == "outside-workspace":
                 # `decide`'s own guard. Load-bearing here in a way it is not for
                 # a file: a scoped rule written `paths: ["**"]` is precisely the
                 # rule written to *exempt* the workspace, and without this it
@@ -441,7 +441,7 @@ class FsPermissions:
         `_refuses_under`, which `screen` shares and which records why the two
         callers differ.
 
-        `honour_scope=False`: a rule scoped `outside-workspace` still refuses a
+        `honor_scope=False`: a rule scoped `outside-workspace` still refuses a
         recursive delete of a directory inside it, because the delete would
         reach paths outside as soon as the tree contains a symlink or the
         workspace boundary moves. The enumeration side, which can be wrong in
@@ -456,7 +456,7 @@ class FsPermissions:
             "write",
             path.as_posix(),
             agent,
-            honour_scope=False,
+            honor_scope=False,
             require_head=False,
         ):
             return RECURSIVE_DENIAL.format(path=path)

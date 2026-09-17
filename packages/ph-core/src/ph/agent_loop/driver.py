@@ -59,7 +59,7 @@ from ..agent.types import (
     RequestProposal,
     TurnEndReason,
 )
-from ..cancel import Cancelled, CancelToken
+from ..cancel import Canceled, CancelToken
 from ..cordis import Context, settled, settled_or_none
 from ..json import as_int
 from ..keys import LLM, SYSTEM_PROMPT
@@ -89,16 +89,16 @@ from ..system_prompt.assembly import (
 from ..tools.batch import execute_tool_calls
 from ..tools.errors import error_info
 
-__all__ = ["AgentCancelled", "ReactLoopAgent"]
+__all__ = ["AgentCanceled", "ReactLoopAgent"]
 
 log = logging.getLogger("ph.agent_loop")
 
 
-class AgentCancelled(Exception):
-    """The active driver was cancelled; carries the cause for `turn/end`."""
+class AgentCanceled(Exception):
+    """The active driver was canceled; carries the cause for `turn/end`."""
 
     def __init__(self, cause: AgentCancelCause) -> None:
-        super().__init__(f"agent cancelled: {cause.kind}")
+        super().__init__(f"agent canceled: {cause.kind}")
         self.cause = cause
 
 
@@ -107,7 +107,7 @@ class _Phase:
     kind: str = "idle"
     turn: int = 0
     step: int = 0
-    cancelled: AgentCancelCause | None = None
+    canceled: AgentCancelCause | None = None
     token: CancelToken = field(default_factory=CancelToken)
     """The live cancellation view handed to tool calls.
 
@@ -120,7 +120,7 @@ class _Phase:
         """Fresh per-turn state: a new token, so an old cancellation cannot leak
         into the next turn's tool calls."""
         self.step = 0
-        self.cancelled = None
+        self.canceled = None
         self.token = CancelToken()
 
 
@@ -183,7 +183,7 @@ class ReactLoopAgent:
         # turn. Classified BEFORE the insertion, so a reentrant cancel from a
         # splice observer cannot reclassify it.
         waking_after_abort = (
-            wakeup and self._phase.kind != "idle" and self._phase.cancelled is not None
+            wakeup and self._phase.kind != "idle" and self._phase.canceled is not None
         )
         self.inbox.append("next-turn" if waking_after_abort else target, message)
 
@@ -223,12 +223,12 @@ class ReactLoopAgent:
     def cancel(self, cause: AgentCancelCause, *, keep_inbox: bool = False) -> None:
         if not keep_inbox:
             self.inbox.clear()
-        self._phase.cancelled = cause
+        self._phase.canceled = cause
         self._phase.token.cancel(cause.kind)
 
-    def _throw_if_cancelled(self) -> None:
-        if self._phase.cancelled is not None:
-            raise AgentCancelled(self._phase.cancelled)
+    def _throw_if_canceled(self) -> None:
+        if self._phase.canceled is not None:
+            raise AgentCanceled(self._phase.canceled)
 
     # ------------------------------------------------------------------ run --
 
@@ -251,7 +251,7 @@ class ReactLoopAgent:
         try:
             while await self._turn():
                 pass
-        except (AgentCancelled, Cancelled):
+        except (AgentCanceled, Canceled):
             pass
         except Exception:
             log.debug("ph.agent_loop: driver contained a failure", exc_info=True)
@@ -275,10 +275,10 @@ class ReactLoopAgent:
         self.ctx.emit("agent/error", self, self._phase.turn, self._phase.step, error)
 
     async def _pre_step(self, target: InboxTarget, turn: int, step: int) -> _PreparedStep:
-        self._throw_if_cancelled()
+        self._throw_if_canceled()
         claimed = self.inbox.claim(target, turn)
         assembly = await self.ctx.require(SYSTEM_PROMPT).assemble(self.ctx, agent=self)
-        self._throw_if_cancelled()
+        self._throw_if_canceled()
         context_message = self._project_context(assembly)
         messages = (*claimed, context_message) if context_message is not None else tuple(claimed)
 
@@ -289,7 +289,7 @@ class ReactLoopAgent:
             agent=self, session=self.session, messages=messages, turn=turn, step=step
         )
         answered = await self.ctx.waterfall("agent/pre-step", request, inner=inner)
-        self._throw_if_cancelled()
+        self._throw_if_canceled()
         decision = settled("agent/pre-step", answered, PreStepDecision)
         if decision.kind == "reject":
             return _PreparedStep(kind="reject")
@@ -318,7 +318,7 @@ class ReactLoopAgent:
 
     async def _turn(self) -> bool:
         phase = self._phase
-        self._throw_if_cancelled()
+        self._throw_if_canceled()
         turn = phase.turn + 1
         self.session.append("turn/start", {"turn": turn})
         phase.turn = turn
@@ -326,7 +326,7 @@ class ReactLoopAgent:
         target: InboxTarget = "next-turn"
         try:
             while True:
-                self._throw_if_cancelled()
+                self._throw_if_canceled()
                 step = phase.step + 1
                 decision = await self._pre_step(target, turn, step)
                 if decision.kind == "reject":
@@ -340,7 +340,7 @@ class ReactLoopAgent:
                 if phase.step == 0 and not decision.messages:
                     turn_ends = TurnEndReason(kind="completed")
                     return False
-                self._throw_if_cancelled()
+                self._throw_if_canceled()
                 self.session.append("step/start", {"turn": turn, "step": step})
                 phase.step = step
                 try:
@@ -356,18 +356,18 @@ class ReactLoopAgent:
                         turn_ends = step_end
                 finally:
                     self.session.append("step/end", {"turn": turn, "step": step})
-                self._throw_if_cancelled()
+                self._throw_if_canceled()
                 if turn_ends is not None and not self.inbox.next_step:
                     await self.ctx.serial("agent/turn-stopping", self, turn)
-                    self._throw_if_cancelled()
+                    self._throw_if_canceled()
                 if turn_ends is not None and not self.inbox.next_step:
                     break
                 target = "next-step"
-        except (AgentCancelled, Cancelled) as cancelled:
+        except (AgentCanceled, Canceled) as canceled:
             cause = (
-                cancelled.cause
-                if isinstance(cancelled, AgentCancelled)
-                else self._phase.cancelled or AgentCancelCause(kind="user")
+                canceled.cause
+                if isinstance(canceled, AgentCanceled)
+                else self._phase.canceled or AgentCancelCause(kind="user")
             )
             turn_ends = TurnEndReason(kind="aborted", reason=cause)
             raise
@@ -395,7 +395,7 @@ class ReactLoopAgent:
     async def _step(self, assembly: PromptAssembly) -> TurnEndReason | None:
         phase = self._phase
         turn, step = phase.turn, phase.step
-        self._throw_if_cancelled()
+        self._throw_if_canceled()
         system = render_prompt(assembly)
 
         while True:
@@ -404,9 +404,9 @@ class ReactLoopAgent:
             chunk_seqs: list[int] = []
             try:
                 stream = await self.ctx.require(LLM).stream(request)
-                self._throw_if_cancelled()
+                self._throw_if_canceled()
                 async for chunk in stream:
-                    self._throw_if_cancelled()
+                    self._throw_if_canceled()
                     # Raw chunks are logged before assembly, so the log carries
                     # token-level replay fidelity even for a stream that later
                     # fails.
@@ -417,8 +417,8 @@ class ReactLoopAgent:
                         ).seq
                     )
                     assembler.push(chunk)
-                self._throw_if_cancelled()
-            except (AgentCancelled, Cancelled):
+                self._throw_if_canceled()
+            except (AgentCanceled, Canceled):
                 content = assembler.interrupted_blocks()
                 if content:
                     # An interrupted turn still finalizes what the user saw:
@@ -470,8 +470,8 @@ class ReactLoopAgent:
             max_parallel=self.max_parallel_tool_calls,
         )
         if outcome.aborted:
-            self._throw_if_cancelled()
-            raise Cancelled("tool batch aborted")
+            self._throw_if_canceled()
+            raise Canceled("tool batch aborted")
         return TurnEndReason(kind="completed") if outcome.concluded else None
 
     async def _request_error(
@@ -488,7 +488,7 @@ class ReactLoopAgent:
             failure=finish.failure or LlmFailure(message="model request failed", code="UNKNOWN"),
         )
         action = await self.ctx.waterfall("agent/request-error", failure, inner=inner)
-        self._throw_if_cancelled()
+        self._throw_if_canceled()
         return settled_or_none("agent/request-error", action, RequestErrorAction)
 
     def _append_assistant_message(
@@ -533,7 +533,7 @@ class ReactLoopAgent:
 
         proposal = RequestProposal(agent=self, turn=turn, step=step, config=seed)
         answered = await self.ctx.waterfall("agent/request", proposal, inner=inner)
-        self._throw_if_cancelled()
+        self._throw_if_canceled()
         proposed = settled("agent/request", answered, LlmCallConfig)
         if not proposed.provider or not proposed.model:
             raise ValueError(
@@ -560,7 +560,7 @@ class ReactLoopAgent:
         )
         if session.request_context() != request_context:
             session.append("request/context", request_context.to_wire())
-        self._throw_if_cancelled()
+        self._throw_if_canceled()
 
         return GenerateOptions(
             provider=header.config.provider,

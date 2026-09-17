@@ -267,7 +267,7 @@ speculative.
   `test_a_question_asked_of_someone_who_walked_away_re_poses_on_attach` ·
   `test_only_a_profile_with_a_screen_offers_the_model_ask_user` (read off `--dump-config`, both
   profiles and both *layers*; sabotage: enable the row in `base.yaml`, or drop the patch from
-  `tui.yaml`) · `test_a_question_cancelled_mid_answer_stays_pending` (a real cancellation, which
+  `tui.yaml`) · `test_a_question_canceled_mid_answer_stays_pending` (a real cancellation, which
   also pins that `ask`'s `except Exception` does not swallow one into a false `declined`) ·
   `test_a_daemon_with_no_front_end_does_not_log_a_question` (sabotage: register the desk's
   answerer without `reachable`) · `test_the_wire_ask_id_is_the_one_the_log_wrote`.

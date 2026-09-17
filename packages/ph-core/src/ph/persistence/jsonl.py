@@ -39,7 +39,7 @@ from ..session import Session, SessionEvent, SessionHeader
 from ..wire import WireModel
 from .families import locate_under, logs_under, path_under
 from .lease import claim_file
-from .lineage import materialise
+from .lineage import materialize
 from .protocol import SessionPersistence, StoredSession, attach, stored_row
 
 __all__ = [
@@ -226,7 +226,7 @@ class JsonlSessionStore:
         0 is complete and is returned unchanged, which is every log written so
         far — so this is a no-op until something writes a reference-fork.
         """
-        return materialise(self.read_own, session_id)
+        return materialize(self.read_own, session_id)
 
     def read_own(
         self, session_id: str, upto: int | None = None, family: str | None = None

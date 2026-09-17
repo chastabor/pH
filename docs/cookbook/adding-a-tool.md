@@ -113,7 +113,7 @@ something different for each:
 * **`denied`** — policy refused. Ends the whole Code Mode run (C3), so it must
   not be catchable by model-authored code. Raise something whose
   `failure_kind = "denied"` — `FsDenied` and `SandboxError` already are.
-* **`aborted`** — cancellation. Call `run.raise_if_cancelled()` in a long body.
+* **`aborted`** — cancellation. Call `run.raise_if_canceled()` in a long body.
 
 Getting this wrong is invisible in tests that only read the message: a denial
 reported as a failure lets a program route around a policy veto.

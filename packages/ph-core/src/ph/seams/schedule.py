@@ -5,7 +5,7 @@ Three kinds, one mechanism: `once` at a moment, `interval` every so often, and
 schedule outlives the process holding it.
 
 **Everything is in the log, including the claim.** A schedule is
-`schedule/created` until a matching `schedule/cancelled`; a firing is
+`schedule/created` until a matching `schedule/canceled`; a firing is
 `schedule/tick`, appended *before* the work is delivered. That ordering is A10's
 write-ahead applied to time: a tick recorded and then lost to a crash costs one
 skipped run, while a tick delivered and then lost costs a *repeated* run — and
@@ -45,7 +45,7 @@ from .invariants import contribute_fold_cache
 from .schedule_index import ScheduleIndex
 
 __all__ = [
-    "CANCELLED",
+    "CANCELED",
     "CREATED",
     "HEARTBEAT",
     "TICK",
@@ -63,7 +63,7 @@ __all__ = [
 log = logging.getLogger("ph.seams.schedule")
 
 CREATED = "schedule/created"
-CANCELLED = "schedule/cancelled"
+CANCELED = "schedule/canceled"
 TICK = "schedule/tick"
 HEARTBEAT = "schedule/heartbeat"
 
@@ -119,7 +119,7 @@ class ScheduleState:
     a tick claimed four minutes late must not push the following one four
     minutes later, or a five-minute schedule drifts into a six-minute one over a
     day."""
-    cancelled: bool = False
+    canceled: bool = False
 
     @property
     def anchor(self) -> int:
@@ -132,9 +132,9 @@ class ScheduleState:
 
 
 def schedules(session: Session) -> dict[str, ScheduleState]:
-    """Every schedule this log knows about, live or cancelled — a fold.
+    """Every schedule this log knows about, live or canceled — a fold.
 
-    Cancelled ones are kept rather than dropped, for `subagent_roster`'s reason:
+    Canceled ones are kept rather than dropped, for `subagent_roster`'s reason:
     a caller asking what happened to the schedule it revoked deserves an answer
     other than silence, and a reader of the log can see the cancellation.
     """
@@ -151,10 +151,10 @@ def schedules(session: Session) -> dict[str, ScheduleState]:
         if event.type == CREATED:
             schedule = Schedule.model_validate(dict(data))
             found[schedule.id] = ScheduleState(schedule=schedule, created_at=int(event.time))
-        elif event.type == CANCELLED:
+        elif event.type == CANCELED:
             state = found.get(as_str(data.get("id")))
             if state is not None:
-                state.cancelled = True
+                state.canceled = True
         elif event.type == TICK:
             state = found.get(as_str(data.get("id")))
             if state is not None:
@@ -170,7 +170,7 @@ def due_at(state: ScheduleState, *, now: int) -> int | None:
     The caller records that moment as the tick's `dueAt`, which is what the next
     call reads back.
     """
-    if state.cancelled:
+    if state.canceled:
         return None
     schedule = state.schedule
     anchor = state.anchor
@@ -226,7 +226,7 @@ def next_at(state: ScheduleState, *, now: int) -> int | None:
     out for work about to run in five seconds is the small lie a listing exists
     to prevent.
     """
-    if state.cancelled:
+    if state.canceled:
         return None
     overdue = due_at(state, now=now)
     if overdue is not None:
@@ -351,7 +351,7 @@ class ScheduleService:
         """Cached schedule tables that no longer equal their fold (I6).
 
         Asked of the cache rather than reconstructed here. A drifted table is how
-        a cancelled schedule keeps firing, or a live one stops being claimed —
+        a canceled schedule keeps firing, or a live one stops being claimed —
         both silent, because the log would still say the right thing.
         """
         return self._states.stale(sessions)
@@ -366,22 +366,22 @@ class ScheduleService:
         """Record a cancellation. `False` when there was nothing to cancel.
 
         Nothing to cancel covers both an id this log never knew *and* one it
-        already cancelled — the fold keeps cancelled schedules visible
+        already canceled — the fold keeps canceled schedules visible
         (`subagent_roster`'s reason), so the second case would otherwise report
-        success and append a redundant `schedule/cancelled` on every retry. To a
-        person running `phern agents schedule --cancel` twice, "cancelled" the
+        success and append a redundant `schedule/canceled` on every retry. To a
+        person running `phern agents schedule --cancel` twice, "canceled" the
         second time is a claim about work that was already stopped.
         """
         state = self.states(session).get(schedule_id)
-        if state is None or state.cancelled:
+        if state is None or state.canceled:
             return False
-        session.append(CANCELLED, {"id": schedule_id})
+        session.append(CANCELED, {"id": schedule_id})
         self.reindex(session)
         return True
 
     def live(self, session: Session) -> list[ScheduleState]:
         """The schedules that could still fire."""
-        return [state for state in self.states(session).values() if not state.cancelled]
+        return [state for state in self.states(session).values() if not state.canceled]
 
     def claim(self, session: Session, *, now: int) -> list[Schedule]:
         """Claim everything due, write-ahead, and return it for delivery.
@@ -414,7 +414,7 @@ class ScheduleService:
         for a session however many appointments it holds — the daemon's question
         is "is this root worth mounting", not "which schedule".
 
-        `None` when nothing is outstanding, which removes the entry: a cancelled
+        `None` when nothing is outstanding, which removes the entry: a canceled
         schedule and a `once` that has fired both mean a daemon should stop
         waking for this session.
         """

@@ -220,11 +220,11 @@ async def test_cancellation_records_a_result_for_every_skipped_call() -> None:
     root, tools, agent, trace = _setup()
     token = CancelToken()
 
-    async def cancelling(_args: object, _run: object) -> str:
+    async def canceling(_args: object, _run: object) -> str:
         token.cancel("user")
         return "first"
 
-    tools.register(simple_tool("first", cancelling))
+    tools.register(simple_tool("first", canceling))
     tools.register(_slow("second", trace, 0.0, safe=False))
 
     outcome = await _run(root, agent, "first", "second", token=token)

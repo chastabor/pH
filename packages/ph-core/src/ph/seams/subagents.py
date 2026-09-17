@@ -117,7 +117,7 @@ else". A `cast` stood here, which asserts rather than checks — and what this o
 feeds is `_take_workspace`'s `access`, the difference between a child getting a
 writable checkout of the project and a read-only one."""
 
-SubagentStatus: TypeAlias = Literal["queued", "running", "done", "error", "cancelled"]
+SubagentStatus: TypeAlias = Literal["queued", "running", "done", "error", "canceled"]
 
 UNRECOVERABLE_DETAIL = (
     "the harness stopped while this child was running, and no provider here can "
@@ -150,12 +150,12 @@ def exhausted_detail(limit: int) -> str:
     )
 
 
-SETTLED_STATUSES: frozenset[str] = frozenset({"done", "error", "cancelled"})
+SETTLED_STATUSES: frozenset[str] = frozenset({"done", "error", "canceled"})
 """The statuses that mean a child has stopped. Beside the vocabulary it reads.
 
 Here rather than in the consumer, for the reason the four event names are here:
 the fold and every producer have to agree exactly. P5-05's sweeper wrote its own
-copy — `{"completed", "failed", "cancelled", "deleted"}` — and it was wrong in
+copy — `{"completed", "failed", "canceled", "deleted"}` — and it was wrong in
 three of four members. `completed` and `failed` are names no producer emits (the
 writer says `done` and `error`), `deleted` is not a status at all, and the two
 that actually mean settled were missing. The effect was that a root which had

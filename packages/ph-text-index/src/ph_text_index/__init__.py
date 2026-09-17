@@ -555,7 +555,7 @@ async def apply(ctx: Context, config: Config) -> None:
 
         async with seam.locked():
             for path in documents:
-                run.raise_if_cancelled()
+                run.raise_if_canceled()
                 if store.holds(path) and state.vouches_for(path, store.vcs_id(path)):
                     unchanged += 1
                     continue
@@ -597,7 +597,7 @@ async def apply(ctx: Context, config: Config) -> None:
     async def search_tool(args: SearchArgs, run: ToolRunContext) -> dict[str, Any]:
         store = await seam.index()
         vector = await seam.embed([args.query], query=True)
-        run.raise_if_cancelled()
+        run.raise_if_canceled()
         # The id set is built **once** and handed to `search`, which used to
         # rebuild it internally while this computed it for the count — two
         # O(chunks) passes per filtered query (7.5 ms against a 0.22 ms

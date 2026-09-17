@@ -418,7 +418,7 @@ async def test_a_surfaced_shell_command_is_marked_apart_from_a_quiet_one(
     assert titles == ["Shell → agent", "Shell"], "the loud one is named and the quiet one is not"
 
 
-async def test_cancelled_pending_input_leaves_a_row_and_not_a_falling_count(
+async def test_canceled_pending_input_leaves_a_row_and_not_a_falling_count(
     mount: MountProfile,
 ) -> None:
     """Esc throws the inbox away, and the transcript has to say so.
@@ -459,7 +459,7 @@ async def test_cancelled_pending_input_leaves_a_row_and_not_a_falling_count(
     state = _replay(session)
     assert state.queued == 0
     (row,) = [item for item in state.visible_items() if item.role == "notice"]
-    assert row.text == "1 pending message cancelled"
+    assert row.text == "1 pending message canceled"
 
     # A claim removes messages too, and is not a loss: the model got them.
     inbox.append("next-step", create_user_message(content=[TextBlock(text="second")], source=relay))

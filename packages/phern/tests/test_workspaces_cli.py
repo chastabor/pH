@@ -99,7 +99,7 @@ def test_doctor_counts_what_is_being_kept(tmp_path: Path, roots: Path) -> None:
     A diagnostic that read a thousand transcripts to print one number is one
     people stop running, so it is bounded by whatever the store lists.
     """
-    _retained_tree(tmp_path, roots, "one", "the child was cancelled")
+    _retained_tree(tmp_path, roots, "one", "the child was canceled")
     _retained_tree(tmp_path, roots, "two", "the child failed")
 
     result = runner.invoke(app, ["doctor", "--profile", "headless"])
@@ -118,20 +118,20 @@ def test_gc_reports_before_it_removes(tmp_path: Path, roots: Path) -> None:
     know what these directories are. They should learn that by typing the obvious
     thing.
     """
-    tree = _retained_tree(tmp_path, roots, "one", "the child was cancelled")
+    tree = _retained_tree(tmp_path, roots, "one", "the child was canceled")
 
     result = runner.invoke(app, ["workspaces", "gc", "--profile", "headless", "--older-than", "0"])
 
     assert result.exit_code == 0, result.output
     assert "collect" in result.stdout
-    assert "the child was cancelled" in result.stdout, "a reason is why a person can decide"
+    assert "the child was canceled" in result.stdout, "a reason is why a person can decide"
     assert "--remove" in result.stdout
     assert tree.exists(), "the default run removed a checkout nobody asked it to"
 
 
 def test_gc_refuses_a_tree_inside_the_age_bound(tmp_path: Path, roots: Path) -> None:
     """The bound is what stops last night's failure being collected this morning."""
-    tree = _retained_tree(tmp_path, roots, "one", "the child was cancelled")
+    tree = _retained_tree(tmp_path, roots, "one", "the child was canceled")
 
     result = runner.invoke(app, ["workspaces", "gc", "--profile", "headless", "--remove"])
 
@@ -150,7 +150,7 @@ def test_gc_collects_only_what_the_tier_can_end(tmp_path: Path, roots: Path) -> 
     tree is *cleared* for collection here and still survives, which is the split
     between the rule and the removal doing its job.
     """
-    tree = _retained_tree(tmp_path, roots, "one", "the child was cancelled")
+    tree = _retained_tree(tmp_path, roots, "one", "the child was canceled")
 
     result = runner.invoke(
         app, ["workspaces", "gc", "--profile", "headless", "--older-than", "0", "--remove"]
@@ -195,7 +195,7 @@ def test_gc_narrows_to_one_session_and_the_children_it_spawned(tmp_path: Path, r
     different one.
     """
     _retained_tree(tmp_path, roots, "parent", "the parent kept one")
-    _retained_tree(tmp_path, roots, "kid", "the child was cancelled", parent="parent")
+    _retained_tree(tmp_path, roots, "kid", "the child was canceled", parent="parent")
     _retained_tree(tmp_path, roots, "stranger", "someone else's run")
 
     result = runner.invoke(
@@ -204,7 +204,7 @@ def test_gc_narrows_to_one_session_and_the_children_it_spawned(tmp_path: Path, r
 
     assert result.exit_code == 0, result.output
     assert "the parent kept one" in result.stdout
-    assert "the child was cancelled" in result.stdout, "a child's log was not folded in"
+    assert "the child was canceled" in result.stdout, "a child's log was not folded in"
     assert "someone else" not in result.stdout, "a stranger's tree was offered for collection"
     assert "2 within the age bound" in result.stdout, "the counts describe the narrowed set"
 
@@ -212,7 +212,7 @@ def test_gc_narrows_to_one_session_and_the_children_it_spawned(tmp_path: Path, r
 def test_gc_says_which_family_had_nothing(tmp_path: Path, roots: Path) -> None:
     """ "No retained trees" and "no retained trees *under this run*" are different
     answers to a person who narrowed the question themselves."""
-    _retained_tree(tmp_path, roots, "elsewhere", "the child was cancelled")
+    _retained_tree(tmp_path, roots, "elsewhere", "the child was canceled")
     _log(roots, "quiet", ("session/end-seed", {}))
 
     result = runner.invoke(app, ["workspaces", "gc", "--profile", "headless", "--session", "quiet"])

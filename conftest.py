@@ -73,7 +73,7 @@ all, because by then nothing of ours is on the stack.
 **If `context:` names `Future.set_result(None)`, this is issue 58** and the
 mechanism is known: anyio registers that bound method as an `add_reader`
 callback and removes the reader in a *done-callback* one loop iteration later,
-so a wait cancelled in the gap can still be fired. Five copies of that shape —
+so a wait canceled in the gap can still be fired. Five copies of that shape —
 `_RawSocketMixin._wait_until_readable` and `_wait_until_writable`,
 `UNIXSocketListener.accept`, and inline in `AsyncIOBackend.connect_unix` and
 `create_unix_datagram_socket` — so the exposure is the **daemon** socket:

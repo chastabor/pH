@@ -29,7 +29,7 @@ from stabilize_helpers import PROFILE, break_spill
 
 from ph.agent.types import AgentOptions
 from ph.agent_loop.driver import ReactLoopAgent
-from ph.cancel import Cancelled
+from ph.cancel import Canceled
 from ph.cordis import DEPLOYMENT, Context
 from ph.json import as_obj, thaw_json
 from ph.keys import AGENTS, COMMANDS, COMPACTION, LLM_FAKE, SESSIONS, TOKEN_METER, TOOLS
@@ -1171,21 +1171,21 @@ async def test_cancellation_is_not_swallowed(
 ) -> None:
     """The one thing the guard must let through.
 
-    `Cancelled` derives from `Exception`, so a guard written to contain bugs
+    `Canceled` derives from `Exception`, so a guard written to contain bugs
     would also contain a person pressing stop — and the turn would carry on as
     though nothing had been asked of it.
     """
     ctx = await mount(profile=PROFILE)
     _route(ctx)
-    agent = await _conversation(ctx, "cancelled")
+    agent = await _conversation(ctx, "canceled")
     engine = _engine(ctx)
 
     async def stop(*_args: object, **_kwargs: object) -> NoReturn:
-        raise Cancelled("the user pressed stop")
+        raise Canceled("the user pressed stop")
 
     monkeypatch.setattr(type(engine), "_land", stop)
 
-    with pytest.raises(Cancelled):
+    with pytest.raises(Canceled):
         await engine.compact_if_needed(agent, "overflow")
 
 

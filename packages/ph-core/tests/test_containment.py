@@ -175,7 +175,7 @@ async def test_without_strict_a_missing_backend_is_not_a_refusal(mount: MountPro
 # ------------------------------------------------------------------- startup --
 
 
-async def test_a_profile_that_cannot_honour_strict_does_not_start(mount: MountProfile) -> None:
+async def test_a_profile_that_cannot_honor_strict_does_not_start(mount: MountProfile) -> None:
     """ "Refuse to start" has to mean the process, not the first unconfined call.
 
     Through the loader's own `profile/mounted` hook, so the refusal covers every

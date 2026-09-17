@@ -15,7 +15,7 @@ stderr in the same group, so everything is entered and exited by **one** task. A
 long-lived reader task per kernel — the obvious design, and the first one here —
 needs a group entered when the kernel starts and exited when it closes, which is a
 *different* task; anyio refuses that, and the symptom was a `ClosedResourceError`
-from a cancelled drain instead of the real failure being reported. `done` is
+from a canceled drain instead of the real failure being reported. `done` is
 therefore the last frame of a run, which is why the guest snapshots *before*
 settling.
 
@@ -51,7 +51,7 @@ import anyio
 import anyio.abc
 
 from ph.agent.types import AgentHandle
-from ph.cancel import CancelToken, is_cancelled
+from ph.cancel import CancelToken, is_canceled
 from ph.cordis import Context, Disposer, plugin
 from ph.json import as_str, thaw_json
 from ph.keys import CODE_RUNTIME
@@ -116,10 +116,10 @@ fd 3 (C10). Sized to hold a `maxSnapshotBytes` payload with base64 and JSON
 overhead."""
 
 _CANCEL_POLL_SECONDS = 0.05
-"""How often `_watch` asks whether the caller has cancelled.
+"""How often `_watch` asks whether the caller has canceled.
 
 `CancelToken` is a polled flag, not an awaitable — it has to answer "was this
-cancelled" at points where nothing is pending, which a cancel scope cannot do,
+canceled" at points where nothing is pending, which a cancel scope cannot do,
 and `ph.cancel` deliberately offers no awaitable form. So something has to
 sleep and re-ask. What changed with `_watch` is only *who*: the reader used to
 interrupt itself at this cadence, and now a task that holds nothing does."""
@@ -170,7 +170,7 @@ class _ActiveRun:
     failure: CodeRunFailure | None = None
     """A refusal or a budget, raised out of `run()` once the program unwinds (C3)."""
     aborting_since: float | None = None
-    """When this run was asked to stop, by either route — the caller cancelling,
+    """When this run was asked to stop, by either route — the caller canceling,
     or a dispatch being refused. Held here rather than in `_pump` because
     `_serve_call` starts the abort from its own task, and the escalation clock
     the pump runs has to be the same clock."""
@@ -291,7 +291,7 @@ class Kernel:
     boot_timeout: float = 30.0
     shutdown_grace: float = 5.0
     cancel_grace: float = 2.0
-    """How long a cancelled cell has to unwind before the child is killed.
+    """How long a canceled cell has to unwind before the child is killed.
 
     **What the abort ladder can and cannot do**, stated here because this field is
     the ladder's only tuning point. `cancel` frame → `SIGINT` → `SIGKILL` at
@@ -573,7 +573,7 @@ class Kernel:
 
         **The scope it used to sit in was paid per frame, not per read.** The
         body was wrapped in `move_on_after(_CANCEL_POLL_SECONDS)` so the loop
-        could ask two questions between reads — has the caller cancelled, and
+        could ask two questions between reads — has the caller canceled, and
         has the abort grace expired — neither of which is about the socket. But
         `_recv_line` returns straight out of its buffer whenever a frame is
         already there, and a 64 KiB read of a chatty cell carries many: the
@@ -588,17 +588,17 @@ class Kernel:
         `_recv_line` returning `None` on the next turn.
 
         **On issue 58, which this was first written to fix: it does not, and the
-        attribution was wrong.** The claim was that cancelling the wait leaves
+        attribution was wrong.** The claim was that canceling the wait leaves
         the fd wired — anyio's `_wait_until_readable` registers `f.set_result`
         as the reader callback and removes the reader in a done-callback one
         loop iteration later, so a queued readiness callback can fire
-        `set_result(None)` on a cancelled future and raise `InvalidStateError`
+        `set_result(None)` on a canceled future and raise `InvalidStateError`
         from a bare loop callback. That mechanism is real, and the captured
         `<Handle Future.set_result(None)>` is its signature. It is not reachable
         from here. `_recv_line` calls the *free* `anyio.wait_readable`, which is
         `AsyncIOBackend.wait_readable` — a different implementation that wraps
         `fut.set_result` in `except InvalidStateError: pass` and removes the
-        reader synchronously inside the callback. Cancelling it is safe. The
+        reader synchronously inside the callback. Canceling it is safe. The
         defective shape belongs to `_RawSocketMixin`, i.e. `UNIXSocketStream`,
         `UNIXSocketListener.accept` and `connect_unix` — the **daemon** socket,
         where the flake was observed both times. Issue 58 is still open and now
@@ -621,7 +621,7 @@ class Kernel:
         The two questions `_pump` used to interrupt itself to ask, asked by
         something that is only ever sleeping. Same 0.05 s cadence, so
         cancellation is noticed as promptly as before — what changes is that
-        noticing it no longer costs a cancelled socket wait.
+        noticing it no longer costs a canceled socket wait.
 
         Concurrency with `_pump` is not new: `_serve_call` has always started an
         abort from its own task, which is why `aborting_since` lives on
@@ -640,7 +640,7 @@ class Kernel:
             if active.settled:
                 return
             if active.aborting_since is None:
-                if is_cancelled(token):
+                if is_canceled(token):
                     await self._begin_abort(active)
             elif anyio.current_time() - active.aborting_since > self.cancel_grace:
                 # Neither the frame nor the signal reached it, which means the
@@ -701,7 +701,7 @@ class Kernel:
         # overwritten once this has claimed it.
         active.settle(
             error=(
-                "the program did not stop when cancelled and the runtime was killed; "
+                "the program did not stop when canceled and the runtime was killed; "
                 "the namespace is gone"
             )
         )
@@ -846,7 +846,7 @@ class Kernel:
         written = 0
         cap = self.limits.max_log_bytes
         # `ClosedResourceError` is the ordinary end of this task: the run is over
-        # and the group cancelled it, or the child exited. Neither is a failure
+        # and the group canceled it, or the child exited. Neither is a failure
         # to report, and letting it escape would mask the real outcome.
         with suppress(anyio.ClosedResourceError, anyio.BrokenResourceError, anyio.EndOfStream):
             async for chunk in stream:

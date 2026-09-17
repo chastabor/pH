@@ -507,7 +507,7 @@ A name rather than an inline literal because an adapter has to *return* one, and
 the third one to be written spelled the union out again to say so — which is the
 same list in a second place, free to grow a sixth member nothing else handles.
 
-`aborted` is the one no adapter in this repo produces: a cancelled run reaches
+`aborted` is the one no adapter in this repo produces: a canceled run reaches
 the loop as an exception, never as a chunk, so `TurnEndReason` carries that
 answer instead. It stays here for an adapter whose provider can report a
 cancellation on the wire, and `driver.py` routes it alongside `error`."""

@@ -391,16 +391,16 @@ async def test_interrupt_asks_and_the_answer_decides(mount: MountProfile, tmp_pa
     assert events_of(session, "approval/decided")
 
 
-async def test_a_cancelled_call_is_not_asked_about(mount: MountProfile, tmp_path: Path) -> None:
+async def test_a_canceled_call_is_not_asked_about(mount: MountProfile, tmp_path: Path) -> None:
     """A prompt is a question to a person, so an abandoned turn does not ask one.
 
     No `cancel=` argument: the seam defaults to the agent's own token, so this
     pins the claim rather than the plumbing. All three operations, because a
-    cancelled read costs a wasted question and a cancelled write costs a file.
+    canceled read costs a wasted question and a canceled write costs a file.
     """
     (tmp_path / "notes.md").write_text("hello\n", encoding="utf-8")
     ctx = await _mounted(mount, tmp_path, {"paths": ["notes.md"], "mode": "interrupt"})
-    session = ctx.require(SESSIONS).create("cancelled")
+    session = ctx.require(SESSIONS).create("canceled")
     agent = StubAgent(ctx, session)
     asked = answer_approvals(ctx, "allowed-once")
     agent.signal.cancel("the user stopped the turn")
@@ -412,7 +412,7 @@ async def test_a_cancelled_call_is_not_asked_about(mount: MountProfile, tmp_path
         await fs.write("notes.md", "new", agent=agent, scope=DEPLOYMENT)
     with pytest.raises(FsDenied):
         await fs.edit("notes.md", "hello", "bye", agent=agent, scope=DEPLOYMENT)
-    assert asked == [], "a cancelled turn must not reach the answerer"
+    assert asked == [], "a canceled turn must not reach the answerer"
     assert (tmp_path / "notes.md").read_text(encoding="utf-8") == "hello\n", "nothing was written"
 
 

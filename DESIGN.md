@@ -800,7 +800,7 @@ the tombstone is the record.
 | **Daemon unreachable** | socket `(st_dev, st_ino)` changed | `supervisor/unreachable`, to **every** root, each flushed | everything — **roots keep working** |
 | **Session lease (I-5)** | a second daemon opens a held log | **none** — an error frame, `session_already_active` | the first daemon is unaffected |
 | **Agent cancellation** | `AgentCancelCause` | `turn/end{aborted}` | a partial `assistant/message` with `interrupted: true`; durable `tool/result` pairs for skipped calls |
-| **Subagent release** | parent teardown, or model `delete()` | `subagent/status{cancelled}` + `subagent/deleted` | the child's **log**, always — it is a tombstone, not a deletion |
+| **Subagent release** | parent teardown, or model `delete()` | `subagent/status{canceled}` + `subagent/deleted` | the child's **log**, always — it is a tombstone, not a deletion |
 | **Limits / breaker** | a configured ceiling | `limits/exceeded` or `limits/breaker-tripped` | everything — none of these stop a process |
 
 Details worth having:

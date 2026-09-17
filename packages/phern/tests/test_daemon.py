@@ -1300,7 +1300,7 @@ async def test_a_root_with_a_live_child_is_not_released(tmp_path: Path) -> None:
 
     Folded from `subagent/*` (P3-13) rather than tracked beside it, and asked of
     the seam that owns the vocabulary — the first version of this test spelled
-    the settled statuses itself as `{"completed", "failed", "cancelled",
+    the settled statuses itself as `{"completed", "failed", "canceled",
     "deleted"}`, of which only one is a string any producer emits. The writer
     says `done` and `error`; deletion is a tombstone that leaves `status` alone.
     The effect was that a root which had ever run a child to completion could
@@ -1313,7 +1313,7 @@ async def test_a_root_with_a_live_child_is_not_released(tmp_path: Path) -> None:
         for label, settle in (
             ("finished", ("subagent/status", {"runId": "c", "status": "done"})),
             ("errored", ("subagent/status", {"runId": "c", "status": "error"})),
-            ("cancelled", ("subagent/status", {"runId": "c", "status": "cancelled"})),
+            ("canceled", ("subagent/status", {"runId": "c", "status": "canceled"})),
             ("revoked", ("subagent/deleted", {"runId": "c", "reason": "revoked"})),
         ):
             root = await supervisor.start(label)

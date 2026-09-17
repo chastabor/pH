@@ -17,7 +17,7 @@ failing separately is the point of the split.
 An ephemeral tree is discarded *even if dirty* — that is the kind's whole promise
 — and it is also why a settled subagent's work vanished. A child admitted with
 `access="read"` gets `worktree-ephemeral`, so the child a parent most wants to
-inspect (one that failed, or was cancelled at `parent-teardown`) was exactly the
+inspect (one that failed, or was canceled at `parent-teardown`) was exactly the
 one whose tree disposal removed.
 
 `Workspace.retained` is the exception, and deliberately an exception to `discard`
@@ -102,7 +102,7 @@ def test_the_three_survivors_are_told_apart() -> None:
         _acquired("kept", "/trees/kept"),
         _disposed("kept", kept=True),
         _acquired("said-why", "/trees/said-why"),
-        _disposed("said-why", kept=True, retained="cancelled at parent-teardown"),
+        _disposed("said-why", kept=True, retained="canceled at parent-teardown"),
         _acquired("leaked", "/trees/leaked"),
     )
 
@@ -111,7 +111,7 @@ def test_the_three_survivors_are_told_apart() -> None:
     assert found["kept"].outcome == "kept"
     assert found["kept"].reason == ""
     assert found["said-why"].outcome == "retained"
-    assert found["said-why"].reason == "cancelled at parent-teardown"
+    assert found["said-why"].reason == "canceled at parent-teardown"
     assert found["leaked"].outcome == "leaked"
 
 
@@ -139,12 +139,12 @@ def test_a_retention_survives_the_crash_it_was_written_for() -> None:
     field: reconciliation still owes this pair a closing event, and it is
     `reclaim` — not the fold — that knows a reason means leave the tree alone.
     """
-    session = _log(_acquired("a", "/trees/a"), _retained("a", "the child was cancelled"))
+    session = _log(_acquired("a", "/trees/a"), _retained("a", "the child was canceled"))
 
     (record,) = workspace_survivors(session)
 
     assert record.outcome == "retained"
-    assert record.reason == "the child was cancelled"
+    assert record.reason == "the child was canceled"
     assert record.closed is False
     assert [one.agent_id for one in workspace_leaks(session)] == ["a"], (
         "an unclosed pair is still owed its closing event, retained or not"

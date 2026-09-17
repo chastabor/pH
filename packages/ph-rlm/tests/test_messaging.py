@@ -244,7 +244,7 @@ async def test_repeated_wakes_do_not_accrete_jobs(family_ctx: MountedRuntime) ->
 
 
 async def test_disposing_the_parent_abandons_a_running_drive(family_ctx: MountedRuntime) -> None:
-    """The other half: work still in flight when its owner goes is cancelled."""
+    """The other half: work still in flight when its owner goes is canceled."""
     ctx, _session, parent = await family_ctx()
     await _spawn(ctx, parent, "scout")
     running = [job for job in ctx.require(JOBS).list() if job.kind == "subagent"]
@@ -252,7 +252,7 @@ async def test_disposing_the_parent_abandons_a_running_drive(family_ctx: Mounted
 
     await ctx.require(AGENTS).dispose(parent.id)
     assert [job for job in ctx.require(JOBS).list() if job.kind == "subagent"] == []
-    assert running[0].token.cancelled
+    assert running[0].token.canceled
 
 
 async def test_a_revoked_child_is_not_quietly_revived(family_ctx: MountedRuntime) -> None:

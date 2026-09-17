@@ -126,7 +126,7 @@ see §6.
 The first design was a long-lived reader task per kernel. It cannot work: a
 background task needs a task group, a group entered when the kernel starts is
 exited when the kernel closes, and those are different tasks — which anyio
-refuses, correctly. The symptom was a `ClosedResourceError` from a cancelled
+refuses, correctly. The symptom was a `ClosedResourceError` from a canceled
 output drain surfacing *instead of* the failure being reported.
 
 So `run()` opens a task group for the duration of one program: it reads frames
@@ -165,7 +165,7 @@ mechanisms then cover three genuinely different situations:
 |---|---|
 | awaiting a `reply` or a `sleep` | the `cancel` frame, or the `SIGINT` callback — both cancel the cell's task |
 | spinning in Python | neither: the loop is starved. `SIGXCPU` from the per-run CPU budget *does* land, because the cell is executing bytecode |
-| spinning, and cancelled by the user before the budget | nothing cooperative works, so the host escalates to `SIGKILL` after `cancel_grace` and restarts |
+| spinning, and canceled by the user before the budget | nothing cooperative works, so the host escalates to `SIGKILL` after `cancel_grace` and restarts |
 
 The third row is a deliberate loss: the namespace goes, and the result says so.
 A wedged kernel that holds the turn open until it times out is worse.
@@ -708,7 +708,7 @@ resource leak.
 
 `code-runtime:<namespace>` is an effect of the *agent's scope* — that is the
 Phase 3 design working correctly, and it is exactly why this went wrong. The
-provider created child agents and disposed them nowhere: `delete()` cancelled the
+provider created child agents and disposed them nowhere: `delete()` canceled the
 agent but never called `ctx.agents.dispose`, which is the only thing that unwinds
 an agent's scope. So every delegation left a live child process holding its whole
 namespace, for the host's lifetime, whether the child finished or was revoked.
@@ -722,7 +722,7 @@ keeping the terminal `SubagentResult` — so a caller awaiting `result()` after 
 child is gone still gets its answer. Two new tests pin both halves.
 
 The session observer had the same shape of bug: `observe()` returns a disposer
-and the return value was discarded, so a cancelled child kept attributing usage
+and the return value was discarded, so a canceled child kept attributing usage
 to its parent forever.
 
 ### `rlm/child-*` was the wrong name for a generic seam's contract
@@ -1119,7 +1119,7 @@ Two things this had to distinguish, and the reason is specific:
 * **released** (`jobs.forget`) — the owner knows the work is done: forget,
   cancel nothing.
 
-Without the second, a subagent drive job would report `cancelled` for work that
+Without the second, a subagent drive job would report `canceled` for work that
 completed, because `_drive`'s own last act disposes the child. The presence of the
 entry in `_jobs` *is* the flag that tells the two apart — `forget` pops it before
 deregistering, so the abandon path sees it gone and no-ops. That also settled
@@ -1420,7 +1420,7 @@ folded anything caught it.
 
 **Every global refinement was refused, however the human answered.** `_approved`
 compared the outcome against `"allowed"`, and `ApprovalOutcome` has no such
-member — it is `allowed-once | rejected | cancelled | unavailable`. The failure
+member — it is `allowed-once | rejected | canceled | unavailable`. The failure
 direction is the safe one, which is exactly why nothing else would have noticed:
 a fail-closed gate that always fails closed looks like a working gate until
 someone tries to use it. Only the test that asserted a global edit *lands* could

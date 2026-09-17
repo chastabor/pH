@@ -164,7 +164,7 @@ class _Child:
     job_id: str | None = None
     """The drive job, owned by the *parent's* scope. Not the child's: the child's
     scope is disposed *by* the drive job's own last act, and a job that abandoned
-    itself would report `cancelled` for work that finished."""
+    itself would report `canceled` for work that finished."""
     result: SubagentResult | None = None
     replied: bool = False
     """Whether the child sent its parent a message (`rlm-messaging` sets it).
@@ -700,7 +700,7 @@ class RlmChildProvider:
             child.unobserve = None
         if child.job_id is not None:
             # Released, not abandoned: the work finished, so the entry goes
-            # without the job being reported as cancelled.
+            # without the job being reported as canceled.
             self.ctx.require(JOBS).forget(child.job_id)
             child.job_id = None
         agent, child.agent, child.session = child.agent, None, None
@@ -850,7 +850,7 @@ class RlmChildProvider:
             child.agent.cancel(AgentCancelCause(kind="parent"))
         # A terminal state for the roster: a revoked child is not merely absent,
         # and a panel that knew only `deleted` could not say whether it had run.
-        self._status(child, "cancelled", reason=reason)
+        self._status(child, "canceled", reason=reason)
         child.finished.set()
         await self._quiesce(child)
         # `get`, not attribute access: on the parent-teardown path this runs while

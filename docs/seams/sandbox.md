@@ -263,7 +263,7 @@ Two consequences worth knowing:
   descriptor, and `bwrap`, the egress shim's `sh -c … exec "$@"`, `sandbox-exec`
   and its `env` prefix all pass it through. Measured on both platforms, because a
   wrapper that closed it would look like a dead runtime rather than a lost channel.
-- **Cancelling a confined cell has one cooperative route under `bwrap`, two under
+- **Canceling a confined cell has one cooperative route under `bwrap`, two under
   Seatbelt.** `bwrap` does not forward signals — it dies of `SIGINT` itself and
   takes the namespace with it — so there the kernel sends the `cancel` frame and
   skips the signal. `sandbox-exec` execs its target, so a signal lands on the cell

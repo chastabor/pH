@@ -429,7 +429,7 @@ class DaemonSession:
 
     def _spawn(self, work: Coroutine[Any, Any, Any]) -> None:
         """Run an awaitable from a sync caller, owned by the app's worker pool so
-        it is cancelled with the app. The sync members of `FrontSession` exist
+        it is canceled with the app. The sync members of `FrontSession` exist
         for key handlers, and key handlers exist only once there is an app."""
         if self.app is None:
             raise RuntimeError("attach_surfaces first: nothing owns background work yet")
@@ -564,7 +564,7 @@ class DaemonSession:
         earlier, which matters to a client that keeps one connection across
         several sessions. So a connection already gone is a detach already done:
         checking `closed` cannot close the race, because the pump can stop
-        between the check and the reply, and Textual cancelling its workers at
+        between the check and the reply, and Textual canceling its workers at
         shutdown is exactly when it does.
         """
         with suppress(DaemonGone), anyio.move_on_after(2.0):

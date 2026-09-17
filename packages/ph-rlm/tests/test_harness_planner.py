@@ -362,7 +362,7 @@ async def test_a_finished_pass_leaves_no_job_behind(refining: Refining) -> None:
 
     await ctx.drain()
     assert ctx.require(JOBS).list() == []
-    # Forgotten because it finished, not cancelled: the refinement still landed.
+    # Forgotten because it finished, not canceled: the refinement still landed.
     assert [event for event in session.events if event.type == REFINED] != []
 
 

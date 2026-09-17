@@ -47,6 +47,7 @@ from ph.persistence import SessionBusy, read_session
 from ph.testing import stored_log
 from ph_app.modes import render_transcript, run_json, run_rpc, run_transcript
 from ph_app.profiles import compose_profile
+from ph_app.protocol import PROTOCOL_VERSION
 
 pytestmark = pytest.mark.anyio
 
@@ -173,7 +174,9 @@ async def test_an_rpc_round_trip_in_the_sdk_shape(profile: Profile) -> None:
     replies = {frame["id"]: frame for frame in frames if "id" in frame}
     notifications = [frame for frame in frames if "method" in frame]
 
-    assert replies[1]["result"]["protocolVersion"] == 1
+    # The constant, not a literal — `--mode rpc` and the daemon answer with one
+    # number, and a copy here made a protocol bump a search for the copies.
+    assert replies[1]["result"]["protocolVersion"] == PROTOCOL_VERSION
     assert replies[1]["result"]["capabilities"]["streaming"] is True
     assert replies[2]["result"]["sessionId"] == "rpc-1"
     assert replies[3]["result"]["events"] > 0

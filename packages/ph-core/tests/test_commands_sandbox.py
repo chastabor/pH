@@ -83,7 +83,7 @@ async def test_the_change_is_kept_as_a_drop_in_under_the_profile(mount: MountPro
     assert "example.com" not in patch["config"]["network"]["hosts"], "rewritten, not appended"
 
 
-async def test_a_host_is_normalised_the_same_way_in_both_directions(mount: MountProfile) -> None:
+async def test_a_host_is_normalized_the_same_way_in_both_directions(mount: MountProfile) -> None:
     """Allow and revoke run the argument through one validator, so what a person
     typed means the same thing to both.
 

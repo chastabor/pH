@@ -378,7 +378,7 @@ class Peer:
         """An answer to something this end asked.
 
         An unknown id is dropped rather than raised on: an ask already given up
-        on — because the asker was cancelled, or the connection is closing — gets
+        on — because the asker was canceled, or the connection is closing — gets
         answered by a peer that could not have known, and ending the connection
         over a late reply would punish it for a race it did not cause.
         """

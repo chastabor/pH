@@ -128,7 +128,7 @@ async def test_an_answerer_cannot_decide_what_the_asking_row_withheld() -> None:
     the modal that hides the button and ignored by the next answerer, an RPC one
     or a test's, that returns an `Edited` anyway.
 
-    A refusal is never withheld: `rejected`, `cancelled` and `unavailable` are
+    A refusal is never withheld: `rejected`, `canceled` and `unavailable` are
     how this seam says no, and a row that could suppress them would be a row
     that could force a call through.
     """
@@ -780,23 +780,23 @@ async def test_a_job_is_an_effect_of_the_scope_that_owns_it() -> None:
 
     async def body(job: Job) -> str:
         await release.wait()
-        return "unreached" if not job.token.cancelled else "noticed"
+        return "unreached" if not job.token.canceled else "noticed"
 
     job = await service.start(kind="test", label="owned", run=body, scope=owner)
     assert service.get(job.id) is job
 
     await owner.dispose()
-    assert job.token.cancelled, "the owner went away and the work was not cancelled"
+    assert job.token.canceled, "the owner went away and the work was not canceled"
     assert service.get(job.id) is None, "the entry outlived its owner"
     release.set()
     await root.drain()
 
 
-async def test_releasing_a_finished_job_does_not_report_it_cancelled() -> None:
+async def test_releasing_a_finished_job_does_not_report_it_canceled() -> None:
     """The distinction the two halves exist for.
 
     A subagent's drive job disposes the child as its own last act, so a job that
-    abandoned itself on that teardown would report `cancelled` for work that
+    abandoned itself on that teardown would report `canceled` for work that
     completed. `forget` drops the entry and cancels nothing.
     """
     root = Context()
@@ -815,7 +815,7 @@ async def test_releasing_a_finished_job_does_not_report_it_cancelled() -> None:
     # it must not revive or re-report the job.
     await owner.dispose()
     assert job.state == "done"
-    assert not job.token.cancelled
+    assert not job.token.canceled
 
 
 # ------------------------------------------------------------------- slots --
@@ -871,11 +871,11 @@ async def test_a_failed_job_frees_its_slot() -> None:
     assert second.result == "ran"
 
 
-async def test_cancelling_a_queued_job_stops_the_wait_and_takes_no_slot() -> None:
+async def test_canceling_a_queued_job_stops_the_wait_and_takes_no_slot() -> None:
     """A body parked on a limiter reads no token, so cooperative cancellation
     cannot reach it — `Job.cancel` cancels the wait itself.
 
-    Without this a cancelled job stays queued behind work that may never settle,
+    Without this a canceled job stays queued behind work that may never settle,
     and `drain()` waits for it: a cancellation that hangs the shutdown.
 
     **Settled while the slot is still held**, which is the whole assertion. An
@@ -899,10 +899,10 @@ async def test_cancelling_a_queued_job_stops_the_wait_and_takes_no_slot() -> Non
 
     service.cancel(queued.id)
     await _settled(
-        lambda: state_of(queued) == "cancelled",
-        "the cancelled job to leave the queue while the slot is still held",
+        lambda: state_of(queued) == "canceled",
+        "the canceled job to leave the queue while the slot is still held",
     )
-    assert ran == [first.id], "a cancelled job ran anyway"
+    assert ran == [first.id], "a canceled job ran anyway"
 
     gate.set()
     await root.drain()
@@ -1035,7 +1035,7 @@ async def test_disposing_an_owner_stops_a_job_that_is_still_queued() -> None:
     assert state_of(queued) == "queued"
 
     await owner.dispose()
-    await _settled(lambda: state_of(queued) == "cancelled", "the queued job to be abandoned")
+    await _settled(lambda: state_of(queued) == "canceled", "the queued job to be abandoned")
     assert ran == [holder.id], "a job whose owner went away ran anyway"
 
     gate.set()
@@ -1100,7 +1100,7 @@ async def test_a_job_with_no_slot_is_untouched_by_the_mechanism() -> None:
     assert service._queues == {}, "no slot and no cap for this kind reaches no queue"
 
 
-async def test_a_cancelled_job_reports_cancelled() -> None:
+async def test_a_canceled_job_reports_canceled() -> None:
     root = Context()
     service = JobService(ctx=root)
 
@@ -1110,7 +1110,7 @@ async def test_a_cancelled_job_reports_cancelled() -> None:
 
     job = await service.start(kind="test", label="a job", run=body)
     await root.drain()
-    assert job.state == "cancelled"
+    assert job.state == "canceled"
 
 
 # ------------------------------------------------------- settings and skills --
@@ -1315,7 +1315,7 @@ def test_settled_statuses_are_drawn_from_the_declared_vocabulary() -> None:
     `Any` so a log written by another build can round-trip, and by the time a
     consumer folds it back out there is nothing left for mypy to check. A
     reader's `row.get("status") in {...}` type-checks against any strings at all,
-    which is how P5-05 shipped a settled-set of `{completed, failed, cancelled,
+    which is how P5-05 shipped a settled-set of `{completed, failed, canceled,
     deleted}` — three names no producer writes — and pinned every parent that
     had ever run a child.
 

@@ -45,7 +45,7 @@ events.declare(
     "agent/inbox/claimed", "emit", owner="ph.agent", doc="A pending message was claimed for a turn."
 )
 events.declare(
-    "agent/inbox/discarded", "emit", owner="ph.agent", doc="A pending message was cancelled."
+    "agent/inbox/discarded", "emit", owner="ph.agent", doc="A pending message was canceled."
 )
 events.declare(
     "agent/pre-step",

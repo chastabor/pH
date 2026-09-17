@@ -200,7 +200,7 @@ async def test_a_file_no_provider_ingests_is_refused_with_the_way_out(
     # An extension nothing classifies reads as "no recognizable type" rather than
     # as the literal `application/octet-stream`, which names a MIME the model
     # might reasonably try to fix by renaming the file.
-    assert "no recognisable type" in not_none(unknown.error).message
+    assert "no recognizable type" in not_none(unknown.error).message
     assert "text/plain" in not_none(text.error).message
 
 

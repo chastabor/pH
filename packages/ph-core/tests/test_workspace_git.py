@@ -700,7 +700,7 @@ async def test_a_retained_ephemeral_tree_survives_the_kind_that_discards_it(
     commit-then-remove path an ordinary `worktree` does.
 
     **So retention buys a branch, not a directory** — and that is a strictly better
-    thing to buy. The evidence a parent needs to diagnose a cancelled child now
+    thing to buy. The evidence a parent needs to diagnose a canceled child now
     survives the crash of the process holding it, is reachable by `export` and
     `merge` like any other artifact, and costs a ref instead of a checkout. What
     would be wrong is retaining the *tree*: nothing enumerates an orphaned
@@ -744,10 +744,10 @@ async def test_retention_is_refused_once_the_scope_is_gone(
     `retain` marks a *held* workspace, and a workspace is held only while the
     scope that acquired it is alive. On `ph_rlm`'s `parent-teardown` path the
     child's scope is already gone by the time the provider learns the child was
-    cancelled — `Context.dispose` unwinds `_children` before its own effects, so
+    canceled — `Context.dispose` unwinds `_children` before its own effects, so
     the tree is released *before* the settle handler runs.
 
-    So a policy that retains the evidence of a cancelled child cannot call this
+    So a policy that retains the evidence of a canceled child cannot call this
     from that handler; it has to mark while the child is live. `False` rather
     than a raise, because the ordinary caller is a settle path that does not know
     whether this tier hands out trees at all.
@@ -784,9 +784,9 @@ async def test_the_mark_is_written_the_moment_it_is_made(
         session_id="s1", agent_id="a1", base=base, access="read", session=session
     )
 
-    ctx.require(WORKSPACE).retain("a1", "the child was cancelled")
+    ctx.require(WORKSPACE).retain("a1", "the child was canceled")
     marks = [one.data.get("retained") for one in session.events if one.type == "workspace/retained"]
-    assert marks == ["the child was cancelled"]
+    assert marks == ["the child was canceled"]
     (open_record,) = workspace_survivors(session)
     assert (open_record.outcome, open_record.closed) == ("retained", False), (
         "a crash here leaves a record that is both retained and unclosed"
@@ -796,7 +796,7 @@ async def test_the_mark_is_written_the_moment_it_is_made(
     assert workspace_survivors(session)[0].outcome == "leaked", "the withdrawal is durable too"
 
 
-async def test_reconciliation_honours_a_retention_the_way_release_does(
+async def test_reconciliation_honors_a_retention_the_way_release_does(
     mount: MountProfile, tmp_path: Path
 ) -> None:
     """One rule for one word, across both paths that can end a tree.
@@ -819,7 +819,7 @@ async def test_reconciliation_honours_a_retention_the_way_release_does(
         session_id="s1", agent_id="a1", base=base, access="read", session=session
     )
     (workspace.root / "evidence.txt").write_text("what the child was doing\n", encoding="utf-8")
-    ctx.require(WORKSPACE).retain("a1", "the child was cancelled")
+    ctx.require(WORKSPACE).retain("a1", "the child was canceled")
     (record,) = workspace_survivors(session)
 
     assert await ctx.require(WORKSPACE).provider.reclaim(record) is True
@@ -863,7 +863,7 @@ async def test_disposal_leaves_the_collector_nothing_to_collect(
     )
     for agent_id, workspace in (("gone", ephemeral), ("dirty", ordinary)):
         (workspace.root / "work.txt").write_text("uncommitted\n", encoding="utf-8")
-        ctx.require(WORKSPACE).retain(agent_id, "the child was cancelled")
+        ctx.require(WORKSPACE).retain(agent_id, "the child was canceled")
         await ctx.require(WORKSPACE).dispose(agent_id)
 
     records = workspace_survivors(session)

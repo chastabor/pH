@@ -1040,7 +1040,7 @@ class TuiEventAdapter:
         removed = as_int(event.data.get("removedCount"))
         self.state.queued = max(0, self.state.queued + inserted - removed)
         if removed and as_str(event.data.get("outcome")) == "canceled":
-            self._row("inbox", "notice", f"{count_of(removed, 'pending message')} cancelled", event)
+            self._row("inbox", "notice", f"{count_of(removed, 'pending message')} canceled", event)
 
 
 Handler = Callable[[TuiEventAdapter, SessionEvent, Frame], None]
@@ -1146,10 +1146,10 @@ rule to answer it."""
 
 RECORDLESS: frozenset[str] = frozenset(
     {
-        # Creating, cancelling and heartbeating a schedule are not events in the
+        # Creating, canceling and heartbeating a schedule are not events in the
         # conversation — the *tick* is what a reader needs, and it has a row.
         "schedule/created",
-        "schedule/cancelled",
+        "schedule/canceled",
         "schedule/heartbeat",
         # The loop's own bookkeeping. `goal/set` and `goal/settled` are rows —
         # they bracket the run — while a continuation and a gate result are

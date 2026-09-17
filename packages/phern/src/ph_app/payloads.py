@@ -79,7 +79,7 @@ __all__ = [
     "RootDetail",
     "RootListing",
     "RootStatusReply",
-    "ScheduleCancelled",
+    "ScheduleCanceled",
     "SessionAsk",
     "SessionBrowse",
     "SessionCommandsNotice",
@@ -496,11 +496,11 @@ class PresetApplied(SessionScoped):
     preset: str
 
 
-class ScheduleCancelled(SessionScoped):
+class ScheduleCanceled(SessionScoped):
     """`schedule/cancel` — whether that schedule was still there to cancel."""
 
     schedule_id: str
-    cancelled: bool = False
+    canceled: bool = False
 
 
 class SessionSchedulesReply(SessionScoped, _CarriesSchedules):

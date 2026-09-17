@@ -1,4 +1,4 @@
-"""Make a **cancelled** socket readiness wait safe, on every platform (issue 58).
+"""Make a **canceled** socket readiness wait safe, on every platform (issue 58).
 
 anyio has two shapes for waiting on a socket. The hardened one, which
 `AsyncIOBackend.wait_readable` uses and `ph_rlm.kernel.manager` reaches through
@@ -20,7 +20,7 @@ registers the bound `future.set_result` itself and has no such guard:
     await f
 
 Cancel that wait after the loop has already queued the ready handle and
-`set_result` runs on a cancelled future, raising `InvalidStateError` from a bare
+`set_result` runs on a canceled future, raising `InvalidStateError` from a bare
 loop handle with **no frames of ours on the stack** — which is why the captured
 traceback was one line of `asyncio/events.py` and nothing else. The removal
 cannot close the window: done-callbacks are `call_soon`'d, so they run an
@@ -33,7 +33,7 @@ deregister the fd: the done-callback above already does, exactly once, and the
 hardened shape guards its own removal behind a bookkeeping dict for the same
 reason. A guard that removed the fd itself would make anyio's removal a miss —
 `selectors` raises `KeyError` twice, nested, with a `repr(socket)` that costs
-two more syscalls, on every wait rather than only cancelled ones.
+two more syscalls, on every wait rather than only canceled ones.
 
 **This is not a bug in pH.** No package here uses `call_soon`, `call_later`,
 `add_reader` or `add_writer`, and pH's one `future.set_result`
@@ -119,14 +119,14 @@ def _guarding(original: Callable[..., Any]) -> Callable[..., Any]:
             # a `try` and +53 ns as `if not future.done()` — because the
             # exception is only paid on the firing that races, while the check
             # is paid on every readiness event. The check wins only if about
-            # one wait in three is cancelled inside the window; the observed
+            # one wait in three is canceled inside the window; the observed
             # rate is nearer two per thirty full-suite runs. anyio's own
             # hardened `wait_readable` catches for the same reason.
             #
-            # A pre-check would also have to ask `done()`, not `cancelled()`:
+            # A pre-check would also have to ask `done()`, not `canceled()`:
             # `set_result` refuses two states, and the second — an *already
             # resolved* future, fired on again before anyio's done-callback
-            # deregisters the fd — reports `cancelled() is False`. It is the
+            # deregisters the fd — reports `canceled() is False`. It is the
             # rarer of the two here (measured: 1 firing under anyio's shape)
             # but the unbounded one if a deregistration is ever missed.
             #

@@ -219,7 +219,7 @@ class AskDesk:
         """Put one question to every front end and wait for the first answer.
 
         The fan-out has a task group of its own rather than borrowing the root's:
-        every delivery belongs to *this* question and ends with it, so cancelling
+        every delivery belongs to *this* question and ends with it, so canceling
         the group when the answer lands is exactly the right lifetime — the other
         front ends stop being waited on, and `ask.settled` tells them why.
         """

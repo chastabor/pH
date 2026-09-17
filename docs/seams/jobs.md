@@ -10,7 +10,7 @@ build.
 
 It **outlives the step that started it**, so it needs its own identity and its
 own cancellation rather than borrowing the turn's. A tool call that tried to be a
-job would be cancelled when its step ended, which is the opposite of the point.
+job would be canceled when its step ended, which is the opposite of the point.
 
 ## A job is an effect of the scope that owns it (I2)
 
@@ -36,7 +36,7 @@ Deliberately distinct, and picking the wrong one produces a wrong record:
   entry gone. **Forget it, cancel nothing.**
 
 A job whose own body triggers its owner's teardown would otherwise report
-`cancelled` for work that had in fact completed.
+`canceled` for work that had in fact completed.
 
 ## Cancellation is cooperative
 
@@ -76,7 +76,7 @@ for all of it, and a refusal answers a question about *resources* with one about
 `start` still returns at once and the handle is real — what waits is the **body**,
 so a producer's admission, its records and its identity are untouched by how busy
 the deployment is. A job waiting for a slot is `queued`, takes one in admission
-order, and frees it on **every** ending — done, failed or cancelled — so one
+order, and frees it on **every** ending — done, failed or canceled — so one
 failure cannot wedge everything behind it.
 
 * **The key is the producer's to choose**, and is namespaced by job kind, so the
@@ -87,9 +87,9 @@ failure cannot wedge everything behind it.
 * **`on_queued` fires only when there is really a wait**, so a producer records
   *that it waited* instead of inferring it — the subagent provider writes `queued`
   to the parent's log there.
-* **Cancelling a queued job stops the wait.** A body parked on a limiter is not
+* **Canceling a queued job stops the wait.** A body parked on a limiter is not
   running, so it reads no cancel token; `Job.cancel` cancels the wait itself.
-  Without that a cancelled job sits behind work that may never settle and
+  Without that a canceled job sits behind work that may never settle and
   `ctx.drain()` waits for it — a cancellation that hangs the shutdown.
 * **A queue is dropped once nobody holds a place in it**, by a refcount rather
   than a scan of the job table: `forget` is the owner's call, so a settled job may
@@ -136,7 +136,7 @@ patching this row so `--dump-config` reports the number actually in force.
 | event | |
 |---|---|
 | `job/started` | with its kind and label |
-| `job/settled` | how it ended — completed, cancelled, failed |
+| `job/settled` | how it ended — completed, canceled, failed |
 
 ## What it does not do
 
