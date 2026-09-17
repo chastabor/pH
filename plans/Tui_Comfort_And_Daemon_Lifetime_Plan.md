@@ -86,10 +86,10 @@ anything about the process's own life: the sidebar draws session id, sandbox and
    satisfy.
 4. **The startup picker leads with "start a new session".** Shown only when this
    directory has prior sessions; `enter` is today's behavior, the arrow keys resume.
-5. **Only an ephemeral daemon leaves; the linger defaults to zero.** `phern daemon`
+5. **Only an ephemeral daemon leaves; the keep-alive defaults to zero.** `phern daemon`
    typed at a prompt is still a service and still stays. One a UI spawned exits as
    soon as the last front end detaches, unless a task is running, a schedule is on the
-   books, or a linger was asked for.
+   books, or a keep-alive was asked for.
 
 ---
 
@@ -102,8 +102,8 @@ anything about the process's own life: the sidebar draws session id, sandbox and
 | P9-03 | **Landed.** Prompt history on the arrow keys, searched, and revealed in the transcript | — |
 | P9-04 | **Landed.** `sessions/browse` filtered by working directory | — |
 | P9-05 | **Landed.** The startup session picker | P9-04 |
-| P9-06 | An ephemeral daemon exits when the last front end detaches | — |
-| P9-07 | The lifetime on the wire and in the side panel | P9-06 |
+| P9-06 | **Landed.** An ephemeral daemon exits when the last front end detaches | — |
+| P9-07 | **Landed.** The lifetime on the wire and in the side panel | P9-06 |
 | P9-08 | Docs, non-guarantees, `Implementation_Plan.md` §4 | all |
 
 `plans/Implementation_Plan.md` §4 gains a **Phase 9 — the front end a person lives in**
@@ -621,6 +621,48 @@ worse first run than no picker.
 
 ## P9-06 — an ephemeral daemon leaves when the last front end does
 
+> **Landed** (2026-09-17). `holds()` replaces `spent()`'s yes/no with the list of
+> reasons — `client`, `task`, `schedule`, `keep-alive` — and `spent()` is
+> `ephemeral and not holds()`. `Supervisor.busy()` and `booked()` answer the two
+> supervisor-side terms. `check_lifetime()` runs on the connection transition and
+> on the sweep. `--keep-alive` on `phern daemon` and `phern`, `daemon_keep_alive` in
+> `tui.json`, forwarded through `spawn_command`. Eight gates, every one
+> sabotage-checked.
+>
+> **`EPHEMERAL_QUIET` and `Supervisor.unwanted` are deleted, not retuned.** The
+> plan kept the constant "on the root half"; it had no root-half job. The sweep
+> has always released roots on `passivate_after`, and the exit was the only
+> reader — so what survived the change was a named sixty seconds nothing
+> consulted, which is the shape of a knob wired to nothing. `unwanted` went with
+> it for the same reason: its one caller was the old `spent`.
+>
+> **The row opened a hole the plan did not see, and the launch suite caught it.**
+> `launch.listening()` — a connect and an immediate close — is how every spawn,
+> every stale-socket check and every `_await_socket` poll asks whether a daemon is
+> there. Reading that close as "the last client left" stopped the daemon the poll
+> had just declared ready, so the UI that started it connected to nothing:
+> `test_daemon_launch.py` failed three ways, none of which named this line.
+>
+> The fix is in the predicate, not in one of its callers. `_Connection.spoke` —
+> the first frame is what makes a connection a client rather than a knock — keeps
+> one job, arming the keep-alive window, because that window is about a *client*
+> leaving. The exit reads `DaemonServer.served`, the same question about the
+> process: an auto-started daemon may not leave until somebody has spoken to it
+> or `launch.SPAWN_TIMEOUT` has passed, which is the launcher's own number, so
+> after it there is nobody left to protect.
+>
+> Guarding the teardown alone would have left the other two callers — the sweep,
+> and a scheduled root finishing a turn inside the spawn window — to find the
+> same hole by another door. In the predicate it also closes the case a
+> per-connection guard could not: a knock still open when the last real client
+> leaves now ends the daemon when it closes, rather than waiting for a sweep.
+>
+> `served` is in `spent()` and deliberately not in `holds()`: a daemon waiting
+> for the client that spawned it is not *held* by anything — nobody could name a
+> reason — it simply may not go yet. Among the reasons it would have put a
+> `starting` on the wire and `held · starting` in a sidebar for the first thirty
+> seconds of every session.
+
 **Files:** `daemon/server.py`, `daemon/recovery.py`, `ph_app/cli.py`,
 `tui/config.py`, `packages/phern/tests/test_daemon_lifetime.py`.
 
@@ -638,8 +680,8 @@ person named.** `spent()` (`server.py:1257`) becomes:
    it here is what put a minute between the last detach and the exit.
 4. **nothing is on the books** — `supervisor.appointments()` non-empty, or any mounted
    root with a live schedule, keeps it up. Unchanged in meaning.
-5. **the linger has expired** — `linger_until`, set when the last connection closes,
-   `None` when the linger is zero.
+5. **the keep-alive has expired** — `keep_alive_until`, set when the last connection closes,
+   `None` when the keep-alive is zero.
 
 `EPHEMERAL_QUIET` keeps its job on the root half — an ephemeral daemon still releases
 its roots aggressively, because it intends to leave — and its docstring gains the
@@ -647,10 +689,10 @@ sentence saying it is no longer the exit's window.
 
 **Evaluated on the event, with the sweep as backstop.** `_handle`'s `finally`
 (`server.py:1299`) already runs when a connection ends; it calls a new
-`check_lifetime()` which either sets `stop` or arms the linger deadline. The same call
+`check_lifetime()` which either sets `stop` or arms the keep-alive deadline. The same call
 happens when a turn ends and when a schedule is canceled — the two other transitions
 that can make a held daemon unheld. The sixty-second sweep keeps calling it, for the
-case nothing else can cover: a linger that expires with no event to notice it. This is
+case nothing else can cover: a keep-alive that expires with no event to notice it. This is
 the plan's own argument for one cadence per question, honored — the cadence is not a
 new timer, and the prompt path is not a poll.
 
@@ -658,21 +700,19 @@ new timer, and the prompt path is not a poll.
 `connections: set[_Connection]`. The count answered one question; the set answers two,
 the second being *who to tell* in P9-07, and `spent()` reads `not self.connections`.
 
-**The linger.** `phern daemon --linger <duration>` and `phern --linger <duration>`
+**The keep-alive.** `phern daemon --keep-alive <duration>` and `phern --keep-alive <duration>`
 (forwarded through `spawn_command`, `cli.py:656`, beside the `--ephemeral` it already
-spells), plus `daemon_linger` in `$PH_HOME/tui.json` so a person sets it once.
+spells), plus `daemon_keep_alive` in `$PH_HOME/tui.json` so a person sets it once.
 Precedence is CLI, then `tui.json`, then zero. The client's preference reaching the
 daemon through the argv the client composes is the only route that works — a daemon
 may not read a front end's preference file, and after P5-14 it might not be on the
 same machine.
 
-Service daemons are untouched: `phern daemon` without `--ephemeral` stays, `--keep-daemon`
-still means "the one you spawn is a service", and `--linger` on a service daemon is
-accepted and ignored with a warning rather than silently, because a person who typed it
-meant something.
+Service daemons are untouched: `phern daemon` without either flag stays, and
+`--keep-daemon` still means "the one you spawn is a service".
 
 **Guarantee.** Closing the last front end ends an auto-started daemon at once, unless a
-task is running, a schedule is on the books, or a linger was asked for — and in each of
+task is running, a schedule is on the books, or a keep-alive was asked for — and in each of
 those cases, *which* one is a fact the process can state.
 
 **Gates** (`test_daemon_lifetime.py`, extending the existing module):
@@ -680,8 +720,8 @@ those cases, *which* one is a fact the process can state.
 check on the sweep alone, and it takes a minute) ·
 `test_a_running_turn_holds_an_ephemeral_daemon_past_the_last_detach` ·
 `test_an_indexed_appointment_holds_it` (already covered; re-pinned against the new
-predicate) · `test_a_linger_holds_it_for_exactly_as_long_as_it_says` ·
-`test_the_linger_expires_without_a_client_to_notice` — the backstop, driven by the
+predicate) · `test_a_keep_alive_holds_it_for_exactly_as_long_as_it_says` ·
+`test_the_keep_alive_expires_without_a_client_to_notice` — the backstop, driven by the
 sweep with no connection at all · `test_an_explicitly_started_daemon_still_never_exits`
 · `test_the_exit_no_longer_waits_on_the_root_quiet_window` (sabotage: put
 `EPHEMERAL_QUIET` back into `spent`).
@@ -689,6 +729,100 @@ sweep with no connection at all · `test_an_explicitly_started_daemon_still_neve
 ---
 
 ## P9-07 — the lifetime on the wire, and in the side panel
+
+> **Landed** (2026-09-17). `DaemonNotice` is a family of its own beside
+> `SessionScoped`, with `DaemonLifetime` its one member. `daemon/lifetime` is
+> read once in `attach_session`'s startup group; `daemon.lifetime` is broadcast
+> from `_announce_lifetime` to `server.connections` when the answer moves, and
+> `DaemonSession.dispatch` handles it above the `sessionId` filter.
+> `DaemonServer.lifetime()` is the one builder behind the verb, the notice and
+> the doctor's `daemon lifetime` section. Seven gates, every one
+> sabotage-checked.
+>
+> **The sibling table the plan called for is a sibling *type* instead.**
+> `DAEMON_NOTICES` and `daemon_notice_of` were written and then deleted: one
+> method and one reader do not earn a second mapping, and the reader narrowed
+> straight back to the concrete type it had just looked up. What the base class
+> earns on its own is the exclusion — `Mapping[str, type[SessionNotice]]`
+> structurally cannot hold a process-level frame, so one can never be dispatched
+> behind the `sessionId` filter by an author's oversight. A second member is the
+> moment to write the table.
+>
+> **`--keep-alive` implies `--ephemeral`, and the contradiction is refused.** The
+> two flags were one concept — when does this daemon leave — split across two
+> spellings, and the split is what made `--keep-alive` alone mean *nothing* on
+> `phern daemon` and need a warning line to say so. "Stay up five minutes after
+> the last client leaves" is a statement about leaving, so it carries the
+> lifetime with it.
+>
+> Merging them into one flag was considered and is not available: typer has no
+> optional-value option (`--ephemeral` with no argument is a usage error, and
+> with `is_flag=False` it swallows the following flag as its value), and the two
+> commands express the lifetime in opposite directions on purpose — `phern
+> daemon` opts into leaving, `phern` opts into staying — so a single merged flag
+> could not read the same on both. The *duration* is the part that means the same
+> thing on both, which is the argument for it staying its own flag.
+>
+> The implication lives at each call site rather than in the parser, for that
+> same reason: a parser that decided the lifetime would have to know which
+> command it was serving. `--keep-daemon` with a *typed* `--keep-alive` is now
+> refused rather than warned — two opposite answers, of which the person meant
+> one. A *configured* keep-alive is not a contradiction and is simply overridden.
+>
+> **`--linger` is `--keep-alive`.** The name collided with `ph.lingering`, an
+> unrelated pre-existing concept — `loginctl enable-linger`, whether
+> `$XDG_RUNTIME_DIR` survives logout — and `phern agents doctor` was printing a
+> row called `linger` in each of two adjacent sections, meaning different things.
+> The collision was not theoretical: it made a doctor assertion stop
+> distinguishing what it was written for, and forced the new gate to select rows
+> by section title rather than by label. Renamed while both halves are
+> unreleased — the flag, `daemon_keep_alive` in `tui.json`, the `keep-alive`
+> hold, `keep_alive_ms` on the wire and the `keep alive` row in the doctor.
+>
+> **`exits_at` and the countdown are cut, and the reason is the mechanism.** The
+> keep-alive is armed when the last connection closes and cleared by the first frame
+> of the next one — so a client is by construction never connected while a
+> deadline is running, and `phern agents doctor` cancels the very window it would
+> have printed. The field could only ever have carried `null`. What a connected
+> client can say truthfully is not "it leaves at 9:41" but "it leaves five
+> minutes after you do", so `keep_alive_ms` stays and `exits_at` never existed.
+>
+> **The sidebar line answers "if I close this window", not "what is the daemon
+> doing".** `client` is filtered out of the reasons before rendering: it is true
+> of the front end drawing the line, so printing it unconditionally would spend a
+> row of a 32-column panel saying the person has a window open. What is left —
+> `held · task`, `held · schedule` — is the set of reasons that survive their
+> leaving. A front end with no daemon draws no row at all.
+>
+> **The filter needed a fact the plan's frame did not carry**, so `clients` is on
+> it: `holds` says `client` whenever *anybody* is connected, which reads
+> identically with one terminal and with two while the sentence flips. Dropping
+> it unconditionally promised `exits on detach` to both of two open terminals and
+> was wrong for whichever closed first. With the count, a second terminal reads
+> `held · client` — and a client *arriving* is announced as well as one leaving,
+> which was the transition nothing had been sent for.
+>
+> **Two pieces of plumbing the plan did not name.** `Supervisor.recheck_lifetime`
+> is a callback `serve` points at `check_lifetime` — named for the question
+> because more than one thing raises it, and registered as its own `ctx.on`
+> listener beside the others rather than as a line inside `announce`, whose body
+> is guarded on there being watchers to announce to. The case that matters most
+> has none: a detached `phern -p`, whose daemon should leave when the work it was
+> started for is finished. `schedule/create` and `schedule/cancel` call it from
+> their handlers, which is the other way `holds()` moves without an event. What
+> is *not* wired — a root parking on a person, and a keep-alive expiring — is written
+> down in `holds()` itself, with the sweep named as its backstop (§5 rule 6).
+>
+> And `_duration` moved from `ph_app.agents` to `ph.text.duration`: the sidebar
+> renders the same kind of thing, and two copies of a duration format is two
+> sentences for one fact.
+>
+> **The vocabulary is typed.** `DaemonMode` and `Hold` are `Literal` aliases in
+> the `TrustAnswer` mould, so `holds()` returning a fifth reason is an error
+> where it is written rather than a blank row in somebody's terminal. The cost is
+> the ordinary one `PROTOCOL_VERSION` documents: a front end older than a new
+> value refuses the frame rather than ignoring it, and the fix is to restart the
+> daemon.
 
 **Files:** `ph_app/payloads.py`, `ph_app/verbs.py`, `daemon/server.py`,
 `tui/remote.py`, `tui/state.py`, `tui/widgets/status.py`, `ph_app/agents.py`.
@@ -699,9 +833,9 @@ is not its own (`remote.py:311`) — correct, and exactly wrong for a fact about
 process. So:
 
 * `DaemonLifetime(WireModel)`: `mode` (`"service" | "ephemeral"`), `holds: list[str]`
-  drawn from `client`, `task`, `schedule`, `linger`, `exits_at: int | None`,
-  `linger_ms: int`.
-* `daemon/lifetime` — a `Verb` read at attach, so a client that connects mid-linger
+  drawn from `client`, `task`, `schedule`, `keep-alive`, `exits_at: int | None`,
+  `keep_alive_ms: int`.
+* `daemon/lifetime` — a `Verb` read at attach, so a client that connects mid-window
   draws the truth rather than waiting for a change.
 * `daemon.lifetime` — a notification, broadcast to `server.connections` whenever
   `check_lifetime()` finds a different answer. `NOTICES`/`notice_of` (`payloads.py:618`)
@@ -728,7 +862,7 @@ daemon  held · task          # or: exits in 9:41 · service · exits on detach
 ```
 
 Rendered from `TuiState.lifetime`; the countdown re-renders on the spinner's clock when
-one is running and on ordinary draws otherwise, so a lingering daemon does not start a
+one is running and on ordinary draws otherwise, so a waiting daemon does not start a
 timer in an idle terminal. The word is the *reason*, not the state — `held · task`
 answers "why is this still here", which is the question a person actually has.
 
@@ -743,7 +877,7 @@ it and in the doctor, and both read it from the process rather than re-deriving 
 **Gates:** `test_the_sidebar_names_the_reason_a_daemon_is_held` ·
 `test_a_lifetime_notice_reaches_a_client_watching_another_session` (sabotage: route it
 through the `sessionId` filter and it is dropped) ·
-`test_a_client_that_attaches_mid_linger_draws_the_countdown` ·
+`test_a_client_that_attaches_mid_window_draws_the_countdown` ·
 `test_every_daemon_notice_has_a_reader` — `test_payloads`' existing shape, applied to
 the new family · `test_the_doctor_prints_the_same_holds_the_sidebar_does`.
 
@@ -753,7 +887,7 @@ the new family · `test_the_doctor_prints_the_same_holds_the_sidebar_does`.
 
 * `docs/dev-notes/phase-9.md` — what was traded, in the series' shape. Three things
   belong in it: why the theme profile is not a pH profile row, why history is the
-  mirror rather than a file, and why the linger is the client's argv rather than a
+  mirror rather than a file, and why the keep-alive is the client's argv rather than a
   daemon-side setting.
 * `plans/Implementation_Plan.md` §4 — the Phase 9 table above, and a "done when" row in
   §6.
@@ -780,7 +914,7 @@ the new family · `test_the_doctor_prints_the_same_holds_the_sidebar_does`.
   it resident, so the ordinary case holds — but `kill -9`, a logout reap, or a reboot
   ends the process and the appointment until a UI opens again. Timely scheduling on a
   machine that reboots still wants a systemd or launchd unit owning `phern daemon`.
-* The linger is a **floor on how long the process stays, not a ceiling**: a task that
+* The keep-alive is a **floor on how long the process stays, not a ceiling**: a task that
   outruns it keeps the daemon up, which is the point.
 
 ---
@@ -799,7 +933,7 @@ the new family · `test_the_doctor_prints_the_same_holds_the_sidebar_does`.
   second.
 * `passivatable`'s clauses — the exit predicate names the ones it wants and derives
   nothing in parallel.
-* `spawn_command` — the linger is one more option beside `--ephemeral`, in the module
+* `spawn_command` — the keep-alive is one more option beside `--ephemeral`, in the module
   that already spells that command line.
 * `TuiKeybindings.as_map()` / `set_keymap` — three new bindings, no new mechanism, and
   no key compared as a literal anywhere.

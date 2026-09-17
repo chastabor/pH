@@ -94,6 +94,7 @@ from ..payloads import (
     ApprovalAsk,
     ApprovalAskReply,
     CommandShown,
+    DaemonLifetime,
     QuestionAsk,
     QuestionAskReply,
     SessionCommandsNotice,
@@ -104,7 +105,7 @@ from ..payloads import (
     StatusFacts,
     notice_of,
 )
-from ..protocol import DaemonGone, SessionParams, Verb
+from ..protocol import DaemonGone, NoParams, SessionParams, Verb
 from ..sessions import SessionSummary
 from ..wire import view_of
 from .adapter import Frame, TuiEventAdapter
@@ -304,6 +305,14 @@ class DaemonSession:
         """
         if method in FED:
             self.feed(method, params)
+            return
+        # **Before the ownership check below**, because this frame has no owner:
+        # it is about the daemon every attached session shares, so it carries no
+        # `sessionId` and the filter would drop it for belonging to nobody. Its
+        # own type for the same reason — see `DaemonNotice`.
+        if method == DaemonLifetime.METHOD:
+            self.state.lifetime = DaemonLifetime.model_validate(params)
+            self.host.state_changed(Surface.SIDEBAR)
             return
         # Read off the raw frame, before any model sees it: "is this mine"
         # is the one question that must be answered *without* validating,
@@ -642,6 +651,7 @@ async def attach_session(
     listed_screens: list[SessionScreensNotice] = []
     listed_tools: list[SessionToolsReply] = []
     listed_skills: list[SessionSkillsReply] = []
+    read_lifetime: list[DaemonLifetime] = []
     asked = SessionParams(session_id=session_id)
     async with anyio.create_task_group() as tasks:
         tasks.start_soon(fetch, verbs.COMMANDS_LIST, asked, listed_commands)
@@ -653,9 +663,15 @@ async def attach_session(
         # registers a tool does it at mount, and installing a skill is a restart.
         tasks.start_soon(fetch, verbs.TOOLS_LIST, asked, listed_tools)
         tasks.start_soon(fetch, verbs.SKILLS_LIST, asked, listed_skills)
+        # The one read here that is not about this root: whether the daemon
+        # behind it intends to stay. Read once rather than waited for, because
+        # `daemon.lifetime` is sent when the answer *changes* — so a client that
+        # connected between two changes would draw nothing until something moved.
+        tasks.start_soon(fetch, verbs.DAEMON_LIFETIME, NoParams(), read_lifetime)
 
     state.tools = _catalog(listed_tools[0].tools)
     state.skills = _catalog(listed_skills[0].skills)
+    state.lifetime = read_lifetime[0]
     front = DaemonSession(
         client=client,
         session_id=session_id,

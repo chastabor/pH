@@ -42,12 +42,14 @@ from typer.testing import CliRunner
 
 from ph.json import JsonObject, as_obj
 from ph.testing import ReapedHost
+from ph_app import verbs
 from ph_app.cli import app
 from ph_app.daemon.client import DaemonClient
 from ph_app.payloads import DaemonStatusReply
-from ph_app.protocol import PROTOCOL_VERSION, Cursor
+from ph_app.protocol import PROTOCOL_VERSION, Cursor, NoParams
 
 pytestmark = pytest.mark.anyio
+
 
 runner = CliRunner()
 
@@ -565,12 +567,58 @@ async def test_doctor_prints_the_lifetime_the_daemon_reports(
         reported = await _ph("agents", "doctor")
         assert reported.exit_code == 0, reported.output
         assert "socket lifetime" in reported.output
-        assert "linger" in reported.output
+        # The advice line rather than the bare word: this section is about
+        # logind, and a doctor now prints a `daemon lifetime` section beside it.
+        # They were both spelled `linger` until the daemon's half was renamed
+        # `keep alive` for exactly that reason (P9-06).
         assert "loginctl enable-linger someone" in reported.output
         # Absent while it can be reached, which this invocation just proved by
         # arriving: a permanent "reachable: yes" row is a fact delivered by its
         # own delivery, and it would push the row that matters off the eye.
         assert "reachable" not in reported.output
+
+
+async def test_the_doctor_prints_the_same_holds_the_sidebar_does(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One builder behind two readers, so they cannot disagree about one process.
+
+    `DaemonServer.lifetime()` answers the verb the sidebar reads, the
+    notification it is sent, and this section — so "why is this daemon still
+    here" has one implementation and three renderings rather than three answers.
+
+    **Read as models, printed as a table.** The rows travel as
+    `DiagnosticSection`/`DiagnosticRow`, so the values are asserted off the reply
+    the doctor renders rather than off the render: scraping box-drawing
+    characters back into a dict couples a lifetime gate to rich's border style,
+    and nothing guarantees a label is unique across a report — this section and
+    the socket's were both printing one called `linger` until the daemon's half
+    was renamed `keep alive`. Selected by section title, which is the key the
+    envelope actually has. The printed half needs one substring: that the section
+    reaches the terminal at all.
+
+    `holds: client` is the asking connection itself, which is why it is read over
+    the socket rather than off the in-process server — by the time a CLI run has
+    returned, the connection that held it is gone. That it says so is the point:
+    a section reporting "nothing" while somebody is plainly talking to it would
+    be reading a snapshot rather than the process.
+
+    Sabotage: build the section from `self.ephemeral` and `self.keep_alive` directly
+    and it stops being the same answer the moment either question grows a term.
+    """
+    async with serving(tmp_path, monkeypatch) as daemon:
+        client = await daemon.client("asks")
+        reply = await client.call(verbs.DAEMON_STATUS, NoParams())
+
+        section = next(one for one in reply.sections if one.title == "daemon lifetime")
+        rows = {row.label: row.value for row in section.rows}
+        assert rows["mode"] == "service", "which is what `phern daemon` started"
+        assert rows["holds"] == "client", "and the asking connection holds it"
+        assert rows["keep alive"] == "off"
+
+        reported = await _ph("agents", "doctor")
+        assert reported.exit_code == 0, reported.output
+        assert "daemon lifetime" in reported.output, "named apart from the socket's"
 
 
 # ------------------------------------------------------------------ registration --

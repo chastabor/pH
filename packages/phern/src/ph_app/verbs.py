@@ -58,6 +58,7 @@ from .payloads import (
     CredentialsHeldReply,
     CredentialStored,
     DaemonConfigReply,
+    DaemonLifetime,
     DaemonStatusReply,
     PresetApplied,
     RootDescription,
@@ -86,6 +87,7 @@ __all__ = [
     "CREDENTIALS_STORE",
     "DAEMON_CONFIG",
     "DAEMON_HELLO",
+    "DAEMON_LIFETIME",
     "DAEMON_STATUS",
     "INITIALIZE",
     "MUTATING",
@@ -129,6 +131,13 @@ says either gets the same reply model — which is the fact worth declaring."""
 
 DAEMON_CONFIG = Verb("daemon/config", NoParams, DaemonConfigReply)
 DAEMON_STATUS = Verb("daemon/status", NoParams, DaemonStatusReply)
+DAEMON_LIFETIME = Verb("daemon/lifetime", NoParams, DaemonLifetime)
+"""Why this daemon is still here, read once at attach.
+
+A verb as well as a notification because a client that connected between two
+changes would otherwise draw nothing until something moved — the same reason
+`session/attach` replies with a footer rather than waiting for the first
+`session.status`."""
 SHUTDOWN = Notify("shutdown", NoParams)
 """The one method with no reply, and a `Notify` so that stays true.
 

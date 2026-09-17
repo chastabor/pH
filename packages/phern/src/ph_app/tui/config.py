@@ -34,7 +34,7 @@ from pathlib import Path
 from typing import Any, Literal, TypeAlias
 
 from ph.documents import read_document
-from ph.json import as_bool
+from ph.json import as_bool, as_str
 from ph.paths import write_text_under
 
 __all__ = [
@@ -110,6 +110,15 @@ class TuiSettings:
     show_thinking: bool = True
     show_tool_results: bool = True
     show_tools: bool = True
+    daemon_keep_alive: str = "0"
+    """How long a daemon this UI starts should stay after the terminal closes.
+
+    A duration as `--keep-alive` spells it (`"30s"`, `"5m"`), and `"0"` — leave at
+    once — is the default. Here rather than on the daemon because it is a
+    *preference*: the person flipping between two terminals is the one who knows
+    whether a re-mount between them is worth avoiding. It reaches the daemon
+    through `spawn_command`'s argv, which is the only route a client-side
+    preference has (`cli._spawned_keep_alive`)."""
     show_skills: bool = True
     """Whether the sidebar's tools and skills panels are drawn.
 
@@ -164,6 +173,7 @@ def tui_settings_from_json(data: object) -> TuiSettings:
         show_thinking=as_bool(data.get("show_thinking"), True),
         show_tools=as_bool(data.get("show_tools"), True),
         show_skills=as_bool(data.get("show_skills"), True),
+        daemon_keep_alive=as_str(data.get("daemon_keep_alive"), "0"),
         show_tool_results=as_bool(data.get("show_tool_results"), True),
     )
 

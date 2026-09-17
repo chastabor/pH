@@ -28,7 +28,7 @@ import logging
 import os
 from base64 import b64decode
 from binascii import Error as BinasciiError
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -47,6 +47,7 @@ from ph.seams.attachments import mime_for
 from ph.seams.schedule import Schedule
 from ph.seams.shell import ShellService
 from ph.session import now_ms
+from ph.text import duration
 from ph.wire import WireModel
 
 from .. import verbs
@@ -74,9 +75,12 @@ from ..payloads import (
     CredentialsHeldReply,
     CredentialStored,
     DaemonConfigReply,
+    DaemonLifetime,
+    DaemonMode,
     DaemonStatusReply,
     DiagnosticRow,
     DiagnosticSection,
+    Hold,
     MutationRepeated,
     PresetApplied,
     RootDescription,
@@ -114,7 +118,7 @@ from ..trust import TrustStore, trust_path
 from .cards import CARD_EVENTS, presentation_of
 from .duplex import Peer
 from .framing import MAX_ATTACHMENT_BYTES, MAX_ATTACHMENT_SIZE
-from .launch import listening
+from .launch import SPAWN_TIMEOUT, listening
 from .projections import (
     browse_of,
     commands_of,
@@ -125,7 +129,7 @@ from .projections import (
     skills_of,
     tools_of,
 )
-from .recovery import EPHEMERAL_QUIET, PASSIVATE_AFTER, WAKE_WITHIN
+from .recovery import PASSIVATE_AFTER, WAKE_WITHIN
 from .supervisor import NON_GUARANTEES, Root, Supervisor
 
 if TYPE_CHECKING:
@@ -385,6 +389,20 @@ class _Connection:
     `asks` is the name in both directions — the daemon offering to ask, and a
     client offering to answer — because it is one feature, and half of it is
     useless without the other half."""
+    spoke: bool = False
+    """Whether this connection has ever sent a frame — a client, not a knock.
+
+    `launch.listening()` is a connect and an immediate close, and every spawn,
+    every stale-socket check and every `_await_socket` poll runs it. Nothing at
+    the socket layer tells that apart from a front end, so the first frame is
+    what does.
+
+    One job: **the keep-alive window is armed by a client leaving, not by a probe**.
+    A knock re-arming it would hold a daemon open for another full keep-alive every
+    time something checked whether it was there. The *exit* asks
+    `DaemonServer.served` instead, which is the same question about the process
+    rather than about one socket, and so covers the sweep and a finishing turn
+    as well as this teardown."""
     peer: Peer = field(init=False)
 
     def __post_init__(self) -> None:
@@ -445,6 +463,20 @@ class _Connection:
         each branch a different static type without a cast per branch, which is
         a dict with extra steps.
         """
+        if not self.spoke:
+            self.spoke = True
+            self.server.served = True
+            # A client is here, so any window armed by the last one to leave is
+            # over: the keep-alive means "since you left", not "since the daemon
+            # started". Here rather than on the accept, because a knock that
+            # reset the window would hold a daemon open for another full keep-alive
+            # every time something checked whether it was there.
+            self.server.keep_alive_until = None
+            # And the terminal already attached learns it is no longer alone —
+            # `clients` moved, which is what turns its `exits on detach` into
+            # `held · client`. The arrival is a lifetime transition like the
+            # departure in `_handle`, and was the only one not announced.
+            self.server.check_lifetime()
         mutation = MUTATIONS.get(method)
         if mutation is not None:
             return await self._mutate(mutation, params)
@@ -558,10 +590,20 @@ class _Connection:
     # a buffer is one a restart forgets.
 
     async def _schedule_create(self, params: CreateScheduleParams) -> Schedule:
-        return await self.server.supervisor.schedule(params.session_id, params.to_schedule())
+        made = await self.server.supervisor.schedule(params.session_id, params.to_schedule())
+        # `schedule` is one of `holds()`' terms, and this is the moment it can
+        # start being true — the other two ways it moves are a cancel below and
+        # the sweep. Announced rather than waited for, so the sidebar of a
+        # terminal that just set an appointment says so.
+        self.server.check_lifetime()
+        return made
 
     async def _schedule_cancel(self, params: CancelScheduleParams) -> ScheduleCanceled:
         canceled = await self.server.supervisor.unschedule(params.session_id, params.schedule_id)
+        # The other direction, and the one with teeth: a cancel can be what lets
+        # an ephemeral daemon go, so leaving it to the sweep would keep a process
+        # alive for a minute on a claim that had just been withdrawn.
+        self.server.check_lifetime()
         return ScheduleCanceled(
             session_id=params.session_id,
             schedule_id=params.schedule_id,
@@ -576,6 +618,9 @@ class _Connection:
 
     async def _daemon_status(self, _params: NoParams) -> DaemonStatusReply:
         return self.server.status()
+
+    async def _daemon_lifetime(self, _params: NoParams) -> DaemonLifetime:
+        return self.server.lifetime()
 
     async def _shutdown(self, _params: NoParams) -> None:
         # Actually stops it, and takes no id by contract: a client awaiting
@@ -1053,6 +1098,7 @@ METHODS: dict[str, _Row] = dict(
         _unkeyed(verbs.SCHEDULE_LIST, _Connection._schedule_list),
         _unkeyed(verbs.DAEMON_CONFIG, _Connection._daemon_config),
         _unkeyed(verbs.DAEMON_STATUS, _Connection._daemon_status),
+        _unkeyed(verbs.DAEMON_LIFETIME, _Connection._daemon_lifetime),
         _announcing(verbs.SHUTDOWN, _Connection._shutdown),
     )
 )
@@ -1095,14 +1141,55 @@ class DaemonServer:
     A flag rather than a subclass or a second `serve`: every other behavior is
     identical, and the difference is one predicate on a cadence that already
     runs."""
-    open_connections: int = 0
-    """How many clients are connected right now — *connected*, not attached.
+    connections: set[_Connection] = field(default_factory=set)
+    """The clients connected right now — *connected*, not attached.
 
-    The exit predicate reads this, and the distinction is deliberate: a
-    `phern agents doctor` mid-call has no subscription and no root, so an
-    attachment-based count would hang up on it between the request and the
-    reply. Counted rather than a set of connections, because the only question
-    asked of it is whether it is zero."""
+    The distinction is deliberate: a `phern agents doctor` mid-call has no
+    subscription and no root, so an attachment-based count would hang up on it
+    between the request and the reply.
+
+    A set rather than the count it used to be, because two questions are asked of
+    it now: whether anything is connected, and **who to tell** when the lifetime
+    changes (P9-07)."""
+    keep_alive: float = 0.0
+    """Seconds to stay up after the last client leaves, when nothing else holds it.
+
+    Zero — leave at once — is the default, and the flag is what a person types
+    when flipping between two terminals should not pay for a re-mount. It is the
+    *client's* preference reaching the daemon through the argv the client
+    composed, which is the only route there is: a daemon may not read a front
+    end's `tui.json`, and after P5-14 it may not even share a filesystem with it."""
+    keep_alive_until: int | None = None
+    """When the armed keep-alive expires, or `None` when none is armed.
+
+    Armed when the last client leaves and cleared by the next one's first frame,
+    so the window is "since you left" rather than "since the daemon started"."""
+    served: bool = False
+    """Whether any client has ever spoken to this daemon (P9-06).
+
+    **The spawn window, closed where every caller inherits it.** A fresh
+    ephemeral daemon holds nothing — no connection, no turn, no appointment — so
+    it is spent from its first instant, and the only thing between it and the
+    exit is that nothing happens to ask during the moment between `serve()`
+    binding the socket and the UI that spawned it sending a frame. Three callers
+    can ask in that moment: the knock's own disconnect, the sweep, and a
+    scheduled root finishing a turn. Guarding one of them left the other two.
+
+    So `spent()` reads this instead, and the answer is bounded rather than
+    latched: a daemon nobody has spoken to may not exit until
+    `launch.SPAWN_TIMEOUT` has passed, which is the same number the launcher
+    waits — after it, the launcher has given up, so there is nobody left to
+    protect. One constant for both halves rather than two that have to agree.
+
+    Not on the wire and deliberately: it is never true when anybody is watching,
+    since the frame that makes it true is the watcher's own."""
+
+    announced: DaemonLifetime | None = None
+    """The last lifetime frame sent, so an unchanged answer is not sent again.
+
+    A remembered value rather than a dirty flag: the thing being compared is the
+    whole frame, and a flag would have to be set by every writer of every field
+    that goes into one."""
     tick_every: float = TICK_EVERY
     sweep_every: float = SWEEP_EVERY
     heartbeat_every: float = HEARTBEAT_EVERY
@@ -1177,7 +1264,21 @@ class DaemonServer:
         loop, so the isolation section cost a tuple entry here and nothing at
         all on the other side.
         """
+        life = self.lifetime()
         return [
+            # Named for the *process*, beside the socket's own section rather
+            # than merged with it: one says whether this daemon intends to stay,
+            # the other whether the door it bound survives a logout, and a
+            # person reading "lifetime" wants to be told which they are looking
+            # at.
+            (
+                "daemon lifetime",
+                [
+                    ("mode", life.mode),
+                    ("holds", " · ".join(life.holds) or "nothing"),
+                    ("keep alive", duration(life.keep_alive_ms) if life.keep_alive_ms else "off"),
+                ],
+            ),
             ("socket lifetime", self.socket_lifetime().describe()),
             # The daemon's own non-guarantees (N5, I-2), printed by the command a
             # person runs to ask what this daemon is. Rule 6 wants them beside
@@ -1256,24 +1357,83 @@ class DaemonServer:
         await self.supervisor.announce_unreachable(note)
         return reason
 
-    def spent(self, *, now: int | None = None) -> bool:
+    def holds(self, *, now: int | None = None) -> list[Hold]:
+        """Why this daemon is still up — every reason, in the order asked.
+
+        **The reasons rather than a yes/no**, because the same four facts answer
+        two questions: whether to stop, and what to *tell* a person about why it
+        has not (P9-07). Computed once, so the sidebar and the exit cannot
+        disagree about a daemon's own life.
+
+        `client` is *connected*, not attached — see `connections`. `task` and
+        `schedule` are the supervisor's to answer. `keep-alive` is this object's, and
+        it is last because it is the only one that expires on its own.
+
+        Empty means nothing wants it. For a **service** daemon that is still not a
+        reason to leave: somebody chose to run a supervisor, and `spent` is where
+        that is decided.
+
+        A `now`, for the reason `passivatable` takes one: a test asks the question
+        rather than waiting out a cadence.
+
+        **Not every term has an event behind it** (§5 rule 6, stated where it
+        would be assumed). `client`, `task` and `schedule` are announced as they
+        move — a connection's first and last frame, an `agent/status` transition,
+        a `schedule/create` or `schedule/cancel`. Two changes are left to the
+        sweep: a root parking on a person (`Root.status` becomes `waiting`
+        without the agent's status moving, so `task` drops silently) and a
+        a `keep-alive` expiring, which ends on a clock. Both cost at most one
+        `sweep_every` of a stale sidebar line, and the second is why the sweep
+        still asks at all.
+
+        `list[Hold]` rather than `list[str]`: the vocabulary is closed and the
+        sidebar spends it, so a fifth reason is a type error here rather than a
+        blank row in somebody's terminal.
+        """
+        stamp = now if now is not None else now_ms()
+        reasons: list[Hold] = []
+        if self.connections:
+            reasons.append("client")
+        if self.supervisor.busy():
+            reasons.append("task")
+        if self.supervisor.booked():
+            reasons.append("schedule")
+        if self.keep_alive_until is not None and stamp < self.keep_alive_until:
+            reasons.append("keep-alive")
+        return reasons
+
+    def spent(self, *, now: int | None = None, holds: Sequence[Hold] | None = None) -> bool:
         """Whether there is anything left for this daemon to be up for (P7-08).
 
-        Auto-started, nobody connected, and nothing the supervisor holds is
-        wanted. **Connected, not attached**: see `open_connections`. And the
-        supervisor's half asks P5-05's own `passivatable` with a window of its own
-        (`EPHEMERAL_QUIET`) rather than waiting for the sweep to empty `roots` —
-        the obvious version quietly made the exit depend on `--passivate-after`,
-        so `off` pinned an ephemeral daemon forever and `90` held it ninety
-        minutes, neither of which is what either flag says.
+        Auto-started, and nothing holds it. **`EPHEMERAL_QUIET` is no longer part
+        of this**: asking P5-05's `passivatable` whole meant the exit inherited a
+        sixty-second log-quiet window, which is the right window for releasing a
+        root and the wrong one for ending a process — it is what put a minute
+        between closing the last terminal and the daemon leaving. The quiet window
+        keeps its job on the root half, where it belongs.
 
-        A predicate, with a `now`, for the reason `passivatable` is: a test asks
-        the question rather than waiting out a cadence.
+        **`served` is the other half of the answer**, and it is here rather than
+        in `holds()` on purpose: a daemon still waiting for the client that
+        spawned it is not *held* by anything — nobody could name a reason — it
+        simply may not leave yet. Putting it among the reasons would have put a
+        `starting` on the wire and `held · starting` in a sidebar for the first
+        thirty seconds of every session, which is a word about the daemon's
+        plumbing in the row that answers a person's question.
+
+        `holds` is the caller's own already-computed answer, for the one caller
+        that has one: `check_lifetime` needs it for the announcement anyway, and
+        asking twice is both a second trip to the schedule index and — worse —
+        a second *sample*, so a turn ending between them would announce one
+        answer and act on another. A parameter rather than the caller inlining
+        `ephemeral and not holds`, so this stays the only place the rule is
+        written down.
         """
-        if not self.ephemeral or self.open_connections:
+        if not self.ephemeral:
+            return False
+        if self.holds(now=now) if holds is None else holds:
             return False
         stamp = now if now is not None else now_ms()
-        return self.supervisor.unwanted(now=stamp, after=EPHEMERAL_QUIET)
+        return self.served or stamp >= self.started + int(SPAWN_TIMEOUT * 1000)
 
     async def sweep(self) -> list[str]:
         """The passivation sweep, and then — if this daemon is spent — the exit.
@@ -1293,22 +1453,106 @@ class DaemonServer:
         says something quite different.
         """
         released = await self.supervisor.sweep()
-        if self.spent():
-            log.info("ph_app.daemon: nothing left to serve; stopping (auto-started)")
-            self.stop.set()
+        # The backstop, and the one case nothing else can cover: a keep-alive that
+        # expires with no client left to notice it.
+        self.check_lifetime()
         return released
 
+    @property
+    def mode(self) -> DaemonMode:
+        """`ephemeral` or `service`, from the flag that decided it."""
+        return "ephemeral" if self.ephemeral else "service"
+
+    def lifetime(self) -> DaemonLifetime:
+        """Why this daemon is still here, as the frame both doors carry.
+
+        One builder for the verb, the notification and the doctor's section, so
+        the three cannot describe the same process differently — which is
+        `holds()`' own argument one layer up.
+        """
+        return DaemonLifetime(
+            mode=self.mode,
+            holds=self.holds(),
+            clients=len(self.connections),
+            keep_alive_ms=int(self.keep_alive * 1000),
+        )
+
+    def check_lifetime(self) -> None:
+        """Say what holds this daemon, and stop if nothing does.
+
+        **On the event, not only on the cadence.** A connection opening or
+        closing and a turn starting or ending are the moments the answer can
+        change, and each calls this — so closing the last terminal ends an
+        auto-started daemon at once rather than up to a sweep later, and the
+        sidebar of the terminal *beside* it learns a turn is holding the process
+        while it is still running. The sweep keeps calling it, because a keep-alive
+        expires on a clock and not on an event.
+
+        The announcement comes first and runs even when the answer is "nothing",
+        because that frame is the one a front end most needs: it is what turns
+        `daemon exits on detach` into the sentence the person acts on.
+
+        **One sample, two uses.** The announcement and the exit read the same
+        `DaemonLifetime` rather than asking twice — which is what `holds()`
+        promises ("computed once, so the sidebar and the exit cannot disagree")
+        and what a second call would quietly have broken. It is the cheaper half
+        too: `holds()` reaches `booked()`, which touches the schedule index, and
+        this runs on every turn transition.
+        """
+        current = self.lifetime()
+        self._announce_lifetime(current)
+        if self.spent(holds=current.holds):
+            log.info("ph_app.daemon: nothing left to serve; stopping (auto-started)")
+            self.stop.set()
+
+    def _announce_lifetime(self, current: DaemonLifetime) -> None:
+        """Tell every connected client, when the answer has moved.
+
+        **On change**, because this runs on every turn transition and a daemon
+        with four terminals open would otherwise write four identical frames per
+        prompt — the fan-out `SessionEventNotice` is careful about, for a fact
+        that moves a hundred times less often.
+
+        To `connections` rather than to a root's subscribers: this is a fact
+        about the process, so the audience is everyone attached to it, including
+        a client watching some other session. That is the second question the
+        connection *set* exists to answer.
+        """
+        if current == self.announced:
+            return
+        self.announced = current
+        wire = current.to_wire()
+        for connection in list(self.connections):
+            try:
+                connection.notify(DaemonLifetime.METHOD, wire)
+            except Exception:
+                # A client that cannot keep up is the root's problem to drop, not
+                # the lifetime's: `notify` raises so the *subscriber* list sheds
+                # it, and this list is membership of the socket rather than of a
+                # feed. Losing one lifetime frame costs a stale sidebar line; the
+                # next change sends another.
+                log.debug("ph_app.daemon: a client did not take the lifetime frame")
+
     async def _handle(self, stream: ByteStream) -> None:
-        self.open_connections += 1
+        connection = _Connection(stream=stream, server=self)
+        self.connections.add(connection)
         try:
             async with stream:
-                await _Connection(stream=stream, server=self).serve()
+                await connection.serve()
         finally:
-            # In `finally`, because the count is a claim on the *process* now: a
-            # connection that ended by crashing and was never subtracted would
-            # keep an ephemeral daemon resident forever, and the symptom — a
-            # daemon that will not leave — points nowhere near here.
-            self.open_connections -= 1
+            # In `finally`, because membership is a claim on the *process*: a
+            # connection that ended by crashing and was never removed would keep
+            # an ephemeral daemon resident forever, and the symptom — a daemon
+            # that will not leave — points nowhere near here.
+            self.connections.discard(connection)
+            # **A knock is not a departure** — see `_Connection.spoke` — so it
+            # arms no window. The *check* is unconditional, because `spent()`
+            # now knows about the spawn window itself: a knock that outlived the
+            # last real client used to leave the exit to the sweep, and asking
+            # here is both correct and immediate.
+            if connection.spoke and not self.connections and self.keep_alive > 0:
+                self.keep_alive_until = now_ms() + int(self.keep_alive * 1000)
+            self.check_lifetime()
 
 
 async def _every(
@@ -1361,6 +1605,7 @@ async def serve(
     passivate_after: float | None = PASSIVATE_AFTER,
     wake_within: float | None = WAKE_WITHIN,
     ephemeral: bool = False,
+    keep_alive: float = 0.0,
     sweep_every: float = SWEEP_EVERY,
     tick_every: float = TICK_EVERY,
     heartbeat_every: float = HEARTBEAT_EVERY,
@@ -1416,12 +1661,18 @@ async def serve(
                 watch_every=watch_every,
                 invariants_every=invariants_every,
                 ephemeral=ephemeral,
+                keep_alive=keep_alive,
                 # Taken here, immediately after the bind and before anything can
                 # have replaced it — the one moment at which "the socket at this
                 # path" and "the socket this daemon is listening on" are the
                 # same file by construction rather than by assumption (P5-11).
                 identity=socket_identity(socket_path),
             )
+            # Wired after the build rather than passed into it, because the two
+            # hold each other: the server needs the supervisor to ask what is
+            # running, and the supervisor needs the server to say that the
+            # answer moved. See `Supervisor.moved`.
+            supervisor.recheck_lifetime = server.check_lifetime
             # Four cadences, four tasks, one primitive: a cadence riding another's
             # counter advances only when that one *succeeds*, so a run of failing
             # ticks would starve an unrelated record.

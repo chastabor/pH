@@ -20,6 +20,7 @@ __all__ = [
     "block_marker",
     "brief_value",
     "count_of",
+    "duration",
     "thousands",
     "truncation_marker",
 ]
@@ -90,6 +91,34 @@ def count_of(count: int, noun: str, plural: str = "") -> str:
     if count == 1:
         return f"{count} {noun}"
     return f"{count} {plural or f'{noun}s'}"
+
+
+def duration(milliseconds: float) -> str:
+    """`3d 4h`, `1h 30m`, `12m`, `8s` — the two largest units that are not zero.
+
+    Zeros are dropped rather than kept for shape: a sweep every sixty seconds
+    reads as `1m`, not `1m 0s`, and an hour and a half of quiet is `1h 30m`
+    whether or not the seconds happen to be round.
+
+    **A number, not an `object`.** It carried an `isinstance` guard and a `—` for
+    "that was not a number", written when its callers were reading loose wire
+    dictionaries; every one of them now reads a typed field, so the guard was a
+    runtime check standing where a signature does the same work earlier and for
+    free. A caller who really does hold an `object` has somewhere better to
+    decide what it is than inside a formatter.
+
+    Here rather than in `ph_app.agents`, where it was written, because the
+    sidebar renders the same kind of thing (P9-07) and a second copy of a
+    duration format is two sentences for one fact — which is the argument
+    `truncation_marker` above makes for itself.
+    """
+    seconds = int(milliseconds // 1000)
+    parts: list[str] = []
+    for name, size in (("d", 86400), ("h", 3600), ("m", 60), ("s", 1)):
+        count, seconds = divmod(seconds, size)
+        if count:
+            parts.append(f"{count}{name}")
+    return " ".join(parts[:2]) or "0s"
 
 
 def thousands(count: int) -> str:

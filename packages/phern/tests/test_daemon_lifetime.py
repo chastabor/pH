@@ -1,4 +1,4 @@
-"""P7-08 — an auto-started daemon leaves; a service daemon stays.
+"""P7-08 and P9-06 — an auto-started daemon leaves; a service daemon stays.
 
 **The lifetime is decided by who started it, and nothing else.** `phern daemon`
 typed at a prompt is a service: somebody chose to run a supervisor, and one that
@@ -7,18 +7,20 @@ UI spawned because the socket was absent was nobody's decision, and a process
 left resident after the thing that started it closed is the kind of accretion
 nobody attributes to the right cause a week later.
 
-Nothing here is a new mechanism, which is the reason it is a predicate on an
-existing cadence rather than a fourth timer. P5-05's sweep already asks "is
-anything still using this root"; `spent()` asks the same question one level up,
-about the process. What is new is only the *four claimants* — a connection, a
-root, an appointment, and the person who typed the command — and that each of
-them can keep a daemon up alone.
+Nothing here is a new mechanism, which is the reason it is a predicate rather
+than a fourth timer. P5-05's sweep already asks "is anything still using this
+root"; `holds()` asks the same question one level up, about the process. What is
+new is only the *claimants* — a connection, a turn in flight, an appointment, a
+keep-alive somebody asked for, and the person who typed the command — and that each
+of them can keep a daemon up alone.
 
-The exit deliberately has a **window of its own** rather than waiting for the
-passivation sweep to empty `roots`, and that is asserted too: coupling them would
-make `--passivate-after off` pin an ephemeral daemon forever and
-`--passivate-after 90` hold it for ninety minutes, neither of which is what
-either flag says.
+P9-06 moved the exit off the cadence and onto the transitions. Closing the last
+terminal ends an auto-started daemon *then*, not up to a sweep later, so the
+gates come in two halves: what `holds()` says, and when `check_lifetime()` acts
+on it. The exit no longer has a quiet window of its own either — it asks what is
+happening now, where the sweep asks how long a root has been quiet — and the
+fifth claimant, a `--keep-alive` the client asked for, is the only one that ends on
+a clock rather than on an event.
 """
 
 from __future__ import annotations
@@ -33,9 +35,9 @@ from daemon_helpers import running, until
 from ph.keys import APPROVAL
 from ph.paths import resolve_roots
 from ph.seams.schedule_index import ScheduleIndex
-from ph.session import now_ms
-from ph.testing import StubAgent
-from ph_app.daemon.recovery import EPHEMERAL_QUIET, PASSIVATE_AFTER
+from ph.session import SurfaceIntent, now_ms
+from ph.testing import StubAgent, user_payload
+from ph_app.daemon.launch import SPAWN_TIMEOUT
 
 pytestmark = pytest.mark.anyio
 
@@ -51,20 +53,34 @@ def _appointment(session_id: str = "later", *, at: int = 4_000_000_000_000) -> N
     ScheduleIndex(resolve_roots().home).record(session_id, next_at=at, now=at)
 
 
-# --------------------------------------------------------------- the window --
+# -------------------------------------------- what the exit does not wait for --
 
 
-def test_the_two_windows_differ_by_intent_not_by_tuning() -> None:
-    """Ninety minutes against one, and the interaction that decides the design.
+async def test_the_exit_no_longer_waits_on_the_root_quiet_window(tmp_path: Path) -> None:
+    """A root that was busy a second ago does not hold the process for a minute.
 
-    Asserted as a relation rather than as two numbers, because what matters is
-    that the ephemeral window is *far* shorter: left at `PASSIVATE_AFTER`, an
-    ephemeral daemon could not reach an empty `roots` — and so could not satisfy
-    its own exit predicate — until ninety minutes after the last turn, which
-    would make "ephemeral" a word with no behavior behind it for an hour and a
-    half.
+    The exit used to ask P5-05's `passivatable` whole, and so inherited a
+    sixty-second window measured from the log's last event. That window is right
+    for releasing a *root* — somebody who stepped away comes back to a mounted
+    profile rather than to a rehydrate — and wrong for a process nobody is
+    connected to: it put a minute between closing the last terminal and the
+    daemon leaving, with nothing a person could see to account for it.
+
+    So the two halves ask different questions now, which is why `EPHEMERAL_QUIET`
+    is gone rather than retuned: a second quiet window would have been a second
+    answer to when a root is finished.
+
+    Sabotage: put a quiet term back into `spent` — `passivatable(root, now=...,
+    after=60.0)` — and this fails on a log written a moment ago.
     """
-    assert EPHEMERAL_QUIET < PASSIVATE_AFTER / 10
+    async with running(tmp_path, ephemeral=True, passivate_after=None) as daemon:
+        daemon.aged()
+        root = await daemon.running.supervisor.start("just-finished")
+        root.session.append("user/message", user_payload("the last thing"), SurfaceIntent("append"))
+        assert root.idle_for(now_ms()) < 1_000, "the log was written just now"
+
+        assert daemon.running.spent(), "idle is idle, however recently"
+        assert not daemon.running.holds(), "and nothing else wants it either"
 
 
 async def test_the_exit_does_not_wait_on_the_passivation_window(tmp_path: Path) -> None:
@@ -118,32 +134,45 @@ async def test_a_connected_client_keeps_an_ephemeral_daemon_up(tmp_path: Path) -
     Sabotage: count attached roots instead of open connections.
     """
     async with running(tmp_path, ephemeral=True) as daemon:
+        daemon.aged()
         assert daemon.running.spent(), "nothing has connected yet"
 
-        await daemon.client()
-        await until(lambda: bool(daemon.running.open_connections), what="the connection to count")
+        await daemon.client("asks")
+        await until(lambda: bool(daemon.running.connections), what="the connection to register")
 
         assert not daemon.running.spent(), "a client is on the socket"
+        assert daemon.running.holds() == ["client"]
 
 
-async def test_a_root_somebody_is_watching_keeps_an_ephemeral_daemon_up(
+async def test_a_running_turn_holds_an_ephemeral_daemon_past_the_last_detach(
     tmp_path: Path,
 ) -> None:
-    """A subscriber is its own claim, which is P5-05's rule and not a new one.
+    """The one claim a connection cannot make, because the work outlives it.
 
-    Condition 3 is `passivatable`, so every reason a root is still wanted is
-    already written down once — a watcher, a live child, an appointment of its
-    own, a turn in flight. This exercises the reuse through the case a client
-    creates: attach, and the root you are watching cannot be swept out from under
-    you, so the daemon behind it stays too.
+    `phern -p` prompts and detaches; a daemon that left with the last connection
+    would take the turn with it, halfway through a tool call, leaving a log that
+    shows a prompt and no answer.
+
+    **A watcher is no longer a claimant of its own**, and that is a deletion
+    rather than an oversight: a subscription is registered by a connection and
+    dropped in that connection's own teardown — before `_handle`'s `finally`
+    asks — so "somebody is watching" cannot outlive "somebody is connected", and
+    keeping both would be one fact with two answers. What `busy` adds over the
+    connection is the opposite case: work with nobody watching it.
+
+    Sabotage: drop the `task` term from `holds`, and a detached prompt is stopped
+    mid-turn by the disconnect that started it.
     """
     async with running(tmp_path, ephemeral=True) as daemon:
-        root = await daemon.running.supervisor.start("watched")
-        client = await daemon.client()
-        await client.call("session/attach", sessionId=root.id)
-        await until(lambda: bool(root.subscribers), what="the attach to land")
+        await daemon.busy_root("working")
 
-        assert not daemon.running.spent()
+        client = await daemon.client("asks")
+        await until(lambda: bool(daemon.running.connections), what="the connection to register")
+        await client.aclose()
+        await until(lambda: not daemon.running.connections, what="the disconnect to land")
+
+        assert daemon.running.holds() == ["task"], "nobody is here; something is running"
+        assert not daemon.running.stop.is_set()
 
 
 async def test_an_appointment_keeps_an_ephemeral_daemon_up(tmp_path: Path) -> None:
@@ -157,11 +186,46 @@ async def test_an_appointment_keeps_an_ephemeral_daemon_up(tmp_path: Path) -> No
     Sabotage: drop condition 4, and this passes as spent.
     """
     async with running(tmp_path, ephemeral=True) as daemon:
+        daemon.aged()
         assert daemon.running.spent(), "nothing on the books yet"
 
         _appointment()
 
         assert not daemon.running.spent(), "somebody has an appointment with this daemon"
+        assert daemon.running.holds() == ["schedule"], "and it can say which claim that is"
+
+
+async def test_a_keep_alive_holds_it_for_exactly_as_long_as_it_says(tmp_path: Path) -> None:
+    """Armed on the last disconnect, cleared on the next connect, and it expires.
+
+    The window is "since you left", which is the only reading under which
+    `--keep-alive 30s` means what the person typing it means: a daemon that started
+    the window at boot would be gone before the second terminal opened, and one
+    that never cleared it would re-arm a window it was already inside.
+
+    Asserted against the deadline rather than by sleeping thirty seconds —
+    `holds` takes a `now` for the reason `passivatable` does.
+
+    Sabotage: arm it at start rather than on the last disconnect.
+    """
+    async with running(tmp_path, ephemeral=True, keep_alive=30.0) as daemon:
+        assert daemon.running.keep_alive_until is None, "nobody has left yet"
+
+        first = await daemon.client("asks")
+        await until(lambda: bool(daemon.running.connections), what="the connection to register")
+        await first.aclose()
+        await until(lambda: not daemon.running.connections, what="the disconnect to land")
+
+        armed = daemon.running.keep_alive_until
+        assert armed is not None, "the last one out arms it"
+        assert daemon.running.holds(now=armed - 1) == ["keep-alive"]
+        assert not daemon.running.holds(now=armed), "the deadline is the end of the window"
+        assert not daemon.running.stop.is_set(), "and it was still open when they left"
+
+        await daemon.client("asks")
+        await until(lambda: bool(daemon.running.connections), what="the second client to arrive")
+
+        assert daemon.running.keep_alive_until is None, "a window is for a daemon nobody is using"
 
 
 # ----------------------------------------------------------------- the exit --
@@ -180,6 +244,7 @@ async def test_the_sweep_that_finds_nothing_left_ends_the_daemon(tmp_path: Path)
     until somebody kills it.
     """
     async with running(tmp_path, ephemeral=True, passivate_after=0.0) as daemon:
+        daemon.aged()
         root = await daemon.running.supervisor.start("done")
         # Nobody watching: a subscriber is its own claim on a root's life, and
         # `start` leaves none.
@@ -217,6 +282,7 @@ async def test_a_root_parked_on_a_person_does_not_keep_an_ephemeral_daemon_alive
     stopping loses it. The log keeps the question.
     """
     async with running(tmp_path, ephemeral=True, passivate_after=0.0) as daemon:
+        daemon.aged()
         root = await daemon.running.supervisor.start("parked")
         outcome: list[Any] = []
 
@@ -251,6 +317,7 @@ async def test_the_socket_is_gone_once_an_ephemeral_daemon_has_left(tmp_path: Pa
     that left its socket behind would make every ordinary exit look like a crash.
     """
     async with running(tmp_path, ephemeral=True, passivate_after=0.0) as daemon:
+        daemon.aged()
         path = daemon.path
         await daemon.running.supervisor.start("done")
 
@@ -281,3 +348,199 @@ async def test_a_session_created_and_never_used_does_not_pin_the_daemon(
 
         assert root.idle_for(now_ms() + 3_600_000) >= 3_600_000
         assert daemon.running.spent(now=now_ms() + 3_600_000)
+
+
+async def test_an_auto_started_daemon_exits_when_the_last_connection_closes(
+    tmp_path: Path,
+) -> None:
+    """At once, which is the row's whole point, and not one sweep later.
+
+    The exit rode the passivation sweep alone, so closing the last terminal left
+    a daemon resident for the rest of a `SWEEP_EVERY` window with nothing to do —
+    the gap a person reads as "it did not work". A connection closing is an
+    *event*, and the object that owns the lifetime is the one that sees it.
+
+    Two clients, so the assertion is about the **last** one: a daemon that left
+    when any connection closed would take down the terminal beside it. The sweep
+    is pushed out to ten minutes rather than turned off, because a cadence that
+    could still cover for the missing call would make this gate prove nothing.
+
+    Sabotage: leave the check on the sweep alone, and this hangs for ten minutes.
+    """
+    async with running(tmp_path, ephemeral=True, passivate_after=None, sweep_every=600.0) as daemon:
+        first = await daemon.client("asks")
+        second = await daemon.client("asks")
+        await until(lambda: len(daemon.running.connections) == 2, what="both clients to register")
+
+        await first.aclose()
+        await until(lambda: len(daemon.running.connections) == 1, what="the first client to go")
+        assert not daemon.running.stop.is_set(), "somebody is still on the socket"
+
+        await second.aclose()
+        await until(lambda: daemon.running.stop.is_set(), what="the daemon to stop")
+
+
+async def test_a_knock_on_the_socket_does_not_end_the_daemon_it_was_checking_for(
+    tmp_path: Path,
+) -> None:
+    """The window between the spawn and the UI's first connect, closed.
+
+    `launch.listening()` is a connect and an immediate close — the only test that
+    tells "a socket file exists" from "a daemon is behind it", and every spawn
+    runs it in a poll until the door opens. Reading that close as "the last
+    client left" stopped the daemon the poll had just declared ready, so the UI
+    that started it connected to nothing: `test_daemon_launch.py` saw it as three
+    `DaemonGone`s, which points nowhere near this line.
+
+    `listening`'s own two steps, paused between them: a connect and a close, with
+    a wait in the middle so the daemon is *observed* accepting and dropping it.
+    Calling `listening` straight through cannot be asserted on — it returns
+    before the accept loop has built the connection, so a poll for "the knock is
+    over" can be satisfied by a knock that has not happened yet, and the gate
+    passes under its own sabotage.
+
+    Note what this daemon deliberately is *not*: `aged()`. The window is the
+    subject, so the gate sits on the launcher's side of it.
+
+    Sabotage: drop the `served` term from `spent`, and a UI can no longer start a
+    daemon at all.
+    """
+    async with running(tmp_path, ephemeral=True, passivate_after=None) as daemon:
+        knock = await anyio.connect_unix(str(daemon.path))
+        await until(lambda: bool(daemon.running.connections), what="the knock to be accepted")
+
+        await knock.aclose()
+        await until(lambda: not daemon.running.connections, what="the knock to end")
+
+        assert not daemon.running.stop.is_set(), "nobody has been served yet"
+
+
+async def test_an_explicitly_started_daemon_still_never_exits(tmp_path: Path) -> None:
+    """The same transition, the same empty daemon, the opposite outcome.
+
+    `check_lifetime` runs on the connection path now, and that is a path a
+    *service* daemon takes too — `phern agents doctor` connects, asks, prints and
+    leaves. So the flag has to be read there as well; a check that only asked
+    "is anything connected" would end `phern daemon` on the first such call.
+    """
+    async with running(tmp_path, passivate_after=None) as daemon:
+        client = await daemon.client("asks")
+        await until(lambda: bool(daemon.running.connections), what="the connection to register")
+
+        await client.aclose()
+        await until(lambda: not daemon.running.connections, what="the disconnect to land")
+
+        assert not daemon.running.stop.is_set(), "somebody chose to run this"
+
+
+async def test_the_keep_alive_expires_without_a_client_to_notice(tmp_path: Path) -> None:
+    """The backstop, and the reason the sweep still asks after P9-06.
+
+    Every other hold ends on an event — a connection closes, a turn ends, a
+    schedule is canceled — and `check_lifetime` runs on each. A keep-alive ends on a
+    *clock*, with nobody left in the process to notice, so without the sweep's
+    call an ephemeral daemon with `--keep-alive` would outlive its own window and sit
+    there until something unrelated happened to it.
+
+    Driven with no connection at all and the deadline already behind us, because
+    the subject is the pass rather than the wait.
+
+    Sabotage: drop `check_lifetime()` from `sweep`, and this hangs.
+    """
+    async with running(tmp_path, ephemeral=True, keep_alive=30.0, passivate_after=None) as daemon:
+        daemon.aged()
+        daemon.running.keep_alive_until = now_ms() - 1
+        assert not daemon.running.holds(), "the window is behind us"
+
+        await daemon.running.sweep()
+
+        assert daemon.running.stop.is_set(), "the pass that noticed is the one that ends it"
+
+
+async def test_a_daemon_nobody_spoke_to_gives_up_when_its_launcher_would_have(
+    tmp_path: Path,
+) -> None:
+    """The far edge of the spawn window, which is what keeps it from being a pin.
+
+    `served` protects a daemon from leaving before the UI that spawned it can
+    find it. Latched, that protection would be permanent: a UI that crashed
+    between the spawn and its first frame would leave a supervisor resident for
+    good, which is the accretion this whole row exists to prevent — the failure
+    arriving from the other side.
+
+    `SPAWN_TIMEOUT` bounds it, and is the launcher's own number rather than a
+    second one beside it: past that point `_await_socket` has already given up,
+    so there is nobody left to protect.
+
+    Sabotage: make `served` the only term, and this hangs — forever, on a real
+    machine.
+    """
+    async with running(tmp_path, ephemeral=True, passivate_after=None) as daemon:
+        assert not daemon.running.served, "the case under test: nobody has spoken"
+        assert not daemon.running.spent(), "the launcher may still be on its way"
+        assert not daemon.running.holds(), "and nothing is claiming it, either"
+
+        assert daemon.running.spent(now=now_ms() + int(SPAWN_TIMEOUT * 1000)), (
+            "past the point the launcher waits, there is nobody to wait for"
+        )
+
+
+async def test_a_knock_outliving_the_last_client_does_not_strand_the_daemon(
+    tmp_path: Path,
+) -> None:
+    """The hole the per-connection guard left, closed by moving it to the process.
+
+    A probe open while the last real client leaves *holds* the daemon — it is a
+    connection, and `holds` counts connections, which is the conservative
+    direction. Then it closes without ever having spoken, and while the exit was
+    guarded per-connection that close asked nothing: the daemon sat there until
+    something unrelated happened to it, up to a whole `sweep_every` later.
+
+    Now the check on every teardown is unconditional, because `spent()` knows
+    about the spawn window itself — and this daemon has been served, so there is
+    no window left to protect.
+
+    Sabotage: guard the teardown's `check_lifetime()` on `connection.spoke`
+    again, and this waits for a sweep that is ten minutes out.
+    """
+    async with running(tmp_path, ephemeral=True, passivate_after=None, sweep_every=600.0) as daemon:
+        client = await daemon.client("asks")
+        await until(lambda: daemon.running.served, what="the client's first frame")
+
+        knock = await anyio.connect_unix(str(daemon.path))
+        await until(lambda: len(daemon.running.connections) == 2, what="the knock to be accepted")
+
+        await client.aclose()
+        await until(lambda: len(daemon.running.connections) == 1, what="the client to go")
+        assert not daemon.running.stop.is_set(), "a connection is a connection"
+
+        await knock.aclose()
+        await until(lambda: daemon.running.stop.is_set(), what="the daemon to stop")
+
+
+async def test_a_turn_finishing_with_nobody_watching_ends_the_daemon(tmp_path: Path) -> None:
+    """The transition nothing on the socket can see, and the one it exists for.
+
+    A detached `phern -p` prompts and hangs up: the daemon it spawned has no
+    connection, no watcher and no appointment, and the only thing holding it is
+    the turn. Nothing arrives on the socket when that turn ends — the client is
+    long gone — so the *agent's* status change is the event, which is why
+    `Supervisor.recheck_lifetime` is registered as a listener of its own rather
+    than living inside `announce`, whose whole body is guarded on there being
+    watchers to announce to.
+
+    `sweep_every` is pushed out to ten minutes so the cadence cannot cover for
+    the missing registration: what ends this daemon has to be the turn.
+
+    Sabotage: drop `ctx.on("agent/status", lifetime)`, or fold it back inside
+    `announce`'s `subscribers` guard, and a one-shot run leaves a supervisor
+    behind every time.
+    """
+    async with running(tmp_path, ephemeral=True, passivate_after=None, sweep_every=600.0) as daemon:
+        daemon.aged()
+        root = await daemon.running.supervisor.start("detached")
+        assert not root.subscribers, "the case under test: nobody is listening"
+
+        await daemon.running.supervisor.prompt("detached", "do the thing")
+
+        await until(lambda: daemon.running.stop.is_set(), what="the finished turn to end it")

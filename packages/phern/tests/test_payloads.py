@@ -28,6 +28,7 @@ from ph_app.payloads import (
     ApprovalAsk,
     ApprovalAskReply,
     AttachReply,
+    DaemonLifetime,
     MutationRepeated,
     QuestionAsk,
     RootDescription,
@@ -155,6 +156,28 @@ def test_every_notice_is_reachable_by_its_method() -> None:
     a tautology wearing a check's clothes.
     """
     assert set(NOTICES.values()) == {one for one in _notice_classes() if one.METHOD}
+
+
+def test_a_process_level_frame_cannot_be_dispatched_as_a_session_one() -> None:
+    """The exclusion is the **type**, which is the whole reason it is one.
+
+    `daemon.lifetime` is about the process every attached session shares, so it
+    carries no `sessionId` and every reader answers it above the ownership
+    filter. A payload that slipped into `NOTICES` would be dispatched below that
+    filter instead and dropped for belonging to nobody — silently, since an
+    unknown notice is a feature a client does not have rather than an error.
+
+    `Mapping[str, type[SessionNotice]]` structurally cannot hold a
+    `DaemonNotice`, so that cannot happen by an author forgetting: the same
+    argument `SessionAsk` makes for being a sibling rather than a subclass.
+
+    Sabotage: make `DaemonLifetime` a `SessionNotice`, and the enumeration in
+    `test_every_notice_is_reachable_by_its_method` starts demanding a table
+    entry for a frame that must never have one.
+    """
+    assert not issubclass(DaemonLifetime, SessionNotice), "a lifetime has no session"
+    assert DaemonLifetime.METHOD and DaemonLifetime.METHOD not in NOTICES
+    assert "session_id" not in DaemonLifetime.model_fields
 
 
 def test_an_ask_cannot_be_registered_as_a_notice() -> None:

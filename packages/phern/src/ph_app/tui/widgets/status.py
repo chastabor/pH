@@ -22,8 +22,9 @@ from textual.widgets import Static
 from ph.json import as_str
 from ph.seams.subagents import child_is_live
 from ph.seams.tui_status import StatusReading
-from ph.text import thousands
+from ph.text import duration, thousands
 
+from ...payloads import DaemonLifetime
 from ..state import CatalogEntry, TuiState
 
 __all__ = [
@@ -31,6 +32,7 @@ __all__ = [
     "Sidebar",
     "StatusBar",
     "children_heading",
+    "daemon_line",
     "render_subagents",
     "shorten_path",
 ]
@@ -253,6 +255,7 @@ class Sidebar(Vertical):
                 f"id      {session_id}",
                 placed or "sandbox -",
                 f"cwd     {shorten_path(cwd)}",
+                *daemon_line(state.lifetime),
             ]
         )
         todos = "\n".join(_todo_line(todo) for todo in state.todos) or "—"
@@ -361,6 +364,45 @@ panel is the plan a person watches all session. It is a *signal*, not a verdict:
 "decide the approach" is a real step with no tool calls, and the point is that a
 tick with work behind it and a tick without now look different.
 """
+
+
+def daemon_line(lifetime: DaemonLifetime | None) -> list[str]:
+    """The `daemon` fact, or no line at all — P9-04's question, answered here.
+
+    **The question is "if I close this window, what happens".** A person running
+    a front end a daemon was spawned for has no other way to know whether the
+    supervisor behind it stays, and the answer is not one a client can derive:
+    the lifetime was decided by whoever started the process.
+
+    So three sentences, in the order the answer narrows:
+
+    * `service` — somebody ran `phern daemon`; closing this changes nothing.
+    * `held · task` — it is ephemeral, but a turn is in flight or a schedule is
+      on the books, so it outlives this window and keeps going.
+    * `held · client` — somebody else's terminal is on it too.
+    * `exits on detach`, or `exits 5m after detach` — nothing but this client
+      wants it.
+
+    **`client` is filtered by the count, not by assumption.** It is in `holds`
+    whenever *anybody* is connected, and this window is one of them, so printing
+    it unconditionally would spend a row of a 32-column panel telling a person
+    they have a window open. Dropping it unconditionally would be worse: with
+    two terminals open, both would read `exits on detach` and both would be
+    wrong. `clients` is on the frame so the reader can tell those apart.
+
+    An empty list rather than an empty string, so a front end with no daemon
+    draws no row instead of a blank one: `"this process exits when you close it"`
+    is not news about a process the person is looking at.
+    """
+    if lifetime is None:
+        return []
+    if lifetime.mode != "ephemeral":
+        return [f"daemon  {lifetime.mode}"]
+    others = [one for one in lifetime.holds if one != "client" or lifetime.clients > 1]
+    if others:
+        return [f"daemon  held · {' · '.join(others)}"]
+    after = f" {duration(lifetime.keep_alive_ms)} after" if lifetime.keep_alive_ms else " on"
+    return [f"daemon  exits{after} detach"]
 
 
 def _todo_line(todo: dict[str, Any]) -> str:

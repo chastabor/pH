@@ -38,7 +38,7 @@ shape is the tool registry's. Both are handed on to something that knows them.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Literal, TypeAlias
 
 from pydantic import Field
 
@@ -68,9 +68,13 @@ __all__ = [
     "CredentialStored",
     "CredentialsHeldReply",
     "DaemonConfigReply",
+    "DaemonLifetime",
+    "DaemonMode",
+    "DaemonNotice",
     "DaemonStatusReply",
     "DiagnosticRow",
     "DiagnosticSection",
+    "Hold",
     "MutationRepeated",
     "PresetApplied",
     "QuestionAsk",
@@ -673,6 +677,101 @@ def notice_of(method: str, params: dict[str, Any]) -> SessionNotice | None:
     """
     model = NOTICES.get(method)
     return None if model is None else model.model_validate(params)
+
+
+# -------------------------------------------------- the daemon's own frames --
+
+
+class DaemonNotice(WireModel):
+    """A frame about the *process*, not about a root.
+
+    Its own family because `SessionScoped` carries a `sessionId` and every
+    reader gates on it before parsing — correct for a client watching one root
+    among several, and exactly wrong for a fact about the daemon they all share.
+    A lifetime notice given a `sessionId` would have to invent one, and a reader
+    would drop it for belonging to somebody else.
+
+    `METHOD` is declared on the payload for the reason `SessionScoped` states:
+    the name and the model were two values that had to agree.
+
+    **A type, not a table.** `NOTICES` exists because two readers were spelling
+    `if method == X.METHOD: X.model_validate(...)` for six names apiece; one
+    reader and one name do not earn a second mapping, and its only consumer
+    narrowed straight back to the concrete type it had just looked up. What the
+    base *does* earn is the exclusion: `Mapping[str, type[SessionNotice]]`
+    structurally cannot hold one of these, so a process-level frame can never be
+    dispatched behind the `sessionId` filter by an author's oversight — which is
+    the argument `SessionAsk` makes for being a sibling rather than a subclass.
+    A second member is the moment to write the table.
+    """
+
+    METHOD: ClassVar[str] = ""
+
+
+DaemonMode: TypeAlias = Literal["service", "ephemeral"]
+"""Who decided this daemon's life: a person who typed `phern daemon`, or a UI
+that spawned one because the socket was absent (P7-08).
+
+A `Literal` rather than a `str`, for `TrustAnswer`'s reason: it is a closed set
+the *daemon* writes, so the type is what stops a typo reaching a client that
+would render it verbatim. The cost is that a front end older than a third mode
+refuses the frame rather than ignoring it, which is the skew `PROTOCOL_VERSION`
+documents and `phern agents shutdown` fixes."""
+
+Hold: TypeAlias = Literal["client", "task", "schedule", "keep-alive"]
+"""One reason a daemon is still running — `DaemonServer.holds`' vocabulary.
+
+Closed, and typed as such, because both ends spend it: the server appends these
+names and the sidebar renders them into a sentence a person acts on, so a fifth
+reason spelled at one end and not the other is a row that reads `held ·` and
+nothing else. A `str` would have made that a runtime surprise in a terminal
+rather than an error where it was written."""
+
+
+class DaemonLifetime(DaemonNotice):
+    """`daemon/lifetime`, and `daemon.lifetime` — why this daemon is still here.
+
+    One model through two doors, like `CapabilityBlock`: a client reads it once
+    at attach, because one that connected mid-turn would otherwise draw nothing
+    until something moved, and then receives it again whenever the answer
+    changes.
+
+    **No `exits_at`.** The plan carried one, for a sidebar countdown, and it
+    cannot be honest: the keep-alive is armed when the last connection closes and
+    cleared by the first frame of the next one, so a client is by construction
+    never connected while a deadline is running. A field whose only value on the
+    wire is `null` is a knob wired to nothing, and a countdown drawn from a
+    deadline that this client's own arrival has already canceled is worse than
+    none. `keep_alive_ms` is what a connected client can say truthfully: not "it
+    leaves at 9:41" but "it leaves five minutes after you do".
+    """
+
+    METHOD: ClassVar[str] = "daemon.lifetime"
+    mode: DaemonMode
+    """`"ephemeral"` — a daemon a front end spawned, which leaves when nothing
+    needs it — or `"service"`, which somebody chose to run and which stays."""
+
+    holds: list[Hold] = Field(default_factory=list)
+    """Why it is still up, in `DaemonServer.holds`' own order. Empty on a service
+    daemon is the ordinary answer and not a contradiction — `mode` is what says
+    it stays anyway."""
+
+    clients: int = 0
+    """How many front ends are connected right now, this one included.
+
+    On the wire because the reader cannot derive it and needs it: `holds` says
+    `client` whenever *anybody* is connected, so a sidebar that subtracted its
+    own connection would promise `exits on detach` to two terminals at once and
+    be wrong for whichever closed first. A count is the smallest fact that makes
+    the subtraction honest, and it costs the server nothing — `holds` already
+    reads the same set."""
+
+    keep_alive_ms: int = 0
+    """How long it stays after the last client leaves, or `0` for "at once".
+
+    What the person typed as `--keep-alive 5m`, in the unit the wire uses
+    everywhere else. Zero is also what a service daemon reports, where it means
+    nothing at all — `mode` is the field that carries that."""
 
 
 # -------------------------------------------------------------------- asks --

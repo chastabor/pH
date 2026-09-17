@@ -25,7 +25,7 @@ from __future__ import annotations
 import json
 import shlex
 import sys
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from functools import partial
 from pathlib import Path
 from typing import Annotated, Any, Literal, TypeAlias
@@ -146,6 +146,13 @@ def default(
     resume: Annotated[
         str | None, typer.Option("--resume", help="Session id to reopen (tui and web).")
     ] = None,
+    keep_alive: Annotated[
+        str | None,
+        typer.Option(
+            "--keep-alive",
+            help='Keep a daemon this UI starts up for this long after it detaches ("5m").',
+        ),
+    ] = None,
     new: Annotated[
         bool,
         typer.Option(
@@ -231,6 +238,7 @@ def default(
                     model=model,
                     patch=patch,
                     keep=keep_daemon,
+                    keep_alive=_spawned_keep_alive(keep_alive, keep=keep_daemon),
                 ),
                 session_id=wanted,
                 spawn=not no_spawn,
@@ -460,24 +468,124 @@ always passes its own value.
 """
 
 
-def _passivation(value: str) -> float | None:
-    """`"off"` or a number of minutes, as seconds (P5-05).
+def _spawned_keep_alive(value: str | None, *, keep: bool) -> str:
+    """The `--keep-alive` a spawned daemon is given, in seconds, refused here on a typo.
 
-    Refused rather than defaulted when it is neither: a typo in a duration is a
-    deployment that silently keeps every root it ever started, and the daemon is
-    the one process where that goes unnoticed for a week.
+    **Parsed at this end, not forwarded as typed.** `phern --keep-alive` does not run
+    a daemon, it composes the argv for one — so a string handed straight through
+    would be refused by a process whose output goes to the null device, and the
+    person would see a UI that could not reach a daemon and no reason why. Same
+    parser, same message, whichever end they typed it at; what crosses is a bare
+    number of seconds, which `keep_alive_seconds` reads back unambiguously.
+
+    CLI first, then `tui.json`, then zero: a person who sets it once should not
+    have to type it, and a person who typed it means this run. The file is read
+    only when they did not, which is also why it is not hoisted — settings are
+    deliberately re-read for each `PHTuiApp`, so that a `/theme` written during
+    a session is picked up when the picker reopens one.
+
+    **`--keep-daemon` and a typed `--keep-alive` are refused together**, because
+    they ask for opposite things: one says the daemon stays, the other says how
+    long it waits before going. A warning would have been the wrong answer to a
+    person who has said two things and meant one of them. A *configured*
+    keep-alive is not a contradiction — nobody typed it for this run — so
+    `--keep-daemon` simply overrides it, and a service daemon has no window.
+
+    `ph_app.tui.config` is imported inside the function for `run_tui`'s reason:
+    it is a front-end module and `phern -p` should not load one to print an
+    answer.
+    """
+    if keep:
+        if value is not None and keep_alive_seconds(value) > 0:
+            raise typer.BadParameter(
+                "--keep-alive and --keep-daemon ask for opposite things: one says when "
+                "the daemon leaves, the other says it stays"
+            )
+        return "0"
+    if value is None:
+        from .tui.config import load_tui_settings
+
+        value = load_tui_settings(resolve_roots().home).daemon_keep_alive
+    return f"{keep_alive_seconds(value):g}"
+
+
+UNITS: Mapping[str, float] = {"s": 1.0, "m": 60.0, "h": 3600.0}
+"""The suffixes a duration option accepts, as seconds each."""
+
+
+def _duration_seconds(value: str, *, unit: float) -> float:
+    """A duration a person typed, as seconds. Negative for "not one".
+
+    One parser for `--keep-alive` and `--passivate-after`, which are the same
+    question asked twice and were two parsers with two refusal shapes. `unit` is
+    what a *bare* number means — seconds for a keep-alive, minutes for a passivation
+    window, which is what each flag's own history established — and a suffix
+    overrides it, so `--passivate-after 30s` now means what it reads like
+    instead of half an hour.
+
+    Negative rather than raising, because the two callers refuse differently:
+    one of them has an `"off"` spelling to check first, and a parser that raised
+    would have to know about it.
+    """
+    text = value.strip().lower()
+    if not text:
+        return -1.0
+    scale = UNITS.get(text[-1])
+    number = text[:-1] if scale is not None else text
+    try:
+        seconds = float(number) * (scale if scale is not None else unit)
+    except ValueError:
+        return -1.0
+    return seconds if seconds >= 0 else -1.0
+
+
+def keep_alive_seconds(value: str) -> float:
+    """`"30s"`, `"5m"`, `"1h"` or a bare number of seconds, as seconds.
+
+    Refused rather than defaulted on a typo, for `_passivation`'s reason: a
+    mistyped duration here is a daemon that leaves immediately or never, and
+    either is a surprise a person attributes to something else a week later.
+
+    **Public, because both ends of the flag have to agree.** `phern daemon
+    --keep-alive` parses it here, and `phern --keep-alive` — which does not run the
+    daemon, it *spawns* one — parses it here too rather than forwarding the
+    string into an argv where a typo would surface as a daemon that refused to
+    start and a UI that said nothing. Same refusal, same message, at whichever
+    end the person typed it.
+
+    **A duration and nothing else.** Whether the daemon is ephemeral is the
+    caller's question, not this one's: `phern daemon` and `phern` express that
+    in opposite directions — one opts into leaving, the other opts into staying
+    — so a parser that also decided it would have to know which command it was
+    serving.
+    """
+    if not value.strip() or value.strip() == "0":
+        return 0.0
+    seconds = _duration_seconds(value, unit=1.0)
+    if seconds < 0:
+        # `typer.BadParameter` like `_passivation` and `_children_cap` beside it,
+        # rather than a hand-built refusal: typer already writes the usage line
+        # and the exit code, and three value parsers on one command refusing in
+        # two different shapes is how one of them comes to say something else.
+        raise typer.BadParameter(f'wants a duration like "30s", "5m" or "90", not "{value}"')
+    return seconds
+
+
+def _passivation(value: str) -> float | None:
+    """`"off"`, a number of minutes, or a suffixed duration, as seconds (P5-05).
+
+    Refused rather than defaulted when it is none of those: a typo in a duration
+    is a deployment that silently keeps every root it ever started, and the
+    daemon is the one process where that goes unnoticed for a week.
     """
     if value.strip().lower() == "off":
         return None
-    try:
-        minutes = float(value)
-    except ValueError:
-        minutes = 0.0
-    if minutes <= 0:
+    seconds = _duration_seconds(value, unit=60.0)
+    if seconds <= 0:
         # One message for one mistake: "not a number" and "not a positive
         # number" are the same correction to the same flag.
         raise typer.BadParameter(f'wants positive minutes or "off", not "{value}"')
-    return minutes * 60.0
+    return seconds
 
 
 def _children_cap(value: int | None) -> list[str]:
@@ -528,6 +636,13 @@ def daemon(
             "--passivate-after", help='Minutes of quiet before a root is released, or "off".'
         ),
     ] = _DEFAULT_PASSIVATION,
+    keep_alive: Annotated[
+        str,
+        typer.Option(
+            "--keep-alive",
+            help='Stay up this long after the last client leaves ("5m"); implies --ephemeral.',
+        ),
+    ] = "0",
     ephemeral: Annotated[
         bool,
         typer.Option("--ephemeral", help="Exit once no client, root or appointment needs this."),
@@ -548,6 +663,9 @@ def daemon(
     """
     from .daemon.server import DaemonUnavailable, serve
 
+    # Parsed before anything is composed or bound, so a mistyped duration is a
+    # usage error rather than a daemon that got as far as printing a socket path.
+    window = keep_alive_seconds(keep_alive)
     composed = profile_or_exit(profile, _children_cap(max_concurrent_children))
     try:
         roots = resolve_roots(create=True)
@@ -577,7 +695,14 @@ def daemon(
                 passivate_after=_passivation(passivate_after),
                 # Off here, on in `spawn_command`: `DaemonServer.ephemeral` says
                 # why the lifetime is decided by who started it (P7-08).
-                ephemeral=ephemeral,
+                #
+                # **A keep-alive implies it.** "Stay up five minutes after the
+                # last client leaves" is a statement about *leaving*, so a person
+                # who typed one has said which lifetime they want; the two flags
+                # were one concept split across two spellings, and the split is
+                # what made `--keep-alive` alone mean nothing and need a warning.
+                ephemeral=ephemeral or window > 0,
+                keep_alive=window,
                 path=socket_path,
             )
         )
@@ -665,7 +790,13 @@ def tab_command(
 
 
 def spawn_command(
-    *, profile: str, provider: str, model: str, patch: Sequence[str] = (), keep: bool = False
+    *,
+    profile: str,
+    provider: str,
+    model: str,
+    patch: Sequence[str] = (),
+    keep: bool = False,
+    keep_alive: str = "0",
 ) -> list[str]:
     """The argv for a daemon a UI starts on its own behalf (P7-08).
 
@@ -680,8 +811,19 @@ def spawn_command(
     a decision rather than a property of the process that happened to spawn it.
     """
     ephemeral = () if keep else ("--ephemeral",)
+    # **The only route a client's preference has to the daemon.** A daemon may not
+    # read a front end's `tui.json` — after P5-14 it may not share a filesystem
+    # with it — so the terminal spells its own keep-alive into the command line it
+    # composes. Omitted when zero, which is the default on both sides.
+    window = ("--keep-alive", keep_alive) if keep_alive not in ("", "0") else ()
     return reinvoke(
-        "daemon", *ephemeral, profile=profile, provider=provider, model=model, patch=patch
+        "daemon",
+        *ephemeral,
+        *window,
+        profile=profile,
+        provider=provider,
+        model=model,
+        patch=patch,
     )
 
 

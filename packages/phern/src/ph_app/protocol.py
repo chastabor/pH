@@ -92,6 +92,14 @@ client folds — a job's, a subagent's, an approval's — is spelled the America
 way. A 0.1.x client reading a 0.2.x daemon sees an absent field and an unknown
 status rather than an error.
 
+The same number covers 0.2.0's *additions*, which are not breaking in that
+direction and are in the other: `daemon/lifetime` and the `daemon.lifetime`
+notice (P9-07). An older client never asks for them; a 0.2.x client attaching to
+a daemon still running from before them fails at the attach read, which is what
+every verb added since 0.1.0 already does and what restarting the daemon fixes.
+No second number, because 0.2.0 has not shipped: a bump inside an unreleased
+version would record a skew nothing could have been on either side of.
+
 **Nothing refuses on this number, and that is worth saying where it is
 declared.** It is reported in `daemon/hello`'s capability block and printed by
 `phern agents doctor`; no client compares it and hangs up. So it documents a

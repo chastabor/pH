@@ -43,6 +43,7 @@ from ph.paths import RuntimeDirError, resolve_roots
 from ph.resources import GRACE_SECONDS
 from ph.seams.schedule import ScheduleKind
 from ph.selectors import Selector, matches_any
+from ph.text import duration
 
 from . import verbs
 from .console import TypeOption, console, detail, fail, section, selectors_or_exit
@@ -166,30 +167,12 @@ def _cadence(seconds: float) -> str:
 
     **All five read `0` as off**, each behind its own `if x > 0` in `serve`, and
     for a day only the newest one said so on screen while the other four printed
-    `0s`. `_duration` cannot absorb the rule: zero milliseconds is a real and
+    `0s`. `duration` cannot absorb the rule: zero milliseconds is a real and
     different answer elsewhere (an uptime, a turn that took no measurable time),
     where "off" would be a lie. So the convention lives here, once, next to the
     only four-plus-one readers that share it.
     """
-    return _duration(seconds * 1000) if seconds > 0 else "off"
-
-
-def _duration(milliseconds: object) -> str:
-    """`3d 4h`, `1h 30m`, `12m`, `8s` — the two largest units that are not zero.
-
-    Zeros are dropped rather than kept for shape: a sweep every sixty seconds
-    reads as `1m`, not `1m 0s`, and an hour and a half of quiet is `1h 30m`
-    whether or not the seconds happen to be round.
-    """
-    if not isinstance(milliseconds, int | float):
-        return "—"
-    seconds = int(milliseconds // 1000)
-    parts: list[str] = []
-    for name, size in (("d", 86400), ("h", 3600), ("m", 60), ("s", 1)):
-        count, seconds = divmod(seconds, size)
-        if count:
-            parts.append(f"{count}{name}")
-    return " ".join(parts[:2]) or "0s"
+    return duration(seconds * 1000) if seconds > 0 else "off"
 
 
 def _summary(kind: str, event: JsonObject) -> str:
@@ -666,12 +649,12 @@ def doctor() -> None:
             (
                 ("socket", facts.socket),
                 ("pid", str(facts.pid)),
-                ("uptime", _duration(facts.uptime_ms)),
+                ("uptime", duration(facts.uptime_ms)),
                 ("protocol", str(facts.protocol_version)),
                 ("capabilities", ", ".join(sorted(facts.capabilities))),
                 ("roots", str(facts.roots)),
                 ("provider", f"{facts.provider} · {facts.model}"),
-                ("passivate after", "off" if passivate is None else _duration(passivate * 1000)),
+                ("passivate after", "off" if passivate is None else duration(passivate * 1000)),
                 ("tick", _cadence(facts.tick_every)),
                 ("sweep", _cadence(facts.sweep_every)),
                 ("heartbeat", _cadence(facts.heartbeat_every)),

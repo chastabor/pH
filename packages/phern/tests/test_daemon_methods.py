@@ -136,7 +136,7 @@ def test_every_handler_answers_with_the_reply_its_verb_declares() -> None:
             f"{method} answers with {resolved} where its verb declares {row.verb.reply}"
         )
         checked += 1
-    assert checked == len(METHODS) + len(MUTATIONS) - len(projections) == 24
+    assert checked == len(METHODS) + len(MUTATIONS) - len(projections) == 25
 
 
 def test_the_one_method_with_no_reply_is_a_notify_and_not_a_verb() -> None:
@@ -186,7 +186,8 @@ def test_the_two_tuples_partition_the_vocabulary_the_way_the_tables_do() -> None
 def test_every_method_about_one_root_requires_its_id() -> None:
     """The `str(params["sessionId"])` the row replaced was a `KeyError` waiting
     at twenty-one sites; the model makes the requirement one declaration."""
-    daemon_level = {"initialize", "daemon/hello", "daemon/config", "daemon/status", "shutdown"}
+    daemon_level = {"initialize", "daemon/hello", "daemon/config", "shutdown"}
+    daemon_level |= {"daemon/status", "daemon/lifetime"}
     daemon_level |= {"sessions/list", "sessions/browse"}
     for method, row in {**METHODS, **MUTATIONS}.items():
         if method in daemon_level:

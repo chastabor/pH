@@ -25,12 +25,14 @@ import anyio
 import pytest
 from anyio.abc import TaskGroup
 
+from ph.agent_loop.driver import ReactLoopAgent
 from ph.bundles import BASE, HEADLESS
 from ph.cordis import Profile
 from ph.llm.types import StreamChunk
 from ph.paths import resolve_roots
 from ph_app.daemon.client import DaemonClient
 from ph_app.daemon.duplex import Notification
+from ph_app.daemon.launch import SPAWN_TIMEOUT
 from ph_app.daemon.server import DaemonServer, serve
 from ph_app.daemon.supervisor import Root
 
@@ -124,6 +126,39 @@ class _Daemon:
     async def root(self, session_id: str = "root") -> Root:
         """One live root, started the way `session/attach` starts one."""
         return await self.running.supervisor.start(session_id)
+
+    def aged(self) -> None:
+        """Wind this daemon's clock back past the window it protects itself in.
+
+        An auto-started daemon may not exit until a client has spoken to it or
+        `SPAWN_TIMEOUT` has passed — see `DaemonServer.served`, which exists so
+        that a daemon does not leave in the moment between the spawn and the UI
+        finding it. A test whose subject is the exit has to say which side of
+        that window it is on, and this is the side where the launcher has given
+        up: what happens to a daemon nobody came for.
+
+        `started` rather than a sleep, and rather than a `now=` on every call:
+        it is the field the window is measured from, and `sweep()` takes no
+        clock of its own.
+        """
+        self.running.started -= int(SPAWN_TIMEOUT * 1000) + 1
+
+    async def busy_root(self, session_id: str = "busy") -> Root:
+        """One root the supervisor reads as mid-turn, without running a turn.
+
+        `Root.status` derives from the driver's own phase rather than from a
+        flag beside it (P5-01), so the only honest way to make a root look busy
+        is to move that phase — and the three lines that do it reach into a
+        private attribute of the real driver. Here rather than in each file for
+        the usual reason and one sharper: a rename of `_phase` or of the
+        `"running"` phase kind should be one edit, and a lifetime gate should
+        open with what it is testing rather than with driver internals.
+        """
+        root = await self.running.supervisor.start(session_id)
+        driver = root.agent
+        assert isinstance(driver, ReactLoopAgent), "the real driver is what has a phase"
+        driver._phase.kind = "running"
+        return root
 
     def held(self, session_id: str) -> Root:
         """The root this daemon is *already* holding, or `KeyError`.

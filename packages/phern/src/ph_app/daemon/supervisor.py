@@ -588,6 +588,25 @@ def _recorded_violations(session: Session) -> set[str]:
     return {as_str(as_obj(one).get("invariant")) for one in as_seq(event.data.get("violations"))}
 
 
+QUIET: tuple[str, ...] = ("idle", "waiting")
+"""The statuses that are not work in hand — read by `passivatable` and `busy`.
+
+`waiting` joins `idle`, which is the whole reason that status exists: a root
+parked on a person who has closed their terminal reports `running` from the
+agent, which is true and not useful. `retrying` is deliberately absent — a root
+in P5-04's backoff is between attempts, not finished.
+
+Named rather than spelled twice, because the two readers answer *different*
+questions from the same rule — "may this root be released" and "may this process
+end" — and a status added to one tuple and not the other would move one answer
+and not the other.
+"""
+
+
+def _nothing() -> None:
+    """`Supervisor.moved`'s default: a supervisor nobody is watching."""
+
+
 @dataclass(slots=True)
 class Supervisor:
     """Every root this daemon is running, and the task group they live in."""
@@ -610,7 +629,26 @@ class Supervisor:
     daemon was down, which is the scheduler's whole promise. A deployment that
     would rather not resurrect a long-abandoned session sets a bound here."""
     roots: dict[str, Root] = field(default_factory=dict)
+    recheck_lifetime: Callable[[], None] = _nothing
+    """Say that what holds the *daemon* may have moved — `serve` points this at
+    `DaemonServer.check_lifetime` (P9-06, P9-07).
+
+    A callback rather than the supervisor knowing its server, because the
+    dependency only runs one way: the server holds a supervisor, and a
+    supervisor that held one back would be a cycle. A no-op by default, so a
+    supervisor built by a test — or by anything that is not `serve` — has
+    nothing to remember to set.
+
+    **Named for the question, not the cause**, because more than one thing
+    raises it. A turn starting or ending is the one the socket cannot see, and
+    it is registered in `_start` beside the other `ctx.on` listeners rather than
+    buried inside one of them. `schedule/create` and `schedule/cancel` call it
+    from their handlers, since a client's own request is the other way `holds()`
+    moves. What is *not* wired is written down in `DaemonServer.holds` (§5 rule
+    6), where a reader would otherwise assume every term has an event."""
     _starting: anyio.Lock = field(default_factory=anyio.Lock)
+    _schedules: ScheduleIndex | None = None
+    """The appointment index, built on first use. See `_index`."""
 
     async def start(self, root_id: str, *, cwd: str | None = None) -> Root:
         """Take the lease for this root, then mount it (I-5).
@@ -769,6 +807,20 @@ class Supervisor:
                 if root.subscribers:
                     root.publish(SessionScreensNotice(session_id=root.id, screens=screens_of(root)))
 
+            def lifetime(agent_: object, _status: str) -> None:
+                """A turn starting or ending changes what holds the *daemon*.
+
+                Its own listener rather than a line inside `announce`, because
+                it is a different subscriber with a different audience: that one
+                tells the watchers of this root what the root is doing, and this
+                one tells the process whether it is still wanted. The case that
+                matters most has no watchers at all — a detached `phern -p`,
+                whose daemon should leave when the work it was started for is
+                finished — which is why `announce`'s guard must not cover it.
+                """
+                if agent_ is agent:
+                    self.recheck_lifetime()
+
             def announce(agent_: object, status: str) -> None:
                 # Guarded like `relay` above, and for the same reason: reading
                 # the footer folds every registered status field over the log,
@@ -797,6 +849,7 @@ class Supervisor:
             # child agent's events belong to its own transcript, and subscribing
             # here means never receiving them rather than receiving and discarding.
             exits.callback(session.observe(relay))
+            ctx.on("agent/status", lifetime)
             ctx.on("agent/status", announce)
             ctx.on("commands/change", verbs)
             ctx.on("screens/change", drew)
@@ -1031,12 +1084,22 @@ class Supervisor:
 
         Built from the same `$PH_HOME` the seam writes under, rather than asked
         of a mounted root: at boot there are none, which is the whole situation.
+
+        **Built once.** `$PH_HOME` is fixed for the life of a daemon, and
+        `resolve_roots()` is not free — it re-reads the environment and
+        canonicalizes three paths, a handful of syscalls — so re-deriving it per
+        call was measurable once `booked()` joined the turn path. The index
+        object holds a path, not a snapshot: `read()` still goes to disk every
+        time, which is what keeps a schedule created by another process visible.
         """
-        try:
-            return ScheduleIndex(resolve_roots().home)
-        except Exception:
-            log.warning("ph_app.daemon: no schedule index; nothing will be woken", exc_info=True)
-            return None
+        if self._schedules is None:
+            try:
+                self._schedules = ScheduleIndex(resolve_roots().home)
+            except Exception:
+                log.warning(
+                    "ph_app.daemon: no schedule index; nothing will be woken", exc_info=True
+                )
+        return self._schedules
 
     def appointments(self) -> dict[str, Appointment]:
         """Every appointment on record, or empty when nothing indexes."""
@@ -1078,18 +1141,35 @@ class Supervisor:
                 return found
         return resolve_roots().sessions_dir()
 
-    def unwanted(self, *, now: int, after: float) -> bool:
-        """Whether nothing this supervisor holds still needs to be held (P7-08).
+    def busy(self) -> bool:
+        """Whether any root is doing something a person is waiting on.
 
-        Every root releasable by P5-05's own predicate, and nothing on the books.
-        `all()` over no roots is `True`, so an empty supervisor is the degenerate
-        case rather than a branch. The supervisor answers this rather than the
-        server iterating `roots` itself, for the reason `appointments` is public:
-        a supervisor-level fact re-derived one layer up is two answers.
+        `passivatable`'s first clause and **nothing else from it**: that predicate
+        also requires sixty seconds of log quiet, which is the right window for
+        releasing a *root* and the wrong one for ending a *process*. Reusing it
+        whole is what used to put a minute between the last detach and the exit.
+
+        The clause itself is `QUIET`, read rather than restated, so the two
+        predicates cannot come to disagree about what "doing something" means.
         """
-        return (
-            all(self.passivatable(root, now=now, after=after) for root in self.roots.values())
-            and not self.appointments()
+        return any(root.status not in QUIET for root in self.roots.values())
+
+    def booked(self) -> bool:
+        """Whether anything is scheduled to happen — on disk or on a live root.
+
+        Both halves, because they answer at different times: the index is what a
+        daemon reads at boot with no roots mounted, and a root's own seam is what
+        knows about a schedule created since.
+
+        **The in-memory half first.** `appointments()` opens a file and the seam
+        lookup is a dict hit, and this runs on every turn transition now
+        (`DaemonServer.check_lifetime`), so a mounted root that already says yes
+        should not pay for the index as well. The common case — nothing
+        scheduled anywhere — still reaches the index, where it costs one failed
+        open rather than a parse.
+        """
+        return any(self._live_schedules(root) for root in self.roots.values()) or bool(
+            self.appointments()
         )
 
     async def wake_and_tick(self, *, now: int | None = None) -> list[str]:
@@ -1447,8 +1527,7 @@ class Supervisor:
         not a claim on the root's life. What keeps a scheduled root mounted is the
         schedule.
         """
-        # `waiting` joins `idle`, which is the whole reason that status exists.
-        if root.status not in ("idle", "waiting"):
+        if root.status not in QUIET:
             return False
         if root.subscribers:
             return False

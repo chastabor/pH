@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import typer
 import yaml
 from filelock import FileLock
 from typer.testing import CliRunner
@@ -1006,6 +1007,149 @@ def test_a_launchs_lifetime_choice_reaches_its_tabs() -> None:
     assert "--keep-daemon" in kept
     assert "--keep-daemon" not in plain
     assert "--no-spawn" not in plain, "spawning is the default; refusing is the flag"
+
+
+def test_one_parser_reads_both_duration_flags() -> None:
+    """`--keep-alive` and `--passivate-after` are the same question asked twice.
+
+    They were two parsers on one command, disagreeing about more than they
+    agreed on: what a bare number meant, whether a suffix was allowed at all,
+    and how a typo was refused. Now the *unit of a bare number* is the only
+    difference — seconds for a keep-alive, minutes for a passivation window, which
+    is what each flag's own history established — and a suffix means the same
+    thing on both.
+
+    Sabotage: give `_passivation` its own `float(value)` back, and
+    `--passivate-after 30s` reads as thirty *minutes* while `--keep-alive 30s` reads
+    as thirty seconds.
+    """
+    from ph_app.cli import _passivation, keep_alive_seconds
+
+    assert keep_alive_seconds("90") == 90.0, "a bare number is seconds here"
+    assert keep_alive_seconds("5m") == 300.0
+    assert keep_alive_seconds("1h") == 3600.0
+    assert keep_alive_seconds("") == 0.0 and keep_alive_seconds("0") == 0.0
+
+    assert _passivation("90") == 5400.0, "and minutes there"
+    assert _passivation("30s") == 30.0, "the suffix means the same on both"
+    assert _passivation("off") is None
+
+
+def _records_serve(monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
+    """Patch `serve` out and hand back the keywords the command passed it.
+
+    The flags are what a person types; this is what they *mean*, and `serve` is
+    where the meaning lands — so a lifetime gate asserts here rather than on the
+    argv or on the source.
+
+    `object` rather than `Any`: nothing here inspects a value beyond comparing
+    two of them, and `serve`'s own signature is where their types are declared.
+    A second declaration in a test double is one that can drift from it.
+    """
+    served: dict[str, object] = {}
+
+    async def recording(profile: object, **kwargs: object) -> None:
+        served.update(kwargs)
+
+    monkeypatch.setattr("ph_app.daemon.server.serve", recording)
+    return served
+
+
+def test_a_keep_alive_says_which_lifetime_it_means(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One concept, two spellings — so the narrower one implies the wider.
+
+    "Stay up five minutes after the last client leaves" is a statement about
+    *leaving*: a person who typed it has already said which lifetime they want.
+    While the two flags were independent, `--keep-alive` alone meant nothing at
+    all on `phern daemon`, and the only thing between a person and that surprise
+    was a warning line they had to read.
+
+    The two commands express the lifetime in opposite directions — `phern daemon`
+    opts into leaving, `phern` opts into staying — which is why the implication
+    lives at each call site rather than in the parser: one that also decided the
+    lifetime would have to know which command it was serving.
+
+    Asserted on what reaches `serve`, which is the only thing that decides
+    anything; the flags are what a person types and this is what they mean.
+
+    Sabotage: pass `ephemeral=ephemeral` again, and `phern daemon --keep-alive 5m`
+    is a service daemon quietly waiting for nothing.
+    """
+    monkeypatch.setenv("PH_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("PH_RUNTIME", str(tmp_path / "run"))
+    served = _records_serve(monkeypatch)
+
+    result = runner.invoke(app, ["daemon", "--profile", "headless", "--keep-alive", "5m"])
+
+    assert result.exit_code == 0, result.output
+    assert served["keep_alive"] == 300.0
+    assert served["ephemeral"] is True, "a keep-alive is a statement about leaving"
+
+
+def test_a_daemon_nobody_gave_a_lifetime_to_is_a_service(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other half of the implication, and the default it must not disturb.
+
+    `phern daemon` with neither flag is somebody choosing to run a supervisor,
+    which is P7-08's whole rule. Making `--keep-alive` imply `--ephemeral` must
+    not make *absence* imply it too.
+    """
+    monkeypatch.setenv("PH_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("PH_RUNTIME", str(tmp_path / "run"))
+    served = _records_serve(monkeypatch)
+
+    result = runner.invoke(app, ["daemon", "--profile", "headless"])
+
+    assert result.exit_code == 0, result.output
+    assert served["ephemeral"] is False and served["keep_alive"] == 0.0
+
+
+def test_asking_a_daemon_to_stay_and_to_go_is_refused_not_warned() -> None:
+    """`--keep-daemon` and a typed `--keep-alive` are opposite answers.
+
+    One says the daemon stays; the other says how long it waits before going.
+    A person who has said both has meant one of them, and a warning is the
+    wrong answer to that — it leaves them with a daemon whose lifetime is
+    whichever flag the code happened to read last.
+
+    A *configured* keep-alive is not a contradiction and is not refused: nobody
+    typed it for this run, so `--keep-daemon` simply overrides it and a service
+    daemon carries no window.
+
+    Sabotage: warn instead of raising, and `--keep-daemon --keep-alive 5m`
+    silently picks one.
+    """
+    from ph_app.cli import _spawned_keep_alive
+
+    with pytest.raises(typer.BadParameter):
+        _spawned_keep_alive("5m", keep=True)
+
+    assert _spawned_keep_alive("0", keep=True) == "0", "not a contradiction, so not refused"
+    assert _spawned_keep_alive(None, keep=True) == "0", "a service daemon has no window"
+
+
+def test_a_mistyped_keep_alive_is_refused_where_it_was_typed() -> None:
+    """Both ends of one flag, because only one of them has a person watching.
+
+    `phern --keep-alive` does not run a daemon; it composes the argv for one and
+    spawns it with its output on the null device. A string forwarded as typed
+    would be refused *there*, by a process nobody can see, and the person would
+    get a UI that could not reach a daemon and no reason why. So the UI end
+    parses it too, and what crosses is a bare number of seconds.
+
+    Sabotage: pass `keep_alive` straight into `spawn_command`, and the second
+    assertion here becomes a daemon that exits before it has started.
+    """
+    from ph_app.cli import _spawned_keep_alive
+
+    with pytest.raises(typer.BadParameter):
+        _spawned_keep_alive("5min", keep=False)
+
+    assert _spawned_keep_alive("5m", keep=False) == "300", "seconds, unambiguously"
+    assert _spawned_keep_alive("0", keep=False) == "0"
 
 
 def test_drop_ins_compose_after_the_overlay(roots: Path) -> None:

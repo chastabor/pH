@@ -35,12 +35,15 @@ from ph.seams.skills import Skill
 from ph.seams.tui_status import StatusReading
 from ph.seams.user_questions import UserQuestion
 from ph.testing import StubAgent
+from ph_app import verbs
 from ph_app.daemon.follow import Followed
-from ph_app.payloads import StatusFacts
+from ph_app.params import CancelScheduleParams, CreateScheduleParams
+from ph_app.payloads import DaemonLifetime, StatusFacts
 from ph_app.tui.adapter import TuiEventAdapter
 from ph_app.tui.commands import TUI_VERBS
 from ph_app.tui.remote import DaemonSession, attach_session
 from ph_app.tui.state import TuiState
+from ph_app.tui.widgets.status import daemon_line
 
 pytestmark = pytest.mark.anyio
 
@@ -593,3 +596,164 @@ async def test_closing_a_front_end_leaves_the_root_running(tmp_path: Path) -> No
 
         assert "kept" in daemon.running.supervisor.roots
         assert not daemon.running.stop.is_set()
+
+
+# ---------------------------------------------- the daemon's own lifetime --
+# P9-07. Three claims: a front end learns why its daemon is still running at
+# attach, it is *told* when that changes, and the sidebar renders the answer as
+# the sentence a person actually wants — what happens if they close this window.
+
+
+def test_the_sidebar_names_the_reason_a_daemon_is_held() -> None:
+    """Four shapes, and `client` dropped from every one of them.
+
+    A pure fold, tested as one: the rendering is the whole of what a person sees
+    of this row, and driving it through a terminal would assert on a picture
+    where the claim is about a sentence.
+
+    `client` is always in `holds` here — this *is* the client — so a line that
+    printed it would spend a row of a 32-column panel telling somebody they have
+    a window open. What survives the filter is exactly what survives their
+    leaving, which is the question the line answers.
+
+    Sabotage: keep `client` among the reasons, and every ephemeral daemon reads
+    as `held · client` forever — the line that can never say anything else.
+    """
+    assert daemon_line(None) == [], "a front end with no daemon draws no row"
+    assert daemon_line(DaemonLifetime(mode="service", holds=["client"])) == ["daemon  service"]
+    assert daemon_line(DaemonLifetime(mode="ephemeral", holds=["client"], clients=1)) == [
+        "daemon  exits on detach"
+    ]
+    # The same `holds`, and the opposite sentence: somebody else is on it, so
+    # closing this window does not end anything. Without `clients` on the frame
+    # these two are indistinguishable and one of them is a lie.
+    assert daemon_line(DaemonLifetime(mode="ephemeral", holds=["client"], clients=2)) == [
+        "daemon  held · client"
+    ]
+    assert daemon_line(
+        DaemonLifetime(mode="ephemeral", holds=["client"], keep_alive_ms=300_000)
+    ) == ["daemon  exits 5m after detach"]
+    assert daemon_line(DaemonLifetime(mode="ephemeral", holds=["client", "task", "schedule"])) == [
+        "daemon  held · task · schedule"
+    ]
+
+
+async def test_a_client_reads_the_lifetime_at_attach(tmp_path: Path) -> None:
+    """Read, not waited for — which is why there is a verb as well as a notice.
+
+    `daemon.lifetime` is sent when the answer *moves*, so a front end that only
+    listened would draw nothing at all until something happened: open a terminal
+    on a quiet daemon and the row that says whether it stays would stay blank,
+    which is exactly when a person is asking.
+
+    Sabotage: drop the read from `attach_session` and this is `None`.
+    """
+    async with running(tmp_path) as daemon:
+        front, _ = await _front(daemon)
+
+        life = front.state.lifetime
+        assert life is not None, "the attach did not read it"
+        assert life.mode == "service", "the fixture's daemon is one somebody started"
+        assert "client" in life.holds, "and this front end is why it is held"
+
+
+async def test_a_lifetime_notice_reaches_a_client_watching_another_session(
+    tmp_path: Path,
+) -> None:
+    """The frame with no owner, delivered to everyone.
+
+    A turn on *some other* root is what changes this daemon's lifetime, and the
+    notice that says so carries no `sessionId` — there is no session it is about.
+    Every other notification is filtered on that field before it is parsed, which
+    is right for a client watching one root among several and would drop this one
+    as belonging to nobody.
+
+    Sabotage: route it through the `sessionId` filter — move the
+    `DaemonLifetime` branch below `params.get("sessionId") != self.session_id`
+    — and the sidebar never learns that anything holds the process.
+    """
+    async with running(tmp_path) as daemon:
+        front, _ = await _front(daemon, "watched")
+        assert front.state.lifetime is not None
+        assert "task" not in front.state.lifetime.holds, "nothing is running yet"
+
+        await daemon.busy_root("somewhere-else")
+        daemon.running.check_lifetime()
+
+        await until(
+            lambda: "task" in (front.state.lifetime.holds if front.state.lifetime else []),
+            what="the lifetime frame to arrive",
+        )
+
+
+async def test_a_second_terminal_arriving_tells_the_first_it_is_not_alone(
+    tmp_path: Path,
+) -> None:
+    """The arrival is a lifetime transition too, and it was the unannounced one.
+
+    `holds` cannot carry this on its own: it says `client` whenever anybody is
+    connected, so it reads the same with one terminal and with two, while the
+    sentence a person needs — "does closing this end it?" — flips. `clients` is
+    the count that separates them, and a client arriving is when it moves.
+
+    Sabotage: leave the announcement to the *departure* alone, as it was, and
+    the first terminal goes on promising `exits on detach` with a second one
+    open on the same daemon.
+    """
+    async with running(tmp_path, ephemeral=True) as daemon:
+        front, _ = await _front(daemon, "first")
+        assert front.state.lifetime is not None
+        assert front.state.lifetime.clients == 1, "nobody else is here yet"
+
+        await daemon.client("asks")
+
+        await until(
+            lambda: (front.state.lifetime.clients if front.state.lifetime else 0) == 2,
+            what="the second client to be announced",
+        )
+        assert daemon_line(front.state.lifetime) == ["daemon  held · client"]
+
+
+async def test_setting_and_clearing_an_appointment_moves_the_line_at_once(
+    tmp_path: Path,
+) -> None:
+    """The third term of `holds`, and the only one a client changes by asking.
+
+    `schedule` moves when somebody creates or cancels one, and nothing about
+    that arrives as an agent status or a connection — so the two handlers say so
+    themselves. Left to the sweep, a person who had just set an appointment
+    would watch the row go on claiming their daemon leaves when they close the
+    window, for up to a minute, having been told otherwise by the command they
+    just ran.
+
+    The cancel is the half with teeth: it is a claim being *withdrawn*, and on a
+    daemon whose only hold it was, the withdrawal is what lets the process go.
+
+    Sabotage: drop either `check_lifetime()` from the schedule handlers, and the
+    corresponding `until` here waits out its ten seconds.
+    """
+
+    def held() -> list[str]:
+        return list(front.state.lifetime.holds) if front.state.lifetime else []
+
+    async with running(tmp_path, ephemeral=True, sweep_every=600.0) as daemon:
+        front, _ = await _front(daemon, "planner")
+        assert "schedule" not in held(), "nothing is on the books yet"
+
+        await front.client.call(
+            verbs.SCHEDULE_CREATE,
+            CreateScheduleParams(
+                session_id="planner",
+                schedule_id="nightly",
+                kind="interval",
+                spec="60000",
+                prompt="do the thing",
+            ),
+        )
+        await until(lambda: "schedule" in held(), what="the appointment to reach the line")
+
+        await front.client.call(
+            verbs.SCHEDULE_CANCEL,
+            CancelScheduleParams(session_id="planner", schedule_id="nightly"),
+        )
+        await until(lambda: "schedule" not in held(), what="the withdrawal to reach the line")

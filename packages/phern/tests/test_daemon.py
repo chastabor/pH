@@ -319,6 +319,11 @@ async def test_attaching_streams_events_and_detaching_stops_them(tmp_path: Path)
 
     The root is prompted *after* the detach, so the second silence is evidence
     the subscription ended rather than that nothing happened.
+
+    Filtered to the session's own frames, because `daemon.lifetime` is not one:
+    it goes to every *connection* by design (P9-07) and a turn starting and
+    ending moves it twice. A detach ends a subscription to a root, not the
+    connection — which is the distinction the filter is asserting.
     """
     async with running(tmp_path) as daemon:
         seen: list[str] = []
@@ -334,7 +339,9 @@ async def test_attaching_streams_events_and_detaching_stops_them(tmp_path: Path)
         await client.call("session/prompt", sessionId="beta", prompt="second")
         await _settled(client, "beta", events=2)
 
-        assert seen == [], "a detached client was still being sent events"
+        assert [one for one in seen if one.startswith("session.")] == [], (
+            "a detached client was still being sent events"
+        )
         await client.notify("shutdown")
 
 

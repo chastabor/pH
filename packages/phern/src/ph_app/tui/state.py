@@ -19,6 +19,8 @@ from typing import Any, Literal, TypeAlias
 
 from ph.json import JsonValue, as_bool, as_str
 
+from ..payloads import DaemonLifetime
+
 __all__ = [
     "CatalogEntry",
     "ChatItem",
@@ -223,6 +225,17 @@ class TuiState:
     context_window: int | None = None
     model: str = ""
     provider: str = ""
+    lifetime: DaemonLifetime | None = None
+    """Why the daemon behind this session is still running, or `None`.
+
+    `None` for a front end that is not on a daemon at all, and the sidebar draws
+    no line then: "this process will exit when you close it" is not news about a
+    process the person is looking at.
+
+    The wire model itself rather than a copy of its fields: it is read once at
+    attach and replaced whole whenever `daemon.lifetime` says the answer moved,
+    so a second shape here would be a second declaration of three fields with
+    nothing checking they agree."""
     todos: list[dict[str, Any]] = field(default_factory=list)
     roster: dict[str, dict[str, Any]] = field(default_factory=dict)
     """The seam's own fold of `subagent/*`, kept verbatim so the panel and the
